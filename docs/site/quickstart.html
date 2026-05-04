@@ -309,7 +309,11 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
   <section class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="grid sm:grid-cols-3 gap-4">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <a class="card p-5 block" href="api.html#training">
+          <h3 class="font-semibold mb-2">SFT corrections</h3>
+          <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference.</p>
+        </a>
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO Guide</h3>
           <p style="color: var(--fg-dim);">Run the generate &rarr; score &rarr; train loop against the same server.</p>
