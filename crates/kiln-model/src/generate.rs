@@ -18,15 +18,16 @@ use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
-    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_decode_contiguous_batch, model_forward_paged_last_token,
+    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::sampling::{greedy_sample, sample_with_params};
+use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -1354,6 +1355,108 @@ impl ModelRunner {
             token_ids: generated_tokens,
             finish_reason: FinishReason::MaxTokens,
         })
+    }
+
+    /// Decode one greedy token for multiple compatible paged requests in one
+    /// model-forward call.
+    ///
+    /// This is the scheduler admission primitive for true decode batching: the
+    /// caller still owns request readiness, stop handling, and output routing,
+    /// while this method owns the row assembly needed to call
+    /// `model_forward_paged_decode_contiguous_batch`.
+    ///
+    /// Current constraints intentionally mirror the lower-level helper:
+    /// non-empty rows, one token per row, one `BlockTable` per row, common
+    /// decode position, non-FP8 cache, contiguous live KV windows, and shared
+    /// base model/LoRA state for every row. Qwen-style GDN models must pass one
+    /// mutable one-row `LinearAttentionState` per row; the method assembles
+    /// those into batch state before the forward pass and scatters the updated
+    /// rows back afterward.
+    pub fn decode_next_tokens_paged_contiguous_batch_greedy(
+        &self,
+        input_tokens: &[TokenId],
+        paged_cache: &Mutex<PagedKvCache>,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_states: &mut [&mut LinearAttentionState],
+    ) -> Result<Vec<TokenId>> {
+        let batch = input_tokens.len();
+        anyhow::ensure!(batch > 0, "batched decode requires at least one row");
+        anyhow::ensure!(
+            block_tables.len() == batch && seq_lens.len() == batch,
+            "batched decode metadata length mismatch"
+        );
+
+        let has_linear_layers = self.weights.layers.iter().any(|layer| {
+            matches!(
+                layer.attention,
+                crate::forward::GpuAttentionWeights::Linear(_)
+            )
+        });
+        if has_linear_layers {
+            anyhow::ensure!(
+                linear_states.len() == batch,
+                "batched decode requires one LinearAttentionState per row"
+            );
+        } else {
+            anyhow::ensure!(
+                linear_states.is_empty(),
+                "full-attention-only batched decode does not accept linear states"
+            );
+        }
+
+        if batch == 1 {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let linear_state = if has_linear_layers {
+                Some(&mut *linear_states[0])
+            } else {
+                None
+            };
+            let token = model_forward_paged_next_token_greedy(
+                &*self.backend,
+                input_tokens[0],
+                &self.weights,
+                &self.config,
+                &mut pc_guard,
+                block_tables[0],
+                seq_lens[0],
+                linear_state,
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("single-row greedy decode forward pass (paged) failed")?;
+            return Ok(vec![token]);
+        }
+
+        let mut batch_state = if has_linear_layers {
+            let state_refs: Vec<&LinearAttentionState> =
+                linear_states.iter().map(|state| &**state).collect();
+            Some(LinearAttentionState::from_batch_rows(&state_refs)?)
+        } else {
+            None
+        };
+
+        let logits = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            model_forward_paged_decode_contiguous_batch(
+                &*self.backend,
+                input_tokens,
+                &self.weights,
+                &self.config,
+                &mut pc_guard,
+                block_tables,
+                seq_lens,
+                batch_state.as_mut(),
+                self.active_lora.as_ref(),
+            )
+            .context("batched greedy decode forward pass (paged) failed")?
+        };
+
+        if let Some(state) = batch_state.as_ref() {
+            state.scatter_batch_rows(linear_states)?;
+        }
+
+        greedy_sample_rows(&logits).context("batched greedy row sampling failed")
     }
 
     fn decode_next_token_paged_interleaved(
@@ -4308,6 +4411,203 @@ mod tests {
 
         let bytes = serde_json::to_vec(&json).unwrap();
         KilnTokenizer::from_bytes(&bytes).unwrap()
+    }
+
+    #[cfg(feature = "metal")]
+    fn patterned_bf16(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i * 17 + 13) % 257) as f32 - 128.0) * scale)
+            .collect();
+        Ok(Tensor::new(data, device)?
+            .reshape(shape)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?)
+    }
+
+    #[cfg(feature = "metal")]
+    fn qwen_shape_bf16_full_attention_weights(
+        config: &ModelConfig,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let hidden = config.hidden_size;
+        let num_heads = config.num_attention_heads;
+        let num_kv_heads = config.num_kv_heads;
+        let head_dim = config.head_dim;
+        let embed_tokens = patterned_bf16(&[config.vocab_size, hidden], 0.01, device)?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let q_proj = patterned_bf16(&[num_heads * head_dim, hidden], 0.00002, device)?;
+        let k_proj = patterned_bf16(&[num_kv_heads * head_dim, hidden], 0.00003, device)?;
+        let v_proj = patterned_bf16(&[num_kv_heads * head_dim, hidden], 0.00004, device)?;
+        let o_proj = patterned_bf16(&[hidden, num_heads * head_dim], 0.00002, device)?;
+        let gate_proj = patterned_bf16(&[config.intermediate_size, hidden], 0.00003, device)?;
+        let up_proj = patterned_bf16(&[config.intermediate_size, hidden], 0.00002, device)?;
+        let down_proj = patterned_bf16(&[hidden, config.intermediate_size], 0.00003, device)?;
+        let layer = crate::forward::GpuLayerWeights {
+            input_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+            post_attention_layernorm: Tensor::zeros(hidden, DType::BF16, device)?,
+            attention: crate::forward::GpuAttentionWeights::Full(
+                crate::forward::GpuFullAttentionWeights {
+                    q_proj_t: q_proj.t()?.contiguous()?,
+                    k_proj_t: k_proj.t()?.contiguous()?,
+                    v_proj_t: v_proj.t()?.contiguous()?,
+                    o_proj_t: o_proj.t()?.contiguous()?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    q_norm: Tensor::zeros(head_dim, DType::BF16, device)?,
+                    k_norm: Tensor::zeros(head_dim, DType::BF16, device)?,
+                    q_proj_marlin: None,
+                },
+            ),
+            mlp: crate::forward::GpuFfnWeights {
+                gate_proj_t: gate_proj.t()?.contiguous()?,
+                up_proj_t: up_proj.t()?.contiguous()?,
+                down_proj_t: down_proj.t()?.contiguous()?,
+                gate_proj,
+                up_proj,
+                down_proj,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+            },
+        };
+        Ok(GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers: vec![layer],
+            final_norm: Tensor::zeros(hidden, DType::BF16, device)?,
+            rotary_inv_freq: crate::forward::compute_rotary_inv_freq(
+                config.rotary_dim(),
+                config.rope_theta,
+                device,
+            )?,
+            mtp: None,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping runner batch decode test");
+            return Ok(());
+        }
+
+        let config = ModelConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+        let weights = qwen_shape_bf16_full_attention_weights(&config, &device)?;
+        let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+        let batch = 2usize;
+        let block_size = 16usize;
+        let start_pos = 3usize;
+        let token_ids = [7u32, 11u32];
+        let prefix_k = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[batch, start_pos, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let seq_lens = [start_pos, start_pos];
+
+        let batch_cache = Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?);
+        {
+            let mut pc = batch_cache.lock().unwrap();
+            for (row, block_table) in block_tables.iter().enumerate() {
+                let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            }
+        }
+        let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+        let batched = runner.decode_next_tokens_paged_contiguous_batch_greedy(
+            &token_ids,
+            &batch_cache,
+            &block_tables,
+            &seq_lens,
+            &mut no_linear_states,
+        )?;
+        assert_eq!(batched.len(), batch);
+
+        for row in 0..batch {
+            let row_cache = Mutex::new(PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?);
+            let row_table = BlockTable { blocks: vec![0] };
+            {
+                let mut pc = row_cache.lock().unwrap();
+                let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            }
+            let rowwise_logits = {
+                let mut pc = row_cache.lock().unwrap();
+                model_forward_paged(
+                    &*runner.backend,
+                    &token_ids[row..row + 1],
+                    &runner.weights,
+                    &runner.config,
+                    &mut pc,
+                    &row_table,
+                    start_pos,
+                    None,
+                    None,
+                    None,
+                )?
+            };
+            let rowwise = greedy_sample(&rowwise_logits)?;
+            assert_eq!(
+                batched[row], rowwise,
+                "row {row} batched greedy token should match rowwise"
+            );
+        }
+
+        Ok(())
     }
 
     #[test]

@@ -1090,3 +1090,13 @@
   (`max_abs_diff=0`, `mean_abs_diff=0` for both rows), and every post-decode
   GDN recurrent/conv state row matched exactly for all three linear layers.
   This removes the main correctness blocker before scheduler admission.
+- 2026-05-04 E344: Accepted
+  `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy` as the first
+  scheduler-facing decode batch admission primitive. It accepts one ready
+  decode token/block table/position per row, assembles per-request GDN states
+  into batch state, calls `model_forward_paged_decode_contiguous_batch` under
+  the shared paged-cache lock, scatters state back, and samples all rows with
+  `greedy_sample_rows`. A Metal `ModelRunner` test using Qwen full-attention
+  decode geometry matched two-row batched greedy tokens against rowwise
+  `model_forward_paged` logits plus `greedy_sample`. This is not live request
+  batching yet; it gives the eventual scheduler one call to execute.

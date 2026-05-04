@@ -10875,3 +10875,58 @@ request/scheduler integration that can assemble compatible decode rows, call
 `model_forward_paged_decode_contiguous_batch`, and scatter logits/state back to
 their owning requests under the current common-position and contiguous-KV
 constraints.
+
+## 2026-05-04 E344 - Added ModelRunner batched greedy decode admission primitive
+
+### Goal
+
+Move from isolated model-forward helpers toward the live serving boundary. E342
+and E343 proved that strict batched paged model-forward decode is correct, but
+request decode loops still had no `ModelRunner`-level operation that could
+accept multiple ready rows, assemble their per-request GDN state, call the
+batched helper under the shared paged-cache lock, sample per-row greedy tokens,
+and scatter state back.
+
+### Change
+
+- Added `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy`.
+- The method accepts one input token, `BlockTable`, and absolute decode
+  position per row plus a shared `Mutex<PagedKvCache>`.
+- For Qwen-style hybrid models, it requires one mutable one-row
+  `LinearAttentionState` per row, assembles them with
+  `LinearAttentionState::from_batch_rows`, forwards through
+  `model_forward_paged_decode_contiguous_batch`, then scatters updated
+  recurrent/conv state back with `scatter_batch_rows`.
+- It samples all batch rows with `greedy_sample_rows`, so the batch path does
+  one vocab-dim argmax over `[B,1,V]` instead of narrowing/sampling rows one by
+  one.
+- It keeps the existing single-row greedy fast path for `batch == 1` so bs=1
+  does not regress to full-logits batch plumbing.
+- Added a Metal `ModelRunner` test using Qwen full-attention decode geometry
+  (`16` Q heads, `4` KV heads, `head_dim=256`) and a shared paged cache. The
+  test compares two-row batched greedy tokens against rowwise
+  `model_forward_paged` logits plus `greedy_sample`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal --lib -- --nocapture`
+
+### Results
+
+- The `ModelRunner` batched greedy admission method matched rowwise greedy
+  sampling for both rows in the focused Metal test.
+- This test covers the serving-facing method shape: `ModelRunner`, shared
+  `Mutex<PagedKvCache>`, per-row `BlockTable`s, common decode positions, and
+  batched row sampling.
+
+### Artifact
+
+- `e344_model_runner_batched_greedy_decode_admission.log`
+
+### Decision
+
+Accepted as the first scheduler-facing decode batch admission primitive. This
+still does not batch live HTTP/SSE requests because the request threads do not
+yet rendezvous around a central decode queue, but the serving layer now has a
+single call that can execute a compatible greedy decode batch and preserve
+per-request state ownership.
