@@ -41,6 +41,25 @@
       font-feature-settings: "ss01", "cv02", "cv11";
       -webkit-font-smoothing: antialiased;
     }
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: 0;
+      transform: translateY(-120%);
+      z-index: 50;
+      background: var(--accent);
+      color: #1a0c00;
+      border-radius: 0 0 0.5rem 0.5rem;
+      padding: 0.65rem 0.9rem;
+      font-weight: 700;
+      text-decoration: none;
+      transition: transform 0.15s ease;
+    }
+    .skip-link:focus {
+      transform: translateY(0);
+      outline: 2px solid #fed7aa;
+      outline-offset: 2px;
+    }
     code, pre, kbd, samp {
       font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }
@@ -180,6 +199,7 @@
   </style>
 </head>
 <body class="min-h-screen">
+  <a class="skip-link" href="#content">Skip to content</a>
   <!-- nav -->
   <header class="border-b" style="border-color: var(--line);">
     <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
@@ -200,7 +220,7 @@
     </div>
   </header>
 
-  <main>
+  <main id="content" tabindex="-1">
 
   <!-- hero -->
   <section class="hero-glow">
