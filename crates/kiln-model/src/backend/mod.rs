@@ -398,11 +398,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    /// Fused GDN decode input projections.
+    /// Fused GDN input projections.
     ///
-    /// Collapses the four single-token `broadcast_matmul` calls in Step 1
-    /// (`qkv`, `z`, `a`, `b`) into one backend launch for decode. Returns
-    /// `(mixed_qkv, z, a, b)` with shapes matching the portable matmul path.
+    /// Collapses the four `broadcast_matmul` calls in Step 1 (`qkv`, `z`,
+    /// `a`, `b`) into one backend launch when the backend supports the shape.
+    /// Returns `(mixed_qkv, z, a, b)` with shapes matching the portable matmul
+    /// path.
     #[allow(clippy::too_many_arguments)]
     fn gdn_in_proj_decode(
         &self,
@@ -415,11 +416,12 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
-    /// Single-token transposed linear projection.
+    /// Transposed linear projection.
     ///
-    /// `x` is `[1, 1, hidden]`, `weight_t` is `[hidden, out_dim]`, and the
-    /// output shape is `[1, 1, out_dim]`. Backends should return `Ok(None)` for
-    /// unsupported shapes, dtypes, LoRA paths, or debug modes.
+    /// `x` is `[batch, seq_len, hidden]`, `weight_t` is `[hidden, out_dim]`,
+    /// and the output shape is `[batch, seq_len, out_dim]`. Backends should
+    /// return `Ok(None)` for unsupported shapes, dtypes, LoRA paths, or debug
+    /// modes.
     fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }

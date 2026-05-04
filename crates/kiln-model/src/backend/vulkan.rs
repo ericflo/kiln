@@ -29,6 +29,7 @@ pub struct VulkanBackend {
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     gdn_enabled: bool,
+    gdn_prefill_in_proj_enabled: bool,
     gdn_gates_enabled: bool,
     gdn_gated_rms_norm_enabled: bool,
     fused_conv1d_enabled: bool,
@@ -94,6 +95,8 @@ fn exit_recurrent_state_resident_scope() {
 impl VulkanBackend {
     pub fn new(device: Device) -> Self {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
+        let gdn_prefill_in_proj_enabled =
+            gdn_enabled && std::env::var("KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
         let gdn_gated_rms_norm_enabled =
@@ -158,6 +161,7 @@ impl VulkanBackend {
         Self {
             device,
             gdn_enabled,
+            gdn_prefill_in_proj_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
             fused_conv1d_enabled,
@@ -458,10 +462,10 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
 
-        let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if seq_len != 1 {
+        if seq_len != 1 && !self.gdn_prefill_in_proj_enabled {
             return Ok(None);
         }
 
@@ -490,10 +494,37 @@ impl BackendRuntime for VulkanBackend {
         let a_buf = self.cached_f32_weight_buffer(in_proj_a_t)?;
         let b_buf = self.cached_f32_weight_buffer(in_proj_b_t)?;
 
-        let result = kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached(
-            vk_device, x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        let row_count = batch * seq_len;
+        let dispatch_x = if seq_len == 1 {
+            x.clone()
+        } else {
+            x.reshape((row_count, 1usize, hidden))?
+        };
+
+        let (qkv, z, a, b) = kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached(
+            vk_device,
+            &dispatch_x,
+            &qkv_buf,
+            &z_buf,
+            &a_buf,
+            &b_buf,
+            hidden,
+            qkv_dim,
+            z_dim,
+            a_dim,
+            b_dim,
         )
         .context("gdn_in_proj_decode kernel failed")?;
+        let result = if seq_len == 1 {
+            (qkv, z, a, b)
+        } else {
+            (
+                qkv.reshape((batch, seq_len, qkv_dim))?,
+                z.reshape((batch, seq_len, z_dim))?,
+                a.reshape((batch, seq_len, a_dim))?,
+                b.reshape((batch, seq_len, b_dim))?,
+            )
+        };
         Ok(Some(result))
     }
 
