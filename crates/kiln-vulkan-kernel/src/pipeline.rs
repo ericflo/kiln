@@ -3,6 +3,32 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn compile_shader_command(glsl_path: &str, spv_path: &std::path::Path) -> std::io::Result<std::process::Output> {
+    let glslc = std::process::Command::new("glslc")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output();
+    if glslc.is_ok() {
+        return glslc;
+    }
+
+    std::process::Command::new("glslangValidator")
+        .arg("-V")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output()
+}
+
 // Include the build-time generated SPIR-V modules
 include!(concat!(env!("OUT_DIR"), "/vulkan_spirv.rs"));
 
@@ -130,31 +156,12 @@ impl ShaderPipeline {
             ));
         }
 
-        // Check that glslc is available
-        let glslc_status = std::process::Command::new("glslc").arg("--help").output();
-        if glslc_status.is_err() {
-            anyhow::bail!(
-                "Vulkan SPIR-V '{}' was not compiled at build time and glslc is not on PATH. \
-                 Install glslc (part of the SPIR-V Tools package) and rebuild kiln-vulkan-kernel.",
-                glsl_path
-            );
-        }
-
-        // Compile with glslc into temp dir
-        let output = std::process::Command::new("glslc")
-            .arg(glsl_path)
-            .arg("-o")
-            .arg(&spv_path)
-            .arg("-DFLOAT_TYPE=float")
-            .arg("-DUSE_BFLOAT16=1")
-            .arg("-DUSE_SUBGROUP_ADD=1")
-            .arg("-DUSE_SUBGROUP_CLUSTERED=1")
-            .output()
-            .context("failed to run glslc")?;
+        let output = compile_shader_command(glsl_path, &spv_path)
+            .context("failed to run glslc or glslangValidator")?;
 
         if !output.status.success() {
             anyhow::bail!(
-                "glslc failed to compile '{}': {}",
+                "shader compiler failed to compile '{}': {}",
                 glsl_path,
                 String::from_utf8_lossy(&output.stderr)
             );

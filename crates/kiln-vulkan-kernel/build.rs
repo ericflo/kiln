@@ -69,6 +69,32 @@ const SHADERS: &[(&str, &str)] = &[
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
 ];
 
+fn compile_shader_command(glsl_path: &std::path::Path, spv_path: &std::path::Path) -> std::io::Result<std::process::Output> {
+    let glslc = std::process::Command::new("glslc")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output();
+    if glslc.is_ok() {
+        return glslc;
+    }
+
+    std::process::Command::new("glslangValidator")
+        .arg("-V")
+        .arg(glsl_path)
+        .arg("-o")
+        .arg(spv_path)
+        .arg("-DFLOAT_TYPE=float")
+        .arg("-DUSE_BFLOAT16=1")
+        .arg("-DUSE_SUBGROUP_ADD=1")
+        .arg("-DUSE_SUBGROUP_CLUSTERED=1")
+        .output()
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let csrc_dir = manifest_dir.join("csrc/shaders");
@@ -90,15 +116,7 @@ fn main() {
             continue;
         }
 
-        let output = std::process::Command::new("glslc")
-            .arg(&glsl_path)
-            .arg("-o")
-            .arg(&spv_path)
-            .arg("-DFLOAT_TYPE=float")
-            .arg("-DUSE_BFLOAT16=1")
-            .arg("-DUSE_SUBGROUP_ADD=1")
-            .arg("-DUSE_SUBGROUP_CLUSTERED=1")
-            .output();
+        let output = compile_shader_command(&glsl_path, &spv_path);
 
         match &output {
             Ok(output) if output.status.success() => {
