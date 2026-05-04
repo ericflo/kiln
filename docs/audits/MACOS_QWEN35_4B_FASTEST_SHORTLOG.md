@@ -1037,3 +1037,10 @@
   (`0.989x`), cratered batch4 (`1901.101 us` vs `3217.815 us`, 0.591x), and
   only won batch8 (`1.242x`). Source was reverted; do not carry this
   Qwen-specific shared-X layout.
+- 2026-05-04 E338: Accepted batch-aware `LinearAttentionState` construction.
+  Added `LinearAttentionState::new_with_batch(config, batch, device)` while
+  preserving `new` as the batch-1 wrapper. CPU and Metal tests verify batch-3
+  recurrent state `[3,nv,dk,dv]`, conv state `[3,conv_dim,k-1]`, and the
+  existing Metal BF16 recurrent/F32 conv dtype policy. This is true-batching
+  plumbing, not a current endpoint win; it removes the hard-coded batch-1 GDN
+  state allocation blocker.

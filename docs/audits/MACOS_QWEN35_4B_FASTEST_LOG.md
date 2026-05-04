@@ -10548,3 +10548,42 @@ batches: batch8 improved, but batch4 regressed heavily. The source was
 reverted. Do not add a Qwen-specific shared-X gate/up variant without a more
 robust threading/memory layout that wins bs=1 or consistently wins realistic
 batch sizes.
+
+## 2026-05-04 E338 - Added batch-aware LinearAttentionState construction
+
+### Goal
+
+Remove another true-batching blocker in the model-forward owner. The GDN state
+contract is already batch-shaped (`[batch,nv,dk,dv]` recurrent state and
+`[batch,conv_dim,k-1]` conv state), and the low-level GDN decode kernels have
+batch-shaped tests, but `LinearAttentionState::new` still hard-coded batch 1.
+
+### Change
+
+- Added `LinearAttentionState::new_with_batch(config, batch, device)`.
+- Preserved `LinearAttentionState::new(config, device)` as the existing batch-1
+  wrapper so current callers are unchanged.
+- The new constructor validates `batch > 0`, keeps the existing dtype policy
+  (Metal BF16 models use BF16 recurrent state, conv state remains F32), and
+  allocates every linear layer with the requested batch dimension.
+- Extended CPU and Metal tests to verify batch-3 recurrent/conv state shapes
+  and dtypes.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_linear_attention_state_new --lib`
+- `cargo test -p kiln-model --features metal test_linear_attention_state_uses_bf16_on_metal_for_bf16_models --lib`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+
+### Results
+
+- CPU batch-1 state remains `[1,nv,dk,dv]` and `[1,conv_dim,k-1]`.
+- CPU batch-3 state now allocates `[3,nv,dk,dv]` and `[3,conv_dim,k-1]`.
+- Metal BF16 batch-3 state uses BF16 recurrent tensors and F32 conv tensors.
+
+### Decision
+
+Accepted as true-batching plumbing. This does not change current endpoint
+latency or throughput by itself, but it removes the hard-coded batch-1 GDN
+state allocation that would block a scheduler/model-forward path feeding
+`[B,1,H]` rows through the already batched GDN kernels.

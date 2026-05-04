@@ -919,6 +919,17 @@ pub struct LinearAttentionState {
 impl LinearAttentionState {
     /// Create fresh zero-initialized state for all linear attention layers.
     pub fn new(config: &kiln_core::config::ModelConfig, device: &Device) -> Result<Self> {
+        Self::new_with_batch(config, 1, device)
+    }
+
+    /// Create fresh zero-initialized state for all linear attention layers and
+    /// `batch` independent decode rows.
+    pub fn new_with_batch(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+    ) -> Result<Self> {
+        anyhow::ensure!(batch > 0, "LinearAttentionState batch must be positive");
         let num_linear_layers = config.num_layers - config.num_full_attention_layers;
         let nv = config.linear_num_value_heads;
         let dk = config.linear_key_head_dim;
@@ -935,8 +946,8 @@ impl LinearAttentionState {
         let mut conv_states = Vec::with_capacity(num_linear_layers);
 
         for _ in 0..num_linear_layers {
-            recurrent_states.push(Tensor::zeros((1, nv, dk, dv), recurrent_dtype, device)?);
-            conv_states.push(Tensor::zeros((1, conv_dim, k_minus_1), DType::F32, device)?);
+            recurrent_states.push(Tensor::zeros((batch, nv, dk, dv), recurrent_dtype, device)?);
+            conv_states.push(Tensor::zeros((batch, conv_dim, k_minus_1), DType::F32, device)?);
         }
 
         Ok(Self {
@@ -10272,6 +10283,15 @@ mod tests {
         assert_eq!(state.conv_states[0].dims(), &[1, qkv_dim, 3]);
         assert_eq!(state.conv_states[0].dtype(), DType::F32);
 
+        let batched = LinearAttentionState::new_with_batch(&config, 3, &device)?;
+        assert_eq!(batched.recurrent_states.len(), 3);
+        assert_eq!(batched.conv_states.len(), 3);
+        assert_eq!(batched.recurrent_states[0].dims(), &[3, 4, 4, 4]);
+        assert_eq!(batched.recurrent_states[0].dtype(), DType::F32);
+        assert_eq!(batched.conv_states[0].dims(), &[3, qkv_dim, 3]);
+        assert_eq!(batched.conv_states[0].dtype(), DType::F32);
+        assert!(LinearAttentionState::new_with_batch(&config, 0, &device).is_err());
+
         Ok(())
     }
 
@@ -10308,6 +10328,12 @@ mod tests {
         let state = LinearAttentionState::new(&config, &device)?;
         assert_eq!(state.recurrent_states[0].dtype(), DType::BF16);
         assert_eq!(state.conv_states[0].dtype(), DType::F32);
+
+        let batched = LinearAttentionState::new_with_batch(&config, 3, &device)?;
+        assert_eq!(batched.recurrent_states[0].dims(), &[3, 4, 4, 4]);
+        assert_eq!(batched.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(batched.conv_states[0].dims(), &[3, config.linear_qkv_dim(), 3]);
+        assert_eq!(batched.conv_states[0].dtype(), DType::F32);
 
         Ok(())
     }
