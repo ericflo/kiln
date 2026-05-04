@@ -5345,7 +5345,7 @@ async fn batch_completions_inner(
     let clone_greedy_prompt_groups = batch_can_clone_identical_prompt_groups(&req);
     let prompt_count = req.prompts.len();
     let prompt_groups = batch_prompt_groups(&req.prompts);
-    let prepare_prompt_groups = !batch_prepared_prompts_disabled();
+    let prepare_prompt_groups = !batch_prepared_prompts_disabled() && !clone_greedy_completions;
     let mut handles = Vec::with_capacity(prompt_groups.len());
     for prompt_group in prompt_groups {
         let state_clone = state.clone();
@@ -9912,8 +9912,8 @@ mod tests {
         assert!(generated_after_batch > 0);
         let render_stats_after_batch = state.rendered_prompt_cache.lock().unwrap().stats();
         let token_stats_after_batch = state.prompt_token_cache.lock().unwrap().stats();
-        assert_eq!(render_stats_after_batch, (4, 2, 2));
-        assert_eq!(token_stats_after_batch, (4, 2, 2));
+        assert_eq!(render_stats_after_batch, (0, 2, 2));
+        assert_eq!(token_stats_after_batch, (0, 2, 2));
         assert_eq!(state.batch_cache.lock().unwrap().stats(), 1);
         assert_eq!(
             state.chat_choices_cache.lock().unwrap().stats(),
