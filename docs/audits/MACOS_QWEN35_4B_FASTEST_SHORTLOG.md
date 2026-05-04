@@ -643,3 +643,11 @@
   425.5 ms / 164.5 ms / 6.08 tok/s. Memory pressure was 80-81% free around
   the repeat. The candidate source was reverted and clean-source release
   `kiln-bench` rebuild passed.
+- 2026-05-04 E272-E273: Rejected a GDN `out_proj` + residual fusion. The
+  candidate added a tile8 transposed cooperative GEMV epilogue that writes
+  `residual + out_proj(gated_norm)` directly, passed focused split-reference
+  parity, and release `kiln-bench` built. Same-binary warmed p64/o64 lost
+  clearly: fused was 418.6 ms prefill / 167.3 ms mean ITL / 5.98 tok/s with
+  239.2 ms P99, while disabled control was 417.4 ms / 159.9 ms / 6.25 tok/s
+  with 178.9 ms P99. Memory pressure was 78% free after E273. The candidate
+  source was reverted and clean-source release `kiln-bench` rebuild passed.

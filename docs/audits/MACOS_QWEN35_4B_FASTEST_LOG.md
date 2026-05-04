@@ -8029,3 +8029,69 @@ projection work should avoid simply wrapping the current transposed layout in
 more lanes; the next plausible direction is a real packed layout or a larger
 fusion that consumes the projected values without materializing the same
 intermediate boundaries.
+
+## Experiments E272-E273: Rejected GDN Out-Projection + Residual Fusion
+
+Hypothesis:
+
+The GDN `out_proj` stage already uses the generic Metal transposed cooperative
+GEMV in single-token decode, but the caller still launches a separate residual
+add after every linear-attention layer. A GEMV epilogue that writes
+`residual + out_proj(gated_norm)` directly would remove that standalone add
+without changing model math.
+
+Temporary change:
+
+- Added `kiln_transposed_coop_gemv8_add_bf16`, which computes a tile8
+  transposed cooperative GEMV and adds a `[1, 1, output_dim]` residual in the
+  writeback.
+- Routed GDN decode `out_proj` through this fused path when no debug taps are
+  armed and a residual tensor is supplied by the linear-attention caller.
+- Added `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ADD=1` for same-binary
+  fallback to the existing `out_proj` plus residual add path.
+- Reverted the candidate before commit after the same-binary control clearly
+  beat it.
+
+Validation while the candidate was applied:
+
+- `rustfmt --edition 2024 --config skip_children=true --check crates/kiln-model/src/backend/metal.rs`
+  - Passed.
+- `git diff --check`
+  - Passed.
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_add_matches_split_reference --lib`
+  - Passed.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed with the candidate applied.
+- `cargo build --release --features metal --bin kiln-bench`
+  - Passed again after reverting the candidate source.
+
+Full-model warmed p64/o64:
+
+Both runs used
+`--paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 64 --temperature 0.0`.
+E273 used `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ADD=1` in the same candidate
+binary.
+
+| Experiment | Variant | Measured prefill | Decode tok/s | Mean ITL | P50 ITL | P99 ITL | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| E272 | GDN out-proj + residual fused | 418.6 ms | 5.98 | 167.3 ms | 159.7 ms | 239.2 ms | rejected |
+| E273 | same-binary disabled control | 417.4 ms | 6.25 | 159.9 ms | 158.9 ms | 178.9 ms | control |
+
+Memory-pressure check:
+
+- `memory_pressure` reported 78% system-wide free memory after E273, so this
+  is treated as a real rejection rather than a memory-pressure artifact.
+
+Artifacts:
+
+- `e272_m1_bs1_p64_o64_warmed_gdn_outproj_residual_add.log`
+- `e273_m1_bs1_p64_o64_warmed_gdn_outproj_residual_disabled_control.log`
+
+Takeaway:
+
+Removing the explicit residual add was not enough to offset the fused epilogue
+cost in this shape, and P99 worsened substantially. The existing split
+`out_proj` plus residual add remains faster. Future larger-boundary fusions
+need to remove more than one simple add, for example by carrying the result
+directly into the following RMSNorm/MLP boundary or by changing the producer and
+consumer layouts together.
