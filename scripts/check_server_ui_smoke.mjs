@@ -2,10 +2,11 @@
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
+import { tmpdir } from 'node:os';
 
 const repoRoot = resolve(import.meta.dirname, '..');
 const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
@@ -79,6 +80,12 @@ async function readJsonBody(req) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+async function readBufferBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  return Buffer.concat(chunks);
+}
+
 function isFiniteNumber(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
@@ -135,6 +142,53 @@ function validateAdapterMergePayload(body) {
     return 'Density should only be sent for TIES merges';
   }
   return null;
+}
+
+function parseMultipartFormData(contentType, body) {
+  const match = /(?:^|;)\s*boundary=(?:("[^"]+")|([^;]+))/i.exec(contentType || '');
+  if (!match) return null;
+  const boundary = (match[1] || match[2]).replace(/^"|"$/g, '');
+  const parts = [];
+  const delimiter = Buffer.from(`--${boundary}`);
+  let searchOffset = 0;
+  while (true) {
+    const start = body.indexOf(delimiter, searchOffset);
+    if (start === -1) break;
+    let partStart = start + delimiter.length;
+    if (body.subarray(partStart, partStart + 2).toString() === '--') break;
+    if (body.subarray(partStart, partStart + 2).toString() === '\r\n') partStart += 2;
+    const next = body.indexOf(delimiter, partStart);
+    if (next === -1) break;
+    let part = body.subarray(partStart, next);
+    if (part.subarray(part.length - 2).toString() === '\r\n') part = part.subarray(0, part.length - 2);
+    const headerEnd = part.indexOf(Buffer.from('\r\n\r\n'));
+    if (headerEnd !== -1) {
+      const headers = part.subarray(0, headerEnd).toString('utf8');
+      const content = part.subarray(headerEnd + 4);
+      const disposition = /content-disposition:\s*form-data;([^\r\n]+)/i.exec(headers)?.[1] || '';
+      const name = /name="([^"]+)"/i.exec(disposition)?.[1];
+      const filename = /filename="([^"]*)"/i.exec(disposition)?.[1];
+      if (name) parts.push({ name, filename, content });
+    }
+    searchOffset = next;
+  }
+  return parts;
+}
+
+function validateAdapterUploadRequest(req, body) {
+  if (req.method !== 'POST') return { status: 405, detail: 'Use POST for adapter upload' };
+  const contentType = req.headers['content-type'] || '';
+  if (!/^multipart\/form-data\b/i.test(contentType)) {
+    return { status: 400, detail: 'Adapter upload should use multipart/form-data' };
+  }
+  const parts = parseMultipartFormData(contentType, body);
+  if (!parts) return { status: 400, detail: 'Adapter upload should include a multipart boundary' };
+  const name = parts.find((part) => part.name === 'name')?.content.toString('utf8').trim();
+  const archive = parts.find((part) => part.name === 'archive');
+  if (!isPathSafeAdapterDirectoryName(name)) return { status: 400, detail: 'Adapter upload name should be path-safe' };
+  if (!archive?.filename) return { status: 400, detail: 'Adapter upload should include an archive file field' };
+  if (archive.content.length === 0) return { status: 400, detail: 'Adapter upload archive should be non-empty' };
+  return { name, archiveSize: archive.content.length };
 }
 
 const defaultAvailableAdapters = [
@@ -210,6 +264,24 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
     }
     if (url.pathname === '/v1/adapters') {
       json(res, { active: null, available: availableAdapters });
+      return;
+    }
+    if (url.pathname === '/v1/adapters/upload') {
+      const body = await readBufferBody(req);
+      const validation = validateAdapterUploadRequest(req, body);
+      if (validation.detail) {
+        res.writeHead(validation.status, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: validation.detail }));
+        return;
+      }
+      if (!availableAdapters.some((adapter) => adapter.name === validation.name)) {
+        availableAdapters.push({ name: validation.name, active: false, size_bytes: validation.archiveSize });
+      }
+      setTimeout(() => json(res, {
+        name: validation.name,
+        size_bytes: validation.archiveSize,
+        files: 2,
+      }), 125);
       return;
     }
     if (url.pathname === '/v1/adapters/merge') {
@@ -517,6 +589,25 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
+    await expectDisabled(page, '#upload-adapter-btn', true, 'Adapter upload should start disabled until name and archive are provided');
+    const uploadFixtureDir = await mkdtemp(join(tmpdir(), 'kiln-ui-upload-'));
+    try {
+      const uploadBytes = Buffer.from('tiny adapter archive\n');
+      const uploadFixture = join(uploadFixtureDir, 'uploaded-smoke-adapter.tgz');
+      await writeFile(uploadFixture, uploadBytes);
+      await page.type('#upload-name', 'uploaded-smoke-adapter');
+      await expectDisabled(page, '#upload-adapter-btn', true, 'Adapter upload should stay disabled until an archive is attached');
+      const uploadInput = await page.$('#upload-archive');
+      if (!uploadInput) fail('Adapter upload archive input missing');
+      await uploadInput.uploadFile(uploadFixture);
+      await expectDisabled(page, '#upload-adapter-btn', false, 'Adapter upload should enable after path-safe name and archive are provided');
+      await clickAndWait(page, '#upload-adapter-btn', 'Could not submit adapter upload');
+      await expectDisabled(page, '#upload-adapter-btn', true, 'Adapter upload should disable while submitting');
+      await expectTrainingToast(page, `Uploaded uploaded-smoke-adapter (${uploadBytes.length} B, 2 files)`);
+      await waitForPanelText(page, '#adapters-panel', /uploaded-smoke-adapter/, 'Adapter list should refresh with the uploaded smoke adapter');
+    } finally {
+      await rm(uploadFixtureDir, { recursive: true, force: true });
+    }
     await waitForPanelText(page, '#merge-helper', /Select at least two source adapters/i, 'Adapter merge helper should ask for source selections before merge');
     await expectDisabled(page, '#add-merge-source', false, 'Add merge source should enable when at least two adapters exist');
     await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled before source adapters are selected');
