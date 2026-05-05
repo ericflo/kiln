@@ -65,6 +65,13 @@
     }
     pre {
       max-width: 100%;
+      min-width: 0;
+      overflow-x: auto;
+    }
+    pre code {
+      display: block;
+      width: max-content;
+      min-width: 100%;
     }
     p code, li code, td code, h2 code, h3 code {
       background: var(--bg-soft);
@@ -87,6 +94,7 @@
       border-radius: 12px;
       min-width: 0;
     }
+    .grid > * { min-width: 0; }
     .btn-primary {
       background: var(--accent);
       color: #1a0c00;

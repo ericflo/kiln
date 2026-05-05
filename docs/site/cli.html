@@ -50,6 +50,8 @@
       border: 1px solid var(--line);
       border-radius: 10px;
       padding: 1rem;
+      max-width: 100%;
+      min-width: 0;
       overflow-x: auto;
       color: #ffe9c9;
     }
@@ -59,13 +61,21 @@
       border-radius: 0.35rem;
       padding: 0.08rem 0.28rem;
     }
-    pre code { background: transparent; border: 0; padding: 0; }
+    pre code {
+      background: transparent;
+      border: 0;
+      display: block;
+      min-width: 100%;
+      padding: 0;
+      width: max-content;
+    }
     .card {
       background: var(--bg-soft);
       border: 1px solid var(--line);
       border-radius: 12px;
       min-width: 0;
     }
+    .grid > * { min-width: 0; }
     .btn-primary {
       background: var(--accent);
       color: #1a0c00;
