@@ -131,14 +131,37 @@ async function expectText(page, selector, pattern, message) {
 }
 
 async function expectDisabled(page, selector, expected, message) {
-  const actual = await page.$eval(selector, (el) => Boolean(el.disabled));
-  if (actual !== expected) fail(`${message}: expected ${selector} disabled=${expected}, got ${actual}`);
+  await page.waitForFunction(
+    (targetSelector, targetDisabled) => {
+      const element = document.querySelector(targetSelector);
+      return element && Boolean(element.disabled) === targetDisabled;
+    },
+    { timeout: 5000 },
+    selector,
+    expected,
+  ).catch(async () => {
+    const actual = await page.$eval(selector, (el) => Boolean(el.disabled)).catch(() => 'missing');
+    fail(`${message}: expected ${selector} disabled=${expected}, got ${actual}`);
+  });
 }
 
 async function clickAndWait(page, selector, message) {
-  const handle = await page.$(selector);
+  const handle = await page.waitForSelector(selector, { visible: true, timeout: 5000 });
   if (!handle) fail(`${message}: missing selector ${selector}`);
-  await handle.click();
+  await page.evaluate((element) => element.click(), handle);
+}
+
+async function waitForVisiblePanel(page, selector, message) {
+  await page.waitForFunction(
+    (panelSelector) => {
+      const panel = document.querySelector(panelSelector);
+      if (!panel || panel.hidden || panel.inert || !panel.classList.contains('active')) return false;
+      const rect = panel.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    },
+    { timeout: 5000 },
+    selector,
+  ).catch(() => fail(`${message}: ${selector} did not become active and visible`));
 }
 
 async function waitForPanelText(page, selector, pattern, message) {
@@ -199,11 +222,13 @@ async function runSmoke(baseUrl) {
     await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
+    await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should start disabled until examples are provided');
     await clickAndWait(page, '#use-sft-sample', 'Could not click SFT sample payload button');
     await expectDisabled(page, '#sft-form button[type="submit"]', false, 'SFT submit should enable after sample payload is clicked');
 
     await clickAndWait(page, '#training-tab-grpo', 'Could not open GRPO tab');
+    await waitForVisiblePanel(page, '#tab-grpo', 'GRPO tab did not activate');
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should start disabled until groups are provided');
     await clickAndWait(page, '#use-grpo-sample', 'Could not click GRPO sample payload button');
     await expectDisabled(page, '#grpo-form button[type="submit"]', false, 'GRPO submit should enable after sample payload is clicked');
