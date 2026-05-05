@@ -191,6 +191,19 @@ function validateAdapterUploadRequest(req, body) {
   return { name, archiveSize: archive.content.length };
 }
 
+function validateExistingAdapterName(name, availableAdapters, action) {
+  if (!isPathSafeAdapterDirectoryName(name)) return `${action} adapter name should be path-safe`;
+  if (!availableAdapters.some((adapter) => adapter.name === name)) return `${action} adapter should already exist`;
+  return null;
+}
+
+function parseAdapterRoute(pathname) {
+  const match = /^\/v1\/adapters\/([^/]+)(?:\/(download))?$/.exec(pathname);
+  if (!match) return null;
+  if (['load', 'unload', 'upload', 'merge'].includes(match[1])) return null;
+  return { name: decodeURIComponent(match[1]), action: match[2] || null };
+}
+
 const defaultAvailableAdapters = [
   { name: 'adapter-alpha', active: false, size_bytes: 4096 },
   { name: 'adapter-beta', active: false, size_bytes: 8192 },
@@ -211,9 +224,12 @@ function sse(res, chunks) {
 
 async function startServer({ failDashboardApis = false, availableAdapters = defaultAvailableAdapters } = {}) {
   const uiHtml = await readFile(uiPath, 'utf8');
+  availableAdapters = availableAdapters.map((adapter) => ({ ...adapter }));
+  let activeAdapter = availableAdapters.find((adapter) => adapter.active)?.name || null;
   const completedTrainingJobs = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
+    const adapterRoute = parseAdapterRoute(url.pathname);
     if (url.pathname === '/' || url.pathname === '/ui') {
       text(res, uiHtml, 'text/html; charset=utf-8');
       return;
@@ -251,7 +267,7 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
         model: 'Qwen3.5-4B',
         backend: 'mock',
         uptime_seconds: 42,
-        active_adapter: null,
+        active_adapter: activeAdapter,
         scheduler: { waiting: 0, running: 0, blocks_used: 0, blocks_free: 1024 },
         gpu_memory: { total_vram_gb: 24, model_gb: 8, kv_cache_gb: 2, training_budget_gb: 4 },
         checks: [{ name: 'mock smoke server', pass: true }],
@@ -263,7 +279,74 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
       return;
     }
     if (url.pathname === '/v1/adapters') {
-      json(res, { active: null, available: availableAdapters });
+      json(res, { active: activeAdapter, available: availableAdapters });
+      return;
+    }
+    if (url.pathname === '/v1/adapters/load') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for adapter load' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const validationError = validateExistingAdapterName(body?.name, availableAdapters, 'Load');
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      activeAdapter = body.name;
+      setTimeout(() => json(res, { active: activeAdapter }), 75);
+      return;
+    }
+    if (url.pathname === '/v1/adapters/unload') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for adapter unload' }));
+        return;
+      }
+      const body = await readBufferBody(req);
+      if (body.length > 0) {
+        apiBadRequest(res, 'Unload should not require or send a request body');
+        return;
+      }
+      activeAdapter = null;
+      setTimeout(() => json(res, { active: null }), 75);
+      return;
+    }
+    if (adapterRoute?.action === 'download') {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use GET for adapter download' }));
+        return;
+      }
+      const validationError = validateExistingAdapterName(adapterRoute.name, availableAdapters, 'Download');
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      const archive = Buffer.from(`kiln smoke adapter archive: ${adapterRoute.name}\n`);
+      res.writeHead(200, {
+        'content-type': 'application/gzip',
+        'content-disposition': `attachment; filename="${adapterRoute.name}.tar.gz"`,
+        'content-length': String(archive.length),
+      });
+      res.end(archive);
+      return;
+    }
+    if (adapterRoute && adapterRoute.action === null) {
+      if (req.method !== 'DELETE') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use DELETE for adapter deletion' }));
+        return;
+      }
+      const validationError = validateExistingAdapterName(adapterRoute.name, availableAdapters, 'Delete');
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      availableAdapters = availableAdapters.filter((adapter) => adapter.name !== adapterRoute.name);
+      if (activeAdapter === adapterRoute.name) activeAdapter = null;
+      setTimeout(() => json(res, { deleted: adapterRoute.name }), 75);
       return;
     }
     if (url.pathname === '/v1/adapters/upload') {
@@ -281,7 +364,7 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
         name: validation.name,
         size_bytes: validation.archiveSize,
         files: 2,
-      }), 125);
+      }), 300);
       return;
     }
     if (url.pathname === '/v1/adapters/merge') {
@@ -474,7 +557,10 @@ async function expectTrainingToast(page, text) {
     (expectedText) => Array.from(document.querySelectorAll('#toasts .toast')).some((toast) => toast.textContent?.trim() === expectedText),
     { timeout: 5000 },
     text,
-  ).catch(() => fail(`Expected training success toast ${JSON.stringify(text)}`));
+  ).catch(async () => {
+    const toasts = await page.evaluate(() => Array.from(document.querySelectorAll('#toasts .toast')).map((toast) => toast.textContent?.trim())).catch(() => []);
+    fail(`Expected training success toast ${JSON.stringify(text)}, got ${JSON.stringify(toasts)}`);
+  });
 }
 
 async function expectPanelLink(page, selector, label, href) {
@@ -491,6 +577,42 @@ async function expectPanelLink(page, selector, label, href) {
     label,
     href,
   ).catch(() => fail(`${selector} missing expected ${label} link ${href}`));
+}
+
+async function clickAdapterAction(page, adapterName, actionLabel) {
+  const clicked = await page.evaluate((targetAdapterName, targetActionLabel) => {
+    const items = Array.from(document.querySelectorAll('#adapters-panel .adapter-item'));
+    const item = items.find((candidate) => candidate.querySelector('.adapter-name')?.textContent?.trim() === targetAdapterName);
+    const button = Array.from(item?.querySelectorAll('button') || [])
+      .find((candidate) => candidate.textContent?.trim() === targetActionLabel);
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  }, adapterName, actionLabel);
+  if (!clicked) fail(`Could not click ${actionLabel} for ${adapterName}`);
+}
+
+async function expectAdapterAction(page, adapterName, actionLabel, message) {
+  await page.waitForFunction(
+    (targetAdapterName, targetActionLabel) => {
+      const items = Array.from(document.querySelectorAll('#adapters-panel .adapter-item'));
+      const item = items.find((candidate) => candidate.querySelector('.adapter-name')?.textContent?.trim() === targetAdapterName);
+      return Array.from(item?.querySelectorAll('button') || [])
+        .some((button) => button.textContent?.trim() === targetActionLabel && !button.disabled);
+    },
+    { timeout: 5000 },
+    adapterName,
+    actionLabel,
+  ).catch(() => fail(message));
+}
+
+async function expectAdapterAbsent(page, adapterName, message) {
+  await page.waitForFunction(
+    (targetAdapterName) => !Array.from(document.querySelectorAll('#adapters-panel .adapter-name'))
+      .some((name) => name.textContent?.trim() === targetAdapterName),
+    { timeout: 5000 },
+    adapterName,
+  ).catch(() => fail(message));
 }
 
 function escapeRegExp(value) {
@@ -589,6 +711,28 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
+
+    await clickAdapterAction(page, 'adapter-alpha', 'Load');
+    await expectTrainingToast(page, 'Loaded adapter: adapter-alpha');
+    await expectAdapterAction(page, 'adapter-alpha', 'Unload', 'Loaded adapter should refresh as active with an Unload button');
+    await clickAdapterAction(page, 'adapter-alpha', 'Unload');
+    await expectTrainingToast(page, 'Unloaded adapter');
+    await expectAdapterAction(page, 'adapter-alpha', 'Load', 'Unloaded adapter should refresh with a Load button');
+
+    const downloadResponsePromise = page.waitForResponse(
+      (response) => response.url().endsWith('/v1/adapters/adapter-beta/download') && response.status() === 200,
+      { timeout: 5000 },
+    );
+    await clickAdapterAction(page, 'adapter-beta', 'Download');
+    const downloadResponse = await downloadResponsePromise.catch(() => fail('Adapter download did not request /v1/adapters/adapter-beta/download'));
+    const downloadHeaders = downloadResponse.headers();
+    if (!/^attachment\b/i.test(downloadHeaders['content-disposition'] || '')) fail('Adapter download should return an attachment content-disposition header');
+    if (!/^application\/gzip\b/i.test(downloadHeaders['content-type'] || '')) fail('Adapter download should return an archive content-type header');
+    if (Number(downloadHeaders['content-length'] || 0) <= 0) fail('Adapter download should return non-empty archive bytes');
+    await page.goto(`${baseUrl}/ui`, { waitUntil: 'domcontentloaded' });
+    await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should reload after adapter download');
+    await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should still include adapter-beta after download');
+
     await expectDisabled(page, '#upload-adapter-btn', true, 'Adapter upload should start disabled until name and archive are provided');
     const uploadFixtureDir = await mkdtemp(join(tmpdir(), 'kiln-ui-upload-'));
     try {
@@ -601,18 +745,41 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       if (!uploadInput) fail('Adapter upload archive input missing');
       await uploadInput.uploadFile(uploadFixture);
       await expectDisabled(page, '#upload-adapter-btn', false, 'Adapter upload should enable after path-safe name and archive are provided');
+      const uploadResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith('/v1/adapters/upload'),
+        { timeout: 5000 },
+      );
       await clickAndWait(page, '#upload-adapter-btn', 'Could not submit adapter upload');
       await expectDisabled(page, '#upload-adapter-btn', true, 'Adapter upload should disable while submitting');
+      const uploadResponse = await uploadResponsePromise.catch(() => fail('Adapter upload did not request /v1/adapters/upload'));
+      if (uploadResponse.status() !== 200) {
+        const uploadDetail = await uploadResponse.text().catch(() => '');
+        fail(`Adapter upload should return 200, got ${uploadResponse.status()}: ${uploadDetail}`);
+      }
       await expectTrainingToast(page, `Uploaded uploaded-smoke-adapter (${uploadBytes.length} B, 2 files)`);
       await waitForPanelText(page, '#adapters-panel', /uploaded-smoke-adapter/, 'Adapter list should refresh with the uploaded smoke adapter');
     } finally {
       await rm(uploadFixtureDir, { recursive: true, force: true });
     }
+
+    page.once('dialog', async (dialog) => {
+      if (!/Delete adapter "adapter-beta"\?/.test(dialog.message())) fail(`Unexpected delete confirmation text: ${dialog.message()}`);
+      await dialog.accept();
+    });
+    const deleteRequestPromise = page.waitForRequest(
+      (request) => request.method() === 'DELETE' && request.url().endsWith('/v1/adapters/adapter-beta'),
+      { timeout: 5000 },
+    );
+    await clickAdapterAction(page, 'adapter-beta', 'Delete');
+    await deleteRequestPromise.catch(() => fail('Adapter delete did not send DELETE /v1/adapters/adapter-beta'));
+    await expectTrainingToast(page, 'Deleted adapter: adapter-beta');
+    await expectAdapterAbsent(page, 'adapter-beta', 'Deleted adapter should disappear after list refresh');
+
     await waitForPanelText(page, '#merge-helper', /Select at least two source adapters/i, 'Adapter merge helper should ask for source selections before merge');
     await expectDisabled(page, '#add-merge-source', false, 'Add merge source should enable when at least two adapters exist');
     await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled before source adapters are selected');
     await page.select('#merge-src-name-1', 'adapter-alpha');
-    await page.select('#merge-src-name-2', 'adapter-beta');
+    await page.select('#merge-src-name-2', 'uploaded-smoke-adapter');
     await page.click('#merge-output-name', { clickCount: 3 });
     await page.type('#merge-output-name', 'merged-smoke-adapter');
     await expectDisabled(page, '#merge-btn', false, 'Adapter merge should enable after two distinct sources and path-safe output are selected');
