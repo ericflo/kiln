@@ -1935,6 +1935,7 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
 // --- Chat ---
 const chatMessages = [];
 let chatAbort = null;
+let chatGenerating = false;
 let servedModelId = null;
 
 async function loadServedModelId() {
@@ -1993,6 +1994,13 @@ function updateCopyChatResponseState() {
 }
 window.updateCopyChatResponseState = updateCopyChatResponseState;
 
+function updateChatSendState() {
+  const input = document.getElementById('chat-input');
+  const send = document.getElementById('chat-send');
+  if (!input || !send) return;
+  send.disabled = chatGenerating || !input.value.trim();
+}
+
 function fallbackCopyText(text) {
   const textarea = document.createElement('textarea');
   textarea.value = text;
@@ -2031,10 +2039,11 @@ async function copyLatestAssistantResponse() {
 }
 
 function setChatGenerating(isGenerating) {
+  chatGenerating = isGenerating;
   const send = document.getElementById('chat-send');
   const stop = document.getElementById('chat-stop');
-  send.disabled = isGenerating;
   send.textContent = isGenerating ? 'Generating…' : 'Send';
+  updateChatSendState();
   stop.hidden = !isGenerating;
   stop.disabled = !isGenerating;
 }
@@ -2080,6 +2089,7 @@ async function sendChat() {
   }
 
   input.value = '';
+  updateChatSendState();
 
   chatMessages.push({ role: 'user', content: msg });
   chatMessages.push({ role: 'assistant', content: '', pending: true });
@@ -2157,6 +2167,7 @@ async function sendChat() {
 }
 
 document.getElementById('chat-send').addEventListener('click', sendChat);
+document.getElementById('chat-input').addEventListener('input', updateChatSendState);
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
@@ -2164,16 +2175,19 @@ document.querySelectorAll('[data-chat-starter-prompt]').forEach((button) => {
   button.addEventListener('click', () => {
     const input = document.getElementById('chat-input');
     input.value = button.dataset.chatStarterPrompt || '';
+    updateChatSendState();
     input.focus();
   });
 });
 document.getElementById('chat-stop').addEventListener('click', () => {
   if (chatAbort) chatAbort.abort();
+  updateChatSendState();
 });
 document.getElementById('chat-clear').addEventListener('click', () => {
   if (chatAbort) { chatAbort.abort(); chatAbort = null; }
   chatMessages.length = 0;
   setChatGenerating(false);
+  updateChatSendState();
   renderChat();
 });
 document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
@@ -2184,6 +2198,7 @@ updateUploadAdapterState();
 
 // --- Init ---
 renderChat();
+updateChatSendState();
 pollHealth();
 pollAdapters();
 pollTraining();
