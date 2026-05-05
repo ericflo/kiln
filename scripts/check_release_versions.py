@@ -8,6 +8,7 @@ import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_VERSION_RE = re.compile(r'^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$', re.MULTILINE)
@@ -60,6 +61,10 @@ CLI_EXAMPLE_SURFACES = [
 CLI_BINARIES = ("kiln", "./target/release/kiln")
 NO_VALUE_FLAGS = frozenset({"--json", "--quiet", "-q", "--verbose", "-v"})
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+DOCS_SITE = ROOT / "docs/site"
+DOCS_SITE_URL_ATTR_RE = re.compile(r"\b(?:href|src)\s*=\s*(['\"])(.*?)\1", re.IGNORECASE | re.DOTALL)
+DOCS_SITE_JS_URL_RE = re.compile(r"\b(?:cast|script)\s*:\s*(['\"])(.*?)\1")
+IGNORED_LOCAL_URL_PREFIXES = ("mailto:", "tel:", "javascript:", "data:")
 
 
 @dataclass(frozen=True)
@@ -372,6 +377,73 @@ def check_cli_examples() -> list[str]:
     return errors
 
 
+def docs_site_html_pages() -> list[Path]:
+    return sorted(DOCS_SITE.glob("**/*.html"))
+
+
+def is_ignored_docs_site_url(url: str) -> bool:
+    stripped = html.unescape(url).strip()
+    if not stripped or stripped.startswith("#") or "${" in stripped:
+        return True
+    lowered = stripped.lower()
+    if lowered.startswith(IGNORED_LOCAL_URL_PREFIXES):
+        return True
+    parsed = urlsplit(stripped)
+    return bool(parsed.scheme or parsed.netloc)
+
+
+def resolve_docs_site_url(source: Path, url: str) -> Path:
+    stripped = html.unescape(url).strip()
+    parsed = urlsplit(stripped)
+    relative_path = unquote(parsed.path)
+    base = source.parent / relative_path
+    if stripped.endswith("/") or relative_path in {"", ".", ".."}:
+        base = base / "index.html"
+    return base.resolve()
+
+
+def is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+    except ValueError:
+        return False
+    return True
+
+
+def check_docs_site_local_links() -> list[str]:
+    errors: list[str] = []
+    docs_site_root = DOCS_SITE.resolve()
+    for path in docs_site_html_pages():
+        text = path.read_text()
+        local_reference_matches = [
+            *DOCS_SITE_URL_ATTR_RE.finditer(text),
+            *DOCS_SITE_JS_URL_RE.finditer(text),
+        ]
+        for match in sorted(local_reference_matches, key=lambda item: item.start()):
+            url = match.group(2)
+            if is_ignored_docs_site_url(url):
+                continue
+            resolved = resolve_docs_site_url(path, url)
+            line = text.count("\n", 0, match.start()) + 1
+            if not is_relative_to(resolved, docs_site_root):
+                errors.append(
+                    f"{rel(path)}:{line}: docs site local link escapes docs/site: "
+                    f"{url!r} resolves to {resolved}"
+                )
+                continue
+            if not resolved.exists():
+                errors.append(
+                    f"{rel(path)}:{line}: broken docs site local link {url!r}: "
+                    f"missing {rel(resolved)}"
+                )
+            elif resolved.is_dir():
+                errors.append(
+                    f"{rel(path)}:{line}: docs site local link {url!r} resolves to directory "
+                    f"without trailing index.html: {rel(resolved)}"
+                )
+    return errors
+
+
 def rel(path: Path) -> str:
     return str(path.relative_to(ROOT))
 
@@ -420,6 +492,7 @@ def main() -> int:
                 errors.append(f"{rel(path)}: missing latest-version snippet {snippet!r}")
 
     errors.extend(check_cli_examples())
+    errors.extend(check_docs_site_local_links())
 
     if errors:
         print("release version drift check failed:", file=sys.stderr)
@@ -429,7 +502,8 @@ def main() -> int:
 
     print(
         "release version drift check passed: "
-        f"server examples avoid pinned {SERVER_VERSION}; desktop pins match {expected_desktop_tag}; CLI examples match cli.rs"
+        f"server examples avoid pinned {SERVER_VERSION}; desktop pins match {expected_desktop_tag}; "
+        "CLI examples match cli.rs; docs/site local links resolve"
     )
     return 0
 
