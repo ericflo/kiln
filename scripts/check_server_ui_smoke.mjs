@@ -205,6 +205,22 @@ async function waitForPanelText(page, selector, pattern, message) {
   ).catch(() => fail(`${message}: ${selector} did not render text matching ${pattern}`));
 }
 
+async function expectPanelLink(page, selector, label, href) {
+  await page.waitForFunction(
+    (panelSelector, expectedLabel, expectedHref) => {
+      const panel = document.querySelector(panelSelector);
+      if (!panel) return false;
+      return Array.from(panel.querySelectorAll('a')).some((anchor) => (
+        anchor.textContent?.trim() === expectedLabel && anchor.getAttribute('href') === expectedHref
+      ));
+    },
+    { timeout: 5000 },
+    selector,
+    label,
+    href,
+  ).catch(() => fail(`${selector} missing expected ${label} link ${href}`));
+}
+
 function escapeRegExp(value) {
   return String(value).split('').map((char) => ('\\^$.*+?()[]{}|'.includes(char) ? `\\${char}` : char)).join('');
 }
@@ -225,18 +241,8 @@ async function expectApiFailurePanel(page, selector, action, detail) {
   await expectText(page, selector, /Troubleshooting/, `${action} failure copy missing Troubleshooting link`);
   await expectText(page, selector, new RegExp(escapeRegExp(detail)), `${action} failure copy missing error detail`);
 
-  const links = await page.$$eval(`${selector} .api-failure a`, (anchors) => anchors.map((anchor) => ({
-    text: anchor.textContent?.trim(),
-    href: anchor.getAttribute('href'),
-  })));
-  for (const [label, href] of [
-    ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
-    ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
-  ]) {
-    if (!links.some((link) => link.text === label && link.href === href)) {
-      fail(`${action} failure copy missing expected ${label} link ${href}`);
-    }
-  }
+  await expectPanelLink(page, `${selector} .api-failure`, 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
+  await expectPanelLink(page, `${selector} .api-failure`, 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
 
   const retryLabel = await page.$eval(`${selector} .api-failure button`, (button) => ({
     text: button.textContent?.trim(),
@@ -301,9 +307,22 @@ async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
     }
 
     await waitForPanelText(page, '#adapters-panel', /No adapters found yet\./, 'Empty adapter state missing');
+    await expectPanelLink(page, '#adapters-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
+    await expectPanelLink(page, '#adapters-panel .empty', 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
+
     await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Empty training queue state missing');
+    await expectPanelLink(page, '#tab-queue .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
+    await expectPanelLink(page, '#tab-queue .empty', 'GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html');
+
     await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Empty recent requests state missing');
+    await expectPanelLink(page, '#recent-requests-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
+
     await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
+    await expectPanelLink(page, '#decode-perf-panel', '/health', '/health');
+
+    await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
+    await expectPanelLink(page, '#chat-output .empty', '/health', '/health');
+    await expectPanelLink(page, '#chat-output .empty', 'Troubleshooting guide', 'https://ericflo.github.io/kiln/troubleshooting.html');
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');
