@@ -9604,9 +9604,18 @@ mod tests {
 
     #[test]
     fn test_decode_lm_head_batch_env_parsing() {
-        assert_eq!(parse_decode_lm_head_batch(None), DEFAULT_DECODE_LM_HEAD_BATCH);
-        assert_eq!(parse_decode_lm_head_batch(Some("")), DEFAULT_DECODE_LM_HEAD_BATCH);
-        assert_eq!(parse_decode_lm_head_batch(Some("0")), DEFAULT_DECODE_LM_HEAD_BATCH);
+        assert_eq!(
+            parse_decode_lm_head_batch(None),
+            DEFAULT_DECODE_LM_HEAD_BATCH
+        );
+        assert_eq!(
+            parse_decode_lm_head_batch(Some("")),
+            DEFAULT_DECODE_LM_HEAD_BATCH
+        );
+        assert_eq!(
+            parse_decode_lm_head_batch(Some("0")),
+            DEFAULT_DECODE_LM_HEAD_BATCH
+        );
         assert_eq!(
             parse_decode_lm_head_batch(Some("not-a-number")),
             DEFAULT_DECODE_LM_HEAD_BATCH
