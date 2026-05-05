@@ -1796,6 +1796,15 @@ function parseFiniteNumberField(value, label) {
   return parsed;
 }
 
+function parseQuickInferenceTemperature(input) {
+  const text = input.value.trim();
+  const parsed = Number(text);
+  if (!text || !Number.isFinite(parsed) || parsed < 0 || parsed > 2) {
+    throw new Error('Temperature must be between 0 and 2.');
+  }
+  return parsed;
+}
+
 function parsePositiveIntegerField(value, label) {
   const parsed = parseFiniteNumberField(value, label);
   if (!Number.isInteger(parsed) || parsed <= 0) {
@@ -2057,8 +2066,19 @@ function formatQuickInferenceError(error) {
 async function sendChat() {
   if (chatAbort) return;
   const input = document.getElementById('chat-input');
+  const tempInput = document.getElementById('chat-temp');
   const msg = input.value.trim();
   if (!msg) return;
+
+  let temp;
+  try {
+    temp = parseQuickInferenceTemperature(tempInput);
+  } catch (error) {
+    toast(error.message || 'Temperature must be between 0 and 2.');
+    tempInput.focus();
+    return;
+  }
+
   input.value = '';
 
   chatMessages.push({ role: 'user', content: msg });
@@ -2067,8 +2087,6 @@ async function sendChat() {
   setChatGenerating(true);
 
   const adapter = document.getElementById('chat-adapter').value || undefined;
-  const parsedTemp = parseFloat(document.getElementById('chat-temp').value);
-  const temp = Number.isFinite(parsedTemp) ? parsedTemp : 0.0;
 
   const body = {
     messages: chatMessages.filter(m => m.content).map(m => ({ role: m.role, content: m.content })),
