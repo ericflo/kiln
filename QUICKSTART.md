@@ -679,6 +679,7 @@ sudo systemctl enable --now kiln
 
 - **Docs site**: Start at the [Kiln website](https://ericflo.github.io/kiln/) for the current docs index.
 - **API reference**: See the [HTTP API reference](https://ericflo.github.io/kiln/api.html) for endpoint shapes and request examples.
+- **CLI reference**: Use the [CLI Reference](https://ericflo.github.io/kiln/cli.html) for server, health, training, and adapter commands.
 - **Architecture**: Read the [architecture guide](https://ericflo.github.io/kiln/architecture.html) for the single-model design, scheduler, cache, and training flow.
 - **Demo**: Watch the [demo/asciicast](https://ericflo.github.io/kiln/demo/) to see the UI and common commands in context.
 - **Troubleshooting**: Use the [troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) for setup, GPU, model-path, and server-health issues.
