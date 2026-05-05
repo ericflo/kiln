@@ -1667,7 +1667,14 @@ function fillSftSamplePayload() {
       ],
     },
   ];
-  document.getElementById('sft-examples').value = JSON.stringify(sample, null, 2);
+  const textarea = document.getElementById('sft-examples');
+  const samplePayload = JSON.stringify(sample, null, 2);
+  if (textarea.value.trim() && textarea.value !== samplePayload && !confirm('Replace the current SFT examples with the sample payload?')) {
+    return;
+  }
+  textarea.value = samplePayload;
+  textarea.focus();
+  toast('Sample SFT payload inserted');
 }
 
 function fillGrpoSamplePayload() {
@@ -1685,7 +1692,14 @@ function fillGrpoSamplePayload() {
       ],
     },
   ];
-  document.getElementById('grpo-groups').value = JSON.stringify(sample, null, 2);
+  const textarea = document.getElementById('grpo-groups');
+  const samplePayload = JSON.stringify(sample, null, 2);
+  if (textarea.value.trim() && textarea.value !== samplePayload && !confirm('Replace the current GRPO groups with the sample payload?')) {
+    return;
+  }
+  textarea.value = samplePayload;
+  textarea.focus();
+  toast('Sample GRPO payload inserted');
 }
 
 document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
