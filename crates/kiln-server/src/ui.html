@@ -398,6 +398,11 @@ textarea { resize: vertical; min-height: 80px; }
 .chat-input-row input {
   flex: 1;
 }
+.chat-output-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -2px 0 8px;
+}
 .chat-starter-prompts {
   display: flex;
   flex-wrap: wrap;
@@ -875,7 +880,10 @@ textarea { resize: vertical; min-height: 80px; }
         <label for="chat-temp" style="font-size:12px;color:var(--text2);margin-left:8px;">Temp:</label>
         <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
       </div>
-      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-messages" id="chat-output"></div>
+      <div class="chat-output-actions">
+        <button type="button" class="btn btn-sm" id="copy-chat-response" data-copy-chat-response disabled>Copy response</button>
+      </div>
       <div class="chat-starter-prompts" aria-label="Starter prompts for Quick Inference">
         <span>Try a starter:</span>
         <button type="button" class="btn btn-sm" data-chat-starter-prompt="Summarize Kiln in two sentences for a new developer.">Summarize Kiln</button>
@@ -1860,7 +1868,7 @@ async function loadServedModelId() {
 loadServedModelId();
 
 function renderChat() {
-  const el = document.getElementById('chat-messages');
+  const el = document.getElementById('chat-output');
   if (chatMessages.length === 0) {
     el.innerHTML = `<div class="empty" style="padding:24px;text-align:left;">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Send a message to test inference.</div>
@@ -1868,6 +1876,7 @@ function renderChat() {
       <div style="margin-top:8px;">Try: <code>Explain Kiln in one sentence.</code></div>
       <div style="margin-top:8px;">If the server is still starting or model loading fails, check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting guide</a>.</div>
     </div>`;
+    updateCopyChatResponseState();
     return;
   }
   el.innerHTML = chatMessages.map(m => `
@@ -1877,6 +1886,68 @@ function renderChat() {
     </div>
   `).join('');
   el.scrollTop = el.scrollHeight;
+  updateCopyChatResponseState();
+}
+
+function getLatestAssistantResponseText() {
+  for (let i = chatMessages.length - 1; i >= 0; i--) {
+    const message = chatMessages[i];
+    if (message.role === 'assistant' && message.content.trim()) {
+      return message.content.trim();
+    }
+  }
+
+  const output = document.getElementById('chat-output');
+  const assistantMessages = output ? output.querySelectorAll('.chat-msg.assistant pre, .msg.assistant') : [];
+  for (let i = assistantMessages.length - 1; i >= 0; i--) {
+    const text = assistantMessages[i].textContent.trim();
+    if (text && text !== 'Generating…') return text;
+  }
+  return '';
+}
+
+function updateCopyChatResponseState() {
+  const button = document.getElementById('copy-chat-response');
+  if (!button) return;
+  button.disabled = !getLatestAssistantResponseText();
+}
+window.updateCopyChatResponseState = updateCopyChatResponseState;
+
+function fallbackCopyText(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  try {
+    if (!document.execCommand('copy')) throw new Error('copy command failed');
+    if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = text;
+  } finally {
+    textarea.remove();
+  }
+}
+
+async function copyLatestAssistantResponse() {
+  const text = getLatestAssistantResponseText();
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = text;
+    } else {
+      fallbackCopyText(text);
+    }
+    toast('Copied response');
+  } catch (error) {
+    try {
+      fallbackCopyText(text);
+      toast('Copied response');
+    } catch {
+      toast('Could not copy response. Select the answer text and copy it manually.', 'err');
+    }
+  }
 }
 
 function setChatGenerating(isGenerating) {
@@ -2016,6 +2087,7 @@ document.getElementById('chat-clear').addEventListener('click', () => {
   setChatGenerating(false);
   renderChat();
 });
+document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
 
 document.getElementById('upload-name').addEventListener('input', updateUploadAdapterState);
 document.getElementById('upload-archive').addEventListener('change', updateUploadAdapterState);
