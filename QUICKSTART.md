@@ -603,6 +603,8 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
+| GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
+| GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
 | GET | `/health` | Server health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 | GET | `/v1/models` | List available models |
