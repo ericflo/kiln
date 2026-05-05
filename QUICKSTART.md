@@ -644,11 +644,12 @@ Use the prebuilt GHCR image for the fastest terminal path. You need the [NVIDIA 
 docker pull ghcr.io/ericflo/kiln-server:latest
 
 docker run --gpus all -p 8420:8420 \
-  -v /path/to/Qwen3.5-4B:/models \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
-Replace `/path/to/Qwen3.5-4B` with your local model directory. After the server starts, verify it with `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
+Replace `/path/to/Qwen3.5-4B` with your local Qwen3.5-4B model directory. After the server starts, verify it with `curl http://localhost:8420/health`, then open [http://localhost:8420/ui](http://localhost:8420/ui).
 
 Optional: build from source if you are contributing to kiln or testing local image changes.
 
@@ -658,7 +659,8 @@ docker build -f deploy/Dockerfile -t kiln .
 
 # Run with GPU access
 docker run --gpus all \
-  -v /path/to/Qwen3.5-4B:/models \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   -p 8420:8420 \
   kiln serve
 ```
