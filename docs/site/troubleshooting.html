@@ -282,7 +282,10 @@
         </div>
       </div>
 <pre class="mt-6"><code>curl -s http://localhost:8420/health | jq .
-curl -s http://localhost:8420/v1/models | jq .</code></pre>
+curl -s http://localhost:8420/v1/models | jq .
+curl -s http://localhost:8420/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5-4b","messages":[{"role":"user","content":"Say hi."}],"max_tokens":16}' | jq .</code></pre>
       <div class="card p-6 mt-6">
         <div class="label mb-2">Desktop App first launch</div>
         <h2 id="desktop-app-first-launch" class="text-xl font-semibold mb-3">If the Desktop App does not finish first launch</h2>
@@ -504,6 +507,14 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
         <a class="card p-5 block" href="architecture.html">
           <h3 class="font-semibold mb-2">Architecture</h3>
           <p style="color: var(--fg-dim);">See how the scheduler, paged KV cache, model engine, and live LoRA training fit together.</p>
+        </a>
+        <a class="card p-5 block" href="api.html">
+          <h3 class="font-semibold mb-2">API reference</h3>
+          <p style="color: var(--fg-dim);">Check exact request shapes for health, chat completions, adapters, SFT, and GRPO.</p>
+        </a>
+        <a class="card p-5 block" href="cli.html">
+          <h3 class="font-semibold mb-2">CLI reference</h3>
+          <p style="color: var(--fg-dim);">Map the same diagnostics to <code>kiln health</code>, adapter, config, and training commands.</p>
         </a>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/issues">
           <h3 class="font-semibold mb-2">GitHub issues</h3>
