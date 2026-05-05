@@ -271,8 +271,10 @@ kiln serve --served-model-id qwen3.5-4b-local</code></pre>
       <div class="card p-6 lg:col-span-2">
         <p class="label mb-2">Logging</p>
         <h2 class="text-2xl font-semibold tracking-tight mb-4">Tune startup output</h2>
-        <p class="mb-4" style="color: var(--fg-dim);">Kiln uses the configured log level by default. Add global <code>-v</code> / <code>--verbose</code> for debug startup detail, repeat it as <code>-vv</code> for trace-level kernel and scheduler detail, or use <code>-q</code> / <code>--quiet</code> when you only want warnings and errors.</p>
-<pre class="text-sm"><code>kiln -v serve
+        <p class="mb-4" style="color: var(--fg-dim);">Kiln uses the configured log level by default. Add global <code>-v</code> / <code>--verbose</code> for debug startup detail, repeat it as <code>-vv</code> for trace-level kernel and scheduler detail, or use <code>-q</code> / <code>--quiet</code> when you only want warnings and errors. Add <code>--help</code> to any command group when you want the exact flags from the installed binary.</p>
+<pre class="text-sm"><code>kiln --help
+kiln train --help
+kiln -v serve
 kiln -vv serve
 kiln -q health</code></pre>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">Put these flags before or after the subcommand; they are global CLI options and are mutually exclusive between verbose and quiet modes.</p>
@@ -375,6 +377,10 @@ kiln adapters unload support-bot</code></pre>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
           <p style="color: var(--fg-dim);">Fix first-run server, model path, CUDA, Docker, and health issues.</p>
+        </a>
+        <a class="card p-5 block" href="architecture.html">
+          <h3 class="font-semibold mb-2">Architecture</h3>
+          <p style="color: var(--fg-dim);">Understand how serving, training, adapters, and the scheduler fit together.</p>
         </a>
       </div>
     </div>

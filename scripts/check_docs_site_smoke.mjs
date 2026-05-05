@@ -45,6 +45,7 @@ const expectedFooterLinks = [
 const demoPagePath = 'docs/site/demo/index.html';
 const quickstartPagePath = 'docs/site/quickstart.html';
 const apiPagePath = 'docs/site/api.html';
+const cliPagePath = 'docs/site/cli.html';
 const architecturePagePath = 'docs/site/architecture.html';
 const troubleshootingPagePath = 'docs/site/troubleshooting.html';
 
@@ -138,6 +139,38 @@ const expectedApiCodeExamples = [
   { label: 'merge', terms: ['/v1/adapters/merge', 'mode', 'ties'] },
   { label: 'composition', terms: ['/v1/chat/completions', 'adapters', 'scale'] },
   { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
+];
+
+const expectedCliSections = [
+  { label: 'command chooser', terms: ['if you want to'] },
+  { label: 'serve/start-server path', terms: ['start serving qwen3.5-4b', 'kiln_model_path', 'kiln serve'] },
+  { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
+  { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
+  { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
+  { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
+  { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
+  { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },
+  { label: 'UI handoff', terms: ['http://127.0.0.1:8420/ui', '/ui'] },
+  { label: 'related docs', terms: ['related docs', 'quickstart', 'api reference', 'grpo guide', 'troubleshooting', 'architecture'] },
+];
+
+const expectedCliCodeExamples = [
+  { label: 'serve command', terms: ['kiln_model_path=./qwen3.5-4b', 'kiln serve'] },
+  { label: 'health commands', terms: ['kiln health', 'kiln health --json'] },
+  { label: 'SFT training command', terms: ['kiln train sft', '--file corrections.jsonl', '--adapter support-bot'] },
+  { label: 'GRPO training command', terms: ['kiln train grpo', '--file grpo-batch.json', '--adapter support-bot'] },
+  { label: 'training status command', terms: ['kiln train status'] },
+  { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
+  { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
+  { label: 'help and verbosity commands', terms: ['kiln --help', 'kiln train --help', 'kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
+];
+
+const expectedCliLinks = [
+  { label: 'Quickstart', href: 'quickstart.html' },
+  { label: 'API Reference', href: 'api.html' },
+  { label: 'GRPO Guide', href: 'grpo.html' },
+  { label: 'Troubleshooting', href: 'troubleshooting.html' },
+  { label: 'Architecture', href: 'architecture.html' },
 ];
 
 const expectedArchitectureSections = [
@@ -479,6 +512,64 @@ async function runSmoke() {
 
         if (apiResult.copyButtonCount < apiResult.copyableCodeBlocks.length) {
           fail(`${sitePage.path}: expected each API code block to have a copy button; got ${apiResult.copyButtonCount} for ${apiResult.copyableCodeBlocks.length} code blocks`);
+        }
+      }
+
+
+      if (sitePage.path === cliPagePath) {
+        const cliResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const bodyText = normalize(document.body.innerText);
+          const headings = normalize(Array.from(document.querySelectorAll('h1, h2, h3'))
+            .map((heading) => heading.textContent || '')
+            .join('\n'));
+          const copyableCodeBlocks = Array.from(document.querySelectorAll('pre > code'))
+            .map((code) => normalize(code.innerText || code.textContent));
+          const copyButtons = Array.from(document.querySelectorAll('.copy-code-button'));
+          const links = Array.from(document.querySelectorAll('main a[href]')).map((link) => ({
+            href: link.getAttribute('href'),
+            text: normalize(link.textContent),
+          }));
+
+          return {
+            bodyText,
+            headings,
+            copyableCodeBlocks,
+            copyButtonCount: copyButtons.length,
+            links,
+          };
+        });
+
+        const missingSections = expectedCliSections
+          .filter((section) => !section.terms.every((term) => {
+            const normalizedTerm = term.toLowerCase();
+            return cliResult.headings.includes(normalizedTerm)
+              || cliResult.bodyText.includes(normalizedTerm)
+              || cliResult.copyableCodeBlocks.some((codeBlock) => codeBlock.includes(normalizedTerm));
+          }))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing CLI cold-reader coverage: ${missingSections.join(', ')}`);
+        }
+
+        const missingCodeExamples = expectedCliCodeExamples
+          .filter((example) => !cliResult.copyableCodeBlocks.some((codeBlock) => (
+            example.terms.every((term) => codeBlock.includes(term.toLowerCase()))
+          )))
+          .map((example) => example.label);
+        if (missingCodeExamples.length > 0) {
+          fail(`${sitePage.path}: missing copy-paste CLI examples: ${missingCodeExamples.join(', ')}`);
+        }
+
+        if (cliResult.copyButtonCount < cliResult.copyableCodeBlocks.length) {
+          fail(`${sitePage.path}: expected each CLI code block to have a copy button; got ${cliResult.copyButtonCount} for ${cliResult.copyableCodeBlocks.length} code blocks`);
+        }
+
+        const missingLinks = expectedCliLinks
+          .filter((expectedLink) => !cliResult.links.some((link) => link.href === expectedLink.href))
+          .map((link) => link.label);
+        if (missingLinks.length > 0) {
+          fail(`${sitePage.path}: missing CLI next-step links: ${missingLinks.join(', ')}`);
         }
       }
 
