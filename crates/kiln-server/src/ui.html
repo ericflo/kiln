@@ -1401,14 +1401,17 @@ function updateUploadAdapterState() {
     if (state) state.textContent = 'Uploading adapter…';
     return;
   }
-  const hasName = nameEl.value.trim().length > 0;
+  const uploadName = nameEl.value.trim();
+  const hasName = uploadName.length > 0;
+  const hasPathSafeName = isPathSafeAdapterDirectoryName(uploadName);
   const hasFile = fileEl.files.length > 0;
-  button.disabled = !(hasName && hasFile);
+  button.disabled = !(hasName && hasPathSafeName && hasFile);
   if (state) {
     if (!hasName && !hasFile) state.textContent = 'Enter a name and choose an archive to enable upload.';
     else if (!hasName) state.textContent = 'Enter an adapter name to enable upload.';
+    else if (!hasPathSafeName) state.textContent = pathSafeAdapterDirectoryNameMessage();
     else if (!hasFile) state.textContent = 'Choose a .tar.gz or .tgz archive to enable upload.';
-    else if (uploadNameWasAutofilled && nameEl.value.trim() === lastAutofilledUploadName) state.textContent = 'Ready to upload with the auto-filled adapter name.';
+    else if (uploadNameWasAutofilled && uploadName === lastAutofilledUploadName) state.textContent = 'Ready to upload with the auto-filled adapter name.';
     else state.textContent = 'Ready to upload.';
   }
 }
@@ -1421,6 +1424,12 @@ window.uploadAdapter = async function() {
     name = parseAdapterNameField(nameEl);
   } catch (e) {
     toast(e.message, 'err');
+    return;
+  }
+  if (!isPathSafeAdapterDirectoryName(name)) {
+    nameEl.focus();
+    toast(pathSafeAdapterDirectoryNameMessage(), 'err');
+    updateUploadAdapterState();
     return;
   }
   const file = fileEl.files[0];
@@ -1468,12 +1477,16 @@ window.uploadAdapter = async function() {
 let mergeSourceCount = 2;
 let mergeAdaptersBusy = false;
 
-function isPathSafeMergeOutputName(name) {
+function isPathSafeAdapterDirectoryName(name) {
   return name
     && name !== '.'
     && name !== '..'
     && !name.includes('/')
     && !name.includes('\\');
+}
+
+function pathSafeAdapterDirectoryNameMessage() {
+  return 'Name must be a single adapter directory name with no / or \\, and not . or ..';
 }
 
 function mergeReadinessState() {
@@ -1494,7 +1507,7 @@ function mergeReadinessState() {
   if (!outputName) {
     return { ready: false, message: 'Enter a path-safe output adapter name to enable merge.' };
   }
-  if (!isPathSafeMergeOutputName(outputName)) {
+  if (!isPathSafeAdapterDirectoryName(outputName)) {
     return { ready: false, message: 'Output name must be a single path-safe adapter name, not a path.' };
   }
 
