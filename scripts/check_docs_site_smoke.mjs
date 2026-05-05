@@ -43,9 +43,41 @@ const expectedFooterLinks = [
 ];
 
 const demoPagePath = 'docs/site/demo/index.html';
+const quickstartPagePath = 'docs/site/quickstart.html';
 const apiPagePath = 'docs/site/api.html';
 const architecturePagePath = 'docs/site/architecture.html';
 const troubleshootingPagePath = 'docs/site/troubleshooting.html';
+
+const expectedQuickstartSections = [
+  { label: 'Desktop App path', terms: ['desktop app', 'recommended'] },
+  { label: 'server binary path', terms: ['server binary', 'terminal-first'] },
+  { label: 'Docker path', terms: ['docker', 'nvidia container toolkit'] },
+  { label: 'prerequisites', terms: ['prerequisites'] },
+  { label: 'start server', terms: ['run the server', 'kiln serve'] },
+  { label: 'test inference', terms: ['send chat', '/v1/chat/completions'] },
+  { label: 'open UI', terms: ['open the ui', '/ui'] },
+  { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
+  { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
+  { label: 'GRPO next step', terms: ['grpo guide', 'generate', 'score', 'train'] },
+  { label: 'Where to go next', terms: ['where to go next'] },
+];
+
+const expectedQuickstartDashboardTerms = [
+  'dashboard',
+  'status',
+  'adapters',
+  'training',
+  'quick inference',
+];
+
+const expectedQuickstartLinks = [
+  { label: 'GRPO Guide', href: 'grpo.html' },
+  { label: 'API Reference', href: 'api.html' },
+  { label: 'CLI Reference', href: 'cli.html' },
+  { label: 'Demo', href: 'demo/' },
+  { label: 'Troubleshooting', href: 'troubleshooting.html' },
+  { label: 'Architecture', href: 'architecture.html' },
+];
 
 const expectedDemoSections = [
   { label: 'first token', terms: ['first token'] },
@@ -324,6 +356,74 @@ async function runSmoke() {
         }
 
         validateDemoCasts(sitePage.path, demoResult.referencedCasts);
+      }
+
+      if (sitePage.path === quickstartPagePath) {
+        const quickstartResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const bodyText = normalize(document.body.innerText);
+          const headings = normalize(Array.from(document.querySelectorAll('h1, h2, h3'))
+            .map((heading) => heading.textContent || '')
+            .join('\n'));
+          const codeText = normalize(Array.from(document.querySelectorAll('pre > code, code'))
+            .map((code) => code.innerText || code.textContent)
+            .join('\n'));
+          const links = Array.from(document.querySelectorAll('main a[href]')).map((link) => ({
+            href: link.getAttribute('href'),
+            text: normalize(link.textContent),
+          }));
+          const dashboardImage = document.querySelector('main img[src="assets/server-ui-dashboard.png"]');
+
+          return {
+            bodyText,
+            headings,
+            codeText,
+            links,
+            dashboardImage: dashboardImage ? {
+              alt: normalize(dashboardImage.getAttribute('alt')),
+              complete: dashboardImage.complete,
+              naturalWidth: dashboardImage.naturalWidth,
+              naturalHeight: dashboardImage.naturalHeight,
+            } : null,
+          };
+        });
+
+        const missingSections = expectedQuickstartSections
+          .filter((section) => !section.terms.every((term) => {
+            const normalizedTerm = term.toLowerCase();
+            return quickstartResult.headings.includes(normalizedTerm)
+              || quickstartResult.bodyText.includes(normalizedTerm)
+              || quickstartResult.codeText.includes(normalizedTerm);
+          }))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing quickstart cold-reader coverage: ${missingSections.join(', ')}`);
+        }
+
+        const missingDashboardTerms = expectedQuickstartDashboardTerms
+          .filter((term) => !quickstartResult.bodyText.includes(term));
+        if (missingDashboardTerms.length > 0) {
+          fail(`${sitePage.path}: dashboard checkpoint missing terms: ${missingDashboardTerms.join(', ')}`);
+        }
+
+        if (!quickstartResult.dashboardImage) {
+          fail(`${sitePage.path}: missing dashboard screenshot assets/server-ui-dashboard.png`);
+        }
+        if (!quickstartResult.dashboardImage.complete
+            || quickstartResult.dashboardImage.naturalWidth <= 0
+            || quickstartResult.dashboardImage.naturalHeight <= 0) {
+          fail(`${sitePage.path}: dashboard screenshot did not load locally`);
+        }
+        if (!expectedQuickstartDashboardTerms.every((term) => quickstartResult.dashboardImage.alt.includes(term))) {
+          fail(`${sitePage.path}: dashboard screenshot alt text must mention status, adapters, training, and quick inference`);
+        }
+
+        const missingLinks = expectedQuickstartLinks
+          .filter((expectedLink) => !quickstartResult.links.some((link) => link.href === expectedLink.href))
+          .map((link) => link.label);
+        if (missingLinks.length > 0) {
+          fail(`${sitePage.path}: missing quickstart onboarding links: ${missingLinks.join(', ')}`);
+        }
       }
 
       if (sitePage.path === apiPagePath) {
