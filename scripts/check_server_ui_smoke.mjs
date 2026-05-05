@@ -60,7 +60,14 @@ function text(res, body, contentType = 'text/plain; charset=utf-8') {
   res.end(body);
 }
 
-async function startServer() {
+function apiFailure(res, panelName, path) {
+  res.writeHead(503, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({
+    detail: `${panelName} smoke failure from ${path}`,
+  }));
+}
+
+async function startServer({ failDashboardApis = false } = {}) {
   const uiHtml = await readFile(uiPath, 'utf8');
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
@@ -72,6 +79,28 @@ async function startServer() {
       res.writeHead(204);
       res.end();
       return;
+    }
+    if (failDashboardApis) {
+      if (url.pathname === '/health') {
+        apiFailure(res, 'Server status', url.pathname);
+        return;
+      }
+      if (url.pathname === '/v1/stats/decode') {
+        apiFailure(res, 'Decode performance', url.pathname);
+        return;
+      }
+      if (url.pathname === '/v1/stats/recent-requests') {
+        apiFailure(res, 'Recent requests', url.pathname);
+        return;
+      }
+      if (url.pathname === '/v1/adapters') {
+        apiFailure(res, 'Adapters', url.pathname);
+        return;
+      }
+      if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
+        apiFailure(res, 'Training queue', url.pathname);
+        return;
+      }
     }
     if (url.pathname === '/health') {
       json(res, {
@@ -176,7 +205,49 @@ async function waitForPanelText(page, selector, pattern, message) {
   ).catch(() => fail(`${message}: ${selector} did not render text matching ${pattern}`));
 }
 
-async function runSmoke(baseUrl) {
+function escapeRegExp(value) {
+  return String(value).split('').map((char) => ('\\^$.*+?()[]{}|'.includes(char) ? `\\${char}` : char)).join('');
+}
+
+async function expectApiFailurePanel(page, selector, action, detail) {
+  await page.waitForFunction(
+    (panelSelector) => {
+      const panel = document.querySelector(panelSelector);
+      return panel && panel.querySelector('.api-failure');
+    },
+    { timeout: 5000 },
+    selector,
+  ).catch(() => fail(`${action} did not render an api-failure state in ${selector}`));
+
+  await expectText(page, selector, new RegExp(`${action} could not load yet`, 'i'), `${action} failure copy missing panel/action name`);
+  await expectText(page, selector, /Retry/i, `${action} failure copy missing retry affordance`);
+  await expectText(page, selector, /Quickstart/, `${action} failure copy missing Quickstart link`);
+  await expectText(page, selector, /Troubleshooting/, `${action} failure copy missing Troubleshooting link`);
+  await expectText(page, selector, new RegExp(escapeRegExp(detail)), `${action} failure copy missing error detail`);
+
+  const links = await page.$$eval(`${selector} .api-failure a`, (anchors) => anchors.map((anchor) => ({
+    text: anchor.textContent?.trim(),
+    href: anchor.getAttribute('href'),
+  })));
+  for (const [label, href] of [
+    ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
+    ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
+  ]) {
+    if (!links.some((link) => link.text === label && link.href === href)) {
+      fail(`${action} failure copy missing expected ${label} link ${href}`);
+    }
+  }
+
+  const retryLabel = await page.$eval(`${selector} .api-failure button`, (button) => ({
+    text: button.textContent?.trim(),
+    ariaLabel: button.getAttribute('aria-label'),
+  })).catch(() => null);
+  if (!retryLabel || retryLabel.text !== `Retry ${action}` || retryLabel.ariaLabel !== `Retry ${action}`) {
+    fail(`${action} failure retry button should be labelled "Retry ${action}"`);
+  }
+}
+
+async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
@@ -189,7 +260,10 @@ async function runSmoke(baseUrl) {
     const page = await browser.newPage();
     page.on('pageerror', (error) => pageErrors.push(error.message));
     page.on('console', (entry) => {
-      if (entry.type() === 'error') pageErrors.push(entry.text());
+      if (entry.type() !== 'error') return;
+      const text = entry.text();
+      if (expectFailureStates && /Failed to load resource: the server responded with a status of 503/.test(text)) return;
+      pageErrors.push(text);
     });
     page.on('requestfailed', (request) => {
       pageErrors.push(`${request.method()} ${request.url()} failed: ${request.failure()?.errorText || 'unknown error'}`);
@@ -214,6 +288,16 @@ async function runSmoke(baseUrl) {
       if (!helpLinks.some((link) => link.text === label && link.href === href)) {
         fail(`Header help link missing expected ${label} -> ${href}`);
       }
+    }
+
+    if (expectFailureStates) {
+      await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
+      await expectApiFailurePanel(page, '#decode-perf-panel', 'Decode performance', 'Decode performance smoke failure from /v1/stats/decode');
+      await expectApiFailurePanel(page, '#recent-requests-panel', 'Recent requests', 'Recent requests smoke failure from /v1/stats/recent-requests');
+      await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
+      await expectApiFailurePanel(page, '#tab-queue', 'Training queue', 'Training queue smoke failure from /v1/train/queue');
+      if (pageErrors.length > 0) fail(`Failure state UI emitted browser errors: ${pageErrors.join('; ')}`);
+      return;
     }
 
     await waitForPanelText(page, '#adapters-panel', /No adapters found yet\./, 'Empty adapter state missing');
@@ -255,7 +339,15 @@ async function runSmoke(baseUrl) {
 const { server, baseUrl } = await startServer();
 try {
   await runSmoke(baseUrl);
-  console.log('server UI smoke check passed');
 } finally {
   await new Promise((accept) => server.close(accept));
 }
+
+const failureScenario = await startServer({ failDashboardApis: true });
+try {
+  await runSmoke(failureScenario.baseUrl, { expectFailureStates: true });
+} finally {
+  await new Promise((accept) => failureScenario.server.close(accept));
+}
+
+console.log('server UI smoke check passed');
