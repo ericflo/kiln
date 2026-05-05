@@ -67,9 +67,29 @@ function apiFailure(res, panelName, path) {
   }));
 }
 
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  if (chunks.length === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function sse(res, chunks) {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  for (const chunk of chunks) {
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+  }
+  res.write('data: [DONE]\n\n');
+  res.end();
+}
+
 async function startServer({ failDashboardApis = false } = {}) {
   const uiHtml = await readFile(uiPath, 'utf8');
-  const server = http.createServer((req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     if (url.pathname === '/' || url.pathname === '/ui') {
       text(res, uiHtml, 'text/html; charset=utf-8');
@@ -137,6 +157,26 @@ async function startServer({ failDashboardApis = false } = {}) {
     }
     if (url.pathname === '/v1/stats/recent-requests') {
       json(res, []);
+      return;
+    }
+    if (url.pathname === '/v1/chat/completions') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for chat completions' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const prompt = body?.messages?.findLast((message) => message.role === 'user')?.content || '';
+      if (!body?.stream || !/Explain Kiln in one sentence\./.test(prompt)) {
+        res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Unexpected Quick Inference smoke request' }));
+        return;
+      }
+      sse(res, [
+        { choices: [{ delta: { role: 'assistant' } }] },
+        { choices: [{ delta: { content: 'Kiln serves one tuned model' } }] },
+        { choices: [{ delta: { content: ' and learns from feedback live.' } }] },
+      ]);
       return;
     }
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
@@ -339,6 +379,21 @@ async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
     await expectDisabled(page, '#chat-send', false, 'Quick Inference send should enable after text is entered');
+    await page.evaluate(() => { window.__copiedText = ''; });
+    await clickAndWait(page, '#chat-send', 'Could not click Quick Inference send');
+    await waitForPanelText(page, '#chat-output', /Kiln serves one tuned model and learns from feedback live\./, 'Quick Inference response missing');
+    await expectDisabled(page, '#copy-chat-response', false, 'Copy response should enable after an assistant response renders');
+    await clickAndWait(page, '#copy-chat-response', 'Could not click Copy response');
+    await page.waitForFunction(
+      () => window.__copiedText === 'Kiln serves one tuned model and learns from feedback live.',
+      { timeout: 5000 },
+    ).catch(async () => {
+      const copiedText = await page.evaluate(() => window.__copiedText).catch(() => undefined);
+      fail(`Copy response should copy the latest assistant response, got ${JSON.stringify(copiedText)}`);
+    });
+    await clickAndWait(page, '#chat-clear', 'Could not click Quick Inference clear');
+    await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference clear should restore the empty state');
+    await expectDisabled(page, '#copy-chat-response', true, 'Copy response should disable after clearing chat');
 
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1, isMobile: true });
     const overflow = await page.evaluate(() => ({
