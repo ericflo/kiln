@@ -269,6 +269,7 @@
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#lora-lifecycle">LoRA lifecycle</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training">Training</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#training-data-safety">Training data safety</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#response-shapes">Response shapes</a>
           <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
         </div>
       </div>
@@ -457,7 +458,7 @@ kiln serve --config kiln.toml</code></pre>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/sft</code> &mdash; submit supervised fine-tuning examples.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/train/grpo</code> &mdash; submit a GRPO batch of prompts, completions, and rewards.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status</code> &mdash; summarize training queue and job state.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/train/status/{job_id}</code> &mdash; inspect one training job; there is no separate <code>/v1/train/jobs/{job_id}</code> route.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a queued job.</div>
         </div>
@@ -478,6 +479,16 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
           whether an example is semantically safe or desirable. Treat training data like code review
           input, and start with the <a href="https://github.com/ericflo/kiln/blob/main/README.md#security-model">README security model</a>
           and <a href="troubleshooting.html">Troubleshooting</a> guide when hardening a deployment.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Response bodies</div>
+        <h2 id="response-shapes" class="text-2xl font-semibold mb-4">Response shapes</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          Inference responses follow OpenAI-compatible <code>choices</code> payloads. Training submissions return
+          queued job metadata with a <code>job_id</code>, then <code>/v1/train/status</code> and the per-job
+          <code>/v1/train/status/{job_id}</code> lookup report state, loss, adapter name, and any failure message.
         </p>
       </article>
     </div>

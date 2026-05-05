@@ -31,6 +31,7 @@ const expectedNavLabels = [
 ];
 
 const demoPagePath = 'docs/site/demo/index.html';
+const apiPagePath = 'docs/site/api.html';
 
 const expectedDemoSections = [
   { label: 'first token', terms: ['first token'] },
@@ -48,6 +49,49 @@ const expectedDemoCastFiles = [
   'openai.cast',
   'grpo.cast',
   'kiln-60s.cast',
+];
+
+const expectedApiEndpoints = [
+  '/health',
+  '/v1/health',
+  '/metrics',
+  '/ui',
+  '/v1/models',
+  '/v1/config',
+  '/v1/chat/completions',
+  '/v1/completions/batch',
+  '/v1/adapters',
+  '/v1/adapters/default/download',
+  '/v1/adapters/upload',
+  '/v1/adapters/merge',
+  '/v1/train/sft',
+  '/v1/train/grpo',
+  '/v1/train/status',
+  '/v1/train/queue',
+  '/v1/train/jobs/{job_id}',
+];
+
+const expectedApiSections = [
+  { label: 'server status', terms: ['server status'] },
+  { label: 'copy-paste first requests', terms: ['copy-paste first requests'] },
+  { label: 'power-user requests', terms: ['power-user requests'] },
+  { label: 'OpenAI-compatible generation', terms: ['openai-compatible generation'] },
+  { label: 'adapter lifecycle', terms: ['lora lifecycle'] },
+  { label: 'training', terms: ['training'] },
+  { label: 'training data safety', terms: ['training data changes', 'adapter'] },
+  { label: 'response shapes', terms: ['response shapes'] },
+];
+
+const expectedApiCodeExamples = [
+  { label: 'first chat', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
+  { label: 'first SFT', terms: ['/v1/train/sft', 'examples', 'config', 'epochs'] },
+  { label: 'first GRPO', terms: ['/v1/train/grpo', 'groups', 'completions', 'reward'] },
+  { label: 'training status', terms: ['/v1/train/status'] },
+  { label: 'batch completions', terms: ['/v1/completions/batch', 'prompts'] },
+  { label: 'adapter download/upload', terms: ['/v1/adapters/default/download', '/v1/adapters/upload'] },
+  { label: 'merge', terms: ['/v1/adapters/merge', 'mode', 'ties'] },
+  { label: 'composition', terms: ['/v1/chat/completions', 'adapters', 'scale'] },
+  { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
 ];
 
 function fail(message) {
@@ -184,6 +228,62 @@ async function runSmoke() {
         }
 
         validateDemoCasts(sitePage.path, demoResult.referencedCasts);
+      }
+
+      if (sitePage.path === apiPagePath) {
+        const apiResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const bodyText = normalize(document.body.innerText);
+          const endpointText = normalize(Array.from(document.querySelectorAll('.endpoint, code'))
+            .map((element) => element.textContent || '')
+            .join('\n'));
+          const headings = normalize(Array.from(document.querySelectorAll('h2, h3'))
+            .map((heading) => heading.textContent || '')
+            .join('\n'));
+          const copyableCodeBlocks = Array.from(document.querySelectorAll('pre > code'))
+            .map((code) => normalize(code.innerText || code.textContent));
+          const copyButtons = Array.from(document.querySelectorAll('.copy-code-button'));
+
+          return {
+            bodyText,
+            endpointText,
+            headings,
+            copyableCodeBlocks,
+            copyButtonCount: copyButtons.length,
+          };
+        });
+
+        const missingEndpoints = expectedApiEndpoints.filter((endpoint) => {
+          const normalizedEndpoint = endpoint.toLowerCase();
+          return !apiResult.endpointText.includes(normalizedEndpoint)
+            && !apiResult.bodyText.includes(normalizedEndpoint);
+        });
+        if (missingEndpoints.length > 0) {
+          fail(`${sitePage.path}: missing API endpoint coverage: ${missingEndpoints.join(', ')}`);
+        }
+
+        const missingSections = expectedApiSections
+          .filter((section) => !section.terms.every((term) => {
+            const normalizedTerm = term.toLowerCase();
+            return apiResult.headings.includes(normalizedTerm) || apiResult.bodyText.includes(normalizedTerm);
+          }))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing API cold-reader sections: ${missingSections.join(', ')}`);
+        }
+
+        const missingCodeExamples = expectedApiCodeExamples
+          .filter((example) => !apiResult.copyableCodeBlocks.some((codeBlock) => (
+            example.terms.every((term) => codeBlock.includes(term.toLowerCase()))
+          )))
+          .map((example) => example.label);
+        if (missingCodeExamples.length > 0) {
+          fail(`${sitePage.path}: missing copy-paste API examples: ${missingCodeExamples.join(', ')}`);
+        }
+
+        if (apiResult.copyButtonCount < apiResult.copyableCodeBlocks.length) {
+          fail(`${sitePage.path}: expected each API code block to have a copy button; got ${apiResult.copyButtonCount} for ${apiResult.copyableCodeBlocks.length} code blocks`);
+        }
       }
     }
   } finally {
