@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, relative, sep, join, resolve } from 'node:path';
@@ -233,6 +233,33 @@ function fail(message) {
   throw new Error(message);
 }
 
+function validateReadmeStartupBanner() {
+  const readmePath = resolve(repoRoot, 'README.md');
+  const readme = readFileSync(readmePath, 'utf8');
+  const bannerMatch = readme.match(/```[\s\S]*?K I L N[\s\S]*?Endpoints:[\s\S]*?```/);
+  if (!bannerMatch) {
+    fail('README.md: missing Quick Start startup banner snippet');
+  }
+
+  const banner = bannerMatch[0];
+  const expectedLabels = ['Mode:', 'CUDA:', 'GPU:', 'VRAM:', 'Listen:', 'Endpoints:'];
+  const missingLabels = expectedLabels.filter((label) => !banner.includes(label));
+  if (missingLabels.length > 0) {
+    fail(`README.md: startup banner missing labels: ${missingLabels.join(', ')}`);
+  }
+  if (!/Mode:\s+GPU inference/.test(banner)) {
+    fail('README.md: startup banner Mode line must show GPU inference');
+  }
+
+  const labelPositions = expectedLabels.map((label) => [label, banner.indexOf(label)]);
+  const outOfOrder = labelPositions.find(([, position], index) => (
+    index > 0 && position < labelPositions[index - 1][1]
+  ));
+  if (outOfOrder) {
+    fail(`README.md: startup banner label order drifted near ${outOfOrder[0]}`);
+  }
+}
+
 function expectedLocalHref(localPath) {
   const href = pathToFileURL(resolve(repoRoot, localPath)).href;
   return localPath.endsWith('/') && !href.endsWith('/') ? `${href}/` : href;
@@ -296,6 +323,8 @@ function chromiumPath() {
 }
 
 async function runSmoke() {
+  validateReadmeStartupBanner();
+
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
