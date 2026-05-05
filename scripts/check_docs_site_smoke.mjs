@@ -32,6 +32,7 @@ const expectedNavLabels = [
 
 const demoPagePath = 'docs/site/demo/index.html';
 const apiPagePath = 'docs/site/api.html';
+const architecturePagePath = 'docs/site/architecture.html';
 
 const expectedDemoSections = [
   { label: 'first token', terms: ['first token'] },
@@ -92,6 +93,35 @@ const expectedApiCodeExamples = [
   { label: 'merge', terms: ['/v1/adapters/merge', 'mode', 'ties'] },
   { label: 'composition', terms: ['/v1/chat/completions', 'adapters', 'scale'] },
   { label: 'webhook', terms: ['kiln.toml', 'webhook_url', 'kiln_training_webhook_url'] },
+];
+
+const expectedArchitectureSections = [
+  { label: 'single-process server', terms: ['single process', 'rust binary', 'axum http api'] },
+  { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
+  { label: 'Gated DeltaNet/GDN hybrid', terms: ['gated deltanet', 'gdn', 'hybrid'] },
+  { label: 'paged KV/block manager', terms: ['paged kv', 'block manager'] },
+  { label: 'Qwen3.5-4B', terms: ['qwen3.5-4b'] },
+  { label: 'LoRA hot-swap', terms: ['lora hot-swap', 'iteration boundary'] },
+  { label: 'training queue', terms: ['training queue', 'fifo background queue'] },
+  { label: 'GPU backend crates', terms: ['gpu backend crates', 'kiln-flash-attn', 'kiln-vulkan-kernel'] },
+  { label: 'where-to-go-next links', terms: ['where to go next', 'deep dive', 'grpo guide', 'quickstart', 'troubleshooting'] },
+];
+
+const expectedArchitectureFlowTerms = [
+  'http/api',
+  'scheduler',
+  'block manager',
+  'qwen/qwen3.5-4b engine',
+  'lora training queue',
+  'hot-swapped adapter',
+];
+
+const expectedArchitectureLinks = [
+  { label: 'full ARCHITECTURE.md', href: 'https://github.com/ericflo/kiln/blob/main/ARCHITECTURE.md' },
+  { label: 'quickstart', href: 'quickstart.html' },
+  { label: 'troubleshooting', href: 'troubleshooting.html' },
+  { label: 'API reference', href: 'api.html' },
+  { label: 'GRPO guide', href: 'grpo.html' },
 ];
 
 function fail(message) {
@@ -283,6 +313,54 @@ async function runSmoke() {
 
         if (apiResult.copyButtonCount < apiResult.copyableCodeBlocks.length) {
           fail(`${sitePage.path}: expected each API code block to have a copy button; got ${apiResult.copyButtonCount} for ${apiResult.copyableCodeBlocks.length} code blocks`);
+        }
+      }
+
+      if (sitePage.path === architecturePagePath) {
+        const architectureResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const bodyText = normalize(document.body.innerText);
+          const headings = normalize(Array.from(document.querySelectorAll('h2, h3'))
+            .map((heading) => heading.textContent || '')
+            .join('\n'));
+          const copyableCodeBlocks = Array.from(document.querySelectorAll('pre > code'))
+            .map((code) => normalize(code.innerText || code.textContent));
+          const links = Array.from(document.querySelectorAll('a[href]')).map((link) => ({
+            href: link.getAttribute('href'),
+            text: normalize(link.textContent),
+          }));
+
+          return {
+            bodyText,
+            headings,
+            copyableCodeBlocks,
+            links,
+          };
+        });
+
+        const missingSections = expectedArchitectureSections
+          .filter((section) => !section.terms.every((term) => {
+            const normalizedTerm = term.toLowerCase();
+            return architectureResult.headings.includes(normalizedTerm)
+              || architectureResult.bodyText.includes(normalizedTerm);
+          }))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing architecture cold-reader coverage: ${missingSections.join(', ')}`);
+        }
+
+        const hasRequestFlow = architectureResult.copyableCodeBlocks.some((codeBlock) => (
+          expectedArchitectureFlowTerms.every((term) => codeBlock.includes(term.toLowerCase()))
+        ));
+        if (!hasRequestFlow) {
+          fail(`${sitePage.path}: missing copy-paste architecture/request-flow block covering HTTP/API, scheduler, block manager, Qwen engine, and adapter/training path`);
+        }
+
+        const missingLinks = expectedArchitectureLinks
+          .filter((expectedLink) => !architectureResult.links.some((link) => link.href === expectedLink.href))
+          .map((link) => link.label);
+        if (missingLinks.length > 0) {
+          fail(`${sitePage.path}: missing architecture next-step links: ${missingLinks.join(', ')}`);
         }
       }
     }
