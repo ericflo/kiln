@@ -8135,6 +8135,10 @@ pub fn model_forward_paged_batched_decode_hidden(
     let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
     hidden = hidden.unsqueeze(1)?;
 
+    let state_refs: Vec<&LinearAttentionState> =
+        linear_states.iter().map(|state| &**state).collect();
+    let mut batch_linear_state = LinearAttentionState::from_batch_rows(&state_refs)?;
+
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
     for (layer_idx, layer) in weights.layers.iter().enumerate() {
@@ -8148,32 +8152,13 @@ pub fn model_forward_paged_batched_decode_hidden(
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
 
-                let mut recurrent_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.recurrent_states[linear_attn_idx])
-                        .collect();
-                    Tensor::cat(&refs, 0).with_context(|| {
-                        format!("cat batched recurrent state for GDN layer {layer_idx}")
-                    })?
-                };
-                let mut conv_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.conv_states[linear_attn_idx])
-                        .collect();
-                    Tensor::cat(&refs, 0).with_context(|| {
-                        format!("cat batched conv state for GDN layer {layer_idx}")
-                    })?
-                };
-
                 let attn_out = gated_deltanet_forward_decode_if(
                     backend,
                     &normed,
                     lin_weights,
                     config,
-                    &mut recurrent_state,
-                    &mut conv_state,
+                    &mut batch_linear_state.recurrent_states[linear_attn_idx],
+                    &mut batch_linear_state.conv_states[linear_attn_idx],
                     false,
                     false,
                     true,
@@ -8181,21 +8166,6 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
-
-                for (row_idx, state) in linear_states.iter_mut().enumerate() {
-                    state.recurrent_states[linear_attn_idx] = recurrent_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split recurrent state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
-                    state.conv_states[linear_attn_idx] = conv_state
-                        .narrow(0, row_idx, 1)?
-                        .contiguous()
-                        .with_context(|| {
-                            format!("split conv state row {row_idx} for GDN layer {layer_idx}")
-                        })?;
-                }
 
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/attn");
@@ -8268,6 +8238,8 @@ pub fn model_forward_paged_batched_decode_hidden(
             }
         }
     }
+
+    batch_linear_state.scatter_batch_rows(linear_states)?;
 
     Ok(hidden)
 }
