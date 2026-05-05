@@ -274,6 +274,7 @@
         <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
           <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/health</code> &mdash; /v1 compatibility alias for the same health and diagnostics response.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
