@@ -275,7 +275,7 @@
         <div class="card p-5">
           <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Basic path</span>
           <h3 class="font-semibold mb-2">Get Kiln running first</h3>
-          <p style="color: var(--fg-dim);">Follow install, model download, server start, <code>/health</code>, and <code>/ui</code>. If chat works, the first-run path is complete.</p>
+          <p style="color: var(--fg-dim);">Follow prerequisites, install, model download, server start, <code>/health</code>, and <code>/ui</code>. If chat works, the first-run path is complete.</p>
         </div>
         <div class="card p-5">
           <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Optional learning</span>
@@ -297,7 +297,7 @@
       <div class="flex items-start gap-3 mb-6">
         <span class="step">1</span>
         <div>
-          <p class="label mb-2">Choose one path</p>
+          <p class="label mb-2">Prerequisites + choose one path</p>
           <h2 class="text-2xl font-semibold tracking-tight">Install Kiln</h2>
         </div>
       </div>
@@ -426,7 +426,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       <div class="grid lg:grid-cols-3 gap-4">
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Open the dashboard</h3>
-          <p style="color: var(--fg-dim);">Visit <a href="http://127.0.0.1:8420/ui">http://127.0.0.1:8420/ui</a> to inspect requests, adapters, and training jobs.</p>
+          <p style="color: var(--fg-dim);">Visit <a href="http://127.0.0.1:8420/ui">http://127.0.0.1:8420/ui</a> to inspect status, adapters, training jobs, and quick inference from the dashboard.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Check <code>/health</code></h3>
@@ -442,8 +442,13 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
     "max_tokens": 64,
     "temperature": 0.7
   }' | python3 -m json.tool</code></pre>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to SFT or GRPO.</p>
         </div>
       </div>
+      <figure class="card mt-6 overflow-hidden">
+        <img src="assets/server-ui-dashboard.png" alt="Kiln dashboard showing server status, adapters, training, and quick inference controls" class="w-full h-auto block">
+        <figcaption class="px-5 py-3 text-sm" style="color: var(--fg-mute);">Use the dashboard as your status checkpoint before starting adapter or training workflows.</figcaption>
+      </figure>
       <p class="text-sm mt-4" style="color: var(--fg-mute);">
         If <code>/ui</code>, <code>/health</code>, or the chat request fails, use <a href="troubleshooting.html">Troubleshooting</a> to check the model path, binary download, CUDA/Vulkan/Metal setup, Docker, and health checks before retrying.
       </p>
@@ -457,7 +462,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
   <section class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-7 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 class="font-semibold mb-2">SFT corrections</h3>
           <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference.</p>
@@ -477,6 +482,14 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
           <p style="color: var(--fg-dim);">Fix model paths, binary downloads, CUDA/Vulkan/Metal setup, Docker, and health checks.</p>
+        </a>
+        <a class="card p-5 block" href="demo/">
+          <h3 class="font-semibold mb-2">Demo</h3>
+          <p style="color: var(--fg-dim);">Watch the first-token, hot-swap, OpenAI client, and GRPO flows.</p>
+        </a>
+        <a class="card p-5 block" href="architecture.html">
+          <h3 class="font-semibold mb-2">Architecture</h3>
+          <p style="color: var(--fg-dim);">Understand the scheduler, block manager, GDN model path, and hot-swap design.</p>
         </a>
       </div>
     </div>
