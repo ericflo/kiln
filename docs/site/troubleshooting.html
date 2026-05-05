@@ -372,6 +372,32 @@ curl -s http://localhost:8420/v1/models | jq .</code></pre>
       </article>
 
       <article class="card p-6">
+        <h2 id="remote-server-not-reachable" class="text-xl font-semibold mb-4">Remote server is not reachable</h2>
+        <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
+          <div>
+            <div class="label mb-2">Symptom</div>
+            <p>Kiln is running on a GPU box, Tailscale host, or reverse-proxied machine, but client commands fail with a connection error.</p>
+          </div>
+          <div>
+            <div class="label mb-2">Check</div>
+            <ul class="list-disc pl-5">
+              <li>The default bind is local-only: <code>127.0.0.1:8420</code>.</li>
+              <li>For private-network access, set <code>server.host = "0.0.0.0"</code> in config or start with <code>KILN_HOST=0.0.0.0</code>.</li>
+              <li>Only expose that bind on a trusted/private network or behind a reverse proxy that adds authentication.</li>
+              <li>From the client machine, verify the exact host with <code>curl http://gpu-box:8420/health</code>.</li>
+            </ul>
+          </div>
+          <div>
+            <div class="label mb-2">Fix</div>
+            <p>Open the firewall or private-network route to the server port, then point CLI client commands at the same base URL.</p>
+<pre class="mt-4"><code>kiln health --url http://gpu-box:8420
+kiln train status --url http://gpu-box:8420
+kiln adapters list --url http://gpu-box:8420</code></pre>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
         <h2 id="long-prefill-timeouts" class="text-xl font-semibold mb-4">Older-release long-prefill and tool-call timeouts</h2>
         <div class="grid md:grid-cols-3 gap-5 check-list" style="color: var(--fg-dim);">
           <div>
