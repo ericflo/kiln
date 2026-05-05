@@ -1690,6 +1690,16 @@ function parseAdapterNameField(input) {
   return adapterName;
 }
 
+function setTrainingSubmitBusy(form, busy, pendingLabel) {
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (!submitButton) return;
+  if (!submitButton.dataset.originalLabel) {
+    submitButton.dataset.originalLabel = submitButton.textContent;
+  }
+  submitButton.disabled = busy;
+  submitButton.textContent = busy ? pendingLabel : submitButton.dataset.originalLabel;
+}
+
 // --- SFT Form ---
 document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -1711,12 +1721,14 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
         lora_rank: rank,
       }
     };
+    setTrainingSubmitBusy(form, true, 'Submitting SFT…');
     const res = await api('/v1/train/sft', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'SFT job submitted');
     // Switch to queue tab
     document.querySelector('[data-tab="queue"]').click();
     pollTraining();
   } catch (e) { toast(e.message, 'err'); }
+  finally { setTrainingSubmitBusy(form, false, 'Submitting SFT…'); }
 });
 
 // --- GRPO Form ---
@@ -1740,11 +1752,13 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
         lora_rank: rank,
       }
     };
+    setTrainingSubmitBusy(form, true, 'Submitting GRPO…');
     const res = await api('/v1/train/grpo', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
     toast(res.message || 'GRPO job submitted');
     document.querySelector('[data-tab="queue"]').click();
     pollTraining();
   } catch (e) { toast(e.message, 'err'); }
+  finally { setTrainingSubmitBusy(form, false, 'Submitting GRPO…'); }
 });
 
 // --- Chat ---
