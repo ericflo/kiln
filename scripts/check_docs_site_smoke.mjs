@@ -98,6 +98,24 @@ const expectedDemoCastFiles = [
   'kiln-60s.cast',
 ];
 
+const expectedDemoReadmeDrivers = new Map([
+  ['first-token.cast', 'demo-first-token.sh'],
+  ['bench.cast', 'demo-bench.sh'],
+  ['hot-swap.cast', 'demo-hot-swap.sh'],
+  ['openai.cast', 'demo-openai.sh'],
+  ['grpo.cast', 'demo-grpo.sh'],
+  ['kiln-60s.cast', 'demo.sh'],
+]);
+
+const expectedDemoReadmeLinks = [
+  'SCRIPTS.md',
+  'SCRIPT.md',
+  'index.html',
+  'QUICKSTART.md',
+  'README.md',
+  '../launch/README.md',
+];
+
 const expectedApiEndpoints = [
   '/health',
   '/v1/health',
@@ -323,6 +341,31 @@ function validateDemoCasts(sitePagePath, referencedCasts) {
   }
 }
 
+function validateDemoReadmeInventory() {
+  const readmePath = resolve(repoRoot, 'docs/site/demo/README.md');
+  if (!existsSync(readmePath)) {
+    fail('docs/site/demo/README.md: missing demo cast inventory');
+  }
+
+  const readme = readFileSync(readmePath, 'utf8');
+  const missingCasts = expectedDemoCastFiles.filter((cast) => !readme.includes(cast));
+  if (missingCasts.length > 0) {
+    fail(`docs/site/demo/README.md: missing demo cast inventory entries: ${missingCasts.join(', ')}`);
+  }
+
+  const missingDrivers = expectedDemoCastFiles
+    .map((cast) => expectedDemoReadmeDrivers.get(cast))
+    .filter((driver) => driver && !readme.includes(driver));
+  if (missingDrivers.length > 0) {
+    fail(`docs/site/demo/README.md: missing demo driver inventory entries: ${missingDrivers.join(', ')}`);
+  }
+
+  const missingLinks = expectedDemoReadmeLinks.filter((link) => !readme.includes(link));
+  if (missingLinks.length > 0) {
+    fail(`docs/site/demo/README.md: missing expected cross-links: ${missingLinks.join(', ')}`);
+  }
+}
+
 async function loadPuppeteer() {
   try {
     const module = await import('puppeteer');
@@ -362,6 +405,7 @@ function chromiumPath() {
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateLaunchSentinel();
+  validateDemoReadmeInventory();
 
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
