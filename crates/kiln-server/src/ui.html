@@ -792,8 +792,9 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-row">
             <div class="form-group">
               <label for="sft-output-name">Adapter Name</label>
-              <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby=sft-output-name-help required>
-              <div class="form-help" id=sft-output-name-help>Saved adapter name. Keep it short and path-safe.</div>
+              <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby="sft-output-name-help sft-output-name-state" required>
+              <div class="form-help" id="sft-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
+              <div id="sft-output-name-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
             </div>
             <div class="form-group">
               <label for="sft-epochs">Epochs</label>
@@ -831,8 +832,9 @@ textarea { resize: vertical; min-height: 80px; }
           <div class="form-row">
             <div class="form-group">
               <label for="grpo-output-name">Adapter Name</label>
-              <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby=grpo-output-name-help required>
-              <div class="form-help" id=grpo-output-name-help>Saved adapter name. Keep it short and path-safe.</div>
+              <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby="grpo-output-name-help grpo-output-name-state" required>
+              <div class="form-help" id="grpo-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
+              <div id="grpo-output-name-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
             </div>
             <div class="form-group">
               <label for="grpo-kl-coeff">KL Coefficient</label>
@@ -1948,14 +1950,60 @@ function parseAdapterNameField(input) {
   return adapterName;
 }
 
+function trainingOutputNameReadinessState(formId, label) {
+  const form = document.getElementById(formId);
+  const input = form ? form.querySelector('input[name="output_name"]') : null;
+  const outputName = input ? input.value.trim() : '';
+  if (!outputName) {
+    return { ready: false, message: `Enter a path-safe ${label} adapter name to enable submit.` };
+  }
+  if (!isPathSafeAdapterDirectoryName(outputName)) {
+    return { ready: false, message: pathSafeAdapterDirectoryNameMessage() };
+  }
+  return { ready: true, message: 'Ready to submit with this path-safe adapter name.' };
+}
+
+function updateTrainingOutputNameState(formId, stateId, label) {
+  const state = trainingOutputNameReadinessState(formId, label);
+  const helper = document.getElementById(stateId);
+  if (helper) helper.textContent = state.message;
+  const form = document.getElementById(formId);
+  const submitButton = form ? form.querySelector('button[type="submit"]') : null;
+  if (submitButton) submitButton.disabled = form?.dataset.trainingBusy === 'true' || !state.ready;
+  return state;
+}
+
+function updateSftOutputNameState() {
+  return updateTrainingOutputNameState('sft-form', 'sft-output-name-state', 'SFT output');
+}
+
+function updateGrpoOutputNameState() {
+  return updateTrainingOutputNameState('grpo-form', 'grpo-output-name-state', 'GRPO output');
+}
+
+function parsePathSafeAdapterNameField(input, updateState) {
+  const adapterName = parseAdapterNameField(input);
+  if (!isPathSafeAdapterDirectoryName(adapterName)) {
+    if (typeof updateState === 'function') updateState();
+    input.focus();
+    throw new Error(pathSafeAdapterDirectoryNameMessage());
+  }
+  return adapterName;
+}
+
 function setTrainingSubmitBusy(form, busy, pendingLabel) {
   const submitButton = form.querySelector('button[type="submit"]');
   if (!submitButton) return;
   if (!submitButton.dataset.originalLabel) {
     submitButton.dataset.originalLabel = submitButton.textContent;
   }
+  form.dataset.trainingBusy = busy ? 'true' : 'false';
   submitButton.disabled = busy;
   submitButton.textContent = busy ? pendingLabel : submitButton.dataset.originalLabel;
+  if (!busy) {
+    if (form.id === 'sft-form') updateSftOutputNameState();
+    if (form.id === 'grpo-form') updateGrpoOutputNameState();
+  }
 }
 
 // --- SFT Form ---
@@ -1963,12 +2011,12 @@ document.getElementById('sft-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    const outputName = parsePathSafeAdapterNameField(form.output_name, updateSftOutputNameState);
     const examples = parseJsonArrayField(form.examples.value, 'SFT examples');
     validateSftExamples(examples);
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'SFT learning rate');
     const epochs = parsePositiveIntegerField(form.epochs.value, 'SFT epochs');
     const rank = parsePositiveIntegerField(form.rank.value, 'SFT LoRA rank');
-    const outputName = parseAdapterNameField(form.output_name);
     const body = {
       examples,
       config: {
@@ -1994,12 +2042,12 @@ document.getElementById('grpo-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const form = e.target;
   try {
+    const outputName = parsePathSafeAdapterNameField(form.output_name, updateGrpoOutputNameState);
     const groups = parseJsonArrayField(form.groups.value, 'GRPO groups');
     validateGrpoGroups(groups);
     const learningRate = parseFiniteNumberField(form.learning_rate.value, 'GRPO learning rate');
     const klCoeff = parseFiniteNumberField(form.kl_coeff.value, 'GRPO KL coefficient');
     const rank = parsePositiveIntegerField(form.rank.value, 'GRPO LoRA rank');
-    const outputName = parseAdapterNameField(form.output_name);
     const body = {
       groups,
       config: {
@@ -2282,6 +2330,10 @@ document.getElementById('copy-chat-response').addEventListener('click', copyLate
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
 document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
 updateUploadAdapterState();
+document.getElementById('sft-output-name').addEventListener('input', updateSftOutputNameState);
+document.getElementById('grpo-output-name').addEventListener('input', updateGrpoOutputNameState);
+updateSftOutputNameState();
+updateGrpoOutputNameState();
 document.getElementById('merge-output-name').addEventListener('input', updateMergeButtonState);
 document.getElementById('merge-mode').addEventListener('change', updateMergeButtonState);
 document.getElementById('merge-density').addEventListener('input', updateMergeButtonState);
