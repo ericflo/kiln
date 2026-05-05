@@ -1510,6 +1510,8 @@ window.mergeAdapters = async function() {
 };
 
 // --- Training Queue ---
+const cancellingTrainingJobIds = new Set();
+
 async function pollTraining() {
   const queuePanel = setPanelBusy('tab-queue', true);
   if (!queuePanel) return;
@@ -1545,7 +1547,7 @@ function renderTrainingQueue(data) {
           <span>Adapter: ${escapeHtml(q.adapter_name)}</span>
           <span>Position: #${q.position}</span>
         </div>
-        <div style="margin-top:6px"><button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(q.job_id)}" onclick="cancelJobFromButton(this)">Cancel</button></div>
+        <div style="margin-top:6px">${renderCancelJobButton(q.job_id)}</div>
       </div>`;
     });
   }
@@ -1584,20 +1586,39 @@ function renderJobCard(j, isRunning) {
       ${j.adapter_name ? `<span>Adapter: ${escapeHtml(j.adapter_name)}</span>` : ''}
       <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
     </div>
-    ${isRunning ? `<div style="margin-top:6px"><button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(j.job_id)}" onclick="cancelJobFromButton(this)">Cancel</button></div>` : ''}
+    ${isRunning ? `<div style="margin-top:6px">${renderCancelJobButton(j.job_id)}</div>` : ''}
   </div>`;
 }
 
+function renderCancelJobButton(jobId) {
+  const isCancelling = cancellingTrainingJobIds.has(jobId);
+  return `<button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(jobId)}" onclick="cancelJobFromButton(this)" ${isCancelling ? 'disabled' : ''}>${isCancelling ? 'Cancelling…' : 'Cancel'}</button>`;
+}
+
 window.cancelJobFromButton = function(button) {
-  cancelJob(button.dataset.jobId || '');
+  const jobId = button.dataset.jobId || '';
+  if (!jobId || cancellingTrainingJobIds.has(jobId)) return;
+  button.disabled = true;
+  button.textContent = 'Cancelling…';
+  cancelJob(jobId, button);
 };
 
-window.cancelJob = async function(jobId) {
+window.cancelJob = async function(jobId, button) {
+  if (!jobId || cancellingTrainingJobIds.has(jobId)) return;
+  cancellingTrainingJobIds.add(jobId);
   try {
     await api('/v1/train/queue/' + jobId, { method: 'DELETE' });
     toast('Cancelled job ' + jobId.slice(0, 8));
+    cancellingTrainingJobIds.delete(jobId);
     pollTraining();
-  } catch (e) { toast(e.message, 'err'); }
+  } catch (e) {
+    cancellingTrainingJobIds.delete(jobId);
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Cancel';
+    }
+    toast(e.message, 'err');
+  }
 };
 
 function fillSftSamplePayload() {
