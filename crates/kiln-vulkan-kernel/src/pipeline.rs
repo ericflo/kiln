@@ -3,7 +3,10 @@ use ash::vk;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn compile_shader_command(glsl_path: &str, spv_path: &std::path::Path) -> std::io::Result<std::process::Output> {
+fn compile_shader_command(
+    glsl_path: &str,
+    spv_path: &std::path::Path,
+) -> std::io::Result<std::process::Output> {
     let glslc = std::process::Command::new("glslc")
         .arg(glsl_path)
         .arg("-o")

@@ -1,7 +1,7 @@
 use axum::{
+    Router,
     response::{Html, Redirect},
     routing::get,
-    Router,
 };
 
 const UI_HTML: &str = include_str!("../ui.html");

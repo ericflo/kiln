@@ -1828,8 +1828,7 @@ fn completion_usage_tokens(
     visible_token_count: usize,
     finish_reason: &kiln_model::FinishReason,
 ) -> usize {
-    visible_token_count
-        + usize::from(matches!(finish_reason, kiln_model::FinishReason::Eos))
+    visible_token_count + usize::from(matches!(finish_reason, kiln_model::FinishReason::Eos))
 }
 
 /// OpenAI-compatible streaming chunk.
@@ -3003,7 +3002,6 @@ async fn generate_real_batched(
         },
     })
 }
-
 
 async fn generate_real_batched_streaming(
     state: &AppState,
@@ -6022,8 +6020,14 @@ mod tests {
 
     #[test]
     fn completion_usage_counts_terminal_eos_token() {
-        assert_eq!(completion_usage_tokens(0, &kiln_model::FinishReason::Eos), 1);
-        assert_eq!(completion_usage_tokens(3, &kiln_model::FinishReason::Eos), 4);
+        assert_eq!(
+            completion_usage_tokens(0, &kiln_model::FinishReason::Eos),
+            1
+        );
+        assert_eq!(
+            completion_usage_tokens(3, &kiln_model::FinishReason::Eos),
+            4
+        );
         assert_eq!(
             completion_usage_tokens(3, &kiln_model::FinishReason::MaxTokens),
             3

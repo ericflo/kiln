@@ -1125,7 +1125,9 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let hidden_2d = hidden.squeeze(0)?;
     let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
     let active_indices = Tensor::new(active_positions.as_slice(), device)?;
-    let active_hidden = shift_hidden.index_select(&active_indices, 0)?.to_dtype(DType::F32)?;
+    let active_hidden = shift_hidden
+        .index_select(&active_indices, 0)?
+        .to_dtype(DType::F32)?;
 
     let variance = active_hidden.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
     let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
