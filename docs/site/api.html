@@ -270,6 +270,20 @@
   <main id="content" tabindex="-1" class="max-w-4xl mx-auto px-6 py-12">
     <div class="grid gap-6">
       <article class="card p-6">
+        <div class="label mb-3">Run and observe</div>
+        <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/decode</code> &mdash; live decode tokens/sec and inter-token latency stats used by the dashboard.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/stats/recent-requests</code> &mdash; bounded recent chat-completion history for the dashboard's request panel.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration.</div>
+        </div>
+      </article>
+
+      <article class="card p-6">
         <div class="label mb-3">First requests</div>
         <h2 id="copy-paste-first-requests" class="text-2xl font-semibold mb-4">Copy-paste first requests</h2>
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
@@ -394,18 +408,6 @@ webhook_url = "https://example.internal/kiln/training-complete"
 export KILN_TRAINING_WEBHOOK_URL="https://example.internal/kiln/training-complete"
 kiln serve --config kiln.toml</code></pre>
           </section>
-        </div>
-      </article>
-
-      <article class="card p-6">
-        <div class="label mb-3">Run and observe</div>
-        <h2 id="server-status" class="text-2xl font-semibold mb-4">Server status, metrics, UI, and config</h2>
-        <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/health</code> &mdash; server health and diagnostics.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/metrics</code> &mdash; Prometheus metrics for latency, throughput, memory, and training progress.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/ui</code> &mdash; embedded dashboard for status, adapters, training, and chat.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration.</div>
         </div>
       </article>
 
