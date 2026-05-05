@@ -1304,12 +1304,19 @@ window.downloadAdapter = function(name) {
   window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
 };
 
+let uploadAdapterBusy = false;
+
 function updateUploadAdapterState() {
   const nameEl = document.getElementById('upload-name');
   const fileEl = document.getElementById('upload-archive');
   const button = document.getElementById('upload-adapter-btn');
   const state = document.getElementById('upload-adapter-state');
   if (!nameEl || !fileEl || !button) return;
+  if (uploadAdapterBusy) {
+    button.disabled = true;
+    if (state) state.textContent = 'Uploading adapter…';
+    return;
+  }
   const hasName = nameEl.value.trim().length > 0;
   const hasFile = fileEl.files.length > 0;
   button.disabled = !(hasName && hasFile);
@@ -1341,6 +1348,14 @@ window.uploadAdapter = async function() {
   const fd = new FormData();
   fd.append('name', name);
   fd.append('archive', file);
+  const button = document.getElementById('upload-adapter-btn');
+  const originalLabel = button ? button.textContent : '';
+  uploadAdapterBusy = true;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Uploading…';
+  }
+  updateUploadAdapterState();
   try {
     // NOTE: do not set Content-Type — the browser sets the multipart boundary.
     const res = await fetch('/v1/adapters/upload', { method: 'POST', body: fd });
@@ -1355,10 +1370,16 @@ window.uploadAdapter = async function() {
     updateUploadAdapterState();
     pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
+  finally {
+    uploadAdapterBusy = false;
+    if (button) button.textContent = originalLabel;
+    updateUploadAdapterState();
+  }
 };
 
 // --- Adapter Merge ---
 let mergeSourceCount = 2;
+let mergeAdaptersBusy = false;
 
 function renderMergeSources() {
   const list = document.getElementById('merge-sources');
@@ -1372,9 +1393,9 @@ function renderMergeSources() {
       : 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.';
   }
   const addBtn = document.getElementById('add-merge-source');
-  if (addBtn) addBtn.disabled = !canMerge;
+  if (addBtn) addBtn.disabled = !canMerge || mergeAdaptersBusy;
   const mergeBtn = document.getElementById('merge-btn');
-  if (mergeBtn) mergeBtn.disabled = !canMerge;
+  if (mergeBtn) mergeBtn.disabled = !canMerge || mergeAdaptersBusy;
   if (!canMerge) {
     list.innerHTML = '';
     return;
@@ -1465,6 +1486,13 @@ window.mergeAdapters = async function() {
     if (!Number.isFinite(d) || d <= 0 || d > 1) { toast('Density must be in (0, 1]', 'err'); return; }
     body.density = d;
   }
+  const mergeBtn = document.getElementById('merge-btn');
+  const originalLabel = mergeBtn ? mergeBtn.textContent : '';
+  mergeAdaptersBusy = true;
+  if (mergeBtn) {
+    mergeBtn.disabled = true;
+    mergeBtn.textContent = 'Merging…';
+  }
   try {
     const res = await api('/v1/adapters/merge', {
       method: 'POST',
@@ -1474,6 +1502,11 @@ window.mergeAdapters = async function() {
     toast(`Merged ${res.sources.length} sources → ${res.output_name} (${res.num_tensors} tensors, mode=${res.mode})`);
     pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
+  finally {
+    mergeAdaptersBusy = false;
+    if (mergeBtn) mergeBtn.textContent = originalLabel;
+    renderMergeSources();
+  }
 };
 
 // --- Training Queue ---
