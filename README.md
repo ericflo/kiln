@@ -239,17 +239,23 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | POST | `/v1/train/sft` | Submit SFT training examples |
 | POST | `/v1/train/grpo` | Submit GRPO scored completions |
 | GET | `/v1/train/status` | Training queue and job status |
+| GET | `/v1/train/status/{job_id}` | Inspect one training job |
+| GET | `/v1/train/queue` | List queued training jobs |
+| DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | GET | `/v1/adapters` | List loaded LoRA adapters |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
+| DELETE | `/v1/adapters/{name}` | Delete an adapter |
 | POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
 | POST | `/v1/adapters/merge` | Merge adapters (weighted_average, TIES, or concatenation modes) |
 | GET | `/v1/models` | List available models |
+| GET | `/v1/config` | Current server configuration |
 | GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
 | GET | `/health` | Server health and diagnostics |
+| GET | `/v1/health` | /v1 compatibility alias for health and diagnostics |
 | GET | `/metrics` | Prometheus metrics |
 
 ## Architecture
