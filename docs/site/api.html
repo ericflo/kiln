@@ -282,6 +282,13 @@
           <div class="endpoint"><span class="method">GET</span> <code>/v1/models</code> &mdash; list the served model.</div>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/config</code> &mdash; return the current server configuration.</div>
         </div>
+        <div class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Check runtime configuration</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/config | python3 -m json.tool</code></pre>
+          <p class="mt-2 text-sm leading-relaxed" style="color: var(--fg-dim);">
+            Reports detected VRAM, KV-cache sizing and FP8 state, checkpointing, and memory budget.
+          </p>
+        </div>
       </article>
 
       <article class="card p-6">
