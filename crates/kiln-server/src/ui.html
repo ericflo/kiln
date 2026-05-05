@@ -382,6 +382,10 @@ textarea { resize: vertical; min-height: 80px; }
 }
 .chat-msg.user .role { color: var(--green); }
 .chat-msg.assistant .role { color: var(--accent); }
+.chat-msg.pending pre {
+  color: var(--text2);
+  font-style: italic;
+}
 .chat-msg pre {
   font-family: var(--mono);
   white-space: pre-wrap;
@@ -853,6 +857,7 @@ textarea { resize: vertical; min-height: 80px; }
         <label for="chat-input" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Message</label>
         <input type="text" id="chat-input" placeholder="Type a message...">
         <button class="btn btn-primary" id="chat-send">Send</button>
+        <button class="btn" id="chat-stop" disabled hidden>Stop</button>
         <button class="btn" id="chat-clear">Clear</button>
       </div>
     </div>
@@ -1769,12 +1774,30 @@ function renderChat() {
     return;
   }
   el.innerHTML = chatMessages.map(m => `
-    <div class="chat-msg ${m.role}">
+    <div class="chat-msg ${m.role}${m.pending ? ' pending' : ''}">
       <div class="role">${m.role}</div>
-      <pre>${escapeHtml(m.content)}</pre>
+      <pre>${escapeHtml(m.pending && !m.content ? 'Generating…' : m.content)}</pre>
     </div>
   `).join('');
   el.scrollTop = el.scrollHeight;
+}
+
+function setChatGenerating(isGenerating) {
+  const send = document.getElementById('chat-send');
+  const stop = document.getElementById('chat-stop');
+  send.disabled = isGenerating;
+  send.textContent = isGenerating ? 'Generating…' : 'Send';
+  stop.hidden = !isGenerating;
+  stop.disabled = !isGenerating;
+}
+
+function removeEmptyPendingAssistant() {
+  const last = chatMessages[chatMessages.length - 1];
+  if (last?.role === 'assistant' && last.pending && !last.content) {
+    chatMessages.pop();
+  } else if (last?.role === 'assistant') {
+    last.pending = false;
+  }
 }
 
 function formatQuickInferenceError(error) {
@@ -1793,14 +1816,16 @@ function formatQuickInferenceError(error) {
 }
 
 async function sendChat() {
+  if (chatAbort) return;
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
 
   chatMessages.push({ role: 'user', content: msg });
-  chatMessages.push({ role: 'assistant', content: '' });
+  chatMessages.push({ role: 'assistant', content: '', pending: true });
   renderChat();
+  setChatGenerating(true);
 
   const adapter = document.getElementById('chat-adapter').value || undefined;
   const parsedTemp = parseFloat(document.getElementById('chat-temp').value);
@@ -1816,14 +1841,14 @@ async function sendChat() {
   if (adapter) body.adapter = adapter;
 
   try {
-    if (chatAbort) chatAbort.abort();
-    chatAbort = new AbortController();
+    const controller = new AbortController();
+    chatAbort = controller;
 
     const res = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: chatAbort.signal,
+      signal: controller.signal,
     });
 
     if (!res.ok) {
@@ -1851,28 +1876,40 @@ async function sendChat() {
           const chunk = JSON.parse(payload);
           const delta = chunk.choices?.[0]?.delta;
           if (delta?.content) {
-            chatMessages[chatMessages.length - 1].content += delta.content;
+            const last = chatMessages[chatMessages.length - 1];
+            last.pending = false;
+            last.content += delta.content;
             renderChat();
           }
         } catch {}
       }
     }
   } catch (e) {
-    if (e.name !== 'AbortError') {
-      chatMessages[chatMessages.length - 1].content += formatQuickInferenceError(e);
+    const last = chatMessages[chatMessages.length - 1];
+    if (e.name === 'AbortError') {
+      removeEmptyPendingAssistant();
+    } else if (last?.role === 'assistant') {
+      last.pending = false;
+      last.content += formatQuickInferenceError(e);
       renderChat();
     }
   }
   chatAbort = null;
+  setChatGenerating(false);
+  renderChat();
 }
 
 document.getElementById('chat-send').addEventListener('click', sendChat);
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
+document.getElementById('chat-stop').addEventListener('click', () => {
+  if (chatAbort) chatAbort.abort();
+});
 document.getElementById('chat-clear').addEventListener('click', () => {
   if (chatAbort) { chatAbort.abort(); chatAbort = null; }
   chatMessages.length = 0;
+  setChatGenerating(false);
   renderChat();
 });
 
