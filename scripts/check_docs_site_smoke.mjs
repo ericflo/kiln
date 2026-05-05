@@ -30,6 +30,18 @@ const expectedNavLabels = [
   'Architecture',
 ];
 
+const expectedFooterLinks = [
+  { label: 'Quickstart', localPath: 'docs/site/quickstart.html' },
+  { label: 'GRPO Guide', localPath: 'docs/site/grpo.html' },
+  { label: 'API Reference', localPath: 'docs/site/api.html' },
+  { label: 'CLI Reference', localPath: 'docs/site/cli.html' },
+  { label: 'Demo', localPath: 'docs/site/demo/' },
+  { label: 'Troubleshooting', localPath: 'docs/site/troubleshooting.html' },
+  { label: 'Architecture', localPath: 'docs/site/architecture.html' },
+  { label: 'Changelog', href: 'https://github.com/ericflo/kiln/blob/main/CHANGELOG.md' },
+  { label: 'License', href: 'https://github.com/ericflo/kiln/blob/main/LICENSE' },
+];
+
 const demoPagePath = 'docs/site/demo/index.html';
 const apiPagePath = 'docs/site/api.html';
 const architecturePagePath = 'docs/site/architecture.html';
@@ -156,6 +168,11 @@ function fail(message) {
   throw new Error(message);
 }
 
+function expectedLocalHref(localPath) {
+  const href = pathToFileURL(resolve(repoRoot, localPath)).href;
+  return localPath.endsWith('/') && !href.endsWith('/') ? `${href}/` : href;
+}
+
 function validateDemoCasts(sitePagePath, referencedCasts) {
   const demoDir = resolve(repoRoot, dirname(sitePagePath));
   const uniqueCasts = [...new Set(referencedCasts)];
@@ -229,7 +246,12 @@ async function runSmoke() {
       const filePath = resolve(repoRoot, sitePage.path);
       await page.goto(pathToFileURL(filePath).href, { waitUntil: 'domcontentloaded', timeout: 10000 });
 
-      const result = await page.evaluate((expectedLabels, currentLabel) => {
+      const expectedFooterLinksWithUrls = expectedFooterLinks.map((link) => ({
+        label: link.label,
+        href: link.href || expectedLocalHref(link.localPath),
+      }));
+
+      const result = await page.evaluate((expectedLabels, currentLabel, expectedLinks) => {
         const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
         const h1 = document.querySelector('h1');
         const nav = document.querySelector('nav.site-nav');
@@ -238,23 +260,39 @@ async function runSmoke() {
         const missingLabels = expectedLabels.filter((label) => !navLabels.includes(label));
         const current = navLinks.find((link) => link.getAttribute('aria-current') === 'page');
         const homeCurrent = document.querySelector('[aria-current="page"]');
+        const footer = document.querySelector('footer');
+        const footerLinks = Array.from(footer?.querySelectorAll('a[href]') || []).map((link) => ({
+          label: normalize(link.textContent),
+          href: link.href,
+        }));
+        const missingFooterLinks = expectedLinks
+          .filter((expectedLink) => !footerLinks.some((link) => (
+            link.label === expectedLink.label && link.href === expectedLink.href
+          )))
+          .map((link) => `${link.label} -> ${link.href}`);
 
         return {
           h1Text: normalize(h1?.textContent),
           hasNav: Boolean(nav),
+          hasFooter: Boolean(footer),
           missingLabels,
+          missingFooterLinks,
           currentLabel: normalize(current?.textContent),
           hasHomeCurrent: Boolean(homeCurrent),
           scrollWidth: document.documentElement.scrollWidth,
           clientWidth: document.documentElement.clientWidth,
           currentMatches: currentLabel ? normalize(current?.textContent) === currentLabel : Boolean(homeCurrent),
         };
-      }, expectedNavLabels, sitePage.currentLabel);
+      }, expectedNavLabels, sitePage.currentLabel, expectedFooterLinksWithUrls);
 
       if (!result.h1Text) fail(`${sitePage.path}: missing h1`);
       if (!result.hasNav) fail(`${sitePage.path}: missing nav.site-nav`);
+      if (!result.hasFooter) fail(`${sitePage.path}: missing footer`);
       if (result.missingLabels.length > 0) {
         fail(`${sitePage.path}: nav.site-nav missing labels: ${result.missingLabels.join(', ')}`);
+      }
+      if (result.missingFooterLinks.length > 0) {
+        fail(`${sitePage.path}: footer missing visible links: ${result.missingFooterLinks.join(', ')}`);
       }
       if (!result.currentMatches) {
         const expected = sitePage.currentLabel || 'an aria-current="page" marker';
