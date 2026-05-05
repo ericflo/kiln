@@ -813,8 +813,9 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label for="sft-examples">Training Examples (JSON array)</label>
-            <textarea id="sft-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
-            <div class="form-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
+            <textarea id="sft-examples" name="examples" rows="6" aria-describedby="sft-examples-help sft-examples-state" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
+            <div class="form-help" id="sft-examples-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
+            <div id="sft-examples-state" data-sft-examples-state style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Paste examples JSON or use the sample payload to enable submit.</div>
             <div style="display:flex;justify-content:flex-end;margin-top:6px;">
               <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
             </div>
@@ -853,8 +854,9 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-group">
             <label for="grpo-groups">GRPO Groups (JSON array)</label>
-            <textarea id="grpo-groups" name="groups" rows="6" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
-            <div class="form-help">Expected: a JSON array of groups. Each group needs <code>messages</code> plus <code>completions</code> containing <code>text</code> and a numeric <code>reward</code>.</div>
+            <textarea id="grpo-groups" name="groups" rows="6" aria-describedby="grpo-groups-help grpo-groups-state" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
+            <div class="form-help" id="grpo-groups-help">Expected: a JSON array of groups. Each group needs <code>messages</code> plus <code>completions</code> containing <code>text</code> and a numeric <code>reward</code>.</div>
+            <div id="grpo-groups-state" data-grpo-groups-state style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Paste groups JSON or use the sample payload to enable submit.</div>
             <div style="display:flex;justify-content:flex-end;margin-top:6px;">
               <button type="button" class="btn btn-sm" id="use-grpo-sample">Use sample GRPO payload</button>
             </div>
@@ -1819,6 +1821,7 @@ function fillSftSamplePayload() {
     return;
   }
   textarea.value = samplePayload;
+  updateSftSubmitState();
   textarea.focus();
   toast('Sample SFT payload inserted');
 }
@@ -1844,6 +1847,7 @@ function fillGrpoSamplePayload() {
     return;
   }
   textarea.value = samplePayload;
+  updateGrpoSubmitState();
   textarea.focus();
   toast('Sample GRPO payload inserted');
 }
@@ -1963,22 +1967,57 @@ function trainingOutputNameReadinessState(formId, label) {
   return { ready: true, message: 'Ready to submit with this path-safe adapter name.' };
 }
 
-function updateTrainingOutputNameState(formId, stateId, label) {
-  const state = trainingOutputNameReadinessState(formId, label);
-  const helper = document.getElementById(stateId);
-  if (helper) helper.textContent = state.message;
-  const form = document.getElementById(formId);
+function trainingPayloadReadinessState(textareaId, label) {
+  const textarea = document.getElementById(textareaId);
+  if (!textarea || !textarea.value.trim()) {
+    return { ready: false, message: `Paste ${label} JSON or use the sample payload to enable submit.` };
+  }
+  return { ready: true, message: `${label} payload present. Submit will validate the JSON before queuing.` };
+}
+
+function updateTrainingSubmitState(options) {
+  const outputState = trainingOutputNameReadinessState(options.formId, options.outputLabel);
+  const payloadState = trainingPayloadReadinessState(options.payloadId, options.payloadLabel);
+  const outputHelper = document.getElementById(options.outputStateId);
+  const payloadHelper = document.getElementById(options.payloadStateId);
+  if (outputHelper) outputHelper.textContent = outputState.message;
+  if (payloadHelper) payloadHelper.textContent = payloadState.message;
+  const form = document.getElementById(options.formId);
   const submitButton = form ? form.querySelector('button[type="submit"]') : null;
-  if (submitButton) submitButton.disabled = form?.dataset.trainingBusy === 'true' || !state.ready;
-  return state;
+  if (submitButton) {
+    submitButton.disabled = form?.dataset.trainingBusy === 'true' || !outputState.ready || !payloadState.ready;
+  }
+  return { ready: outputState.ready && payloadState.ready, outputState, payloadState };
+}
+
+function updateSftSubmitState() {
+  return updateTrainingSubmitState({
+    formId: 'sft-form',
+    outputStateId: 'sft-output-name-state',
+    outputLabel: 'SFT output',
+    payloadId: 'sft-examples',
+    payloadStateId: 'sft-examples-state',
+    payloadLabel: 'examples',
+  });
+}
+
+function updateGrpoSubmitState() {
+  return updateTrainingSubmitState({
+    formId: 'grpo-form',
+    outputStateId: 'grpo-output-name-state',
+    outputLabel: 'GRPO output',
+    payloadId: 'grpo-groups',
+    payloadStateId: 'grpo-groups-state',
+    payloadLabel: 'groups',
+  });
 }
 
 function updateSftOutputNameState() {
-  return updateTrainingOutputNameState('sft-form', 'sft-output-name-state', 'SFT output');
+  return updateSftSubmitState().outputState;
 }
 
 function updateGrpoOutputNameState() {
-  return updateTrainingOutputNameState('grpo-form', 'grpo-output-name-state', 'GRPO output');
+  return updateGrpoSubmitState().outputState;
 }
 
 function parsePathSafeAdapterNameField(input, updateState) {
@@ -2001,8 +2040,8 @@ function setTrainingSubmitBusy(form, busy, pendingLabel) {
   submitButton.disabled = busy;
   submitButton.textContent = busy ? pendingLabel : submitButton.dataset.originalLabel;
   if (!busy) {
-    if (form.id === 'sft-form') updateSftOutputNameState();
-    if (form.id === 'grpo-form') updateGrpoOutputNameState();
+    if (form.id === 'sft-form') updateSftSubmitState();
+    if (form.id === 'grpo-form') updateGrpoSubmitState();
   }
 }
 
@@ -2330,10 +2369,12 @@ document.getElementById('copy-chat-response').addEventListener('click', copyLate
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
 document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
 updateUploadAdapterState();
-document.getElementById('sft-output-name').addEventListener('input', updateSftOutputNameState);
-document.getElementById('grpo-output-name').addEventListener('input', updateGrpoOutputNameState);
-updateSftOutputNameState();
-updateGrpoOutputNameState();
+document.getElementById('sft-output-name').addEventListener('input', updateSftSubmitState);
+document.getElementById('sft-examples').addEventListener('input', updateSftSubmitState);
+document.getElementById('grpo-output-name').addEventListener('input', updateGrpoSubmitState);
+document.getElementById('grpo-groups').addEventListener('input', updateGrpoSubmitState);
+updateSftSubmitState();
+updateGrpoSubmitState();
 document.getElementById('merge-output-name').addEventListener('input', updateMergeButtonState);
 document.getElementById('merge-mode').addEventListener('change', updateMergeButtonState);
 document.getElementById('merge-density').addEventListener('input', updateMergeButtonState);
