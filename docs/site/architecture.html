@@ -264,10 +264,15 @@
           workers. There is no Python sidecar and no second model load for the normal SFT or GRPO path.
         </p>
         <pre class="mt-5"><code>client request
-  -> axum API
+  -> axum HTTP/API
   -> scheduler + block manager
   -> Qwen/Qwen3.5-4B engine
-  -> sampler or streaming SSE response</code></pre>
+  -> sampler or streaming SSE response
+
+training request
+  -> axum HTTP/API
+  -> LoRA training queue
+  -> hot-swapped adapter path</code></pre>
       </article>
 
       <article class="card p-6">
