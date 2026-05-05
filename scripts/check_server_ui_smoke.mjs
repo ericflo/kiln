@@ -112,6 +112,36 @@ function validateGrpoPayload(body) {
   return null;
 }
 
+function isPathSafeAdapterDirectoryName(name) {
+  return typeof name === 'string'
+    && name.length > 0
+    && name !== '.'
+    && name !== '..'
+    && !name.includes('/')
+    && !name.includes('\\');
+}
+
+function validateAdapterMergePayload(body) {
+  if (!Array.isArray(body?.sources) || body.sources.length !== 2) return 'Merge payload should include exactly two sources from the dashboard flow';
+  const names = body.sources.map((source) => source?.name);
+  if (!names.every((name) => typeof name === 'string' && name.length > 0)) return 'Merge sources should include adapter names';
+  if (new Set(names).size !== names.length) return 'Merge sources should be distinct adapters';
+  if (!body.sources.every((source) => isFiniteNumber(source?.weight))) return 'Merge source weights should be numeric';
+  if (!isPathSafeAdapterDirectoryName(body?.output_name)) return 'Merge output_name should be path-safe';
+  if (!['weighted_average', 'ties', 'concat'].includes(body?.mode)) return 'Merge mode should be a supported dashboard mode';
+  if (body.mode === 'ties') {
+    if (!isFiniteNumber(body?.density) || body.density <= 0 || body.density > 1) return 'TIES merge should include numeric density in (0, 1]';
+  } else if ('density' in body) {
+    return 'Density should only be sent for TIES merges';
+  }
+  return null;
+}
+
+const defaultAvailableAdapters = [
+  { name: 'adapter-alpha', active: false, size_bytes: 4096 },
+  { name: 'adapter-beta', active: false, size_bytes: 8192 },
+];
+
 function sse(res, chunks) {
   res.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -125,7 +155,7 @@ function sse(res, chunks) {
   res.end();
 }
 
-async function startServer({ failDashboardApis = false } = {}) {
+async function startServer({ failDashboardApis = false, availableAdapters = defaultAvailableAdapters } = {}) {
   const uiHtml = await readFile(uiPath, 'utf8');
   const completedTrainingJobs = [];
   const server = http.createServer(async (req, res) => {
@@ -179,7 +209,28 @@ async function startServer({ failDashboardApis = false } = {}) {
       return;
     }
     if (url.pathname === '/v1/adapters') {
-      json(res, { active: null, available: [] });
+      json(res, { active: null, available: availableAdapters });
+      return;
+    }
+    if (url.pathname === '/v1/adapters/merge') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for adapter merge' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const validationError = validateAdapterMergePayload(body);
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      setTimeout(() => json(res, {
+        sources: body.sources,
+        output_name: body.output_name,
+        mode: body.mode,
+        density: body.density,
+        num_tensors: 32,
+      }), 75);
       return;
     }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
@@ -402,7 +453,7 @@ async function expectApiFailurePanel(page, selector, action, detail) {
   }
 }
 
-async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
+async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false } = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
     executablePath: chromiumPath(),
@@ -455,9 +506,28 @@ async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
       return;
     }
 
-    await waitForPanelText(page, '#adapters-panel', /No adapters found yet\./, 'Empty adapter state missing');
-    await expectPanelLink(page, '#adapters-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
-    await expectPanelLink(page, '#adapters-panel .empty', 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
+    if (expectEmptyAdapters) {
+      await waitForPanelText(page, '#adapters-panel', /No adapters found yet\./, 'Empty adapter state missing');
+      await expectPanelLink(page, '#adapters-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
+      await expectPanelLink(page, '#adapters-panel .empty', 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
+      await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled when fewer than two adapters exist');
+      if (pageErrors.length > 0) fail(`Empty adapter UI emitted browser errors: ${pageErrors.join('; ')}`);
+      return;
+    }
+
+    await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
+    await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
+    await waitForPanelText(page, '#merge-helper', /Select at least two source adapters/i, 'Adapter merge helper should ask for source selections before merge');
+    await expectDisabled(page, '#add-merge-source', false, 'Add merge source should enable when at least two adapters exist');
+    await expectDisabled(page, '#merge-btn', true, 'Adapter merge should stay disabled before source adapters are selected');
+    await page.select('#merge-src-name-1', 'adapter-alpha');
+    await page.select('#merge-src-name-2', 'adapter-beta');
+    await page.click('#merge-output-name', { clickCount: 3 });
+    await page.type('#merge-output-name', 'merged-smoke-adapter');
+    await expectDisabled(page, '#merge-btn', false, 'Adapter merge should enable after two distinct sources and path-safe output are selected');
+    await clickAndWait(page, '#merge-btn', 'Could not submit adapter merge');
+    await expectDisabled(page, '#merge-btn', true, 'Adapter merge should disable while submitting');
+    await expectTrainingToast(page, 'Merged 2 sources → merged-smoke-adapter (32 tensors, mode=weighted_average)');
 
     await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Empty training queue state missing');
     await expectPanelLink(page, '#tab-queue .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
@@ -529,6 +599,13 @@ async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
   } finally {
     await browser.close();
   }
+}
+
+const emptyAdapterScenario = await startServer({ availableAdapters: [] });
+try {
+  await runSmoke(emptyAdapterScenario.baseUrl, { expectEmptyAdapters: true });
+} finally {
+  await new Promise((accept) => emptyAdapterScenario.server.close(accept));
 }
 
 const { server, baseUrl } = await startServer();
