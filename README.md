@@ -166,6 +166,7 @@ Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_
   └─────────────────────────────────────┘
 
   Version: <workspace version>
+  Mode:    GPU inference
   Model:   ./Qwen3.5-4B
   CUDA:    available ✓
   GPU:     NVIDIA RTX A6000
