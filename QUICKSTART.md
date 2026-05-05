@@ -264,8 +264,8 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 # List loaded adapters
 ./target/release/kiln adapters list
 
-# Unload an adapter (revert to base model)
-./target/release/kiln adapters unload default
+# Unload the active adapter (revert to base model)
+./target/release/kiln adapters unload
 
 # Reload it
 ./target/release/kiln adapters load default
@@ -582,9 +582,9 @@ kiln train status --job-id train_123
 
 kiln adapters list
 kiln adapters load support-bot
-kiln adapters unload support-bot
+kiln adapters unload
 kiln adapters delete support-bot
-    List, load, unload the active adapter, or delete a saved adapter on the running server.
+    List, load, unload the active adapter to revert to the base model, or delete a saved adapter on the running server.
 ```
 
 The CLI currently covers the basic adapter lifecycle: `list`, `load`, `unload`, and `delete`. For advanced adapter download, upload, merge, and composition flows — plus training-completion webhooks — use the dashboard or the HTTP API examples in [9. Advanced API Examples](#9-advanced-api-examples).
