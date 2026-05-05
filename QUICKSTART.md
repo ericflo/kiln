@@ -592,7 +592,11 @@ The CLI currently covers the basic adapter lifecycle: `list`, `load`, `unload`, 
 ```
 Global options:
   --config, -c <file>   Path to TOML config file
+  --verbose, -v         Show debug startup/model-load diagnostics; repeat as -vv for trace detail
+  --quiet, -q           Print only warnings and errors for script-friendly output
 ```
+
+Use `kiln -v serve` when first-run startup or model-load diagnostics are needed. Use `kiln -q ...` for quieter scripted commands, for example `kiln -q health`.
 
 ## API Endpoints
 
