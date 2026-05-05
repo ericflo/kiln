@@ -12,6 +12,7 @@ on:
       - 'docs/site/**'
       - 'docs/release-version-policy.md'
       - 'scripts/check_release_versions.py'
+      - 'scripts/check_docs_site_smoke.mjs'
       - 'scripts/check_server_ui_smoke.mjs'
       - 'crates/kiln-server/src/ui.html'
       - '.github/workflows/release-version-drift.yml'
@@ -25,6 +26,7 @@ on:
       - 'docs/site/**'
       - 'docs/release-version-policy.md'
       - 'scripts/check_release_versions.py'
+      - 'scripts/check_docs_site_smoke.mjs'
       - 'scripts/check_server_ui_smoke.mjs'
       - 'crates/kiln-server/src/ui.html'
       - '.github/workflows/release-version-drift.yml'
@@ -41,11 +43,15 @@ jobs:
         run: |
           CHROME_BIN=$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)
           if [ -z "$CHROME_BIN" ]; then
-            echo "Could not find Chromium/Chrome for scripts/check_server_ui_smoke.mjs" >&2
+            echo "Could not find Chromium/Chrome for docs/server UI smoke checks" >&2
             exit 1
           fi
           echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
           echo "PUPPETEER_EXECUTABLE_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+      - name: Check docs site mobile smoke
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: npx --yes --package puppeteer@latest node scripts/check_docs_site_smoke.mjs
       - name: Check server UI smoke
         env:
           PUPPETEER_SKIP_DOWNLOAD: "true"
