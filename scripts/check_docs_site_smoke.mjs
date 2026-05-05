@@ -173,6 +173,12 @@ const expectedCliLinks = [
   { label: 'Architecture', href: 'architecture.html' },
 ];
 
+const expectedCliModelSetupCue = {
+  label: 'Qwen/Qwen3.5-4B setup cue',
+  terms: ['qwen/qwen3.5-4b', 'quickstart', 'setup', 'model download'],
+  href: 'quickstart.html',
+};
+
 const expectedArchitectureSections = [
   { label: 'single-process server', terms: ['single process', 'rust binary', 'axum http api'] },
   { label: 'request path and batching', terms: ['request path and batching', 'iteration-level scheduler', 'continuous batching'] },
@@ -559,6 +565,12 @@ async function runSmoke() {
             href: link.getAttribute('href'),
             text: normalize(link.textContent),
           }));
+          const hero = document.querySelector('main > section:first-of-type');
+          const heroText = normalize(hero?.innerText || '');
+          const heroLinks = Array.from(hero?.querySelectorAll('a[href]') || []).map((link) => ({
+            href: link.getAttribute('href'),
+            text: normalize(link.textContent),
+          }));
 
           return {
             bodyText,
@@ -566,8 +578,19 @@ async function runSmoke() {
             copyableCodeBlocks,
             copyButtonCount: copyButtons.length,
             links,
+            heroText,
+            heroLinks,
           };
         });
+
+        const missingModelSetupCueTerms = expectedCliModelSetupCue.terms
+          .filter((term) => !cliResult.heroText.includes(term));
+        if (missingModelSetupCueTerms.length > 0) {
+          fail(`${sitePage.path}: missing ${expectedCliModelSetupCue.label}: ${missingModelSetupCueTerms.join(', ')}`);
+        }
+        if (!cliResult.heroLinks.some((link) => link.href === expectedCliModelSetupCue.href)) {
+          fail(`${sitePage.path}: ${expectedCliModelSetupCue.label} must link to Quickstart`);
+        }
 
         const missingSections = expectedCliSections
           .filter((section) => !section.terms.every((term) => {
