@@ -12,6 +12,8 @@ on:
       - 'docs/site/**'
       - 'docs/release-version-policy.md'
       - 'scripts/check_release_versions.py'
+      - 'scripts/check_server_ui_smoke.mjs'
+      - 'crates/kiln-server/src/ui.html'
       - '.github/workflows/release-version-drift.yml'
   pull_request:
     paths:
@@ -23,6 +25,8 @@ on:
       - 'docs/site/**'
       - 'docs/release-version-policy.md'
       - 'scripts/check_release_versions.py'
+      - 'scripts/check_server_ui_smoke.mjs'
+      - 'crates/kiln-server/src/ui.html'
       - '.github/workflows/release-version-drift.yml'
   workflow_dispatch:
 
@@ -33,3 +37,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: python3 scripts/check_release_versions.py
+      - name: Locate Chromium
+        run: |
+          CHROME_BIN=$(command -v chromium-browser || command -v chromium || command -v google-chrome || command -v google-chrome-stable || true)
+          if [ -z "$CHROME_BIN" ]; then
+            echo "Could not find Chromium/Chrome for scripts/check_server_ui_smoke.mjs" >&2
+            exit 1
+          fi
+          echo "CHROME_BIN=$CHROME_BIN" >> "$GITHUB_ENV"
+          echo "PUPPETEER_EXECUTABLE_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+      - name: Check server UI smoke
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: npx --yes --package puppeteer@latest node scripts/check_server_ui_smoke.mjs
