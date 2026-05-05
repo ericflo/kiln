@@ -33,6 +33,7 @@ const expectedNavLabels = [
 const demoPagePath = 'docs/site/demo/index.html';
 const apiPagePath = 'docs/site/api.html';
 const architecturePagePath = 'docs/site/architecture.html';
+const troubleshootingPagePath = 'docs/site/troubleshooting.html';
 
 const expectedDemoSections = [
   { label: 'first token', terms: ['first token'] },
@@ -122,6 +123,33 @@ const expectedArchitectureLinks = [
   { label: 'troubleshooting', href: 'troubleshooting.html' },
   { label: 'API reference', href: 'api.html' },
   { label: 'GRPO guide', href: 'grpo.html' },
+];
+
+const expectedTroubleshootingSections = [
+  { label: 'first-run diagnostic framing', terms: ['first-run', 'diagnostic'] },
+  { label: 'three probes', terms: ['start with three probes'] },
+  { label: 'Desktop App first launch', terms: ['desktop app first launch'] },
+  { label: 'wrong binary/GPU path', terms: ['wrong binary or gpu path'] },
+  { label: 'model weights not found', terms: ['model weights are not found'] },
+  { label: 'health not green', terms: ['/health', 'not green'] },
+  { label: 'remote server not reachable', terms: ['remote server is not reachable'] },
+  { label: 'long-prefill/tool-call timeouts', terms: ['long-prefill', 'tool-call', 'timeouts'] },
+  { label: 'mock mode', terms: ['mock mode is not real training'] },
+  { label: 'adapter directory', terms: ['adapters are in a different directory'] },
+];
+
+const expectedTroubleshootingProbeExamples = [
+  { label: 'health probe', terms: ['/health'] },
+  { label: 'models probe', terms: ['/v1/models'] },
+  { label: 'minimal chat probe', terms: ['/v1/chat/completions', 'messages', 'max_tokens'] },
+];
+
+const expectedTroubleshootingLinks = [
+  { label: 'Quickstart', href: 'quickstart.html' },
+  { label: 'GRPO Guide', href: 'grpo.html' },
+  { label: 'Architecture', href: 'architecture.html' },
+  { label: 'API Reference', href: 'api.html' },
+  { label: 'CLI Reference', href: 'cli.html' },
 ];
 
 function fail(message) {
@@ -361,6 +389,56 @@ async function runSmoke() {
           .map((link) => link.label);
         if (missingLinks.length > 0) {
           fail(`${sitePage.path}: missing architecture next-step links: ${missingLinks.join(', ')}`);
+        }
+      }
+
+      if (sitePage.path === troubleshootingPagePath) {
+        const troubleshootingResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const bodyText = normalize(document.body.innerText);
+          const headings = normalize(Array.from(document.querySelectorAll('h1, h2, h3'))
+            .map((heading) => heading.textContent || '')
+            .join('\n'));
+          const copyableCodeBlocks = Array.from(document.querySelectorAll('pre > code'))
+            .map((code) => normalize(code.innerText || code.textContent));
+          const links = Array.from(document.querySelectorAll('a[href]')).map((link) => ({
+            href: link.getAttribute('href'),
+            text: normalize(link.textContent),
+          }));
+
+          return {
+            bodyText,
+            headings,
+            copyableCodeBlocks,
+            links,
+          };
+        });
+
+        const missingSections = expectedTroubleshootingSections
+          .filter((section) => !section.terms.every((term) => {
+            const normalizedTerm = term.toLowerCase();
+            return troubleshootingResult.headings.includes(normalizedTerm)
+              || troubleshootingResult.bodyText.includes(normalizedTerm);
+          }))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing troubleshooting cold-reader coverage: ${missingSections.join(', ')}`);
+        }
+
+        const missingProbes = expectedTroubleshootingProbeExamples
+          .filter((probe) => !troubleshootingResult.copyableCodeBlocks.some((codeBlock) => (
+            probe.terms.every((term) => codeBlock.includes(term.toLowerCase()))
+          )))
+          .map((probe) => probe.label);
+        if (missingProbes.length > 0) {
+          fail(`${sitePage.path}: missing troubleshooting first-run probes: ${missingProbes.join(', ')}`);
+        }
+
+        const missingLinks = expectedTroubleshootingLinks
+          .filter((expectedLink) => !troubleshootingResult.links.some((link) => link.href === expectedLink.href))
+          .map((link) => link.label);
+        if (missingLinks.length > 0) {
+          fail(`${sitePage.path}: missing troubleshooting next-step links: ${missingLinks.join(', ')}`);
         }
       }
     }
