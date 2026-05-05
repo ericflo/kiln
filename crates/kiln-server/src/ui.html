@@ -753,7 +753,7 @@ textarea { resize: vertical; min-height: 80px; }
       <div class="form-row" style="margin-bottom:8px;">
         <div class="form-group" style="margin-bottom:0;">
           <label for="merge-output-name">Output Name</label>
-          <input type="text" id="merge-output-name" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
+          <input type="text" id="merge-output-name" value="merged-adapter" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
           <div class="form-help" id="merge-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
         </div>
         <div class="form-group" style="margin-bottom:0;">
@@ -1477,7 +1477,7 @@ function renderMergeSources() {
   const helper = document.getElementById('merge-helper');
   if (helper) {
     helper.textContent = canMerge
-      ? 'Choose two or more saved adapters to merge into a new adapter.'
+      ? 'Choose two or more distinct saved adapters to merge into a new adapter.'
       : 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.';
   }
   const addBtn = document.getElementById('add-merge-source');
@@ -1562,6 +1562,10 @@ window.mergeAdapters = async function() {
     sources.push({ name, weight });
   }
   if (sources.length < 2) { toast('Choose at least two source adapters to merge', 'err'); return; }
+  if (new Set(sources.map(source => source.name)).size !== sources.length) {
+    toast('Choose distinct source adapters to merge', 'err');
+    return;
+  }
   let outputName;
   try {
     outputName = parseAdapterNameField(document.getElementById('merge-output-name'));
