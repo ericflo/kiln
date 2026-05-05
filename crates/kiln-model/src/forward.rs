@@ -943,6 +943,7 @@ impl LinearAttentionState {
         let conv_dim = config.linear_qkv_dim();
         let k_minus_1 = config.linear_conv_kernel_dim.saturating_sub(1);
         let recurrent_dtype = match (device, config.dtype) {
+            (Device::Cuda(_), kiln_core::config::DType::BF16) => DType::BF16,
             (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
             (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
             _ => DType::F32,
