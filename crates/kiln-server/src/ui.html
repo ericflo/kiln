@@ -1232,6 +1232,7 @@ async function pollAdapters() {
   try {
     const data = await api('/v1/adapters');
     lastAdapters = data;
+    window.lastAdapters = data;
     renderAdapters(data);
     updateAdapterSelect(data);
     renderMergeSources();
@@ -1470,7 +1471,8 @@ let mergeAdaptersBusy = false;
 function renderMergeSources() {
   const list = document.getElementById('merge-sources');
   if (!list) return;
-  const available = (lastAdapters && lastAdapters.available) || [];
+  const adapterState = window.lastAdapters || lastAdapters;
+  const available = (adapterState && adapterState.available) || [];
   const canMerge = available.length >= 2;
   const helper = document.getElementById('merge-helper');
   if (helper) {
@@ -1504,7 +1506,7 @@ function renderMergeSources() {
     html += `<div class="merge-source" style="display:grid;grid-template-columns:1fr 90px auto;gap:6px;margin-bottom:6px;align-items:center;">
       <select id="${nameId}" class="merge-src-name" aria-label="Merge source ${rowNumber} adapter"><option value="">(select adapter)</option>${adapterOptions}</select>
       <input id="${weightId}" type="number" class="merge-src-weight" step="0.05" value="${w}" aria-label="Merge source ${rowNumber} weight">
-      <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" aria-label="Remove merge source ${rowNumber}" ${mergeSourceCount <= 1 ? 'disabled' : ''}>−</button>
+      <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" aria-label="Remove merge source ${rowNumber}" ${mergeSourceCount <= 2 ? 'disabled' : ''}>−</button>
     </div>`;
   }
   list.innerHTML = html;
@@ -1514,9 +1516,10 @@ function renderMergeSources() {
   });
 }
 
+window.renderMergeSources = renderMergeSources;
 window.addMergeSource = function() { mergeSourceCount += 1; renderMergeSources(); };
 window.removeMergeSource = function(idx) {
-  if (mergeSourceCount <= 1) return;
+  if (mergeSourceCount <= 2) return;
   // Drop the row at idx by reading current values, removing it, then re-rendering.
   const list = document.getElementById('merge-sources');
   const rows = Array.from(list.querySelectorAll('.merge-source'));
@@ -1524,7 +1527,7 @@ window.removeMergeSource = function(idx) {
     name: row.querySelector('.merge-src-name').value,
     weight: row.querySelector('.merge-src-weight').value,
   }));
-  mergeSourceCount = Math.max(1, kept.length);
+  mergeSourceCount = Math.max(2, kept.length);
   renderMergeSources();
   // Re-apply preserved values to the freshly rendered rows.
   const newRows = list.querySelectorAll('.merge-source');
@@ -1542,7 +1545,8 @@ window.onMergeModeChange = function() {
 };
 
 window.mergeAdapters = async function() {
-  const available = (lastAdapters && lastAdapters.available) || [];
+  const adapterState = window.lastAdapters || lastAdapters;
+  const available = (adapterState && adapterState.available) || [];
   if (available.length < 2) {
     toast('Merging requires at least two saved adapters', 'err');
     return;
@@ -1553,11 +1557,11 @@ window.mergeAdapters = async function() {
   for (const row of rows) {
     const name = row.querySelector('.merge-src-name').value.trim();
     const weight = parseFloat(row.querySelector('.merge-src-weight').value);
-    if (!name) { toast('Each merge source needs an adapter', 'err'); return; }
+    if (!name) continue;
     if (!Number.isFinite(weight)) { toast('Each merge source needs a numeric weight', 'err'); return; }
     sources.push({ name, weight });
   }
-  if (sources.length === 0) { toast('Add at least one source', 'err'); return; }
+  if (sources.length < 2) { toast('Choose at least two source adapters to merge', 'err'); return; }
   let outputName;
   try {
     outputName = parseAdapterNameField(document.getElementById('merge-output-name'));
