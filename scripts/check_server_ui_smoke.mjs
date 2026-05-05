@@ -67,11 +67,49 @@ function apiFailure(res, panelName, path) {
   }));
 }
 
+function apiBadRequest(res, detail) {
+  res.writeHead(400, { 'content-type': 'application/json; charset=utf-8' });
+  res.end(JSON.stringify({ detail }));
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   if (chunks.length === 0) return {};
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
+function isFiniteNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function validateSftPayload(body) {
+  if (!Array.isArray(body?.examples) || body.examples.length !== 1) return 'SFT examples should be a one-item array from the sample payload';
+  const messages = body.examples[0]?.messages;
+  if (!Array.isArray(messages) || messages.length !== 2) return 'SFT sample example should include user and assistant messages';
+  if (messages[0]?.role !== 'user' || messages[1]?.role !== 'assistant') return 'SFT sample messages should preserve chat roles';
+  if (body?.config?.output_name !== 'sft-adapter') return 'SFT output_name should be nested under config';
+  if (body?.config?.auto_load !== true) return 'SFT auto_load should be true by default';
+  if (!isFiniteNumber(body?.config?.learning_rate) || body.config.learning_rate !== 0.0002) return 'SFT learning_rate should be numeric';
+  if (body?.config?.epochs !== 3) return 'SFT epochs should be numeric and nested under config';
+  if (body?.config?.lora_rank !== 8) return 'SFT lora_rank should be numeric and nested under config';
+  if ('output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'SFT payload should not use stale top-level training config fields';
+  return null;
+}
+
+function validateGrpoPayload(body) {
+  if (!Array.isArray(body?.groups) || body.groups.length !== 1) return 'GRPO groups should be a one-item array from the sample payload';
+  const group = body.groups[0];
+  if (!Array.isArray(group?.messages) || group.messages[0]?.role !== 'user') return 'GRPO sample group should preserve prompt messages';
+  if (!Array.isArray(group?.completions) || group.completions.length !== 2) return 'GRPO sample group should include scored completions';
+  if (!group.completions.every((completion) => typeof completion.text === 'string' && isFiniteNumber(completion.reward))) return 'GRPO completions should include text and numeric rewards';
+  if (body?.config?.output_name !== 'grpo-adapter') return 'GRPO output_name should be nested under config';
+  if (body?.config?.auto_load !== true) return 'GRPO auto_load should be true by default';
+  if (!isFiniteNumber(body?.config?.learning_rate) || body.config.learning_rate !== 0.00005) return 'GRPO learning_rate should be numeric';
+  if (!isFiniteNumber(body?.config?.kl_coeff) || body.config.kl_coeff !== 0.1) return 'GRPO kl_coeff should be numeric';
+  if (body?.config?.lora_rank !== 8) return 'GRPO lora_rank should be numeric and nested under config';
+  if ('epochs' in (body?.config || {}) || 'output_name' in body || 'adapter_name' in body || 'num_epochs' in body) return 'GRPO payload should not use stale SFT/top-level training config fields';
+  return null;
 }
 
 function sse(res, chunks) {
@@ -89,6 +127,7 @@ function sse(res, chunks) {
 
 async function startServer({ failDashboardApis = false } = {}) {
   const uiHtml = await readFile(uiPath, 'utf8');
+  const completedTrainingJobs = [];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
     if (url.pathname === '/' || url.pathname === '/ui') {
@@ -144,7 +183,53 @@ async function startServer({ failDashboardApis = false } = {}) {
       return;
     }
     if (url.pathname === '/v1/train/queue' || url.pathname === '/v1/train/status') {
-      json(res, { running: null, queued: [], completed: [] });
+      json(res, { running: null, queued: [], completed: completedTrainingJobs });
+      return;
+    }
+    if (url.pathname === '/v1/train/sft') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for SFT training' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const validationError = validateSftPayload(body);
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      completedTrainingJobs.unshift({
+        job_id: 'smoke-sft',
+        job_type: 'sft',
+        state: 'Completed',
+        progress: 1,
+        adapter_name: body.config.output_name,
+        elapsed_secs: 1,
+      });
+      setTimeout(() => json(res, { message: 'SFT job submitted', job_id: 'smoke-sft' }), 75);
+      return;
+    }
+    if (url.pathname === '/v1/train/grpo') {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ detail: 'Use POST for GRPO training' }));
+        return;
+      }
+      const body = await readJsonBody(req);
+      const validationError = validateGrpoPayload(body);
+      if (validationError) {
+        apiBadRequest(res, validationError);
+        return;
+      }
+      completedTrainingJobs.unshift({
+        job_id: 'smoke-grpo',
+        job_type: 'grpo',
+        state: 'Completed',
+        progress: 1,
+        adapter_name: body.config.output_name,
+        elapsed_secs: 1,
+      });
+      setTimeout(() => json(res, { message: 'GRPO job submitted', job_id: 'smoke-grpo' }), 75);
       return;
     }
     if (url.pathname === '/v1/models') {
@@ -243,6 +328,30 @@ async function waitForPanelText(page, selector, pattern, message) {
     selector,
     pattern.source,
   ).catch(() => fail(`${message}: ${selector} did not render text matching ${pattern}`));
+}
+
+async function expectActiveTrainingTab(page, tabName, message) {
+  await page.waitForFunction(
+    (name) => {
+      const tab = document.querySelector(`[data-tab="${name}"]`);
+      const panel = document.querySelector(`#tab-${name}`);
+      return tab?.getAttribute('aria-selected') === 'true'
+        && panel
+        && !panel.hidden
+        && !panel.inert
+        && panel.classList.contains('active');
+    },
+    { timeout: 5000 },
+    tabName,
+  ).catch(() => fail(message));
+}
+
+async function expectTrainingToast(page, text) {
+  await page.waitForFunction(
+    (expectedText) => Array.from(document.querySelectorAll('#toasts .toast')).some((toast) => toast.textContent?.trim() === expectedText),
+    { timeout: 5000 },
+    text,
+  ).catch(() => fail(`Expected training success toast ${JSON.stringify(text)}`));
 }
 
 async function expectPanelLink(page, selector, label, href) {
@@ -369,12 +478,24 @@ async function runSmoke(baseUrl, { expectFailureStates = false } = {}) {
     await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should start disabled until examples are provided');
     await clickAndWait(page, '#use-sft-sample', 'Could not click SFT sample payload button');
     await expectDisabled(page, '#sft-form button[type="submit"]', false, 'SFT submit should enable after sample payload is clicked');
+    await clickAndWait(page, '#sft-form button[type="submit"]', 'Could not submit sample SFT payload');
+    await expectDisabled(page, '#sft-form button[type="submit"]', true, 'SFT submit should disable while the job is submitting');
+    await expectTrainingToast(page, 'SFT job submitted');
+    await expectActiveTrainingTab(page, 'queue', 'Submitting SFT should switch back to the training queue tab');
+    await waitForPanelText(page, '#tab-queue', /smoke-sf/, 'Training queue should refresh after SFT submit');
+    await waitForPanelText(page, '#tab-queue', /Adapter:\s*sft-adapter/, 'Training queue should show the submitted SFT adapter name');
 
     await clickAndWait(page, '#training-tab-grpo', 'Could not open GRPO tab');
     await waitForVisiblePanel(page, '#tab-grpo', 'GRPO tab did not activate');
     await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should start disabled until groups are provided');
     await clickAndWait(page, '#use-grpo-sample', 'Could not click GRPO sample payload button');
     await expectDisabled(page, '#grpo-form button[type="submit"]', false, 'GRPO submit should enable after sample payload is clicked');
+    await clickAndWait(page, '#grpo-form button[type="submit"]', 'Could not submit sample GRPO payload');
+    await expectDisabled(page, '#grpo-form button[type="submit"]', true, 'GRPO submit should disable while the job is submitting');
+    await expectTrainingToast(page, 'GRPO job submitted');
+    await expectActiveTrainingTab(page, 'queue', 'Submitting GRPO should switch back to the training queue tab');
+    await waitForPanelText(page, '#tab-queue', /smoke-gr/, 'Training queue should refresh after GRPO submit');
+    await waitForPanelText(page, '#tab-queue', /Adapter:\s*grpo-adapter/, 'Training queue should show the submitted GRPO adapter name');
 
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
