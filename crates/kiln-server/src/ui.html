@@ -1468,24 +1468,91 @@ window.uploadAdapter = async function() {
 let mergeSourceCount = 2;
 let mergeAdaptersBusy = false;
 
+function isPathSafeMergeOutputName(name) {
+  return name
+    && name !== '.'
+    && name !== '..'
+    && !name.includes('/')
+    && !name.includes('\\');
+}
+
+function mergeReadinessState() {
+  const adapterState = window.lastAdapters || lastAdapters;
+  const available = (adapterState && adapterState.available) || [];
+  if (available.length < 2) {
+    return {
+      ready: false,
+      message: 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.',
+    };
+  }
+  if (mergeAdaptersBusy) {
+    return { ready: false, message: 'Merging adapters…' };
+  }
+
+  const outputEl = document.getElementById('merge-output-name');
+  const outputName = outputEl ? outputEl.value.trim() : '';
+  if (!outputName) {
+    return { ready: false, message: 'Enter a path-safe output adapter name to enable merge.' };
+  }
+  if (!isPathSafeMergeOutputName(outputName)) {
+    return { ready: false, message: 'Output name must be a single path-safe adapter name, not a path.' };
+  }
+
+  const list = document.getElementById('merge-sources');
+  const rows = list ? Array.from(list.querySelectorAll('.merge-source')) : [];
+  const selected = [];
+  for (const row of rows) {
+    const name = row.querySelector('.merge-src-name')?.value.trim() || '';
+    if (!name) continue;
+    selected.push(name);
+    const weightText = row.querySelector('.merge-src-weight')?.value || '';
+    const weight = parseFloat(weightText);
+    if (!Number.isFinite(weight)) {
+      return { ready: false, message: `Enter a numeric weight for ${name}.` };
+    }
+  }
+  if (selected.length < 2) {
+    return { ready: false, message: 'Select at least two source adapters to enable merge.' };
+  }
+  if (new Set(selected).size !== selected.length) {
+    return { ready: false, message: 'Choose distinct source adapters; duplicates cannot be merged.' };
+  }
+
+  const mode = document.getElementById('merge-mode')?.value;
+  if (mode === 'ties') {
+    const density = parseFloat(document.getElementById('merge-density')?.value || '');
+    if (!Number.isFinite(density) || density <= 0 || density > 1) {
+      return { ready: false, message: 'TIES density must be a number in (0, 1].' };
+    }
+  }
+
+  return { ready: true, message: 'Ready to merge the selected adapters into a new saved adapter.' };
+}
+
+function updateMergeButtonState() {
+  const state = mergeReadinessState();
+  const helper = document.getElementById('merge-helper');
+  if (helper) helper.textContent = state.message;
+  const mergeBtn = document.getElementById('merge-btn');
+  if (mergeBtn) mergeBtn.disabled = !state.ready;
+  const addBtn = document.getElementById('add-merge-source');
+  if (addBtn) {
+    const adapterState = window.lastAdapters || lastAdapters;
+    const available = (adapterState && adapterState.available) || [];
+    addBtn.disabled = available.length < 2 || mergeAdaptersBusy;
+  }
+  return state;
+}
+
 function renderMergeSources() {
   const list = document.getElementById('merge-sources');
   if (!list) return;
   const adapterState = window.lastAdapters || lastAdapters;
   const available = (adapterState && adapterState.available) || [];
   const canMerge = available.length >= 2;
-  const helper = document.getElementById('merge-helper');
-  if (helper) {
-    helper.textContent = canMerge
-      ? 'Choose two or more distinct saved adapters to merge into a new adapter.'
-      : 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.';
-  }
-  const addBtn = document.getElementById('add-merge-source');
-  if (addBtn) addBtn.disabled = !canMerge || mergeAdaptersBusy;
-  const mergeBtn = document.getElementById('merge-btn');
-  if (mergeBtn) mergeBtn.disabled = !canMerge || mergeAdaptersBusy;
   if (!canMerge) {
     list.innerHTML = '';
+    updateMergeButtonState();
     return;
   }
   // Preserve current values across re-renders.
@@ -1513,11 +1580,15 @@ function renderMergeSources() {
   // Re-apply preserved selections after innerHTML replacement.
   Array.from(list.querySelectorAll('.merge-source')).forEach((row, i) => {
     if (existing[i]) row.querySelector('.merge-src-name').value = existing[i].name;
+    row.querySelector('.merge-src-name').addEventListener('change', updateMergeButtonState);
+    row.querySelector('.merge-src-weight').addEventListener('input', updateMergeButtonState);
   });
+  updateMergeButtonState();
 }
 
 window.renderMergeSources = renderMergeSources;
-window.addMergeSource = function() { mergeSourceCount += 1; renderMergeSources(); };
+window.updateMergeButtonState = updateMergeButtonState;
+window.addMergeSource = function() { mergeSourceCount += 1; renderMergeSources(); updateMergeButtonState(); };
 window.removeMergeSource = function(idx) {
   if (mergeSourceCount <= 2) return;
   // Drop the row at idx by reading current values, removing it, then re-rendering.
@@ -1536,12 +1607,14 @@ window.removeMergeSource = function(idx) {
     newRows[i].querySelector('.merge-src-name').value = v.name;
     newRows[i].querySelector('.merge-src-weight').value = v.weight;
   });
+  updateMergeButtonState();
 };
 
 window.onMergeModeChange = function() {
   const mode = document.getElementById('merge-mode').value;
   const densityWrap = document.getElementById('merge-density-wrap');
   if (densityWrap) densityWrap.style.display = (mode === 'ties') ? '' : 'none';
+  updateMergeButtonState();
 };
 
 window.mergeAdapters = async function() {
@@ -1584,9 +1657,9 @@ window.mergeAdapters = async function() {
   const originalLabel = mergeBtn ? mergeBtn.textContent : '';
   mergeAdaptersBusy = true;
   if (mergeBtn) {
-    mergeBtn.disabled = true;
     mergeBtn.textContent = 'Merging…';
   }
+  updateMergeButtonState();
   try {
     const res = await api('/v1/adapters/merge', {
       method: 'POST',
@@ -1600,6 +1673,7 @@ window.mergeAdapters = async function() {
     mergeAdaptersBusy = false;
     if (mergeBtn) mergeBtn.textContent = originalLabel;
     renderMergeSources();
+    updateMergeButtonState();
   }
 };
 
@@ -2195,6 +2269,10 @@ document.getElementById('copy-chat-response').addEventListener('click', copyLate
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
 document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
 updateUploadAdapterState();
+document.getElementById('merge-output-name').addEventListener('input', updateMergeButtonState);
+document.getElementById('merge-mode').addEventListener('change', updateMergeButtonState);
+document.getElementById('merge-density').addEventListener('input', updateMergeButtonState);
+updateMergeButtonState();
 
 // --- Init ---
 renderChat();
