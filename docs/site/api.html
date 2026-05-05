@@ -453,6 +453,12 @@ kiln serve --config kiln.toml</code></pre>
           <div class="endpoint"><span class="method">GET</span> <code>/v1/train/queue</code> &mdash; list queued training jobs.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/train/queue/{job_id}</code> &mdash; cancel a queued job.</div>
         </div>
+        <div class="code-block mt-4" data-placeholder="JOB_ID=<job-id>"><pre><code>curl -s http://localhost:8420/v1/train/queue | python3 -m json.tool
+JOB_ID=&lt;job-id&gt;
+curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json.tool</code></pre></div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          DELETE only cancels jobs that are still queued; running or completed jobs return an error.
+        </p>
       </article>
 
       <article class="card p-6" style="background: var(--bg-soft-2);">
