@@ -398,6 +398,22 @@ textarea { resize: vertical; min-height: 80px; }
 .chat-input-row input {
   flex: 1;
 }
+.chat-starter-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+  color: var(--text2);
+  font-size: 12px;
+}
+.chat-starter-prompts span {
+  flex: 0 0 auto;
+}
+.chat-starter-prompts .btn {
+  white-space: normal;
+  text-align: left;
+}
 .chat-controls {
   display: flex;
   gap: 8px;
@@ -471,6 +487,13 @@ textarea { resize: vertical; min-height: 80px; }
   }
   .chat-controls, .chat-input-row, .adapter-actions {
     flex-wrap: wrap;
+  }
+  .chat-starter-prompts {
+    align-items: stretch;
+  }
+  .chat-starter-prompts span,
+  .chat-starter-prompts .btn {
+    flex: 1 1 100%;
   }
   .chat-controls select, .chat-input-row input {
     width: 100%;
@@ -853,12 +876,18 @@ textarea { resize: vertical; min-height: 80px; }
         <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
       </div>
       <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-starter-prompts" aria-label="Starter prompts for Quick Inference">
+        <span>Try a starter:</span>
+        <button type="button" class="btn btn-sm" data-chat-starter-prompt="Summarize Kiln in two sentences for a new developer.">Summarize Kiln</button>
+        <button type="button" class="btn btn-sm" data-chat-starter-prompt="Write a Rust function that computes a moving average.">Code example</button>
+        <button type="button" class="btn btn-sm" data-chat-starter-prompt="Suggest a reward function for grading concise JSON answers.">Reward loop</button>
+      </div>
       <div class="chat-input-row">
         <label for="chat-input" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Message</label>
         <input type="text" id="chat-input" placeholder="Type a message...">
-        <button class="btn btn-primary" id="chat-send">Send</button>
-        <button class="btn" id="chat-stop" disabled hidden>Stop</button>
-        <button class="btn" id="chat-clear">Clear</button>
+        <button type="button" class="btn btn-primary" id="chat-send">Send</button>
+        <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
+        <button type="button" class="btn" id="chat-clear">Clear</button>
       </div>
     </div>
   </div>
@@ -1970,6 +1999,13 @@ async function sendChat() {
 document.getElementById('chat-send').addEventListener('click', sendChat);
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+document.querySelectorAll('[data-chat-starter-prompt]').forEach((button) => {
+  button.addEventListener('click', () => {
+    const input = document.getElementById('chat-input');
+    input.value = button.dataset.chatStarterPrompt || '';
+    input.focus();
+  });
 });
 document.getElementById('chat-stop').addEventListener('click', () => {
   if (chatAbort) chatAbort.abort();
