@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { dirname, relative, sep, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
@@ -30,8 +30,49 @@ const expectedNavLabels = [
   'Architecture',
 ];
 
+const demoPagePath = 'docs/site/demo/index.html';
+
+const expectedDemoSections = [
+  { label: 'first token', terms: ['first token'] },
+  { label: 'benchmark', terms: ['benchmark'] },
+  { label: 'hot-swap', terms: ['hot-swap'] },
+  { label: 'OpenAI client', terms: ['openai client'] },
+  { label: 'GRPO', terms: ['grpo'] },
+  { label: '60-second loop', terms: ['60-second', 'loop'] },
+];
+
+const expectedDemoCastFiles = [
+  'first-token.cast',
+  'bench.cast',
+  'hot-swap.cast',
+  'openai.cast',
+  'grpo.cast',
+  'kiln-60s.cast',
+];
+
 function fail(message) {
   throw new Error(message);
+}
+
+function validateDemoCasts(sitePagePath, referencedCasts) {
+  const demoDir = resolve(repoRoot, dirname(sitePagePath));
+  const uniqueCasts = [...new Set(referencedCasts)];
+  const missingExpected = expectedDemoCastFiles.filter((cast) => !uniqueCasts.includes(cast));
+
+  if (missingExpected.length > 0) {
+    fail(`${sitePagePath}: missing expected demo cast references: ${missingExpected.join(', ')}`);
+  }
+
+  for (const cast of uniqueCasts) {
+    const castPath = resolve(demoDir, cast);
+    const castRelativePath = relative(demoDir, castPath);
+    if (castRelativePath.startsWith('..') || castRelativePath.includes(`..${sep}`)) {
+      fail(`${sitePagePath}: demo cast escapes docs/site/demo/: ${cast}`);
+    }
+    if (!existsSync(castPath)) {
+      fail(`${sitePagePath}: referenced demo cast does not exist: ${cast}`);
+    }
+  }
 }
 
 async function loadPuppeteer() {
@@ -119,6 +160,30 @@ async function runSmoke() {
       }
       if (result.scrollWidth > result.clientWidth) {
         fail(`${sitePage.path}: mobile horizontal overflow: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth}`);
+      }
+
+      if (sitePage.path === demoPagePath) {
+        const demoResult = await page.evaluate(() => {
+          const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+          const scriptText = Array.from(document.querySelectorAll('script'))
+            .map((script) => script.textContent || '')
+            .join('\n');
+          const referencedCasts = Array.from(scriptText.matchAll(/cast:\s*["']([^"']+\.cast)["']/g), (match) => match[1]);
+
+          return {
+            bodyText: normalize(document.body.innerText),
+            referencedCasts,
+          };
+        });
+
+        const missingSections = expectedDemoSections
+          .filter((section) => !section.terms.every((term) => demoResult.bodyText.includes(term)))
+          .map((section) => section.label);
+        if (missingSections.length > 0) {
+          fail(`${sitePage.path}: missing demo sections: ${missingSections.join(', ')}`);
+        }
+
+        validateDemoCasts(sitePage.path, demoResult.referencedCasts);
       }
     }
   } finally {
