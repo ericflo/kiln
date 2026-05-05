@@ -279,6 +279,7 @@ kiln -q health</code></pre>
           <p class="mb-4" style="color: var(--fg-dim);"><code>kiln health</code> prints a readable tree with model, adapter, scheduler, and training status.</p>
 <pre class="text-sm"><code>kiln health
 kiln health --url http://localhost:8420</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Point <code>--url</code> at a remote, Tailscale, or reverse-proxied server when Kiln runs on another machine.</p>
         </div>
         <div class="card p-6">
           <p class="mb-4" style="color: var(--fg-dim);">Use <code>--json</code> in scripts or CI probes when you want the raw health payload.</p>
@@ -299,7 +300,8 @@ kiln health --url http://localhost:8420</code></pre>
           <h3 class="font-semibold mb-2">SFT corrections</h3>
 <pre class="text-sm"><code>kiln train sft \
   --file corrections.jsonl \
-  --adapter support-bot</code></pre>
+  --adapter support-bot
+kiln train sft --file corrections.jsonl --adapter support-bot --url http://gpu-box:8420</code></pre>
           <p class="text-sm mt-4" style="color: var(--fg-mute);">Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> when you need to override defaults.</p>
         </div>
         <div class="card p-5">
@@ -312,8 +314,9 @@ kiln health --url http://localhost:8420</code></pre>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Queue status</h3>
 <pre class="text-sm"><code>kiln train status
-kiln train status --job-id train_123</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use the dashboard when you want visual progress and recent job history.</p>
+kiln train status --job-id train_123
+kiln train status --url http://gpu-box:8420</code></pre>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use the dashboard when you want visual progress and recent job history. The same <code>--url</code> flag works for SFT, GRPO, and status commands.</p>
         </div>
       </div>
     </div>
@@ -328,10 +331,11 @@ kiln train status --job-id train_123</code></pre>
         <div class="card p-6">
           <h3 class="font-semibold mb-2">List, load, unload</h3>
 <pre class="text-sm"><code>kiln adapters list
+kiln adapters list --url http://gpu-box:8420
 kiln adapters load support-bot
 kiln adapters unload
 kiln adapters unload support-bot</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">The named unload form is accepted for backwards compatibility; the server unloads the active adapter.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">The named unload form is accepted for backwards compatibility; the server unloads the active adapter. Add <code>--url</code> to target a remote server.</p>
         </div>
         <div class="card p-6">
           <h3 class="font-semibold mb-2">Delete</h3>
