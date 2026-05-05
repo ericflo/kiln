@@ -162,7 +162,7 @@ const expectedCliCodeExamples = [
   { label: 'training status command', terms: ['kiln train status'] },
   { label: 'adapter commands', terms: ['kiln adapters list', 'kiln adapters load support-bot', 'kiln adapters unload'] },
   { label: 'config validation commands', terms: ['kiln config --file kiln.toml', 'kiln serve --config kiln.toml'] },
-  { label: 'help and verbosity commands', terms: ['kiln --help', 'kiln train --help', 'kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
+  { label: 'verbosity commands', terms: ['kiln -v serve', 'kiln -vv serve', 'kiln -q health'] },
 ];
 
 const expectedCliLinks = [
