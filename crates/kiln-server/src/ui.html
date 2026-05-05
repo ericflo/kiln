@@ -1482,12 +1482,14 @@ let mergeSourceCount = 2;
 let mergeAdaptersBusy = false;
 
 function isPathSafeAdapterDirectoryName(name) {
-  return name
+  return Boolean(name)
     && name !== '.'
     && name !== '..'
     && !name.includes('/')
     && !name.includes('\\');
 }
+
+window.isPathSafeAdapterDirectoryName = isPathSafeAdapterDirectoryName;
 
 function pathSafeAdapterDirectoryNameMessage() {
   return 'Name must be a single adapter directory name with no / or \\, and not . or ..';
