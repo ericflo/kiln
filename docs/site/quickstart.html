@@ -132,6 +132,33 @@
       padding: 1rem;
       min-width: 0;
     }
+    .installer-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+      color: var(--fg-dim);
+      table-layout: fixed;
+    }
+    .installer-table th,
+    .installer-table td {
+      border-top: 1px solid var(--line);
+      padding: 0.55rem 0.45rem;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+    }
+    .installer-table th {
+      color: var(--fg);
+      font-size: 0.75rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .installer-table th:last-child,
+    .installer-table td:last-child {
+      width: 5.5rem;
+      text-align: right;
+      white-space: nowrap;
+    }
     a { color: #f3c891; }
     a:hover { color: var(--accent); }
     a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
@@ -280,6 +307,42 @@
           <p class="mb-3" style="color: var(--fg-dim);">
             Download <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">Kiln Desktop v0.2.2</a>, then choose or download the Qwen3.5-4B model in the app and start the server from the GUI.
           </p>
+          <table class="installer-table mb-3" aria-label="Kiln Desktop installer downloads">
+            <thead>
+              <tr>
+                <th scope="col">Platform</th>
+                <th scope="col">Installer</th>
+                <th scope="col">Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>macOS Apple Silicon</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_aarch64.dmg">Kiln.Desktop_0.2.2_aarch64.dmg</a></td>
+                <td>8.5 MB</td>
+              </tr>
+              <tr>
+                <td>Windows</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64-setup.exe">Kiln.Desktop_0.2.2_x64-setup.exe</a> (NSIS)</td>
+                <td>4.5 MB</td>
+              </tr>
+              <tr>
+                <td>Windows</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64_en-US.msi">Kiln.Desktop_0.2.2_x64_en-US.msi</a> (MSI)</td>
+                <td>6.8 MB</td>
+              </tr>
+              <tr>
+                <td>Linux</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb">Kiln.Desktop_0.2.2_amd64.deb</a></td>
+                <td>8.8 MB</td>
+              </tr>
+              <tr>
+                <td>Linux</td>
+                <td><a href="https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage">Kiln.Desktop_0.2.2_amd64.AppImage</a></td>
+                <td>85.7 MB</td>
+              </tr>
+            </tbody>
+          </table>
           <p class="text-sm" style="color: var(--fg-mute);">Desktop and server release lines intentionally differ: <code>desktop-v0.2.2</code> is the latest Desktop app release, and the app downloads and verifies the latest <code>kiln-v*</code> server binary for you.</p>
         </div>
         <div class="install-card">
