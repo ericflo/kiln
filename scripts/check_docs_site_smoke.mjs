@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, relative, sep, join, resolve } from 'node:path';
@@ -266,6 +266,37 @@ function validateReadmeStartupBanner() {
   }
 }
 
+function validateLaunchSentinel() {
+  const launchDir = resolve(repoRoot, 'docs/site/launch');
+  const sentinelPath = resolve(launchDir, 'README.md');
+
+  if (!existsSync(sentinelPath)) {
+    fail('docs/site/launch/README.md: missing no-publicity sentinel');
+  }
+
+  const entries = readdirSync(launchDir, { withFileTypes: true });
+  const unexpectedEntries = entries
+    .filter((entry) => entry.name !== 'README.md')
+    .map((entry) => `${entry.name}${entry.isDirectory() ? '/' : ''}`)
+    .sort();
+  if (unexpectedEntries.length > 0) {
+    fail(`docs/site/launch/: unexpected draft/content files: ${unexpectedEntries.join(', ')}`);
+  }
+
+  const sentinel = readFileSync(sentinelPath, 'utf8').toLowerCase().replace(/\s+/g, ' ');
+  const requiredPhrases = [
+    'publicity draft sentinel',
+    'intentionally does not contain external launch, announcement',
+    'agents must not recreate publicity materials',
+    'eric handles publicity himself',
+    'keep phase 11 work limited to internal onboarding',
+  ];
+  const missingPhrases = requiredPhrases.filter((phrase) => !sentinel.includes(phrase));
+  if (missingPhrases.length > 0) {
+    fail(`docs/site/launch/README.md: missing no-publicity sentinel wording: ${missingPhrases.join(', ')}`);
+  }
+}
+
 function expectedLocalHref(localPath) {
   const href = pathToFileURL(resolve(repoRoot, localPath)).href;
   return localPath.endsWith('/') && !href.endsWith('/') ? `${href}/` : href;
@@ -330,6 +361,7 @@ function chromiumPath() {
 
 async function runSmoke() {
   validateReadmeStartupBanner();
+  validateLaunchSentinel();
 
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
