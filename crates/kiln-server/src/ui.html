@@ -1342,6 +1342,52 @@ window.downloadAdapter = function(name) {
 };
 
 let uploadAdapterBusy = false;
+let uploadNameWasAutofilled = false;
+let lastAutofilledUploadName = '';
+
+function pathSafeAdapterStemFromArchiveName(fileName) {
+  const baseName = String(fileName || '').split(/[\\/]/).pop() || '';
+  const stem = baseName.replace(/\.tar\.gz$/i, '').replace(/\.tgz$/i, '');
+  return stem
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[\\/]+/g, '-')
+    .replace(/[^a-z0-9._-]+/gi, '-')
+    .replace(/\.\.+/g, '.')
+    .replace(/-+/g, '-')
+    .replace(/^[.-]+|[.-]+$/g, '');
+}
+
+function maybeAutofillUploadName() {
+  const nameEl = document.getElementById('upload-name');
+  const fileEl = document.getElementById('upload-archive');
+  if (!nameEl || !fileEl || fileEl.files.length === 0) return;
+
+  const currentName = nameEl.value.trim();
+  if (currentName && (!uploadNameWasAutofilled || currentName !== lastAutofilledUploadName)) return;
+
+  const autoName = pathSafeAdapterStemFromArchiveName(fileEl.files[0].name);
+  if (!autoName) return;
+  nameEl.value = autoName;
+  uploadNameWasAutofilled = true;
+  lastAutofilledUploadName = autoName;
+}
+
+function handleUploadNameInput() {
+  const nameEl = document.getElementById('upload-name');
+  if (!nameEl) return;
+  if (uploadNameWasAutofilled && nameEl.value.trim() === lastAutofilledUploadName) {
+    updateUploadAdapterState();
+    return;
+  }
+  uploadNameWasAutofilled = false;
+  updateUploadAdapterState();
+}
+
+function handleUploadArchiveChange() {
+  maybeAutofillUploadName();
+  updateUploadAdapterState();
+}
 
 function updateUploadAdapterState() {
   const nameEl = document.getElementById('upload-name');
@@ -1361,6 +1407,7 @@ function updateUploadAdapterState() {
     if (!hasName && !hasFile) state.textContent = 'Enter a name and choose an archive to enable upload.';
     else if (!hasName) state.textContent = 'Enter an adapter name to enable upload.';
     else if (!hasFile) state.textContent = 'Choose a .tar.gz or .tgz archive to enable upload.';
+    else if (uploadNameWasAutofilled && nameEl.value.trim() === lastAutofilledUploadName) state.textContent = 'Ready to upload with the auto-filled adapter name.';
     else state.textContent = 'Ready to upload.';
   }
 }
@@ -1404,6 +1451,8 @@ window.uploadAdapter = async function() {
     toast(`Uploaded ${data.name} (${fmtBytes(data.size_bytes)}, ${data.files} files)`);
     nameEl.value = '';
     fileEl.value = '';
+    uploadNameWasAutofilled = false;
+    lastAutofilledUploadName = '';
     updateUploadAdapterState();
     pollAdapters();
   } catch (e) { toast(e.message, 'err'); }
@@ -2103,8 +2152,8 @@ document.getElementById('chat-clear').addEventListener('click', () => {
 });
 document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
 
-document.getElementById('upload-name').addEventListener('input', updateUploadAdapterState);
-document.getElementById('upload-archive').addEventListener('change', updateUploadAdapterState);
+document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
+document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
 updateUploadAdapterState();
 
 // --- Init ---
