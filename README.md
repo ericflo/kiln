@@ -120,11 +120,12 @@ If you prefer a terminal, run the prebuilt container instead:
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
 docker run --gpus all -p 8420:8420 \
-  -v /path/to/Qwen3.5-4B:/models \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
-Replace `/path/to/Qwen3.5-4B` with your local model directory, then open http://127.0.0.1:8420/ui after the container starts.
+Replace `/path/to/Qwen3.5-4B` with your local `Qwen3.5-4B` model directory, then open http://127.0.0.1:8420/ui after the container starts.
 
 **Path 2 — Source / CLI, for contributors and direct CLI users:** Install Rust stable, then build the CLI from source for your platform.
 
@@ -366,7 +367,8 @@ Run with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud
 
 ```bash
 docker run --gpus all -p 8420:8420 \
-  -v /path/to/Qwen3.5-4B:/models \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
@@ -374,7 +376,10 @@ docker run --gpus all -p 8420:8420 \
 
 ```bash
 docker build -f deploy/Dockerfile -t kiln .
-docker run --gpus all -v /path/to/Qwen3.5-4B:/models -p 8420:8420 kiln serve
+docker run --gpus all -p 8420:8420 \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
+  kiln serve
 ```
 
 ### systemd

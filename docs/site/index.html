@@ -429,7 +429,8 @@ $env:KILN_MODEL_PATH = ".\Qwen3.5-4B"; .\kiln\kiln.exe serve</code></pre>
       <h3 class="font-semibold mb-2 mt-6">Docker (Linux + NVIDIA Container Toolkit)</h3>
 <pre><code>docker pull ghcr.io/ericflo/kiln-server:latest
 docker run --gpus all -p 8420:8420 \
-  -v /path/to/Qwen3.5-4B:/models \
+  -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
+  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   ghcr.io/ericflo/kiln-server:latest serve</code></pre>
 
       <p class="text-sm mt-6" style="color: var(--fg-mute);">
