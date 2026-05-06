@@ -34,17 +34,7 @@ If setup stalls on binary downloads, CUDA/Vulkan/Metal, model paths, `/health`, 
 
 Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS on Apple Silicon. The installer bundles only the GUI wrapper — on first launch it auto-downloads the matching prebuilt `kiln` server binary for your platform and verifies it against the published SHA-256. Linux chooses CUDA for NVIDIA systems and Vulkan for AMD/Intel systems; macOS uses the Apple Silicon Metal backend. **No Rust toolchain, CUDA toolkit, or source build is required for this path.**
 
-**Download — [Kiln Desktop v0.2.2](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2):**
-
-**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.2` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so this quickstart is not stale.
-
-| Platform | Installer | Size |
-|----------|-----------|------|
-| macOS (Apple Silicon) | [Kiln.Desktop_0.2.2_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_aarch64.dmg) | 8.5 MB |
-| Windows | [Kiln.Desktop_0.2.2_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64-setup.exe) (NSIS) | 4.5 MB |
-| Windows | [Kiln.Desktop_0.2.2_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_x64_en-US.msi) (MSI) | 6.8 MB |
-| Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
-| Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
+**Download:** the full installer matrix (macOS `.dmg`, Windows NSIS `.exe` and MSI, Linux `.deb` and `.AppImage`) lives in the [Desktop App section of the README](README.md#desktop-app), alongside dashboard, settings, and logs screenshots.
 
 Install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to [Test Inference](#4-test-inference). Continue with the Server binary path if you want a prebuilt terminal-first server, or section 1 if you want to build from source.
 
