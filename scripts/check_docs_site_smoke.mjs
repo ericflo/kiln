@@ -52,6 +52,18 @@ const expectedEmbeddedUiHelpLinks = [
   { label: 'Architecture', href: 'https://ericflo.github.io/kiln/architecture.html' },
 ];
 
+const expectedEmbeddedUiAccessibleControls = [
+  { selector: '#chat-input', labelTerms: ['message'], descriptionTerms: ['quick prompt', 'selected adapter', 'base model'] },
+  { selector: '#chat-send', labelTerms: ['send'] },
+  { selector: '#chat-stop', labelTerms: ['stop'] },
+  { selector: '#chat-clear', labelTerms: ['clear'] },
+  { selector: '#sft-examples', labelTerms: ['training examples'], descriptionTerms: ['json array', 'messages'] },
+  { selector: '#grpo-groups', labelTerms: ['grpo groups'], descriptionTerms: ['json array', 'completions', 'reward'] },
+  { selector: '#upload-name', labelTerms: ['adapter name'], descriptionTerms: ['adapter archive', 'saved adapter directory'] },
+  { selector: '#upload-archive', labelTerms: ['adapter archive'], descriptionTerms: ['adapter archive', '.tar.gz'] },
+  { selector: '#merge-output-name', labelTerms: ['output name'], descriptionTerms: ['saved adapter name', 'path-safe'] },
+];
+
 const demoPagePath = 'docs/site/demo/index.html';
 const quickstartPagePath = 'docs/site/quickstart.html';
 const apiPagePath = 'docs/site/api.html';
@@ -399,6 +411,82 @@ function validateEmbeddedUiHelpLinks() {
   });
   if (missingLinks.length > 0) {
     fail(`crates/kiln-server/src/ui.html: embedded UI help nav missing links: ${missingLinks.map(({ label }) => label).join(', ')}`);
+  }
+}
+
+async function validateEmbeddedUiControlAccessibleNames(browser) {
+  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+  const page = await browser.newPage();
+  await page.goto(pathToFileURL(uiPath).href, { waitUntil: 'domcontentloaded', timeout: 10000 });
+
+  try {
+    const result = await page.evaluate((expectedControls) => {
+      const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const byIdText = (id) => normalize(document.getElementById(id)?.textContent || '');
+      const labelTextFor = (element) => {
+        const explicitLabels = element.id
+          ? Array.from(document.querySelectorAll(`label[for="${CSS.escape(element.id)}"]`))
+          : [];
+        const implicitLabel = element.closest('label');
+        return normalize([
+          ...explicitLabels.map((label) => label.textContent || ''),
+          implicitLabel?.textContent || '',
+        ].join(' '));
+      };
+      const referencedText = (element, attribute) => normalize(
+        (element.getAttribute(attribute) || '')
+          .split(/\s+/)
+          .filter(Boolean)
+          .map(byIdText)
+          .join(' '),
+      );
+      const accessibleName = (element) => normalize([
+        element.getAttribute('aria-label') || '',
+        referencedText(element, 'aria-labelledby'),
+        labelTextFor(element),
+        element.tagName === 'BUTTON' ? element.textContent || '' : '',
+      ].join(' '));
+      const accessibleDescription = (element) => referencedText(element, 'aria-describedby');
+
+      return expectedControls.map((control) => {
+        const element = document.querySelector(control.selector);
+        if (!element) {
+          return { selector: control.selector, missing: true };
+        }
+
+        const name = accessibleName(element);
+        const description = accessibleDescription(element);
+        return {
+          selector: control.selector,
+          name,
+          description,
+          missingLabelTerms: control.labelTerms.filter((term) => !name.includes(term)),
+          missingDescriptionTerms: (control.descriptionTerms || [])
+            .filter((term) => !description.includes(term)),
+        };
+      });
+    }, expectedEmbeddedUiAccessibleControls);
+
+    const missingControls = result.filter((control) => control.missing).map((control) => control.selector);
+    if (missingControls.length > 0) {
+      fail(`crates/kiln-server/src/ui.html: missing embedded UI controls: ${missingControls.join(', ')}`);
+    }
+
+    const unnamedControls = result
+      .filter((control) => control.missingLabelTerms?.length > 0)
+      .map((control) => `${control.selector} missing label terms ${control.missingLabelTerms.join(', ')}`);
+    if (unnamedControls.length > 0) {
+      fail(`crates/kiln-server/src/ui.html: embedded UI controls need accessible names: ${unnamedControls.join('; ')}`);
+    }
+
+    const undescribedControls = result
+      .filter((control) => control.missingDescriptionTerms?.length > 0)
+      .map((control) => `${control.selector} missing description terms ${control.missingDescriptionTerms.join(', ')}`);
+    if (undescribedControls.length > 0) {
+      fail(`crates/kiln-server/src/ui.html: embedded UI controls need aria-describedby help text: ${undescribedControls.join('; ')}`);
+    }
+  } finally {
+    await page.close();
   }
 }
 
@@ -1379,6 +1467,8 @@ async function runSmoke() {
   });
 
   try {
+    await validateEmbeddedUiControlAccessibleNames(browser);
+
     const page = await browser.newPage();
     await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true });
 

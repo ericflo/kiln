@@ -897,11 +897,12 @@ textarea { resize: vertical; min-height: 80px; }
       </div>
       <div class="chat-input-row">
         <label for="chat-input" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Message</label>
-        <input type="text" id="chat-input" placeholder="Type a message...">
+        <input type="text" id="chat-input" placeholder="Type a message..." aria-describedby="chat-input-help">
         <button type="button" class="btn btn-primary" id="chat-send">Send</button>
         <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
         <button type="button" class="btn" id="chat-clear">Clear</button>
       </div>
+      <div class="form-help" id="chat-input-help">Type a quick prompt to test the selected adapter or base model.</div>
     </div>
   </div>
 </main>
