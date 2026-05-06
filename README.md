@@ -18,6 +18,7 @@
   <a href="https://ericflo.github.io/kiln/api.html">API Reference</a> &middot;
   <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
+  <a href="BENCHMARKS.md">Benchmarks</a> &middot;
   <a href="kiln.example.toml">Configuration</a> &middot;
   <a href="CHANGELOG.md">Changelog</a> &middot;
   <a href="CONTRIBUTING.md">Contributing</a> &middot;
