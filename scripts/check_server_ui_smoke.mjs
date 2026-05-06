@@ -729,18 +729,19 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (pageErrors.length > 0) fail(`UI emitted browser errors: ${pageErrors.join('; ')}`);
 
     await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Header did not render');
-    await expectText(page, 'nav.header-help', /Quickstart/, 'Header Quickstart link missing');
-    await expectText(page, 'nav.header-help', /GRPO Guide/, 'Header GRPO link missing');
-    await expectText(page, 'nav.header-help', /API Reference/, 'Header docs link missing');
-
     const helpLinks = await page.$$eval('nav.header-help a', (links) => links.map((link) => ({ text: link.textContent?.trim(), href: link.getAttribute('href') })));
-    for (const expected of [
+    const expectedHeaderHelpLinks = [
       ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
       ['GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html'],
-    ]) {
+      ['API Reference', 'https://ericflo.github.io/kiln/api.html'],
+      ['CLI Reference', 'https://ericflo.github.io/kiln/cli.html'],
+      ['Demo', 'https://ericflo.github.io/kiln/demo/'],
+      ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
+    ];
+    for (const expected of expectedHeaderHelpLinks) {
       const [label, href] = expected;
       if (!helpLinks.some((link) => link.text === label && link.href === href)) {
-        fail(`Header help link missing expected ${label} -> ${href}`);
+        fail(`nav.header-help missing expected link ${label} -> ${href}`);
       }
     }
 
