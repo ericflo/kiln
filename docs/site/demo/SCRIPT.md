@@ -203,7 +203,7 @@ When the host is in the prerequisites state and the prompt is clean:
 COLUMNS=120 LINES=32 TERM=xterm-256color asciinema rec docs/site/demo/kiln-60s.cast \
   --title "Kiln 60-second demo: live LoRA online learning" \
   --idle-time-limit 2 \
-  --command ./scripts/demo.sh
+  --command ./docs/site/demo/demo.sh
 ```
 
 The `--command` flag scripts the entire take so each run is identical and idempotent. The reference script that produced the canonical recording lives at [`docs/site/demo/demo.sh`](demo.sh) — it runs scenes 1–6 in order, slow-prints the curl commands as if a human were typing, and cleanly shuts down the kiln server at the end so asciinema's recording terminates promptly. The matching SFT request body is at [`docs/site/demo/demo-sft.json`](demo-sft.json).
