@@ -148,6 +148,15 @@ const expectedApiEndpoints = [
 ];
 
 const staleTrainingJobEndpoint = '/v1/train/jobs/{job_id}';
+const staleAdapterListPhrases = [
+  'List loaded LoRA adapters',
+  'list loaded LoRA adapters',
+  'loaded LoRA adapters',
+];
+const expectedAdapterListSemantics = [
+  'saved/available LoRA adapters',
+  'active adapter',
+];
 
 const expectedApiSections = [
   { label: 'server status', terms: ['server status'] },
@@ -506,6 +515,24 @@ function validateReadmeQuickStartPaths() {
   }
   if (!/QUICKSTART\.md#quick-path-server-binary-terminal-first-no-source-build/.test(serverBinaryPath)) {
     fail('README.md: Server binary path must link to QUICKSTART.md full artifact matrix');
+  }
+}
+
+function validateReadmeAdapterListSemantics() {
+  const readme = readFileSync(resolve(repoRoot, 'README.md'), 'utf8');
+  const adaptersRow = readme
+    .split('\n')
+    .find((line) => line.includes('`/v1/adapters`'));
+  if (!adaptersRow) {
+    fail('README.md: missing GET /v1/adapters API table row');
+  }
+  for (const phrase of staleAdapterListPhrases) {
+    if (readme.includes(phrase)) {
+      fail(`README.md: GET /v1/adapters wording must not say "${phrase}"`);
+    }
+  }
+  for (const term of expectedAdapterListSemantics) {
+    assertIncludes(adaptersRow, term, 'README.md: GET /v1/adapters saved/active semantics');
   }
 }
 
@@ -1281,6 +1308,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateReadmeQuickStartPaths();
+  validateReadmeAdapterListSemantics();
   validateGrpoOverviewRequestsImports();
   validateGrpoDemoPayloadCue();
   validateLandingDesktopVersionSplitCue();
@@ -1465,8 +1493,11 @@ async function runSmoke() {
           const endpointText = normalize(Array.from(document.querySelectorAll('.endpoint, code'))
             .map((element) => element.textContent || '')
             .join('\n'));
-          const endpointRoutes = Array.from(document.querySelectorAll('.endpoint'))
+          const endpointElements = Array.from(document.querySelectorAll('.endpoint'));
+          const endpointRoutes = endpointElements
             .map((element) => normalize(element.querySelector('code')?.textContent || ''));
+          const endpointDescriptions = endpointElements
+            .map((element) => normalize(element.textContent || ''));
           const headings = normalize(Array.from(document.querySelectorAll('h2, h3'))
             .map((heading) => heading.textContent || '')
             .join('\n'));
@@ -1478,6 +1509,7 @@ async function runSmoke() {
             bodyText,
             endpointText,
             endpointRoutes,
+            endpointDescriptions,
             headings,
             copyableCodeBlocks,
             copyButtonCount: copyButtons.length,
@@ -1502,6 +1534,22 @@ async function runSmoke() {
           && !apiResult.bodyText.includes(`no separate ${normalizedStaleEndpoint} route`)
         ) {
           fail(`${sitePage.path}: stale route ${staleTrainingJobEndpoint} must appear only in explicit negative wording`);
+        }
+
+        for (const phrase of staleAdapterListPhrases) {
+          if (apiResult.bodyText.includes(phrase.toLowerCase())) {
+            fail(`${sitePage.path}: GET /v1/adapters wording must not say "${phrase}"`);
+          }
+        }
+        const adaptersEndpoint = apiResult.endpointDescriptions
+          .find((line) => line.startsWith('get /v1/adapters ')) || '';
+        if (!adaptersEndpoint) {
+          fail(`${sitePage.path}: missing GET /v1/adapters endpoint wording`);
+        }
+        for (const term of expectedAdapterListSemantics) {
+          if (!adaptersEndpoint.includes(term.toLowerCase())) {
+            fail(`${sitePage.path}: GET /v1/adapters wording missing ${term}`);
+          }
         }
 
         const missingSections = expectedApiSections
