@@ -61,6 +61,29 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   See QUICKSTART.md and Troubleshooting if the server cannot find weights, CUDA is unavailable, or config validation fails.
 "#;
 
+const HEALTH_OVERVIEW: &str = r#"Check readiness and setup diagnostics for a running Kiln server at http://localhost:8420 by default.
+
+`kiln health` calls the server's /health endpoint and prints a terminal-friendly tree with model, adapter, scheduler, GPU memory, and training status. Use it after `kiln serve` starts, or point --url at a remote server when debugging another host.
+
+If readiness fails, check the /health response first, then follow QUICKSTART.md and Troubleshooting for model path, CUDA, config, and server-start diagnostics.
+"#;
+
+const HEALTH_EXAMPLES: &str = r#"Examples:
+  kiln health
+      Check whether the local server at http://localhost:8420 is ready.
+
+  kiln health --url http://localhost:8420
+      Check a specific Kiln server URL when the default is not the target.
+
+  kiln health --json
+      Print the raw /health JSON response for scripts or bug reports.
+
+  curl http://localhost:8420/health
+      Call the same readiness endpoint directly if you are narrowing down CLI vs server setup.
+
+  See Troubleshooting if /health is not ready, the model path is wrong, CUDA is unavailable, or the server is not reachable.
+"#;
+
 const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
 
 SFT reads newline-delimited chat correction examples from JSONL. GRPO reads one JSON request/batch with scored completions.
@@ -225,6 +248,7 @@ pub enum Commands {
     Adapters(AdapterCommands),
 
     /// Check health of a running server
+    #[command(long_about = HEALTH_OVERVIEW, after_help = HEALTH_EXAMPLES)]
     Health {
         /// Server URL
         #[arg(long, default_value = "http://localhost:8420")]
