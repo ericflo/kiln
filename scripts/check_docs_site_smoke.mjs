@@ -519,7 +519,15 @@ function assertHelpCopyIncludes(helpCopy, constantName, term) {
 function validateCliHelpOnboardingCopy() {
   const cliParser = readFileSync(resolve(repoRoot, 'crates/kiln-server/src/cli.rs'), 'utf8');
   const constants = new Map(
-    ['TOP_LEVEL_OVERVIEW', 'TOP_LEVEL_EXAMPLES', 'TRAIN_EXAMPLES', 'ADAPTERS_EXAMPLES', 'CONFIG_EXAMPLES']
+    [
+      'TOP_LEVEL_OVERVIEW',
+      'TOP_LEVEL_EXAMPLES',
+      'SERVE_OVERVIEW',
+      'SERVE_EXAMPLES',
+      'TRAIN_EXAMPLES',
+      'ADAPTERS_EXAMPLES',
+      'CONFIG_EXAMPLES',
+    ]
       .map((constantName) => [constantName, extractRustRawStringConstant(cliParser, constantName)]),
   );
 
@@ -540,6 +548,22 @@ function validateCliHelpOnboardingCopy() {
       'kiln train sft --file examples.jsonl --adapter my-task',
       'kiln train grpo --file grpo-batch.json --adapter my-task',
       'kiln adapters list',
+    ]],
+    ['SERVE_OVERVIEW', [
+      'Qwen3.5-4B',
+      'KILN_MODEL_PATH',
+      '--config',
+      'http://127.0.0.1:8420/ui',
+      'kiln health',
+      'QUICKSTART.md',
+      'Troubleshooting',
+    ]],
+    ['SERVE_EXAMPLES', [
+      'KILN_MODEL_PATH',
+      'kiln serve --config kiln.toml',
+      'http://127.0.0.1:8420/ui',
+      'kiln health',
+      'Troubleshooting',
     ]],
     ['TRAIN_EXAMPLES', [
       'kiln train status',
@@ -562,6 +586,12 @@ function validateCliHelpOnboardingCopy() {
       assertHelpCopyIncludes(helpCopy, constantName, term);
     }
   }
+
+  assertMatches(
+    cliParser,
+    /pub enum Commands[\s\S]*?\n\s+#\[command\(long_about = SERVE_OVERVIEW, after_help = SERVE_EXAMPLES\)\]\n\s+Serve\s*\{/,
+    'crates/kiln-server/src/cli.rs: Commands::Serve onboarding help wiring',
+  );
 }
 
 function validateQuickstartCliReference() {
