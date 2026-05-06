@@ -6,6 +6,15 @@
 #   2. KILN_CONFIG environment variable
 #   3. ./kiln.toml in the current working directory
 #   4. No file — built-in defaults
+#
+# Minimum required for real (non-mock) inference: set `model.path` —
+# everything else has a working default. Paste this:
+#
+#   [model]
+#   path = "/path/to/qwen3.5-4b"
+#
+# Omitting `model.path` boots mock mode (handy for trying the CLI without
+# weights). See QUICKSTART.md or https://ericflo.github.io/kiln/quickstart.html.
 
 [server]
 host = "0.0.0.0"
