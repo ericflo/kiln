@@ -625,7 +625,10 @@ function validateCliHelpOnboardingCopy() {
       'SFT reads JSONL',
       'messages array',
       'GRPO reads one JSON request/batch',
-      'prompts/groups',
+      'groups',
+      'prompt messages',
+      'candidate completions',
+      'text',
       'completions',
       'reward scores',
       'http://127.0.0.1:8420/ui',
@@ -642,7 +645,10 @@ function validateCliHelpOnboardingCopy() {
     ]],
     ['TRAIN_GRPO_OVERVIEW', [
       'GRPO JSON',
-      'prompts/groups',
+      'groups',
+      'prompt messages',
+      'candidate completions',
+      'text',
       'completions',
       'reward scores',
       'http://127.0.0.1:8420/ui',
@@ -653,6 +659,10 @@ function validateCliHelpOnboardingCopy() {
       'SFT JSONL',
       'messages array',
       'GRPO JSON',
+      'groups',
+      'prompt messages',
+      'candidate completions',
+      'text',
       'completions',
       'reward scores',
       'kiln train status',
@@ -675,6 +685,16 @@ function validateCliHelpOnboardingCopy() {
       assertHelpCopyIncludes(helpCopy, constantName, term);
     }
   }
+
+  if (cliParser.includes('prompts/groups')) {
+    fail('crates/kiln-server/src/cli.rs: kiln train grpo CLI help must describe scored groups, not prompts/groups; prompts belong to /v1/completions/batch');
+  }
+
+  assertMatches(
+    cliParser,
+    /Path to one GRPO JSON request\/batch with groups, prompt messages, candidate completions, text, and reward scores/,
+    'crates/kiln-server/src/cli.rs: TrainCommands::Grpo file arg payload help',
+  );
 
   assertMatches(
     cliParser,
