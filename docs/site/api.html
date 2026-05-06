@@ -372,7 +372,7 @@
   -o default-adapter.tar.gz
 
 curl -s http://localhost:8420/v1/adapters/upload \
-  -F "file=@default-adapter.tar.gz" \
+  -F "archive=@default-adapter.tar.gz" \
   -F "name=default-copy" \
   | python3 -m json.tool</code></pre>
           </section>
@@ -383,7 +383,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
   -d '{
     "output_name": "merged-ties",
     "mode": "ties",
-    "adapters": [
+    "sources": [
       {"name": "default", "weight": 0.7},
       {"name": "grpo-demo", "weight": 0.3}
     ]
@@ -397,7 +397,7 @@ curl -s http://localhost:8420/v1/adapters/upload \
   -d '{
     "output_name": "merged-concat",
     "mode": "concat",
-    "adapters": [
+    "sources": [
       {"name": "default", "weight": 1.0},
       {"name": "format-fixes", "weight": 1.0}
     ]
