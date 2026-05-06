@@ -325,7 +325,7 @@ curl -s http://localhost:8420/v1/train/status | python3 -m json.tool
 ## 8. Manage Adapters
 
 ```bash
-# List loaded adapters
+# List saved/available adapters and show active adapter status
 ./target/release/kiln adapters list
 
 # Unload the active adapter (revert to base model)
