@@ -149,9 +149,17 @@ const expectedApiEndpoints = [
 
 const staleTrainingJobEndpoint = '/v1/train/jobs/{job_id}';
 const staleAdapterListPhrases = [
+  'List loaded adapters',
+  'List loaded and available adapters',
   'List loaded LoRA adapters',
   'list loaded LoRA adapters',
   'loaded LoRA adapters',
+];
+const adapterListStaleWordingSurfaces = [
+  'README.md',
+  'QUICKSTART.md',
+  'docs/site/api.html',
+  'crates/kiln-server/src/api/adapters.rs',
 ];
 const expectedAdapterListSemantics = [
   'saved/available LoRA adapters',
@@ -533,6 +541,17 @@ function validateReadmeAdapterListSemantics() {
   }
   for (const term of expectedAdapterListSemantics) {
     assertIncludes(adaptersRow, term, 'README.md: GET /v1/adapters saved/active semantics');
+  }
+}
+
+function validateAdapterListStaleWordingSurfaces() {
+  for (const filePath of adapterListStaleWordingSurfaces) {
+    const contents = readFileSync(resolve(repoRoot, filePath), 'utf8');
+    for (const phrase of staleAdapterListPhrases) {
+      if (contents.includes(phrase)) {
+        fail(`${filePath}: adapter-list wording must not say \"${phrase}\"`);
+      }
+    }
   }
 }
 
@@ -1308,6 +1327,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateReadmeQuickStartPaths();
+  validateAdapterListStaleWordingSurfaces();
   validateReadmeAdapterListSemantics();
   validateGrpoOverviewRequestsImports();
   validateGrpoDemoPayloadCue();

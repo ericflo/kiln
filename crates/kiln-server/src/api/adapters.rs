@@ -73,7 +73,7 @@ struct DeleteAdapterResponse {
     name: String,
 }
 
-/// List loaded and available adapters.
+/// List saved/available adapters and identify the active adapter.
 async fn list_adapters(State(state): State<AppState>) -> Json<AdaptersResponse> {
     // Read the active adapter name from shared state.
     let active = state.active_adapter_name.read().unwrap().clone();
