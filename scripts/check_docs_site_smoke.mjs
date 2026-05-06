@@ -1006,6 +1006,33 @@ function resolveLocalHref(sourceHtmlPath, href) {
   return resolvedPath;
 }
 
+function expectedCanonicalHref(localPath) {
+  const siteRelativePath = localPath.replace(/^docs\/site\//, '');
+  if (siteRelativePath === 'index.html') return 'https://ericflo.github.io/kiln/';
+  if (siteRelativePath === 'demo/index.html') return 'https://ericflo.github.io/kiln/demo/';
+  return `https://ericflo.github.io/kiln/${siteRelativePath}`;
+}
+
+function validateDocsSiteCanonicalLinks() {
+  for (const sitePage of pages) {
+    const pagePath = resolve(repoRoot, sitePage.path);
+    const html = readFileSync(pagePath, 'utf8');
+    const canonicalMatches = Array.from(html.matchAll(/<link\b[^>]*\brel\s*=\s*(?:"canonical"|'canonical'|canonical)[^>]*>/gi));
+
+    if (canonicalMatches.length !== 1) {
+      fail(`${sitePage.path}: expected exactly one canonical link, found ${canonicalMatches.length}`);
+    }
+
+    const canonicalTag = canonicalMatches[0][0];
+    const hrefMatch = canonicalTag.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i);
+    const href = decodeHtmlAttribute(hrefMatch?.[1] ?? hrefMatch?.[2] ?? hrefMatch?.[3] ?? '').trim();
+    const expectedHref = expectedCanonicalHref(sitePage.path);
+    if (href !== expectedHref) {
+      fail(`${sitePage.path}: canonical href must be ${expectedHref}, found ${href || '(missing)'}`);
+    }
+  }
+}
+
 function validateDocsSiteLocalLinks() {
   for (const sitePage of pages) {
     const pagePath = resolve(repoRoot, sitePage.path);
@@ -1340,6 +1367,7 @@ async function runSmoke() {
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  validateDocsSiteCanonicalLinks();
   validateDocsSiteLocalLinks();
   validateMarkdownLocalLinks();
 
