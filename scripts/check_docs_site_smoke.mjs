@@ -1434,6 +1434,66 @@ function validateDemoCasts(sitePagePath, referencedCasts) {
       fail(`${sitePagePath}: referenced demo cast does not exist: ${cast}`);
     }
   }
+
+  for (const cast of expectedDemoCastFiles) {
+    validateDemoCastContent(demoDir, cast);
+  }
+}
+
+function parseDemoCastJsonLine(castPath, line, lineNumber) {
+  try {
+    return JSON.parse(line);
+  } catch (error) {
+    fail(`${castPath}: line ${lineNumber} is not valid JSON: ${error.message}`);
+  }
+}
+
+function validateDemoCastContent(demoDir, cast) {
+  const castPath = resolve(demoDir, cast);
+  const castDisplayPath = relative(repoRoot, castPath).split(sep).join('/');
+  const lines = readFileSync(castPath, 'utf8').trimEnd().split(/\r?\n/);
+
+  if (lines.length === 0 || lines[0].trim() === '') {
+    fail(`${castDisplayPath}: missing asciinema v2 header row`);
+  }
+
+  const header = parseDemoCastJsonLine(castDisplayPath, lines[0], 1);
+  if (!header || Array.isArray(header) || typeof header !== 'object') {
+    fail(`${castDisplayPath}: header row must be a JSON object`);
+  }
+  if (header.version !== 2) {
+    fail(`${castDisplayPath}: header version must be 2, got ${JSON.stringify(header.version)}`);
+  }
+  if (header.width !== 120) {
+    fail(`${castDisplayPath}: header width must be 120, got ${JSON.stringify(header.width)}`);
+  }
+  if (header.height !== 32) {
+    fail(`${castDisplayPath}: header height must be 32, got ${JSON.stringify(header.height)}`);
+  }
+  if (typeof header.title !== 'string' || header.title.trim() === '') {
+    fail(`${castDisplayPath}: header title must be a non-empty string`);
+  }
+
+  const eventLines = lines.slice(1).filter((line) => line.trim() !== '');
+  if (eventLines.length === 0) {
+    fail(`${castDisplayPath}: missing asciinema JSONL event rows`);
+  }
+
+  let hasOutputEvent = false;
+  for (const [eventIndex, eventLine] of eventLines.entries()) {
+    const lineNumber = eventIndex + 2;
+    const event = parseDemoCastJsonLine(castDisplayPath, eventLine, lineNumber);
+    if (!Array.isArray(event) || typeof event[0] !== 'number' || typeof event[1] !== 'string' || typeof event[2] !== 'string') {
+      fail(`${castDisplayPath}: line ${lineNumber} must be an event row shaped like [number, string, string]`);
+    }
+    if (event[1] === 'o') {
+      hasOutputEvent = true;
+    }
+  }
+
+  if (!hasOutputEvent) {
+    fail(`${castDisplayPath}: missing output event shaped like [number, "o", string]`);
+  }
 }
 
 function validateDemoReadmeInventory() {
