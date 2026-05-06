@@ -414,6 +414,27 @@ function validateQuickstartServerBinaryPath() {
   if (!/https:\/\/github\.com\/ericflo\/kiln\/releases\/download\/kiln-v/.test(serverBinarySection)) {
     fail('QUICKSTART.md: Server binary path must include at least one kiln-v release download command');
   }
+
+  if (/^## 1\. Build Kiln\s*$/m.test(quickstart)) {
+    fail('QUICKSTART.md: source build heading must stay optional, not generic mandatory-sounding "## 1. Build Kiln"');
+  }
+
+  const sourceBuildSection = extractMarkdownSection(quickstart, '1. Optional Source / CLI Branch: Build Kiln');
+  if (!sourceBuildSection) {
+    fail('QUICKSTART.md: missing optional Source / CLI build section');
+  }
+
+  const requiredSourceBuildTerms = [
+    'Skip this section',
+    'Desktop App',
+    'prebuilt server binary',
+    'container image',
+    'do not require a source checkout or Rust build',
+    '[Download Model Weights](#2-download-model-weights)',
+  ];
+  for (const term of requiredSourceBuildTerms) {
+    assertIncludes(sourceBuildSection, term, 'QUICKSTART.md: optional Source / CLI branch');
+  }
 }
 
 function validateReadmeQuickStartPaths() {

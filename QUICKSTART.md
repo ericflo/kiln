@@ -9,11 +9,11 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Desktop App (recommended)** | You want the shortest first run on Windows, Linux, or Apple Silicon macOS. | Install the app, choose or download `Qwen/Qwen3.5-4B`, start the server from the GUI, then jump to [Test Inference](#4-test-inference). |
 | **Server binary (terminal-first)** | You want a prebuilt `kiln` server in your terminal without the Desktop App or a source build. | Download the latest `kiln-v*` server binary for your GPU backend, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 2-5. |
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
-| **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
+| **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
 ## Reader map
 
-- **5-minute path:** sections 1-5 get you to a running server, first inference, and dashboard checkpoint. Stop there if you only need to confirm Kiln is serving.
+- **5-minute path:** choose Desktop, Server binary, Container, or the optional Source / CLI branch, then continue through model download, first inference, and dashboard checkpoint. Stop there if you only need to confirm Kiln is serving.
 - **Optional learning:** sections 6-8 cover live-learning and adapter workflows after the server is working: SFT, training status, and adapter activation.
 - **Advanced API:** section 9 is reference material for direct HTTP usage once the basic path is clear.
 
@@ -116,7 +116,9 @@ Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln
 
 After extracting, the binary is `./kiln` on Linux/macOS or `.\kiln\kiln.exe` on Windows. Continue at [Download Model Weights](#2-download-model-weights), keep `Qwen/Qwen3.5-4B` as the model, then start the server with `kiln serve`.
 
-## 1. Build Kiln
+## 1. Optional Source / CLI Branch: Build Kiln
+
+Skip this section if you installed the Desktop App, extracted a prebuilt server binary, or are running the container image. Those paths do not require a source checkout or Rust build; continue at [Download Model Weights](#2-download-model-weights) unless the Desktop App already downloaded the model for you.
 
 ```bash
 git clone https://github.com/ericflo/kiln.git
