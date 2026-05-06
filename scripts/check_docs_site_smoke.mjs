@@ -528,6 +528,28 @@ function validateLandingDesktopVersionSplitCue() {
   }
 }
 
+function validateQuickstartDesktopVersionSplitCue() {
+  const quickstart = readFileSync(resolve(repoRoot, 'docs/site/quickstart.html'), 'utf8');
+  const desktopInstallMatch = quickstart.match(/<h3[^>]*>Desktop App &middot; recommended<\/h3>([\s\S]*?)<\/div>\s*<div class="install-card">/);
+  if (!desktopInstallMatch) {
+    fail('docs/site/quickstart.html: missing Desktop App install card copy');
+  }
+
+  const desktopInstallCopy = desktopInstallMatch[1];
+  const requiredTerms = [
+    'desktop-v0.2.2',
+    'Desktop',
+    'server',
+    'release',
+    'kiln-v*',
+    'downloads',
+    'verifies',
+  ];
+  for (const term of requiredTerms) {
+    assertIncludes(desktopInstallCopy, term, 'docs/site/quickstart.html: Desktop App version-split cue');
+  }
+}
+
 function assertRequestsImportNearPost(section, context) {
   const requestPosts = Array.from(section.matchAll(/requests\.post/g));
   if (requestPosts.length === 0) {
@@ -1233,6 +1255,7 @@ async function runSmoke() {
   validateGrpoOverviewRequestsImports();
   validateGrpoDemoPayloadCue();
   validateLandingDesktopVersionSplitCue();
+  validateQuickstartDesktopVersionSplitCue();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
