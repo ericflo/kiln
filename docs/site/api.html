@@ -441,7 +441,7 @@ kiln serve --config kiln.toml</code></pre>
         <div class="label mb-3">Adapters</div>
         <h2 id="lora-lifecycle" class="text-2xl font-semibold mb-4">LoRA lifecycle</h2>
         <div class="endpoint-list" style="color: var(--fg-dim);">
-          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list loaded LoRA adapters.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/adapters</code> &mdash; list saved/available LoRA adapters and identify the active adapter.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/load</code> &mdash; load an adapter from disk.</div>
           <div class="endpoint"><span class="method">POST</span> <code>/v1/adapters/unload</code> &mdash; unload the active adapter.</div>
           <div class="endpoint"><span class="method">DELETE</span> <code>/v1/adapters/{name}</code> &mdash; delete an adapter.</div>

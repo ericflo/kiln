@@ -259,7 +259,7 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
-| GET | `/v1/adapters` | List loaded LoRA adapters |
+| GET | `/v1/adapters` | List saved/available LoRA adapters and identify the active adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
