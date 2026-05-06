@@ -17,7 +17,7 @@ The companion file [`README.md`](README.md) inventories the full six-cast demo s
 
 Get the host into this exact state **before** opening `asciinema`. Do not include any of these in the recording itself.
 
-- Kiln binary built at `./target/release/kiln` (release mode, `--features cuda` on Linux/Windows or `--features metal` on macOS). See [`QUICKSTART.md` §1](../../../QUICKSTART.md).
+- Kiln binary available through `KILN_BIN`. It defaults to `./target/release/kiln`, but can point at an extracted release artifact or a source-built release binary (`--features cuda` on Linux/Windows or `--features metal` on macOS). See [`QUICKSTART.md` §1](../../../QUICKSTART.md).
 - Model weights at `./Qwen3.5-4B/` (downloaded via `huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B`). See [`QUICKSTART.md` §2](../../../QUICKSTART.md).
 - A clean shell working dir at the kiln repo root.
 - `asciinema` 2.4 or newer installed (`asciinema --version`). On Linux: `pip install asciinema` or distro package; on macOS: `brew install asciinema`.
@@ -30,7 +30,8 @@ Pre-recording dry run:
 
 ```bash
 # Sanity check: server starts cleanly and serves a base-model completion.
-KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml &
+KILN_BIN=${KILN_BIN:-./target/release/kiln}
+KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml &
 sleep 30  # model load + warmup
 curl -s http://localhost:8420/v1/chat/completions \
   -H 'Content-Type: application/json' \
@@ -51,7 +52,8 @@ The cumulative time budget on the right is wall-clock seconds elapsed at the **e
 Type:
 
 ```bash
-$ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml
+$ KILN_BIN=${KILN_BIN:-./target/release/kiln}
+$ KILN_MODEL_PATH=./Qwen3.5-4B "$KILN_BIN" serve --config kiln.example.toml
 ```
 
 Expected on-screen output (abbreviated by the asciicast — let it scroll naturally for ~8s, then the listen line lands):

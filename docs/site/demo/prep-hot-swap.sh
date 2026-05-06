@@ -10,12 +10,13 @@
 set -e
 
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
+KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEMO_SFT="${SCRIPT_DIR}/demo-sft.json"
 FORMAL_SFT="${SCRIPT_DIR}/demo-sft-formal.json"
 
-./target/release/kiln serve --config kiln.example.toml >/tmp/kiln-prep.log 2>&1 &
+"${KILN_BIN}" serve --config kiln.example.toml >/tmp/kiln-prep.log 2>&1 &
 SRV_PID=$!
 trap 'kill -TERM "$SRV_PID" 2>/dev/null || true; wait "$SRV_PID" 2>/dev/null || true' EXIT
 
