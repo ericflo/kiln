@@ -167,6 +167,8 @@ const expectedCliSections = [
   { label: 'no-subcommand serve path', terms: ['running kiln with no subcommand starts the server'] },
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
   { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
+  { label: 'SFT payload shape', terms: ['sft reads jsonl', 'one chat correction example per line', 'messages array'] },
+  { label: 'GRPO payload shape', terms: ['grpo reads one json request/batch', 'prompts/groups', 'completions', 'reward scores'] },
   { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
   { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
   { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },
