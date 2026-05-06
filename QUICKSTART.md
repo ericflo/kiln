@@ -192,7 +192,7 @@ Kiln ships with an embedded web dashboard. Open [http://localhost:8420/ui](http:
 - **Training** — submit SFT or GRPO jobs from a form, watch the queue, and review recently completed runs
 - **Quick Inference** — chat with the model directly (per-request adapter and temperature pickers) without writing curl
 
-![Kiln embedded server dashboard](docs/site/assets/server-ui-dashboard.png)
+![Kiln dashboard showing server status, adapters, training controls, and quick inference chat panels](docs/site/assets/server-ui-dashboard.png)
 
 It's a single HTML page served by the `kiln` binary itself — no extra process, no build step, no JS bundle to deploy.
 
