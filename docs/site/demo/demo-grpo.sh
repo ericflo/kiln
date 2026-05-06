@@ -70,7 +70,7 @@ beat 2.0
 # ------------------------------------------------------------------
 typecmd 'curl -s http://localhost:8420/v1/train/grpo \'
 typecmd '    -H "Content-Type: application/json" \'
-typecmd '    -d @demo-grpo.json \'
+typecmd '    -d @docs/site/demo/demo-grpo.json \'
 typecmd '    | jq -c "{job_id, state}"'
 
 curl -s http://localhost:8420/v1/train/grpo \

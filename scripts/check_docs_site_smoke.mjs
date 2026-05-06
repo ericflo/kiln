@@ -496,6 +496,19 @@ function validateGrpoOverviewRequestsImports() {
   assertRequestsImportNearPost(indexSection[0], 'docs/site/index.html: The GRPO loop');
 }
 
+function validateGrpoDemoPayloadCue() {
+  const driverPath = 'docs/site/demo/demo-grpo.sh';
+  const driver = readFileSync(resolve(repoRoot, driverPath), 'utf8');
+
+  if (driver.includes('-d @demo-grpo.json')) {
+    fail(`${driverPath}: displayed GRPO curl command must use a repo-root path, not -d @demo-grpo.json`);
+  }
+
+  if (!driver.includes('-d @docs/site/demo/demo-grpo.json')) {
+    fail(`${driverPath}: displayed GRPO curl command must cue docs/site/demo/demo-grpo.json for repo-root copy/paste`);
+  }
+}
+
 function assertRequestsImportNearPost(section, context) {
   const requestPosts = Array.from(section.matchAll(/requests\.post/g));
   if (requestPosts.length === 0) {
@@ -1182,6 +1195,7 @@ async function runSmoke() {
   validateReadmeMedia();
   validateReadmeQuickStartPaths();
   validateGrpoOverviewRequestsImports();
+  validateGrpoDemoPayloadCue();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
