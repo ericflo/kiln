@@ -494,6 +494,7 @@ function validateGrpoOverviewRequestsImports() {
     fail('docs/site/index.html: missing The GRPO loop section');
   }
   assertRequestsImportNearPost(indexSection[0], 'docs/site/index.html: The GRPO loop');
+  assertOpenAIClientSetupNearChatCreate(indexSection[0], 'docs/site/index.html: The GRPO loop');
 }
 
 function validateGrpoDemoPayloadCue() {
@@ -519,6 +520,23 @@ function assertRequestsImportNearPost(section, context) {
     const nearbyPrefix = section.slice(Math.max(0, requestPost.index - 800), requestPost.index);
     if (!nearbyPrefix.includes('import requests')) {
       fail(`${context}: requests.post must have import requests nearby before use`);
+    }
+  }
+}
+
+function assertOpenAIClientSetupNearChatCreate(section, context) {
+  const chatCreates = Array.from(section.matchAll(/client\.chat\.completions\.create/g));
+  if (chatCreates.length === 0) {
+    fail(`${context}: missing client.chat.completions.create generate call`);
+  }
+
+  for (const chatCreate of chatCreates) {
+    const nearbyPrefix = section.slice(Math.max(0, chatCreate.index - 800), chatCreate.index);
+    if (!nearbyPrefix.includes('import openai')) {
+      fail(`${context}: client.chat.completions.create must have import openai nearby before use`);
+    }
+    if (!nearbyPrefix.includes('openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")')) {
+      fail(`${context}: client.chat.completions.create must set OpenAI base_url and api_key nearby before use`);
     }
   }
 }
