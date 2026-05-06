@@ -11,46 +11,22 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
-## Reader map
-
-- **5-minute path:** choose Desktop, Server binary, Container, or the optional Source / CLI branch, then continue through model download, first inference, and dashboard checkpoint. Stop there if you only need to confirm Kiln is serving.
-- **Optional learning:** sections 6-8 cover live-learning and adapter workflows after the server is working: SFT, training status, and adapter activation.
-- **Advanced API:** section 9 is reference material for direct HTTP usage once the basic path is clear.
-
 After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
-Choose the path that matches how you want to run Kiln. The Desktop App is the shortest GUI path, Server binary is the terminal-first path with no Rust build, Container is the prebuilt Docker/GHCR path, and Source / CLI is for contributors or users who want to compile the binary themselves.
+All paths share these requirements:
 
-**Desktop App path (recommended for most users):**
+- **GPU + memory**: NVIDIA with 24GB+ VRAM and CUDA 12.4+ driver/runtime (RTX 3090, 4090, A6000, etc.), AMD/Intel Linux GPU with Vulkan 1.2+ runtime, or Apple Silicon Mac with 16GB+ unified memory. Intel Macs are not supported.
+- **Disk**: ~20GB free for the server binary, model weights, and adapters (Source / CLI builds also share this with build artifacts).
+- **Model**: `Qwen/Qwen3.5-4B` weights — downloaded by the Desktop App, by `huggingface-cli` for the Server binary path, or mounted into the container.
 
-- **Platform**: Windows, Linux, or macOS on Apple Silicon. Intel Macs are not supported.
-- **GPU**: NVIDIA GPU, AMD/Intel Vulkan-capable Linux GPU, or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
-- **Disk**: ~20GB free for the server binary, model weights, and adapters.
-- **Build tooling**: No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path. The app downloads the matching prebuilt `kiln` server binary for your platform.
+Build-tooling deltas by path:
 
-**Server binary path (terminal-first, no source build):**
-
-- **Platform**: Linux x86_64, Windows x86_64, or macOS on Apple Silicon. Intel Macs are not supported.
-- **GPU**: NVIDIA systems need CUDA 12.4+ driver/runtime support and 24GB+ VRAM. AMD/Intel Linux systems use Vulkan 1.2+. Apple Silicon Macs use Metal with 16GB+ unified memory.
-- **Disk**: ~20GB free for the server binary, model weights, and adapters.
-- **Build tooling**: No Rust toolchain is required. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
-
-**Container path (Docker/GHCR, no source build):**
-
-- **Platform**: Linux x86_64 host with Docker and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed for NVIDIA GPU deployment.
-- **GPU**: NVIDIA GPU with 24GB+ VRAM and CUDA 12.4+ driver/runtime support.
-- **Model**: Local `Qwen/Qwen3.5-4B` model directory to mount read-only into the container.
-- **Build tooling**: No Rust toolchain or source checkout is required when using the prebuilt `ghcr.io/ericflo/kiln-server:latest` image. Continue at [Running with Docker](#running-with-docker).
-
-**Source / CLI path (for contributors and direct CLI users):**
-
-- **Rust**: Stable toolchain (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`).
-- **Linux / Windows + NVIDIA builds**: GPU with 24GB+ VRAM and CUDA 12.4+ (`nvcc --version` to check).
-- **Linux + AMD / Intel builds**: Vulkan 1.2+ runtime plus `glslc` or `glslangValidator` for shader embedding. `vulkaninfo --summary` should list your GPU.
-- **macOS + Apple Silicon builds**: M-series Mac with 16GB+ unified memory and Xcode Command Line Tools installed (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
-- **Disk**: ~20GB free for model weights and build artifacts.
+- **Desktop App path** (Windows / Linux / Apple Silicon macOS): No Rust toolchain, CUDA toolkit, or Xcode install. The app downloads and SHA-256-verifies the matching prebuilt `kiln` server binary on first launch.
+- **Server binary path** (Linux x86_64 / Windows x86_64 / Apple Silicon macOS): No Rust toolchain. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
+- **Container path** (Docker/GHCR, Linux x86_64 + Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)): No Rust toolchain or source checkout — uses the prebuilt `ghcr.io/ericflo/kiln-server:latest` image. Continue at [Running with Docker](#running-with-docker).
+- **Source / CLI path** (contributors): stable Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). NVIDIA builds need `nvcc` (CUDA 12.4+); AMD/Intel builds need `glslc` or `glslangValidator` for shader embedding (`vulkaninfo --summary` should list your GPU); Apple Silicon builds need Xcode Command Line Tools (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 
 If setup stalls on binary downloads, CUDA/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
 
@@ -457,8 +433,6 @@ Francisco.").
 > on Hugging Face. If a tool call format ever looks ambiguous, that file is
 > the source of truth.
 
-<a id="42-troubleshooting-older-release-long-prefill-timeouts"></a>
-
 ### 9.2 Troubleshooting: older-release long-prefill timeouts
 
 If long tools-bearing prompts or long-prefill requests time out, first upgrade
@@ -473,50 +447,22 @@ details.
 
 ### 9.3 Troubleshooting: KV cache OOM auto-recovery
 
-At startup, kiln's auto-sizer computes the paged KV cache budget as
-`available_for_kv = (total_vram - model_bytes) * inference_memory_fraction`
-(default `inference_memory_fraction = 0.7`). On A40 / A6000 / RTX 6000 Ada /
-L40S running Qwen3.5-4B in BF16, the configured fraction occasionally OOMs at
-allocation time even though the math says it should fit — driver overhead,
-fragmentation, and other allocations on the device can shrink the actual free
-pool below the auto-sizer's estimate.
+Since kiln-v0.2.9 (PR #687), the KV-cache auto-sizer automatically retries
+allocation with a shrinking `inference_memory_fraction` from the list
+`[0.75, 0.65, 0.55, 0.45]` if the configured value OOMs at startup. On
+recovery it logs a `WARN` naming the `actual_fraction` it landed on; pin
+that value in `[memory] inference_memory_fraction` (or
+`KILN_INFERENCE_MEMORY_FRACTION`) to silence the warning on the next restart.
 
-Since kiln-v0.2.9 (PR #687), the auto-sizer **automatically retries with a
-shrinking fraction** from the fallback list `[0.75, 0.65, 0.55, 0.45]` (only
-values strictly below the configured fraction are attempted). On success after
-a fallback, kiln logs a `WARN` line naming the actual fraction it landed on:
+If every fallback also OOMs, startup aborts with a structured panic and
+recommends:
 
-```
-WARN kiln_server::state: KV cache auto-sizer fell back to a smaller
-inference_memory_fraction because the configured value OOM'd; set
-memory.inference_memory_fraction (or KILN_INFERENCE_MEMORY_FRACTION) to
-this value to silence the warning configured_fraction=0.99
-actual_fraction=0.45 num_blocks=56652 attempts=5
-```
-
-**What to do on the next restart:** pin the `actual_fraction` value so the
-auto-sizer doesn't have to retry. Either set `memory.inference_memory_fraction`
-in [`kiln.example.toml`](kiln.example.toml), or export
-`KILN_INFERENCE_MEMORY_FRACTION=<value>` in your environment. Subsequent
-restarts will hit the configured fraction on the first attempt and the WARN
-line goes away.
-
-If **every** fraction in the fallback list also OOMs, kiln aborts startup with
-a structured panic message that lists each attempted fraction → `num_blocks` →
-exact OOM error, names the detected GPU and model size, and recommends two
-concrete remediations:
-
-- **(a) `KILN_NUM_BLOCKS=N`** (or `[memory] num_blocks = N` in
-  `kiln.example.toml`) — preferred. This bypasses the auto-sizer entirely and
-  pins an exact block count, which is the canonical workaround documented in
-  [issue #685](https://github.com/ericflo/kiln/issues/685). The panic message
-  prints a concrete `N` value sized at ~30% of remaining VRAM (well below the
-  retry floor, with headroom for driver overhead).
-- **(b) `KILN_INFERENCE_MEMORY_FRACTION=X`** (or
-  `[memory] inference_memory_fraction = X`) — equivalent fraction-based knob,
-  if you'd rather size by ratio than by absolute block count.
-
-Use (a) on first-run failures and you are unlikely to see this codepath again.
+- **`KILN_NUM_BLOCKS=N`** (or `[memory] num_blocks = N` in
+  [`kiln.example.toml`](kiln.example.toml)) — preferred; bypasses the
+  auto-sizer with an exact block count. This is the canonical workaround in
+  [issue #685](https://github.com/ericflo/kiln/issues/685). The panic prints
+  a concrete `N`.
+- **`KILN_INFERENCE_MEMORY_FRACTION=X`** — fraction-based equivalent.
 
 
 ### 9.4 Batch generation (efficient for GRPO rollouts)
