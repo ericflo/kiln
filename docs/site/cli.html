@@ -304,7 +304,7 @@ kiln health --url http://localhost:8420</code></pre>
     <div class="max-w-5xl mx-auto px-6 py-12">
       <p class="label mb-2">Training</p>
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Submit SFT and GRPO jobs</h2>
-      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL correction examples; GRPO reads one JSON request or batch with prompts, completions, and rewards.</p>
+      <p class="max-w-3xl mb-6" style="color: var(--fg-dim);">Training commands talk to an already-running server. SFT reads JSONL with one chat correction example per line, each with a <code>messages</code> array. GRPO reads one JSON request/batch with <code>prompts</code>/<code>groups</code>, completions, and reward scores.</p>
       <div class="grid lg:grid-cols-3 gap-4">
         <div class="card p-5">
           <h3 class="font-semibold mb-2">SFT corrections</h3>
@@ -312,14 +312,14 @@ kiln health --url http://localhost:8420</code></pre>
   --file corrections.jsonl \
   --adapter support-bot
 kiln train sft --file corrections.jsonl --adapter support-bot --url http://gpu-box:8420</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> when you need to override defaults.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Each JSONL line is one chat correction with a <code>messages</code> array. Add <code>--epochs</code>, <code>--lr</code>, or <code>--lora-rank</code> when you need to override defaults.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">GRPO rewards</h3>
 <pre class="text-sm"><code>kiln train grpo \
   --file grpo-batch.json \
   --adapter support-bot</code></pre>
-          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use this for generate &rarr; score &rarr; train loops with verifiable rewards.</p>
+          <p class="text-sm mt-4" style="color: var(--fg-mute);">Use this for generate &rarr; score &rarr; train loops: send prompts/groups, candidate completions, and reward scores. See the <a href="grpo.html" class="link">GRPO Guide</a> for reward-loop examples.</p>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Queue status</h3>
