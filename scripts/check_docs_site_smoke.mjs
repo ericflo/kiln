@@ -368,6 +368,74 @@ function validateReadmeMedia() {
   }
 }
 
+function normalizeReadmeForColdReader(value) {
+  return value
+    .toLowerCase()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[`*_~[\]()]/g, ' ')
+    .replace(/[-_/]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function assertReadmeColdReaderTerms(source, label, terms) {
+  const missingTerms = terms.filter((term) => !source.includes(normalizeReadmeForColdReader(term)));
+  if (missingTerms.length > 0) {
+    fail(`README.md: missing cold-reader ${label}: ${missingTerms.join(', ')}`);
+  }
+}
+
+function assertReadmeColdReaderAny(source, label, terms) {
+  if (!terms.some((term) => source.includes(normalizeReadmeForColdReader(term)))) {
+    fail(`README.md: missing cold-reader ${label}: expected one of ${terms.join(', ')}`);
+  }
+}
+
+function validateReadmeColdReaderCoverage() {
+  const readmePath = resolve(repoRoot, 'README.md');
+  const readme = readFileSync(readmePath, 'utf8');
+  const normalizedReadme = normalizeReadmeForColdReader(readme);
+
+  const requiredTermGroups = [
+    ['what-it-is paragraph', ['single-GPU inference server', 'live LoRA training', 'same process', 'same GPU']],
+    ['install/run paths', ['Desktop App', 'server binary', 'Docker', 'source CLI', 'kiln serve']],
+    ['GRPO loop', ['GRPO Loop', 'killer feature', 'generate completions', 'score them', 'reward function']],
+    ['embedded dashboard', ['/ui', 'dashboard']],
+    ['demo/asciicast coverage', ['asciicasts', 'https://ericflo.github.io/kiln/demo/', 'docs/site/demo/']],
+    ['embedded dashboard screenshot', ['docs/site/assets/server-ui-dashboard.png']],
+    ['required links', ['QUICKSTART.md', 'CHANGELOG.md', 'LICENSE']],
+  ];
+
+  for (const [label, terms] of requiredTermGroups) {
+    assertReadmeColdReaderTerms(normalizedReadme, label, terms);
+  }
+  assertReadmeColdReaderAny(normalizedReadme, 'docs site or website link', [
+    'https://ericflo.github.io/kiln/',
+    'docs/site',
+  ]);
+}
+
+function validateReadmeImageReferences() {
+  const sourcePath = 'README.md';
+  const readme = readFileSync(resolve(repoRoot, sourcePath), 'utf8');
+  const imageTargets = extractMarkdownLocalTargets(readme)
+    .filter((link) => link.text === 'image' || /\.(?:avif|gif|jpe?g|png|svg|webp)(?:[?#]|$)/i.test(link.target))
+    .map((link) => link.target.trim())
+    .filter((target) => !isIgnoredMarkdownTarget(target));
+
+  if (imageTargets.length === 0) {
+    fail('README.md: missing image references for cold-reader visual context');
+  }
+
+  for (const target of imageTargets) {
+    const { pathPart } = markdownTargetParts(target);
+    const resolvedPath = resolveMarkdownTargetPath(sourcePath, pathPart);
+    if (!existsSync(resolvedPath) || statSync(resolvedPath).isDirectory()) {
+      fail(`README.md: broken image reference ${target} (resolved path: ${relative(repoRoot, resolvedPath)})`);
+    }
+  }
+}
+
 function validateQuickstartMarkdownMedia() {
   const quickstartPath = resolve(repoRoot, 'QUICKSTART.md');
   const quickstart = readFileSync(quickstartPath, 'utf8');
@@ -1567,6 +1635,8 @@ function formatLikelyOverflowingElements(elements) {
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
+  validateReadmeColdReaderCoverage();
+  validateReadmeImageReferences();
   validateReadmeQuickStartPaths();
   validateAdapterListStaleWordingSurfaces();
   validateReadmeAdapterListSemantics();
