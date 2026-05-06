@@ -322,6 +322,35 @@ function validateReadmeMedia() {
   }
 }
 
+function validateQuickstartMarkdownMedia() {
+  const quickstartPath = resolve(repoRoot, 'QUICKSTART.md');
+  const quickstart = readFileSync(quickstartPath, 'utf8');
+  const dashboardImagePath = 'docs/site/assets/server-ui-dashboard.png';
+
+  if (!quickstart.includes(dashboardImagePath)) {
+    fail(`QUICKSTART.md: missing dashboard screenshot reference ${dashboardImagePath}`);
+  }
+  if (!existsSync(resolve(repoRoot, dashboardImagePath))) {
+    fail(`QUICKSTART.md: referenced dashboard screenshot does not exist: ${dashboardImagePath}`);
+  }
+
+  const dashboardImagePattern = new RegExp(`!\\[([^\\]]+)\\]\\(${dashboardImagePath.replaceAll('/', '\\/')}\\)`);
+  const dashboardImageMatch = quickstart.match(dashboardImagePattern);
+  if (!dashboardImageMatch) {
+    fail(`QUICKSTART.md: dashboard screenshot reference must include alt text for ${dashboardImagePath}`);
+  }
+
+  const altText = dashboardImageMatch[1].toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const requiredAltTerms = ['dashboard', 'status', 'adapters', 'training'];
+  const missingAltTerms = requiredAltTerms.filter((term) => !altText.includes(term));
+  if (!altText.includes('chat') && !altText.includes('quick inference')) {
+    missingAltTerms.push('chat or quick inference');
+  }
+  if (missingAltTerms.length > 0) {
+    fail(`QUICKSTART.md: dashboard screenshot alt text missing terms: ${missingAltTerms.join(', ')}`);
+  }
+}
+
 function validateLaunchSentinel() {
   const launchDir = resolve(repoRoot, 'docs/site/launch');
   const sentinelPath = resolve(launchDir, 'README.md');
@@ -443,6 +472,7 @@ function chromiumPath() {
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
+  validateQuickstartMarkdownMedia();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
 
