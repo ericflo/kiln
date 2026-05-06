@@ -1419,6 +1419,30 @@ async function runSmoke() {
           fail(`${sitePage.path}: missing copy-paste API examples: ${missingCodeExamples.join(', ')}`);
         }
 
+        const adapterUploadCode = apiResult.copyableCodeBlocks.find((codeBlock) => codeBlock.includes('/v1/adapters/upload'));
+        if (!adapterUploadCode) {
+          fail(`${sitePage.path}: missing /v1/adapters/upload copy-paste example`);
+        }
+        if (!adapterUploadCode.includes('-f "archive=@default-adapter.tar.gz"')) {
+          fail(`${sitePage.path}: adapter upload example must use multipart field archive for default-adapter.tar.gz`);
+        }
+        if (adapterUploadCode.includes('-f "file=@')) {
+          fail(`${sitePage.path}: adapter upload example uses stale multipart field file; use archive`);
+        }
+
+        const adapterMergeCodeBlocks = apiResult.copyableCodeBlocks.filter((codeBlock) => codeBlock.includes('/v1/adapters/merge'));
+        if (adapterMergeCodeBlocks.length < 2) {
+          fail(`${sitePage.path}: expected TIES and concat /v1/adapters/merge copy-paste examples`);
+        }
+        for (const [index, codeBlock] of adapterMergeCodeBlocks.entries()) {
+          if (!codeBlock.includes('"sources"')) {
+            fail(`${sitePage.path}: adapter merge example ${index + 1} must use sources array`);
+          }
+          if (codeBlock.includes('"adapters"')) {
+            fail(`${sitePage.path}: adapter merge example ${index + 1} uses stale adapters array; use sources`);
+          }
+        }
+
         if (apiResult.copyButtonCount < apiResult.copyableCodeBlocks.length) {
           fail(`${sitePage.path}: expected each API code block to have a copy button; got ${apiResult.copyButtonCount} for ${apiResult.copyableCodeBlocks.length} code blocks`);
         }
