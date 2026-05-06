@@ -109,6 +109,21 @@ unsafe extern "C" {
         value_heads: i32,
         dk: i32,
         dv: i32,
+        q_b_stride: i32,
+        q_t_stride: i32,
+        q_h_stride: i32,
+        k_b_stride: i32,
+        k_t_stride: i32,
+        k_h_stride: i32,
+        v_b_stride: i32,
+        v_t_stride: i32,
+        v_h_stride: i32,
+        a_b_stride: i32,
+        a_t_stride: i32,
+        a_h_stride: i32,
+        b_b_stride: i32,
+        b_t_stride: i32,
+        b_h_stride: i32,
         eps: f32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
@@ -130,6 +145,21 @@ unsafe extern "C" {
         value_heads: i32,
         dk: i32,
         dv: i32,
+        q_b_stride: i32,
+        q_t_stride: i32,
+        q_h_stride: i32,
+        k_b_stride: i32,
+        k_t_stride: i32,
+        k_h_stride: i32,
+        v_b_stride: i32,
+        v_t_stride: i32,
+        v_h_stride: i32,
+        a_b_stride: i32,
+        a_t_stride: i32,
+        a_h_stride: i32,
+        b_b_stride: i32,
+        b_t_stride: i32,
+        b_h_stride: i32,
         eps: f32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
@@ -566,6 +596,9 @@ pub fn gdn_decode_gates_recurrent_supports(
         && value_heads % q_heads == 0
         && dk == 128
         && dv == 128
+        && q.stride().last().copied() == Some(1)
+        && k.stride().last().copied() == Some(1)
+        && v.stride().last().copied() == Some(1)
         && state.is_contiguous()
 }
 
@@ -621,6 +654,38 @@ fn next_decode_gates_recurrent_output(
     })
 }
 
+fn stride4_i32(layout: &Layout, name: &str) -> Result<[i32; 4]> {
+    let stride = layout.stride();
+    if stride.len() != 4 {
+        candle_core::bail!("kiln-gdn-kernel: {name} expected rank-4 layout");
+    }
+    Ok([
+        stride_i32(stride[0], name)?,
+        stride_i32(stride[1], name)?,
+        stride_i32(stride[2], name)?,
+        stride_i32(stride[3], name)?,
+    ])
+}
+
+fn stride3_i32(layout: &Layout, name: &str) -> Result<[i32; 3]> {
+    let stride = layout.stride();
+    if stride.len() != 3 {
+        candle_core::bail!("kiln-gdn-kernel: {name} expected rank-3 layout");
+    }
+    Ok([
+        stride_i32(stride[0], name)?,
+        stride_i32(stride[1], name)?,
+        stride_i32(stride[2], name)?,
+    ])
+}
+
+fn stride_i32(stride: usize, name: &str) -> Result<i32> {
+    if stride > i32::MAX as usize {
+        candle_core::bail!("kiln-gdn-kernel: {name} stride {stride} exceeds i32");
+    }
+    Ok(stride as i32)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_decode_gates_recurrent(
     q: &Tensor,
@@ -643,11 +708,6 @@ pub fn gdn_decode_gates_recurrent(
     let (batch, _, q_heads, dk) = q.dims4()?;
     let (_, _, value_heads, dv) = v.dims4()?;
 
-    let q = gdn_gates_ctx(q.contiguous(), "gdn_decode_gates_recurrent q contiguous")?;
-    let k = gdn_gates_ctx(k.contiguous(), "gdn_decode_gates_recurrent k contiguous")?;
-    let v = gdn_gates_ctx(v.contiguous(), "gdn_decode_gates_recurrent v contiguous")?;
-    let a = gdn_gates_ctx(a.contiguous(), "gdn_decode_gates_recurrent a contiguous")?;
-    let b = gdn_gates_ctx(b.contiguous(), "gdn_decode_gates_recurrent b contiguous")?;
     let a_log = gdn_gates_ctx(
         a_log.contiguous(),
         "gdn_decode_gates_recurrent a_log contiguous",
@@ -674,6 +734,12 @@ pub fn gdn_decode_gates_recurrent(
         let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
         let (s_storage, s_layout) = state.storage_and_layout();
         let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_stride = stride4_i32(q_layout, "gdn_decode_gates_recurrent q")?;
+        let k_stride = stride4_i32(k_layout, "gdn_decode_gates_recurrent k")?;
+        let v_stride = stride4_i32(v_layout, "gdn_decode_gates_recurrent v")?;
+        let a_stride = stride3_i32(a_layout, "gdn_decode_gates_recurrent a")?;
+        let b_stride = stride3_i32(b_layout, "gdn_decode_gates_recurrent b")?;
 
         let q_cuda = match &*q_storage {
             candle_core::Storage::Cuda(c) => c,
@@ -773,6 +839,21 @@ pub fn gdn_decode_gates_recurrent(
                         value_heads as i32,
                         dk as i32,
                         dv as i32,
+                        q_stride[0],
+                        q_stride[1],
+                        q_stride[2],
+                        k_stride[0],
+                        k_stride[1],
+                        k_stride[2],
+                        v_stride[0],
+                        v_stride[1],
+                        v_stride[2],
+                        a_stride[0],
+                        a_stride[1],
+                        a_stride[2],
+                        b_stride[0],
+                        b_stride[1],
+                        b_stride[2],
                         eps,
                         raw_stream,
                     )
@@ -799,6 +880,21 @@ pub fn gdn_decode_gates_recurrent(
                         value_heads as i32,
                         dk as i32,
                         dv as i32,
+                        q_stride[0],
+                        q_stride[1],
+                        q_stride[2],
+                        k_stride[0],
+                        k_stride[1],
+                        k_stride[2],
+                        v_stride[0],
+                        v_stride[1],
+                        v_stride[2],
+                        a_stride[0],
+                        a_stride[1],
+                        a_stride[2],
+                        b_stride[0],
+                        b_stride[1],
+                        b_stride[2],
                         eps,
                         raw_stream,
                     )
@@ -2287,6 +2383,145 @@ mod tests {
         assert!(
             state_mean == 0.0,
             "fused decode recurrent state mean_abs_diff={state_mean:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cuda_decode_gates_recurrent_matches_contiguous_reference_for_strided_inputs()
+    -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping strided decode gates+recurrent parity test: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 2usize;
+        let seq_len = 1usize;
+        let heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let q = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dk, 0.35, 0.1),
+            (heads, batch, seq_len, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let k = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dk, 0.25, 0.7),
+            (heads, batch, seq_len, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let v = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dv, 0.5, 1.3),
+            (heads, batch, seq_len, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let a = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads, 0.4, 2.1),
+            (heads, batch, seq_len),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let b = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads, 0.6, 2.9),
+            (heads, batch, seq_len),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let a_log = Tensor::from_slice(&patterned_data(heads, 0.15, 3.7), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(&patterned_data(heads, 0.2, 4.3), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * dv, 0.45, 4.9),
+            (heads, batch, seq_len, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?
+        .transpose(0, 1)?
+        .transpose(1, 2)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
+            .to_dtype(DType::BF16)?;
+        let state = Tensor::from_slice(
+            &patterned_data(batch * heads * dk * dv, 0.08, 6.1),
+            (batch, heads, dk, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        assert!(!q.is_contiguous());
+        assert!(!a.is_contiguous());
+
+        let mut state_reference = state.copy()?;
+        let out_reference = gdn_decode_gates_recurrent(
+            &q.contiguous()?,
+            &k.contiguous()?,
+            &v.contiguous()?,
+            &a.contiguous()?,
+            &b.contiguous()?,
+            &a_log,
+            &dt_bias,
+            &mut state_reference,
+            &z.contiguous()?,
+            &weight,
+            1e-6,
+        )?;
+
+        let mut state_strided = state.copy()?;
+        let out_strided = gdn_decode_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_strided,
+            &z,
+            &weight,
+            1e-6,
+        )?;
+
+        let (out_max, out_mean) = max_mean_abs_diff(&out_strided, &out_reference)?;
+        let (state_max, state_mean) = max_mean_abs_diff(&state_strided, &state_reference)?;
+        eprintln!(
+            "cuda decode strided vs contiguous reference: out max={out_max:e} mean={out_mean:e}, state max={state_max:e} mean={state_mean:e}"
+        );
+
+        assert!(
+            out_max == 0.0,
+            "strided decode recurrent output max_abs_diff={out_max:e}"
+        );
+        assert!(
+            out_mean == 0.0,
+            "strided decode recurrent output mean_abs_diff={out_mean:e}"
+        );
+        assert!(
+            state_max == 0.0,
+            "strided decode recurrent state max_abs_diff={state_max:e}"
+        );
+        assert!(
+            state_mean == 0.0,
+            "strided decode recurrent state mean_abs_diff={state_mean:e}"
         );
 
         Ok(())

@@ -176,6 +176,21 @@ __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
     __nv_bfloat16 *__restrict__ out,            // [B, 1, value_heads, dv]
     int q_heads,
     int value_heads,
+    int q_b_stride,
+    int q_t_stride,
+    int q_h_stride,
+    int k_b_stride,
+    int k_t_stride,
+    int k_h_stride,
+    int v_b_stride,
+    int v_t_stride,
+    int v_h_stride,
+    int a_b_stride,
+    int a_t_stride,
+    int a_h_stride,
+    int b_b_stride,
+    int b_t_stride,
+    int b_h_stride,
     float eps
 ) {
     __shared__ float k_smem[128];
@@ -191,17 +206,20 @@ __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
     const int q_group = value_heads / q_heads;
     const int q_head_idx = head_idx / q_group;
 
-    const size_t qk_base = ((size_t)batch_idx * q_heads + q_head_idx) * 128;
-    const size_t v_base = ((size_t)batch_idx * value_heads + head_idx) * 128;
-    const size_t gate_idx = (size_t)batch_idx * value_heads + head_idx;
+    const size_t q_base = (size_t)batch_idx * q_b_stride + (size_t)q_head_idx * q_h_stride;
+    const size_t k_base = (size_t)batch_idx * k_b_stride + (size_t)q_head_idx * k_h_stride;
+    const size_t v_base_in = (size_t)batch_idx * v_b_stride + (size_t)head_idx * v_h_stride;
+    const size_t v_base_out = ((size_t)batch_idx * value_heads + head_idx) * 128;
+    const size_t a_idx = (size_t)batch_idx * a_b_stride + (size_t)head_idx * a_h_stride;
+    const size_t b_idx = (size_t)batch_idx * b_b_stride + (size_t)head_idx * b_h_stride;
     const size_t state_base = (size_t)bh * 128 * 128;
 
-    k_smem[tid] = bf16_to_f32(k[qk_base + tid]);
+    k_smem[tid] = bf16_to_f32(k[k_base + tid]);
 
     if (tid == 0) {
-        const float beta = stable_sigmoid(bf16_to_f32(b[gate_idx]));
+        const float beta = stable_sigmoid(bf16_to_f32(b[b_idx]));
         const float g = -expf(bf16_to_f32(a_log[head_idx]))
-            * stable_softplus(bf16_to_f32(a[gate_idx]) + bf16_to_f32(dt_bias[head_idx]));
+            * stable_softplus(bf16_to_f32(a[a_idx]) + bf16_to_f32(dt_bias[head_idx]));
         scalars[0] = expf(bf16_to_f32(f32_to_bf16(g)));
         scalars[1] = bf16_to_f32(f32_to_bf16(beta));
     }
@@ -219,16 +237,16 @@ __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
         v_pred += k_smem[i] * d;
     }
 
-    const float delta = beta_t * (to_f32(v[v_base + tid]) - v_pred);
+    const float delta = beta_t * (to_f32(v[v_base_in + tid]) - v_pred);
     float y = 0.0f;
     #pragma unroll
     for (int i = 0; i < 128; ++i) {
         const float new_s = s_local[i] + k_smem[i] * delta;
         state[state_base + (size_t)i * 128 + tid] = f32_to_bf16(new_s);
-        y += bf16_to_f32(q[qk_base + i]) * new_s;
+        y += bf16_to_f32(q[q_base + i]) * new_s;
     }
 
-    out[v_base + tid] = f32_to_bf16(y);
+    out[v_base_out + tid] = f32_to_bf16(y);
 
 }
 
@@ -316,6 +334,21 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_vf32_bf16
     int value_heads,
     int dk,
     int dv,
+    int q_b_stride,
+    int q_t_stride,
+    int q_h_stride,
+    int k_b_stride,
+    int k_t_stride,
+    int k_h_stride,
+    int v_b_stride,
+    int v_t_stride,
+    int v_h_stride,
+    int a_b_stride,
+    int a_t_stride,
+    int a_h_stride,
+    int b_b_stride,
+    int b_t_stride,
+    int b_h_stride,
     float eps,
     void *stream
 ) {
@@ -338,6 +371,21 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_vf32_bf16
         reinterpret_cast<__nv_bfloat16 *>(out),
         q_heads,
         value_heads,
+        q_b_stride,
+        q_t_stride,
+        q_h_stride,
+        k_b_stride,
+        k_t_stride,
+        k_h_stride,
+        v_b_stride,
+        v_t_stride,
+        v_h_stride,
+        a_b_stride,
+        a_t_stride,
+        a_h_stride,
+        b_b_stride,
+        b_t_stride,
+        b_h_stride,
         eps
     );
 
@@ -363,6 +411,21 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
     int value_heads,
     int dk,
     int dv,
+    int q_b_stride,
+    int q_t_stride,
+    int q_h_stride,
+    int k_b_stride,
+    int k_t_stride,
+    int k_h_stride,
+    int v_b_stride,
+    int v_t_stride,
+    int v_h_stride,
+    int a_b_stride,
+    int a_t_stride,
+    int a_h_stride,
+    int b_b_stride,
+    int b_t_stride,
+    int b_h_stride,
     float eps,
     void *stream
 ) {
@@ -385,6 +448,21 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
         reinterpret_cast<__nv_bfloat16 *>(out),
         q_heads,
         value_heads,
+        q_b_stride,
+        q_t_stride,
+        q_h_stride,
+        k_b_stride,
+        k_t_stride,
+        k_h_stride,
+        v_b_stride,
+        v_t_stride,
+        v_h_stride,
+        a_b_stride,
+        a_t_stride,
+        a_h_stride,
+        b_b_stride,
+        b_t_stride,
+        b_h_stride,
         eps
     );
 
