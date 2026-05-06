@@ -237,6 +237,21 @@ const expectedCliLinks = [
   { label: 'Architecture', href: 'architecture.html' },
 ];
 
+const expectedCliHeroFragments = [
+  { label: 'Start the server', href: '#serve' },
+  { label: 'Check health', href: '#health' },
+  { label: 'Submit training', href: '#training' },
+  { label: 'Manage adapters', href: '#adapters' },
+];
+
+const expectedCliPageFragments = [
+  '#serve',
+  '#health',
+  '#training',
+  '#adapters',
+  '#where-to-go-next',
+];
+
 const expectedCliModelSetupCue = {
   label: 'Qwen/Qwen3.5-4B setup cue',
   terms: ['qwen/qwen3.5-4b', 'quickstart', 'setup', 'model download'],
@@ -1989,6 +2004,8 @@ async function runSmoke() {
             href: link.getAttribute('href'),
             text: normalize(link.textContent),
           }));
+          const fragmentIds = Array.from(document.querySelectorAll('[id]'))
+            .map((element) => element.getAttribute('id'));
 
           return {
             bodyText,
@@ -1998,6 +2015,7 @@ async function runSmoke() {
             links,
             heroText,
             heroLinks,
+            fragmentIds,
           };
         });
 
@@ -2044,6 +2062,19 @@ async function runSmoke() {
           .map((link) => link.label);
         if (missingLinks.length > 0) {
           fail(`${sitePage.path}: missing CLI next-step links: ${missingLinks.join(', ')}`);
+        }
+
+        const missingHeroFragments = expectedCliHeroFragments
+          .filter((expectedLink) => !cliResult.heroLinks.some((link) => link.href === expectedLink.href))
+          .map((link) => `${link.label} -> ${link.href}`);
+        if (missingHeroFragments.length > 0) {
+          fail(`${sitePage.path}: missing CLI hero deep links: ${missingHeroFragments.join(', ')}`);
+        }
+
+        const missingPageFragments = expectedCliPageFragments
+          .filter((fragment) => !cliResult.fragmentIds.includes(fragment.slice(1)));
+        if (missingPageFragments.length > 0) {
+          fail(`${sitePage.path}: missing CLI page fragments: ${missingPageFragments.join(', ')}`);
         }
       }
 
