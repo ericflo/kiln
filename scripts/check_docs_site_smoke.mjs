@@ -353,6 +353,47 @@ function validateQuickstartMarkdownMedia() {
   }
 }
 
+function validateQuickstartServerBinaryPath() {
+  const quickstart = readFileSync(resolve(repoRoot, 'QUICKSTART.md'), 'utf8');
+  const choosePathSection = extractMarkdownSection(quickstart, 'Choose your path');
+  if (!choosePathSection) {
+    fail('QUICKSTART.md: missing ## Choose your path section');
+  }
+
+  const expectedPathRows = [
+    ['Desktop App path', '**Desktop App (recommended)**'],
+    ['Server binary path', '**Server binary (terminal-first)**'],
+    ['Source / CLI path', '**Source / CLI**'],
+  ];
+  for (const [label, term] of expectedPathRows) {
+    assertIncludes(choosePathSection, term, `QUICKSTART.md: Choose your path ${label}`);
+  }
+
+  const serverBinarySection = extractMarkdownSection(quickstart, 'Quick path: Server binary (terminal-first, no source build)');
+  if (!serverBinarySection) {
+    fail('QUICKSTART.md: missing ## Quick path: Server binary (terminal-first, no source build) section');
+  }
+
+  const requiredTerms = [
+    'terminal-first',
+    'no source build',
+    'Qwen/Qwen3.5-4B',
+    'SHA-256 sidecars',
+    'kiln-v${KILN_VERSION}',
+    'x86_64-unknown-linux-gnu-cuda124.tar.gz',
+    'x86_64-unknown-linux-gnu-vulkan.tar.gz',
+    'aarch64-apple-darwin-metal.tar.gz',
+    'x86_64-pc-windows-msvc-cuda124.zip',
+  ];
+  for (const term of requiredTerms) {
+    assertIncludes(serverBinarySection, term, 'QUICKSTART.md: Server binary path');
+  }
+
+  if (!/https:\/\/github\.com\/ericflo\/kiln\/releases\/download\/kiln-v/.test(serverBinarySection)) {
+    fail('QUICKSTART.md: Server binary path must include at least one kiln-v release download command');
+  }
+}
+
 function extractMarkdownSection(markdown, heading) {
   const headingPattern = new RegExp(`^## ${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm');
   const headingMatch = markdown.match(headingPattern);
@@ -900,6 +941,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateQuickstartMarkdownMedia();
+  validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
