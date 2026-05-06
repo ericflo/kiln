@@ -132,9 +132,11 @@ const expectedApiEndpoints = [
   '/v1/train/sft',
   '/v1/train/grpo',
   '/v1/train/status',
+  '/v1/train/status/{job_id}',
   '/v1/train/queue',
-  '/v1/train/jobs/{job_id}',
 ];
+
+const staleTrainingJobEndpoint = '/v1/train/jobs/{job_id}';
 
 const expectedApiSections = [
   { label: 'server status', terms: ['server status'] },
@@ -1010,6 +1012,8 @@ async function runSmoke() {
           const endpointText = normalize(Array.from(document.querySelectorAll('.endpoint, code'))
             .map((element) => element.textContent || '')
             .join('\n'));
+          const endpointRoutes = Array.from(document.querySelectorAll('.endpoint'))
+            .map((element) => normalize(element.querySelector('code')?.textContent || ''));
           const headings = normalize(Array.from(document.querySelectorAll('h2, h3'))
             .map((heading) => heading.textContent || '')
             .join('\n'));
@@ -1020,6 +1024,7 @@ async function runSmoke() {
           return {
             bodyText,
             endpointText,
+            endpointRoutes,
             headings,
             copyableCodeBlocks,
             copyButtonCount: copyButtons.length,
@@ -1033,6 +1038,17 @@ async function runSmoke() {
         });
         if (missingEndpoints.length > 0) {
           fail(`${sitePage.path}: missing API endpoint coverage: ${missingEndpoints.join(', ')}`);
+        }
+
+        const normalizedStaleEndpoint = staleTrainingJobEndpoint.toLowerCase();
+        if (apiResult.endpointRoutes.includes(normalizedStaleEndpoint)) {
+          fail(`${sitePage.path}: stale route ${staleTrainingJobEndpoint} is presented as a real API endpoint; use /v1/train/status/{job_id} instead`);
+        }
+        if (
+          apiResult.bodyText.includes(normalizedStaleEndpoint)
+          && !apiResult.bodyText.includes(`no separate ${normalizedStaleEndpoint} route`)
+        ) {
+          fail(`${sitePage.path}: stale route ${staleTrainingJobEndpoint} must appear only in explicit negative wording`);
         }
 
         const missingSections = expectedApiSections
