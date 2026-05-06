@@ -376,6 +376,70 @@ function assertMatches(source, pattern, context) {
   }
 }
 
+function extractRustRawStringConstant(source, constantName) {
+  const escapedName = constantName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`const\\s+${escapedName}\\s*:\\s*&str\\s*=\\s*r(#+)"([\\s\\S]*?)"\\1;`);
+  const match = source.match(pattern);
+  if (!match) {
+    fail(`crates/kiln-server/src/cli.rs: missing raw string constant ${constantName}`);
+  }
+  return match[2];
+}
+
+function assertHelpCopyIncludes(helpCopy, constantName, term) {
+  if (!helpCopy.includes(term)) {
+    fail(`crates/kiln-server/src/cli.rs: ${constantName} missing ${term}`);
+  }
+}
+
+function validateCliHelpOnboardingCopy() {
+  const cliParser = readFileSync(resolve(repoRoot, 'crates/kiln-server/src/cli.rs'), 'utf8');
+  const constants = new Map(
+    ['TOP_LEVEL_OVERVIEW', 'TOP_LEVEL_EXAMPLES', 'TRAIN_EXAMPLES', 'ADAPTERS_EXAMPLES', 'CONFIG_EXAMPLES']
+      .map((constantName) => [constantName, extractRustRawStringConstant(cliParser, constantName)]),
+  );
+
+  const requiredTerms = new Map([
+    ['TOP_LEVEL_OVERVIEW', [
+      'Qwen3.5-4B',
+      'live LoRA training',
+      'no subcommand starts',
+      'http://127.0.0.1:8420/ui',
+      'kiln health',
+      'kiln train sft',
+      'kiln train grpo',
+      'kiln adapters list',
+    ]],
+    ['TOP_LEVEL_EXAMPLES', [
+      'kiln serve',
+      'kiln health',
+      'kiln train sft --file examples.jsonl --adapter my-task',
+      'kiln train grpo --file grpo-batch.json --adapter my-task',
+      'kiln adapters list',
+    ]],
+    ['TRAIN_EXAMPLES', [
+      'kiln train status',
+      'kiln train status --job-id train_123',
+    ]],
+    ['ADAPTERS_EXAMPLES', [
+      'kiln adapters unload',
+      'revert the running server to the base model',
+    ]],
+    ['CONFIG_EXAMPLES', [
+      'kiln config',
+      'kiln config --file kiln.toml',
+      'kiln serve --config kiln.toml',
+    ]],
+  ]);
+
+  for (const [constantName, terms] of requiredTerms) {
+    const helpCopy = constants.get(constantName);
+    for (const term of terms) {
+      assertHelpCopyIncludes(helpCopy, constantName, term);
+    }
+  }
+}
+
 function validateQuickstartCliReference() {
   const quickstart = readFileSync(resolve(repoRoot, 'QUICKSTART.md'), 'utf8');
   const cliReference = extractMarkdownSection(quickstart, 'CLI Reference');
@@ -837,6 +901,7 @@ async function runSmoke() {
   validateReadmeMedia();
   validateQuickstartMarkdownMedia();
   validateQuickstartCliReference();
+  validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
   validateDocsSiteLocalLinks();
