@@ -462,6 +462,14 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
   <section class="divider">
     <div class="max-w-5xl mx-auto px-6 py-12">
       <h2 class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="card p-5 mb-4" style="background: rgba(168, 85, 247, 0.08); border-color: rgba(168, 85, 247, 0.22);">
+        <h3 class="font-semibold mb-2">Training file shapes at a glance</h3>
+        <p style="color: var(--fg-dim);">
+          <code>kiln train sft</code> reads <strong>SFT JSONL</strong>: one chat correction per line, each with a <code>messages</code> array.
+          <code>kiln train grpo</code> reads a <strong>GRPO JSON request/batch</strong>: <code>groups</code> of candidate completions with reward scores.
+          See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for full command examples.
+        </p>
+      </div>
       <div class="grid sm:grid-cols-2 lg:grid-cols-7 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 class="font-semibold mb-2">SFT corrections</h3>

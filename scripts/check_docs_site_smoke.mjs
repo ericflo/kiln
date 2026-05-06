@@ -60,6 +60,7 @@ const expectedQuickstartSections = [
   { label: 'first inference checkpoint', terms: ['first inference checkpoint'] },
   { label: 'SFT next step', terms: ['sft corrections', '/v1/train/sft'] },
   { label: 'GRPO next step', terms: ['grpo guide', 'generate', 'score', 'train'] },
+  { label: 'training payload shapes', terms: ['sft jsonl', 'one chat correction per line', 'messages array', 'grpo json request/batch', 'groups', 'candidate completions', 'reward scores', 'kiln train sft', 'kiln train grpo'] },
   { label: 'Where to go next', terms: ['where to go next'] },
 ];
 
