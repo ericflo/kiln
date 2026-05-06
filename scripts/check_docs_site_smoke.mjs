@@ -510,6 +510,24 @@ function validateGrpoDemoPayloadCue() {
   }
 }
 
+function validateLandingDesktopVersionSplitCue() {
+  const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
+  const desktopInstallMatch = index.match(/<h3[^>]*>Desktop App[\s\S]*?<\/h3>([\s\S]*?)<table class="installer-table/);
+  if (!desktopInstallMatch) {
+    fail('docs/site/index.html: missing Desktop App install copy');
+  }
+
+  const desktopInstallCopy = desktopInstallMatch[1];
+  const requiredTerms = [
+    'separate GitHub release tags/version numbers',
+    'desktop-v0.2.2',
+    'latest <code>kiln-v*</code>',
+  ];
+  for (const term of requiredTerms) {
+    assertIncludes(desktopInstallCopy, term, 'docs/site/index.html: Desktop App version-split cue');
+  }
+}
+
 function assertRequestsImportNearPost(section, context) {
   const requestPosts = Array.from(section.matchAll(/requests\.post/g));
   if (requestPosts.length === 0) {
@@ -1214,6 +1232,7 @@ async function runSmoke() {
   validateReadmeQuickStartPaths();
   validateGrpoOverviewRequestsImports();
   validateGrpoDemoPayloadCue();
+  validateLandingDesktopVersionSplitCue();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
