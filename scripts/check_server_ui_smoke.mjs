@@ -10,6 +10,14 @@ import { tmpdir } from 'node:os';
 
 const repoRoot = resolve(import.meta.dirname, '..');
 const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+const expectedHeaderHelpLinks = [
+  ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
+  ['GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html'],
+  ['API Reference', 'https://ericflo.github.io/kiln/api.html'],
+  ['CLI Reference', 'https://ericflo.github.io/kiln/cli.html'],
+  ['Demo', 'https://ericflo.github.io/kiln/demo/'],
+  ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
+];
 
 function fail(message) {
   throw new Error(message);
@@ -524,6 +532,20 @@ async function waitForVisiblePanel(page, selector, message) {
   ).catch(() => fail(`${message}: ${selector} did not become active and visible`));
 }
 
+async function waitForVisibleElement(page, selector, message) {
+  await page.waitForFunction(
+    (targetSelector) => {
+      const element = document.querySelector(targetSelector);
+      if (!element) return false;
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    },
+    { timeout: 5000 },
+    selector,
+  ).catch(() => fail(`${message}: ${selector} did not become visible`));
+}
+
 async function waitForPanelText(page, selector, pattern, message) {
   await page.waitForFunction(
     (panelSelector, source) => {
@@ -633,6 +655,82 @@ async function expectPanelLink(page, selector, label, href) {
   ).catch(() => fail(`${selector} missing expected ${label} link ${href}`));
 }
 
+async function expectHeaderHelpLinks(page, { visible = false } = {}) {
+  const helpLinks = await page.$$eval('nav.header-help a', (links) => links.map((link) => {
+    const rect = link.getBoundingClientRect();
+    const style = window.getComputedStyle(link);
+    return {
+      text: link.textContent?.trim(),
+      href: link.getAttribute('href'),
+      visible: rect.width > 0
+        && rect.height > 0
+        && rect.bottom > 0
+        && rect.right > 0
+        && rect.top < window.innerHeight
+        && rect.left < window.innerWidth
+        && style.visibility !== 'hidden'
+        && style.display !== 'none',
+    };
+  }));
+  for (const [label, href] of expectedHeaderHelpLinks) {
+    const link = helpLinks.find((candidate) => candidate.text === label && candidate.href === href);
+    if (!link) fail(`nav.header-help missing expected link ${label} -> ${href}`);
+    if (visible && !link.visible) fail(`nav.header-help link ${label} should be visible on mobile`);
+  }
+}
+
+async function expectNoMobileOverflow(page) {
+  const overflow = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    bodyScrollWidth: document.body.scrollWidth,
+    bodyClientWidth: document.body.clientWidth,
+  }));
+  if (overflow.scrollWidth > overflow.clientWidth + 1 || overflow.bodyScrollWidth > overflow.bodyClientWidth + 1) {
+    fail(`Mobile viewport has horizontal overflow at 390x844: document ${overflow.scrollWidth}/${overflow.clientWidth}, body ${overflow.bodyScrollWidth}/${overflow.bodyClientWidth}`);
+  }
+}
+
+async function expectMobilePanelFlow(page) {
+  const panelSelectors = [
+    '#server-status',
+    '#decode-perf-panel',
+    '#recent-requests-panel',
+    '#adapters-panel',
+    '[data-training-tabs]',
+    '#chat-output',
+  ];
+  const panelFlow = await page.evaluate((selectors) => selectors.map((selector) => {
+    const element = document.querySelector(selector);
+    const panel = element?.closest('.panel');
+    const rect = panel?.getBoundingClientRect();
+    return rect && {
+      selector,
+      left: Math.round(rect.left),
+      top: Math.round(rect.top + window.scrollY),
+      width: Math.round(rect.width),
+    };
+  }), panelSelectors);
+
+  if (panelFlow.some((panel) => !panel)) fail(`Mobile dashboard is missing a main panel: ${JSON.stringify(panelFlow)}`);
+  for (let index = 1; index < panelFlow.length; index += 1) {
+    const previous = panelFlow[index - 1];
+    const current = panelFlow[index];
+    if (current.top <= previous.top) fail(`Mobile panels should stack in source order: ${JSON.stringify(panelFlow)}`);
+    if (Math.abs(current.left - panelFlow[0].left) > 2) fail(`Mobile panels should align in one column: ${JSON.stringify(panelFlow)}`);
+    if (current.width > 390) fail(`Mobile panel exceeds viewport width: ${JSON.stringify(current)}`);
+  }
+
+  for (const selector of panelSelectors) {
+    await page.evaluate((targetSelector) => document.querySelector(targetSelector)?.closest('.panel')?.scrollIntoView({ block: 'center' }), selector);
+    await page.waitForFunction((targetSelector) => {
+      const panel = document.querySelector(targetSelector)?.closest('.panel');
+      const rect = panel?.getBoundingClientRect();
+      return Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0 && rect.height > 0);
+    }, { timeout: 5000 }, selector).catch(() => fail(`Mobile panel ${selector} should be reachable by scrolling`));
+  }
+}
+
 async function clickAdapterAction(page, adapterName, actionLabel) {
   const clicked = await page.evaluate((targetAdapterName, targetActionLabel) => {
     const items = Array.from(document.querySelectorAll('#adapters-panel .adapter-item'));
@@ -701,6 +799,47 @@ async function expectApiFailurePanel(page, selector, action, detail) {
   }
 }
 
+async function runMobileOnboardingSmoke(baseUrl) {
+  const puppeteer = await loadPuppeteer();
+  const browser = await puppeteer.launch({
+    executablePath: chromiumPath(),
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+
+  const pageErrors = [];
+  try {
+    const page = await browser.newPage();
+    page.on('pageerror', (error) => pageErrors.push(error.message));
+    page.on('console', (entry) => {
+      if (entry.type() === 'error') pageErrors.push(entry.text());
+    });
+    page.on('requestfailed', (request) => {
+      pageErrors.push(`${request.method()} ${request.url()} failed: ${request.failure()?.errorText || 'unknown error'}`);
+    });
+
+    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true });
+    await page.goto(`${baseUrl}/ui`, { waitUntil: 'networkidle0', timeout: 10000 });
+
+    if (pageErrors.length > 0) fail(`Mobile UI emitted browser errors: ${pageErrors.join('; ')}`);
+    await expectNoMobileOverflow(page);
+    await waitForVisibleElement(page, '.header h1', 'Mobile header title did not render');
+    await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Mobile header title text missing');
+    await expectHeaderHelpLinks(page, { visible: true });
+    await expectMobilePanelFlow(page);
+    await expectTrainingTabKeyboardNavigation(page);
+    await clickAndWait(page, '#training-tab-queue', 'Could not activate mobile Queue tab');
+    await waitForVisiblePanel(page, '#tab-queue', 'Mobile Queue tab did not activate');
+    await clickAndWait(page, '#training-tab-sft', 'Could not activate mobile SFT tab');
+    await waitForVisiblePanel(page, '#tab-sft', 'Mobile SFT tab did not activate');
+    await clickAndWait(page, '#training-tab-grpo', 'Could not activate mobile GRPO tab');
+    await waitForVisiblePanel(page, '#tab-grpo', 'Mobile GRPO tab did not activate');
+    await expectNoMobileOverflow(page);
+  } finally {
+    await browser.close();
+  }
+}
+
 async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapters = false } = {}) {
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
@@ -729,21 +868,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (pageErrors.length > 0) fail(`UI emitted browser errors: ${pageErrors.join('; ')}`);
 
     await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Header did not render');
-    const helpLinks = await page.$$eval('nav.header-help a', (links) => links.map((link) => ({ text: link.textContent?.trim(), href: link.getAttribute('href') })));
-    const expectedHeaderHelpLinks = [
-      ['Quickstart', 'https://ericflo.github.io/kiln/quickstart.html'],
-      ['GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html'],
-      ['API Reference', 'https://ericflo.github.io/kiln/api.html'],
-      ['CLI Reference', 'https://ericflo.github.io/kiln/cli.html'],
-      ['Demo', 'https://ericflo.github.io/kiln/demo/'],
-      ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
-    ];
-    for (const expected of expectedHeaderHelpLinks) {
-      const [label, href] = expected;
-      if (!helpLinks.some((link) => link.text === label && link.href === href)) {
-        fail(`nav.header-help missing expected link ${label} -> ${href}`);
-      }
-    }
+    await expectHeaderHelpLinks(page);
 
     if (expectFailureStates) {
       await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
@@ -901,16 +1026,6 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference clear should restore the empty state');
     await expectDisabled(page, '#copy-chat-response', true, 'Copy response should disable after clearing chat');
 
-    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 1, isMobile: true });
-    const overflow = await page.evaluate(() => ({
-      scrollWidth: document.documentElement.scrollWidth,
-      clientWidth: document.documentElement.clientWidth,
-      bodyScrollWidth: document.body.scrollWidth,
-      bodyClientWidth: document.body.clientWidth,
-    }));
-    if (overflow.scrollWidth > overflow.clientWidth + 1 || overflow.bodyScrollWidth > overflow.bodyClientWidth + 1) {
-      fail(`Mobile viewport has horizontal overflow at 390x844: document ${overflow.scrollWidth}/${overflow.clientWidth}, body ${overflow.bodyScrollWidth}/${overflow.bodyClientWidth}`);
-    }
   } finally {
     await browser.close();
   }
@@ -926,6 +1041,7 @@ try {
 const { server, baseUrl } = await startServer();
 try {
   await runSmoke(baseUrl);
+  await runMobileOnboardingSmoke(baseUrl);
 } finally {
   await new Promise((accept) => server.close(accept));
 }
