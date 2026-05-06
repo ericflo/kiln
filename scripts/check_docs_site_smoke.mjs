@@ -688,6 +688,19 @@ function validateQuickstartCliReference() {
     fail(`QUICKSTART.md: CLI Reference command block missing commands: ${missingCommands.join(', ')}`);
   }
 
+  const expectedTrainingPayloadTerms = [
+    'SFT JSONL',
+    'messages array',
+    'GRPO JSON request/batch',
+    'groups',
+    'completions',
+    'reward scores',
+  ];
+  const missingTrainingPayloadTerms = expectedTrainingPayloadTerms.filter((term) => !cliReferenceCodeBlock.includes(term));
+  if (missingTrainingPayloadTerms.length > 0) {
+    fail(`QUICKSTART.md: CLI Reference command block missing training payload cues: ${missingTrainingPayloadTerms.join(', ')}`);
+  }
+
   const cliParser = readFileSync(resolve(repoRoot, 'crates/kiln-server/src/cli.rs'), 'utf8');
   const parserChecks = [
     ['Commands::Serve', /pub enum Commands[\s\S]*?\n\s+Serve\s*\{[\s\S]*?served_model_id:\s*Option<String>/],

@@ -636,10 +636,10 @@ kiln config -f kiln.toml
     Validate a TOML config file without starting the server.
 
 kiln train sft --file corrections.jsonl --adapter support-bot
-    Submit JSONL SFT correction examples to the running server.
+    Submit SFT JSONL: each line is one chat correction with a messages array.
 
 kiln train grpo --file grpo-batch.json --adapter support-bot
-    Submit one JSON GRPO request/batch to the running server.
+    Submit one GRPO JSON request/batch with groups, candidate completions, and reward scores.
 
 kiln train status --job-id train_123
     Check a specific training job; omit --job-id to show the queue.
