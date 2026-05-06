@@ -380,6 +380,8 @@ curl http://localhost:8420/v1/chat/completions \
         regex, unit tests, another model, human eval.
       </p>
 <pre><code><span style="color:#7f8694"># 1. Generate candidates</span>
+import requests
+
 responses = [client.chat.completions.create(
     model="qwen3.5-4b-kiln", messages=[...], temperature=0.7
 ) for _ in range(8)]

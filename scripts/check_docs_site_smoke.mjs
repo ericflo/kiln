@@ -480,6 +480,36 @@ function validateReadmeQuickStartPaths() {
   }
 }
 
+function validateGrpoOverviewRequestsImports() {
+  const readme = readFileSync(resolve(repoRoot, 'README.md'), 'utf8');
+  const readmeSection = extractMarkdownSection(readme, 'The GRPO Loop');
+  if (!readmeSection) {
+    fail('README.md: missing ## The GRPO Loop section');
+  }
+  assertRequestsImportNearPost(readmeSection, 'README.md: The GRPO Loop');
+
+  const index = readFileSync(resolve(repoRoot, 'docs/site/index.html'), 'utf8');
+  const indexSection = index.match(/<!-- the GRPO loop -->[\s\S]*?<\/section>/);
+  if (!indexSection) {
+    fail('docs/site/index.html: missing The GRPO loop section');
+  }
+  assertRequestsImportNearPost(indexSection[0], 'docs/site/index.html: The GRPO loop');
+}
+
+function assertRequestsImportNearPost(section, context) {
+  const requestPosts = Array.from(section.matchAll(/requests\.post/g));
+  if (requestPosts.length === 0) {
+    fail(`${context}: missing requests.post GRPO submit call`);
+  }
+
+  for (const requestPost of requestPosts) {
+    const nearbyPrefix = section.slice(Math.max(0, requestPost.index - 800), requestPost.index);
+    if (!nearbyPrefix.includes('import requests')) {
+      fail(`${context}: requests.post must have import requests nearby before use`);
+    }
+  }
+}
+
 function extractMarkdownSection(markdown, heading) {
   const headingPattern = new RegExp(`^## ${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm');
   const headingMatch = markdown.match(headingPattern);
@@ -1131,6 +1161,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateReadmeQuickStartPaths();
+  validateGrpoOverviewRequestsImports();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();

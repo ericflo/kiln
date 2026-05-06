@@ -80,6 +80,7 @@ This is the killer feature. Generate completions, score them with your own rewar
 
 ```python
 import openai
+import requests
 
 client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
 
