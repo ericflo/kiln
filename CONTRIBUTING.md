@@ -46,10 +46,10 @@ CUDA builds compile a fair amount of `nvcc` per architecture. To target only an 
 KILN_CUDA_ARCHS=86 cargo build --release --features cuda
 ```
 
-Run the test suite. The two skipped tests are pre-existing flakes documented in `.github/workflows/ci.yml` (env-var races and a `Device::new_metal(0)` race in `candle-metal`):
+Run the test suite. The skipped `test_health_with_real_backend` depends on a live network backend and is intentionally excluded from CI. Env-mutating tests are now serialized via an internal `ENV_LOCK` mutex and run safely in parallel. CI on macOS additionally pins the Metal feature tests to `--test-threads=1` because of a known race in `candle-metal`'s `MetalDevice::new`:
 
 ```bash
-cargo test --locked -- --skip test_env_var_overrides --skip test_health_with_real_backend
+cargo test --locked -- --skip test_health_with_real_backend
 ```
 
 If you have `cargo-nextest` installed, it runs the same tests in parallel and is noticeably faster:
@@ -57,6 +57,15 @@ If you have `cargo-nextest` installed, it runs the same tests in parallel and is
 ```bash
 cargo nextest run --locked
 ```
+
+Run the license / source / bans policy check that CI runs:
+
+```bash
+cargo install --locked cargo-deny  # if not already installed
+cargo deny check --all-features
+```
+
+This validates that any new dependency satisfies the workspace's MIT/Apache-compatible license allowlist and other policy rules in `deny.toml`. CI pins cargo-deny to a specific action SHA (see `.github/workflows/ci.yml`); local runs with the latest version are fine for catching gross violations before pushing.
 
 ## Running the server locally
 
