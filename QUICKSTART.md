@@ -7,7 +7,8 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | Path | Pick this if | What you do first |
 |------|--------------|-------------------|
 | **Desktop App (recommended)** | You want the shortest first run on Windows, Linux, or Apple Silicon macOS. | Install the app, choose or download `Qwen/Qwen3.5-4B`, start the server from the GUI, then jump to [Test Inference](#4-test-inference). |
-| **Source / CLI** | You are contributing, scripting, or want direct terminal control. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
+| **Server binary (terminal-first)** | You want a prebuilt `kiln` server in your terminal without the Desktop App or a source build. | Download the latest `kiln-v*` server binary for your GPU backend, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 2-5. |
+| **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
 
 ## Reader map
 
@@ -19,7 +20,7 @@ After first inference, continue to [SFT training](#6-submit-sft-training), the [
 
 ## Prerequisites
 
-Choose the path that matches how you want to run Kiln. The Desktop App avoids source builds; the Source / CLI path is for users who want the binary in their terminal.
+Choose the path that matches how you want to run Kiln. The Desktop App is the shortest GUI path, Server binary is the terminal-first path with no Rust build, and Source / CLI is for contributors or users who want to compile the binary themselves.
 
 **Desktop App path (recommended for most users):**
 
@@ -27,6 +28,13 @@ Choose the path that matches how you want to run Kiln. The Desktop App avoids so
 - **GPU**: NVIDIA GPU, AMD/Intel Vulkan-capable Linux GPU, or Apple Silicon Mac. NVIDIA systems should have 24GB+ VRAM (RTX 3090, RTX 4090, A6000, etc.); Apple Silicon systems should have 16GB+ unified memory.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters.
 - **Build tooling**: No Rust toolchain, CUDA toolkit, or Xcode install is required for the GUI path. The app downloads the matching prebuilt `kiln` server binary for your platform.
+
+**Server binary path (terminal-first, no source build):**
+
+- **Platform**: Linux x86_64, Windows x86_64, or macOS on Apple Silicon. Intel Macs are not supported.
+- **GPU**: NVIDIA systems need CUDA 12.4+ driver/runtime support and 24GB+ VRAM. AMD/Intel Linux systems use Vulkan 1.2+. Apple Silicon Macs use Metal with 16GB+ unified memory.
+- **Disk**: ~20GB free for the server binary, model weights, and adapters.
+- **Build tooling**: No Rust toolchain is required. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
 
 **Source / CLI path (for contributors and direct CLI users):**
 
@@ -54,7 +62,51 @@ Kiln Desktop ships prebuilt installers for Windows, Linux, and macOS on Apple Si
 | Linux | [Kiln.Desktop_0.2.2_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.deb) | 8.8 MB |
 | Linux | [Kiln.Desktop_0.2.2_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.2/Kiln.Desktop_0.2.2_amd64.AppImage) | 85.7 MB |
 
-Install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to [Test Inference](#4-test-inference). Continue with section 1 only if you want to build from source, contribute, or use the CLI directly.
+Install the desktop app, choose or download the Qwen3.5-4B model weights, start the server from the app, then skip ahead to [Test Inference](#4-test-inference). Continue with the Server binary path if you want a prebuilt terminal-first server, or section 1 if you want to build from source.
+
+## Quick path: Server binary (terminal-first, no source build)
+
+Use this terminal-first, no source build path when you want the `kiln` server in your terminal without installing the Desktop App or compiling Rust. Pick the artifact for your platform/backend, extract it, then continue at [Download Model Weights](#2-download-model-weights). Release artifacts publish SHA-256 sidecars next to the downloads; verify them if your environment requires artifact checks.
+
+**Linux x86_64 + NVIDIA CUDA 12.4:**
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-linux-cuda.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+tar -xzf kiln-linux-cuda.tar.gz
+```
+
+**Linux x86_64 + AMD / Intel Vulkan 1.2:**
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-linux-vulkan.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-vulkan.tar.gz"
+tar -xzf kiln-linux-vulkan.tar.gz
+```
+
+Use this on AMD/Intel Linux systems where `vulkaninfo --summary` lists the GPU.
+
+**macOS Apple Silicon + Metal:**
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-macos.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-aarch64-apple-darwin-metal.tar.gz"
+tar -xzf kiln-macos.tar.gz
+```
+
+**Windows x86_64 + NVIDIA CUDA 12.4 (PowerShell):**
+
+```powershell
+$KilnVersion = ((Invoke-RestMethod https://api.github.com/repos/ericflo/kiln/releases/latest).tag_name -replace '^kiln-v', '')
+curl.exe -L -o kiln-windows.zip `
+  "https://github.com/ericflo/kiln/releases/download/kiln-v$KilnVersion/kiln-$KilnVersion-x86_64-pc-windows-msvc-cuda124.zip"
+Expand-Archive .\kiln-windows.zip -DestinationPath .\kiln
+```
+
+After extracting, the binary is `./kiln` on Linux/macOS or `.\kiln\kiln.exe` on Windows. Continue at [Download Model Weights](#2-download-model-weights), keep `Qwen/Qwen3.5-4B` as the model, then start the server with `kiln serve`.
 
 ## 1. Build Kiln
 
