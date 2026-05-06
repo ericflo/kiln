@@ -42,6 +42,16 @@ const expectedFooterLinks = [
   { label: 'License', href: 'https://github.com/ericflo/kiln/blob/main/LICENSE' },
 ];
 
+const expectedEmbeddedUiHelpLinks = [
+  { label: 'Quickstart', href: 'https://ericflo.github.io/kiln/quickstart.html' },
+  { label: 'GRPO Guide', href: 'https://ericflo.github.io/kiln/grpo.html' },
+  { label: 'API Reference', href: 'https://ericflo.github.io/kiln/api.html' },
+  { label: 'CLI Reference', href: 'https://ericflo.github.io/kiln/cli.html' },
+  { label: 'Demo', href: 'https://ericflo.github.io/kiln/demo/' },
+  { label: 'Troubleshooting', href: 'https://ericflo.github.io/kiln/troubleshooting.html' },
+  { label: 'Architecture', href: 'https://ericflo.github.io/kiln/architecture.html' },
+];
+
 const demoPagePath = 'docs/site/demo/index.html';
 const quickstartPagePath = 'docs/site/quickstart.html';
 const apiPagePath = 'docs/site/api.html';
@@ -353,6 +363,25 @@ function validateQuickstartMarkdownMedia() {
   }
   if (missingAltTerms.length > 0) {
     fail(`QUICKSTART.md: dashboard screenshot alt text missing terms: ${missingAltTerms.join(', ')}`);
+  }
+}
+
+function validateEmbeddedUiHelpLinks() {
+  const uiPath = resolve(repoRoot, 'crates/kiln-server/src/ui.html');
+  const ui = readFileSync(uiPath, 'utf8');
+  const navMatch = ui.match(/<nav class="header-help" aria-label="Help links">[\s\S]*?<\/nav>/);
+  if (!navMatch) {
+    fail('crates/kiln-server/src/ui.html: missing embedded UI help nav');
+  }
+
+  const nav = navMatch[0];
+  const missingLinks = expectedEmbeddedUiHelpLinks.filter(({ label, href }) => {
+    const escapedHref = href.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const linkPattern = new RegExp(`<a\\s+href="${escapedHref}"[^>]*>${label}<\\/a>`);
+    return !linkPattern.test(nav);
+  });
+  if (missingLinks.length > 0) {
+    fail(`crates/kiln-server/src/ui.html: embedded UI help nav missing links: ${missingLinks.map(({ label }) => label).join(', ')}`);
   }
 }
 
@@ -1259,6 +1288,7 @@ async function runSmoke() {
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
+  validateEmbeddedUiHelpLinks();
   validateCliHelpOnboardingCopy();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
