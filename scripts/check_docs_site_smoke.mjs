@@ -394,6 +394,46 @@ function validateQuickstartServerBinaryPath() {
   }
 }
 
+function validateReadmeQuickStartPaths() {
+  const readme = readFileSync(resolve(repoRoot, 'README.md'), 'utf8');
+  const quickStartSection = extractMarkdownSection(readme, 'Quick Start');
+  if (!quickStartSection) {
+    fail('README.md: missing ## Quick Start section');
+  }
+
+  const requiredPaths = [
+    ['Desktop App path', 'Desktop App (recommended)'],
+    ['Server binary path', 'Server binary (terminal-first, no source build)'],
+    ['Container path', 'Container'],
+    ['Source / CLI path', 'Source / CLI'],
+  ];
+  for (const [label, term] of requiredPaths) {
+    assertIncludes(quickStartSection, term, `README.md: Quick Start ${label}`);
+  }
+
+  const serverBinaryMatch = quickStartSection.match(/\*\*Path 2 — Server binary \(terminal-first, no source build\):\*\*([\s\S]*?)(?=\n\*\*Path 3 — Container:\*\*)/);
+  if (!serverBinaryMatch) {
+    fail('README.md: Quick Start missing distinct Server binary path before Container path');
+  }
+  const serverBinaryPath = serverBinaryMatch[1];
+  const requiredServerTerms = [
+    'terminal-first',
+    'no source build',
+    'Qwen/Qwen3.5-4B',
+    'kiln-v${KILN_VERSION}',
+    'x86_64-unknown-linux-gnu-cuda124.tar.gz',
+  ];
+  for (const term of requiredServerTerms) {
+    assertIncludes(serverBinaryPath, term, 'README.md: Server binary path');
+  }
+  if (!/https:\/\/github\.com\/ericflo\/kiln\/releases\/download\/kiln-v/.test(serverBinaryPath)) {
+    fail('README.md: Server binary path must include at least one kiln-v release download command');
+  }
+  if (!/QUICKSTART\.md#quick-path-server-binary-terminal-first-no-source-build/.test(serverBinaryPath)) {
+    fail('README.md: Server binary path must link to QUICKSTART.md full artifact matrix');
+  }
+}
+
 function extractMarkdownSection(markdown, heading) {
   const headingPattern = new RegExp(`^## ${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm');
   const headingMatch = markdown.match(headingPattern);
@@ -940,6 +980,7 @@ function chromiumPath() {
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
+  validateReadmeQuickStartPaths();
   validateQuickstartMarkdownMedia();
   validateQuickstartServerBinaryPath();
   validateQuickstartCliReference();
