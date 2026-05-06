@@ -21,6 +21,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
+use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_head, model_forward_paged,
     model_forward_paged_batched_decode_hidden, model_forward_paged_decode_contiguous_batch_greedy,
@@ -31,6 +32,7 @@ use crate::forward::{
 };
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
+use crate::packed_weight_registry::GpuPackedWeightRegistry;
 use crate::paged_kv_cache::PagedKvCache;
 use crate::sampling::{greedy_sample, sample_with_params};
 use crate::speculative::{
@@ -67,6 +69,13 @@ pub struct ModelRunner {
     /// CUDA graph runner for accelerated decode steps.
     /// Uses Mutex for interior mutability (graph state changes during &self generation).
     cuda_graph: Mutex<CudaGraphRunner>,
+    /// Phase A explicit decode weight registry. Decode kernels address weights
+    /// by enum keys instead of safetensors/Candle names.
+    packed_weight_registry: GpuPackedWeightRegistry,
+    /// Phase A raw decode buffer pool. The first decode/warmup materializes
+    /// stable typed tensors for the active graph bucket, then reuses them.
+    decode_buffers: Mutex<Option<DecodeBuffers>>,
+    decode_buffer_config: DecodeBufferConfig,
     backend: Arc<dyn BackendRuntime>,
 }
 
@@ -128,6 +137,15 @@ pub struct PagedBatchedDecodeState {
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+}
+
+
+fn decode_buffer_max_batch() -> usize {
+    std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(8)
 }
 
 enum PrefillSampleSource {
@@ -771,6 +789,16 @@ impl ModelRunner {
         let device = weights.embed_tokens.device().clone();
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
+        let packed_weight_registry = GpuPackedWeightRegistry::from_gpu_weights(&weights)
+            .expect("Qwen3.5 packed-weight registry must build from loaded GPU weights");
+        let decode_buffer_config = DecodeBufferConfig::graph_bucket(
+            decode_buffer_max_batch(),
+            config.max_position_embeddings,
+            1,
+            16,
+            DecodeElementType::Bf16,
+        )
+        .expect("Qwen3.5 decode buffer config must be valid");
         Self {
             weights,
             tokenizer,
@@ -778,6 +806,9 @@ impl ModelRunner {
             eos_token_ids,
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
+            packed_weight_registry,
+            decode_buffers: Mutex::new(None),
+            decode_buffer_config,
             backend,
         }
     }
@@ -809,6 +840,25 @@ impl ModelRunner {
     /// Returns a reference to the active LoRA weights, if any.
     pub fn active_lora(&self) -> Option<&LoraWeights> {
         self.active_lora.as_ref()
+    }
+
+    pub fn packed_weight_registry(&self) -> &GpuPackedWeightRegistry {
+        &self.packed_weight_registry
+    }
+
+    pub fn ensure_decode_buffers(&self, batch: usize) -> Result<()> {
+        let mut guard = self
+            .decode_buffers
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock decode buffers: {e}"))?;
+        if guard.is_none() {
+            let device = self.weights.embed_tokens.device();
+            *guard = Some(DecodeBuffers::allocate(self.decode_buffer_config.clone(), device)?);
+        }
+        guard
+            .as_ref()
+            .expect("decode buffers initialized")
+            .ensure_batch_fits(batch)
     }
 
     /// Atomically swap the active LoRA adapter.
@@ -1852,6 +1902,7 @@ impl ModelRunner {
         anyhow::ensure!(!states.is_empty(), "batched decode step requires rows");
 
         let row_count = states.len();
+        self.ensure_decode_buffers(row_count)?;
         let input_tokens: Vec<TokenId> = states.iter().map(|state| state.next_token).collect();
         let block_tables: Vec<BlockTable> = states
             .iter()
