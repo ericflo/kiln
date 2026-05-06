@@ -18,6 +18,27 @@ const expectedHeaderHelpLinks = [
   ['Demo', 'https://ericflo.github.io/kiln/demo/'],
   ['Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html'],
 ];
+const forbiddenPublicityTerms = [
+  'launch post',
+  'announcement',
+  'press release',
+  'marketing',
+  'outreach',
+  'social media',
+  'twitter',
+  'x-twitter',
+  'hacker news',
+  'hn launch',
+  'lobste.rs',
+  'localllama',
+  'discord',
+  'reddit',
+  'product hunt',
+  'community post',
+  'community launch',
+  'community announcement',
+  'external community',
+];
 
 function fail(message) {
   throw new Error(message);
@@ -498,6 +519,15 @@ async function expectText(page, selector, pattern, message) {
   if (!pattern.test(textContent)) fail(`${message}: selector ${selector} text was ${JSON.stringify(textContent.trim())}`);
 }
 
+async function expectNoForbiddenPublicityCopy(page, label) {
+  const text = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase());
+  for (const term of forbiddenPublicityTerms) {
+    if (text.includes(term.toLowerCase())) {
+      fail(`${label} should not use external publicity wording: ${term}`);
+    }
+  }
+}
+
 async function expectDisabled(page, selector, expected, message) {
   await page.waitForFunction(
     (targetSelector, targetDisabled) => {
@@ -826,6 +856,7 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await waitForVisibleElement(page, '.header h1', 'Mobile header title did not render');
     await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Mobile header title text missing');
     await expectHeaderHelpLinks(page, { visible: true });
+    await expectNoForbiddenPublicityCopy(page, 'Mobile server dashboard');
     await expectMobilePanelFlow(page);
     await expectTrainingTabKeyboardNavigation(page);
     await clickAndWait(page, '#training-tab-queue', 'Could not activate mobile Queue tab');
@@ -869,6 +900,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
     await expectText(page, '.header h1', /^\s*kiln\s*$/i, 'Header did not render');
     await expectHeaderHelpLinks(page);
+    await expectNoForbiddenPublicityCopy(page, 'Server dashboard');
 
     if (expectFailureStates) {
       await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
