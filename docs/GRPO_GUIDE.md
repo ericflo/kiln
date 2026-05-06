@@ -46,7 +46,7 @@ reward trend up.
 ## Endpoint reference
 
 The full schema for both endpoints lives in
-[Quickstart §9](../QUICKSTART.md#9-phase-8-api-examples). The fields used in
+[Quickstart §9](../QUICKSTART.md#9-advanced-api-examples). The fields used in
 this guide are:
 
 **`POST /v1/completions/batch`** — issues `prompts.len() × n` completions in
@@ -296,7 +296,7 @@ server-side default, so omit anything you don't want to override:
   via `/v1/adapters` (e.g., for A/B testing).
 
 For full schema details, see
-[QUICKSTART.md §9.1](../QUICKSTART.md#91-batch-generation-efficient-for-grpo-rollouts).
+[QUICKSTART.md §9.4](../QUICKSTART.md#94-batch-generation-efficient-for-grpo-rollouts).
 
 ## What to expect at the wall clock
 
@@ -337,7 +337,7 @@ Watch live training progress with `GET /v1/train/status`.
 
 ## See also
 
-- [Quickstart §9](../QUICKSTART.md#9-phase-8-api-examples) — full schema for
+- [Quickstart §9](../QUICKSTART.md#9-advanced-api-examples) — full schema for
   `/v1/completions/batch` and `/v1/train/grpo`, plus the fastest path to run
   Kiln before trying GRPO.
 - [README.md `## The GRPO Loop`](../README.md#the-grpo-loop) — the 30-second

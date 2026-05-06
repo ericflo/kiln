@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { dirname, relative, sep, join, resolve } from 'node:path';
+import { dirname, extname, relative, sep, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
@@ -531,6 +531,223 @@ function validateDocsSiteLocalLinks() {
   }
 }
 
+
+function markdownLocalLinkSourcePaths() {
+  const docsDir = resolve(repoRoot, 'docs');
+  const topLevelDocs = readdirSync(docsDir)
+    .filter((entry) => entry.endsWith('.md') && !/^archive(?:\.|$|-)/i.test(entry))
+    .map((entry) => join('docs', entry))
+    .sort();
+
+  return ['README.md', 'QUICKSTART.md', ...topLevelDocs];
+}
+
+function stripMarkdownCode(markdown) {
+  return markdown
+    .replace(/^```[\s\S]*?^```/gm, (block) => '\n'.repeat(block.split('\n').length - 1))
+    .replace(/^~~~[\s\S]*?^~~~/gm, (block) => '\n'.repeat(block.split('\n').length - 1))
+    .replace(/`[^`\n]*(?:`|$)/g, '');
+}
+
+function normalizeMarkdownLinkText(value) {
+  return value
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/[`*_~\[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function githubHeadingSlug(headingText) {
+  return normalizeMarkdownLinkText(headingText)
+    .toLowerCase()
+    .replace(/&(?:amp|lt|gt|quot|#39);/g, (entity) => ({
+      '&amp;': '&',
+      '&lt;': '<',
+      '&gt;': '>',
+      '&quot;': '',
+      '&#39;': '',
+    })[entity] ?? '')
+    .replace(/[^\p{Letter}\p{Number}\s_-]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-');
+}
+
+function markdownHeadingAnchors(markdown) {
+  const anchors = new Set();
+  const seen = new Map();
+  const headingMatches = stripMarkdownCode(markdown).matchAll(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/gm);
+
+  for (const match of headingMatches) {
+    const baseSlug = githubHeadingSlug(match[2]);
+    if (!baseSlug) continue;
+    const duplicateCount = seen.get(baseSlug) ?? 0;
+    seen.set(baseSlug, duplicateCount + 1);
+    anchors.add(duplicateCount === 0 ? baseSlug : `${baseSlug}-${duplicateCount}`);
+  }
+
+  return anchors;
+}
+
+function splitMarkdownTarget(rawTarget) {
+  const trimmed = rawTarget.trim();
+  if (trimmed.startsWith('<')) {
+    const closingBracket = trimmed.indexOf('>');
+    return closingBracket === -1 ? trimmed : trimmed.slice(1, closingBracket);
+  }
+
+  const match = trimmed.match(/^(?:\\.|[^\s"'])+/);
+  return match ? match[0].replace(/\\([()])/g, '$1') : trimmed;
+}
+
+function extractMarkdownLocalTargets(markdown) {
+  const source = stripMarkdownCode(markdown);
+  const targets = [];
+  const inlineLinkPattern = /(!?)\[([^\]\n]*(?:\][^\[\]\n]*)*)\]\(\s*([^\n)]*(?:\([^\n)]*\)[^\n)]*)*)\)/g;
+  const referenceDefinitionPattern = /^ {0,3}\[([^\]\n]+)\]:\s*(\S[^\n]*)$/gm;
+  const htmlAttrPattern = /\b(?:href|src)\s*=\s*(?:"([^"]*)"|'([^']*)')/gi;
+
+  for (const match of source.matchAll(inlineLinkPattern)) {
+    targets.push({
+      text: match[2].replace(/\s+/g, ' ').trim() || (match[1] ? 'image' : 'link'),
+      target: splitMarkdownTarget(match[3]),
+    });
+  }
+
+  for (const match of source.matchAll(referenceDefinitionPattern)) {
+    targets.push({
+      text: `[${match[1]}]`,
+      target: splitMarkdownTarget(match[2]),
+    });
+  }
+
+  for (const match of source.matchAll(htmlAttrPattern)) {
+    targets.push({
+      text: '<html attribute>',
+      target: decodeHtmlAttribute(match[1] ?? match[2] ?? ''),
+    });
+  }
+
+  return targets;
+}
+
+function isDynamicMarkdownTarget(target) {
+  return target.includes('${')
+    || target.includes('{{')
+    || target.includes('}}')
+    || target.includes('<')
+    || target.includes('>')
+    || target.includes('*')
+    || target.includes('…')
+    || target.includes('...');
+}
+
+function isIgnoredMarkdownTarget(target) {
+  const trimmed = target.trim();
+  return trimmed === ''
+    || hasKnownExternalScheme(trimmed)
+    || /^javascript:/i.test(trimmed)
+    || /^data:/i.test(trimmed)
+    || isDynamicMarkdownTarget(trimmed);
+}
+
+function markdownTargetParts(target) {
+  const [pathAndQuery, rawAnchor = ''] = target.split('#');
+  const pathPart = pathAndQuery.split('?')[0];
+  const anchor = rawAnchor.split('?')[0];
+  return { pathPart, anchor };
+}
+
+function decodeLocalPath(pathPart) {
+  try {
+    return decodeURIComponent(pathPart);
+  } catch {
+    return pathPart;
+  }
+}
+
+function resolveMarkdownTargetPath(sourceMarkdownPath, pathPart) {
+  const decodedPath = decodeLocalPath(pathPart);
+  if (decodedPath === '') return resolve(repoRoot, sourceMarkdownPath);
+  const sourceDir = dirname(resolve(repoRoot, sourceMarkdownPath));
+  return decodedPath.startsWith('/')
+    ? resolve(repoRoot, `.${decodedPath}`)
+    : resolve(sourceDir, decodedPath);
+}
+
+function directoryHasMarkdownIndex(directoryPath) {
+  return ['index.html', 'README.md', 'Readme.md', 'readme.md']
+    .some((entry) => existsSync(resolve(directoryPath, entry)));
+}
+
+function validateMarkdownTargetFile(sourcePath, link, resolvedPath, pathPart) {
+  if (!existsSync(resolvedPath)) {
+    fail(`${sourcePath}: broken local Markdown link "${link.text}" -> ${link.target} (resolved path: ${relative(repoRoot, resolvedPath)})`);
+  }
+
+  const targetStat = statSync(resolvedPath);
+  if (targetStat.isDirectory()) {
+    if (!directoryHasMarkdownIndex(resolvedPath)) {
+      fail(`${sourcePath}: directory Markdown link "${link.text}" -> ${link.target} must contain index.html or README.md (resolved path: ${relative(repoRoot, resolvedPath)})`);
+    }
+    return;
+  }
+
+  if (pathPart.endsWith('/')) {
+    fail(`${sourcePath}: directory-style Markdown link "${link.text}" -> ${link.target} resolved to a file (${relative(repoRoot, resolvedPath)})`);
+  }
+}
+
+function anchorLooksLikeIssueOrPrShorthand(anchor) {
+  return /^\d+$/.test(anchor);
+}
+
+function safeDecodeAnchor(anchor) {
+  try {
+    return decodeURIComponent(anchor).toLowerCase();
+  } catch {
+    return anchor.toLowerCase();
+  }
+}
+
+function validateMarkdownLocalLinks() {
+  const anchorCache = new Map();
+  const markdownPaths = markdownLocalLinkSourcePaths();
+
+  function anchorsFor(relativePath) {
+    if (!anchorCache.has(relativePath)) {
+      anchorCache.set(relativePath, markdownHeadingAnchors(readFileSync(resolve(repoRoot, relativePath), 'utf8')));
+    }
+    return anchorCache.get(relativePath);
+  }
+
+  for (const sourcePath of markdownPaths) {
+    const markdown = readFileSync(resolve(repoRoot, sourcePath), 'utf8');
+    for (const link of extractMarkdownLocalTargets(markdown)) {
+      const target = link.target.trim();
+      if (isIgnoredMarkdownTarget(target)) continue;
+
+      const { pathPart, anchor } = markdownTargetParts(target);
+      if (pathPart === '' && anchorLooksLikeIssueOrPrShorthand(anchor)) continue;
+
+      const resolvedPath = resolveMarkdownTargetPath(sourcePath, pathPart);
+      validateMarkdownTargetFile(sourcePath, link, resolvedPath, pathPart);
+
+      if (anchor) {
+        if (statSync(resolvedPath).isDirectory()) continue;
+        if (extname(resolvedPath).toLowerCase() !== '.md') continue;
+
+        const targetRelativePath = relative(repoRoot, resolvedPath).split(sep).join('/');
+        const normalizedAnchor = safeDecodeAnchor(anchor);
+        if (!anchorsFor(targetRelativePath).has(normalizedAnchor)) {
+          fail(`${sourcePath}: broken Markdown anchor "${link.text}" -> ${link.target} (missing anchor #${normalizedAnchor} in ${targetRelativePath})`);
+        }
+      }
+    }
+  }
+}
+
 function validateDemoCasts(sitePagePath, referencedCasts) {
   const demoDir = resolve(repoRoot, dirname(sitePagePath));
   const uniqueCasts = [...new Set(referencedCasts)];
@@ -621,6 +838,7 @@ async function runSmoke() {
   validateLaunchSentinel();
   validateDemoReadmeInventory();
   validateDocsSiteLocalLinks();
+  validateMarkdownLocalLinks();
 
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
