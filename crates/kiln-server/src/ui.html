@@ -1059,10 +1059,10 @@ function renderServerStatus(h) {
           <div class="vram-seg" style="width:${pct(free)}%;background:#21262d"></div>
         </div>
         <div class="vram-legend">
-          <span class="model">Model ${fmtGb(model)}</span>
-          <span class="kv">KV Cache ${fmtGb(kv)}</span>
-          <span class="train">Training ${fmtGb(train)}</span>
-          <span class="free">Free ${fmtGb(free)}</span>
+          <span class="model" title="GPU memory used by the model weights (Qwen3.5-4B + Marlin packed quantized projections).">Model ${fmtGb(model)}</span>
+          <span class="kv" title="GPU memory reserved for the paged attention KV cache (live inference state for in-flight requests).">KV Cache ${fmtGb(kv)}</span>
+          <span class="train" title="GPU memory budget reserved for online LoRA training (SFT and GRPO).">Training ${fmtGb(train)}</span>
+          <span class="free" title="Unallocated GPU memory available to grow KV cache or training as needed.">Free ${fmtGb(free)}</span>
         </div>
       </div>
     `;
@@ -1072,10 +1072,10 @@ function renderServerStatus(h) {
   if (sched) {
     schedHtml = `
       <div class="sched-stats">
-        <div class="sched-stat"><div class="num">${sched.waiting}</div><div class="lbl">Waiting</div></div>
-        <div class="sched-stat"><div class="num">${sched.running}</div><div class="lbl">Running</div></div>
-        <div class="sched-stat"><div class="num">${sched.blocks_used}</div><div class="lbl">Blocks Used</div></div>
-        <div class="sched-stat"><div class="num">${sched.blocks_free}</div><div class="lbl">Blocks Free</div></div>
+        <div class="sched-stat" title="Requests admitted to the scheduler but not yet running: queued for KV cache blocks to free up."><div class="num">${sched.waiting}</div><div class="lbl">Waiting</div></div>
+        <div class="sched-stat" title="Requests currently decoding tokens this step (chunked-prefill scheduler runs prefill and decode in the same batch)."><div class="num">${sched.running}</div><div class="lbl">Running</div></div>
+        <div class="sched-stat" title="KV cache blocks allocated to active requests. Each block holds a fixed span of tokens (paged attention)."><div class="num">${sched.blocks_used}</div><div class="lbl">Blocks Used</div></div>
+        <div class="sched-stat" title="KV cache blocks available for new requests. When this hits 0, new requests must wait."><div class="num">${sched.blocks_free}</div><div class="lbl">Blocks Free</div></div>
       </div>
     `;
   }
@@ -1099,10 +1099,10 @@ async function pollDecodePerf() {
     const window = data.window_secs ? Math.round(data.window_secs) : 60;
     if (!data.sample_count || data.sample_count < 1) {
       el.innerHTML = `<div class="sched-stats">
-        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
-        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
-        <div class="sched-stat"><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat"><div class="num">0</div><div class="lbl">samples (last ${window}s)</div></div>
+        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions in this rolling window."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Median inter-token latency: time between consecutive output tokens during streaming."><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat" title="99th-percentile inter-token latency: tail latency between output tokens (worst-case 1-in-100 step)."><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples (last ${window}s)</div></div>
       </div>
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">No streaming completions in the last ${window}s. Send a message in Quick Inference below, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
       return;
@@ -1112,10 +1112,10 @@ async function pollDecodePerf() {
     const p99 = data.p99_itl_ms.toFixed(1) + ' ms';
     const mean = data.mean_itl_ms.toFixed(1);
     el.innerHTML = `<div class="sched-stats">
-        <div class="sched-stat"><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
-        <div class="sched-stat"><div class="num">${p50}</div><div class="lbl">p50 ITL</div></div>
-        <div class="sched-stat"><div class="num">${p99}</div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat"><div class="num">${data.sample_count}</div><div class="lbl">samples (last ${window}s)</div></div>
+        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions in this rolling window."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Median inter-token latency: time between consecutive output tokens during streaming."><div class="num">${p50}</div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat" title="99th-percentile inter-token latency: tail latency between output tokens (worst-case 1-in-100 step)."><div class="num">${p99}</div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples (last ${window}s)</div></div>
       </div>
       <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
   } catch (e) {
