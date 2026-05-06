@@ -42,7 +42,7 @@ const SERVE_OVERVIEW: &str = r#"Start the OpenAI-compatible Kiln server for Qwen
 
 Before starting, point Kiln at model weights with KILN_MODEL_PATH or pass a TOML config with --config. After startup, open http://127.0.0.1:8420/ui for the embedded dashboard and use kiln health to check readiness.
 
-If setup stalls, follow QUICKSTART.md first, then the Troubleshooting section for model path, CUDA, and config checks.
+If setup stalls, follow https://ericflo.github.io/kiln/quickstart.html first, then https://ericflo.github.io/kiln/troubleshooting.html for model path, CUDA, and config checks.
 "#;
 
 const SERVE_EXAMPLES: &str = r#"Examples:
@@ -58,14 +58,14 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   kiln health
       Confirm the server is ready and inspect model, adapter, scheduler, and training status.
 
-  See QUICKSTART.md and Troubleshooting if the server cannot find weights, CUDA is unavailable, or config validation fails.
+  See https://ericflo.github.io/kiln/quickstart.html and https://ericflo.github.io/kiln/troubleshooting.html if the server cannot find weights, CUDA is unavailable, or config validation fails.
 "#;
 
 const HEALTH_OVERVIEW: &str = r#"Check readiness and setup diagnostics for a running Kiln server at http://localhost:8420 by default.
 
 `kiln health` calls the server's /health endpoint and prints a terminal-friendly tree with model, adapter, scheduler, GPU memory, and training status. Use it after `kiln serve` starts, or point --url at a remote server when debugging another host.
 
-If readiness fails, check the /health response first, then follow QUICKSTART.md and Troubleshooting for model path, CUDA, config, and server-start diagnostics.
+If readiness fails, check the /health response first, then follow https://ericflo.github.io/kiln/quickstart.html and https://ericflo.github.io/kiln/troubleshooting.html for model path, CUDA, config, and server-start diagnostics.
 "#;
 
 const HEALTH_EXAMPLES: &str = r#"Examples:
@@ -238,7 +238,7 @@ fn handle_request_error(url: &str, err: reqwest::Error) -> anyhow::Error {
             style("kiln serve").white().bold(),
             style("--url <addr>").white().bold()
         );
-        eprintln!("  See QUICKSTART.md for setup help.");
+        eprintln!("  See https://ericflo.github.io/kiln/quickstart.html for setup help.");
         std::process::exit(1);
     }
     anyhow::Error::new(err)
