@@ -45,7 +45,7 @@ For another page under `docs/site/`, copy the player setup from [`index.html`](i
 
 ## How to re-record
 
-Use [`SCRIPTS.md`](SCRIPTS.md) for the current six-cast recording workflow. The common shape for each cast is:
+Use [`SCRIPTS.md`](SCRIPTS.md) for the current six-cast recording workflow, including the canonical [pre-recording host setup](SCRIPTS.md#pre-recording-host-setup). Before running a driver, maintainers can set `KILN_BIN` to an extracted release artifact or a source-built `./target/release/kiln`; set `KILN_BENCH_BIN` the same way when re-recording `bench.cast` with `demo-bench.sh`. The common shape for each cast is:
 
 ```bash
 COLUMNS=120 LINES=32 TERM=xterm-256color asciinema rec docs/site/demo/<name>.cast \
