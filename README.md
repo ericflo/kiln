@@ -116,6 +116,15 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 **Path 1 — Desktop App (recommended):** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading `Qwen/Qwen3.5-4B`. No Rust toolchain, CUDA toolkit, or source build is required for this path.
 
+**Get the model weights** (Paths 2–4 share this step; the Desktop App handles it automatically):
+
+```bash
+pip install huggingface-hub
+huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+```
+
+This downloads `Qwen/Qwen3.5-4B` into `./Qwen3.5-4B`, which the commands below reference directly.
+
 **Path 2 — Server binary (terminal-first, no source build):** Download the latest `kiln-v*` server artifact when you want the `kiln` server in your terminal with no source build, Desktop App, or Docker. Linux x86_64 + NVIDIA CUDA 12.4 is the compact path:
 
 ```bash
@@ -124,24 +133,22 @@ curl -L -o kiln-linux-cuda.tar.gz \
   "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
 tar -xzf kiln-linux-cuda.tar.gz
 
-pip install huggingface-hub
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
 KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
 ```
 
 For Linux Vulkan, macOS Metal, Windows CUDA, and SHA-256 sidecar checks, use the full release artifact matrix in [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
 
-**Path 3 — Container:** Run the prebuilt GHCR image when you prefer containerized deployment. This path requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+**Path 3 — Container:** Run the prebuilt GHCR image when you prefer containerized deployment. This path requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). Make sure the weights step above has placed the model under `./Qwen3.5-4B` (or substitute your own absolute path), then mount that directory into the container:
 
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
 docker run --gpus all -p 8420:8420 \
   -e KILN_MODEL_PATH=/models/Qwen3.5-4B \
-  -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
+  -v "$(pwd)/Qwen3.5-4B:/models/Qwen3.5-4B:ro" \
   ghcr.io/ericflo/kiln-server:latest serve
 ```
 
-Replace `/path/to/Qwen3.5-4B` with your local `Qwen3.5-4B` model directory, then open http://127.0.0.1:8420/ui after the container starts.
+Open http://127.0.0.1:8420/ui after the container starts.
 
 **Path 4 — Source / CLI:** Install Rust stable, then build the CLI from source when you are contributing, scripting against a local checkout, or need to test unreleased changes.
 
@@ -160,14 +167,7 @@ cargo build --release --features vulkan   # Vulkan compute kernels via ash + SPI
 cargo build --release --features metal    # Metal backend via candle
 ```
 
-Download the model weights:
-
-```bash
-pip install huggingface-hub
-huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
-```
-
-Start the source-built server:
+Start the source-built server (using the weights downloaded above):
 
 ```bash
 KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve
