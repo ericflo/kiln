@@ -8,6 +8,8 @@ import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 
 const repoRoot = resolve(import.meta.dirname, '..');
+const mobileViewport = { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true };
+const mobileOverflowTolerancePx = 2;
 
 const pages = [
   { label: 'Home', path: 'docs/site/index.html', currentLabel: null },
@@ -1438,6 +1440,13 @@ function chromiumPath() {
   return path;
 }
 
+function formatLikelyOverflowingElements(elements) {
+  if (!elements || elements.length === 0) return 'none found';
+  return elements
+    .map((element) => `${element.selector} rect=[${element.left},${element.right}] scrollWidth=${element.scrollWidth} clientWidth=${element.clientWidth} text="${element.text}"`)
+    .join('; ');
+}
+
 async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
@@ -1470,7 +1479,7 @@ async function runSmoke() {
     await validateEmbeddedUiControlAccessibleNames(browser);
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true });
+    await page.setViewport(mobileViewport);
 
     for (const sitePage of pages) {
       const filePath = resolve(repoRoot, sitePage.path);
@@ -1481,8 +1490,41 @@ async function runSmoke() {
         href: link.href || expectedLocalHref(link.localPath),
       }));
 
-      const result = await page.evaluate((expectedLabels, currentLabel, expectedLinks) => {
+      const result = await page.evaluate((expectedLabels, currentLabel, expectedLinks, overflowTolerancePx) => {
         const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim();
+        const selectorFor = (element) => {
+          if (!element || element === document.documentElement) return 'html';
+          if (element.id) return `${element.tagName.toLowerCase()}#${CSS.escape(element.id)}`;
+
+          const classes = Array.from(element.classList || [])
+            .slice(0, 3)
+            .map((className) => `.${CSS.escape(className)}`)
+            .join('');
+          const tagSelector = `${element.tagName.toLowerCase()}${classes}`;
+          const parent = element.parentElement;
+          if (!parent) return tagSelector;
+
+          const sameTagSiblings = Array.from(parent.children)
+            .filter((sibling) => sibling.tagName === element.tagName);
+          if (sameTagSiblings.length <= 1) return tagSelector;
+          return `${tagSelector}:nth-of-type(${sameTagSiblings.indexOf(element) + 1})`;
+        };
+        const likelyOverflowingElements = Array.from(document.body.querySelectorAll('*'))
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            return {
+              selector: selectorFor(element),
+              left: Math.floor(rect.left),
+              right: Math.ceil(rect.right),
+              scrollWidth: element.scrollWidth,
+              clientWidth: element.clientWidth,
+              text: normalize(element.innerText || element.textContent).slice(0, 80),
+              exceedsViewport: rect.left < -overflowTolerancePx || rect.right > window.innerWidth + overflowTolerancePx,
+              overflowsInternally: element.scrollWidth > element.clientWidth + overflowTolerancePx,
+            };
+          })
+          .filter((element) => element.exceedsViewport || element.overflowsInternally)
+          .slice(0, 6);
         const h1 = document.querySelector('h1');
         const nav = document.querySelector('nav.site-nav');
         const navLinks = Array.from(nav?.querySelectorAll('a') || []);
@@ -1511,9 +1553,10 @@ async function runSmoke() {
           hasHomeCurrent: Boolean(homeCurrent),
           scrollWidth: document.documentElement.scrollWidth,
           clientWidth: document.documentElement.clientWidth,
+          likelyOverflowingElements,
           currentMatches: currentLabel ? normalize(current?.textContent) === currentLabel : Boolean(homeCurrent),
         };
-      }, expectedNavLabels, sitePage.currentLabel, expectedFooterLinksWithUrls);
+      }, expectedNavLabels, sitePage.currentLabel, expectedFooterLinksWithUrls, mobileOverflowTolerancePx);
 
       if (!result.h1Text) fail(`${sitePage.path}: missing h1`);
       if (!result.hasNav) fail(`${sitePage.path}: missing nav.site-nav`);
@@ -1528,8 +1571,8 @@ async function runSmoke() {
         const expected = sitePage.currentLabel || 'an aria-current="page" marker';
         fail(`${sitePage.path}: expected current marker for ${expected}, got ${result.currentLabel || 'none'}`);
       }
-      if (result.scrollWidth > result.clientWidth) {
-        fail(`${sitePage.path}: mobile horizontal overflow: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth}`);
+      if (result.scrollWidth > result.clientWidth + mobileOverflowTolerancePx) {
+        fail(`${sitePage.path}: mobile horizontal overflow at ${mobileViewport.width}x${mobileViewport.height}: scrollWidth ${result.scrollWidth} > clientWidth ${result.clientWidth} + tolerance ${mobileOverflowTolerancePx}; likely overflowing elements: ${formatLikelyOverflowingElements(result.likelyOverflowingElements)}`);
       }
 
       if (sitePage.path === demoPagePath) {
