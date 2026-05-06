@@ -45,6 +45,15 @@
         font-size: 14px;
         max-width: 440px;
       }
+      #status p.help-links {
+        margin-top: 14px;
+        font-size: 12px;
+      }
+      #status a.doc-link {
+        color: #5f9bff;
+        text-decoration: none;
+      }
+      #status a.doc-link:hover { text-decoration: underline; }
       #status code {
         background: #1b1e24;
         padding: 2px 6px;
@@ -571,6 +580,15 @@
         <button id="retry" class="hidden">Retry</button>
         <button id="open-settings-btn" class="hidden">Open Settings</button>
       </div>
+      <p class="help-links">
+        First run? Set your model path and kiln server binary in Settings, then follow the
+        <a class="doc-link" href="https://ericflo.github.io/kiln/quickstart.html"
+           target="_blank" rel="noopener noreferrer">Quickstart</a>
+        or
+        <a class="doc-link" href="https://ericflo.github.io/kiln/troubleshooting.html"
+           target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+        guide.
+      </p>
     </div>
     <div id="install" class="phase-ready hidden">
       <h1 id="install-title">Kiln server isn't installed yet</h1>
@@ -587,8 +605,13 @@
         <button id="install-browse-btn" class="secondary">Use a local build…</button>
       </div>
       <p id="install-footnote">
+        Need setup help? Read the
+        <a class="doc-link" href="https://ericflo.github.io/kiln/quickstart.html"
+           target="_blank" rel="noopener noreferrer">Quickstart</a>, check
+        <a class="doc-link" href="https://ericflo.github.io/kiln/troubleshooting.html"
+           target="_blank" rel="noopener noreferrer">Troubleshooting</a>, or
         <a class="doc-link" href="https://github.com/ericflo/kiln/blob/main/QUICKSTART.md"
-           target="_blank" rel="noopener noreferrer">Prefer to build from source?</a>
+           target="_blank" rel="noopener noreferrer">build from source</a>.
       </p>
     </div>
     <div id="shortcuts-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="shortcuts-title">

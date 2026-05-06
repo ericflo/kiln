@@ -139,6 +139,17 @@
       }
       .update-download-line.error { color: #f08080; }
       .update-download-line.success { color: #7fbf7f; }
+      .help-row {
+        color: #6c7280;
+        font-size: 12px;
+        line-height: 1.4;
+        margin: 2px 0 10px 0;
+      }
+      .help-row a {
+        color: #5f9bff;
+        text-decoration: none;
+      }
+      .help-row a:hover { text-decoration: underline; }
       .actions {
         display: flex;
         gap: 8px;
@@ -347,6 +358,13 @@
           <span class="hint">Directory containing the Qwen3.5-4B weights.</span>
           <span class="path-warning" id="warn_model_path"></span>
         </label>
+        <p class="help-row">
+          Setting up Desktop for the first time? Use the hosted
+          <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
+          for model path and kiln server binary setup, or open
+          <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
+          if a path check or server start fails.
+        </p>
         <label class="row"><span class="name">Host</span>
           <input type="text" id="host" />
           <span class="hint">IP address to bind on. 127.0.0.1 for local only, 0.0.0.0 for LAN.</span>
