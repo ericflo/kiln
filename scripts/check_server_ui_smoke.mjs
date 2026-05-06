@@ -552,6 +552,60 @@ async function expectActiveTrainingTab(page, tabName, message) {
   ).catch(() => fail(message));
 }
 
+async function expectTrainingTabA11yState(page, activeName, message, { focused = true } = {}) {
+  const state = await page.evaluate(() => {
+    const tabNames = ['queue', 'sft', 'grpo'];
+    return Object.fromEntries(tabNames.map((tabName) => {
+      const tab = document.querySelector(`#training-tab-${tabName}`);
+      const panel = document.querySelector(`#tab-${tabName}`);
+      const rect = panel?.getBoundingClientRect();
+      return [tabName, {
+        ariaSelected: tab?.getAttribute('aria-selected'),
+        classActive: Boolean(tab?.classList.contains('active')),
+        focused: document.activeElement === tab,
+        panelClassActive: Boolean(panel?.classList.contains('active')),
+        panelHidden: Boolean(panel?.hidden),
+        panelInert: Boolean(panel?.inert),
+        panelVisible: Boolean(rect && rect.width > 0 && rect.height > 0),
+        tabIndex: tab?.getAttribute('tabindex'),
+      }];
+    }));
+  });
+
+  for (const [name, tabState] of Object.entries(state)) {
+    const isActive = name === activeName;
+    if (tabState.ariaSelected !== String(isActive)) fail(`${message}: ${name} aria-selected=${tabState.ariaSelected}`);
+    if (tabState.classActive !== isActive) fail(`${message}: ${name} active class=${tabState.classActive}`);
+    if (tabState.tabIndex !== (isActive ? '0' : '-1')) fail(`${message}: ${name} tabindex=${tabState.tabIndex}`);
+    if (tabState.panelClassActive !== isActive) fail(`${message}: ${name} panel active class=${tabState.panelClassActive}`);
+    if (tabState.panelHidden !== !isActive) fail(`${message}: ${name} panel hidden=${tabState.panelHidden}`);
+    if (tabState.panelInert !== !isActive) fail(`${message}: ${name} panel inert=${tabState.panelInert}`);
+    if (isActive && !tabState.panelVisible) fail(`${message}: ${name} panel should be visible`);
+    if (focused && isActive && !tabState.focused) fail(`${message}: ${name} tab should retain keyboard focus`);
+    if (focused && !isActive && tabState.focused) fail(`${message}: ${name} inactive tab should not be focused`);
+  }
+}
+
+async function expectTrainingTabKeyboardNavigation(page) {
+  await page.focus('#training-tab-queue');
+  await expectTrainingTabA11yState(page, 'queue', 'Queue should start as the active focused training tab');
+
+  await page.keyboard.press('ArrowRight');
+  await expectTrainingTabA11yState(page, 'sft', 'ArrowRight should activate the SFT training tab');
+
+  await page.keyboard.press('ArrowRight');
+  await expectTrainingTabA11yState(page, 'grpo', 'ArrowRight should activate the GRPO training tab');
+
+  await page.keyboard.press('ArrowLeft');
+  await expectTrainingTabA11yState(page, 'sft', 'ArrowLeft should return to the SFT training tab');
+
+  await page.keyboard.press('Home');
+  await expectTrainingTabA11yState(page, 'queue', 'Home should activate the Queue training tab');
+
+  await page.keyboard.press('End');
+  await expectTrainingTabA11yState(page, 'grpo', 'End should activate the GRPO training tab');
+}
+
 async function expectTrainingToast(page, text) {
   await page.waitForFunction(
     (expectedText) => Array.from(document.querySelectorAll('#toasts .toast')).some((toast) => toast.textContent?.trim() === expectedText),
@@ -800,6 +854,8 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
     await expectPanelLink(page, '#chat-output .empty', '/health', '/health');
     await expectPanelLink(page, '#chat-output .empty', 'Troubleshooting guide', 'https://ericflo.github.io/kiln/troubleshooting.html');
+
+    await expectTrainingTabKeyboardNavigation(page);
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
     await waitForVisiblePanel(page, '#tab-sft', 'SFT tab did not activate');
