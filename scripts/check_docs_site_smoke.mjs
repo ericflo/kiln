@@ -524,6 +524,8 @@ function validateCliHelpOnboardingCopy() {
       'TOP_LEVEL_EXAMPLES',
       'SERVE_OVERVIEW',
       'SERVE_EXAMPLES',
+      'HEALTH_OVERVIEW',
+      'HEALTH_EXAMPLES',
       'TRAIN_EXAMPLES',
       'ADAPTERS_EXAMPLES',
       'CONFIG_EXAMPLES',
@@ -565,6 +567,24 @@ function validateCliHelpOnboardingCopy() {
       'kiln health',
       'Troubleshooting',
     ]],
+    ['HEALTH_OVERVIEW', [
+      'kiln health',
+      'http://localhost:8420',
+      '/health',
+      '--url',
+      'QUICKSTART.md',
+      'Troubleshooting',
+    ]],
+    ['HEALTH_EXAMPLES', [
+      'kiln health',
+      'kiln health --url http://localhost:8420',
+      'kiln health --json',
+      'curl http://localhost:8420/health',
+      '/health',
+      '--url',
+      '--json',
+      'Troubleshooting',
+    ]],
     ['TRAIN_EXAMPLES', [
       'kiln train status',
       'kiln train status --job-id train_123',
@@ -591,6 +611,11 @@ function validateCliHelpOnboardingCopy() {
     cliParser,
     /pub enum Commands[\s\S]*?\n\s+#\[command\(long_about = SERVE_OVERVIEW, after_help = SERVE_EXAMPLES\)\]\n\s+Serve\s*\{/,
     'crates/kiln-server/src/cli.rs: Commands::Serve onboarding help wiring',
+  );
+  assertMatches(
+    cliParser,
+    /pub enum Commands[\s\S]*?\n\s+#\[command\(long_about = HEALTH_OVERVIEW, after_help = HEALTH_EXAMPLES\)\]\n\s+Health\s*\{/,
+    'crates/kiln-server/src/cli.rs: Commands::Health onboarding help wiring',
   );
 }
 
