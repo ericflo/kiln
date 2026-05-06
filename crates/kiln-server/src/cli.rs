@@ -86,15 +86,27 @@ const HEALTH_EXAMPLES: &str = r#"Examples:
 
 const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
 
-SFT reads newline-delimited chat correction examples from JSONL. GRPO reads one JSON request/batch with scored completions.
+SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads one JSON request/batch: prompts/groups with completions and reward scores.
+
+Prefer http://127.0.0.1:8420/ui for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
+"#;
+
+const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction example per line with a messages array.
+
+Open http://127.0.0.1:8420/ui for guided submission and training status.
+"#;
+
+const TRAIN_GRPO_OVERVIEW: &str = r#"Train from one GRPO JSON request/batch: prompts/groups with completions and reward scores.
+
+Open http://127.0.0.1:8420/ui for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
 
 const TRAIN_EXAMPLES: &str = r#"Examples:
   kiln train sft --file corrections.jsonl --adapter support-bot
-      Train from JSONL chat correction examples and hot-swap the resulting LoRA adapter.
+      Train from SFT JSONL: one chat correction example per line with a messages array.
 
   kiln train grpo --file grpo-batch.json --adapter support-bot
-      Train from one JSON GRPO request/batch containing prompts, completions, and rewards.
+      Train from GRPO JSON containing prompts/groups, completions, and reward scores.
 
   kiln train status
       Show the training queue and recent jobs on the running server.
@@ -275,8 +287,9 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum TrainCommands {
     /// Train a LoRA adapter from corrected SFT examples
+    #[command(long_about = TRAIN_SFT_OVERVIEW)]
     Sft {
-        /// Path to JSONL chat correction examples, one example per line
+        /// Path to SFT JSONL: one chat correction example per line with a messages array
         #[arg(long, short)]
         file: String,
 
@@ -301,8 +314,9 @@ pub enum TrainCommands {
         url: String,
     },
     /// Train a LoRA adapter from scored GRPO completions
+    #[command(long_about = TRAIN_GRPO_OVERVIEW)]
     Grpo {
-        /// Path to one JSON GRPO request/batch with scored completions
+        /// Path to GRPO JSON with prompts/groups, completions, and reward scores
         #[arg(long, short)]
         file: String,
 
