@@ -363,10 +363,32 @@ function validateQuickstartServerBinaryPath() {
   const expectedPathRows = [
     ['Desktop App path', '**Desktop App (recommended)**'],
     ['Server binary path', '**Server binary (terminal-first)**'],
+    ['Container path', '**Container**'],
     ['Source / CLI path', '**Source / CLI**'],
   ];
   for (const [label, term] of expectedPathRows) {
     assertIncludes(choosePathSection, term, `QUICKSTART.md: Choose your path ${label}`);
+  }
+
+  if (!/\[Running with Docker\]\(#running-with-docker\)/.test(choosePathSection)) {
+    fail('QUICKSTART.md: Choose your path Container row must link to Running with Docker');
+  }
+
+  const prerequisitesSection = extractMarkdownSection(quickstart, 'Prerequisites');
+  if (!prerequisitesSection) {
+    fail('QUICKSTART.md: missing ## Prerequisites section');
+  }
+
+  const requiredPrerequisiteTerms = [
+    'Container path',
+    'Docker/GHCR',
+    'NVIDIA Container Toolkit',
+    'Qwen/Qwen3.5-4B',
+    'No Rust toolchain',
+    'prebuilt `ghcr.io/ericflo/kiln-server:latest` image',
+  ];
+  for (const term of requiredPrerequisiteTerms) {
+    assertIncludes(prerequisitesSection, term, 'QUICKSTART.md: Container prerequisites');
   }
 
   const serverBinarySection = extractMarkdownSection(quickstart, 'Quick path: Server binary (terminal-first, no source build)');

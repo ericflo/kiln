@@ -8,6 +8,7 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 |------|--------------|-------------------|
 | **Desktop App (recommended)** | You want the shortest first run on Windows, Linux, or Apple Silicon macOS. | Install the app, choose or download `Qwen/Qwen3.5-4B`, start the server from the GUI, then jump to [Test Inference](#4-test-inference). |
 | **Server binary (terminal-first)** | You want a prebuilt `kiln` server in your terminal without the Desktop App or a source build. | Download the latest `kiln-v*` server binary for your GPU backend, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 2-5. |
+| **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Build `kiln`, download `Qwen/Qwen3.5-4B`, start `kiln serve`, then continue through steps 1-5. |
 
 ## Reader map
@@ -20,7 +21,7 @@ After first inference, continue to [SFT training](#6-submit-sft-training), the [
 
 ## Prerequisites
 
-Choose the path that matches how you want to run Kiln. The Desktop App is the shortest GUI path, Server binary is the terminal-first path with no Rust build, and Source / CLI is for contributors or users who want to compile the binary themselves.
+Choose the path that matches how you want to run Kiln. The Desktop App is the shortest GUI path, Server binary is the terminal-first path with no Rust build, Container is the prebuilt Docker/GHCR path, and Source / CLI is for contributors or users who want to compile the binary themselves.
 
 **Desktop App path (recommended for most users):**
 
@@ -35,6 +36,13 @@ Choose the path that matches how you want to run Kiln. The Desktop App is the sh
 - **GPU**: NVIDIA systems need CUDA 12.4+ driver/runtime support and 24GB+ VRAM. AMD/Intel Linux systems use Vulkan 1.2+. Apple Silicon Macs use Metal with 16GB+ unified memory.
 - **Disk**: ~20GB free for the server binary, model weights, and adapters.
 - **Build tooling**: No Rust toolchain is required. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
+
+**Container path (Docker/GHCR, no source build):**
+
+- **Platform**: Linux x86_64 host with Docker and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) installed for NVIDIA GPU deployment.
+- **GPU**: NVIDIA GPU with 24GB+ VRAM and CUDA 12.4+ driver/runtime support.
+- **Model**: Local `Qwen/Qwen3.5-4B` model directory to mount read-only into the container.
+- **Build tooling**: No Rust toolchain or source checkout is required when using the prebuilt `ghcr.io/ericflo/kiln-server:latest` image. Continue at [Running with Docker](#running-with-docker).
 
 **Source / CLI path (for contributors and direct CLI users):**
 
