@@ -113,9 +113,24 @@ See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examp
 
 **Supported hardware:** NVIDIA GPU with 24GB+ VRAM and CUDA 12+, AMD/Intel GPU with Vulkan 1.2+ on Linux, **or** Apple Silicon Mac with 16GB+ unified memory. Kiln targets `Qwen/Qwen3.5-4B` and needs about 20GB of free disk for the server, model weights, and adapters.
 
-**Path 1 — Desktop App / prebuilt binary, recommended for most users:** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading the model weights. No Rust toolchain, CUDA toolkit, or source build is required for this path.
+**Path 1 — Desktop App (recommended):** Install [Kiln Desktop](#desktop-app) on Windows, Linux, or macOS. The app downloads and verifies the matching prebuilt `kiln` server binary on first launch, then walks you through choosing or downloading `Qwen/Qwen3.5-4B`. No Rust toolchain, CUDA toolkit, or source build is required for this path.
 
-If you prefer a terminal, run the prebuilt container instead:
+**Path 2 — Server binary (terminal-first, no source build):** Download the latest `kiln-v*` server artifact when you want the `kiln` server in your terminal with no source build, Desktop App, or Docker. Linux x86_64 + NVIDIA CUDA 12.4 is the compact path:
+
+```bash
+KILN_VERSION=$(curl -fsSL https://api.github.com/repos/ericflo/kiln/releases/latest | sed -n 's/.*"tag_name": "kiln-v\([^"]*\)".*/\1/p')
+curl -L -o kiln-linux-cuda.tar.gz \
+  "https://github.com/ericflo/kiln/releases/download/kiln-v${KILN_VERSION}/kiln-${KILN_VERSION}-x86_64-unknown-linux-gnu-cuda124.tar.gz"
+tar -xzf kiln-linux-cuda.tar.gz
+
+pip install huggingface-hub
+huggingface-cli download Qwen/Qwen3.5-4B --local-dir ./Qwen3.5-4B
+KILN_MODEL_PATH=./Qwen3.5-4B ./kiln serve
+```
+
+For Linux Vulkan, macOS Metal, Windows CUDA, and SHA-256 sidecar checks, use the full release artifact matrix in [QUICKSTART.md](QUICKSTART.md#quick-path-server-binary-terminal-first-no-source-build).
+
+**Path 3 — Container:** Run the prebuilt GHCR image when you prefer containerized deployment. This path requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 
 ```bash
 docker pull ghcr.io/ericflo/kiln-server:latest
@@ -127,7 +142,7 @@ docker run --gpus all -p 8420:8420 \
 
 Replace `/path/to/Qwen3.5-4B` with your local `Qwen3.5-4B` model directory, then open http://127.0.0.1:8420/ui after the container starts.
 
-**Path 2 — Source / CLI, for contributors and direct CLI users:** Install Rust stable, then build the CLI from source for your platform.
+**Path 4 — Source / CLI:** Install Rust stable, then build the CLI from source when you are contributing, scripting against a local checkout, or need to test unreleased changes.
 
 ```bash
 git clone https://github.com/ericflo/kiln.git
