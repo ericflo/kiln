@@ -1059,7 +1059,6 @@ function isServerRoute(href) {
 
 function isIgnoredHref(href) {
   return href === ''
-    || href.startsWith('#')
     || href.includes('${')
     || /^javascript:/i.test(href)
     || hasKnownExternalScheme(href)
@@ -1078,9 +1077,57 @@ function hrefPathOnly(href) {
   return href.split('#')[0].split('?')[0];
 }
 
+function hrefFragment(href) {
+  const fragmentIndex = href.indexOf('#');
+  if (fragmentIndex === -1) return '';
+
+  const fragment = href.slice(fragmentIndex + 1);
+  try {
+    return decodeURIComponent(fragment);
+  } catch {
+    return fragment;
+  }
+}
+
+function docsSiteHtmlPaths() {
+  const docsSiteRoot = resolve(repoRoot, 'docs/site');
+  const htmlPaths = [];
+
+  function visit(directoryPath) {
+    for (const entry of readdirSync(directoryPath).sort()) {
+      const entryPath = resolve(directoryPath, entry);
+      const entryStat = statSync(entryPath);
+      if (entryStat.isDirectory()) {
+        visit(entryPath);
+      } else if (entryStat.isFile() && entry.endsWith('.html')) {
+        htmlPaths.push(relative(repoRoot, entryPath).split(sep).join('/'));
+      }
+    }
+  }
+
+  visit(docsSiteRoot);
+  return htmlPaths;
+}
+
+function htmlIdsForPath(htmlPath, idCache) {
+  if (!idCache.has(htmlPath)) {
+    const html = readFileSync(resolve(repoRoot, htmlPath), 'utf8');
+    const ids = new Set();
+    const idMatches = html.matchAll(/\bid\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi);
+    for (const match of idMatches) {
+      ids.add(decodeHtmlAttribute(match[1] ?? match[2] ?? match[3] ?? ''));
+    }
+    idCache.set(htmlPath, ids);
+  }
+
+  return idCache.get(htmlPath);
+}
+
 function resolveLocalHref(sourceHtmlPath, href) {
   const sourceDir = dirname(resolve(repoRoot, sourceHtmlPath));
   const hrefPath = hrefPathOnly(href);
+  if (hrefPath === '') return resolve(repoRoot, sourceHtmlPath);
+
   const resolvedPath = hrefPath.startsWith('/')
     ? resolve(repoRoot, `.${hrefPath}`)
     : resolve(sourceDir, hrefPath);
@@ -1124,8 +1171,10 @@ function validateDocsSiteCanonicalLinks() {
 }
 
 function validateDocsSiteLocalLinks() {
-  for (const sitePage of pages) {
-    const pagePath = resolve(repoRoot, sitePage.path);
+  const idCache = new Map();
+
+  for (const sourcePath of docsSiteHtmlPaths()) {
+    const pagePath = resolve(repoRoot, sourcePath);
     const html = readFileSync(pagePath, 'utf8');
     const hrefMatches = html.matchAll(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi);
 
@@ -1133,9 +1182,17 @@ function validateDocsSiteLocalLinks() {
       const href = decodeHtmlAttribute(match[1] ?? match[2] ?? match[3] ?? '').trim();
       if (isIgnoredHref(href)) continue;
 
-      const targetPath = resolveLocalHref(sitePage.path, href);
+      const targetPath = resolveLocalHref(sourcePath, href);
       if (!existsSync(targetPath) || statSync(targetPath).isDirectory()) {
-        fail(`${sitePage.path}: broken local href ${href} (resolved target: ${relative(repoRoot, targetPath)})`);
+        fail(`${sourcePath}: broken local href ${href} (resolved target: ${relative(repoRoot, targetPath)})`);
+      }
+
+      const fragment = hrefFragment(href);
+      if (fragment) {
+        const targetRelativePath = relative(repoRoot, targetPath).split(sep).join('/');
+        if (!htmlIdsForPath(targetRelativePath, idCache).has(fragment)) {
+          fail(`${sourcePath}: broken local href anchor ${href} (resolved target: ${targetRelativePath}, missing fragment: #${fragment})`);
+        }
       }
     }
   }
