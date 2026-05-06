@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, relative, sep, join, resolve } from 'node:path';
@@ -466,6 +466,71 @@ function expectedLocalHref(localPath) {
   return localPath.endsWith('/') && !href.endsWith('/') ? `${href}/` : href;
 }
 
+function hasKnownExternalScheme(href) {
+  return /^(?:https?:|mailto:)/i.test(href);
+}
+
+function isServerRoute(href) {
+  return /^\/(?:ui(?:[/?#]|$)|health(?:[/?#]|$)|metrics(?:[/?#]|$)|v1(?:[/?#\/]|$))/.test(href);
+}
+
+function isIgnoredHref(href) {
+  return href === ''
+    || href.startsWith('#')
+    || href.includes('${')
+    || /^javascript:/i.test(href)
+    || hasKnownExternalScheme(href)
+    || isServerRoute(href);
+}
+
+function decodeHtmlAttribute(value) {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function hrefPathOnly(href) {
+  return href.split('#')[0].split('?')[0];
+}
+
+function resolveLocalHref(sourceHtmlPath, href) {
+  const sourceDir = dirname(resolve(repoRoot, sourceHtmlPath));
+  const hrefPath = hrefPathOnly(href);
+  const resolvedPath = hrefPath.startsWith('/')
+    ? resolve(repoRoot, `.${hrefPath}`)
+    : resolve(sourceDir, hrefPath);
+
+  if (hrefPath.endsWith('/')) {
+    return resolve(resolvedPath, 'index.html');
+  }
+
+  if (existsSync(resolvedPath) && statSync(resolvedPath).isDirectory()) {
+    return resolve(resolvedPath, 'index.html');
+  }
+
+  return resolvedPath;
+}
+
+function validateDocsSiteLocalLinks() {
+  for (const sitePage of pages) {
+    const pagePath = resolve(repoRoot, sitePage.path);
+    const html = readFileSync(pagePath, 'utf8');
+    const hrefMatches = html.matchAll(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/gi);
+
+    for (const match of hrefMatches) {
+      const href = decodeHtmlAttribute(match[1] ?? match[2] ?? match[3] ?? '').trim();
+      if (isIgnoredHref(href)) continue;
+
+      const targetPath = resolveLocalHref(sitePage.path, href);
+      if (!existsSync(targetPath) || statSync(targetPath).isDirectory()) {
+        fail(`${sitePage.path}: broken local href ${href} (resolved target: ${relative(repoRoot, targetPath)})`);
+      }
+    }
+  }
+}
+
 function validateDemoCasts(sitePagePath, referencedCasts) {
   const demoDir = resolve(repoRoot, dirname(sitePagePath));
   const uniqueCasts = [...new Set(referencedCasts)];
@@ -555,6 +620,7 @@ async function runSmoke() {
   validateQuickstartCliReference();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
+  validateDocsSiteLocalLinks();
 
   const puppeteer = await loadPuppeteer();
   const browser = await puppeteer.launch({
