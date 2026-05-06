@@ -234,11 +234,11 @@
       border-color: var(--line-2);
       background: var(--bg-soft-2);
     }
-    .cast-tile[aria-pressed="true"] {
+    .cast-tile[aria-selected="true"] {
       border-color: rgba(249,115,22,0.55);
       background: var(--accent-soft);
     }
-    .cast-tile[aria-pressed="true"] .cast-tile__title {
+    .cast-tile[aria-selected="true"] .cast-tile__title {
       color: var(--accent);
     }
     .cast-tile__head {
@@ -350,13 +350,15 @@
 
       <div id="cast-picker" class="cast-grid mb-6" role="tablist" aria-label="Demo casts"></div>
 
-      <div class="asciinema-frame mb-4">
-        <div id="kiln-demo-player"></div>
+      <div id="cast-panel" role="tabpanel">
+        <div class="asciinema-frame mb-4">
+          <div id="kiln-demo-player"></div>
+        </div>
+
+        <div class="cast-meta mb-3" id="cast-meta"></div>
+
+        <section id="cast-caption" class="cast-caption mt-6"></section>
       </div>
-
-      <div class="cast-meta mb-3" id="cast-meta"></div>
-
-      <section id="cast-caption" class="cast-caption mt-6"></section>
 
       <p class="meta-line mt-4">
         Recordings captured on a RunPod NVIDIA RTX A6000 with the release-mode CUDA build of Kiln.
@@ -632,6 +634,7 @@
     ];
 
     const DEFAULT_SLUG = "first-token";
+    const PANEL_ID = "cast-panel";
 
     let player = null;
 
@@ -689,8 +692,8 @@
     function renderTiles() {
       const grid = document.getElementById("cast-picker");
       grid.innerHTML = CASTS.map((c, i) => `
-        <button class="cast-tile" type="button" role="tab" aria-pressed="false"
-                data-slug="${c.slug}" id="tile-${c.slug}">
+        <button class="cast-tile" type="button" role="tab" aria-selected="false"
+                aria-controls="${PANEL_ID}" tabindex="-1" data-slug="${c.slug}" id="tile-${c.slug}">
           <div class="cast-tile__head">
             <span class="cast-tile__num">${String(i + 1).padStart(2, "0")}</span>
             <span class="cast-tile__dur">${c.duration}</span>
@@ -702,16 +705,45 @@
 
       grid.querySelectorAll(".cast-tile").forEach(el => {
         el.addEventListener("click", () => selectCast(el.dataset.slug, true));
+        el.addEventListener("keydown", handleTileKeydown);
       });
     }
 
-    function selectCast(slug, updateHash) {
+    function handleTileKeydown(event) {
+      const currentIndex = CASTS.findIndex(c => c.slug === event.currentTarget.dataset.slug);
+      if (currentIndex < 0) return;
+
+      let nextIndex = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (currentIndex + 1) % CASTS.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (currentIndex - 1 + CASTS.length) % CASTS.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = CASTS.length - 1;
+      }
+
+      if (nextIndex === null) return;
+      event.preventDefault();
+      selectCast(CASTS[nextIndex].slug, true, { focus: true });
+    }
+
+    function selectCast(slug, updateHash, options = {}) {
       const c = CASTS.find(x => x.slug === slug);
       if (!c) return;
 
       document.querySelectorAll(".cast-tile").forEach(el => {
-        el.setAttribute("aria-pressed", el.dataset.slug === slug ? "true" : "false");
+        const selected = el.dataset.slug === slug;
+        el.setAttribute("aria-selected", selected ? "true" : "false");
+        el.tabIndex = selected ? 0 : -1;
       });
+
+      const selectedTile = document.getElementById(`tile-${slug}`);
+      const panel = document.getElementById(PANEL_ID);
+      if (selectedTile && panel) {
+        panel.setAttribute("aria-labelledby", selectedTile.id);
+      }
 
       document.getElementById("cast-meta").innerHTML = castMetaHTML(c);
       document.getElementById("cast-caption").innerHTML = c.caption;
@@ -726,6 +758,10 @@
 
       if (updateHash) {
         history.replaceState(null, "", "#" + slug);
+      }
+
+      if (options.focus && selectedTile) {
+        selectedTile.focus();
       }
     }
 
