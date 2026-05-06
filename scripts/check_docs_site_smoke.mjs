@@ -169,7 +169,7 @@ const expectedCliSections = [
   { label: 'health/readiness path', terms: ['check server readiness', 'kiln health'] },
   { label: 'SFT/GRPO training path', terms: ['submit sft and grpo jobs', 'kiln train sft', 'kiln train grpo'] },
   { label: 'SFT payload shape', terms: ['sft reads jsonl', 'one chat correction example per line', 'messages array'] },
-  { label: 'GRPO payload shape', terms: ['grpo reads one json request/batch', 'prompts/groups', 'completions', 'reward scores'] },
+  { label: 'GRPO payload shape', terms: ['grpo reads one json request/batch', 'groups', 'messages', 'candidate completions', 'text', 'reward scores'] },
   { label: 'adapter lifecycle path', terms: ['manage lora adapters', 'kiln adapters list', 'kiln adapters load', 'kiln adapters unload'] },
   { label: 'config validation path', terms: ['validate config', 'kiln config --file'] },
   { label: 'help and verbosity flags', terms: ['--help', '--verbose', '--quiet', '-vv'] },
@@ -1465,6 +1465,10 @@ async function runSmoke() {
           .map((example) => example.label);
         if (missingCodeExamples.length > 0) {
           fail(`${sitePage.path}: missing copy-paste CLI examples: ${missingCodeExamples.join(', ')}`);
+        }
+
+        if (cliResult.bodyText.includes('prompts/groups') || cliResult.copyableCodeBlocks.some((codeBlock) => codeBlock.includes('prompts/groups'))) {
+          fail(`${sitePage.path}: kiln train grpo docs must describe scored groups, not prompts/groups; prompts belong to /v1/completions/batch`);
         }
 
         if (cliResult.copyButtonCount < cliResult.copyableCodeBlocks.length) {
