@@ -351,6 +351,85 @@ function validateQuickstartMarkdownMedia() {
   }
 }
 
+function extractMarkdownSection(markdown, heading) {
+  const headingPattern = new RegExp(`^## ${heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'm');
+  const headingMatch = markdown.match(headingPattern);
+  if (!headingMatch) return null;
+
+  const sectionStart = headingMatch.index + headingMatch[0].length;
+  const nextHeadingMatch = markdown.slice(sectionStart).match(/^##\s+/m);
+  const sectionEnd = nextHeadingMatch ? sectionStart + nextHeadingMatch.index : markdown.length;
+  return markdown.slice(sectionStart, sectionEnd);
+}
+
+function assertIncludes(source, needle, context) {
+  if (!source.includes(needle)) {
+    fail(`${context}: missing ${needle}`);
+  }
+}
+
+function assertMatches(source, pattern, context) {
+  if (!pattern.test(source)) {
+    fail(`${context}: missing ${pattern}`);
+  }
+}
+
+function validateQuickstartCliReference() {
+  const quickstart = readFileSync(resolve(repoRoot, 'QUICKSTART.md'), 'utf8');
+  const cliReference = extractMarkdownSection(quickstart, 'CLI Reference');
+  if (!cliReference) {
+    fail('QUICKSTART.md: missing ## CLI Reference section');
+  }
+
+  const cliReferenceCodeBlock = cliReference.match(/```(?:bash|sh)?\n([\s\S]*?)```/i)?.[1];
+  if (!cliReferenceCodeBlock) {
+    fail('QUICKSTART.md: CLI Reference section must include a fenced command block');
+  }
+
+  const expectedCommands = [
+    'kiln serve --served-model-id <id>',
+    'kiln health',
+    'kiln health --json',
+    'kiln config --file kiln.toml',
+    'kiln config -f kiln.toml',
+    'kiln train sft --file corrections.jsonl --adapter support-bot',
+    'kiln train grpo --file grpo-batch.json --adapter support-bot',
+    'kiln train status --job-id train_123',
+    'kiln adapters list',
+    'kiln adapters load support-bot',
+    'kiln adapters unload',
+    'kiln adapters delete support-bot',
+  ];
+  const missingCommands = expectedCommands.filter((command) => !cliReferenceCodeBlock.includes(command));
+  if (missingCommands.length > 0) {
+    fail(`QUICKSTART.md: CLI Reference command block missing commands: ${missingCommands.join(', ')}`);
+  }
+
+  const cliParser = readFileSync(resolve(repoRoot, 'crates/kiln-server/src/cli.rs'), 'utf8');
+  const parserChecks = [
+    ['Commands::Serve', /pub enum Commands[\s\S]*?\n\s+Serve\s*\{[\s\S]*?served_model_id:\s*Option<String>/],
+    ['Commands::Health', /pub enum Commands[\s\S]*?\n\s+Health\s*\{[\s\S]*?url:\s*String[\s\S]*?json:\s*bool/],
+    ['Commands::ConfigCheck', /pub enum Commands[\s\S]*?\n\s+ConfigCheck\s*\{[\s\S]*?file:\s*Option<String>/],
+    ['Commands::Train', /pub enum Commands[\s\S]*?Train\(TrainCommands\)/],
+    ['Commands::Adapters', /pub enum Commands[\s\S]*?Adapters\(AdapterCommands\)/],
+    ['TrainCommands::Sft', /pub enum TrainCommands[\s\S]*?\n\s+Sft\s*\{[\s\S]*?file:\s*String[\s\S]*?adapter:\s*String[\s\S]*?url:\s*String/],
+    ['TrainCommands::Grpo', /pub enum TrainCommands[\s\S]*?\n\s+Grpo\s*\{[\s\S]*?file:\s*String[\s\S]*?adapter:\s*String[\s\S]*?url:\s*String/],
+    ['TrainCommands::Status', /pub enum TrainCommands[\s\S]*?\n\s+Status\s*\{[\s\S]*?job_id:\s*Option<String>[\s\S]*?url:\s*String/],
+    ['AdapterCommands::List', /pub enum AdapterCommands[\s\S]*?\n\s+List\s*\{[\s\S]*?url:\s*String/],
+    ['AdapterCommands::Load', /pub enum AdapterCommands[\s\S]*?\n\s+Load\s*\{[\s\S]*?name:\s*String[\s\S]*?url:\s*String/],
+    ['AdapterCommands::Unload', /pub enum AdapterCommands[\s\S]*?\n\s+Unload\s*\{[\s\S]*?name:\s*Option<String>[\s\S]*?url:\s*String/],
+    ['AdapterCommands::Delete', /pub enum AdapterCommands[\s\S]*?\n\s+Delete\s*\{[\s\S]*?name:\s*String[\s\S]*?url:\s*String/],
+  ];
+  for (const [label, pattern] of parserChecks) {
+    assertMatches(cliParser, pattern, `crates/kiln-server/src/cli.rs: ${label}`);
+  }
+
+  const expectedArgs = ['served_model_id', 'json', 'file', 'job_id', 'adapter', 'url'];
+  for (const arg of expectedArgs) {
+    assertIncludes(cliParser, arg, 'crates/kiln-server/src/cli.rs');
+  }
+}
+
 function validateLaunchSentinel() {
   const launchDir = resolve(repoRoot, 'docs/site/launch');
   const sentinelPath = resolve(launchDir, 'README.md');
@@ -473,6 +552,7 @@ async function runSmoke() {
   validateReadmeStartupBanner();
   validateReadmeMedia();
   validateQuickstartMarkdownMedia();
+  validateQuickstartCliReference();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
 
