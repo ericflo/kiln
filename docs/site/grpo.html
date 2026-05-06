@@ -363,7 +363,14 @@
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs, then confirm the trained adapter through the adapter APIs or the web UI.
         </p>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln train status</code> for the same info as a readable summary (use <code>--url http://host:8420</code> for remote servers). The curl command below is the equivalent HTTP probe &mdash; handy for CI, scripts, or any environment without the CLI.
+        </p>
         <section class="endpoint">
+          <h3 class="font-semibold mb-2">Training status from the CLI</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status</code></pre>
+        </section>
+        <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Training status</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
         </section>
