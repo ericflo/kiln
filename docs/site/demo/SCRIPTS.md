@@ -7,8 +7,9 @@ original 60-second online-learning loop in detail; this file covers the
 full six-cast recording matrix as a single playlist.
 
 Recording target for every cast: **120 columns × 32 rows**, `xterm-256color`,
-`asciinema rec --idle-time-limit 2`, captured on a RunPod A6000 with the
-release-mode CUDA build of `kiln`.
+`asciinema rec --idle-time-limit 2`, captured on a RunPod A6000 with a
+release-mode CUDA build of `kiln`, either from `./target/release` or an
+extracted release artifact selected via the binary path overrides below.
 
 | File | Driver | Runtime | Story |
 |---|---|---|---|
@@ -27,8 +28,12 @@ play them in sequence.
 
 Same baseline as the canonical 60-second cast:
 
-- `./target/release/kiln` and `./target/release/kiln-bench` built with
-  `--features cuda`.
+- `KILN_BIN` points at the server binary. It defaults to
+  `./target/release/kiln`, but can also point at an extracted release
+  artifact, for example `KILN_BIN=./kiln-release/kiln`.
+- `KILN_BENCH_BIN` points at the benchmark binary. It defaults to
+  `./target/release/kiln-bench`, but can likewise point at an extracted
+  release artifact or a source-built `target/release/kiln-bench`.
 - Model weights at `./Qwen3.5-4B/` (override with `KILN_MODEL_PATH`).
 - `kiln.example.toml` at the repo root, with `inference_memory_fraction`
   ≈ 0.4 so the trainer can grab scratch space alongside the inference

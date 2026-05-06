@@ -12,13 +12,16 @@
 #     --command ./docs/site/demo/demo-grpo.sh
 #
 # Prerequisites:
-#   - ./target/release/kiln (--features cuda) + ./Qwen3.5-4B/
+#   - Kiln binary at ./target/release/kiln by default; override KILN_BIN to use
+#     an extracted release artifact or another source-built binary.
+#   - ./Qwen3.5-4B/ weights (override with KILN_MODEL_PATH)
 #   - kiln.example.toml with `inference_memory_fraction` ~0.4 so the trainer
 #     can grab scratch space alongside the inference KV cache.
 
 set -e
 
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
+KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GRPO_JSON="${SCRIPT_DIR}/demo-grpo.json"
@@ -40,10 +43,10 @@ beat() { sleep "$1"; }
 # ------------------------------------------------------------------
 # Scene 1 — Boot kiln. Banner + spinner + ready.
 # ------------------------------------------------------------------
-typecmd './target/release/kiln serve --config kiln.example.toml &'
+typecmd "${KILN_BIN} serve --config kiln.example.toml &"
 
 # Server logs redirected to a file so they don't bleed into the asciinema TTY.
-./target/release/kiln serve --config kiln.example.toml >/tmp/kiln-grpo.log 2>&1 &
+"${KILN_BIN}" serve --config kiln.example.toml >/tmp/kiln-grpo.log 2>&1 &
 SRV_PID=$!
 
 for i in $(seq 1 180); do

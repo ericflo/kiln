@@ -10,7 +10,8 @@
 #     --command ./docs/site/demo/demo.sh
 #
 # Prerequisites:
-#   - Kiln binary built at ./target/release/kiln (release mode, --features cuda).
+#   - Kiln binary at ./target/release/kiln by default; override KILN_BIN to use
+#     an extracted release artifact or another source-built binary.
 #   - Model weights at ./Qwen3.5-4B/ (override with KILN_MODEL_PATH if elsewhere).
 #   - The chat template disables thinking-mode by default — Qwen3.5-4B will otherwise
 #     emit reasoning into a separate `reasoning_content` field and Scene 2/5 read empty.
@@ -35,6 +36,7 @@ set -e
 
 # Default to ./Qwen3.5-4B but allow override.
 export KILN_MODEL_PATH="${KILN_MODEL_PATH:-./Qwen3.5-4B}"
+KILN_BIN="${KILN_BIN:-./target/release/kiln}"
 
 # Resolve the directory this script lives in so we can find demo-sft.json next to it.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,10 +61,10 @@ beat() { sleep "$1"; }
 # ------------------------------------------------------------------
 # Scene 1 — Cold start
 # ------------------------------------------------------------------
-typecmd 'KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve --config kiln.example.toml &'
+typecmd "KILN_MODEL_PATH=${KILN_MODEL_PATH} ${KILN_BIN} serve --config kiln.example.toml &"
 
 # Server logs redirected to a file so they don't bleed into the asciinema TTY.
-./target/release/kiln serve --config kiln.example.toml >/tmp/kiln-demo.log 2>&1 &
+"${KILN_BIN}" serve --config kiln.example.toml >/tmp/kiln-demo.log 2>&1 &
 SRV_PID=$!
 
 # Wait for /health, capped so the recording cannot hang on a broken build.
