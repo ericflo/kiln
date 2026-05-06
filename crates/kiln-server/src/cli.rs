@@ -5,7 +5,7 @@ use std::io::Write;
 use clap::{Parser, Subcommand};
 use console::style;
 
-const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it live with LoRA training.
+const TOP_LEVEL_OVERVIEW: &str = r#"Kiln serves Qwen3.5-4B from one Rust process and lets you adapt it with live LoRA training.
 
 Running `kiln` with no subcommand starts the OpenAI-compatible server, just like `kiln serve`. Commands such as `kiln health`, `kiln train sft`, `kiln train grpo`, and `kiln adapters list` talk to a running server.
 
