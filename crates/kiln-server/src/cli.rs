@@ -38,6 +38,29 @@ const TOP_LEVEL_EXAMPLES: &str = r#"Examples:
       Show saved adapters and which adapter is active on the running server.
 "#;
 
+const SERVE_OVERVIEW: &str = r#"Start the OpenAI-compatible Kiln server for Qwen3.5-4B on http://127.0.0.1:8420 by default.
+
+Before starting, point Kiln at model weights with KILN_MODEL_PATH or pass a TOML config with --config. After startup, open http://127.0.0.1:8420/ui for the embedded dashboard and use kiln health to check readiness.
+
+If setup stalls, follow QUICKSTART.md first, then the Troubleshooting section for model path, CUDA, and config checks.
+"#;
+
+const SERVE_EXAMPLES: &str = r#"Examples:
+  KILN_MODEL_PATH=/models/Qwen3.5-4B kiln serve
+      Start the local server with model weights from KILN_MODEL_PATH.
+
+  kiln serve --config kiln.toml
+      Start with a checked TOML config. Run `kiln config --file kiln.toml` first if you want to preview the effective settings.
+
+  open http://127.0.0.1:8420/ui
+      Open the dashboard for status, adapters, training monitoring, and quick inference.
+
+  kiln health
+      Confirm the server is ready and inspect model, adapter, scheduler, and training status.
+
+  See QUICKSTART.md and Troubleshooting if the server cannot find weights, CUDA is unavailable, or config validation fails.
+"#;
+
 const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
 
 SFT reads newline-delimited chat correction examples from JSONL. GRPO reads one JSON request/batch with scored completions.
@@ -177,6 +200,7 @@ impl Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start the inference server explicitly; running `kiln` with no subcommand also serves
+    #[command(long_about = SERVE_OVERVIEW, after_help = SERVE_EXAMPLES)]
     Serve {
         /// Override the served model identifier exposed at /v1/models.
         /// Wins over KILN_SERVED_MODEL_ID env and TOML `model.served_model_id`.
