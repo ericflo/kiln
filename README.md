@@ -203,7 +203,7 @@ The kiln server also ships an embedded web dashboard at `http://localhost:8420/u
 
 Here is the embedded server dashboard running with healthy status, active adapters, training progress, and the chat playground in one view:
 
-![Kiln embedded server dashboard](docs/site/assets/server-ui-dashboard.png)
+![Kiln embedded server dashboard showing healthy status metrics, adapters panel, training progress, and chat quick-inference panels](docs/site/assets/server-ui-dashboard.png)
 
 ## Memory Budget (24GB GPU)
 

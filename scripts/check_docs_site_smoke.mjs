@@ -284,6 +284,44 @@ function validateReadmeStartupBanner() {
   }
 }
 
+function validateReadmeMedia() {
+  const readmePath = resolve(repoRoot, 'README.md');
+  const readme = readFileSync(readmePath, 'utf8');
+  const dashboardImagePath = 'docs/site/assets/server-ui-dashboard.png';
+
+  if (!readme.includes(dashboardImagePath)) {
+    fail(`README.md: missing dashboard screenshot reference ${dashboardImagePath}`);
+  }
+  if (!existsSync(resolve(repoRoot, dashboardImagePath))) {
+    fail(`README.md: referenced dashboard screenshot does not exist: ${dashboardImagePath}`);
+  }
+
+  const dashboardImagePattern = new RegExp(`!\\[([^\\]]+)\\]\\(${dashboardImagePath.replaceAll('/', '\\/')}\\)`);
+  const dashboardImageMatch = readme.match(dashboardImagePattern);
+  if (!dashboardImageMatch) {
+    fail(`README.md: dashboard screenshot reference must include alt text for ${dashboardImagePath}`);
+  }
+
+  const altText = dashboardImageMatch[1].toLowerCase().replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const requiredAltTerms = ['dashboard', 'status', 'adapters', 'training'];
+  const missingAltTerms = requiredAltTerms.filter((term) => !altText.includes(term));
+  if (!altText.includes('chat') && !altText.includes('quick inference')) {
+    missingAltTerms.push('chat or quick inference');
+  }
+  if (missingAltTerms.length > 0) {
+    fail(`README.md: dashboard screenshot alt text missing terms: ${missingAltTerms.join(', ')}`);
+  }
+
+  const requiredDemoLinks = [
+    'https://ericflo.github.io/kiln/demo/',
+    'docs/site/demo/',
+  ];
+  const missingDemoLinks = requiredDemoLinks.filter((link) => !readme.includes(link));
+  if (missingDemoLinks.length > 0) {
+    fail(`README.md: missing demo/asciicast links: ${missingDemoLinks.join(', ')}`);
+  }
+}
+
 function validateLaunchSentinel() {
   const launchDir = resolve(repoRoot, 'docs/site/launch');
   const sentinelPath = resolve(launchDir, 'README.md');
@@ -404,6 +442,7 @@ function chromiumPath() {
 
 async function runSmoke() {
   validateReadmeStartupBanner();
+  validateReadmeMedia();
   validateLaunchSentinel();
   validateDemoReadmeInventory();
 
