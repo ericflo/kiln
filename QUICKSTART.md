@@ -23,10 +23,10 @@ All paths share these requirements:
 
 Build-tooling deltas by path:
 
-- **Desktop App** (Windows / Linux / Apple Silicon macOS): no Rust toolchain, CUDA toolkit, or Xcode install. The app downloads and SHA-256-verifies the matching prebuilt `kiln` server binary on first launch.
-- **Server binary** (Linux x86_64 / Windows x86_64 / Apple Silicon macOS): no Rust toolchain. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
-- **Container** (Linux x86_64 + Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)): no Rust toolchain or source checkout. Continue at [Running with Docker](#running-with-docker).
-- **Source / CLI** (contributors): stable Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). NVIDIA builds need `nvcc` (CUDA 12.4+); AMD/Intel builds need `glslc` or `glslangValidator` for shader embedding (`vulkaninfo --summary` should list your GPU); Apple Silicon builds need Xcode Command Line Tools (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
+- **Desktop App path** (Windows / Linux / Apple Silicon macOS): No Rust toolchain, CUDA toolkit, or Xcode install. The app downloads and SHA-256-verifies the matching prebuilt `kiln` server binary on first launch.
+- **Server binary path** (Linux x86_64 / Windows x86_64 / Apple Silicon macOS): No Rust toolchain. Download a prebuilt `kiln-v*` release artifact, then continue at [Download Model Weights](#2-download-model-weights).
+- **Container path** (Docker/GHCR, Linux x86_64 + Docker + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)): No Rust toolchain or source checkout — uses the prebuilt `ghcr.io/ericflo/kiln-server:latest` image. Continue at [Running with Docker](#running-with-docker).
+- **Source / CLI path** (contributors): stable Rust (`curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`). NVIDIA builds need `nvcc` (CUDA 12.4+); AMD/Intel builds need `glslc` or `glslangValidator` for shader embedding (`vulkaninfo --summary` should list your GPU); Apple Silicon builds need Xcode Command Line Tools (`xcode-select --install`). Full Xcode is **not** required — `candle-metal-kernels` JIT-compiles MSL shaders at runtime.
 
 If setup stalls on binary downloads, CUDA/Vulkan/Metal, model paths, `/health`, mock mode, training endpoints, or adapter directories, see the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html) first.
 
