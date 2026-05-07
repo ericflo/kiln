@@ -280,7 +280,7 @@
         <div class="card p-5">
           <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Optional learning</span>
           <h3 class="font-semibold mb-2">Train after verification</h3>
-          <p style="color: var(--fg-dim);">Use SFT, <a href="grpo.html">GRPO</a>, and adapter workflows only after the server is healthy and you have sent one chat request.</p>
+          <p style="color: var(--fg-dim);">Use <a href="#sft-corrections">SFT</a>, <a href="grpo.html">GRPO</a>, and adapter workflows only after the server is healthy and you have sent one chat request.</p>
         </div>
         <div class="card p-5">
           <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-4">Advanced reference</span>
@@ -442,7 +442,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
     "max_tokens": 64,
     "temperature": 0.7
   }' | python3 -m json.tool</code></pre>
-          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to SFT or GRPO.</p>
+          <p class="text-sm mt-3" style="color: var(--fg-mute);">This is the first inference checkpoint: get one response before moving on to <a href="#sft-corrections">SFT</a> or <a href="grpo.html">GRPO</a>.</p>
         </div>
       </div>
       <figure class="card mt-6 overflow-hidden">
@@ -472,7 +472,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       </div>
       <div class="grid sm:grid-cols-2 lg:grid-cols-7 gap-4">
         <a class="card p-5 block" href="api.html#training">
-          <h3 class="font-semibold mb-2">SFT corrections</h3>
+          <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
           <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
