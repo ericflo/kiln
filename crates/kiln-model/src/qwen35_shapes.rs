@@ -44,13 +44,16 @@ pub const GDN_STATE_ELEMENTS_PER_STREAM: usize =
     GDN_NUM_VALUE_HEADS * GDN_KEY_HEAD_DIM * GDN_VALUE_HEAD_DIM;
 pub const KV_ELEMENTS_PER_TOKEN_PER_FULL_LAYER: usize = NUM_KV_HEADS * HEAD_DIM * 2;
 
+// Canonical layer-interleave matches `kiln_core::config::ModelConfig`:
+// full-attention layers are 3, 7, 11, 15, 19, 23, 27, 31; the rest are GDN.
+// Layer 0 is GDN, not full attention.
 pub fn is_full_attention_layer(layer_idx: usize) -> bool {
-    layer_idx % FULL_ATTN_INTERVAL == 0
+    (layer_idx + 1) % FULL_ATTN_INTERVAL == 0
 }
 
 pub fn full_attention_layer_index(layer_idx: usize) -> Option<usize> {
     if layer_idx < NUM_LAYERS && is_full_attention_layer(layer_idx) {
-        Some(layer_idx / FULL_ATTN_INTERVAL)
+        Some((layer_idx + 1) / FULL_ATTN_INTERVAL - 1)
     } else {
         None
     }
@@ -60,7 +63,7 @@ pub fn gdn_layer_index(layer_idx: usize) -> Option<usize> {
     if layer_idx >= NUM_LAYERS || is_full_attention_layer(layer_idx) {
         return None;
     }
-    Some(layer_idx - (layer_idx / FULL_ATTN_INTERVAL) - 1)
+    Some(layer_idx - layer_idx / FULL_ATTN_INTERVAL)
 }
 
 pub fn assert_matches_config(config: &kiln_core::config::ModelConfig) -> Result<()> {
@@ -146,14 +149,66 @@ mod tests {
         let full: Vec<_> = (0..NUM_LAYERS)
             .filter(|&idx| is_full_attention_layer(idx))
             .collect();
-        assert_eq!(full, vec![0, 4, 8, 12, 16, 20, 24, 28]);
+        assert_eq!(full, vec![3, 7, 11, 15, 19, 23, 27, 31]);
         assert_eq!(full.len(), NUM_FULL_ATTN_LAYERS);
         assert_eq!(
             (0..NUM_LAYERS).filter_map(gdn_layer_index).count(),
             NUM_GDN_LAYERS
         );
-        assert_eq!(full_attention_layer_index(20), Some(5));
-        assert_eq!(gdn_layer_index(1), Some(0));
-        assert_eq!(gdn_layer_index(31), Some(23));
+    }
+
+    #[test]
+    fn is_full_attention_layer_matches_kiln_core() {
+        let config = kiln_core::config::ModelConfig::qwen3_5_4b();
+        for idx in 0..NUM_LAYERS {
+            assert_eq!(
+                is_full_attention_layer(idx),
+                config.is_full_attention_layer(idx),
+                "qwen35_shapes disagrees with ModelConfig at layer {idx}",
+            );
+        }
+        // Spot-check the canonical kiln-core assertions explicitly.
+        assert!(!is_full_attention_layer(0));
+        assert!(!is_full_attention_layer(1));
+        assert!(!is_full_attention_layer(2));
+        assert!(is_full_attention_layer(3));
+        assert!(!is_full_attention_layer(4));
+        assert!(is_full_attention_layer(7));
+        assert!(is_full_attention_layer(31));
+    }
+
+    #[test]
+    fn full_attention_layer_index_dense_mapping() {
+        assert_eq!(full_attention_layer_index(0), None);
+        assert_eq!(full_attention_layer_index(2), None);
+        assert_eq!(full_attention_layer_index(3), Some(0));
+        assert_eq!(full_attention_layer_index(4), None);
+        assert_eq!(full_attention_layer_index(7), Some(1));
+        assert_eq!(full_attention_layer_index(11), Some(2));
+        assert_eq!(full_attention_layer_index(15), Some(3));
+        assert_eq!(full_attention_layer_index(19), Some(4));
+        assert_eq!(full_attention_layer_index(23), Some(5));
+        assert_eq!(full_attention_layer_index(27), Some(6));
+        assert_eq!(full_attention_layer_index(31), Some(7));
+        assert_eq!(full_attention_layer_index(NUM_LAYERS), None);
+    }
+
+    #[test]
+    fn gdn_layer_index_dense_mapping() {
+        assert_eq!(gdn_layer_index(0), Some(0));
+        assert_eq!(gdn_layer_index(1), Some(1));
+        assert_eq!(gdn_layer_index(2), Some(2));
+        assert_eq!(gdn_layer_index(3), None);
+        assert_eq!(gdn_layer_index(4), Some(3));
+        assert_eq!(gdn_layer_index(5), Some(4));
+        assert_eq!(gdn_layer_index(6), Some(5));
+        assert_eq!(gdn_layer_index(7), None);
+        assert_eq!(gdn_layer_index(8), Some(6));
+        assert_eq!(gdn_layer_index(30), Some(23));
+        assert_eq!(gdn_layer_index(31), None);
+        assert_eq!(gdn_layer_index(NUM_LAYERS), None);
+
+        let dense: Vec<_> = (0..NUM_LAYERS).filter_map(gdn_layer_index).collect();
+        assert_eq!(dense, (0..NUM_GDN_LAYERS).collect::<Vec<_>>());
     }
 }
