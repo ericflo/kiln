@@ -78,7 +78,11 @@ pub struct ModelRunner {
     packed_weight_registry: OnceLock<GpuPackedWeightRegistry>,
     /// Phase A raw decode buffer pool. The first decode/warmup materializes
     /// stable typed tensors for the active graph bucket, then reuses them.
-    decode_buffers: Mutex<Option<DecodeBuffers>>,
+    /// Phase A.6: `OnceLock` instead of `Mutex<Option<_>>` — the buffer is
+    /// allocated once at the largest configured graph bucket
+    /// (`decode_buffer_max_batch()`), so subsequent decode steps just need a
+    /// `get()` (load-acquire) instead of a `Mutex::lock()` per step.
+    decode_buffers: OnceLock<DecodeBuffers>,
     /// Phase A.5: lazily built on first hot-path access via `ensure_decode_buffers()`.
     /// Mirrors the lazy registry pattern above so `ModelRunner::new` doesn't validate
     /// shapes that decode hasn't asked for yet.
@@ -807,7 +811,7 @@ impl ModelRunner {
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
             packed_weight_registry: OnceLock::new(),
-            decode_buffers: Mutex::new(None),
+            decode_buffers: OnceLock::new(),
             decode_buffer_config: OnceLock::new(),
             backend,
         }
@@ -852,30 +856,34 @@ impl ModelRunner {
     }
 
     pub fn ensure_decode_buffers(&self, batch: usize) -> Result<()> {
-        let mut guard = self
-            .decode_buffers
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock decode buffers: {e}"))?;
-        if guard.is_none() {
-            // Phase A.5: lazy decode-buffer-config build (see `new_with_options`).
-            let cfg = self
-                .decode_buffer_config
-                .get_or_init(|| {
-                    DecodeBufferConfig::graph_bucket(
-                        decode_buffer_max_batch(),
-                        self.config.max_position_embeddings,
-                        1,
-                        16,
-                        DecodeElementType::Bf16,
-                    )
-                    .expect("Qwen3.5 decode buffer config must be valid")
-                })
-                .clone();
-            let device = self.weights.embed_tokens.device();
-            *guard = Some(DecodeBuffers::allocate(cfg, device)?);
+        // Phase A.6: lock-free fast path. The buffer is allocated once at the
+        // largest configured graph bucket; subsequent decode steps only need a
+        // load-acquire on the `OnceLock`, eliminating the ~11% c=1 regression
+        // measured in Validation #5 from a per-step `Mutex::lock`.
+        if let Some(buffers) = self.decode_buffers.get() {
+            return buffers.ensure_batch_fits(batch);
         }
-        guard
-            .as_ref()
+        // Phase A.5: lazy decode-buffer-config build (see `new_with_options`).
+        let cfg = self
+            .decode_buffer_config
+            .get_or_init(|| {
+                DecodeBufferConfig::graph_bucket(
+                    decode_buffer_max_batch(),
+                    self.config.max_position_embeddings,
+                    1,
+                    16,
+                    DecodeElementType::Bf16,
+                )
+                .expect("Qwen3.5 decode buffer config must be valid")
+            })
+            .clone();
+        let device = self.weights.embed_tokens.device();
+        let buffers = DecodeBuffers::allocate(cfg, device)?;
+        // If another thread won the race, drop our newly allocated copy
+        // harmlessly and fall through to the winner's buffer.
+        let _ = self.decode_buffers.set(buffers);
+        self.decode_buffers
+            .get()
             .expect("decode buffers initialized")
             .ensure_batch_fits(batch)
     }
