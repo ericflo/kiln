@@ -195,6 +195,12 @@ Vulkan builds auto-select a Vulkan physical device at startup. Use `KILN_VULKAN_
 
 The `GPU` and `VRAM` lines come from `nvidia-smi` and are skipped silently if it isn't installed.
 
+**Verify the server is up.** Run `kiln health` (binary at `./kiln` for Path 2/3 or `./target/release/kiln` for Path 4) before sending real requests — it prints a readable tree with model, scheduler, training, and GPU status, and exits non-zero if anything is wrong. See [troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html#start-with-three-probes) for the full three-probe sequence.
+
+```bash
+./kiln health
+```
+
 ```bash
 # Chat
 curl http://localhost:8420/v1/chat/completions \
