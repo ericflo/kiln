@@ -106,14 +106,32 @@ impl<T: DecodeDType> fmt::Debug for DecodeBuffer<T> {
 }
 
 impl<T: DecodeDType> DecodeBuffer<T> {
-    pub fn allocate(kind: DecodeBufferKind, dims: impl Into<Vec<usize>>, device: &Device) -> Result<Self> {
+    pub fn allocate(
+        kind: DecodeBufferKind,
+        dims: impl Into<Vec<usize>>,
+        device: &Device,
+    ) -> Result<Self> {
         let dims = dims.into();
-        ensure!(!dims.is_empty(), "decode buffer {kind:?} must have at least one dimension");
-        ensure!(dims.iter().all(|&dim| dim > 0), "decode buffer {kind:?} dimensions must be non-zero: {dims:?}");
+        ensure!(
+            !dims.is_empty(),
+            "decode buffer {kind:?} must have at least one dimension"
+        );
+        ensure!(
+            dims.iter().all(|&dim| dim > 0),
+            "decode buffer {kind:?} dimensions must be non-zero: {dims:?}"
+        );
         let tensor = Tensor::zeros(dims.as_slice(), T::ELEMENT_TYPE.candle_dtype(), device)
             .with_context(|| format!("allocate decode buffer {kind:?} {dims:?}"))?;
-        ensure!(tensor.is_contiguous(), "decode buffer {kind:?} allocation must be contiguous");
-        Ok(Self { kind, tensor, dims, _dtype: PhantomData })
+        ensure!(
+            tensor.is_contiguous(),
+            "decode buffer {kind:?} allocation must be contiguous"
+        );
+        Ok(Self {
+            kind,
+            tensor,
+            dims,
+            _dtype: PhantomData,
+        })
     }
 
     pub fn kind(&self) -> DecodeBufferKind {
@@ -141,15 +159,29 @@ impl<T: DecodeDType> DecodeBuffer<T> {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn with_bf16_device_ptr<R>(&self, f: impl FnOnce(*const core::ffi::c_void) -> R) -> Result<R> {
+    pub fn with_bf16_device_ptr<R>(
+        &self,
+        f: impl FnOnce(*const core::ffi::c_void) -> R,
+    ) -> Result<R> {
         use half::bf16;
 
-        ensure!(T::ELEMENT_TYPE == DecodeElementType::Bf16, "decode buffer {:?} is not BF16", self.kind);
-        ensure!(self.tensor.is_contiguous(), "decode buffer {:?} must be contiguous for raw pointer access", self.kind);
+        ensure!(
+            T::ELEMENT_TYPE == DecodeElementType::Bf16,
+            "decode buffer {:?} is not BF16",
+            self.kind
+        );
+        ensure!(
+            self.tensor.is_contiguous(),
+            "decode buffer {:?} must be contiguous for raw pointer access",
+            self.kind
+        );
         let (storage, layout) = self.tensor.storage_and_layout();
         let cuda = match &*storage {
             candle_core::Storage::Cuda(cuda) => cuda,
-            _ => bail!("decode buffer {:?} must be on CUDA for raw pointer access", self.kind),
+            _ => bail!(
+                "decode buffer {:?} must be on CUDA for raw pointer access",
+                self.kind
+            ),
         };
         let stream = cuda.device().cuda_stream();
         let slice = cuda.as_cuda_slice::<bf16>()?.slice(layout.start_offset()..);
@@ -170,13 +202,34 @@ pub struct DecodeBufferConfig {
 }
 
 impl DecodeBufferConfig {
-    pub fn graph_bucket(max_batch: usize, max_context: usize, kv_pages: usize, page_size: usize, kv_dtype: DecodeElementType) -> Result<Self> {
+    pub fn graph_bucket(
+        max_batch: usize,
+        max_context: usize,
+        kv_pages: usize,
+        page_size: usize,
+        kv_dtype: DecodeElementType,
+    ) -> Result<Self> {
         ensure!(max_batch > 0, "decode buffer max_batch must be non-zero");
-        ensure!(max_context > 0, "decode buffer max_context must be non-zero");
+        ensure!(
+            max_context > 0,
+            "decode buffer max_context must be non-zero"
+        );
         ensure!(kv_pages > 0, "decode buffer kv_pages must be non-zero");
         ensure!(page_size > 0, "decode buffer page_size must be non-zero");
-        ensure!(matches!(kv_dtype, DecodeElementType::Bf16 | DecodeElementType::Fp8E4M3), "KV cache dtype must be BF16 or FP8");
-        Ok(Self { max_batch, max_context, kv_pages, page_size, kv_dtype })
+        ensure!(
+            matches!(
+                kv_dtype,
+                DecodeElementType::Bf16 | DecodeElementType::Fp8E4M3
+            ),
+            "KV cache dtype must be BF16 or FP8"
+        );
+        Ok(Self {
+            max_batch,
+            max_context,
+            kv_pages,
+            page_size,
+            kv_dtype,
+        })
     }
 
     pub fn hidden_dims(&self) -> [usize; 2] {
@@ -250,23 +303,47 @@ pub struct DecodeBuffers {
 
 impl DecodeBuffers {
     pub fn allocate(config: DecodeBufferConfig, device: &Device) -> Result<Self> {
-        let hidden = DecodeBuffer::allocate(DecodeBufferKind::Hidden, config.hidden_dims(), device)?;
+        let hidden =
+            DecodeBuffer::allocate(DecodeBufferKind::Hidden, config.hidden_dims(), device)?;
         let q = DecodeBuffer::allocate(DecodeBufferKind::Q, config.full_q_dims(), device)?;
         let k = DecodeBuffer::allocate(DecodeBufferKind::K, config.full_kv_dims(), device)?;
         let v = DecodeBuffer::allocate(DecodeBufferKind::V, config.full_kv_dims(), device)?;
-        let gdn_state = DecodeBuffer::allocate(DecodeBufferKind::GdnState, config.gdn_state_dims(), device)?;
+        let gdn_state =
+            DecodeBuffer::allocate(DecodeBufferKind::GdnState, config.gdn_state_dims(), device)?;
         let kv_pages = match config.kv_dtype {
-            DecodeElementType::Bf16 => KvCachePageBuffer::Bf16(DecodeBuffer::allocate(DecodeBufferKind::KvCachePages, config.kv_page_dims(), device)?),
-            DecodeElementType::Fp8E4M3 => KvCachePageBuffer::Fp8(DecodeBuffer::allocate(DecodeBufferKind::KvCachePages, config.kv_page_dims(), device)?),
+            DecodeElementType::Bf16 => KvCachePageBuffer::Bf16(DecodeBuffer::allocate(
+                DecodeBufferKind::KvCachePages,
+                config.kv_page_dims(),
+                device,
+            )?),
+            DecodeElementType::Fp8E4M3 => KvCachePageBuffer::Fp8(DecodeBuffer::allocate(
+                DecodeBufferKind::KvCachePages,
+                config.kv_page_dims(),
+                device,
+            )?),
             DecodeElementType::Fp32 => bail!("decode KV pages cannot use FP32"),
         };
-        let logits = DecodeBuffer::allocate(DecodeBufferKind::Logits, config.logits_dims(), device)?;
-        Ok(Self { config, hidden, q, k, v, gdn_state, kv_pages, logits })
+        let logits =
+            DecodeBuffer::allocate(DecodeBufferKind::Logits, config.logits_dims(), device)?;
+        Ok(Self {
+            config,
+            hidden,
+            q,
+            k,
+            v,
+            gdn_state,
+            kv_pages,
+            logits,
+        })
     }
 
     pub fn ensure_batch_fits(&self, batch: usize) -> Result<()> {
         ensure!(batch > 0, "decode batch must be non-zero");
-        ensure!(batch <= self.config.max_batch, "decode batch {batch} exceeds buffer max_batch {}", self.config.max_batch);
+        ensure!(
+            batch <= self.config.max_batch,
+            "decode batch {batch} exceeds buffer max_batch {}",
+            self.config.max_batch
+        );
         Ok(())
     }
 }
@@ -277,25 +354,52 @@ mod tests {
 
     #[test]
     fn graph_bucket_shapes_are_qwen35_baked() {
-        let cfg = DecodeBufferConfig::graph_bucket(8, 1024, 256, 16, DecodeElementType::Bf16).unwrap();
+        let cfg =
+            DecodeBufferConfig::graph_bucket(8, 1024, 256, 16, DecodeElementType::Bf16).unwrap();
         assert_eq!(cfg.hidden_dims(), [8, shapes::HIDDEN]);
         assert_eq!(cfg.full_q_dims(), [8, shapes::NUM_HEADS, shapes::HEAD_DIM]);
-        assert_eq!(cfg.full_kv_dims(), [8, shapes::NUM_KV_HEADS, shapes::HEAD_DIM]);
-        assert_eq!(cfg.gdn_state_dims(), [8, shapes::NUM_GDN_LAYERS, shapes::GDN_NUM_VALUE_HEADS, shapes::GDN_KEY_HEAD_DIM, shapes::GDN_VALUE_HEAD_DIM]);
-        assert_eq!(cfg.kv_page_dims(), [256, shapes::NUM_FULL_ATTN_LAYERS, 2, 16, shapes::FULL_KV_WIDTH]);
+        assert_eq!(
+            cfg.full_kv_dims(),
+            [8, shapes::NUM_KV_HEADS, shapes::HEAD_DIM]
+        );
+        assert_eq!(
+            cfg.gdn_state_dims(),
+            [
+                8,
+                shapes::NUM_GDN_LAYERS,
+                shapes::GDN_NUM_VALUE_HEADS,
+                shapes::GDN_KEY_HEAD_DIM,
+                shapes::GDN_VALUE_HEAD_DIM
+            ]
+        );
+        assert_eq!(
+            cfg.kv_page_dims(),
+            [
+                256,
+                shapes::NUM_FULL_ATTN_LAYERS,
+                2,
+                16,
+                shapes::FULL_KV_WIDTH
+            ]
+        );
         assert_eq!(cfg.logits_dims(), [8, shapes::VOCAB]);
     }
 
     #[test]
     fn graph_bucket_rejects_invalid_capacity() {
-        assert!(DecodeBufferConfig::graph_bucket(0, 1024, 256, 16, DecodeElementType::Bf16).is_err());
-        assert!(DecodeBufferConfig::graph_bucket(8, 1024, 256, 16, DecodeElementType::Fp32).is_err());
+        assert!(
+            DecodeBufferConfig::graph_bucket(0, 1024, 256, 16, DecodeElementType::Bf16).is_err()
+        );
+        assert!(
+            DecodeBufferConfig::graph_bucket(8, 1024, 256, 16, DecodeElementType::Fp32).is_err()
+        );
     }
 
     #[test]
     fn decode_buffer_metadata_tracks_bytes() {
         let device = Device::Cpu;
-        let buffer = DecodeBuffer::<Fp32>::allocate(DecodeBufferKind::Logits, [2, 4], &device).unwrap();
+        let buffer =
+            DecodeBuffer::<Fp32>::allocate(DecodeBufferKind::Logits, [2, 4], &device).unwrap();
         assert_eq!(buffer.dims(), &[2, 4]);
         assert_eq!(buffer.byte_len(), 32);
         assert_eq!(buffer.element_type(), DecodeElementType::Fp32);

@@ -139,7 +139,6 @@ pub struct PagedBatchedDecodeState {
     pub decode_duration: std::time::Duration,
 }
 
-
 fn decode_buffer_max_batch() -> usize {
     std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
         .ok()
@@ -853,7 +852,10 @@ impl ModelRunner {
             .map_err(|e| anyhow::anyhow!("failed to lock decode buffers: {e}"))?;
         if guard.is_none() {
             let device = self.weights.embed_tokens.device();
-            *guard = Some(DecodeBuffers::allocate(self.decode_buffer_config.clone(), device)?);
+            *guard = Some(DecodeBuffers::allocate(
+                self.decode_buffer_config.clone(),
+                device,
+            )?);
         }
         guard
             .as_ref()
