@@ -430,7 +430,8 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         </div>
         <div class="card p-5">
           <h3 class="font-semibold mb-2">Check <code>/health</code></h3>
-<pre class="text-sm"><code>curl -s http://127.0.0.1:8420/health \
+<pre class="text-sm"><code>kiln health</code></pre>
+<pre class="text-sm mt-3"><code>curl -s http://127.0.0.1:8420/health \
   | python3 -m json.tool</code></pre>
         </div>
         <div class="card p-5">
@@ -473,7 +474,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
       <div class="grid sm:grid-cols-2 lg:grid-cols-7 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
-          <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference.</p>
+          <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference, then run <code>kiln train status</code> to confirm the job finished before the next chat request.</p>
         </a>
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO Guide</h3>

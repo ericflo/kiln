@@ -346,7 +346,9 @@
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Training status check</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+            <p class="text-sm mb-3" style="color: var(--fg-dim);">Use the CLI for a friendlier summary, or hit the endpoint directly:</p>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status</code></pre>
+            <pre class="overflow-x-auto text-sm leading-relaxed mt-3" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
           </section>
         </div>
       </article>
@@ -498,7 +500,7 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
   <section class="divider">
     <div class="max-w-4xl mx-auto px-6 py-12">
       <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
-      <div class="grid sm:grid-cols-3 gap-4">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="quickstart.html">
           <h3 class="font-semibold mb-2">Quickstart</h3>
           <p style="color: var(--fg-dim);">Run the server, send the first chat request, and post the first SFT job.</p>
@@ -506,6 +508,10 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
         <a class="card p-5 block" href="grpo.html">
           <h3 class="font-semibold mb-2">GRPO guide</h3>
           <p style="color: var(--fg-dim);">See scored-completion payloads and the generate &rarr; score &rarr; train loop.</p>
+        </a>
+        <a class="card p-5 block" href="troubleshooting.html">
+          <h3 class="font-semibold mb-2">Troubleshooting</h3>
+          <p style="color: var(--fg-dim);">Check binary, CUDA or Metal setup, model path, health output, and adapter storage.</p>
         </a>
         <a class="card p-5 block" href="demo/">
           <h3 class="font-semibold mb-2">Demo</h3>

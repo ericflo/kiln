@@ -342,6 +342,14 @@ training request
             <p>Scored completions become a generate &rarr; score &rarr; train loop through the same HTTP API.</p>
           </div>
         </div>
+        <p class="text-sm mt-5" style="color: var(--fg-dim);">
+          Inspect your live server&rsquo;s queue and registry: <code>kiln train status</code> shows pending and running jobs, and <code>kiln adapters list</code> shows the published adapters available to subsequent requests.
+        </p>
+        <pre class="mt-3 overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status
+kiln adapters list</code></pre>
+        <p class="text-xs mt-3" style="color: var(--fg-mute);">
+          See the <a href="cli.html">CLI Reference</a> for the full <code>kiln</code> command surface.
+        </p>
       </article>
 
       <article class="card p-6">
@@ -385,6 +393,10 @@ training request
         <a class="card p-5 block" href="troubleshooting.html">
           <h3 class="font-semibold mb-2">Troubleshooting</h3>
           <p style="color: var(--fg-dim);">Check binary, CUDA or Metal setup, model path, health output, and adapter storage.</p>
+        </a>
+        <a class="card p-5 block" href="cli.html">
+          <h3 class="font-semibold mb-2">CLI reference</h3>
+          <p style="color: var(--fg-dim);">Map architecture concepts to <code>kiln serve</code>, <code>kiln health</code>, <code>kiln adapters list</code>, and training commands.</p>
         </a>
         <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">
           <h3 class="font-semibold mb-2">Benchmarks</h3>
