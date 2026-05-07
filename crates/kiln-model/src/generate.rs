@@ -1942,7 +1942,59 @@ impl ModelRunner {
             .collect();
 
         let started = std::time::Instant::now();
-        let sampled = {
+
+        // Fast path: when row_count > 1, all rows greedy with a common seq_len,
+        // and the cache is non-FP8, route through the contiguous-batched
+        // primitive. That single forward pass batches GQA across rows and uses
+        // the fused argmax LM head, eliminating the per-row GQA loop and
+        // per-row [1, 1, vocab] LM-head allocations that produce the c=8
+        // throughput collapse documented in
+        // docs/audits/PHASE12_B_PRIME_BATCHING_DIAGNOSIS.md.
+        let common_seq_len = sequence_lengths[0];
+        let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
+        let all_greedy = params.iter().all(|p| p.temperature == 0.0);
+        let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
+        let try_contiguous_batched =
+            row_count > 1 && positions_uniform && all_greedy && !cache_is_fp8;
+
+        let mut sampled: Option<Vec<TokenId>> = None;
+        if try_contiguous_batched {
+            let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+            let result = if self.has_linear_attention_layers() {
+                let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+                    linear_states.iter_mut().map(|s| &mut **s).collect();
+                self.decode_next_tokens_paged_contiguous_batch_greedy(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut linear_state_refs,
+                )
+            } else {
+                let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+                self.decode_next_tokens_paged_contiguous_batch_greedy(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut no_linear_states,
+                )
+            };
+            match result {
+                Ok(tokens) => sampled = Some(tokens),
+                Err(err) => {
+                    tracing::debug!(
+                        batch = row_count,
+                        error = %err,
+                        "contiguous-batched decode declined; falling back to per-row path"
+                    );
+                }
+            }
+        }
+
+        let sampled = if let Some(tokens) = sampled {
+            tokens
+        } else {
             let mut pc_guard = lock_paged_cache(paged_cache)?;
             let mut graph_runner = self
                 .cuda_graph

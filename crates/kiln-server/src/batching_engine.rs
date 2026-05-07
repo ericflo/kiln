@@ -546,7 +546,14 @@ impl BatchingEngineActor {
                 }
             }
 
-            thread::sleep(Duration::from_millis(1));
+            // Only sleep when we have nothing to do. Sleeping unconditionally
+            // before every decode step adds ~5% c=1 regression and starves
+            // already-active rows of GPU time. With active work, drain commands
+            // non-blockingly, admit any new arrivals, and run the decode step
+            // immediately.
+            if self.active.is_empty() {
+                thread::sleep(Duration::from_millis(1));
+            }
             self.drain_commands();
             self.admit_waiting();
             if !self.active.is_empty() {

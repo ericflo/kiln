@@ -1021,15 +1021,52 @@ impl LinearAttentionState {
             );
         }
 
+        // Defensive dtype normalization: rows must share a dtype for `Tensor::cat`.
+        // The canonical recurrent dtype is whatever `new_with_batch` produced for
+        // row 0 (F32 on CUDA, BF16/F16 on Metal). If any other row drifted (e.g. a
+        // prior decode error left state mid-conversion in BF16), cast it back to
+        // row 0's dtype so cat succeeds. Same for conv state.
         let mut recurrent_states = Vec::with_capacity(num_layers);
         let mut conv_states = Vec::with_capacity(num_layers);
         for layer_idx in 0..num_layers {
-            let recurrent_refs: Vec<&Tensor> = rows
-                .iter()
-                .map(|row| &row.recurrent_states[layer_idx])
-                .collect();
-            let conv_refs: Vec<&Tensor> =
-                rows.iter().map(|row| &row.conv_states[layer_idx]).collect();
+            let target_recurrent_dtype = rows[0].recurrent_states[layer_idx].dtype();
+            let mut recurrent_owned: Vec<Tensor> = Vec::with_capacity(rows.len());
+            for (row_idx, row) in rows.iter().enumerate() {
+                let t = &row.recurrent_states[layer_idx];
+                if t.dtype() != target_recurrent_dtype {
+                    tracing::debug!(
+                        layer = layer_idx,
+                        row = row_idx,
+                        from = ?t.dtype(),
+                        to = ?target_recurrent_dtype,
+                        "from_batch_rows: normalizing recurrent state dtype before cat"
+                    );
+                    recurrent_owned.push(t.to_dtype(target_recurrent_dtype)?);
+                } else {
+                    recurrent_owned.push(t.clone());
+                }
+            }
+            let recurrent_refs: Vec<&Tensor> = recurrent_owned.iter().collect();
+
+            let target_conv_dtype = rows[0].conv_states[layer_idx].dtype();
+            let mut conv_owned: Vec<Tensor> = Vec::with_capacity(rows.len());
+            for (row_idx, row) in rows.iter().enumerate() {
+                let t = &row.conv_states[layer_idx];
+                if t.dtype() != target_conv_dtype {
+                    tracing::debug!(
+                        layer = layer_idx,
+                        row = row_idx,
+                        from = ?t.dtype(),
+                        to = ?target_conv_dtype,
+                        "from_batch_rows: normalizing conv state dtype before cat"
+                    );
+                    conv_owned.push(t.to_dtype(target_conv_dtype)?);
+                } else {
+                    conv_owned.push(t.clone());
+                }
+            }
+            let conv_refs: Vec<&Tensor> = conv_owned.iter().collect();
+
             recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?.contiguous()?);
             conv_states.push(Tensor::cat(&conv_refs, 0)?.contiguous()?);
         }
@@ -7807,20 +7844,60 @@ pub fn model_forward_paged_batched_decode_hidden(
                     rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
                 };
 
+                // Defensive dtype normalization (same rationale as
+                // LinearAttentionState::from_batch_rows): cast any drifted rows
+                // back to row 0's dtype before cat, so a stray BF16 row from a
+                // prior aborted decode does not break the slow path either.
                 let mut recurrent_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.recurrent_states[linear_attn_idx])
-                        .collect();
+                    let target_dtype = linear_states[0].recurrent_states[linear_attn_idx].dtype();
+                    let mut owned: Vec<Tensor> = Vec::with_capacity(linear_states.len());
+                    for (row_idx, state) in linear_states.iter().enumerate() {
+                        let t = &state.recurrent_states[linear_attn_idx];
+                        if t.dtype() != target_dtype {
+                            tracing::debug!(
+                                layer = layer_idx,
+                                row = row_idx,
+                                from = ?t.dtype(),
+                                to = ?target_dtype,
+                                "batched_decode: normalizing recurrent state dtype before cat"
+                            );
+                            owned.push(t.to_dtype(target_dtype).with_context(|| {
+                                format!(
+                                    "cast recurrent state row {row_idx} to {target_dtype:?} for GDN layer {layer_idx}"
+                                )
+                            })?);
+                        } else {
+                            owned.push(t.clone());
+                        }
+                    }
+                    let refs: Vec<&Tensor> = owned.iter().collect();
                     Tensor::cat(&refs, 0).with_context(|| {
                         format!("cat batched recurrent state for GDN layer {layer_idx}")
                     })?
                 };
                 let mut conv_state = {
-                    let refs: Vec<&Tensor> = linear_states
-                        .iter()
-                        .map(|state| &state.conv_states[linear_attn_idx])
-                        .collect();
+                    let target_dtype = linear_states[0].conv_states[linear_attn_idx].dtype();
+                    let mut owned: Vec<Tensor> = Vec::with_capacity(linear_states.len());
+                    for (row_idx, state) in linear_states.iter().enumerate() {
+                        let t = &state.conv_states[linear_attn_idx];
+                        if t.dtype() != target_dtype {
+                            tracing::debug!(
+                                layer = layer_idx,
+                                row = row_idx,
+                                from = ?t.dtype(),
+                                to = ?target_dtype,
+                                "batched_decode: normalizing conv state dtype before cat"
+                            );
+                            owned.push(t.to_dtype(target_dtype).with_context(|| {
+                                format!(
+                                    "cast conv state row {row_idx} to {target_dtype:?} for GDN layer {layer_idx}"
+                                )
+                            })?);
+                        } else {
+                            owned.push(t.clone());
+                        }
+                    }
+                    let refs: Vec<&Tensor> = owned.iter().collect();
                     Tensor::cat(&refs, 0).with_context(|| {
                         format!("cat batched conv state for GDN layer {layer_idx}")
                     })?
