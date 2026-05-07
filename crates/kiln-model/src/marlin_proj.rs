@@ -34,7 +34,7 @@ use half::f16;
 ///
 /// All tensors live on the same CUDA device as the source model weights. The
 /// struct is `Send + Sync` via the underlying `Tensor` handles.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MarlinPackedProj {
     /// Packed 4-bit weights in Marlin's tiled/permuted layout.
     /// Shape: `[k / 16, n * 16 / 8]`, dtype `i32`.
