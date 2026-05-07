@@ -281,6 +281,12 @@
           </p>
         </div>
       </div>
+      <p class="mt-6" style="color: var(--fg-dim);">
+        If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln health</code> for the same
+        info as a readable tree (use <code>--json</code> for scripts and
+        <code>--url http://host:8420</code> for remote servers). The curl commands below are the
+        equivalent HTTP probes &mdash; handy for CI, scripts, or any environment without the CLI.
+      </p>
 <pre class="mt-6"><code>curl -s http://localhost:8420/health | jq .
 curl -s http://localhost:8420/v1/models | jq .
 curl -s http://localhost:8420/v1/chat/completions \
@@ -541,6 +547,7 @@ kiln adapters list --url http://gpu-box:8420</code></pre>
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

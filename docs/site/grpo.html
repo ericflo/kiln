@@ -363,9 +363,27 @@
         <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
           <code>/v1/train/grpo</code> returns a queued job immediately. Poll <code>/v1/train/status</code> to see pending, running, completed, or failed jobs, then confirm the trained adapter through the adapter APIs or the web UI.
         </p>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          If the <code>kiln</code> CLI is on your <code>PATH</code>, run <code>kiln train status</code> for the same info as a readable summary (use <code>--url http://host:8420</code> for remote servers). The curl command below is the equivalent HTTP probe &mdash; handy for CI, scripts, or any environment without the CLI.
+        </p>
         <section class="endpoint">
+          <h3 class="font-semibold mb-2">Training status from the CLI</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status</code></pre>
+        </section>
+        <section class="endpoint mt-4">
           <h3 class="font-semibold mb-2">Training status</h3>
           <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+        </section>
+        <p class="leading-relaxed mt-5 mb-5" style="color: var(--fg-dim);">
+          Once a job is <code>completed</code>, confirm the new adapter actually landed and is active. If the <code>kiln</code> CLI is on your <code>PATH</code>, <code>kiln adapters list</code> shows the new adapter and which one is active. The curl command below hits the same endpoint for CI or scripted use.
+        </p>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Confirm the trained adapter from the CLI</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln adapters list</code></pre>
+        </section>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Confirm the trained adapter</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/adapters | python3 -m json.tool</code></pre>
         </section>
         <p class="text-sm mt-4" style="color: var(--fg-mute);">
           If a GRPO request is rejected or stays queued longer than expected, start with the <a href="troubleshooting.html">troubleshooting guide</a> and the full endpoint map in <a href="api.html#training">API training</a>.
@@ -415,6 +433,7 @@
         <a href="demo/">Demo</a>
         <a href="troubleshooting.html">Troubleshooting</a>
         <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
         <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
         <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
         <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>

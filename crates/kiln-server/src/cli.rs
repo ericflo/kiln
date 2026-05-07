@@ -42,7 +42,7 @@ const SERVE_OVERVIEW: &str = r#"Start the OpenAI-compatible Kiln server for Qwen
 
 Before starting, point Kiln at model weights with KILN_MODEL_PATH or pass a TOML config with --config. After startup, open http://127.0.0.1:8420/ui for the embedded dashboard and use kiln health to check readiness.
 
-If setup stalls, follow QUICKSTART.md first, then the Troubleshooting section for model path, CUDA, and config checks.
+If setup stalls, follow https://ericflo.github.io/kiln/quickstart.html first, then https://ericflo.github.io/kiln/troubleshooting.html for model path, CUDA, and config checks.
 "#;
 
 const SERVE_EXAMPLES: &str = r#"Examples:
@@ -58,14 +58,14 @@ const SERVE_EXAMPLES: &str = r#"Examples:
   kiln health
       Confirm the server is ready and inspect model, adapter, scheduler, and training status.
 
-  See QUICKSTART.md and Troubleshooting if the server cannot find weights, CUDA is unavailable, or config validation fails.
+  See https://ericflo.github.io/kiln/quickstart.html and https://ericflo.github.io/kiln/troubleshooting.html if the server cannot find weights, CUDA is unavailable, or config validation fails.
 "#;
 
 const HEALTH_OVERVIEW: &str = r#"Check readiness and setup diagnostics for a running Kiln server at http://localhost:8420 by default.
 
 `kiln health` calls the server's /health endpoint and prints a terminal-friendly tree with model, adapter, scheduler, GPU memory, and training status. Use it after `kiln serve` starts, or point --url at a remote server when debugging another host.
 
-If readiness fails, check the /health response first, then follow QUICKSTART.md and Troubleshooting for model path, CUDA, config, and server-start diagnostics.
+If readiness fails, check the /health response first, then follow https://ericflo.github.io/kiln/quickstart.html and https://ericflo.github.io/kiln/troubleshooting.html for model path, CUDA, config, and server-start diagnostics.
 "#;
 
 const HEALTH_EXAMPLES: &str = r#"Examples:
@@ -184,6 +184,64 @@ fn render_api_error(body: &serde_json::Value, status: reqwest::StatusCode) -> St
     } else {
         status.to_string()
     }
+}
+
+/// True if a `reqwest::Error` indicates the Kiln server is unreachable
+/// (connect refused, DNS failure, or transport timeout).
+///
+/// Walks the error chain so I/O errors wrapped under hyper/h2/rustls are still
+/// classified — `reqwest::Error::is_connect()` alone misses some cases.
+fn is_connection_error(err: &reqwest::Error) -> bool {
+    use std::error::Error as _;
+    if err.is_connect() || err.is_timeout() {
+        return true;
+    }
+    let mut source: Option<&(dyn std::error::Error + 'static)> = err.source();
+    while let Some(e) = source {
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind;
+            if matches!(
+                io_err.kind(),
+                ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::TimedOut
+                    | ErrorKind::AddrNotAvailable
+                    | ErrorKind::NotConnected
+            ) {
+                return true;
+            }
+        }
+        source = e.source();
+    }
+    false
+}
+
+/// Map a `reqwest::Error` to a friendly Kiln CLI diagnostic.
+///
+/// On connect / DNS / timeout errors (the "is the server even running?" class),
+/// print a tip pointing at `kiln serve` + QUICKSTART and `exit(1)` so the user
+/// is not buried under raw `reqwest`/`hyper` chain text. For any other transport
+/// error, return it wrapped in `anyhow::Error` so today's `?` propagation keeps
+/// working unchanged. HTTP-error responses (`status.is_success() == false`)
+/// still flow through `render_api_error` since they are reached only after the
+/// response body has been read successfully.
+fn handle_request_error(url: &str, err: reqwest::Error) -> anyhow::Error {
+    if is_connection_error(&err) {
+        eprintln!(
+            "{} Could not reach Kiln server at {}.",
+            style("✗").red().bold(),
+            style(url).cyan()
+        );
+        eprintln!(
+            "  Is the server running? Try {} first, or pass {} to point at another host.",
+            style("kiln serve").white().bold(),
+            style("--url <addr>").white().bold()
+        );
+        eprintln!("  See https://ericflo.github.io/kiln/quickstart.html for setup help.");
+        std::process::exit(1);
+    }
+    anyhow::Error::new(err)
 }
 
 /// Kiln — single-model inference server with live online learning
@@ -743,7 +801,9 @@ pub fn format_health_pretty(body: &serde_json::Value) -> String {
 /// the raw JSON error body is always printed regardless of `json` so failure
 /// diagnostics are never lossy.
 pub async fn run_health(url: &str, json: bool) -> anyhow::Result<()> {
-    let resp = reqwest::get(format!("{url}/health")).await?;
+    let resp = reqwest::get(format!("{url}/health"))
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -823,7 +883,9 @@ pub fn run_config_check(file: Option<&str>) -> anyhow::Result<()> {
 
 /// Run the `adapters list` CLI subcommand.
 pub async fn run_adapters_list(url: &str) -> anyhow::Result<()> {
-    let resp = reqwest::get(format!("{url}/v1/adapters")).await?;
+    let resp = reqwest::get(format!("{url}/v1/adapters"))
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -935,7 +997,8 @@ pub async fn run_adapters_load(url: &str, name: &str) -> anyhow::Result<()> {
         .post(adapter_load_url(url))
         .json(&build_adapter_load_payload(name))
         .send()
-        .await?;
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -960,7 +1023,11 @@ pub async fn run_adapters_load(url: &str, name: &str) -> anyhow::Result<()> {
 /// Run the `adapters unload` CLI subcommand.
 pub async fn run_adapters_unload(url: &str, name: Option<&str>) -> anyhow::Result<()> {
     let client = reqwest::Client::new();
-    let resp = client.post(adapter_unload_url(url)).send().await?;
+    let resp = client
+        .post(adapter_unload_url(url))
+        .send()
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -994,7 +1061,8 @@ pub async fn run_adapters_delete(url: &str, name: &str) -> anyhow::Result<()> {
     let resp = client
         .delete(format!("{url}/v1/adapters/{name}"))
         .send()
-        .await?;
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
 
     if status.is_success() {
@@ -1053,7 +1121,8 @@ pub async fn run_train_sft(
         .post(format!("{url}/v1/train/sft"))
         .json(&body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
 
     let status = resp.status();
     let resp_body: serde_json::Value = resp.json().await?;
@@ -1111,7 +1180,8 @@ pub async fn run_train_grpo(
         .post(format!("{url}/v1/train/grpo"))
         .json(&body)
         .send()
-        .await?;
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
 
     let status = resp.status();
     let resp_body: serde_json::Value = resp.json().await?;
@@ -1202,7 +1272,9 @@ pub async fn run_train_status(url: &str, job_id: Option<&str>) -> anyhow::Result
 }
 
 async fn print_single_job_status(url: &str, id: &str) -> anyhow::Result<()> {
-    let resp = reqwest::get(format!("{url}/v1/train/status/{id}")).await?;
+    let resp = reqwest::get(format!("{url}/v1/train/status/{id}"))
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -1221,7 +1293,9 @@ async fn print_single_job_status(url: &str, id: &str) -> anyhow::Result<()> {
 }
 
 async fn print_all_job_statuses(url: &str) -> anyhow::Result<()> {
-    let resp = reqwest::get(format!("{url}/v1/train/status")).await?;
+    let resp = reqwest::get(format!("{url}/v1/train/status"))
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await?;
 
@@ -1597,6 +1671,35 @@ mod tests {
             }
             other => panic!("expected adapters unload, got {:?}", other.is_some()),
         }
+    }
+
+    #[tokio::test]
+    async fn handle_request_error_classifies_unreachable_server() {
+        // Bind a TCP listener on an OS-assigned port, capture the port, then
+        // drop the listener so that subsequent connects to the same port get
+        // ECONNREFUSED. This is more reliable than picking a "probably closed"
+        // high port.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}");
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .expect("build reqwest client");
+        let err = client
+            .get(format!("{url}/health"))
+            .send()
+            .await
+            .expect_err("expected connect error against closed loopback port");
+
+        assert!(
+            is_connection_error(&err),
+            "expected is_connection_error=true (is_connect={}, is_timeout={}); err={err:?}",
+            err.is_connect(),
+            err.is_timeout(),
+        );
     }
 
     #[test]
