@@ -346,7 +346,9 @@
           </section>
           <section class="endpoint">
             <h3 class="font-semibold mb-2">Training status check</h3>
-            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
+            <p class="text-sm mb-3" style="color: var(--fg-dim);">Use the CLI for a friendlier summary, or hit the endpoint directly:</p>
+            <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln train status</code></pre>
+            <pre class="overflow-x-auto text-sm leading-relaxed mt-3" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/status | python3 -m json.tool</code></pre>
           </section>
         </div>
       </article>
