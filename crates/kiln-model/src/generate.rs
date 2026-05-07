@@ -1521,18 +1521,15 @@ impl ModelRunner {
             .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
             .is_enabled();
-        if cuda_graph_enabled {
-            let mut bm_guard = lock_block_manager(block_manager)?;
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
-            return self.generate_from_tokens_paged(
-                prompt_tokens,
-                params,
-                &mut bm_guard,
-                &mut pc_guard,
-                cancel,
-            );
-        }
 
+        // Phase 12-B'': allocate blocks under a one-shot BlockManager lock and
+        // wrap them in `SharedBlockReservation` so the BM lock is released
+        // before any forward passes run. The CUDA-graph branch previously held
+        // both the BM and the PagedKvCache locks for the entire generation
+        // (~2.3 s for a 512-prompt, 128-decode run), which forced concurrent
+        // requests onto a serial staircase even with c=8. Both branches now
+        // route through interleaved variants that take `&Mutex<PagedKvCache>`
+        // and lock per-step, mirroring the non-CUDA-graph path.
         let max_total = prompt_tokens.len() + params.max_tokens;
         let (reservation, block_table) = {
             let mut bm_guard = lock_block_manager(block_manager)?;
@@ -1554,13 +1551,23 @@ impl ModelRunner {
             )
         };
 
-        let result = self.generate_from_tokens_paged_interleaved(
-            prompt_tokens,
-            params,
-            paged_cache,
-            &block_table,
-            cancel,
-        );
+        let result = if cuda_graph_enabled {
+            self.generate_from_tokens_paged_cuda_graph_interleaved(
+                prompt_tokens,
+                params,
+                paged_cache,
+                &block_table,
+                cancel,
+            )
+        } else {
+            self.generate_from_tokens_paged_interleaved(
+                prompt_tokens,
+                params,
+                paged_cache,
+                &block_table,
+                cancel,
+            )
+        };
 
         drop(reservation);
         result
@@ -2601,6 +2608,206 @@ impl ModelRunner {
                 step_seed,
             )?;
             seq_len += 1;
+        }
+
+        Ok(GenerationOutput {
+            text: String::new(),
+            token_ids: generated_tokens,
+            finish_reason: FinishReason::MaxTokens,
+        })
+    }
+
+    /// CUDA-graph variant of the interleaved decode path (Phase 12-B'').
+    ///
+    /// Mirrors `generate_from_tokens_paged_inner` (the path the old CUDA-graph
+    /// branch used) but takes `paged_cache: &Mutex<PagedKvCache>` and locks it
+    /// per forward pass instead of holding it across the entire generation.
+    /// The CUDA graph runner mutex is also acquired per decode step, so that
+    /// concurrent c=8 requests can interleave on a per-step granularity rather
+    /// than serialising on a generation-lifetime lock. Blocks are still
+    /// allocated once up-front by the caller (`generate_from_tokens_paged_shared`)
+    /// and freed via `SharedBlockReservation` when the caller drops the
+    /// reservation guard, mirroring the non-graph interleaved path.
+    fn generate_from_tokens_paged_cuda_graph_interleaved(
+        &self,
+        prompt_tokens: &[TokenId],
+        params: &SamplingParams,
+        paged_cache: &Mutex<PagedKvCache>,
+        block_table: &BlockTable,
+        cancel: Option<&CancelHandle>,
+    ) -> Result<GenerationOutput> {
+        let mut linear_state = self.new_linear_state()?;
+
+        // Prefill: lock the paged cache for one forward pass and drop it
+        // before the decode loop starts. The decode loop then re-acquires the
+        // cache per step.
+        let streaming_prefill =
+            streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len());
+        let prefill_source = {
+            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            if streaming_prefill {
+                PrefillSampleSource::Logits(
+                    model_forward_paged_streaming(
+                        &*self.backend,
+                        prompt_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        0,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                    )
+                    .context("prefill forward pass (paged, streaming) failed")?,
+                )
+            } else if params.is_effectively_greedy()
+                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            {
+                PrefillSampleSource::GreedyToken(
+                    model_forward_paged_last_token_greedy(
+                        &*self.backend,
+                        prompt_tokens,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        0,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .context("greedy prefill forward pass (paged) failed")?,
+                )
+            } else {
+                let logits = model_forward_paged_last_token(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("prefill forward pass (paged) failed")?;
+                if let Some(cancel) = cancel {
+                    cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
+                }
+                PrefillSampleSource::Logits(logits)
+            }
+        };
+
+        let mut seq_len = prompt_tokens.len();
+        let mut generated_tokens: Vec<TokenId> = Vec::new();
+        let mut step_seed = params.seed;
+
+        let mut next_token = match prefill_source {
+            PrefillSampleSource::GreedyToken(token) => token,
+            PrefillSampleSource::Logits(logits) => {
+                if params.is_effectively_greedy() {
+                    greedy_sample(&logits)?
+                } else {
+                    sample_with_params(
+                        &logits,
+                        params.temperature,
+                        params.top_p,
+                        params.top_k,
+                        step_seed,
+                    )?
+                }
+            }
+        };
+
+        for _step in 0..params.max_tokens {
+            check_cancelled(cancel)?;
+            if let Some(s) = step_seed.as_mut() {
+                *s = s.wrapping_add(1);
+            }
+
+            if self.eos_token_ids.contains(&next_token) {
+                return Ok(GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason: FinishReason::Eos,
+                });
+            }
+
+            generated_tokens.push(next_token);
+
+            if !params.stop.is_empty() {
+                let decoded_so_far = self
+                    .tokenizer
+                    .decode(&generated_tokens)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .ok();
+                if let Some(text) = &decoded_so_far {
+                    for stop_seq in &params.stop {
+                        if text.contains(stop_seq.as_str()) {
+                            return Ok(GenerationOutput {
+                                text: String::new(),
+                                token_ids: generated_tokens,
+                                finish_reason: FinishReason::StopSequence(stop_seq.clone()),
+                            });
+                        }
+                    }
+                }
+            }
+
+            if generated_tokens.len() >= params.max_tokens {
+                break;
+            }
+
+            next_token = if params.is_effectively_greedy()
+                && matches!(self.backend.device(), candle_core::Device::Metal(_))
+            {
+                // Metal greedy path bypasses the CUDA graph runner entirely.
+                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                let token = model_forward_paged_next_token_greedy(
+                    &*self.backend,
+                    next_token,
+                    &self.weights,
+                    &self.config,
+                    &mut pc_guard,
+                    block_table,
+                    seq_len,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
+                    None,
+                )?;
+                seq_len += 1;
+                token
+            } else {
+                // CUDA graph decode step: acquire the graph runner and the
+                // paged cache for one step, then drop both before sampling so
+                // concurrent requests can interleave on the next step.
+                let logits = {
+                    let mut graph_runner = self.cuda_graph.lock().map_err(|e| {
+                        anyhow::anyhow!("failed to lock CUDA graph runner: {e}")
+                    })?;
+                    let mut pc_guard = lock_paged_cache(paged_cache)?;
+                    graph_runner.decode_step_paged(
+                        &*self.backend,
+                        next_token,
+                        &self.weights,
+                        &self.config,
+                        &mut pc_guard,
+                        block_table,
+                        seq_len,
+                        &mut linear_state,
+                        self.active_lora.as_ref(),
+                    )?
+                };
+                seq_len += 1;
+                sample_with_params(
+                    &logits,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    step_seed,
+                )?
+            };
         }
 
         Ok(GenerationOutput {
