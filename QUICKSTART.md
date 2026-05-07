@@ -185,6 +185,16 @@ Kiln binds to loopback (`127.0.0.1`) by default so a fresh install isn't reachab
 
 On Apple Silicon, Kiln auto-detects Metal and logs `Metal available — using Apple Silicon GPU` at startup instead of the CUDA availability line. On Linux AMD/Intel builds, the equivalent Vulkan log line is `Vulkan available — using Vulkan GPU (AMD/Intel)`. No config changes needed — the binary selects the backend that was compiled in.
 
+### Verify the server is up
+
+Before sending real inference traffic, run a quick health probe:
+
+```bash
+./target/release/kiln health
+```
+
+This prints a tree-style status of the server, model, and GPU and exits non-zero if the server is unreachable or unhealthy, which makes it easy to script in shell pipelines or CI. If `kiln health` reports a problem, see the [troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html#start-with-three-probes) for the full probe sequence.
+
 ## 4. Test Inference
 
 Send a chat completion request (OpenAI-compatible):
