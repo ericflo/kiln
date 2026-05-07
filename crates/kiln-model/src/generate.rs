@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Tensor};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
@@ -71,11 +71,18 @@ pub struct ModelRunner {
     cuda_graph: Mutex<CudaGraphRunner>,
     /// Phase A explicit decode weight registry. Decode kernels address weights
     /// by enum keys instead of safetensors/Candle names.
-    packed_weight_registry: GpuPackedWeightRegistry,
+    /// Phase A.5: lazily built on first hot-path access via `packed_weight_registry()`.
+    /// Building eagerly in `ModelRunner::new` measured a 22% c=1 paged decode regression
+    /// (Validation #4: 42.6 vs 54.76 baseline), so construction stays cheap and the
+    /// registry is materialized only when decode actually needs it.
+    packed_weight_registry: OnceLock<GpuPackedWeightRegistry>,
     /// Phase A raw decode buffer pool. The first decode/warmup materializes
     /// stable typed tensors for the active graph bucket, then reuses them.
     decode_buffers: Mutex<Option<DecodeBuffers>>,
-    decode_buffer_config: DecodeBufferConfig,
+    /// Phase A.5: lazily built on first hot-path access via `ensure_decode_buffers()`.
+    /// Mirrors the lazy registry pattern above so `ModelRunner::new` doesn't validate
+    /// shapes that decode hasn't asked for yet.
+    decode_buffer_config: OnceLock<DecodeBufferConfig>,
     backend: Arc<dyn BackendRuntime>,
 }
 
@@ -788,16 +795,10 @@ impl ModelRunner {
         let device = weights.embed_tokens.device().clone();
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
-        let packed_weight_registry = GpuPackedWeightRegistry::from_gpu_weights(&weights)
-            .expect("Qwen3.5 packed-weight registry must build from loaded GPU weights");
-        let decode_buffer_config = DecodeBufferConfig::graph_bucket(
-            decode_buffer_max_batch(),
-            config.max_position_embeddings,
-            1,
-            16,
-            DecodeElementType::Bf16,
-        )
-        .expect("Qwen3.5 decode buffer config must be valid");
+        // Phase A.5: registry + decode-buffer config are deferred to first hot-path
+        // access. Building them eagerly here regressed c=1 paged decode by 22%
+        // (Validation #4: 42.6 tok/s vs 54.76 baseline). The lazy `OnceLock` keeps
+        // construction cheap and matches the production-path warmup contract.
         Self {
             weights,
             tokenizer,
@@ -805,9 +806,9 @@ impl ModelRunner {
             eos_token_ids,
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
-            packed_weight_registry,
+            packed_weight_registry: OnceLock::new(),
             decode_buffers: Mutex::new(None),
-            decode_buffer_config,
+            decode_buffer_config: OnceLock::new(),
             backend,
         }
     }
@@ -842,7 +843,12 @@ impl ModelRunner {
     }
 
     pub fn packed_weight_registry(&self) -> &GpuPackedWeightRegistry {
-        &self.packed_weight_registry
+        // Phase A.5: lazy build on first access. See `new_with_options` for the
+        // 22% c=1 regression that this defers.
+        self.packed_weight_registry.get_or_init(|| {
+            GpuPackedWeightRegistry::from_gpu_weights(&self.weights)
+                .expect("Qwen3.5 packed-weight registry must build from loaded GPU weights")
+        })
     }
 
     pub fn ensure_decode_buffers(&self, batch: usize) -> Result<()> {
@@ -851,11 +857,22 @@ impl ModelRunner {
             .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock decode buffers: {e}"))?;
         if guard.is_none() {
+            // Phase A.5: lazy decode-buffer-config build (see `new_with_options`).
+            let cfg = self
+                .decode_buffer_config
+                .get_or_init(|| {
+                    DecodeBufferConfig::graph_bucket(
+                        decode_buffer_max_batch(),
+                        self.config.max_position_embeddings,
+                        1,
+                        16,
+                        DecodeElementType::Bf16,
+                    )
+                    .expect("Qwen3.5 decode buffer config must be valid")
+                })
+                .clone();
             let device = self.weights.embed_tokens.device();
-            *guard = Some(DecodeBuffers::allocate(
-                self.decode_buffer_config.clone(),
-                device,
-            )?);
+            *guard = Some(DecodeBuffers::allocate(cfg, device)?);
         }
         guard
             .as_ref()
@@ -5117,10 +5134,16 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     /// Create a tiny model config for testing.
+    ///
+    /// Phase A.5: layer schedule scaled down 8x from canonical Qwen3.5-4B but the
+    /// `(layer_idx + 1) % full_attention_interval == 0` invariant is preserved, so
+    /// `qwen35_shapes::is_full_attention_layer` agrees with the registry validator
+    /// (layer 3 = Full, layers 0/1/2 = GDN). Previous `num_layers: 1` + interval 1
+    /// claimed layer 0 was Full, which the canonical schedule says is GDN.
     fn tiny_config() -> ModelConfig {
         ModelConfig {
             hidden_size: 8,
-            num_layers: 1,
+            num_layers: 4,
             num_attention_heads: 2,
             num_kv_heads: 1,
             head_dim: 4,
@@ -5131,18 +5154,31 @@ mod tests {
             rope_theta: 10_000.0,
             dtype: kiln_core::config::DType::FP32,
             num_full_attention_layers: 1,
-            full_attention_interval: 1, // every layer is full attention
+            full_attention_interval: 4,
             attn_output_gate: false,
-            linear_num_key_heads: 0,
-            linear_key_head_dim: 0,
-            linear_num_value_heads: 0,
-            linear_value_head_dim: 0,
-            linear_conv_kernel_dim: 0,
+            // Phase A.5: GDN dims must be non-zero so the canonical 4-layer
+            // schedule (layers 0/1/2 = GDN, layer 3 = Full) actually exercises
+            // the GDN forward path on CPU without dividing nv/nk by zero.
+            // Tiny values: nk=1, dk=4, nv=1, dv=4, conv=4. gqa_ratio=1 (skips
+            // the unexpanded path), all matmuls are Candle-CPU friendly.
+            linear_num_key_heads: 1,
+            linear_key_head_dim: 4,
+            linear_num_value_heads: 1,
+            linear_value_head_dim: 4,
+            linear_conv_kernel_dim: 4,
             partial_rotary_factor: 1.0,
         }
     }
 
     /// Create random GPU weights matching the tiny config.
+    ///
+    /// Phase A.5: emits `config.num_layers` layers laid out per the canonical
+    /// `(layer_idx + 1) % full_attention_interval == 0` rule. With the tiny
+    /// config that means layers 0/1/2 = GDN (`Linear`) with placeholder shapes
+    /// and layer 3 = Full attention with the projections the prior single-layer
+    /// fixture used. CPU-only paged-prefix-cache tests don't exercise GDN forward
+    /// math, so 1×1 placeholder GDN tensors are sufficient — the registry only
+    /// needs them to exist with the correct layer-kind tag if it's ever forced.
     fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
         let h = config.hidden_size;
         let inter = config.intermediate_size;
@@ -5155,27 +5191,23 @@ mod tests {
         let embed_t = embed.t().unwrap().contiguous().unwrap();
         let final_norm = Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
 
-        let q_proj = Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
-        let k_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
-        let v_proj = Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
-        let o_proj = Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
-        let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
-        let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
-        let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
-        let o_proj_t = o_proj.t().unwrap().contiguous().unwrap();
-
-        let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-        let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-        let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
-        let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
-        let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
-        let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
-
-        let layer = crate::forward::GpuLayerWeights {
-            input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-            post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-            attention: crate::forward::GpuAttentionWeights::Full(
-                crate::forward::GpuFullAttentionWeights {
+        let mut layers = Vec::with_capacity(config.num_layers);
+        for layer_idx in 0..config.num_layers {
+            let is_full = (layer_idx + 1) % config.full_attention_interval == 0;
+            let attention = if is_full {
+                let q_proj =
+                    Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
+                let k_proj =
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                let v_proj =
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                let o_proj =
+                    Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
+                let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
+                let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
+                let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
+                let o_proj_t = o_proj.t().unwrap().contiguous().unwrap();
+                crate::forward::GpuAttentionWeights::Full(crate::forward::GpuFullAttentionWeights {
                     q_proj,
                     k_proj,
                     v_proj,
@@ -5187,20 +5219,81 @@ mod tests {
                     v_proj_t,
                     o_proj_t,
                     q_proj_marlin: None,
+                })
+            } else {
+                // GDN tensors with shapes valid for the GDN forward path. The
+                // CPU test exercises the candle fallback path through layers
+                // 0/1/2; with `linear_num_key_heads = 1, dk = 4, nv = 1, dv = 4,
+                // kernel = 4`, qk_dim = 4, v_dim = 4, qkv_dim = 12.
+                let nk = config.linear_num_key_heads;
+                let dk = config.linear_key_head_dim;
+                let nv = config.linear_num_value_heads;
+                let dv = config.linear_value_head_dim;
+                let kernel = config.linear_conv_kernel_dim;
+                let qk_dim = nk * dk;
+                let v_dim = nv * dv;
+                let qkv_dim = qk_dim * 2 + v_dim;
+                let in_proj_qkv = Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), device).unwrap();
+                let in_proj_z = Tensor::randn(0.0_f32, 0.02, (v_dim, h), device).unwrap();
+                let in_proj_a = Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
+                let in_proj_b = Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
+                let out_proj = Tensor::randn(0.0_f32, 0.02, (h, v_dim), device).unwrap();
+                let conv1d = Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), device).unwrap();
+                let norm = Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
+                let a_log = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let a_log_gates = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let dt_bias = Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let in_proj_qkv_t = in_proj_qkv.t().unwrap().contiguous().unwrap();
+                let in_proj_z_t = in_proj_z.t().unwrap().contiguous().unwrap();
+                let in_proj_a_t = in_proj_a.t().unwrap().contiguous().unwrap();
+                let in_proj_b_t = in_proj_b.t().unwrap().contiguous().unwrap();
+                let out_proj_t = out_proj.t().unwrap().contiguous().unwrap();
+                crate::forward::GpuAttentionWeights::Linear(
+                    crate::forward::GpuLinearAttentionWeights {
+                        in_proj_qkv,
+                        in_proj_z,
+                        out_proj,
+                        in_proj_a,
+                        in_proj_b,
+                        conv1d,
+                        norm,
+                        a_log,
+                        a_log_gates,
+                        dt_bias,
+                        in_proj_qkv_t,
+                        in_proj_z_t,
+                        in_proj_a_t,
+                        in_proj_b_t,
+                        out_proj_t,
+                    },
+                )
+            };
+
+            let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
+            let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
+            let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
+            let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
+            let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
+            let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
+
+            layers.push(crate::forward::GpuLayerWeights {
+                input_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
+                post_attention_layernorm: Tensor::zeros((h,), candle_core::DType::F32, device)
+                    .unwrap(),
+                attention,
+                mlp: crate::forward::GpuFfnWeights {
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                    gate_proj_t,
+                    up_proj_t,
+                    down_proj_t,
+                    gate_proj_marlin: None,
+                    up_proj_marlin: None,
+                    down_proj_marlin: None,
                 },
-            ),
-            mlp: crate::forward::GpuFfnWeights {
-                gate_proj,
-                up_proj,
-                down_proj,
-                gate_proj_t,
-                up_proj_t,
-                down_proj_t,
-                gate_proj_marlin: None,
-                up_proj_marlin: None,
-                down_proj_marlin: None,
-            },
-        };
+            });
+        }
 
         let rotary_inv_freq =
             crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
@@ -5209,7 +5302,7 @@ mod tests {
         GpuWeights {
             embed_tokens: embed,
             embed_tokens_t: embed_t,
-            layers: vec![layer],
+            layers,
             final_norm,
             rotary_inv_freq,
             mtp: None,
@@ -5751,12 +5844,12 @@ mod tests {
             ..Default::default()
         };
 
-        // Use 1 draft layer (the tiny model has 1 layer, so draft_layers must be < 1)
-        // Since our tiny model only has 1 layer, we can't test speculative decoding
-        // with it (need at least 2 layers). Test validation instead.
+        // Phase A.5: tiny_config has num_layers=4 (canonical Qwen3.5
+        // schedule: 3 GDN + 1 Full). Setting draft_layers=4 (== num_layers)
+        // exercises the validator, which requires draft_layers < num_layers.
         let spec_config = SpeculativeConfig {
             num_speculative_tokens: 2,
-            draft_layers: 1, // == num_layers, should fail validation
+            draft_layers: 4, // == num_layers, should fail validation
         };
 
         let result = runner.generate_from_tokens_speculative(&[1, 2, 3], &params, &spec_config);

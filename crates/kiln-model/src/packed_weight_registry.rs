@@ -416,23 +416,25 @@ mod tests {
 
     #[test]
     fn validates_layer_kind_against_qwen35_pattern() {
+        // Canonical Qwen3.5 schedule: full-attn at indices where
+        // (layer_idx + 1) % FULL_ATTN_INTERVAL == 0, so [3, 7, 11, ...].
         assert!(
-            RegistryLayer::FullAttention { layer_idx: 0 }
+            RegistryLayer::FullAttention { layer_idx: 3 }
                 .validate()
                 .is_ok()
         );
         assert!(
-            RegistryLayer::FullAttention { layer_idx: 1 }
+            RegistryLayer::FullAttention { layer_idx: 0 }
                 .validate()
                 .is_err()
         );
         assert!(
-            RegistryLayer::LinearAttention { layer_idx: 1 }
+            RegistryLayer::LinearAttention { layer_idx: 0 }
                 .validate()
                 .is_ok()
         );
         assert!(
-            RegistryLayer::LinearAttention { layer_idx: 4 }
+            RegistryLayer::LinearAttention { layer_idx: 3 }
                 .validate()
                 .is_err()
         );
