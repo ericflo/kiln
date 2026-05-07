@@ -7,6 +7,8 @@
 //! dispatch.
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "cuda")]
+use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use candle_core::{DType, Tensor};
 use std::collections::BTreeMap;
 
@@ -169,12 +171,10 @@ impl PackedWeightStorage {
             candle_core::Storage::Cuda(cuda) => cuda,
             _ => bail!("registry BF16 pointer requires CUDA storage"),
         };
-        let stream = cuda.device().cuda_stream();
+        let stream = cuda.device.cuda_stream();
         let slice = cuda.as_cuda_slice::<bf16>()?.slice(layout.start_offset()..);
-        unsafe {
-            let (ptr, _guard) = slice.device_ptr(&stream);
-            Ok(f(ptr as *const core::ffi::c_void))
-        }
+        let (ptr, _guard) = slice.device_ptr(&stream);
+        Ok(f(ptr as *const core::ffi::c_void))
     }
 }
 

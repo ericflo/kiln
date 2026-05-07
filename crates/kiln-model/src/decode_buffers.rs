@@ -7,6 +7,8 @@
 //! the production decode path.
 
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "cuda")]
+use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 use candle_core::{DType, Device, Tensor};
 use std::fmt;
 use std::marker::PhantomData;
@@ -183,12 +185,10 @@ impl<T: DecodeDType> DecodeBuffer<T> {
                 self.kind
             ),
         };
-        let stream = cuda.device().cuda_stream();
+        let stream = cuda.device.cuda_stream();
         let slice = cuda.as_cuda_slice::<bf16>()?.slice(layout.start_offset()..);
-        unsafe {
-            let (ptr, _guard) = slice.device_ptr(&stream);
-            Ok(f(ptr as *const core::ffi::c_void))
-        }
+        let (ptr, _guard) = slice.device_ptr(&stream);
+        Ok(f(ptr as *const core::ffi::c_void))
     }
 }
 
