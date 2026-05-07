@@ -7953,44 +7953,91 @@ pub fn model_forward_paged_batched_decode_hidden(
                 linear_attn_idx += 1;
             }
             GpuAttentionWeights::Full(_) => {
-                let mut rows = Vec::with_capacity(batch_size);
-                for row_idx in 0..batch_size {
-                    let row_hidden = hidden.narrow(0, row_idx, 1)?;
-                    let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
-                    let rope_tables = rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
-                    rows.push(
-                        transformer_block_paged_with_rope_tables(
-                            backend,
-                            &row_hidden,
-                            layer,
-                            config,
-                            &pos,
-                            sequence_lengths[row_idx],
-                            config.num_attention_heads,
-                            config.num_kv_heads,
-                            config.head_dim,
-                            config.rotary_dim(),
-                            &weights.rotary_inv_freq,
-                            Some((&rope_tables.0, &rope_tables.1)),
-                            config.rms_norm_eps,
-                            paged_cache,
-                            &block_tables[row_idx],
-                            full_attn_idx,
-                            layer_lora,
-                            #[cfg(feature = "cuda")]
-                            None,
-                            None,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
-                            )
-                        })?,
-                    );
+                // Phase 12-B''': try the fused batched-GQA decode primitive
+                // when the batch is uniform enough for the contiguous paged-KV
+                // path (shared start_pos, non-fp8 cache). On Err we silently
+                // fall back to the per-row loop below, which preserves
+                // correctness for heterogeneous batches without losing the
+                // c=8 batching win when rows happen to align. The c=1
+                // per-stream rate is unaffected because batch_size==1 short-
+                // circuits at the top of this function.
+                let mut handled_via_batched = false;
+                let start_pos = sequence_lengths[0];
+                let same_start_pos = sequence_lengths.iter().all(|&p| p == start_pos);
+                let cache_supports_batched = !paged_cache.is_fp8();
+                if same_start_pos && cache_supports_batched {
+                    let positions = Tensor::from_slice(&[start_pos as f32], 1usize, device)?;
+                    let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+                    match transformer_block_paged_decode_contiguous_batch(
+                        backend,
+                        &hidden,
+                        layer,
+                        config,
+                        &positions,
+                        sequence_lengths,
+                        &weights.rotary_inv_freq,
+                        paged_cache,
+                        &block_table_refs,
+                        full_attn_idx,
+                        layer_lora,
+                        None,
+                        None,
+                    ) {
+                        Ok(h) => {
+                            hidden = h;
+                            handled_via_batched = true;
+                        }
+                        Err(_) => {
+                            // Fall through to per-row loop. The contiguous
+                            // batched path can decline (E340/E341) when the
+                            // KV slot windows aren't contiguous across the
+                            // batch; the per-row path is the strict fallback.
+                        }
+                    }
                 }
-                let row_refs: Vec<&Tensor> = rows.iter().collect();
-                hidden = Tensor::cat(&row_refs, 0)
-                    .with_context(|| format!("cat full-attention rows after layer {layer_idx}"))?;
+
+                if !handled_via_batched {
+                    let mut rows = Vec::with_capacity(batch_size);
+                    for row_idx in 0..batch_size {
+                        let row_hidden = hidden.narrow(0, row_idx, 1)?;
+                        let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
+                        let rope_tables =
+                            rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
+                        rows.push(
+                            transformer_block_paged_with_rope_tables(
+                                backend,
+                                &row_hidden,
+                                layer,
+                                config,
+                                &pos,
+                                sequence_lengths[row_idx],
+                                config.num_attention_heads,
+                                config.num_kv_heads,
+                                config.head_dim,
+                                config.rotary_dim(),
+                                &weights.rotary_inv_freq,
+                                Some((&rope_tables.0, &rope_tables.1)),
+                                config.rms_norm_eps,
+                                paged_cache,
+                                &block_tables[row_idx],
+                                full_attn_idx,
+                                layer_lora,
+                                #[cfg(feature = "cuda")]
+                                None,
+                                None,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
+                                )
+                            })?,
+                        );
+                    }
+                    let row_refs: Vec<&Tensor> = rows.iter().collect();
+                    hidden = Tensor::cat(&row_refs, 0).with_context(|| {
+                        format!("cat full-attention rows after layer {layer_idx}")
+                    })?;
+                }
                 full_attn_idx += 1;
             }
         }
