@@ -503,6 +503,15 @@ docker run --gpus all -p 8420:8420 \
   -v /path/to/Qwen3.5-4B:/models/Qwen3.5-4B:ro \
   ghcr.io/ericflo/kiln-server:latest serve</code></pre>
 
+      <h3 class="font-semibold mb-2 mt-6">Verify the server is up</h3>
+      <p class="text-sm" style="color: var(--fg-mute);">
+        <code>kiln health</code> prints a tree-style status of the model, scheduler, training queue, and GPU, and
+        exits non-zero if anything is wrong &mdash; a fast confirmation that <code>kiln serve</code> actually
+        came up. See <a href="troubleshooting.html#start-with-three-probes">the full three-probe sequence</a>
+        for <code>kiln health</code>, <code>kiln train status</code>, and <code>kiln adapters list</code>.
+      </p>
+<pre><code>./kiln health</code></pre>
+
       <p class="text-sm mt-6" style="color: var(--fg-mute);">
         Each release is signed and SHA-256 checksums are published as <code>.sha256</code> sidecars on the
         <a href="https://github.com/ericflo/kiln/releases">releases page</a>. The
