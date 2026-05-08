@@ -5708,29 +5708,39 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        // Phase 12-B-prime perf gate: dyn_seqlen handles divergent per-row
+        // start_pos correctly but regressed synthetic c=8 throughput by ~61%
+        // versus the post-#996 strict-path baseline under uniform load (which
+        // is the common synthetic + most-production case). Route through the
+        // strict head-major path when start_pos is uniform across the batch
+        // (the pre-12-B-prime working path) and only fall through to
+        // dyn_seqlen when rows actually diverge.
+        //
+        // Env switches:
+        //   KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH=1
+        //     Force strict path everywhere (debug). Will fail loudly if a
+        //     batch arrives with divergent start_pos because the strict
+        //     kernel cannot handle that shape.
+        //   KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH=1
+        //     Force dyn_seqlen everywhere (A/B). Useful to reproduce the
+        //     pre-fix throughput number or to validate dyn_seqlen
+        //     correctness under uniform load.
+        // KILN_DISABLE_* takes precedence over KILN_FORCE_* if both set.
         let kill_dyn_seqlen =
             std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
-        let mut out = if !kill_dyn_seqlen {
-            backend.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-                &q,
-                k_pool,
-                v_pool,
-                &block_table_tensor,
-                &seqused_k_tensor,
-                max_seqlen_k,
-                page_block_size,
-                softmax_scale,
-                true,
-            )?
-        } else {
-            None
-        };
-        if out.is_none() {
-            // Fallback: strict contiguous-batch path for uniform start_pos +
-            // contiguous live KV. This is the pre-12-B-prime code path. The
-            // strict kernel expects head-major [batch, num_heads, 1, head_dim].
+        let force_dyn_seqlen = !kill_dyn_seqlen
+            && std::env::var("KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
+        let prefer_strict = !force_dyn_seqlen
+            && uniform_start_pos
+            && strict_start_slots.is_some();
+
+        let try_strict = |out_acc: &mut Option<Tensor>| -> Result<()> {
+            // Strict contiguous-batch path: pre-12-B-prime code path that
+            // delivered PR #996's +10.76% c=8 throughput win. Requires
+            // uniform start_pos + contiguous live KV. The strict kernel
+            // expects head-major [batch, num_heads, 1, head_dim].
             let strict_slots = strict_start_slots.as_ref().context(
-                "batched contiguous paged attention requires uniform start_pos for the strict fallback path",
+                "batched contiguous paged attention requires uniform start_pos for the strict path",
             )?;
             let start_slots =
                 Tensor::from_slice(strict_slots.as_slice(), batch, x.device())?.contiguous()?;
@@ -5747,7 +5757,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 )?;
                 q_strict
             };
-            out = backend.flash_attn_paged_decode_contiguous_batch(
+            *out_acc = backend.flash_attn_paged_decode_contiguous_batch(
                 &q_strict,
                 k_pool,
                 v_pool,
@@ -5755,6 +5765,44 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 max_seqlen_k,
                 softmax_scale,
             )?;
+            Ok(())
+        };
+
+        let try_dyn_seqlen = |out_acc: &mut Option<Tensor>| -> Result<()> {
+            *out_acc = backend.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                &q,
+                k_pool,
+                v_pool,
+                &block_table_tensor,
+                &seqused_k_tensor,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                true,
+            )?;
+            Ok(())
+        };
+
+        let mut out: Option<Tensor> = None;
+        if kill_dyn_seqlen {
+            // Strict-only; non-uniform batches will surface the strict_slots
+            // context error.
+            try_strict(&mut out)?;
+        } else if prefer_strict {
+            try_strict(&mut out)?;
+            if out.is_none() {
+                // Strict backend declined (e.g. Metal CPU fallback path).
+                // Fall through to dyn_seqlen.
+                try_dyn_seqlen(&mut out)?;
+            }
+        } else {
+            try_dyn_seqlen(&mut out)?;
+            if out.is_none() && uniform_start_pos && strict_start_slots.is_some() {
+                // dyn_seqlen backend declined; the strict path can still
+                // serve uniform batches. Divergent batches have no fallback
+                // and will surface as the final context error below.
+                try_strict(&mut out)?;
+            }
         }
         finish_full_attn_stage_profile(
             profile_device,
