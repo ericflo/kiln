@@ -247,15 +247,34 @@ enum StreamTokenDisposition {
 /// Configuration for the live greedy decode rendezvous worker.
 ///
 /// The worker is enabled by default on Metal and drains immediately available
-/// same-position decode rows without delaying single-step progress. Set
+/// decode rows without delaying single-step progress. Set
 /// `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise path, or
 /// `KILN_DECODE_BATCH_WAIT_US` to experiment with an admission delay.
+///
+/// Phase 12-B-prime-perf: heterogeneous-seq_len rows now batch together by
+/// off by default. The lower attention path routes uniform-start_pos batches
+/// through the strict head-major kernel and divergent batches through the
+/// FA-2 dyn_seqlen kernel landed in PR #998. Set
+/// `KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH=1` to opt in to heterogeneous
+/// admission. Phase 12-B-prime-perf measured this opt-in path on A6000 at
+/// concurrencies 1-32 and shapes (512,128) / (256,256). The dyn_seqlen
+/// decode kernel is currently slower than the homogeneous path under
+/// contention (c=8 Shape A: 17.7 vs 61.0 tok/s, -71%; c=16: -80%; c=32:
+/// liveness loss), so the legacy strict-equality filter remains the
+/// default. The opt-in flag preserves the plumbing for future kernel
+/// improvements without regressing the production decode path.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
     pub max_batch: usize,
     /// Optional admission delay for collecting peers.
     pub wait: std::time::Duration,
+    /// When true, the worker admits rows with divergent `seq_len` into the
+    /// same batch and routes them through the FA-2 dyn_seqlen path. When
+    /// false (the default), the worker uses PR #998's strict-equality
+    /// filter: rows are deferred unless their `seq_len` matches the batch
+    /// leader. Set `KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH=1` to opt in.
+    pub allow_heterogeneous_seqlens: bool,
 }
 
 impl Default for DecodeBatcherConfig {
@@ -263,6 +282,7 @@ impl Default for DecodeBatcherConfig {
         Self {
             max_batch: 8,
             wait: std::time::Duration::ZERO,
+            allow_heterogeneous_seqlens: false,
         }
     }
 }
@@ -279,6 +299,12 @@ impl DecodeBatcherConfig {
             && let Ok(parsed) = value.parse::<u64>()
         {
             config.wait = std::time::Duration::from_micros(parsed);
+        }
+        // Opt-in: enable heterogeneous-seq_len admission. Default is the
+        // pre-#998 strict-equality filter because Phase 12-B-prime-perf
+        // measured a regression on the dyn_seqlen decode kernel.
+        if env_flag_enabled("KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH", false) {
+            config.allow_heterogeneous_seqlens = true;
         }
         config
     }
@@ -319,6 +345,12 @@ pub struct DecodeBatcherStats {
     pub max_observed_batch: usize,
     pub runner_busy_jobs: usize,
     pub failed_jobs: usize,
+    /// Number of executed batches (rows >= 2) where rows had divergent
+    /// `seq_len`. Phase 12-B-prime-perf admission counter.
+    pub heterogeneous_batches: usize,
+    /// Maximum observed (max_seq_len - min_seq_len) across all executed
+    /// batches. Stays 0 while the strict-equality filter is in effect.
+    pub seqlen_spread_max: usize,
 }
 
 struct DecodeBatcherCounters {
@@ -328,6 +360,8 @@ struct DecodeBatcherCounters {
     max_observed_batch: AtomicUsize,
     runner_busy_jobs: AtomicUsize,
     failed_jobs: AtomicUsize,
+    heterogeneous_batches: AtomicUsize,
+    seqlen_spread_max: AtomicUsize,
 }
 
 struct DecodeBatchJob {
@@ -371,6 +405,8 @@ impl DecodeBatcher {
             max_observed_batch: AtomicUsize::new(0),
             runner_busy_jobs: AtomicUsize::new(0),
             failed_jobs: AtomicUsize::new(0),
+            heterogeneous_batches: AtomicUsize::new(0),
+            seqlen_spread_max: AtomicUsize::new(0),
         });
         let counters_for_worker = counters.clone();
         std::thread::Builder::new()
@@ -401,6 +437,8 @@ impl DecodeBatcher {
             max_observed_batch: self.counters.max_observed_batch.load(Ordering::Relaxed),
             runner_busy_jobs: self.counters.runner_busy_jobs.load(Ordering::Relaxed),
             failed_jobs: self.counters.failed_jobs.load(Ordering::Relaxed),
+            heterogeneous_batches: self.counters.heterogeneous_batches.load(Ordering::Relaxed),
+            seqlen_spread_max: self.counters.seqlen_spread_max.load(Ordering::Relaxed),
         }
     }
 
@@ -462,6 +500,34 @@ fn take_linear_attention_state(state: &mut LinearAttentionState) -> LinearAttent
     )
 }
 
+/// Decide whether a newly received decode job is admitted to the current
+/// batch or deferred to the next one.
+///
+/// Phase 12-B-prime-perf admission policy:
+///
+/// - When `allow_heterogeneous` is true (default), every job is admitted up
+///   to `max_batch`. Per-row `seq_len` plumbing is already in place
+///   end-to-end (`decode_batch_jobs_with_runner` ->
+///   `model_forward_paged_decode_contiguous_batch_greedy` ->
+///   `gqa_attention_paged_decode_contiguous_batch`), and the lower attention
+///   path routes uniform-start_pos batches through the strict head-major
+///   kernel and divergent batches through
+///   `BackendRuntime::flash_attn_paged_decode_contiguous_batch_dyn_seqlen`
+///   (the FA-2 varlen path PR #998 added). Heterogeneous admission is
+///   opt-in via `KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH=1`.
+///
+/// - When `allow_heterogeneous` is false (the default), the worker uses
+///   PR #998's strict-equality filter: jobs whose `seq_len` differs from
+///   the batch leader are deferred and reconsidered as the leader of the
+///   next batch. This preserves the legacy behavior bit-for-bit.
+fn should_admit_to_batch(
+    allow_heterogeneous: bool,
+    leader_seq_len: usize,
+    job_seq_len: usize,
+) -> bool {
+    allow_heterogeneous || job_seq_len == leader_seq_len
+}
+
 fn run_decode_batcher_worker(
     runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
     paged_cache: Arc<Mutex<PagedKvCache>>,
@@ -470,20 +536,32 @@ fn run_decode_batcher_worker(
     counters: Arc<DecodeBatcherCounters>,
 ) {
     let max_batch = config.max_batch.max(1);
+    let allow_heterogeneous = config.allow_heterogeneous_seqlens;
     let mut deferred = VecDeque::new();
     let mut disconnected = false;
+
+    // Phase 12-B-prime-perf admission policy: see `should_admit_to_batch`.
+    let admit = |jobs: &mut Vec<DecodeBatchJob>,
+                 deferred: &mut VecDeque<DecodeBatchJob>,
+                 leader_seq_len: usize,
+                 job: DecodeBatchJob| {
+        if should_admit_to_batch(allow_heterogeneous, leader_seq_len, job.seq_len) {
+            jobs.push(job);
+        } else {
+            deferred.push_back(job);
+        }
+    };
 
     while !disconnected || !deferred.is_empty() {
         let Some(first) = deferred.pop_front().or_else(|| receiver.recv().ok()) else {
             break;
         };
-        let seq_len = first.seq_len;
+        let leader_seq_len = first.seq_len;
         let mut jobs = vec![first];
 
         while jobs.len() < max_batch {
             match receiver.try_recv() {
-                Ok(job) if job.seq_len == seq_len => jobs.push(job),
-                Ok(job) => deferred.push_back(job),
+                Ok(job) => admit(&mut jobs, &mut deferred, leader_seq_len, job),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     disconnected = true;
@@ -500,14 +578,35 @@ fn run_decode_batcher_worker(
                     break;
                 }
                 match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-                    Ok(job) if job.seq_len == seq_len => jobs.push(job),
-                    Ok(job) => deferred.push_back(job),
+                    Ok(job) => admit(&mut jobs, &mut deferred, leader_seq_len, job),
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         disconnected = true;
                         break;
                     }
                 }
+            }
+        }
+
+        // Track admission shape before dispatching.
+        if jobs.len() > 1 {
+            let mut min_seq_len = usize::MAX;
+            let mut max_seq_len = 0usize;
+            for job in &jobs {
+                if job.seq_len < min_seq_len {
+                    min_seq_len = job.seq_len;
+                }
+                if job.seq_len > max_seq_len {
+                    max_seq_len = job.seq_len;
+                }
+            }
+            if max_seq_len > min_seq_len {
+                counters
+                    .heterogeneous_batches
+                    .fetch_add(1, Ordering::Relaxed);
+                counters
+                    .seqlen_spread_max
+                    .fetch_max(max_seq_len - min_seq_len, Ordering::Relaxed);
             }
         }
 
@@ -5884,6 +5983,7 @@ mod tests {
             DecodeBatcherConfig {
                 max_batch: 2,
                 wait: std::time::Duration::from_millis(50),
+                allow_heterogeneous_seqlens: true,
             },
         )?;
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -5961,6 +6061,258 @@ mod tests {
             assert_eq!(
                 batched[row], rowwise,
                 "row {row} decode batcher token should match rowwise"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_should_admit_to_batch_opt_in_admits_heterogeneous_seqlens() {
+        // Default policy (Phase 12-B-prime-perf): admit divergent rows into
+        // the same batch.
+        assert!(should_admit_to_batch(true, 3, 3));
+        assert!(should_admit_to_batch(true, 3, 5));
+        assert!(should_admit_to_batch(true, 7, 0));
+    }
+
+    #[test]
+    fn test_should_admit_to_batch_default_strict_filter() {
+        // Default (KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH unset): only
+        // matching seq_lens are admitted; everything else is deferred.
+        assert!(should_admit_to_batch(false, 3, 3));
+        assert!(!should_admit_to_batch(false, 3, 5));
+        assert!(!should_admit_to_batch(false, 7, 0));
+    }
+
+    #[test]
+    fn test_decode_batcher_config_default_strict_admission() {
+        let config = DecodeBatcherConfig::default();
+        assert!(
+            !config.allow_heterogeneous_seqlens,
+            "default admission policy must be the strict-equality filter"
+        );
+    }
+
+    #[test]
+    fn test_decode_batcher_config_from_env_opt_in() {
+        // SAFETY: tests that mutate process env vars must be isolated to a
+        // single thread. cargo test/nextest runs each test in its own worker
+        // process (or serializes within a thread), but to be safe we restore
+        // the prior state on exit.
+        let key = "KILN_ENABLE_HETEROGENEOUS_DECODE_BATCH";
+        let prior = std::env::var(key).ok();
+        // Default (unset): heterogeneous admission is off.
+        unsafe {
+            std::env::remove_var(key);
+        }
+        let config = DecodeBatcherConfig::from_env();
+        assert!(!config.allow_heterogeneous_seqlens);
+        // Opt-in armed: heterogeneous admission is on.
+        unsafe {
+            std::env::set_var(key, "1");
+        }
+        let config = DecodeBatcherConfig::from_env();
+        assert!(config.allow_heterogeneous_seqlens);
+        // Restore.
+        unsafe {
+            match prior {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_decode_batcher_heterogeneous_seqlens_batch_metal() -> Result<()> {
+        // Phase 12-B-prime-perf parity test: two greedy jobs with divergent
+        // seq_lens are admitted into a single batch and routed through the
+        // dyn_seqlen attention path. Each row's output token must match the
+        // rowwise reference, and the heterogeneous-batch counters must
+        // increment.
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping heterogeneous batch test");
+            return Ok(());
+        }
+
+        let config = ModelConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+        let weights = qwen_shape_bf16_full_attention_weights(&config, &device)?;
+        let runner = Arc::new(std::sync::RwLock::new(ModelRunner::new(
+            weights,
+            test_tokenizer(),
+            config.clone(),
+        )));
+        let block_size = 16usize;
+        // Mismatched per-row prefix lengths drive the worker through the
+        // dyn_seqlen path.
+        let start_positions: [usize; 2] = [3, 5];
+        let token_ids: [u32; 2] = [7, 11];
+        let max_prefix = *start_positions.iter().max().unwrap();
+        let prefix_k = patterned_bf16(
+            &[2, max_prefix, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[2, max_prefix, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+
+        let batch_cache = Arc::new(Mutex::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?));
+        {
+            let mut pc = batch_cache.lock().unwrap();
+            for (row, block_table) in block_tables.iter().enumerate() {
+                let row_seq = start_positions[row];
+                let row_k = prefix_k.narrow(0, row, 1)?.narrow(1, 0, row_seq)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.narrow(1, 0, row_seq)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            }
+        }
+
+        let batcher = DecodeBatcher::spawn(
+            runner.clone(),
+            batch_cache.clone(),
+            DecodeBatcherConfig {
+                max_batch: 2,
+                wait: std::time::Duration::from_millis(50),
+                allow_heterogeneous_seqlens: true,
+            },
+        )?;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = [
+            (token_ids[0], bt0.clone(), start_positions[0]),
+            (token_ids[1], bt1.clone(), start_positions[1]),
+        ]
+        .into_iter()
+        .map(|(token, block_table, seq_len)| {
+            let batcher = batcher.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || -> Result<TokenId> {
+                let mut linear_state = LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                };
+                barrier.wait();
+                match batcher.decode_next_token_greedy(
+                    token,
+                    &block_table,
+                    seq_len,
+                    &mut linear_state,
+                )? {
+                    DecodeBatcherDecode::Decoded(next) => Ok(next),
+                    DecodeBatcherDecode::RunnerBusy => {
+                        anyhow::bail!("decode batcher unexpectedly reported runner busy")
+                    }
+                }
+            })
+        })
+        .collect();
+        barrier.wait();
+
+        let mut batched = Vec::new();
+        for handle in handles {
+            batched.push(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("heterogeneous batch test thread panicked"))??,
+            );
+        }
+        // Both rows must execute as a single batch (not deferred).
+        assert_eq!(
+            batcher.max_observed_batch(),
+            2,
+            "two heterogeneous-seqlen rows must batch into one decode call"
+        );
+        let stats = batcher.stats();
+        assert!(
+            stats.heterogeneous_batches >= 1,
+            "heterogeneous_batches counter must increment on divergent batch (got {})",
+            stats.heterogeneous_batches
+        );
+        let expected_spread = (start_positions[1] - start_positions[0]) as usize;
+        assert!(
+            stats.seqlen_spread_max >= expected_spread,
+            "seqlen_spread_max must reflect divergence (expected >= {}, got {})",
+            expected_spread,
+            stats.seqlen_spread_max
+        );
+
+        // Parity vs rowwise greedy reference.
+        let runner_guard = runner.read().unwrap();
+        for row in 0..2 {
+            let row_seq = start_positions[row];
+            let row_cache = Mutex::new(PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?);
+            let row_table = BlockTable { blocks: vec![0] };
+            {
+                let mut pc = row_cache.lock().unwrap();
+                let row_k = prefix_k.narrow(0, row, 1)?.narrow(1, 0, row_seq)?.contiguous()?;
+                let row_v = prefix_v.narrow(0, row, 1)?.narrow(1, 0, row_seq)?.contiguous()?;
+                assert!(pc.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            }
+            let rowwise_logits = {
+                let mut pc = row_cache.lock().unwrap();
+                model_forward_paged(
+                    &*runner_guard.backend,
+                    &token_ids[row..row + 1],
+                    &runner_guard.weights,
+                    &runner_guard.config,
+                    &mut pc,
+                    &row_table,
+                    row_seq,
+                    None,
+                    None,
+                    None,
+                )?
+            };
+            let rowwise = greedy_sample(&rowwise_logits)?;
+            assert_eq!(
+                batched[row], rowwise,
+                "row {row} (seq_len {row_seq}) heterogeneous-batch token must match rowwise"
             );
         }
 
@@ -6618,3 +6970,4 @@ mod tests {
         Ok(())
     }
 }
+
