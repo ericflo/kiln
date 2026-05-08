@@ -1113,7 +1113,7 @@ pub enum ModelBackend {
     Real {
         runner: Arc<std::sync::RwLock<ModelRunner>>,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
-        paged_cache: Arc<std::sync::Mutex<PagedKvCache>>,
+        paged_cache: Arc<PagedKvCache>,
         prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
         batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
@@ -1589,7 +1589,7 @@ impl AppState {
 
         let runner = Arc::new(std::sync::RwLock::new(runner));
         let block_manager = Arc::new(std::sync::Mutex::new(block_manager));
-        let paged_cache = Arc::new(std::sync::Mutex::new(paged_cache));
+        let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
         let batching_engine = matches!(

@@ -360,7 +360,7 @@ enum DecodeBatcherDecode {
 impl DecodeBatcher {
     pub fn spawn(
         runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
-        paged_cache: Arc<Mutex<PagedKvCache>>,
+        paged_cache: Arc<PagedKvCache>,
         config: DecodeBatcherConfig,
     ) -> Result<Arc<Self>> {
         let (sender, receiver) = mpsc::channel();
@@ -464,7 +464,7 @@ fn take_linear_attention_state(state: &mut LinearAttentionState) -> LinearAttent
 
 fn run_decode_batcher_worker(
     runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
-    paged_cache: Arc<Mutex<PagedKvCache>>,
+    paged_cache: Arc<PagedKvCache>,
     receiver: mpsc::Receiver<DecodeBatchJob>,
     config: DecodeBatcherConfig,
     counters: Arc<DecodeBatcherCounters>,
@@ -524,7 +524,7 @@ fn run_decode_batcher_worker(
 
 fn process_decode_batch_jobs(
     runner_lock: &std::sync::RwLock<ModelRunner>,
-    paged_cache: &Mutex<PagedKvCache>,
+    paged_cache: &PagedKvCache,
     mut jobs: Vec<DecodeBatchJob>,
     counters: &DecodeBatcherCounters,
 ) {
@@ -613,7 +613,7 @@ fn process_decode_batch_jobs(
 
 fn decode_batch_jobs_with_runner(
     runner: &ModelRunner,
-    paged_cache: &Mutex<PagedKvCache>,
+    paged_cache: &PagedKvCache,
     jobs: &mut [DecodeBatchJob],
 ) -> Result<Vec<TokenId>> {
     let input_tokens: Vec<TokenId> = jobs.iter().map(|job| job.input_token).collect();
@@ -668,12 +668,13 @@ fn lock_block_manager(
         .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))
 }
 
-fn lock_paged_cache(
-    paged_cache: &Mutex<PagedKvCache>,
-) -> Result<std::sync::MutexGuard<'_, PagedKvCache>> {
-    paged_cache
-        .lock()
-        .map_err(|e| anyhow::anyhow!("failed to lock paged KV cache: {e}"))
+// `PagedKvCache` no longer hides behind a `Mutex` — its write methods take
+// `&self` and rely on the underlying tensor storage's interior mutability,
+// so callers can simply pass the `&PagedKvCache` straight through. This
+// helper is kept as a pass-through identity to minimize call-site churn
+// during the lock-removal sweep; it can be inlined later.
+fn lock_paged_cache(paged_cache: &PagedKvCache) -> Result<&PagedKvCache> {
+    Ok(paged_cache)
 }
 
 pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]) -> BlockTable {
@@ -1255,7 +1256,7 @@ impl ModelRunner {
         prompt: &str,
         params: &SamplingParams,
         block_manager: &mut BlockManager,
-        paged_cache: &mut PagedKvCache,
+        paged_cache: &PagedKvCache,
     ) -> Result<GenerationOutput> {
         let prompt_tokens = self
             .tokenizer
@@ -1292,7 +1293,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &mut BlockManager,
-        paged_cache: &mut PagedKvCache,
+        paged_cache: &PagedKvCache,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
@@ -1340,7 +1341,7 @@ impl ModelRunner {
         prompt: &str,
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
     ) -> Result<GenerationOutput> {
         let prompt_tokens = self
             .tokenizer
@@ -1377,7 +1378,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
         cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
@@ -1414,7 +1415,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
@@ -1480,7 +1481,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let output = self.generate_from_tokens_paged_shared(
@@ -1509,7 +1510,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
@@ -1525,9 +1526,11 @@ impl ModelRunner {
         // before any forward passes run. The CUDA-graph branch previously held
         // both the BM and the PagedKvCache locks for the entire generation
         // (~2.3 s for a 512-prompt, 128-decode run), which forced concurrent
-        // requests onto a serial staircase even with c=8. Both branches now
-        // route through interleaved variants that take `&Mutex<PagedKvCache>`
-        // and lock per-step, mirroring the non-CUDA-graph path.
+        // requests onto a serial staircase even with c=8. Phase 12-C removed
+        // the global `Mutex<PagedKvCache>` entirely: the cache now uses
+        // interior mutability so forward passes can take `&PagedKvCache`
+        // concurrently, with disjoint block tables per request providing
+        // safety.
         let max_total = prompt_tokens.len() + params.max_tokens;
         let (reservation, block_table) = {
             let mut bm_guard = lock_block_manager(block_manager)?;
@@ -1576,7 +1579,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
         cancel: Option<&CancelHandle>,
     ) -> Result<PrefixCachedGenerationOutput> {
@@ -1654,7 +1657,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
@@ -1722,7 +1725,7 @@ impl ModelRunner {
             && !streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len());
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
                 PrefillSampleSource::Logits(
                     model_forward_paged_streaming_with_progress(
@@ -1730,7 +1733,7 @@ impl ModelRunner {
                         prefill_tokens,
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         block_table,
                         cached_tokens,
                         Some(&mut linear_state),
@@ -1746,7 +1749,7 @@ impl ModelRunner {
                         prefill_tokens,
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         block_table,
                         cached_tokens,
                         Some(&mut linear_state),
@@ -1761,7 +1764,7 @@ impl ModelRunner {
                     prefill_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     cached_tokens,
                     Some(&mut linear_state),
@@ -1824,7 +1827,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: BlockTable,
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
@@ -1848,14 +1851,14 @@ impl ModelRunner {
 
         let prefill_start = std::time::Instant::now();
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prefill_tokens.len()) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prefill_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     &block_table,
                     cached_tokens,
                     Some(&mut linear_state),
@@ -1869,7 +1872,7 @@ impl ModelRunner {
                     prefill_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     &block_table,
                     cached_tokens,
                     Some(&mut linear_state),
@@ -1923,7 +1926,7 @@ impl ModelRunner {
         &self,
         states: &mut [&mut PagedBatchedDecodeState],
         params: &[SamplingParams],
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
     ) -> Result<Vec<TokenId>> {
         anyhow::ensure!(
             states.len() == params.len(),
@@ -2000,7 +2003,7 @@ impl ModelRunner {
         let sampled = if let Some(tokens) = sampled {
             tokens
         } else {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             let mut graph_runner = self
                 .cuda_graph
                 .lock()
@@ -2012,7 +2015,7 @@ impl ModelRunner {
                         input_tokens[0],
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         &block_tables[0],
                         sequence_lengths[0],
                         &mut *linear_states[0],
@@ -2037,7 +2040,7 @@ impl ModelRunner {
                     &input_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     &block_tables,
                     &sequence_lengths,
                     &mut linear_states,
@@ -2135,7 +2138,7 @@ impl ModelRunner {
         logits: candle_core::Tensor,
         seq_len: usize,
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         cancel: Option<&CancelHandle>,
@@ -2170,7 +2173,7 @@ impl ModelRunner {
         mut next_token: TokenId,
         mut seq_len: usize,
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         mut step_seed: Option<u64>,
@@ -2253,7 +2256,7 @@ impl ModelRunner {
     pub fn decode_next_tokens_paged_contiguous_batch_greedy(
         &self,
         input_tokens: &[TokenId],
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_tables: &[&BlockTable],
         seq_lens: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
@@ -2279,7 +2282,7 @@ impl ModelRunner {
         }
 
         if batch == 1 {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state = if has_linear_layers {
                 Some(&mut *linear_states[0])
             } else {
@@ -2290,7 +2293,7 @@ impl ModelRunner {
                 input_tokens[0],
                 &self.weights,
                 &self.config,
-                &mut pc_guard,
+                pc_guard,
                 block_tables[0],
                 seq_lens[0],
                 linear_state,
@@ -2310,13 +2313,13 @@ impl ModelRunner {
         };
 
         let tokens = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             model_forward_paged_decode_contiguous_batch_greedy(
                 &*self.backend,
                 input_tokens,
                 &self.weights,
                 &self.config,
-                &mut pc_guard,
+                pc_guard,
                 block_tables,
                 seq_lens,
                 batch_state.as_mut(),
@@ -2336,7 +2339,7 @@ impl ModelRunner {
         &self,
         params: &SamplingParams,
         input_token: TokenId,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
@@ -2345,13 +2348,13 @@ impl ModelRunner {
         if params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
         {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             return model_forward_paged_next_token_greedy(
                 &*self.backend,
                 input_token,
                 &self.weights,
                 &self.config,
-                &mut pc_guard,
+                pc_guard,
                 block_table,
                 seq_len,
                 Some(linear_state),
@@ -2362,13 +2365,13 @@ impl ModelRunner {
         }
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             model_forward_paged(
                 &*self.backend,
                 &[input_token],
                 &self.weights,
                 &self.config,
-                &mut pc_guard,
+                pc_guard,
                 block_table,
                 seq_len,
                 Some(linear_state),
@@ -2395,7 +2398,7 @@ impl ModelRunner {
         &self,
         params: &SamplingParams,
         input_token: TokenId,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
@@ -2432,7 +2435,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         spec_config: &SpeculativeConfig,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
@@ -2497,21 +2500,21 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
         let mut linear_state = self.new_linear_state()?;
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -2525,7 +2528,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -2617,10 +2620,11 @@ impl ModelRunner {
     /// CUDA-graph variant of the interleaved decode path (Phase 12-B'').
     ///
     /// Mirrors `generate_from_tokens_paged_inner` (the path the old CUDA-graph
-    /// branch used) but takes `paged_cache: &Mutex<PagedKvCache>` and locks it
-    /// per forward pass instead of holding it across the entire generation.
-    /// The CUDA graph runner mutex is also acquired per decode step, so that
-    /// concurrent c=8 requests can interleave on a per-step granularity rather
+    /// branch used) but takes `paged_cache: &PagedKvCache` (Phase 12-C
+    /// removed the surrounding `Mutex`; the cache uses interior mutability
+    /// for concurrent `&self` writes). The CUDA graph runner mutex is still
+    /// acquired per decode step, so that concurrent c=8 requests can
+    /// interleave on a per-step granularity rather
     /// than serialising on a generation-lifetime lock. Blocks are still
     /// allocated once up-front by the caller (`generate_from_tokens_paged_shared`)
     /// and freed via `SharedBlockReservation` when the caller drops the
@@ -2629,7 +2633,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
@@ -2641,7 +2645,7 @@ impl ModelRunner {
         let streaming_prefill =
             streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len());
         let prefill_source = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
                 PrefillSampleSource::Logits(
                     model_forward_paged_streaming(
@@ -2649,7 +2653,7 @@ impl ModelRunner {
                         prompt_tokens,
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         block_table,
                         0,
                         Some(&mut linear_state),
@@ -2666,7 +2670,7 @@ impl ModelRunner {
                         prompt_tokens,
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         block_table,
                         0,
                         Some(&mut linear_state),
@@ -2681,7 +2685,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -2760,13 +2764,13 @@ impl ModelRunner {
                 && matches!(self.backend.device(), candle_core::Device::Metal(_))
             {
                 // Metal greedy path bypasses the CUDA graph runner entirely.
-                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                let pc_guard = lock_paged_cache(paged_cache)?;
                 let token = model_forward_paged_next_token_greedy(
                     &*self.backend,
                     next_token,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     seq_len,
                     Some(&mut linear_state),
@@ -2783,13 +2787,13 @@ impl ModelRunner {
                     let mut graph_runner = self.cuda_graph.lock().map_err(|e| {
                         anyhow::anyhow!("failed to lock CUDA graph runner: {e}")
                     })?;
-                    let mut pc_guard = lock_paged_cache(paged_cache)?;
+                    let pc_guard = lock_paged_cache(paged_cache)?;
                     graph_runner.decode_step_paged(
                         &*self.backend,
                         next_token,
                         &self.weights,
                         &self.config,
-                        &mut pc_guard,
+                        pc_guard,
                         block_table,
                         seq_len,
                         &mut linear_state,
@@ -2818,7 +2822,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         spec_config: &SpeculativeConfig,
         cancel: Option<&CancelHandle>,
@@ -2828,14 +2832,14 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -2848,7 +2852,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -2919,13 +2923,13 @@ impl ModelRunner {
             };
 
             let result = {
-                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                let pc_guard = lock_paged_cache(paged_cache)?;
                 speculative_decode_step_paged_greedy(
                     &*self.backend,
                     last_token,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     base_pos,
                     &mut linear_state,
@@ -3002,7 +3006,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &mut PagedKvCache,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         cancel: Option<&CancelHandle>,
     ) -> Result<GenerationOutput> {
@@ -3493,7 +3497,7 @@ impl ModelRunner {
         //   * `mtp_cache` is a single-layer cache for the MTP block.
         // Each gets its own block table mapping logical block i -> physical i.
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
-        let mut base_cache = PagedKvCache::new(
+        let base_cache = PagedKvCache::new(
             self.config.num_full_attention_layers,
             num_blocks,
             BLOCK_SIZE,
@@ -3502,7 +3506,7 @@ impl ModelRunner {
             dtype,
             device,
         )?;
-        let mut mtp_cache = PagedKvCache::new(
+        let mtp_cache = PagedKvCache::new(
             1,
             num_blocks,
             BLOCK_SIZE,
@@ -3529,7 +3533,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut base_cache,
+                    &base_cache,
                     &base_block_table,
                     0,
                     Some(&mut linear_state),
@@ -3542,7 +3546,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut base_cache,
+                    &base_cache,
                     &base_block_table,
                     0,
                     Some(&mut linear_state),
@@ -3634,11 +3638,11 @@ impl ModelRunner {
                 &h_prev,
                 &self.weights,
                 &self.config,
-                &mut base_cache,
+                &base_cache,
                 &base_block_table,
                 base_pos,
                 &mut linear_state,
-                &mut mtp_cache,
+                &mtp_cache,
                 &mtp_block_table,
                 mtp_pos,
                 params,
@@ -3947,7 +3951,7 @@ impl ModelRunner {
         };
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
-        let mut base_cache = PagedKvCache::new(
+        let base_cache = PagedKvCache::new(
             self.config.num_full_attention_layers,
             num_blocks,
             BLOCK_SIZE,
@@ -3956,7 +3960,7 @@ impl ModelRunner {
             dtype,
             device,
         )?;
-        let mut mtp_cache = PagedKvCache::new(
+        let mtp_cache = PagedKvCache::new(
             1,
             num_blocks,
             BLOCK_SIZE,
@@ -3982,7 +3986,7 @@ impl ModelRunner {
                     &prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut base_cache,
+                    &base_cache,
                     &base_block_table,
                     0,
                     Some(&mut linear_state),
@@ -3995,7 +3999,7 @@ impl ModelRunner {
                     &prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut base_cache,
+                    &base_cache,
                     &base_block_table,
                     0,
                     Some(&mut linear_state),
@@ -4061,11 +4065,11 @@ impl ModelRunner {
                 &h_prev,
                 &self.weights,
                 &self.config,
-                &mut base_cache,
+                &base_cache,
                 &base_block_table,
                 base_pos,
                 &mut linear_state,
-                &mut mtp_cache,
+                &mtp_cache,
                 &mtp_block_table,
                 mtp_pos,
                 params,
@@ -4147,7 +4151,7 @@ impl ModelRunner {
         prompt: &str,
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let prompt_tokens = self
             .tokenizer
@@ -4169,7 +4173,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         self.generate_from_tokens_streaming_paged_shared(
             prompt_tokens,
@@ -4187,7 +4191,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
     ) -> Result<PrefixCachedStreamingOutput> {
         self.generate_from_tokens_streaming_paged_interleaved_with_prefix_cache(
@@ -4215,7 +4219,7 @@ impl ModelRunner {
         prompt_tokens: Vec<TokenId>,
         params: SamplingParams,
         block_manager: Arc<Mutex<BlockManager>>,
-        paged_cache: Arc<Mutex<PagedKvCache>>,
+        paged_cache: Arc<PagedKvCache>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
@@ -4249,7 +4253,7 @@ impl ModelRunner {
                 .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
-                let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                 if streaming_prefill_enabled_for(runner_guard.backend.device(), prompt_tokens.len())
                 {
                     model_forward_paged_streaming(
@@ -4257,7 +4261,7 @@ impl ModelRunner {
                         &prompt_tokens,
                         &runner_guard.weights,
                         &runner_guard.config,
-                        &mut pc_guard,
+                        pc_guard,
                         &block_table,
                         0,
                         Some(&mut linear_state),
@@ -4270,7 +4274,7 @@ impl ModelRunner {
                         &prompt_tokens,
                         &runner_guard.weights,
                         &runner_guard.config,
-                        &mut pc_guard,
+                        pc_guard,
                         &block_table,
                         0,
                         Some(&mut linear_state),
@@ -4345,7 +4349,7 @@ impl ModelRunner {
         prompt_tokens: Vec<TokenId>,
         params: SamplingParams,
         block_manager: Arc<Mutex<BlockManager>>,
-        paged_cache: Arc<Mutex<PagedKvCache>>,
+        paged_cache: Arc<PagedKvCache>,
         cached_prefix: Option<PagedPrefixReuse>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
     ) -> Result<PrefixCachedStreamingOutput> {
@@ -4464,7 +4468,7 @@ impl ModelRunner {
                         .read()
                         .map_err(|e| anyhow::anyhow!("failed to acquire runner read lock: {e}"))?;
                     let logits = {
-                        let mut pc_guard = lock_paged_cache(paged_cache.as_ref())?;
+                        let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                         if streaming_prefill_enabled_for(
                             runner_guard.backend.device(),
                             prompt_tokens.len(),
@@ -4474,7 +4478,7 @@ impl ModelRunner {
                                 prefill_tokens,
                                 &runner_guard.weights,
                                 &runner_guard.config,
-                                &mut pc_guard,
+                                pc_guard,
                                 &block_table,
                                 cached_tokens,
                                 Some(&mut linear_state),
@@ -4487,7 +4491,7 @@ impl ModelRunner {
                                 prefill_tokens,
                                 &runner_guard.weights,
                                 &runner_guard.config,
-                                &mut pc_guard,
+                                pc_guard,
                                 &block_table,
                                 cached_tokens,
                                 Some(&mut linear_state),
@@ -4608,7 +4612,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         spec_config: &SpeculativeConfig,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(
@@ -4660,7 +4664,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -4671,12 +4675,12 @@ impl ModelRunner {
             .is_enabled();
         if cuda_graph_enabled {
             let mut bm_guard = lock_block_manager(block_manager)?;
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             return self.generate_from_tokens_streaming_paged_locked(
                 prompt_tokens,
                 params,
                 &mut bm_guard,
-                &mut pc_guard,
+                pc_guard,
             );
         }
 
@@ -4717,7 +4721,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &Mutex<BlockManager>,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
     ) -> Result<PrefixCachedStreamingOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
@@ -4778,7 +4782,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
@@ -4799,14 +4803,14 @@ impl ModelRunner {
         );
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prefill_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     cached_tokens,
                     Some(&mut linear_state),
@@ -4819,7 +4823,7 @@ impl ModelRunner {
                     prefill_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     cached_tokens,
                     Some(&mut linear_state),
@@ -4862,20 +4866,20 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let mut linear_state = self.new_linear_state()?;
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -4888,7 +4892,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -4914,7 +4918,7 @@ impl ModelRunner {
         logits: candle_core::Tensor,
         seq_len: usize,
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
@@ -4950,7 +4954,7 @@ impl ModelRunner {
         mut next_token: TokenId,
         mut seq_len: usize,
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         linear_state: &mut LinearAttentionState,
         decode_batcher: Option<&DecodeBatcher>,
@@ -5013,7 +5017,7 @@ impl ModelRunner {
         &self,
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
-        paged_cache: &Mutex<PagedKvCache>,
+        paged_cache: &PagedKvCache,
         block_table: &BlockTable,
         spec_config: &SpeculativeConfig,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
@@ -5021,14 +5025,14 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         let logits = {
-            let mut pc_guard = lock_paged_cache(paged_cache)?;
+            let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill_enabled_for(self.backend.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -5041,7 +5045,7 @@ impl ModelRunner {
                     prompt_tokens,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     0,
                     Some(&mut linear_state),
@@ -5096,13 +5100,13 @@ impl ModelRunner {
             };
 
             let result = {
-                let mut pc_guard = lock_paged_cache(paged_cache)?;
+                let pc_guard = lock_paged_cache(paged_cache)?;
                 speculative_decode_step_paged_greedy(
                     &*self.backend,
                     last_token,
                     &self.weights,
                     &self.config,
-                    &mut pc_guard,
+                    pc_guard,
                     block_table,
                     base_pos,
                     &mut linear_state,
@@ -5176,7 +5180,7 @@ impl ModelRunner {
         prompt: &str,
         params: &SamplingParams,
         block_manager: &mut BlockManager,
-        paged_cache: &mut PagedKvCache,
+        paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let prompt_tokens = self
             .tokenizer
@@ -5197,7 +5201,7 @@ impl ModelRunner {
         prompt_tokens: &[TokenId],
         params: &SamplingParams,
         block_manager: &mut BlockManager,
-        paged_cache: &mut PagedKvCache,
+        paged_cache: &PagedKvCache,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
@@ -5735,7 +5739,7 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let seq_lens = [start_pos, start_pos];
 
-        let batch_cache = Mutex::new(PagedKvCache::new(
+        let batch_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             2,
             block_size,
@@ -5743,13 +5747,12 @@ mod tests {
             config.head_dim,
             DType::BF16,
             &device,
-        )?);
+        )?;
         {
-            let mut pc = batch_cache.lock().unwrap();
             for (row, block_table) in block_tables.iter().enumerate() {
                 let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
                 let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-                assert!(pc.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+                assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
             }
         }
         let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
@@ -5763,7 +5766,7 @@ mod tests {
         assert_eq!(batched.len(), batch);
 
         for row in 0..batch {
-            let row_cache = Mutex::new(PagedKvCache::new(
+            let row_cache = PagedKvCache::new(
                 config.num_full_attention_layers,
                 1,
                 block_size,
@@ -5771,22 +5774,20 @@ mod tests {
                 config.head_dim,
                 DType::BF16,
                 &device,
-            )?);
+            )?;
             let row_table = BlockTable { blocks: vec![0] };
             {
-                let mut pc = row_cache.lock().unwrap();
                 let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
                 let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-                assert!(pc.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+                assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
             }
             let rowwise_logits = {
-                let mut pc = row_cache.lock().unwrap();
                 model_forward_paged(
                     &*runner.backend,
                     &token_ids[row..row + 1],
                     &runner.weights,
                     &runner.config,
-                    &mut pc,
+                    &row_cache,
                     &row_table,
                     start_pos,
                     None,
@@ -5860,7 +5861,7 @@ mod tests {
         let bt0 = BlockTable { blocks: vec![0] };
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
-        let batch_cache = Arc::new(Mutex::new(PagedKvCache::new(
+        let batch_cache = Arc::new(PagedKvCache::new(
             config.num_full_attention_layers,
             2,
             block_size,
@@ -5868,13 +5869,12 @@ mod tests {
             config.head_dim,
             DType::BF16,
             &device,
-        )?));
+        )?);
         {
-            let mut pc = batch_cache.lock().unwrap();
             for (row, block_table) in block_tables.iter().enumerate() {
                 let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
                 let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-                assert!(pc.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+                assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
             }
         }
 
@@ -5926,7 +5926,7 @@ mod tests {
 
         let runner_guard = runner.read().unwrap();
         for row in 0..batch {
-            let row_cache = Mutex::new(PagedKvCache::new(
+            let row_cache = PagedKvCache::new(
                 config.num_full_attention_layers,
                 1,
                 block_size,
@@ -5934,22 +5934,20 @@ mod tests {
                 config.head_dim,
                 DType::BF16,
                 &device,
-            )?);
+            )?;
             let row_table = BlockTable { blocks: vec![0] };
             {
-                let mut pc = row_cache.lock().unwrap();
                 let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
                 let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-                assert!(pc.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+                assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
             }
             let rowwise_logits = {
-                let mut pc = row_cache.lock().unwrap();
                 model_forward_paged(
                     &*runner_guard.backend,
                     &token_ids[row..row + 1],
                     &runner_guard.weights,
                     &runner_guard.config,
-                    &mut pc,
+                    &row_cache,
                     &row_table,
                     start_pos,
                     None,
@@ -6148,7 +6146,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16; // enough for prompt + max_tokens
         let mut block_manager = BlockManager::new(num_blocks, block_size);
-        let mut paged_cache = PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6168,7 +6166,7 @@ mod tests {
             &[1, 2, 3],
             &params,
             &mut block_manager,
-            &mut paged_cache,
+            &paged_cache,
             None,
         )?;
 
@@ -6196,7 +6194,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16;
         let block_manager = Mutex::new(BlockManager::new(num_blocks, block_size));
-        let paged_cache = Mutex::new(PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6204,7 +6202,7 @@ mod tests {
             config.head_dim,
             candle_core::DType::F32,
             &device,
-        )?);
+        )?;
 
         let params = SamplingParams {
             temperature: 0.0,
@@ -6249,7 +6247,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16;
         let mut block_manager = BlockManager::new(num_blocks, block_size);
-        let mut paged_cache = PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6263,7 +6261,7 @@ mod tests {
             &[1, 2, 3],
             &params,
             &mut block_manager,
-            &mut paged_cache,
+            &paged_cache,
             None,
         )?;
 
@@ -6289,7 +6287,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16;
         let mut block_manager = BlockManager::new(num_blocks, block_size);
-        let mut paged_cache = PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6311,7 +6309,7 @@ mod tests {
             &[1, 2, 3],
             &params,
             &mut block_manager,
-            &mut paged_cache,
+            &paged_cache,
             None,
         )?;
 
@@ -6336,7 +6334,7 @@ mod tests {
         let num_blocks = 16;
         let block_manager =
             std::sync::Arc::new(Mutex::new(BlockManager::new(num_blocks, block_size)));
-        let paged_cache = std::sync::Arc::new(Mutex::new(PagedKvCache::new(
+        let paged_cache = std::sync::Arc::new(PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6344,7 +6342,7 @@ mod tests {
             config.head_dim,
             candle_core::DType::F32,
             &device,
-        )?));
+        )?);
 
         let params = SamplingParams {
             temperature: 0.0,
@@ -6413,7 +6411,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16;
         let block_manager = Mutex::new(BlockManager::new(num_blocks, block_size));
-        let paged_cache = Mutex::new(PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6421,7 +6419,7 @@ mod tests {
             config.head_dim,
             candle_core::DType::F32,
             &device,
-        )?);
+        )?;
         let params = SamplingParams {
             temperature: 0.0,
             max_tokens: 3,
@@ -6489,7 +6487,7 @@ mod tests {
         let block_size = 4;
         let num_blocks = 16;
         let block_manager = Arc::new(Mutex::new(BlockManager::new(num_blocks, block_size)));
-        let paged_cache = Arc::new(Mutex::new(PagedKvCache::new(
+        let paged_cache = Arc::new(PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6497,7 +6495,7 @@ mod tests {
             config.head_dim,
             candle_core::DType::F32,
             &device,
-        )?));
+        )?);
         let params = SamplingParams {
             temperature: 0.0,
             max_tokens: 3,
@@ -6582,7 +6580,7 @@ mod tests {
         // Need enough blocks: prompt(2) + max_tokens(100) = 102 tokens, 102/4 = 26 blocks
         let num_blocks = 32;
         let mut block_manager = BlockManager::new(num_blocks, block_size);
-        let mut paged_cache = PagedKvCache::new(
+        let paged_cache = PagedKvCache::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -6602,7 +6600,7 @@ mod tests {
             &[1, 2],
             &params,
             &mut block_manager,
-            &mut paged_cache,
+            &paged_cache,
             None,
         )?;
 

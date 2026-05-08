@@ -7,6 +7,8 @@
 //!
 //! Supports optional FP8 (E4M3FN) quantization for ~2x memory savings.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
@@ -184,8 +186,18 @@ impl PagedKvCache {
     /// - `start_pos`: absolute position of the first new token
     /// - `k`: `[1, num_kv_heads, new_len, head_dim]`
     /// - `v`: `[1, num_kv_heads, new_len, head_dim]`
+    ///
+    /// # Safety contract
+    ///
+    /// This method takes `&self` (interior mutability via candle's Tensor
+    /// storage). Concurrent callers must guarantee that the physical blocks
+    /// referenced by their `block_table`s are disjoint — `BlockManager`
+    /// already enforces this invariant for all live requests. Two writers
+    /// over disjoint block tables write to disjoint slot indices in the
+    /// shared `(k_pool, v_pool)` tensors, so no data race occurs even though
+    /// the storage handle is shared.
     pub fn write(
-        &mut self,
+        &self,
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
@@ -209,7 +221,7 @@ impl PagedKvCache {
     /// - `v`: `[1, new_len, num_kv_heads, head_dim]`
     #[cfg(feature = "cuda")]
     pub fn write_token_major_native_graph_slot(
-        &mut self,
+        &self,
         layer_idx: usize,
         k: &Tensor,
         v: &Tensor,
@@ -227,7 +239,7 @@ impl PagedKvCache {
     }
 
     pub fn write_token_major_native(
-        &mut self,
+        &self,
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
@@ -239,7 +251,7 @@ impl PagedKvCache {
         }
 
         let new_len = k.dim(1)?;
-        let (k_pool, v_pool) = &mut self.layers[layer_idx];
+        let (k_pool, v_pool) = &self.layers[layer_idx];
 
         if new_len == 1 {
             let slot = block_table
@@ -300,7 +312,7 @@ impl PagedKvCache {
     /// - `k`: `[batch, 1, num_kv_heads, head_dim]`
     /// - `v`: `[batch, 1, num_kv_heads, head_dim]`
     pub fn write_token_major_native_batch(
-        &mut self,
+        &self,
         layer_idx: usize,
         block_tables: &[&BlockTable],
         start_positions: &[usize],
@@ -343,7 +355,7 @@ impl PagedKvCache {
         if slots_fit_u32 {
             let slots =
                 Tensor::from_slice(slots_data.as_slice(), batch, k.device())?.contiguous()?;
-            let (k_pool, v_pool) = &mut self.layers[layer_idx];
+            let (k_pool, v_pool) = &self.layers[layer_idx];
             if crate::backend::metal::metal_paged_kv_write_token_major_batch_supports(
                 k_pool, v_pool, &slots, k, v,
             ) {
@@ -370,7 +382,7 @@ impl PagedKvCache {
     }
 
     fn write_native(
-        &mut self,
+        &self,
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
@@ -378,7 +390,7 @@ impl PagedKvCache {
         v: &Tensor,
     ) -> Result<()> {
         let new_len = k.dim(2)?;
-        let (k_pool, v_pool) = &mut self.layers[layer_idx];
+        let (k_pool, v_pool) = &self.layers[layer_idx];
 
         if new_len == 1 {
             let slot = block_table
@@ -419,7 +431,7 @@ impl PagedKvCache {
     }
 
     fn write_fp8(
-        &mut self,
+        &self,
         layer_idx: usize,
         block_table: &BlockTable,
         start_pos: usize,
@@ -436,7 +448,7 @@ impl PagedKvCache {
                 })?;
             let k_q = fp8::quantize_to_fp8_direct(&k.squeeze(2)?)?;
             let v_q = fp8::quantize_to_fp8_direct(&v.squeeze(2)?)?;
-            let (k_pool, v_pool) = &mut self.layers[layer_idx];
+            let (k_pool, v_pool) = &self.layers[layer_idx];
             k_pool.slice_set(&k_q, 0, slot)?;
             v_pool.slice_set(&v_q, 0, slot)?;
             return Ok(());
@@ -454,7 +466,7 @@ impl PagedKvCache {
         let k_q = fp8::quantize_to_fp8_direct(&k_flat)?;
         let v_q = fp8::quantize_to_fp8_direct(&v_flat)?;
 
-        let (k_pool, v_pool) = &mut self.layers[layer_idx];
+        let (k_pool, v_pool) = &self.layers[layer_idx];
 
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, self.block_size, start_pos, new_len)
@@ -573,6 +585,56 @@ impl PagedKvCache {
     /// either dequantize first or use a kernel that supports FP8 inputs.
     pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&Tensor, &Tensor)> {
         self.layers.get(layer_idx).map(|(k, v)| (k, v))
+    }
+}
+
+/// Per-request write surface into the shared paged KV pool.
+///
+/// `KvWriteSlot` exists to make the *contention model* explicit at the type
+/// level: a request that holds one of these may write into the slots covered
+/// by its `BlockTable`s without taking any global lock. The surrounding
+/// scheduler / `BlockManager` is responsible for ensuring the underlying
+/// block IDs are disjoint across all live `KvWriteSlot`s, so two writers
+/// modify disjoint physical rows of the shared `(k_pool, v_pool)` tensors.
+///
+/// Since candle's `Tensor` uses interior mutability (`Arc<RwLock<...>>`
+/// storage), `&PagedKvCache` is sufficient to mutate slot rows. Holding an
+/// `Arc<PagedKvCache>` through this wrapper avoids the previous design where
+/// every prefill forward pass serialized on a global `Mutex<PagedKvCache>`.
+#[derive(Clone)]
+pub struct KvWriteSlot {
+    cache: Arc<PagedKvCache>,
+}
+
+impl KvWriteSlot {
+    pub fn new(cache: Arc<PagedKvCache>) -> Self {
+        Self { cache }
+    }
+
+    pub fn cache(&self) -> &PagedKvCache {
+        &self.cache
+    }
+
+    pub fn arc(&self) -> &Arc<PagedKvCache> {
+        &self.cache
+    }
+
+    pub fn write(
+        &self,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        start_pos: usize,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<()> {
+        self.cache.write(layer_idx, block_table, start_pos, k, v)
+    }
+}
+
+impl std::ops::Deref for KvWriteSlot {
+    type Target = PagedKvCache;
+    fn deref(&self) -> &PagedKvCache {
+        &self.cache
     }
 }
 

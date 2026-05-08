@@ -153,7 +153,7 @@ pub trait DecodeForward: Send + Sync + 'static {
 pub struct RealDecodeForward {
     runner: Arc<RwLock<ModelRunner>>,
     block_manager: Arc<Mutex<BlockManager>>,
-    paged_cache: Arc<Mutex<PagedKvCache>>,
+    paged_cache: Arc<PagedKvCache>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
 }
@@ -162,7 +162,7 @@ impl RealDecodeForward {
     pub fn new(
         runner: Arc<RwLock<ModelRunner>>,
         block_manager: Arc<Mutex<BlockManager>>,
-        paged_cache: Arc<Mutex<PagedKvCache>>,
+        paged_cache: Arc<PagedKvCache>,
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
     ) -> Self {

@@ -92,7 +92,7 @@ async fn get_config(State(state): State<AppState>) -> Json<ConfigResponse> {
             num_blocks,
             num_blocks_source,
             fp8_enabled: match state.backend.as_ref() {
-                ModelBackend::Real { paged_cache, .. } => paged_cache.lock().unwrap().is_fp8(),
+                ModelBackend::Real { paged_cache, .. } => paged_cache.is_fp8(),
                 ModelBackend::Mock { .. } => false,
             },
         },
