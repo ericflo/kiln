@@ -863,7 +863,7 @@ fn bench_latency_paged(
     let max_total = actual_prompt_tokens + max_output_tokens;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let mut paged_cache = PagedKvCache::new(
+    let paged_cache = PagedKvCache::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
@@ -899,7 +899,7 @@ fn bench_latency_paged(
             &prompt_token_ids,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             0,
             Some(&mut linear_state),
@@ -915,7 +915,7 @@ fn bench_latency_paged(
             &prompt_token_ids,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             0,
             Some(&mut linear_state),
@@ -929,7 +929,7 @@ fn bench_latency_paged(
             &prompt_token_ids,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             0,
             Some(&mut linear_state),
@@ -974,7 +974,7 @@ fn bench_latency_paged(
                 next_token,
                 weights,
                 config,
-                &mut paged_cache,
+                &paged_cache,
                 &block_table,
                 current_pos,
                 Some(&mut linear_state),
@@ -988,7 +988,7 @@ fn bench_latency_paged(
                 &[next_token],
                 weights,
                 config,
-                &mut paged_cache,
+                &paged_cache,
                 &block_table,
                 current_pos,
                 Some(&mut linear_state),
@@ -1633,7 +1633,7 @@ fn bench_latency_paged_skiplayer(
     let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let mut paged_cache = PagedKvCache::new(
+    let paged_cache = PagedKvCache::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
@@ -1664,7 +1664,7 @@ fn bench_latency_paged_skiplayer(
             &prompt_token_ids,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             0,
             Some(&mut linear_state),
@@ -1677,7 +1677,7 @@ fn bench_latency_paged_skiplayer(
             &prompt_token_ids,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             0,
             Some(&mut linear_state),
@@ -1733,7 +1733,7 @@ fn bench_latency_paged_skiplayer(
             last_token,
             weights,
             config,
-            &mut paged_cache,
+            &paged_cache,
             &block_table,
             base_pos,
             &mut linear_state,
@@ -1900,7 +1900,7 @@ fn bench_latency_paged_mtp(
     let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
     let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let mut base_cache = PagedKvCache::new(
+    let base_cache = PagedKvCache::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
@@ -1909,7 +1909,7 @@ fn bench_latency_paged_mtp(
         dtype,
         device,
     )?;
-    let mut mtp_cache = PagedKvCache::new(
+    let mtp_cache = PagedKvCache::new(
         1,
         num_blocks,
         PAGED_BLOCK_SIZE,
@@ -1945,7 +1945,7 @@ fn bench_latency_paged_mtp(
                 &prompt_token_ids,
                 weights,
                 config,
-                &mut base_cache,
+                &base_cache,
                 &base_block_table,
                 0,
                 Some(&mut linear_state),
@@ -1958,7 +1958,7 @@ fn bench_latency_paged_mtp(
                 &prompt_token_ids,
                 weights,
                 config,
-                &mut base_cache,
+                &base_cache,
                 &base_block_table,
                 0,
                 Some(&mut linear_state),
@@ -2031,11 +2031,11 @@ fn bench_latency_paged_mtp(
             &h_prev,
             weights,
             config,
-            &mut base_cache,
+            &base_cache,
             &base_block_table,
             base_pos,
             &mut linear_state,
-            &mut mtp_cache,
+            &mtp_cache,
             &mtp_block_table,
             mtp_pos,
             &params,
