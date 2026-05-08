@@ -284,9 +284,7 @@ impl DecodeBatcherConfig {
     }
 
     pub fn enabled_for_device(device: &Device) -> bool {
-        if !matches!(device, Device::Metal(_)) {
-            return false;
-        }
+        let _ = device;
         env_flag_enabled("KILN_DECODE_BATCHER", true)
     }
 }
@@ -2405,7 +2403,6 @@ impl ModelRunner {
         decode_batcher: Option<&DecodeBatcher>,
     ) -> Result<TokenId> {
         if params.is_effectively_greedy()
-            && matches!(self.backend.device(), Device::Metal(_))
             && let Some(batcher) = decode_batcher
         {
             match batcher.decode_next_token_greedy(
