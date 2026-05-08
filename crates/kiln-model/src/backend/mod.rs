@@ -89,6 +89,29 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Varlen variant of [`Self::flash_attn_paged_decode_contiguous_batch`] for
+    /// a group of decode rows with divergent K/V lengths under continuous
+    /// batching. Uses block-table addressing so K/V need not be contiguous in
+    /// the paged cache.
+    ///
+    /// `q`: `[batch, 1, num_heads, head_dim]` bf16; `block_table`:
+    /// `[batch, max_blocks_per_seq]` u32; `seqused_k`: `[batch]` i32 holding
+    /// per-row attention length. Returns `[batch, 1, num_heads, head_dim]`.
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        _q: &Tensor,
+        _k_pool: &Tensor,
+        _v_pool: &Tensor,
+        _block_table: &Tensor,
+        _seqused_k: &Tensor,
+        _max_seqlen_k: usize,
+        _page_block_size: usize,
+        _softmax_scale: f32,
+        _causal: bool,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     fn supports_paged_kv_head_major_read(&self) -> bool {
         false
     }

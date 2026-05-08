@@ -5491,8 +5491,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         "batched contiguous paged attention metadata length mismatch"
     );
     anyhow::ensure!(
-        positions.elem_count() == 1,
-        "batched contiguous paged attention requires one shared decode position"
+        positions.elem_count() == 1 || positions.elem_count() == batch,
+        "batched contiguous paged attention positions tensor must hold either a shared scalar or one entry per row"
     );
     anyhow::ensure!(
         !paged_cache.is_fp8(),
@@ -5503,26 +5503,80 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         "batched contiguous paged attention layer index out of range"
     );
 
-    let start_pos = start_positions[0];
-    anyhow::ensure!(
-        start_positions.iter().all(|&pos| pos == start_pos),
-        "batched contiguous paged attention requires a common start_pos"
-    );
-    let total_seq_len = start_pos + 1;
-    let live_window_starts = vec![0usize; batch];
-    let start_slots = paged_cache
-        .contiguous_slot_run_starts(block_tables, &live_window_starts, total_seq_len)
-        .context("batched contiguous paged attention requires contiguous live KV windows")?;
-    let start_slots_u32: Vec<u32> = start_slots
+    // Phase 12-B-prime: drop the uniform-start_pos assertion stack. Per-row
+    // K/V lengths are encoded via `seqused_k`, and per-row start positions
+    // (used by RoPE + paged-KV slot indexing) are passed through as-is.
+    let max_start_pos = *start_positions
         .iter()
-        .map(|&slot| {
-            u32::try_from(slot)
-                .context("batched contiguous paged attention start slot exceeds u32 range")
-        })
-        .collect::<Result<_>>()?;
+        .max()
+        .context("batched paged decode requires non-empty start_positions")?;
+    let min_start_pos = *start_positions
+        .iter()
+        .min()
+        .context("batched paged decode requires non-empty start_positions")?;
+    let uniform_start_pos = max_start_pos == min_start_pos;
+    let max_seqlen_k = max_start_pos + 1;
 
-    let use_metal_decode_gemv =
-        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    // Build varlen metadata: per-row seqused_k tensor and a padded
+    // [batch, max_blocks_per_seq] block_table tensor that indexes the
+    // paged KV pool. `flash_attn_paged_decode_dyn_seqlen` masks padding
+    // beyond each row's seqused_k.
+    let page_block_size = paged_cache.block_size();
+    let max_blocks_per_seq =
+        ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+    let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
+    let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
+    for (row_idx, bt) in block_tables.iter().enumerate() {
+        let row_seqlen = start_positions[row_idx] + 1;
+        seqused_k_vec.push(
+            i32::try_from(row_seqlen)
+                .context("batched contiguous paged attention seqused_k exceeds i32 range")?,
+        );
+        let row_blocks = bt.blocks.as_slice();
+        anyhow::ensure!(
+            row_blocks.len() * page_block_size >= row_seqlen,
+            "batched contiguous paged attention row {row_idx}: block_table covers {} tokens but row needs {}",
+            row_blocks.len() * page_block_size,
+            row_seqlen,
+        );
+        let pad_block = *row_blocks.last().unwrap_or(&0);
+        for slot in 0..max_blocks_per_seq {
+            let phys = if slot < row_blocks.len() {
+                row_blocks[slot]
+            } else {
+                pad_block
+            };
+            block_table_vec.push(phys);
+        }
+    }
+
+    // Strict-path slot_run vector kept as a fallback for when the dyn_seqlen
+    // backend declines (e.g. kill switch armed). Only valid when the live
+    // window is uniform across rows.
+    let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
+        let live_window_starts = vec![0usize; batch];
+        match paged_cache
+            .contiguous_slot_run_starts(block_tables, &live_window_starts, max_seqlen_k)
+        {
+            Some(slots) => {
+                let v: Result<Vec<u32>> = slots
+                    .iter()
+                    .map(|&slot| {
+                        u32::try_from(slot).context(
+                            "batched contiguous paged attention start slot exceeds u32 range",
+                        )
+                    })
+                    .collect();
+                Some(v?)
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let use_metal_decode_gemv = start_positions.iter().all(|&p| p > 0)
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
@@ -5588,7 +5642,25 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     };
     let (q, k) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let out = rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        let out = if positions.elem_count() == 1 {
+            // Shared scalar position: reuse the existing seq_len-major rope
+            // path. cos/sin shape [1, half_rotary] broadcasts cleanly across
+            // [batch, 1, num_heads, half_rotary].
+            rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+        } else {
+            // Per-row positions: swap batch <-> seq_len so cos/sin built from
+            // [batch, half_rotary] aligns with the second dim of the q/k
+            // tensors expected by `apply_rope`. After RoPE swap back.
+            let q_swap = q.transpose(0, 1)?.contiguous()?;
+            let k_swap = k.transpose(0, 1)?.contiguous()?;
+            let (q_rot, k_rot) = rotary_embedding_from_tensor(
+                &q_swap, &k_swap, positions, head_dim, rotary_dim, inv_freq,
+            )?;
+            (
+                q_rot.transpose(0, 1)?.contiguous()?,
+                k_rot.transpose(0, 1)?.contiguous()?,
+            )
+        };
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -5598,18 +5670,9 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
         out
     };
-    let q = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let q = q.transpose(1, 2)?.contiguous()?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "q_transpose_batch",
-            seq_len,
-            stage_profile,
-        )?;
-        q
-    };
+    // Q stays in [batch, 1, num_heads, head_dim] for the dyn_seqlen path; the
+    // strict fallback below transposes lazily into the head-major layout it
+    // requires.
 
     {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -5634,19 +5697,65 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let (k_pool, v_pool) = paged_cache
         .pool_tensors(full_attn_layer_idx)
         .context("batched contiguous paged attention layer index out of range")?;
-    let start_slots =
-        Tensor::from_slice(start_slots_u32.as_slice(), batch, x.device())?.contiguous()?;
+    let block_table_tensor = Tensor::from_slice(
+        block_table_vec.as_slice(),
+        (batch, max_blocks_per_seq),
+        x.device(),
+    )?
+    .contiguous()?;
+    let seqused_k_tensor =
+        Tensor::from_slice(seqused_k_vec.as_slice(), batch, x.device())?.contiguous()?;
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let out = backend.flash_attn_paged_decode_contiguous_batch(
-            &q,
-            k_pool,
-            v_pool,
-            &start_slots,
-            total_seq_len,
-            softmax_scale,
-        )?;
+        let kill_dyn_seqlen =
+            std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
+        let mut out = if !kill_dyn_seqlen {
+            backend.flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                &q,
+                k_pool,
+                v_pool,
+                &block_table_tensor,
+                &seqused_k_tensor,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+                true,
+            )?
+        } else {
+            None
+        };
+        if out.is_none() {
+            // Fallback: strict contiguous-batch path for uniform start_pos +
+            // contiguous live KV. This is the pre-12-B-prime code path. The
+            // strict kernel expects head-major [batch, num_heads, 1, head_dim].
+            let strict_slots = strict_start_slots.as_ref().context(
+                "batched contiguous paged attention requires uniform start_pos for the strict fallback path",
+            )?;
+            let start_slots =
+                Tensor::from_slice(strict_slots.as_slice(), batch, x.device())?.contiguous()?;
+            let q_strict = {
+                let stage_profile =
+                    start_full_attn_stage_profile(profile_device, profile_context)?;
+                let q_strict = q.transpose(1, 2)?.contiguous()?;
+                finish_full_attn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "q_transpose_batch",
+                    seq_len,
+                    stage_profile,
+                )?;
+                q_strict
+            };
+            out = backend.flash_attn_paged_decode_contiguous_batch(
+                &q_strict,
+                k_pool,
+                v_pool,
+                &start_slots,
+                max_seqlen_k,
+                softmax_scale,
+            )?;
+        }
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -5655,6 +5764,16 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             stage_profile,
         )?;
         out.context("backend declined batched contiguous paged attention")?
+    };
+
+    // Both kernels feed o_proj a row-major [batch, 1, num_heads * head_dim].
+    // The Metal strict kernel already returns that 3-D shape; the dyn_seqlen
+    // kernel returns 4-D [batch, 1, num_heads, head_dim], so flatten the trailing
+    // axes here. The reshape is a no-op for the 3-D case.
+    let attn_output = if attn_output.dims().len() == 4 {
+        attn_output.reshape((batch, seq_len, num_heads * head_dim))?
+    } else {
+        attn_output
     };
 
     let attn_output = {
@@ -6932,11 +7051,14 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         seq_len == 1,
         "batched contiguous paged transformer decode requires one token per row"
     );
-    let start_pos = *start_positions
-        .first()
-        .context("batched contiguous paged transformer decode requires a non-empty batch")?;
-    let use_metal_decode_ffn =
-        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    anyhow::ensure!(
+        !start_positions.is_empty(),
+        "batched contiguous paged transformer decode requires a non-empty batch"
+    );
+    // Phase 12-B-prime: per-row start positions are allowed; the SwiGLU MLP
+    // decode-gemv hint must hold for every row, so require all > 0.
+    let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
@@ -7015,11 +7137,10 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
         block_tables.len() == batch && start_positions.len() == batch,
         "batched paged decode metadata length mismatch"
     );
-    let start_pos = start_positions[0];
-    anyhow::ensure!(
-        start_positions.iter().all(|&pos| pos == start_pos),
-        "batched paged decode requires a common start_pos"
-    );
+    let max_start_pos = *start_positions
+        .iter()
+        .max()
+        .context("batched paged decode requires a non-empty start_positions")?;
 
     if weights
         .layers
@@ -7038,9 +7159,10 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
 
     let device = weights.embed_tokens.device();
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
-    let positions = Tensor::from_slice(&[start_pos as f32], 1usize, device)?;
-    let use_metal_decode_ffn =
-        start_pos > 0 && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+    let positions = Tensor::from_slice(positions_f32.as_slice(), batch, device)?;
+    let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
     let profile_full_attn_stages = profile_full_attn_stages_enabled();
     let profile_gdn_stages = profile_gdn_stages_enabled();
     let profile_mlp_stages = profile_mlp_stages_enabled();
@@ -7065,8 +7187,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     block_tables,
                     full_attn_idx,
                     layer_lora,
-                    profile_full_attn_stages.then_some((full_attn_idx, start_pos)),
-                    profile_mlp_stages.then_some((i, start_pos)),
+                    profile_full_attn_stages.then_some((full_attn_idx, max_start_pos)),
+                    profile_mlp_stages.then_some((i, max_start_pos)),
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -7092,7 +7214,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     false,
                     use_metal_decode_ffn,
                     use_metal_decode_ffn,
-                    profile_gdn_stages.then_some((i, start_pos)),
+                    profile_gdn_stages.then_some((i, max_start_pos)),
                 )
                 .with_context(|| {
                     format!("batched gated deltanet layer {i} (linear attention, paged)")
@@ -7114,7 +7236,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     &layer.mlp,
                     layer_lora,
                     use_metal_decode_ffn,
-                    profile_mlp_stages.then_some((i, start_pos)),
+                    profile_mlp_stages.then_some((i, max_start_pos)),
                 )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -7953,44 +8075,31 @@ pub fn model_forward_paged_batched_decode_hidden(
                 linear_attn_idx += 1;
             }
             GpuAttentionWeights::Full(_) => {
-                let mut rows = Vec::with_capacity(batch_size);
-                for row_idx in 0..batch_size {
-                    let row_hidden = hidden.narrow(0, row_idx, 1)?;
-                    let pos = Tensor::new(&[sequence_lengths[row_idx] as f32], device)?;
-                    let rope_tables = rotary_tables_from_tensor(&pos, &weights.rotary_inv_freq)?;
-                    rows.push(
-                        transformer_block_paged_with_rope_tables(
-                            backend,
-                            &row_hidden,
-                            layer,
-                            config,
-                            &pos,
-                            sequence_lengths[row_idx],
-                            config.num_attention_heads,
-                            config.num_kv_heads,
-                            config.head_dim,
-                            config.rotary_dim(),
-                            &weights.rotary_inv_freq,
-                            Some((&rope_tables.0, &rope_tables.1)),
-                            config.rms_norm_eps,
-                            paged_cache,
-                            &block_tables[row_idx],
-                            full_attn_idx,
-                            layer_lora,
-                            #[cfg(feature = "cuda")]
-                            None,
-                            None,
-                        )
-                        .with_context(|| {
-                            format!(
-                                "batched decode row {row_idx} transformer block {layer_idx} (full attention, paged)"
-                            )
-                        })?,
-                    );
-                }
-                let row_refs: Vec<&Tensor> = rows.iter().collect();
-                hidden = Tensor::cat(&row_refs, 0)
-                    .with_context(|| format!("cat full-attention rows after layer {layer_idx}"))?;
+                let positions_f32: Vec<f32> =
+                    sequence_lengths.iter().map(|&p| p as f32).collect();
+                let positions =
+                    Tensor::from_slice(positions_f32.as_slice(), batch_size, device)?;
+                let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+                hidden = transformer_block_paged_decode_contiguous_batch(
+                    backend,
+                    &hidden,
+                    layer,
+                    config,
+                    &positions,
+                    sequence_lengths,
+                    &weights.rotary_inv_freq,
+                    paged_cache,
+                    &block_table_refs,
+                    full_attn_idx,
+                    layer_lora,
+                    None,
+                    None,
+                )
+                .with_context(|| {
+                    format!(
+                        "batched decode transformer block {layer_idx} (full attention, paged)"
+                    )
+                })?;
                 full_attn_idx += 1;
             }
         }
@@ -10077,7 +10186,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "cuda"))]
     fn patterned_bf16(shape: &[usize], scale: f32, device: &Device) -> Result<Tensor> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n)
@@ -10098,7 +10207,7 @@ mod tests {
         Ok(Tensor::new(data, device)?.reshape(shape)?.contiguous()?)
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "cuda"))]
     fn make_bf16_full_attn_weights(
         hidden: usize,
         num_heads: usize,
@@ -10125,7 +10234,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "cuda"))]
     fn make_bf16_mlp_weights(
         hidden: usize,
         intermediate: usize,
@@ -10147,7 +10256,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(any(feature = "metal", feature = "cuda"))]
     fn make_bf16_full_attention_gpu_weights(
         vocab: usize,
         hidden: usize,
@@ -10726,6 +10835,182 @@ mod tests {
             assert!(
                 mean <= 3e-3,
                 "row {row} batched contiguous model decode mean_abs_diff={mean:e}"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Phase 12-B-prime: parity test that exercises the dyn_seqlen varlen
+    /// paged decode path under a non-uniform `start_positions` batch on CUDA.
+    /// The Metal-gated test above only covers the uniform `start_pos`
+    /// fast-path; this test confirms that batched decode with divergent
+    /// per-row K/V prefix lengths still matches per-row `model_forward_paged`
+    /// bit-for-bit (within bf16 numeric tolerance).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda: {err}"
+                );
+                return Ok(());
+            }
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping dyn_seqlen batched test");
+            return Ok(());
+        }
+
+        let backend = crate::backend::for_device(&device);
+        let batch = 2usize;
+        let vocab = 64usize;
+        let hidden = 512usize;
+        let intermediate = 768usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        // Non-uniform start positions — the whole point of this test.
+        let start_positions = [3usize, 5usize];
+        let weights = make_bf16_full_attention_gpu_weights(
+            vocab,
+            hidden,
+            intermediate,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+            &device,
+        )?;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: vocab,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        // Build per-row prefix K/V at each row's actual start_pos so that
+        // the batched cache holds divergent K/V prefix lengths. Distinct
+        // patterns per row catch any cross-row leakage.
+        let prefix_k_row0 = patterned_bf16(
+            &[1, start_positions[0], num_kv_heads, head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v_row0 = patterned_bf16(
+            &[1, start_positions[0], num_kv_heads, head_dim],
+            0.003,
+            &device,
+        )?;
+        let prefix_k_row1 = patterned_bf16(
+            &[1, start_positions[1], num_kv_heads, head_dim],
+            0.0021,
+            &device,
+        )?;
+        let prefix_v_row1 = patterned_bf16(
+            &[1, start_positions[1], num_kv_heads, head_dim],
+            0.0031,
+            &device,
+        )?;
+
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let token_ids = [7u32, 11u32];
+
+        let mut batch_cache = PagedKvCache::new(
+            1,
+            2,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            DType::BF16,
+            &device,
+        )?;
+        assert!(batch_cache.write_token_major_native(0, &bt0, 0, &prefix_k_row0, &prefix_v_row0)?);
+        assert!(batch_cache.write_token_major_native(0, &bt1, 0, &prefix_k_row1, &prefix_v_row1)?);
+
+        let batched = model_forward_paged_decode_contiguous_batch(
+            &*backend,
+            &token_ids,
+            &weights,
+            &config,
+            &mut batch_cache,
+            &block_tables,
+            &start_positions,
+            None,
+            None,
+        )?;
+        device.synchronize()?;
+        assert_eq!(batched.dims(), &[batch, 1usize, vocab]);
+
+        for row in 0..batch {
+            let row_start_pos = start_positions[row];
+            let mut row_cache = PagedKvCache::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            let (row_k, row_v) = if row == 0 {
+                (prefix_k_row0.clone(), prefix_v_row0.clone())
+            } else {
+                (prefix_k_row1.clone(), prefix_v_row1.clone())
+            };
+            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            let positions = Tensor::from_slice(&[row_start_pos as f32], 1usize, &device)?;
+            let rowwise = model_forward_paged(
+                &*backend,
+                &token_ids[row..row + 1],
+                &weights,
+                &config,
+                &mut row_cache,
+                &row_table,
+                row_start_pos,
+                None,
+                None,
+                Some(&positions),
+            )?;
+            device.synchronize()?;
+
+            let batch_row = batched.narrow(0, row, 1)?;
+            let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
+            let abs = diff.abs()?;
+            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            eprintln!(
+                "dyn_seqlen batched contiguous model decode row {row} (start_pos={row_start_pos}): max_abs_diff={max:e} mean_abs_diff={mean:e}"
+            );
+            assert!(
+                max <= 3e-2,
+                "row {row} dyn_seqlen batched contiguous model decode max_abs_diff={max:e}"
+            );
+            assert!(
+                mean <= 3e-3,
+                "row {row} dyn_seqlen batched contiguous model decode mean_abs_diff={mean:e}"
             );
         }
 

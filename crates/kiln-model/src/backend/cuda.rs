@@ -136,6 +136,37 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(out))
     }
 
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        block_table: &Tensor,
+        seqused_k: &Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<Tensor>> {
+        if q.dtype() != DType::BF16 {
+            return Ok(None);
+        }
+        let out = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            None,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
+        )
+        .context("flash_attn_paged_decode_dyn_seqlen kernel failed")?;
+        Ok(Some(out))
+    }
+
     fn gdn_forward_substitution(
         &self,
         a_strict: &Tensor,
