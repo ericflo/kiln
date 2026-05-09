@@ -2013,3 +2013,11 @@
   rollback, aggregate `155.002 ms` x2 versus `154.071 ms` rollback. A noisy
   seed-449 pair was discarded due concurrent local work. Source reverted; keep
   the accepted E433 dedicated serial MLP gate/up kernel.
+- 2026-05-09 E449: Rejected Metal MLP down-projection tile16 row-unroll2.
+  The temporary `Tile16Unroll2` transposed cooperative GEMV kernel was selected
+  only for Qwen down-projection `[1,1,9216] x [9216,2560]`, with
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16_UNROLL2=1` rolling back to
+  the accepted tile16 path. The smoke run compiled the shader and reported
+  exact BF16 diffs, but the short selected-shape synthetic A/B was a clear
+  loss: `1030.992 us` candidate versus `894.529 us` rollback. No endpoint A/B
+  was run. Source reverted; keep current tile16.

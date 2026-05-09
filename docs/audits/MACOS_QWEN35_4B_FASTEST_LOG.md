@@ -18650,3 +18650,47 @@ kept as artifacts but were not used for the decision.
 Rejected. The dedicated serial x2 hidden-load candidate improves the isolated
 synthetic kernel slightly, but clean endpoint A/B repeats a regression. Source
 was reverted; keep the accepted E433 dedicated serial MLP gate/up kernel.
+
+## 2026-05-09 - E449 rejected MLP down tile16 row-unroll2
+
+### Purpose
+
+Test whether the Qwen3.5-4B MLP down-projection serial Metal path can improve
+by unrolling the existing tile16 cooperative GEMV row loop by two. E447 shows
+MLP down-projection is the second-largest remaining serial MLP stage after
+gate/up.
+
+### Candidate
+
+Temporarily added a `Tile16Unroll2` variant for Metal transposed cooperative
+GEMV, backed by a new `kiln_transposed_coop_gemv16_u2_bf16` kernel. Selection
+was restricted to the existing Qwen down-projection shape
+`[1,1,9216] x [9216,2560]`; all smaller serial projections stayed on tile8.
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16_UNROLL2=1` rolled back to the
+accepted tile16 down-projection path.
+
+### Results
+
+The smoke run compiled the new shader, selected `Tile16Unroll2` only for
+down-projection, and reported exact BF16 diffs.
+
+Short selected-shape synthetic A/B:
+
+| shape | candidate | rollback | result |
+| --- | ---: | ---: | --- |
+| down-proj `[1,1,9216] x [9216,2560]` | `1030.992 us` | `894.529 us` | rollback `13.2%` faster |
+
+The synthetic loss is large enough that no endpoint A/B was run.
+
+### Artifacts
+
+- `e449_tile16_unroll2_candidate.diff`
+- `e449_tile16_unroll2_selected_smoke.log`
+- `e449_tile16_unroll2_selected_default_short.log`
+- `e449_tile16_unroll2_selected_disabled_short.log`
+
+### Decision
+
+Rejected. The row-unroll2 kernel increased latency for the exact down-proj
+shape it targeted. Source was reverted; keep the current shape-specific tile16
+serial transposed GEMV path.

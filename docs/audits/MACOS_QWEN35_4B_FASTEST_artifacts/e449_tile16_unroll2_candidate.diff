@@ -1,0 +1,289 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index 36c8000..d156165 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -69,6 +69,8 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16";
++const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16_UNROLL2: &str =
++    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16_UNROLL2";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD: &str =
+@@ -86,6 +88,7 @@ enum MetalTransposedCoopGemvTile {
+     Tile4,
+     Tile8,
+     Tile16,
++    Tile16Unroll2,
+ }
+ 
+ impl MetalTransposedCoopGemvTile {
+@@ -94,6 +97,7 @@ impl MetalTransposedCoopGemvTile {
+             Self::Tile4 => "kiln_transposed_coop_gemv4_bf16",
+             Self::Tile8 => "kiln_transposed_coop_gemv8_bf16",
+             Self::Tile16 => "kiln_transposed_coop_gemv16_bf16",
++            Self::Tile16Unroll2 => "kiln_transposed_coop_gemv16_u2_bf16",
+         }
+     }
+ 
+@@ -105,7 +109,7 @@ impl MetalTransposedCoopGemvTile {
+         match self {
+             Self::Tile4 => METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS,
+             Self::Tile8 => METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS,
+-            Self::Tile16 => METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS,
++            Self::Tile16 | Self::Tile16Unroll2 => METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS,
+         }
+     }
+ }
+@@ -224,6 +228,12 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
+         if !metal_transposed_coop_gemv_tile16_disabled() {
+             metal_transposed_coop_gemv_pipeline(metal_device, MetalTransposedCoopGemvTile::Tile16)?;
+         }
++        if !metal_transposed_coop_gemv_tile16_unroll2_disabled() {
++            metal_transposed_coop_gemv_pipeline(
++                metal_device,
++                MetalTransposedCoopGemvTile::Tile16Unroll2,
++            )?;
++        }
+         if !metal_fused_qkv_proj_disabled() {
+             metal_fused_qkv_transposed_coop_gemv_pipeline(metal_device)?;
+         }
+@@ -1007,6 +1017,11 @@ fn metal_transposed_coop_gemv_tile16_disabled() -> bool {
+         || env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16)
+ }
+ 
++fn metal_transposed_coop_gemv_tile16_unroll2_disabled() -> bool {
++    metal_transposed_coop_gemv_tile16_disabled()
++        || env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16_UNROLL2)
++}
++
+ fn metal_transposed_coop_gemv_row_pair_disabled() -> bool {
+     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR)
+ }
+@@ -1033,6 +1048,14 @@ fn metal_transposed_coop_gemv_select_tile(
+ ) -> MetalTransposedCoopGemvTile {
+     let default_tile = metal_transposed_coop_gemv_default_tile();
+     if default_tile == MetalTransposedCoopGemvTile::Tile8
++        && !metal_transposed_coop_gemv_tile16_unroll2_disabled()
++        // Qwen3.5-4B MLP down projection. The wider tile regressed smaller
++        // attention-output GEMVs, so keep the selector shape-specific.
++        && input_dim == 9216
++        && output_dim == 2560
++    {
++        MetalTransposedCoopGemvTile::Tile16Unroll2
++    } else if default_tile == MetalTransposedCoopGemvTile::Tile8
+         && !metal_transposed_coop_gemv_tile16_disabled()
+         // Qwen3.5-4B MLP down projection. The wider tile regressed smaller
+         // attention-output GEMVs, so keep the selector shape-specific.
+@@ -3238,6 +3261,210 @@ kernel void kiln_transposed_coop_gemv16_bf16(
+     }
+ }
+ 
++#define KILN_ACCUM16_VEC4(W0, W1, W2, W3, XV) \
++    acc0 += (XV) * static_cast<float>((W0)[0]); \
++    acc1 += (XV) * static_cast<float>((W0)[1]); \
++    acc2 += (XV) * static_cast<float>((W0)[2]); \
++    acc3 += (XV) * static_cast<float>((W0)[3]); \
++    acc4 += (XV) * static_cast<float>((W1)[0]); \
++    acc5 += (XV) * static_cast<float>((W1)[1]); \
++    acc6 += (XV) * static_cast<float>((W1)[2]); \
++    acc7 += (XV) * static_cast<float>((W1)[3]); \
++    acc8 += (XV) * static_cast<float>((W2)[0]); \
++    acc9 += (XV) * static_cast<float>((W2)[1]); \
++    acc10 += (XV) * static_cast<float>((W2)[2]); \
++    acc11 += (XV) * static_cast<float>((W2)[3]); \
++    acc12 += (XV) * static_cast<float>((W3)[0]); \
++    acc13 += (XV) * static_cast<float>((W3)[1]); \
++    acc14 += (XV) * static_cast<float>((W3)[2]); \
++    acc15 += (XV) * static_cast<float>((W3)[3]);
++
++kernel void kiln_transposed_coop_gemv16_u2_bf16(
++    device const bfloat* x [[buffer(0)]],
++    device const bfloat* weight_t [[buffer(1)]],
++    device bfloat* out [[buffer(2)]],
++    constant uint& input_dim [[buffer(3)]],
++    constant uint& output_dim [[buffer(4)]],
++    uint tgroup [[threadgroup_position_in_grid]],
++    uint simd_group [[simdgroup_index_in_threadgroup]],
++    uint lane [[thread_index_in_simdgroup]]
++) {
++    const uint col_base = (tgroup * 4 + simd_group) * 16;
++    if (col_base >= output_dim) {
++        return;
++    }
++
++    float acc0 = 0.0f;
++    float acc1 = 0.0f;
++    float acc2 = 0.0f;
++    float acc3 = 0.0f;
++    float acc4 = 0.0f;
++    float acc5 = 0.0f;
++    float acc6 = 0.0f;
++    float acc7 = 0.0f;
++    float acc8 = 0.0f;
++    float acc9 = 0.0f;
++    float acc10 = 0.0f;
++    float acc11 = 0.0f;
++    float acc12 = 0.0f;
++    float acc13 = 0.0f;
++    float acc14 = 0.0f;
++    float acc15 = 0.0f;
++    const bool full_tile = col_base + 15 < output_dim;
++    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
++
++    if (vector_load_safe) {
++        uint row = lane;
++        for (; row + 32 < input_dim; row += 64) {
++            const float x0 = static_cast<float>(x[row]);
++            const float x1 = static_cast<float>(x[row + 32]);
++            const uint weight_base0 = row * output_dim + col_base;
++            const uint weight_base1 = weight_base0 + 32 * output_dim;
++            device const bfloat4* w4_ptr0 = (device const bfloat4*)(weight_t + weight_base0);
++            device const bfloat4* w4_ptr1 = (device const bfloat4*)(weight_t + weight_base1);
++            const bfloat4 w00 = w4_ptr0[0];
++            const bfloat4 w01 = w4_ptr0[1];
++            const bfloat4 w02 = w4_ptr0[2];
++            const bfloat4 w03 = w4_ptr0[3];
++            const bfloat4 w10 = w4_ptr1[0];
++            const bfloat4 w11 = w4_ptr1[1];
++            const bfloat4 w12 = w4_ptr1[2];
++            const bfloat4 w13 = w4_ptr1[3];
++            KILN_ACCUM16_VEC4(w00, w01, w02, w03, x0)
++            KILN_ACCUM16_VEC4(w10, w11, w12, w13, x1)
++        }
++        for (; row < input_dim; row += 32) {
++            const float xv = static_cast<float>(x[row]);
++            const uint weight_base = row * output_dim + col_base;
++            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
++            const bfloat4 w0 = w4_ptr[0];
++            const bfloat4 w1 = w4_ptr[1];
++            const bfloat4 w2 = w4_ptr[2];
++            const bfloat4 w3 = w4_ptr[3];
++            KILN_ACCUM16_VEC4(w0, w1, w2, w3, xv)
++        }
++    } else {
++        for (uint row = lane; row < input_dim; row += 32) {
++            const float xv = static_cast<float>(x[row]);
++            const uint weight_base = row * output_dim + col_base;
++            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
++            if (col_base + 1 < output_dim) {
++                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
++            }
++            if (col_base + 2 < output_dim) {
++                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
++            }
++            if (col_base + 3 < output_dim) {
++                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
++            }
++            if (col_base + 4 < output_dim) {
++                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
++            }
++            if (col_base + 5 < output_dim) {
++                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
++            }
++            if (col_base + 6 < output_dim) {
++                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
++            }
++            if (col_base + 7 < output_dim) {
++                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
++            }
++            if (col_base + 8 < output_dim) {
++                acc8 += xv * static_cast<float>(weight_t[weight_base + 8]);
++            }
++            if (col_base + 9 < output_dim) {
++                acc9 += xv * static_cast<float>(weight_t[weight_base + 9]);
++            }
++            if (col_base + 10 < output_dim) {
++                acc10 += xv * static_cast<float>(weight_t[weight_base + 10]);
++            }
++            if (col_base + 11 < output_dim) {
++                acc11 += xv * static_cast<float>(weight_t[weight_base + 11]);
++            }
++            if (col_base + 12 < output_dim) {
++                acc12 += xv * static_cast<float>(weight_t[weight_base + 12]);
++            }
++            if (col_base + 13 < output_dim) {
++                acc13 += xv * static_cast<float>(weight_t[weight_base + 13]);
++            }
++            if (col_base + 14 < output_dim) {
++                acc14 += xv * static_cast<float>(weight_t[weight_base + 14]);
++            }
++            if (col_base + 15 < output_dim) {
++                acc15 += xv * static_cast<float>(weight_t[weight_base + 15]);
++            }
++        }
++    }
++
++    acc0 = simd_sum(acc0);
++    acc1 = simd_sum(acc1);
++    acc2 = simd_sum(acc2);
++    acc3 = simd_sum(acc3);
++    acc4 = simd_sum(acc4);
++    acc5 = simd_sum(acc5);
++    acc6 = simd_sum(acc6);
++    acc7 = simd_sum(acc7);
++    acc8 = simd_sum(acc8);
++    acc9 = simd_sum(acc9);
++    acc10 = simd_sum(acc10);
++    acc11 = simd_sum(acc11);
++    acc12 = simd_sum(acc12);
++    acc13 = simd_sum(acc13);
++    acc14 = simd_sum(acc14);
++    acc15 = simd_sum(acc15);
++
++    if (lane == 0) {
++        out[col_base + 0] = static_cast<bfloat>(acc0);
++        if (col_base + 1 < output_dim) {
++            out[col_base + 1] = static_cast<bfloat>(acc1);
++        }
++        if (col_base + 2 < output_dim) {
++            out[col_base + 2] = static_cast<bfloat>(acc2);
++        }
++        if (col_base + 3 < output_dim) {
++            out[col_base + 3] = static_cast<bfloat>(acc3);
++        }
++        if (col_base + 4 < output_dim) {
++            out[col_base + 4] = static_cast<bfloat>(acc4);
++        }
++        if (col_base + 5 < output_dim) {
++            out[col_base + 5] = static_cast<bfloat>(acc5);
++        }
++        if (col_base + 6 < output_dim) {
++            out[col_base + 6] = static_cast<bfloat>(acc6);
++        }
++        if (col_base + 7 < output_dim) {
++            out[col_base + 7] = static_cast<bfloat>(acc7);
++        }
++        if (col_base + 8 < output_dim) {
++            out[col_base + 8] = static_cast<bfloat>(acc8);
++        }
++        if (col_base + 9 < output_dim) {
++            out[col_base + 9] = static_cast<bfloat>(acc9);
++        }
++        if (col_base + 10 < output_dim) {
++            out[col_base + 10] = static_cast<bfloat>(acc10);
++        }
++        if (col_base + 11 < output_dim) {
++            out[col_base + 11] = static_cast<bfloat>(acc11);
++        }
++        if (col_base + 12 < output_dim) {
++            out[col_base + 12] = static_cast<bfloat>(acc12);
++        }
++        if (col_base + 13 < output_dim) {
++            out[col_base + 13] = static_cast<bfloat>(acc13);
++        }
++        if (col_base + 14 < output_dim) {
++            out[col_base + 14] = static_cast<bfloat>(acc14);
++        }
++        if (col_base + 15 < output_dim) {
++            out[col_base + 15] = static_cast<bfloat>(acc15);
++        }
++    }
++}
++
++#undef KILN_ACCUM16_VEC4
++
+ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+     device const bfloat* x [[buffer(0)]],
+     device const bfloat* weight_t [[buffer(1)]],
