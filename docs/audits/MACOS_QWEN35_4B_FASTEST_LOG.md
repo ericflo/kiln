@@ -14850,3 +14850,51 @@ Accepted. Keep the guarded serial `bfloat2` load path because it improves the
 directly affected synthetic batch-1 kernel, does not regress aggregate
 production paged serial latency in same-build rollback measurements, and has a
 targeted runtime rollback knob.
+
+## 2026-05-09 - E394 rejected fused-QKV tile4 selector
+
+### Hypothesis
+
+The current generic serial transposed-GEMV refresh showed that most important
+Qwen3.5 serial projection shapes still prefer tile8, but the
+attention-QKV-like `[1,1,2560] x [2560,4096]` proxy preferred tile4. Because
+the production no-LoRA full-attention QKV projection uses a fused Q/K/V tile8
+kernel, test whether a fused-QKV tile4 variant is faster for the actual
+Qwen3.5 Q/K/V split (`2048 + 1024 + 1024` outputs).
+
+### Temporary change
+
+Added a temporary fused-QKV tile4 Metal kernel and same-binary benchmark while
+keeping the existing tile8 fused kernel available. The source change was
+reverted after synthetic measurement.
+
+### Results
+
+Current generic transposed-GEMV shape refresh:
+
+- `mlp_gate_or_up`: tile4 `1437.731 us`, tile8 `1104.723 us`
+- `down_proj`: tile4 `1150.165 us`, tile8 `883.667 us`
+- `attn_output`: tile4 `380.875 us`, tile8 `284.392 us`
+- `attn_qkv_like`: tile4 `458.012 us`, tile8 `521.925 us`
+
+The generic proxy made fused-QKV tile4 worth testing, but the actual fused
+Q/K/V candidate did not hold:
+
+- focused fused-QKV parity passed for both tile4 and tile8
+- Qwen3.5 fused QKV same-binary synthetic:
+  - separate default projections: `721.577 us`
+  - fused tile4: `481.798 us`
+  - fused tile8: `462.967 us`
+- tile4 was `4.1%` slower than tile8 on the actual fused-QKV shape
+
+### Artifact
+
+- `e394_transposed_gemv_current_shapes.log`
+- `e394_fused_qkv_tile4_test.log`
+- `e394_fused_qkv_tile4_synthetic.log`
+
+### Decision
+
+Rejected before endpoint measurement. The generic QKV-like tile4 signal was a
+false proxy for the real fused-QKV path; keep the production fused-QKV kernel
+on tile8 and leave the source reverted.

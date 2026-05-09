@@ -1549,3 +1549,10 @@
   default vector path (`162.727 ms` vs `163.596 ms` mean ITL, `0.53%`).
   Metal/Vulkan checks, release Metal builds, fmt, and diff checks passed; CUDA
   check was blocked locally by missing `nvcc`.
+- 2026-05-09 E394: Rejected a fused-QKV tile4 selector. A current generic
+  serial transposed-GEMV refresh showed tile8 still winning MLP gate/up,
+  down-proj, and attention-output shapes, but tile4 winning the generic
+  QKV-like `[2560,4096]` proxy (`458.012 us` vs `521.925 us`). A temporary
+  real fused-QKV tile4 kernel passed parity, then lost same-binary Qwen3.5
+  fused Q/K/V synthetic to tile8 (`481.798 us` vs `462.967 us`, `4.1%`
+  slower). Source reverted; keep fused QKV on tile8.
