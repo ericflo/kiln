@@ -16056,3 +16056,72 @@ Accepted as target-selection evidence; no source change. E412 removed the old
 the projection and GDN recurrent/out-projection work. The next prefill work
 should stay focused on GDN qkv/z input projection, split MLP projection matmuls,
 or the remaining GDN recurrent/out-projection buckets.
+
+## 2026-05-09 - E414 rejected prefill flat-matmul routing
+
+### Purpose
+
+Test whether Metal prefill projections are faster when reshaping
+`[1,T,K] @ [K,N]` into a plain `[T,K].matmul([K,N])` and reshaping back,
+instead of using the current `broadcast_matmul` path. This is distinct from
+E403's rejected `[T,1,K]` batch-GEMV route.
+
+### Temporary Change
+
+Added a temporary Metal-only helper for BF16 Qwen-shaped prefill projections,
+gated to `batch=1`, `seq_len>1`, `input_dim=2560`, `output_dim>=4096`, with
+rollback `KILN_DISABLE_METAL_PREFILL_FLAT_MATMUL=1`. It was wired into GDN
+qkv/z projections and the shared `linear_with_lora_t` base path, then reverted
+before commit after endpoint A/B did not improve.
+
+### Synthetic Results
+
+The synthetic benchmark compared current broadcast matmul to the flattened
+matmul and found exact parity. Selected post-implementation timings:
+
+- `seq_len=64`, MLP gate/up shape `[2560,9216]`: broadcast `2417.817 us`,
+  flat `1822.250 us` (`1.327x`)
+- `seq_len=64`, GDN qkv shape `[2560,8192]`: broadcast `1916.167 us`,
+  flat `1651.025 us` (`1.161x`)
+- `seq_len=64`, GDN z shape `[2560,4096]`: broadcast `2251.742 us`,
+  flat `1122.617 us` (`2.006x`)
+- `seq_len=64`, MLP down shape `[9216,2560]`: broadcast `2324.642 us`,
+  flat `2049.192 us` (`1.134x`), but this shape was not enabled by the
+  temporary route
+- `seq_len=64`, GDN A/B shape `[2560,64]`: broadcast `469.383 us`,
+  flat `524.400 us` (`0.895x`)
+
+### Endpoint A/B
+
+Same release binary, Qwen3.5-4B paged, `--prompt-tokens 64`,
+`--max-output-tokens 64`, one latency warmup:
+
+- Temporary flat route default: prefill `380.304292 ms`, mean ITL
+  `159.577868 ms`
+- Rollback `KILN_DISABLE_METAL_PREFILL_FLAT_MATMUL=1`: prefill
+  `380.260500 ms`, mean ITL `159.978773 ms`
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_prefill_flat_matmul_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_PREFILL_FLAT_MATMUL_BENCH_WARMUP=2 KILN_METAL_PREFILL_FLAT_MATMUL_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_prefill_flat_matmul_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Artifacts
+
+- `e414_prefill_flat_matmul_synthetic.log`
+- `e414_prefill_flat_matmul_parity.log`
+- `e414_prefill_flat_matmul_synthetic_post_impl.log`
+- `e414_prefill_flat_matmul_release_bench_build.log`
+- `e414_prefill_flat_matmul_latency_default_64out.log`
+- `e414_prefill_flat_matmul_latency_disabled_64out.log`
+
+### Decision
+
+Rejected and reverted before commit. The flattened route is attractive in
+isolated matmul timings, but it did not reduce the serving-path paged prefill
+measurement. Keep the current broadcast-matmul route for these prefill
+projections unless a future candidate can prove the lower-level win survives in
+the full endpoint.

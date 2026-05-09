@@ -1694,3 +1694,11 @@
   `gdn:out_proj` `28.755 ms`. The old `full_attn:prefill_attn_fallback`
   bucket is gone; `full_attn:prefill_attn_head_major` now totals `7.017 ms`.
   Accepted as target-selection evidence; no source change.
+- 2026-05-09 E414: Rejected a Metal prefill flat-matmul route that reshaped
+  `[1,T,K] @ [K,N]` into `[T,K].matmul([K,N])` for Qwen-shaped
+  `input_dim=2560`, `output_dim>=4096` projections. Synthetic timings looked
+  promising at `seq_len=64` (MLP gate/up `2417.817 -> 1822.250 us`, GDN qkv
+  `1916.167 -> 1651.025 us`, GDN z `2251.742 -> 1122.617 us`, exact parity),
+  but full paged 64-token endpoint A/B was neutral: default `380.304292 ms`
+  vs rollback `380.260500 ms` prefill, with decode unchanged. Temporary source
+  was reverted; keep current broadcast-matmul route.
