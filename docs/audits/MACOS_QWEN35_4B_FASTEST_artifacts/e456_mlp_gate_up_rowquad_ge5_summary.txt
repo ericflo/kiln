@@ -1,0 +1,55 @@
+E456 Metal MLP gate/up row-quad threshold >=5 summary
+
+Change:
+- Lowered metal_mlp_gate_up_bf16 row-quad selection from rows >=8 to rows >=5.
+- Kept rows 2/3/4 on row-pair.
+- Existing rollback env remains KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1.
+
+Synthetic same-binary A/B, warmup=5, iters=20:
+
+| batch | default policy | default fused | row-quad disabled fused |
+| ---: | --- | ---: | ---: |
+| 4 | row_pair | 1927.800 us | 1956.310 us |
+| 5 | row_quad | 1809.452 us | 3109.225 us |
+| 6 | row_quad | 2007.573 us | 3219.838 us |
+| 7 | row_quad | 2112.573 us | 3512.062 us |
+| 8 | row_quad | 2353.754 us | 3645.777 us |
+
+Clean no-profile live endpoint A/B, eight concurrent streaming requests,
+max_tokens=8:
+
+| config | elapsed | tokens | submitted jobs | batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default rows>=5 | 8.580543 s | 64 | 56 | 14 | 56 | 7 |
+| row-quad disabled | 8.519482 s | 64 | 56 | 14 | 56 | 7 |
+
+Live MLP-stage profile A/B, eight concurrent streaming requests,
+max_tokens=3:
+
+| config | elapsed | tokens | submitted jobs | batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default rows>=5 | 6.345099 s | 24 | 16 | 4 | 16 | 7 |
+| row-quad disabled | 6.546337 s | 24 | 16 | 4 | 16 | 7 |
+
+Parsed live decode MLP stages, seq_len=1 and non-prewarm start positions:
+
+| stage | default total | disabled total | count |
+| --- | ---: | ---: | ---: |
+| gate_up_fused | 378.058 ms | 484.276 ms | 128 |
+| down_proj | 279.012 ms | 356.407 ms | 128 |
+
+Validation:
+- Focused MLP gate/up parity passed for batches 4/5/6/7/8.
+- cargo fmt --check passed.
+- git diff --check passed.
+- cargo build --release --features metal --bin kiln passed.
+- cargo check -p kiln-model --features metal passed.
+- cargo check -p kiln-model --features vulkan passed.
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench passed.
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench passed.
+- cargo check -p kiln-model --features cuda remains locally blocked by missing nvcc.
+
+Decision:
+- Accepted. The no-profile endpoint run is neutral within noise, while the
+  affected synthetic rows and live MLP-stage profile both show the targeted
+  gate_up_fused win for the batch sizes observed by the live decode batcher.

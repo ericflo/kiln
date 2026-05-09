@@ -2082,3 +2082,16 @@
   `4.637 s` default at `max_tokens=3`, and `8.769 s` rollback versus `9.249 s`
   default at `max_tokens=8`. Source reverted; keep the accepted batch-8
   threshold.
+- 2026-05-09 E456: Accepted lowering Metal MLP gate/up row-quad threshold from
+  rows `>=8` to rows `>=5`, leaving batch `4` on row-pair and keeping rollback
+  env `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1`. Focused parity passed for
+  batches `4/5/6/7/8`. Same-binary synthetic favored row-quad for batches
+  `5/6/7/8` (`1809/2008/2113/2354 us` versus rollback
+  `3109/3220/3512/3646 us`) while batch `4` stayed row-pair
+  (`1928 us` versus `1956 us`). Clean eight-stream no-profile endpoint A/B
+  was neutral at `max_tokens=8` (`8.581 s` default versus `8.519 s` rollback,
+  both `64` tokens, `56` submitted jobs, max batch `7`). A matched MLP-stage
+  profile favored default (`6.345 s` versus `6.546 s`) and cut live
+  `gate_up_fused` from `484.276 ms` to `378.058 ms` across the profiled decode
+  rows. Metal/Vulkan model and server checks passed; CUDA remains locally
+  blocked by missing `nvcc`.

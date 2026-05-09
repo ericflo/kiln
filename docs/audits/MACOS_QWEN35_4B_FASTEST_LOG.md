@@ -19185,3 +19185,111 @@ kernel can reduce `gdn:in_proj` time for batches `5/6/7/8`, but both
 no-profile endpoint A/Bs favored the rollback, including the longer
 `max_tokens=8` run that submitted `56` decode-batcher jobs. Keep the current
 Metal GDN in-proj row-quad threshold at batch `8`; no source changes remain.
+
+## E456 - Metal MLP Gate/Up Row-Quad Threshold at Batch 5
+
+### Hypothesis
+
+E454's quiet eight-stream live profile reached `max_observed_batch=7` and left
+`mlp:gate_up_fused` as the hottest decoded MLP stage. E375 rejected lowering
+the MLP gate/up row-quad policy to batch `4` because batch `4` regressed, but
+it did not evaluate a narrower batch `5+` policy. Since live continuous
+batching now reaches batches `5/6/7`, test whether using the existing MLP
+gate/up row-quad kernel for rows `>=5` improves the live batched decode path
+without changing rows `1/2/3/4`.
+
+### Change
+
+Lowered `metal_mlp_gate_up_bf16` row-quad selection from rows `>=8` to rows
+`>=5`, while preserving the existing row-pair path for rows `2/3/4` and the
+existing rollback env `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1`.
+
+Expanded the synthetic bench to print the selected policy and include batches
+`5/6/7`; expanded focused parity from batch `4` only to batches
+`4/5/6/7/8` so partial row-quad groups are covered directly.
+
+### Results
+
+Focused parity passed for batches `4/5/6/7/8`.
+
+Same-binary synthetic A/B with warmup `5`, iters `20`:
+
+| batch | default policy | default fused | row-quad disabled fused |
+| ---: | --- | ---: | ---: |
+| 4 | row_pair | `1927.800 us` | `1956.310 us` |
+| 5 | row_quad | `1809.452 us` | `3109.225 us` |
+| 6 | row_quad | `2007.573 us` | `3219.838 us` |
+| 7 | row_quad | `2112.573 us` | `3512.062 us` |
+| 8 | row_quad | `2353.754 us` | `3645.777 us` |
+
+The initial default live run overlapped with unrelated local machine activity,
+so it was retained as an artifact but not used for the decision. A clean
+no-profile eight-stream endpoint A/B with `max_tokens=8` then completed:
+
+| config | elapsed | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default rows>=5 | `8.580543 s` | `64` | `56` | `14` | `56` | `7` |
+| row-quad disabled | `8.519482 s` | `64` | `56` | `14` | `56` | `7` |
+
+The no-profile endpoint result was neutral, with rollback ahead by about
+`0.7%`. Because both runs exercised the target batch mix but the endpoint
+delta was within expected noise, I ran a matched MLP-stage profile:
+
+| config | elapsed | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default rows>=5 | `6.345099 s` | `24` | `16` | `4` | `16` | `7` |
+| row-quad disabled | `6.546337 s` | `24` | `16` | `4` | `16` | `7` |
+
+Parsed live decode MLP stages for `seq_len=1`, excluding prewarm
+`start_pos=64`:
+
+| stage | default rows>=5 | row-quad disabled | count |
+| --- | ---: | ---: | ---: |
+| `gate_up_fused` | `378.058 ms` | `484.276 ms` | `128` |
+| `down_proj` | `279.012 ms` | `356.407 ms` | `128` |
+
+The targeted live `gate_up_fused` stage improved by `106.218 ms` across the
+profiled decode rows, while the clean no-profile endpoint did not show a
+material regression.
+
+Release build passed with existing warnings.
+
+Validation gates:
+
+- `cargo fmt --check`: passed
+- `git diff --check`: passed
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: blocked by local missing `nvcc`
+  / CUDA toolkit, matching the known local CUDA environment limitation
+
+### Artifacts
+
+- `e456_mlp_gate_up_rowquad_ge5_parity.log`
+- `e456_mlp_gate_up_rowquad_ge5_default_w5_i20.log`
+- `e456_mlp_gate_up_rowquad_ge5_disabled_w5_i20.log`
+- `e456_mlp_gate_up_rowquad_ge5_build.log`
+- `e456_mlp_gate_up_rowquad_ge5_live_batch8_mt8_default_*`
+- `e456_mlp_gate_up_rowquad_ge5_live_batch8_mt8_default_clean_*`
+- `e456_mlp_gate_up_rowquad_ge5_live_batch8_mt8_disabled_clean_*`
+- `e456_mlp_gate_up_rowquad_ge5_live_batch8_mt8_default_profile_*`
+- `e456_mlp_gate_up_rowquad_ge5_live_batch8_mt8_disabled_profile_*`
+- `e456_mlp_gate_up_rowquad_ge5_fmt.log`
+- `e456_mlp_gate_up_rowquad_ge5_diff_check.log`
+- `e456_mlp_gate_up_rowquad_ge5_check_metal.log`
+- `e456_mlp_gate_up_rowquad_ge5_check_vulkan.log`
+- `e456_mlp_gate_up_rowquad_ge5_check_server_metal.log`
+- `e456_mlp_gate_up_rowquad_ge5_check_server_vulkan.log`
+- `e456_mlp_gate_up_rowquad_ge5_check_cuda.log`
+- `e456_mlp_gate_up_rowquad_ge5_summary.txt`
+
+### Decision
+
+Accepted. Lower the Metal MLP gate/up row-quad threshold to rows `>=5`. Batch
+`4` remains on row-pair, batches `5/6/7/8` are synthetically faster with
+row-quad, the live MLP-stage profile shows the targeted `gate_up_fused`
+improvement for the observed continuous-batching shape, and the clean
+no-profile endpoint A/B is neutral within noise. Roll back with
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` if needed.
