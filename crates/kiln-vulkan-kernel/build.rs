@@ -66,6 +66,10 @@ const SHADERS: &[(&str, &str)] = &[
         "mlp_gate_up_decode_batched_rows2",
         "SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2",
     ),
+    (
+        "paged_attn_decode_batch",
+        "SPIR_V_PAGED_ATTN_DECODE_BATCH",
+    ),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
 ];
 

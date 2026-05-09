@@ -38,6 +38,7 @@ pub struct VulkanBackend {
     linear_decode_enabled: bool,
     linear_argmax_batch_enabled: bool,
     full_attn_qkv_enabled: bool,
+    paged_attn_decode_batch_enabled: bool,
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
     weight_prewarm_enabled: bool,
@@ -120,6 +121,8 @@ impl VulkanBackend {
         let linear_argmax_batch_enabled =
             std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH").is_err();
         let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
+        let paged_attn_decode_batch_enabled =
+            std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH").is_err();
         // Full fused MLP decode is validated for single-token no-LoRA decode.
         // After descriptor-pool reuse and tiled projection kernels it is now
         // consistently faster than the split generic GEMV path on Strix Halo.
@@ -170,6 +173,7 @@ impl VulkanBackend {
             linear_decode_enabled,
             linear_argmax_batch_enabled,
             full_attn_qkv_enabled,
+            paged_attn_decode_batch_enabled,
             mlp_decode_enabled,
             mlp_gate_up_enabled,
             weight_prewarm_enabled,
@@ -440,6 +444,133 @@ impl BackendRuntime for VulkanBackend {
         }
         // TODO: Implement Vulkan paged decode dispatch
         Ok(None)
+    }
+
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        block_table: &Tensor,
+        seqused_k: &Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<Tensor>> {
+        if !self.has_vulkan()
+            || !self.paged_attn_decode_batch_enabled
+            || q.dtype() != DType::F32
+            || k_pool.dtype() != DType::F32
+            || v_pool.dtype() != DType::F32
+        {
+            return Ok(None);
+        }
+        if !causal {
+            return Ok(None);
+        }
+        if !matches!(q.device(), Device::Cpu)
+            || !matches!(k_pool.device(), Device::Cpu)
+            || !matches!(v_pool.device(), Device::Cpu)
+            || !matches!(block_table.device(), Device::Cpu)
+            || !matches!(seqused_k.device(), Device::Cpu)
+        {
+            return Ok(None);
+        }
+
+        let Ok((batch, q_len, num_heads, head_dim)) = q.dims4() else {
+            return Ok(None);
+        };
+        let Ok((total_slots, num_kv_heads, k_head_dim)) = k_pool.dims3() else {
+            return Ok(None);
+        };
+        let Ok(v_dims) = v_pool.dims3() else {
+            return Ok(None);
+        };
+        let Ok((bt_batch, max_blocks_per_seq)) = block_table.dims2() else {
+            return Ok(None);
+        };
+        let Ok(seq_count) = seqused_k.dims1() else {
+            return Ok(None);
+        };
+        if batch == 0
+            || q_len != 1
+            || head_dim > 256
+            || k_head_dim != head_dim
+            || v_dims != (total_slots, num_kv_heads, head_dim)
+            || num_heads % num_kv_heads != 0
+            || bt_batch != batch
+            || seq_count != batch
+            || page_block_size == 0
+            || max_seqlen_k == 0
+            || max_seqlen_k.div_ceil(page_block_size) > max_blocks_per_seq
+        {
+            return Ok(None);
+        }
+
+        let block_data = block_table
+            .flatten_all()?
+            .to_dtype(DType::U32)?
+            .to_vec1::<u32>()?;
+        let seq_i32 = seqused_k
+            .flatten_all()?
+            .to_dtype(DType::I32)?
+            .to_vec1::<i32>()?;
+        let mut seq_lens = Vec::with_capacity(batch);
+        let mut gather_slots = Vec::with_capacity(batch * max_seqlen_k);
+        for row in 0..batch {
+            let row_len = usize::try_from(seq_i32[row])
+                .context("Vulkan paged decode seqused_k contains negative length")?;
+            if row_len == 0 || row_len > max_seqlen_k {
+                return Ok(None);
+            }
+            seq_lens.push(
+                u32::try_from(row_len).context("Vulkan paged decode row length exceeds u32")?,
+            );
+            for pos in 0..max_seqlen_k {
+                if pos >= row_len {
+                    gather_slots.push(0);
+                    continue;
+                }
+                let block_idx = pos / page_block_size;
+                let offset = pos % page_block_size;
+                let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
+                let slot = block
+                    .checked_mul(page_block_size)
+                    .and_then(|base| base.checked_add(offset))
+                    .context("Vulkan paged decode slot index overflow")?;
+                if slot >= total_slots {
+                    return Ok(None);
+                }
+                gather_slots
+                    .push(u32::try_from(slot).context("Vulkan paged decode slot exceeds u32")?);
+            }
+        }
+
+        let gather = Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
+        let k_compact = k_pool
+            .index_select(&gather, 0)?
+            .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
+            .contiguous()?;
+        let v_compact = v_pool
+            .index_select(&gather, 0)?
+            .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
+            .contiguous()?;
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let out = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
+            vk_device,
+            q,
+            &k_compact,
+            &v_compact,
+            &seq_lens,
+            softmax_scale,
+        )
+        .context("paged_attn_decode_batch kernel failed")?;
+        Ok(Some(out))
     }
 
     fn gdn_in_proj_decode(

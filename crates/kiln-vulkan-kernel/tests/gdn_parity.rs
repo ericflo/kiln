@@ -535,6 +535,69 @@ fn full_attn_qkv_decode_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn paged_attn_decode_batch_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, max_seqlen, num_heads, num_kv_heads, head_dim) =
+        (2usize, 5usize, 4usize, 2usize, 8usize);
+    let seq_lens = vec![3u32, 5u32];
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let q_data: Vec<f32> = (0..batch * num_heads * head_dim)
+        .map(|i| ((i as f32 % 17.0) - 8.0) * 0.07)
+        .collect();
+    let k_data: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+        .map(|i| ((i as f32 % 19.0) - 9.0) * 0.05)
+        .collect();
+    let v_data: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+        .map(|i| ((i as f32 % 23.0) - 11.0) * 0.03)
+        .collect();
+    let q = cpu_f32(q_data.clone(), (batch, 1, num_heads, head_dim))?;
+    let k = cpu_f32(k_data.clone(), (batch, max_seqlen, num_kv_heads, head_dim))?;
+    let v = cpu_f32(v_data.clone(), (batch, max_seqlen, num_kv_heads, head_dim))?;
+
+    let got = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
+        &vk, &q, &k, &v, &seq_lens, scale,
+    )
+    .context("dispatch_paged_attn_decode_batch_f32")?;
+
+    let gqa_ratio = num_heads / num_kv_heads;
+    let mut expected = vec![0.0f32; batch * num_heads * head_dim];
+    for b in 0..batch {
+        let seq_len = seq_lens[b] as usize;
+        for h in 0..num_heads {
+            let kv_h = h / gqa_ratio;
+            let mut logits = vec![0.0f32; seq_len];
+            for (t, logit) in logits.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    let q_idx = ((b * num_heads + h) * head_dim) + d;
+                    let k_idx = (((b * max_seqlen + t) * num_kv_heads + kv_h) * head_dim) + d;
+                    dot += q_data[q_idx] * k_data[k_idx];
+                }
+                *logit = dot * scale;
+            }
+            let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let denom: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for (t, &logit) in logits.iter().enumerate() {
+                    let weight = (logit - max_logit).exp() / denom;
+                    let v_idx = (((b * max_seqlen + t) * num_kv_heads + kv_h) * head_dim) + d;
+                    acc += weight * v_data[v_idx];
+                }
+                expected[((b * num_heads + h) * head_dim) + d] = acc;
+            }
+        }
+    }
+    let expected = cpu_f32(expected, (batch, 1, num_heads, head_dim))?;
+    assert_close("paged attn decode batch", &got, &expected, 1e-5)?;
+    Ok(())
+}
+
+#[test]
 fn mlp_gate_up_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

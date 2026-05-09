@@ -21,11 +21,11 @@ before or with each accepted change and each measured rejection.
 | A008 | Route full-attention `o_proj` through backend decode. | Full-attn `o_proj` profile dropped from `68.313ms total / 4.270ms mean` to `5.413ms total / 0.338ms mean`. Unprofiled serial bench stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`, `480.8ms` prefill, `135.1ms` mean ITL, `7.4 tok/s`. | Keep; serial throughput win. |
 | A009 | Trial Vulkan MLP decode single-submit command recording. | Focused MLP parity passed, but default single-submit regressed serial bench to `159.6ms` mean ITL; disabling it in the same binary returned to `135.8ms` with the same token IDs. | Rejected and removed before commit. |
 | A010 | Add full-attention QKV single-submit dispatch. | Default runs preserved token IDs `[2838,6587,310,5227,1024,75119,220]` and measured `132.3ms` and `133.1ms` mean ITL. Rollback first measured `134.2ms` with same IDs; a second rollback was noisy and diverged IDs. Profiled QKV bucket moved slightly from `59.768ms` to `59.019ms`. | Keep as a small Vulkan-only win. |
+| A011 | Add Vulkan dyn-seqlen paged decode batch attention for sampled/non-uniform continuous batches. | New parity test passed; full Vulkan kernel suite passed `20` tests. Primary sampled actor batch improved from A006 `9.525668s` to `7.754065s` for `48` completion tokens. Rollback env `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH=1` took `8.571721s` on the same `/no_think` sampled shape. Serial tokens stayed `[2838,6587,310,5227,1024,75119,220]`, `130.0ms` mean ITL. | Keep; batch throughput/availability win, but K/V compaction/upload remains the next target. |
 
-Validation snapshot after A010:
+Validation snapshot after A011:
 
-- `rustfmt --edition 2024 --check crates/kiln-model/src/forward.rs`
-- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs`
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs crates/kiln-vulkan-kernel/tests/gdn_parity.rs crates/kiln-model/src/backend/vulkan.rs`
 - `git diff --check`
 - `cargo check -p kiln-model`
 - `cargo check -p kiln-model --features vulkan`
@@ -33,6 +33,7 @@ Validation snapshot after A010:
 - `cargo test -p kiln-model test_gdn_chunkwise_masks_decay_before_exp --lib -- --nocapture`
 - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
 - `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `KILN_BATCHING_ENGINE=1 KILN_MODEL_PATH=Qwen3.5-4B ./target/release/kiln serve` sampled batch smoke, plus rollback env smoke.
 - `KILN_BENCH_LOG_ITL=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
 
 CUDA and Metal checks were attempted but are environment-blocked on this Linux

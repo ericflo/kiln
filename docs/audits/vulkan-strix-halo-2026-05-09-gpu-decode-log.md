@@ -23,6 +23,9 @@ were taken while the Vulkan path was producing unusable token IDs.
 - Model: local `Qwen3.5-4B`.
 - Branch: `codex/vulkan-gpu-decode-correctness`.
 - PR: `https://github.com/ericflo/kiln/pull/1001`.
+- Base as of A011: `origin/main` at
+  `459162855b5cb00265e53a44ed1c8bce642bcde2`
+  (`fix(metal): drop &mut from paged_kv_write_token_major helpers (#1002)`).
 - Primary serial harness:
   `KILN_BENCH_LOG_ITL=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
 - Short profiling harness:
@@ -416,11 +419,82 @@ Verdict:
 - No CUDA or Metal source is touched by this change. CUDA/Metal feature checks
   remain environment-blocked on this Linux host as recorded above.
 
+### 2026-05-09 A011: Vulkan Dyn-Seqlen Paged Decode Batch Attention
+
+Problem:
+- A006 restored sampled/non-uniform continuous batching by falling back to
+  rowwise full-attention blocks when Vulkan declined the batched paged decode
+  attention hook.
+- That made the actor path correct and available but slow: the accepted A006
+  rebuilt sampled four-prompt actor batch took `time_total=9.525668s` for
+  `48` completion tokens.
+
+Change:
+- Added `paged_attn_decode_batch.comp`, a decode-only Vulkan F32 attention
+  shader for compacted K/V windows with per-row sequence lengths.
+- Added `dispatch_paged_attn_decode_batch_f32` and pipeline/prewarm entries.
+- Implemented
+  `VulkanBackend::flash_attn_paged_decode_contiguous_batch_dyn_seqlen` for
+  CPU F32 tensors, `q_len=1`, block-table/seqused-k addressing, and integer
+  GQA.
+- Added dedicated rollback guard
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH=1`.
+- During K/V compaction, unused positions beyond each row's live sequence
+  length are filled with slot 0 rather than validating unused block-table
+  entries; the shader reads only `t < seq_len`.
+
+Evidence:
+- New direct parity test
+  `paged_attn_decode_batch_matches_cpu_reference` passed.
+- Full Vulkan kernel parity suite passed with the new test included:
+  `20 passed`.
+- Release server with `KILN_BATCHING_ENGINE=1` selected Vulkan on
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)` and completed background
+  prewarm.
+- Default sampled four-prompt actor batch, `temperature=0.7`, `top_p=0.95`,
+  `top_k=40`, `seed=1234`, `max_tokens=12`, returned HTTP 200 with
+  `time_total=7.754065s`, usage `prompt_tokens=82`,
+  `completion_tokens=48`, `total_tokens=130`, all finish reasons `length`.
+- A second sampled `/no_think` four-prompt actor batch returned HTTP 200 with
+  `time_total=7.709984s`, usage `prompt_tokens=84`,
+  `completion_tokens=48`, `total_tokens=132`, all finish reasons `length`.
+  Visible `text` fields were empty in both default and rollback runs because
+  the non-streaming chat reasoning split stores pre-`</think>` text in hidden
+  `reasoning_content`, and the batch item serializer does not expose that
+  field.
+- Rollback server with
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH=1` on the same `/no_think`
+  request returned the same visible response shape and usage, but took
+  `time_total=8.571721s`.
+- Serial paged bench after A011 stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, prefill `460.6ms`, mean ITL
+  `130.0ms`, `7.7 tok/s`.
+
+Validation:
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs crates/kiln-vulkan-kernel/tests/gdn_parity.rs crates/kiln-model/src/backend/vulkan.rs`
+- `git diff --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --lib -- --nocapture`
+- `cargo test -p kiln-model test_gdn_chunkwise_masks_decay_before_exp --lib -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- Server sampled batch smoke with default path and rollback env.
+- Serial paged Vulkan bench with token logging.
+
+Verdict:
+- Keep. This replaces A006's rowwise full-attention fallback for supported
+  sampled/non-uniform Vulkan continuous batches and improves the measured actor
+  batch from `9.525668s` to `7.754065s` on the primary sampled smoke.
+- This is still not a final fast path: the backend compacts K/V windows on the
+  CPU and uploads compact K/V each call. The next batch-attention target should
+  avoid that compaction/upload by reading the paged KV pool and block table
+  directly in Vulkan or by making K/V residency explicit.
+
 ## Current Open Work
 
-- Implement a real Vulkan batched paged full-attention backend if sampled or
-  non-uniform continuous batching needs throughput, because A006 is only a
-  rowwise availability fallback.
+- Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
+  K/V compaction and per-call compact K/V uploads.
 - Continue profiling the remaining serial decode hotspots after A008: GDN
   `in_proj`, fused MLP decode, and full-attention QKV projection.
 - Keep updating this log and
