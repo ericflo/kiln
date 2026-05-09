@@ -55,6 +55,7 @@ before or with each accepted change and each measured rejection.
 | A042 | Trial packed-BF16 Vulkan MLP branchless SiLU shader variants. | Temporary single-row and batched BF16 gate/up shaders passed focused candidate and rollback MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` favored rollback: pair 1 rollback `16.782s` vs candidate `18.933s`; pair 2 candidate `16.454s` vs rollback `16.142s` even though rollback generated more rows (`23` vs `17`). | Rejected and removed; keep the existing stable sigmoid MLP shaders. |
 | A043 | Trial Metal-inspired F32 Vulkan MLP gate/up row-quad for full batch `8`. | Temporary row-quad gate/up shader passed focused candidate and rollback batched MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Eight-request endpoint A/B with wait `5000us` exercised max batch `8` with identical `56` jobs / `8` batches / `56` rows: candidate lost pair 1 (`25.939s` vs rollback `22.018s`) and won pair 2 (`24.860s` vs rollback `27.180s`). | Rejected and removed; not a reliable n8 endpoint win, so Metal row-quad does not directly transfer to Vulkan F32 MLP gate/up. |
 | A044 | Temporarily split Vulkan MLP inner-stage timings. | Temporary `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` instrumentation timed extract, alloc, upload, gate/up, down, readback, and tensor creation inside `dispatch_mlp_decode_cached_impl`; release Vulkan build passed. Four streaming requests with wait `5000us` returned coherent visible text and empty reasoning. Live packed-BF16 inner totals were gate/up `83.117ms`, down `58.250ms`, readback `37.642ms`, upload `34.392ms`, with tiny alloc/extract/tensor times. The outer `mlp:fused seq_len=1` profile bucket was still much larger at `4875.221ms`. | Keep as target-selection evidence; no source change retained. Next MLP work should target residency/transfer or backend boundary overhead before another direct shader-shape trial. |
+| A045-A048 | Fix Vulkan prewarm readiness and decode-weight warmup. | A045 backend-boundary timers showed first live packed-BF16 MLP was paying lazy weight-cache upload, not shader math: live BF16 `kernel_dispatch` was `172.441ms` but batch-1 BF16 gate/up/down cache misses cost about `2.454s`; request wall was `17.144901s`. A046 wired backend decode-weight prewarm but showed health still reported ready before prewarm completed (`17.314253s`). A047 made Vulkan readiness wait for background prewarm and dropped the same measured request shape to `3.039910s`. A048 removed temporary instrumentation; no-profile final was `3.086735s`, `7` tokens, `7` jobs, `3` batches, `7` rows, max batch `4`, with texts `6`, `11`, `16`, `13` and empty reasoning. | Accepted. Server background prewarm now calls backend decode-weight prewarm, and readiness treats Vulkan as needing inference prewarm even though Candle's model device is CPU. |
 
 Additional validation after A044:
 
@@ -68,6 +69,17 @@ Additional validation after A044:
 - All four streams returned HTTP 200 with non-empty visible content and empty
   reasoning text.
 - Temporary instrumentation was removed after profiling.
+
+Additional validation after A048:
+
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- A045, A046, and A047 temporary backend-profile runs retained as artifacts;
+  temporary source instrumentation was removed before the accepted A048 build.
+- A048 no-profile Vulkan server run waited for
+  `inference_prewarm_complete=true`, confirmed the server log contained both
+  `Vulkan decode weight cache prewarmed` and `background inference prewarm
+  complete` before `A048_MEASURE_START`, and returned four HTTP 200 streaming
+  responses with non-empty visible content and empty reasoning.
 
 Additional validation after rejected A043:
 

@@ -1,0 +1,52 @@
+wall_s=3.039910
+metrics_delta={'tokens_generated': 7.0, 'jobs_submitted': 7.0, 'jobs_failed': 0.0, 'worker_batches': 3.0, 'batcher_rows': 7.0, 'max_batch_after': 3.0}
+backend_event_count=1568
+backend_live_bf16_by_stage:
+- total: total_ms=120.474 count=96 avg_ms=1.255
+- kernel_dispatch: total_ms=120.287 count=96 avg_ms=1.253
+- weight_cache_gate: total_ms=0.021 count=96 avg_ms=0.000
+- weight_cache_down: total_ms=0.020 count=96 avg_ms=0.000
+- weight_cache_up: total_ms=0.008 count=96 avg_ms=0.000
+- dispatch_x: total_ms=0.000 count=96 avg_ms=0.000
+- output_reshape: total_ms=0.000 count=96 avg_ms=0.000
+backend_by_stage_all:
+- total: total_ms=2587.406 count=224 avg_ms=11.551
+- kernel_dispatch: total_ms=2586.808 count=224 avg_ms=11.548
+- weight_cache_gate: total_ms=0.091 count=224 avg_ms=0.000
+- weight_cache_down: total_ms=0.041 count=224 avg_ms=0.000
+- weight_cache_up: total_ms=0.029 count=224 avg_ms=0.000
+- output_reshape: total_ms=0.009 count=224 avg_ms=0.000
+- dispatch_x: total_ms=0.003 count=224 avg_ms=0.000
+top_backend_buckets:
+- batch=1 seq_len=23 bf16=false stage=total: total_ms=1919.695 count=96 avg_ms=19.997
+- batch=1 seq_len=23 bf16=false stage=kernel_dispatch: total_ms=1919.385 count=96 avg_ms=19.994
+- batch=1 seq_len=22 bf16=false stage=total: total_ms=547.237 count=32 avg_ms=17.101
+- batch=1 seq_len=22 bf16=false stage=kernel_dispatch: total_ms=547.136 count=32 avg_ms=17.098
+- batch=3 seq_len=1 bf16=true stage=total: total_ms=87.204 count=64 avg_ms=1.363
+- batch=3 seq_len=1 bf16=true stage=kernel_dispatch: total_ms=87.063 count=64 avg_ms=1.360
+- batch=1 seq_len=1 bf16=true stage=total: total_ms=33.270 count=32 avg_ms=1.040
+- batch=1 seq_len=1 bf16=true stage=kernel_dispatch: total_ms=33.224 count=32 avg_ms=1.038
+- batch=1 seq_len=23 bf16=false stage=weight_cache_gate: total_ms=0.058 count=96 avg_ms=0.001
+- batch=1 seq_len=23 bf16=false stage=weight_cache_up: total_ms=0.019 count=96 avg_ms=0.000
+- batch=3 seq_len=1 bf16=true stage=weight_cache_gate: total_ms=0.019 count=64 avg_ms=0.000
+- batch=3 seq_len=1 bf16=true stage=weight_cache_down: total_ms=0.017 count=64 avg_ms=0.000
+- batch=1 seq_len=23 bf16=false stage=weight_cache_down: total_ms=0.016 count=96 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_gate: total_ms=0.012 count=32 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_down: total_ms=0.005 count=32 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=output_reshape: total_ms=0.005 count=32 avg_ms=0.000
+- batch=3 seq_len=1 bf16=true stage=weight_cache_up: total_ms=0.005 count=64 avg_ms=0.000
+- batch=1 seq_len=23 bf16=false stage=output_reshape: total_ms=0.004 count=96 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_up: total_ms=0.003 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_down: total_ms=0.003 count=32 avg_ms=0.000
+- batch=1 seq_len=23 bf16=false stage=dispatch_x: total_ms=0.002 count=96 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_up: total_ms=0.002 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_gate: total_ms=0.002 count=32 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=dispatch_x: total_ms=0.001 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=dispatch_x: total_ms=0.000 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=output_reshape: total_ms=0.000 count=32 avg_ms=0.000
+- batch=3 seq_len=1 bf16=true stage=dispatch_x: total_ms=0.000 count=64 avg_ms=0.000
+- batch=3 seq_len=1 bf16=true stage=output_reshape: total_ms=0.000 count=64 avg_ms=0.000
+response_0 status=200 finish=stop elapsed_s=2.474334 text='6' reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=3.025505 text='11' reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=3.025086 text='16' reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=3.024922 text='13' reasoning_len=0 error=None

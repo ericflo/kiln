@@ -1655,9 +1655,8 @@ impl AppState {
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
             metrics: Arc::new(Metrics::new()),
             started_at: std::time::Instant::now(),
-            inference_prewarm_complete: Arc::new(AtomicBool::new(!matches!(
-                device,
-                candle_core::Device::Metal(_)
+            inference_prewarm_complete: Arc::new(AtomicBool::new(!device_needs_inference_prewarm(
+                &device,
             ))),
             checkpoint_interval: None,
             training_webhook_url: None,
@@ -1837,6 +1836,16 @@ fn is_metal_device(device: &candle_core::Device) -> bool {
         let _ = device;
         false
     }
+}
+
+fn device_needs_inference_prewarm(device: &candle_core::Device) -> bool {
+    let is_metal = is_metal_device(device);
+    #[cfg(feature = "vulkan")]
+    let is_vulkan = matches!(device, candle_core::Device::Cpu)
+        && kiln_model::backend::vulkan::vulkan_is_available();
+    #[cfg(not(feature = "vulkan"))]
+    let is_vulkan = false;
+    is_metal || is_vulkan
 }
 
 /// Query total GPU memory in bytes. Returns 0 for CPU devices.

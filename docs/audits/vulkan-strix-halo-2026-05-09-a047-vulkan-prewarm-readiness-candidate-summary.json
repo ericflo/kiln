@@ -1,0 +1,455 @@
+{
+  "backend_by_stage_all": [
+    {
+      "avg_ms": 11.550919642857142,
+      "count": 224,
+      "key": "total",
+      "total_ms": 2587.406
+    },
+    {
+      "avg_ms": 11.54825000000001,
+      "count": 224,
+      "key": "kernel_dispatch",
+      "total_ms": 2586.8080000000023
+    },
+    {
+      "avg_ms": 0.0004062500000000003,
+      "count": 224,
+      "key": "weight_cache_gate",
+      "total_ms": 0.09100000000000007
+    },
+    {
+      "avg_ms": 0.00018303571428571438,
+      "count": 224,
+      "key": "weight_cache_down",
+      "total_ms": 0.04100000000000002
+    },
+    {
+      "avg_ms": 0.0001294642857142858,
+      "count": 224,
+      "key": "weight_cache_up",
+      "total_ms": 0.02900000000000002
+    },
+    {
+      "avg_ms": 4.017857142857143e-05,
+      "count": 224,
+      "key": "output_reshape",
+      "total_ms": 0.009000000000000001
+    },
+    {
+      "avg_ms": 1.3392857142857144e-05,
+      "count": 224,
+      "key": "dispatch_x",
+      "total_ms": 0.003
+    }
+  ],
+  "backend_event_count": 1568,
+  "backend_live_bf16_by_batch_stage": [
+    {
+      "avg_ms": 1.3625625000000001,
+      "count": 64,
+      "key": "batch=3 stage=total",
+      "total_ms": 87.20400000000001
+    },
+    {
+      "avg_ms": 1.3603593749999998,
+      "count": 64,
+      "key": "batch=3 stage=kernel_dispatch",
+      "total_ms": 87.06299999999999
+    },
+    {
+      "avg_ms": 1.0396875,
+      "count": 32,
+      "key": "batch=1 stage=total",
+      "total_ms": 33.27
+    },
+    {
+      "avg_ms": 1.03825,
+      "count": 32,
+      "key": "batch=1 stage=kernel_dispatch",
+      "total_ms": 33.224
+    },
+    {
+      "avg_ms": 0.00029687500000000016,
+      "count": 64,
+      "key": "batch=3 stage=weight_cache_gate",
+      "total_ms": 0.01900000000000001
+    },
+    {
+      "avg_ms": 0.00026562500000000013,
+      "count": 64,
+      "key": "batch=3 stage=weight_cache_down",
+      "total_ms": 0.017000000000000008
+    },
+    {
+      "avg_ms": 7.8125e-05,
+      "count": 64,
+      "key": "batch=3 stage=weight_cache_up",
+      "total_ms": 0.005
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 32,
+      "key": "batch=1 stage=weight_cache_up",
+      "total_ms": 0.003
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 32,
+      "key": "batch=1 stage=weight_cache_down",
+      "total_ms": 0.003
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=1 stage=weight_cache_gate",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=1 stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=1 stage=output_reshape",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=3 stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=3 stage=output_reshape",
+      "total_ms": 0.0
+    }
+  ],
+  "backend_live_bf16_by_stage": [
+    {
+      "avg_ms": 1.2549374999999998,
+      "count": 96,
+      "key": "total",
+      "total_ms": 120.47399999999998
+    },
+    {
+      "avg_ms": 1.2529895833333329,
+      "count": 96,
+      "key": "kernel_dispatch",
+      "total_ms": 120.28699999999995
+    },
+    {
+      "avg_ms": 0.0002187500000000001,
+      "count": 96,
+      "key": "weight_cache_gate",
+      "total_ms": 0.02100000000000001
+    },
+    {
+      "avg_ms": 0.00020833333333333346,
+      "count": 96,
+      "key": "weight_cache_down",
+      "total_ms": 0.02000000000000001
+    },
+    {
+      "avg_ms": 8.333333333333333e-05,
+      "count": 96,
+      "key": "weight_cache_up",
+      "total_ms": 0.008
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 96,
+      "key": "dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 96,
+      "key": "output_reshape",
+      "total_ms": 0.0
+    }
+  ],
+  "backend_top_buckets": [
+    {
+      "avg_ms": 19.996822916666673,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=total",
+      "total_ms": 1919.6950000000006
+    },
+    {
+      "avg_ms": 19.99359375,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=kernel_dispatch",
+      "total_ms": 1919.3849999999998
+    },
+    {
+      "avg_ms": 17.101156249999995,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=total",
+      "total_ms": 547.2369999999999
+    },
+    {
+      "avg_ms": 17.098,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=kernel_dispatch",
+      "total_ms": 547.136
+    },
+    {
+      "avg_ms": 1.3625625000000001,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=total",
+      "total_ms": 87.20400000000001
+    },
+    {
+      "avg_ms": 1.3603593749999998,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=kernel_dispatch",
+      "total_ms": 87.06299999999999
+    },
+    {
+      "avg_ms": 1.0396875,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=total",
+      "total_ms": 33.27
+    },
+    {
+      "avg_ms": 1.03825,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=kernel_dispatch",
+      "total_ms": 33.224
+    },
+    {
+      "avg_ms": 0.0006041666666666671,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_gate",
+      "total_ms": 0.058000000000000045
+    },
+    {
+      "avg_ms": 0.00019791666666666677,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_up",
+      "total_ms": 0.01900000000000001
+    },
+    {
+      "avg_ms": 0.00029687500000000016,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=weight_cache_gate",
+      "total_ms": 0.01900000000000001
+    },
+    {
+      "avg_ms": 0.00026562500000000013,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=weight_cache_down",
+      "total_ms": 0.017000000000000008
+    },
+    {
+      "avg_ms": 0.00016666666666666672,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_down",
+      "total_ms": 0.016000000000000004
+    },
+    {
+      "avg_ms": 0.0003750000000000001,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_gate",
+      "total_ms": 0.012000000000000004
+    },
+    {
+      "avg_ms": 0.00015625,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_down",
+      "total_ms": 0.005
+    },
+    {
+      "avg_ms": 0.00015625,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=output_reshape",
+      "total_ms": 0.005
+    },
+    {
+      "avg_ms": 7.8125e-05,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=weight_cache_up",
+      "total_ms": 0.005
+    },
+    {
+      "avg_ms": 4.1666666666666665e-05,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=output_reshape",
+      "total_ms": 0.004
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_up",
+      "total_ms": 0.003
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_down",
+      "total_ms": 0.003
+    },
+    {
+      "avg_ms": 2.0833333333333333e-05,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=dispatch_x",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_up",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_gate",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 3.125e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=dispatch_x",
+      "total_ms": 0.001
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=1 seq_len=1 bf16=true stage=output_reshape",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=3 seq_len=1 bf16=true stage=output_reshape",
+      "total_ms": 0.0
+    }
+  ],
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8495",
+    "KILN_PROFILE_VULKAN_BACKEND_MLP_STAGES": "1"
+  },
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 13,
+    "version": "0.2.13"
+  },
+  "marker": "A047_MEASURE_START",
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 3.0,
+    "tokens_generated": 7.0,
+    "worker_batches": 3.0
+  },
+  "port": 8495,
+  "responses": [
+    {
+      "bytes": 599,
+      "elapsed_s": 2.4743335180028225,
+      "error": null,
+      "finish": "stop",
+      "index": 0,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a047-vulkan-prewarm-readiness-candidate-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.025504698001896,
+      "error": null,
+      "finish": "stop",
+      "index": 1,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a047-vulkan-prewarm-readiness-candidate-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.025085681998462,
+      "error": null,
+      "finish": "stop",
+      "index": 2,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a047-vulkan-prewarm-readiness-candidate-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.0249223979990347,
+      "error": null,
+      "finish": "stop",
+      "index": 3,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a047-vulkan-prewarm-readiness-candidate-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "wall_s": 3.0399099229980493
+}

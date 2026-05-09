@@ -2232,6 +2232,67 @@ Verdict:
   an even narrower trace around the backend cache/runner boundary before
   writing another shader variant.
 
+### 2026-05-09 A045-A048: Fix Vulkan Inference Prewarm Readiness and Weight Warmup
+
+Goal:
+- Explain why A044's outer MLP bucket was much larger than inner dispatch
+  timing, and make the current Vulkan path ready only after it is actually warm.
+
+Experiments:
+- A045 added temporary backend-boundary timers around `VulkanBackend::mlp_decode`
+  and ran the same four concurrent streaming requests with
+  `KILN_DECODE_BATCH_WAIT_US=5000` and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- A046 wired the existing backend decode-weight prewarm method into the server
+  background prewarm path and reran the same temporary backend profile.
+- A047 fixed `/health` readiness so Vulkan, whose Candle device is `Cpu`, is
+  treated like a GPU backend for `inference_prewarm_complete`; reran the same
+  temporary profile.
+- A048 removed temporary instrumentation and reran the same endpoint shape as
+  the accepted no-profile validation.
+
+Evidence:
+- A045 found the issue was not shader math. Current live packed-BF16 MLP
+  `kernel_dispatch` totaled `172.441ms` across `128` samples, while lazy
+  `batch=1 seq_len=1` BF16 weight-cache misses cost about `2.454s` across gate,
+  up, and down lookups. A045 request wall was `17.144901s`.
+- A046 showed the prewarm hook alone filled the cache, dropping current live
+  BF16 weight-cache totals to effectively zero, but health still reported ready
+  before the background prewarm finished. The request run still raced prewarm
+  and measured `17.314253s`.
+- A047 fixed readiness. The marker was logged only after
+  `background inference prewarm complete`; current live BF16 weight-cache totals
+  were effectively zero, and the same four streams dropped to `3.039910s`.
+- A048 final no-profile validation also waited until after prewarm, generated
+  `7` tokens through `7` decode-batcher jobs, `3` worker batches, `7` rows, max
+  observed batch `4`, and completed in `3.086735s`.
+- A048 returned coherent visible text and empty reasoning:
+  - `response_0`: finish `stop`, text `"6"`.
+  - `response_1`: finish `stop`, text `"11"`.
+  - `response_2`: finish `stop`, text `"16"`.
+  - `response_3`: finish `stop`, text `"13"`.
+
+Implementation:
+- Added `ModelRunner::prewarm_backend_decode_weights()` and call it from the
+  existing server background inference prewarm before the warmup generation.
+- Added Vulkan-aware readiness gating so `inference_prewarm_complete` starts
+  false when the runtime backend is Vulkan, not just when Candle's device is
+  Metal.
+- No temporary profiling source was retained.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a045-backend-mlp-profile-*`
+- `vulkan-strix-halo-2026-05-09-a046-vulkan-backend-prewarm-candidate-*`
+- `vulkan-strix-halo-2026-05-09-a047-vulkan-prewarm-readiness-candidate-*`
+- `vulkan-strix-halo-2026-05-09-a048-vulkan-prewarm-final-*`
+
+Verdict:
+- Accepted. The current Vulkan path now exposes readiness only after prewarm and
+  avoids first-live-request BF16 MLP weight uploads. This is table-stakes
+  correctness for serving on the GPU path, and it turns the measured four-stream
+  warmed request shape from a prewarm race (`~17.1s`) into a stable warmed run
+  (`~3.1s`) with correct visible output.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2240,11 +2301,9 @@ Verdict:
   dominates live `seq_len=1` work (`2635.685ms`) and total profiled time
   (`12790.460ms`), so split or optimize packed-BF16 MLP decode before spending
   more time on smaller GDN residuals.
-- Use A044's split profile before another MLP shader trial: inner live BF16
-  gate/up plus down totaled `141.367ms`, while upload/readback totaled
-  `72.034ms`, and the outer `mlp:fused` bucket remained much larger. The next
-  MLP improvement should focus on residency/transfer or backend boundary
-  overhead, not direct row-pair/row-quad/SilU shader mirroring.
+- After A048, do not use measurements taken before
+  `inference_prewarm_complete=true` as warmed-serving evidence. The next Vulkan
+  performance target should be based on post-prewarm stage profiles.
 - Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
   direct shader mirroring; A040 and A041 measured both full MLP row-pair and
   gate/up-only row-pair as slower or unstable against rollback.

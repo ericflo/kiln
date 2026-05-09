@@ -1,0 +1,509 @@
+{
+  "backend_by_stage_all": [
+    {
+      "avg_ms": 12.710420138888898,
+      "count": 288,
+      "key": "total",
+      "total_ms": 3660.6010000000024
+    },
+    {
+      "avg_ms": 12.707704861111111,
+      "count": 288,
+      "key": "kernel_dispatch",
+      "total_ms": 3659.819
+    },
+    {
+      "avg_ms": 0.0004027777777777781,
+      "count": 288,
+      "key": "weight_cache_gate",
+      "total_ms": 0.11600000000000009
+    },
+    {
+      "avg_ms": 0.00013541666666666677,
+      "count": 288,
+      "key": "weight_cache_down",
+      "total_ms": 0.03900000000000003
+    },
+    {
+      "avg_ms": 0.00011805555555555564,
+      "count": 288,
+      "key": "weight_cache_up",
+      "total_ms": 0.03400000000000002
+    },
+    {
+      "avg_ms": 0.00010069444444444449,
+      "count": 288,
+      "key": "output_reshape",
+      "total_ms": 0.029000000000000012
+    },
+    {
+      "avg_ms": 3.4722222222222224e-06,
+      "count": 288,
+      "key": "dispatch_x",
+      "total_ms": 0.001
+    }
+  ],
+  "backend_event_count": 2016,
+  "backend_live_bf16_by_batch_stage": [
+    {
+      "avg_ms": 1.0053281250000001,
+      "count": 64,
+      "key": "batch=1 stage=total",
+      "total_ms": 64.34100000000001
+    },
+    {
+      "avg_ms": 1.00371875,
+      "count": 64,
+      "key": "batch=1 stage=kernel_dispatch",
+      "total_ms": 64.238
+    },
+    {
+      "avg_ms": 1.3187500000000003,
+      "count": 32,
+      "key": "batch=2 stage=total",
+      "total_ms": 42.20000000000001
+    },
+    {
+      "avg_ms": 1.3169062499999997,
+      "count": 32,
+      "key": "batch=2 stage=kernel_dispatch",
+      "total_ms": 42.14099999999999
+    },
+    {
+      "avg_ms": 1.3055,
+      "count": 32,
+      "key": "batch=4 stage=total",
+      "total_ms": 41.776
+    },
+    {
+      "avg_ms": 1.3028749999999998,
+      "count": 32,
+      "key": "batch=4 stage=kernel_dispatch",
+      "total_ms": 41.69199999999999
+    },
+    {
+      "avg_ms": 0.0005625000000000003,
+      "count": 32,
+      "key": "batch=4 stage=weight_cache_gate",
+      "total_ms": 0.01800000000000001
+    },
+    {
+      "avg_ms": 0.00031250000000000006,
+      "count": 32,
+      "key": "batch=2 stage=weight_cache_gate",
+      "total_ms": 0.010000000000000002
+    },
+    {
+      "avg_ms": 0.00014062500000000002,
+      "count": 64,
+      "key": "batch=1 stage=weight_cache_down",
+      "total_ms": 0.009000000000000001
+    },
+    {
+      "avg_ms": 0.00021875,
+      "count": 32,
+      "key": "batch=4 stage=weight_cache_up",
+      "total_ms": 0.007
+    },
+    {
+      "avg_ms": 0.00021875,
+      "count": 32,
+      "key": "batch=4 stage=weight_cache_down",
+      "total_ms": 0.007
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 64,
+      "key": "batch=1 stage=weight_cache_gate",
+      "total_ms": 0.006
+    },
+    {
+      "avg_ms": 3.125e-05,
+      "count": 64,
+      "key": "batch=1 stage=weight_cache_up",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=2 stage=weight_cache_up",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=2 stage=weight_cache_down",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=1 stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 64,
+      "key": "batch=1 stage=output_reshape",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=4 stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=4 stage=output_reshape",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=2 stage=dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 32,
+      "key": "batch=2 stage=output_reshape",
+      "total_ms": 0.0
+    }
+  ],
+  "backend_live_bf16_by_stage": [
+    {
+      "avg_ms": 1.1587265625000003,
+      "count": 128,
+      "key": "total",
+      "total_ms": 148.31700000000004
+    },
+    {
+      "avg_ms": 1.1568046874999995,
+      "count": 128,
+      "key": "kernel_dispatch",
+      "total_ms": 148.07099999999994
+    },
+    {
+      "avg_ms": 0.0002656250000000002,
+      "count": 128,
+      "key": "weight_cache_gate",
+      "total_ms": 0.03400000000000002
+    },
+    {
+      "avg_ms": 0.00014062500000000007,
+      "count": 128,
+      "key": "weight_cache_down",
+      "total_ms": 0.01800000000000001
+    },
+    {
+      "avg_ms": 8.593750000000002e-05,
+      "count": 128,
+      "key": "weight_cache_up",
+      "total_ms": 0.011000000000000003
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 128,
+      "key": "dispatch_x",
+      "total_ms": 0.0
+    },
+    {
+      "avg_ms": 0.0,
+      "count": 128,
+      "key": "output_reshape",
+      "total_ms": 0.0
+    }
+  ],
+  "backend_top_buckets": [
+    {
+      "avg_ms": 21.79088541666667,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=total",
+      "total_ms": 2091.925
+    },
+    {
+      "avg_ms": 21.787854166666666,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=kernel_dispatch",
+      "total_ms": 2091.634
+    },
+    {
+      "avg_ms": 27.981312500000005,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=total",
+      "total_ms": 895.4020000000002
+    },
+    {
+      "avg_ms": 27.976499999999998,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=kernel_dispatch",
+      "total_ms": 895.2479999999999
+    },
+    {
+      "avg_ms": 16.40490625,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=total",
+      "total_ms": 524.957
+    },
+    {
+      "avg_ms": 16.4020625,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=kernel_dispatch",
+      "total_ms": 524.866
+    },
+    {
+      "avg_ms": 1.0053281250000001,
+      "count": 64,
+      "key": "batch=1 seq_len=1 bf16=true stage=total",
+      "total_ms": 64.34100000000001
+    },
+    {
+      "avg_ms": 1.00371875,
+      "count": 64,
+      "key": "batch=1 seq_len=1 bf16=true stage=kernel_dispatch",
+      "total_ms": 64.238
+    },
+    {
+      "avg_ms": 1.3187500000000003,
+      "count": 32,
+      "key": "batch=2 seq_len=1 bf16=true stage=total",
+      "total_ms": 42.20000000000001
+    },
+    {
+      "avg_ms": 1.3169062499999997,
+      "count": 32,
+      "key": "batch=2 seq_len=1 bf16=true stage=kernel_dispatch",
+      "total_ms": 42.14099999999999
+    },
+    {
+      "avg_ms": 1.3055,
+      "count": 32,
+      "key": "batch=4 seq_len=1 bf16=true stage=total",
+      "total_ms": 41.776
+    },
+    {
+      "avg_ms": 1.3028749999999998,
+      "count": 32,
+      "key": "batch=4 seq_len=1 bf16=true stage=kernel_dispatch",
+      "total_ms": 41.69199999999999
+    },
+    {
+      "avg_ms": 0.00045833333333333365,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_gate",
+      "total_ms": 0.04400000000000003
+    },
+    {
+      "avg_ms": 0.0007500000000000004,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=weight_cache_gate",
+      "total_ms": 0.024000000000000014
+    },
+    {
+      "avg_ms": 0.0005625000000000003,
+      "count": 32,
+      "key": "batch=4 seq_len=1 bf16=true stage=weight_cache_gate",
+      "total_ms": 0.01800000000000001
+    },
+    {
+      "avg_ms": 0.00015625000000000006,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_down",
+      "total_ms": 0.015000000000000006
+    },
+    {
+      "avg_ms": 0.0004687500000000001,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=output_reshape",
+      "total_ms": 0.015000000000000003
+    },
+    {
+      "avg_ms": 0.00043750000000000017,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_gate",
+      "total_ms": 0.014000000000000005
+    },
+    {
+      "avg_ms": 0.0001354166666666667,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=output_reshape",
+      "total_ms": 0.013000000000000001
+    },
+    {
+      "avg_ms": 0.00011458333333333336,
+      "count": 96,
+      "key": "batch=1 seq_len=23 bf16=false stage=weight_cache_up",
+      "total_ms": 0.011000000000000003
+    },
+    {
+      "avg_ms": 0.00031250000000000006,
+      "count": 32,
+      "key": "batch=2 seq_len=1 bf16=true stage=weight_cache_gate",
+      "total_ms": 0.010000000000000002
+    },
+    {
+      "avg_ms": 0.00014062500000000002,
+      "count": 64,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_down",
+      "total_ms": 0.009000000000000001
+    },
+    {
+      "avg_ms": 0.00021875,
+      "count": 32,
+      "key": "batch=4 seq_len=1 bf16=true stage=weight_cache_up",
+      "total_ms": 0.007
+    },
+    {
+      "avg_ms": 0.00021875,
+      "count": 32,
+      "key": "batch=4 seq_len=1 bf16=true stage=weight_cache_down",
+      "total_ms": 0.007
+    },
+    {
+      "avg_ms": 0.0001875,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=weight_cache_up",
+      "total_ms": 0.006
+    },
+    {
+      "avg_ms": 9.375e-05,
+      "count": 64,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_gate",
+      "total_ms": 0.006
+    },
+    {
+      "avg_ms": 0.0001875,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_up",
+      "total_ms": 0.006
+    },
+    {
+      "avg_ms": 0.000125,
+      "count": 32,
+      "key": "batch=1 seq_len=22 bf16=false stage=weight_cache_down",
+      "total_ms": 0.004
+    },
+    {
+      "avg_ms": 6.25e-05,
+      "count": 32,
+      "key": "batch=1 seq_len=64 bf16=false stage=weight_cache_down",
+      "total_ms": 0.002
+    },
+    {
+      "avg_ms": 3.125e-05,
+      "count": 64,
+      "key": "batch=1 seq_len=1 bf16=true stage=weight_cache_up",
+      "total_ms": 0.002
+    }
+  ],
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8496",
+    "KILN_PROFILE_VULKAN_BACKEND_MLP_STAGES": "1"
+  },
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 0,
+    "version": "0.2.13"
+  },
+  "marker": "A046_MEASURE_START",
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "tokens_generated": 7.0,
+    "worker_batches": 3.0
+  },
+  "port": 8496,
+  "responses": [
+    {
+      "bytes": 602,
+      "elapsed_s": 17.126946630996827,
+      "error": null,
+      "finish": "stop",
+      "index": 0,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a046-vulkan-backend-prewarm-candidate-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "bytes": 792,
+      "elapsed_s": 17.30984964399977,
+      "error": null,
+      "finish": "stop",
+      "index": 1,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a046-vulkan-backend-prewarm-candidate-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "bytes": 792,
+      "elapsed_s": 17.125481912000396,
+      "error": null,
+      "finish": "stop",
+      "index": 2,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a046-vulkan-backend-prewarm-candidate-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "bytes": 792,
+      "elapsed_s": 17.30916899300064,
+      "error": null,
+      "finish": "stop",
+      "index": 3,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a046-vulkan-backend-prewarm-candidate-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "wall_s": 17.31425311800558
+}

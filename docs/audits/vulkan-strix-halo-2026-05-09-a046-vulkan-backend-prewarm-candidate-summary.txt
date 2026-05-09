@@ -1,0 +1,54 @@
+wall_s=17.314253
+metrics_delta={'tokens_generated': 7.0, 'jobs_submitted': 7.0, 'jobs_failed': 0.0, 'worker_batches': 3.0, 'batcher_rows': 7.0, 'max_batch_after': 4.0}
+backend_event_count=2016
+backend_live_bf16_by_stage:
+- total: total_ms=148.317 count=128 avg_ms=1.159
+- kernel_dispatch: total_ms=148.071 count=128 avg_ms=1.157
+- weight_cache_gate: total_ms=0.034 count=128 avg_ms=0.000
+- weight_cache_down: total_ms=0.018 count=128 avg_ms=0.000
+- weight_cache_up: total_ms=0.011 count=128 avg_ms=0.000
+- dispatch_x: total_ms=0.000 count=128 avg_ms=0.000
+- output_reshape: total_ms=0.000 count=128 avg_ms=0.000
+backend_by_stage_all:
+- total: total_ms=3660.601 count=288 avg_ms=12.710
+- kernel_dispatch: total_ms=3659.819 count=288 avg_ms=12.708
+- weight_cache_gate: total_ms=0.116 count=288 avg_ms=0.000
+- weight_cache_down: total_ms=0.039 count=288 avg_ms=0.000
+- weight_cache_up: total_ms=0.034 count=288 avg_ms=0.000
+- output_reshape: total_ms=0.029 count=288 avg_ms=0.000
+- dispatch_x: total_ms=0.001 count=288 avg_ms=0.000
+top_backend_buckets:
+- batch=1 seq_len=23 bf16=false stage=total: total_ms=2091.925 count=96 avg_ms=21.791
+- batch=1 seq_len=23 bf16=false stage=kernel_dispatch: total_ms=2091.634 count=96 avg_ms=21.788
+- batch=1 seq_len=64 bf16=false stage=total: total_ms=895.402 count=32 avg_ms=27.981
+- batch=1 seq_len=64 bf16=false stage=kernel_dispatch: total_ms=895.248 count=32 avg_ms=27.976
+- batch=1 seq_len=22 bf16=false stage=total: total_ms=524.957 count=32 avg_ms=16.405
+- batch=1 seq_len=22 bf16=false stage=kernel_dispatch: total_ms=524.866 count=32 avg_ms=16.402
+- batch=1 seq_len=1 bf16=true stage=total: total_ms=64.341 count=64 avg_ms=1.005
+- batch=1 seq_len=1 bf16=true stage=kernel_dispatch: total_ms=64.238 count=64 avg_ms=1.004
+- batch=2 seq_len=1 bf16=true stage=total: total_ms=42.200 count=32 avg_ms=1.319
+- batch=2 seq_len=1 bf16=true stage=kernel_dispatch: total_ms=42.141 count=32 avg_ms=1.317
+- batch=4 seq_len=1 bf16=true stage=total: total_ms=41.776 count=32 avg_ms=1.306
+- batch=4 seq_len=1 bf16=true stage=kernel_dispatch: total_ms=41.692 count=32 avg_ms=1.303
+- batch=1 seq_len=23 bf16=false stage=weight_cache_gate: total_ms=0.044 count=96 avg_ms=0.000
+- batch=1 seq_len=64 bf16=false stage=weight_cache_gate: total_ms=0.024 count=32 avg_ms=0.001
+- batch=4 seq_len=1 bf16=true stage=weight_cache_gate: total_ms=0.018 count=32 avg_ms=0.001
+- batch=1 seq_len=23 bf16=false stage=weight_cache_down: total_ms=0.015 count=96 avg_ms=0.000
+- batch=1 seq_len=64 bf16=false stage=output_reshape: total_ms=0.015 count=32 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_gate: total_ms=0.014 count=32 avg_ms=0.000
+- batch=1 seq_len=23 bf16=false stage=output_reshape: total_ms=0.013 count=96 avg_ms=0.000
+- batch=1 seq_len=23 bf16=false stage=weight_cache_up: total_ms=0.011 count=96 avg_ms=0.000
+- batch=2 seq_len=1 bf16=true stage=weight_cache_gate: total_ms=0.010 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_down: total_ms=0.009 count=64 avg_ms=0.000
+- batch=4 seq_len=1 bf16=true stage=weight_cache_up: total_ms=0.007 count=32 avg_ms=0.000
+- batch=4 seq_len=1 bf16=true stage=weight_cache_down: total_ms=0.007 count=32 avg_ms=0.000
+- batch=1 seq_len=64 bf16=false stage=weight_cache_up: total_ms=0.006 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_gate: total_ms=0.006 count=64 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_up: total_ms=0.006 count=32 avg_ms=0.000
+- batch=1 seq_len=22 bf16=false stage=weight_cache_down: total_ms=0.004 count=32 avg_ms=0.000
+- batch=1 seq_len=64 bf16=false stage=weight_cache_down: total_ms=0.002 count=32 avg_ms=0.000
+- batch=1 seq_len=1 bf16=true stage=weight_cache_up: total_ms=0.002 count=64 avg_ms=0.000
+response_0 status=200 finish=stop elapsed_s=17.126947 text='6' reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=17.309850 text='11' reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=17.125482 text='16' reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=17.309169 text='13' reasoning_len=0 error=None

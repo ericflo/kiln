@@ -858,6 +858,11 @@ impl ModelRunner {
         self.backend.name()
     }
 
+    /// Preload backend-specific decode weights into any persistent device cache.
+    pub fn prewarm_backend_decode_weights(&self) -> Result<()> {
+        self.backend.prewarm_decode_weights(&self.weights)
+    }
+
     /// Load a LoRA adapter from a PEFT-compatible directory.
     ///
     /// The directory must contain `adapter_config.json` and `adapter_model.safetensors`.

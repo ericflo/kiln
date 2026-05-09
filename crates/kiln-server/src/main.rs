@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use kiln_server::api;
@@ -419,6 +419,9 @@ fn spawn_backend_prewarm(state: AppState) {
             precompile_metal_custom_kernels(&device);
             precompile_vulkan_custom_kernels(&device);
             let runner_guard = runner.read().unwrap();
+            runner_guard
+                .prewarm_backend_decode_weights()
+                .context("backend decode weight prewarm failed")?;
             let params = SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,
