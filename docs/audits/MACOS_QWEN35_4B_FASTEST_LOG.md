@@ -15387,3 +15387,49 @@ fused MLP gate/up kernel. Avoid retrying E332's rejected route of pushing
 prefill rows through the decode gate/up kernel; a useful prefill candidate
 should target the actual split projection path, GDN in-projection, or recurrent
 prefill work.
+
+## 2026-05-09 - E403 rejected GDN prefill batch-GEMV reshape route
+
+### Hypothesis
+
+E402 shows prefill `gdn:in_proj` is the largest `seq_len=64` prefill bucket.
+The existing Metal batch transposed-GEMV path already handles `[B,1,H]` decode
+batches, so test whether reshaping GDN prefill rows from `[1,T,H]` to
+`[T,1,H]` can reuse that optimized path for the four GDN input projections
+without writing a new cooperative GDN prefill kernel.
+
+### Change Tested
+
+Temporarily added an ignored synthetic benchmark-only helper that:
+
+- reshaped `x=[1,T,2560]` to `x_rows=[T,1,2560]`
+- ran existing `metal_transposed_coop_gemv_bf16` for qkv, z, a, and b
+- reshaped outputs back to `[1,T,*]`
+- compared against the current broadcast-matmul reference
+
+No production path was changed. The temporary benchmark-only source change was
+reverted after the measurement.
+
+### Results
+
+Synthetic Metal Qwen3.5 GDN prefill input projection, same binary:
+
+- `seq_len=16`: broadcast `3797.183 us`, batch-GEMV reshape `8420.567 us`,
+  speedup `0.451x`
+- `seq_len=64`: broadcast `4070.275 us`, batch-GEMV reshape `32274.775 us`,
+  speedup `0.126x`
+- `seq_len=128`: broadcast `6544.867 us`, batch-GEMV reshape `64382.725 us`,
+  speedup `0.102x`
+- max absolute diff was `0` for all tested sequence lengths
+
+### Artifact
+
+- `e403_gdn_prefill_batch_gemv_synthetic.log`
+
+### Decision
+
+Rejected before endpoint measurement. The existing batch GEMV kernel is
+optimized for decode batches, not contiguous prefill-row throughput at these
+large projection widths. Do not route GDN prefill input projections through a
+`[T,1,H]` batch-GEMV reshape. Keep prefill `gdn:in_proj` on broadcast matmul
+until there is a genuinely prefill-shaped kernel or a different measured route.

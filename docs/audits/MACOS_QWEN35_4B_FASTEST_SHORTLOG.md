@@ -1610,3 +1610,9 @@
   `83.523 ms`, `mlp:gate_proj` `78.770 ms`, `mlp:up_proj` `72.665 ms`,
   `gdn:recurrent` `40.002 ms`, and `gdn:out_proj` `32.415 ms`. Accepted as
   target-selection evidence; no source change.
+- 2026-05-09 E403: Rejected reshaping GDN prefill rows from `[1,T,H]` to
+  `[T,1,H]` and reusing the existing Metal batch transposed-GEMV path for
+  qkv/z/a/b input projections. Parity was exact, but synthetic timing regressed
+  badly versus broadcast: at `seq_len=64`, broadcast was `4070.275 us` and the
+  batch-GEMV reshape was `32274.775 us` (`0.126x`). Source reverted; keep GDN
+  prefill in-proj on broadcast until a prefill-shaped route is measured.
