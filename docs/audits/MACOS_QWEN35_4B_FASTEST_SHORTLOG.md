@@ -1514,3 +1514,13 @@
   improvement), but worker batches differed (`8` vs `9`). Source reverted; no
   clean same-counters serving win, consistent with E384's effectively tied
   LoRA fused-QKV base projection result.
+- 2026-05-09 E389: Rejected a Metal LoRA fused base-add decode kernel. The
+  temporary source wrote `base + delta` directly in the second LoRA kernel and
+  used `KILN_DISABLE_METAL_LORA_FUSED_BASE_ADD=1` to recover the old
+  delta-only kernel plus Tensor add path. Focused parity passed, and synthetic
+  Qwen3.5 LoRA delta/add improved the local second pass by `1.393x` for
+  gate/up shape and `1.195x` for down shape. Serving did not hold: same-counter
+  prefix-cache-disabled down-only `max_tokens=16` was slightly slower
+  (`12.841861s` default vs `12.812476s` legacy), and same-counter full MLP
+  gate/up/down `max_tokens=8` was slower (`7.911692s` default vs `7.714893s`
+  legacy). Source reverted.

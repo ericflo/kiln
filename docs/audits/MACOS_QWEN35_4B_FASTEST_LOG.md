@@ -14531,3 +14531,84 @@ This is consistent with E384, where the fused-QKV base projection was
 effectively tied for the LoRA serial decode shape. Keep the source reverted and
 continue targeting the rank-small LoRA delta path and larger same-counters
 serving wins.
+
+## 2026-05-09 - E389 rejected Metal LoRA fused base-add decode kernel
+
+### Hypothesis
+
+E385's Metal LoRA decode fast path computes the rank-small delta with two
+custom kernels, then reuses the generic Tensor add for `base + delta`. Fusing
+the base read and final add into the second LoRA kernel might remove one
+allocation, one pass over the output, and one extra dispatch.
+
+### Temporary change
+
+The temporary source added a second Metal LoRA decode kernel that consumed the
+rank hidden, LoRA `B`, and the base projection, then wrote `base + delta`
+directly. `KILN_DISABLE_METAL_LORA_FUSED_BASE_ADD=1` restored the previous
+delta-only kernel plus Tensor add path for in-binary A/B measurement.
+
+The source change was reverted after endpoint measurement.
+
+### Validation
+
+Before reverting the source change:
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+- `KILN_METAL_LORA_DELTA_BENCH_WARMUP=5 KILN_METAL_LORA_DELTA_BENCH_ITERS=30 cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln`
+
+### Results
+
+Synthetic Qwen3.5-shaped LoRA delta/add showed the new fused-base kernel was
+faster than the old delta-only kernel plus Tensor add:
+
+- `mlp_gate_or_up`, batch `4`, rank `16`: `175.004 us` fused-base vs
+  `243.812 us` legacy add (`1.393x`)
+- `down_proj`, batch `4`, rank `16`: `169.574 us` fused-base vs `202.661 us`
+  legacy add (`1.195x`)
+- Both synthetic cases had exact parity against the reference
+  (`max_abs_diff=0`, `mean_abs_diff=0`).
+
+Endpoint evidence did not hold:
+
+- Down-only adapter, prefix cache enabled, `max_tokens=8`: default was
+  `7.684660s` vs legacy-add disabled `7.845670s`, but worker batches differed
+  (`8` vs `9`), so this was not clean acceptance evidence.
+- Down-only adapter, prefix cache enabled, `max_tokens=16`: default was
+  `13.077910s` vs legacy-add disabled `12.741857s`, with worker batches
+  differing (`17` vs `16`), so this was also excluded.
+- Down-only adapter, prefix cache disabled, `max_tokens=16`: same counters
+  (`128` tokens, `120` jobs, `16` worker batches, `120` rows, max batch `8`),
+  but default was slightly slower (`12.841861s` vs `12.812476s`, `-0.23%`).
+- Full MLP gate/up/down adapter, prefix cache disabled, `max_tokens=8`: same
+  counters (`64` tokens, `56` jobs, `8` worker batches, `56` rows, max batch
+  `8`), but default was slower (`7.911692s` vs `7.714893s`, `-2.55%`).
+
+One repeated default long run on the same prefix-cache-enabled server produced
+zero decode-batcher deltas because the prompts were cached; it is recorded in
+the comparison artifact and excluded from the decision.
+
+### Artifact
+
+- `e389_lora_fused_base_add_test.log`
+- `e389_lora_fused_base_add_synthetic.log`
+- `e389_lora_fused_base_add_release_build_metal.log`
+- `e389_lora_fused_base_add_endpoint_default_*`
+- `e389_lora_fused_base_add_endpoint_legacy_add_disabled_*`
+- `e389_lora_fused_base_add_endpoint_longer_default_*`
+- `e389_lora_fused_base_add_endpoint_longer_default_repeat_*`
+- `e389_lora_fused_base_add_endpoint_longer_legacy_add_disabled_*`
+- `e389_lora_fused_base_add_endpoint_nocache_default_*`
+- `e389_lora_fused_base_add_endpoint_nocache_legacy_add_disabled_*`
+- `e389_lora_fused_base_add_endpoint_mlp_nocache_default_*`
+- `e389_lora_fused_base_add_endpoint_mlp_nocache_legacy_add_disabled_*`
+- `e389_lora_fused_base_add_comparison.json`
+
+### Decision
+
+Rejected. The isolated kernel removed work in synthetic projection benches, but
+the same-counters endpoint runs did not improve and the full MLP active-adapter
+case regressed. Keep the source reverted; endpoint-visible LoRA work should
+stay focused on changes that reduce total serving wall time, not just a local
+kernel microbench.

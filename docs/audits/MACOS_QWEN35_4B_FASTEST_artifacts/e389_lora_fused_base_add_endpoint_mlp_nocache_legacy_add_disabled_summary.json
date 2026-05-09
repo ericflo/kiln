@@ -1,0 +1,81 @@
+{
+  "case": "mlp_nocache_legacy_add_disabled",
+  "prefix_cache_enabled": false,
+  "lora_fused_base_add_disabled": true,
+  "adapter": "zero-r16-mlp",
+  "adapter_kind": "synthetic zero BF16 rank16 MLP gate/up/down for all 32 Qwen3.5-4B layers",
+  "port": 8499,
+  "request_elapsed_s": 7.714892541989684,
+  "statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "requests": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 6.9506514999084175,
+      "bytes": 2021
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 7.699561042012647,
+      "bytes": 2016
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 7.699097250006162,
+      "bytes": 2016
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 7.698682166985236,
+      "bytes": 2021
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_s": 7.697646333952434,
+      "bytes": 2016
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_s": 7.697485040989704,
+      "bytes": 2010
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_s": 7.6969739579362795,
+      "bytes": 2016
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_s": 7.696167874964885,
+      "bytes": 2010
+    }
+  ],
+  "counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "prompt_count": 8,
+  "max_tokens": 8,
+  "temperature": 0.0,
+  "stream": true,
+  "decode_wait_env": 200
+}

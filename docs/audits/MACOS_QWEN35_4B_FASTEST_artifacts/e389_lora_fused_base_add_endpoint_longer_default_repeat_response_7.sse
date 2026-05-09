@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-7384b255-7aec-47f7-a232-915093eeba1d","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-7384b255-7aec-47f7-a232-915093eeba1d","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" elecciones!!!!!!!!!!!!!!!"}}]}
+
+data: {"id":"chatcmpl-7384b255-7aec-47f7-a232-915093eeba1d","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

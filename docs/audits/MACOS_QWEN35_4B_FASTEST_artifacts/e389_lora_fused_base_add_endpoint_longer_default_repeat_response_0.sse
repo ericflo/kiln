@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-a4fc0d85-d576-4fd4-8c8a-7ca29f08bdb7","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-a4fc0d85-d576-4fd4-8c8a-7ca29f08bdb7","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" elecciones毎回!!!!!!!!!!!!!!"}}]}
+
+data: {"id":"chatcmpl-a4fc0d85-d576-4fd4-8c8a-7ca29f08bdb7","object":"chat.completion.chunk","created":1778328695,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

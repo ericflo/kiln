@@ -1,0 +1,21 @@
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" elecciones"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-a50465a3-9ec7-48f3-9aa1-f5617c54711c","object":"chat.completion.chunk","created":1778328415,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

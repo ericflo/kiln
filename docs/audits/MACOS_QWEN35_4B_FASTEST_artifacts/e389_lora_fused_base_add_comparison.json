@@ -1,0 +1,131 @@
+{
+  "experiment": "E389 rejected Metal LoRA fused base-add decode kernel",
+  "temporary_change": "Added a second Metal LoRA decode kernel that read base and wrote base + delta directly, with KILN_DISABLE_METAL_LORA_FUSED_BASE_ADD=1 as an in-binary rollback to the old delta-only kernel plus Tensor add.",
+  "synthetic_microbench": [
+    {
+      "label": "mlp_gate_or_up",
+      "batch": 4,
+      "input_dim": 2560,
+      "output_dim": 9216,
+      "rank": 16,
+      "iters": 30,
+      "fused_base_us": 175.004,
+      "legacy_add_us": 243.812,
+      "fallback_us": 1171.978,
+      "legacy_speedup": 1.393,
+      "fallback_speedup": 6.697,
+      "max_abs_diff": "0e0",
+      "mean_abs_diff": "0e0"
+    },
+    {
+      "label": "down_proj",
+      "batch": 4,
+      "input_dim": 9216,
+      "output_dim": 2560,
+      "rank": 16,
+      "iters": 30,
+      "fused_base_us": 169.574,
+      "legacy_add_us": 202.661,
+      "fallback_us": 1711.256,
+      "legacy_speedup": 1.195,
+      "fallback_speedup": 10.092,
+      "max_abs_diff": "0e0",
+      "mean_abs_diff": "0e0"
+    }
+  ],
+  "endpoint_results": {
+    "down_only_wait200_max_tokens_8_prefix_cache_default": {
+      "default_elapsed_s": 7.684660041006282,
+      "legacy_add_disabled_elapsed_s": 7.845670374925248,
+      "apparent_improvement_percent": 2.052218946561344,
+      "default_counters": {
+        "tokens_generated": 64.0,
+        "jobs_submitted": 56.0,
+        "worker_batches": 8.0,
+        "batcher_rows": 56.0,
+        "max_batch_after": 8.0
+      },
+      "legacy_add_disabled_counters": {
+        "tokens_generated": 64.0,
+        "jobs_submitted": 56.0,
+        "worker_batches": 9.0,
+        "batcher_rows": 56.0,
+        "max_batch_after": 8.0
+      },
+      "decision_use": "excluded for acceptance because worker_batches differed"
+    },
+    "down_only_wait200_max_tokens_16_prefix_cache_default": {
+      "default_elapsed_s": 13.077909708954394,
+      "legacy_add_disabled_elapsed_s": 12.741857334040105,
+      "improvement_percent": -2.637389244788658,
+      "default_counters": {
+        "tokens_generated": 128.0,
+        "jobs_submitted": 120.0,
+        "worker_batches": 17.0,
+        "batcher_rows": 120.0,
+        "max_batch_after": 8.0
+      },
+      "legacy_add_disabled_counters": {
+        "tokens_generated": 128.0,
+        "jobs_submitted": 120.0,
+        "worker_batches": 16.0,
+        "batcher_rows": 120.0,
+        "max_batch_after": 8.0
+      },
+      "decision_use": "excluded for acceptance because worker_batches differed"
+    },
+    "down_only_wait200_max_tokens_16_prefix_cache_disabled": {
+      "default_elapsed_s": 12.841861417051405,
+      "legacy_add_disabled_elapsed_s": 12.812476125080138,
+      "improvement_percent": -0.22934904763447878,
+      "default_counters": {
+        "tokens_generated": 128.0,
+        "jobs_submitted": 120.0,
+        "worker_batches": 16.0,
+        "batcher_rows": 120.0,
+        "max_batch_after": 8.0
+      },
+      "legacy_add_disabled_counters": {
+        "tokens_generated": 128.0,
+        "jobs_submitted": 120.0,
+        "worker_batches": 16.0,
+        "batcher_rows": 120.0,
+        "max_batch_after": 8.0
+      },
+      "decision_use": "same counters; default was slightly slower"
+    },
+    "mlp_gate_up_down_wait200_max_tokens_8_prefix_cache_disabled": {
+      "default_elapsed_s": 7.911691708024591,
+      "legacy_add_disabled_elapsed_s": 7.714892541989684,
+      "improvement_percent": -2.5508996394154866,
+      "default_counters": {
+        "tokens_generated": 64.0,
+        "jobs_submitted": 56.0,
+        "worker_batches": 8.0,
+        "batcher_rows": 56.0,
+        "max_batch_after": 8.0
+      },
+      "legacy_add_disabled_counters": {
+        "tokens_generated": 64.0,
+        "jobs_submitted": 56.0,
+        "worker_batches": 8.0,
+        "batcher_rows": 56.0,
+        "max_batch_after": 8.0
+      },
+      "decision_use": "same counters; default was slower"
+    },
+    "invalid_repeat": {
+      "summary": "Repeated default long prompts on the same prefix-cache-enabled server hit cache and produced zero decode-batcher counters; excluded.",
+      "elapsed_s": 0.01788233290426433,
+      "counters": {
+        "tokens_generated": 0.0,
+        "jobs_submitted": 0.0,
+        "worker_batches": 0.0,
+        "batcher_rows": 0.0,
+        "max_batch_after": 8.0
+      }
+    }
+  },
+  "decision": "rejected",
+  "reason": "The isolated kernel saved the synthetic second-pass cost, but same-counters endpoint runs did not improve: down-only prefix-cache-disabled was -0.23%, and full MLP active-adapter prefix-cache-disabled was -2.55%. Source reverted."
+}
