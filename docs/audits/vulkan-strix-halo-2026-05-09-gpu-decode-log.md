@@ -5748,3 +5748,82 @@ Verdict:
 - Keep. This is a Vulkan-only prefill win with a clear rollback env and no
   default decode-update regression.
 - Continue targeting MLP fused and GDN recurrent/adjacent-stage residency next.
+
+### 2026-05-09 A097: Current Profile After A096 On Main
+
+Goal:
+- Refresh the target-selection profile after merging the active PR, rebasing
+  over the latest Metal fixes, and landing A096 on `main`.
+- Confirm the current Vulkan path still emits stable token IDs before the next
+  optimization experiment.
+
+Artifacts:
+- Build log:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a097-current-post-conv-prefill-profile-release-bench-build.log`
+- Profile log:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a097-current-post-conv-prefill-profile.log`
+- Summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a097-current-post-conv-prefill-profile-summary.txt`
+
+Command:
+- `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1
+  KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+  KILN_PROFILE_FULL_ATTN_STAGES=1
+  KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1
+  KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1
+  ./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+  --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+  --max-output-tokens 8 --seed 103 --quiet`
+
+Final measured pass:
+- Backend: `vulkan`
+- GPU: `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`
+- First token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1028.621121ms`
+- Mean ITL: `84.415996375ms`
+- P99 ITL: `94.470553ms`
+
+Prefill stage totals:
+- GDN recurrent: `276.795ms` across `24` calls, `11.533ms` avg.
+- MLP fused: `234.900ms` across `32` calls, `7.341ms` avg.
+- GDN in-proj: `122.603ms` across `24` calls, `5.108ms` avg.
+- Full-attn QKV projection: `98.255ms` across `8` calls, `12.282ms` avg.
+- GDN conv: `69.332ms` across `24` calls, `2.889ms` avg.
+- GDN out-proj: `56.006ms` across `24` calls, `2.334ms` avg.
+- GDN gated-norm: `37.069ms` across `24` calls, `1.545ms` avg.
+
+Decode stage totals:
+- MLP fused: `244.138ms` across `256` calls, `0.954ms` avg.
+- GDN in-proj: `102.437ms` across `192` calls, `0.534ms` avg.
+- GDN recurrent: `72.857ms` across `192` calls, `0.379ms` avg.
+- GDN out-proj: `44.729ms` across `192` calls, `0.233ms` avg.
+- GDN gated-norm: `41.984ms` across `192` calls, `0.219ms` avg.
+- GDN gates: `34.900ms` across `192` calls, `0.182ms` avg.
+- GDN conv: `15.124ms` across `192` calls, `0.079ms` avg.
+- Full-attn QKV projection: `27.844ms` across `64` calls, `0.435ms` avg.
+- Full-attn output projection: `16.961ms` across `64` calls, `0.265ms` avg.
+
+Inner-stage observations:
+- MLP batch `64` total was `233.755ms`; gate/up dispatch was `132.536ms`
+  and down dispatch was `86.442ms`.
+- MLP batch `1` total was `238.884ms`; gate/up dispatch was `120.892ms`
+  and down dispatch was `78.241ms`.
+- GDN in-proj batch `64` total was `121.524ms`; record/submit/wait was
+  `100.451ms`.
+- GDN in-proj batch `1` total was `97.035ms`; record/submit/wait was
+  `85.347ms`.
+- GDN recurrent prefill split was `87.809ms` matmul prep, `81.148ms`
+  chunk scan, `61.665ms` chunk prep, and `42.592ms` state update.
+- GDN recurrent decode now uses `single_token_backend_step`, totaling
+  `71.567ms`; the A092 single-token fallback is not present.
+
+Interpretation:
+- Correctness remains reasonable on the sampled Vulkan path: backend is
+  `vulkan`, token IDs match the prior A096 checks, and visible server smoke
+  from A096 remains the latest endpoint text check.
+- A096 conv prefill is still active. The current `seq_len=64 stage=conv`
+  bucket is `69.332ms`, versus A096 rollback's `166.418ms`.
+- The next target set is MLP fused plus GDN recurrent internals. GDN in-proj
+  remains expensive, but direct `32x8` and QKV/Z-pairing variants were already
+  rejected and should not be repeated without a materially different mechanism.

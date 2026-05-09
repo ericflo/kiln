@@ -1,0 +1,89 @@
+A097 Current Vulkan Profile After Conv Prefill Default
+
+Scope:
+- Profile-only refresh on `main` after A096 default-enabled Vulkan conv1d
+  prefill and after rebasing over the latest Metal fixes.
+- No source changes.
+
+Command:
+- `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1
+  KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+  KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1
+  KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1
+  ./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+  --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+  --max-output-tokens 8 --seed 103 --quiet`
+
+Final measured pass:
+- backend `vulkan`
+- GPU `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`
+- token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- prefill `1028.621121ms`
+- mean ITL `84.415996375ms`
+- p99 ITL `94.470553ms`
+
+Prefill buckets, final measured pass:
+- MLP fused: `234.900ms` total, `32` calls, `7.341ms` avg.
+- GDN recurrent: `276.795ms` total, `24` calls, `11.533ms` avg.
+- GDN in-proj: `122.603ms` total, `24` calls, `5.108ms` avg.
+- GDN conv: `69.332ms` total, `24` calls, `2.889ms` avg.
+- GDN out-proj: `56.006ms` total, `24` calls, `2.334ms` avg.
+- GDN gated-norm: `37.069ms` total, `24` calls, `1.545ms` avg.
+- Full-attn QKV projection: `98.255ms` total, `8` calls, `12.282ms` avg.
+- Full-attn output projection: `24.558ms` total, `8` calls, `3.070ms` avg.
+
+Decode buckets, final measured pass:
+- MLP fused: `244.138ms` total, `256` calls, `0.954ms` avg.
+- GDN in-proj: `102.437ms` total, `192` calls, `0.534ms` avg.
+- GDN recurrent: `72.857ms` total, `192` calls, `0.379ms` avg.
+- GDN out-proj: `44.729ms` total, `192` calls, `0.233ms` avg.
+- GDN gated-norm: `41.984ms` total, `192` calls, `0.219ms` avg.
+- GDN gates: `34.900ms` total, `192` calls, `0.182ms` avg.
+- GDN conv: `15.124ms` total, `192` calls, `0.079ms` avg.
+- Full-attn QKV projection: `27.844ms` total, `64` calls, `0.435ms` avg.
+- Full-attn output projection: `16.961ms` total, `64` calls, `0.265ms` avg.
+- Full-attn decode scores: `7.483ms` total, `64` calls, `0.117ms` avg.
+
+Vulkan MLP inner stages:
+- Batch `64` total: `233.755ms` across `32` calls, `7.305ms` avg.
+  - gate/up dispatch: `132.536ms` total, `4.142ms` avg.
+  - down dispatch: `86.442ms` total, `2.701ms` avg.
+  - upload/readback combined: `10.590ms` total.
+- Batch `1` total: `238.884ms` across `256` calls, `0.933ms` avg.
+  - gate/up dispatch: `120.892ms` total, `0.472ms` avg.
+  - down dispatch: `78.241ms` total, `0.306ms` avg.
+  - upload/readback combined: `27.243ms` total.
+
+Vulkan GDN in-proj inner stages:
+- Batch `64` total: `121.524ms` across `24` calls, `5.063ms` avg.
+  - record/submit/wait: `100.451ms` total, `4.185ms` avg.
+  - read host-visible output: `9.873ms` total, `0.411ms` avg.
+- Batch `1` total: `97.035ms` across `192` calls, `0.505ms` avg.
+  - record/submit/wait: `85.347ms` total, `0.445ms` avg.
+
+GDN recurrent inner stages:
+- Prefill `seq_len=64`:
+  - matmul prep: `87.809ms` total, `3.659ms` avg.
+  - chunk scan: `81.148ms` total, `3.381ms` avg.
+  - chunk prep: `61.665ms` total, `2.569ms` avg.
+  - state update: `42.592ms` total, `1.775ms` avg.
+  - slice inputs: `2.616ms` total, `0.109ms` avg.
+- Decode `seq_len=1`:
+  - single-token backend step: `71.567ms` total, `0.373ms` avg.
+  - precopy: `0.188ms` total, `0.001ms` avg.
+
+Interpretation:
+- A096's conv prefill default is still active: the current conv prefill bucket
+  is `69.332ms`, far below the rejected/rollback full CPU-ish conv profile
+  from A096 (`166.418ms`).
+- The remaining serial target set is now led by MLP fused and GDN recurrent
+  prefill. Decode remains led by MLP fused, then GDN in-proj, then GDN
+  recurrent.
+- The direct GDN in-proj `32x8` and serial QKV/Z-pairing ideas remain rejected.
+  The next Vulkan experiment should be a different shape, preferably reducing
+  MLP/GDN boundary work or attacking GDN recurrent prefill internals rather
+  than re-running a simple row-tile/column-pair port.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a097-current-post-conv-prefill-profile-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a097-current-post-conv-prefill-profile.log`
