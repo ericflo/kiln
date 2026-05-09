@@ -1878,3 +1878,13 @@
   Batch2/3/4/8 keep using the existing shared batch kernel. Metal/Vulkan
   checks, server Metal/Vulkan checks, parity, fmt, and diff check passed; CUDA
   remains locally blocked by missing `nvcc`.
+- 2026-05-09 E434: Refreshed the current Metal paged serial profile after
+  E432/E433. No source change. The measured `prompt_tokens=64`,
+  `max_output_tokens=8` paged latency run reported prefill `516.592 ms`, mean
+  ITL `251.957 ms`, and `3.969 tok/s`, directionally lower than E429's
+  `711.099 ms`, `306.214 ms`, and `3.266 tok/s`. Filtered `seq_len=1` stage
+  totals are still led by MLP `gate_up_fused` `1058.707 ms`, MLP `down_proj`
+  `634.105 ms`, GDN `in_proj` `587.298 ms`, GDN `out_proj` `289.838 ms`,
+  full-attn `qkv_proj` `186.086 ms`, and GDN `gates_recur_gated_norm`
+  `141.417 ms`. Keep serial source targeting focused on MLP gate/up/down and
+  GDN input projection before smaller full-attention point kernels.

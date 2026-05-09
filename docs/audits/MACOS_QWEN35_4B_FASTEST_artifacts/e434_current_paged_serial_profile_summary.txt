@@ -1,0 +1,32 @@
+E434 current paged serial profile summary
+Latency endpoint:
+prefill_ms=516.591542
+mean_inter_token_ms=251.956896
+p50_inter_token_ms=251.918792
+p99_inter_token_ms=265.109958
+decode_tokens_per_sec=3.9689328447672256
+tokens_generated=9
+
+Kind totals for seq_len=1:
+full_attn total_ms=476.902 calls=1152 avg_ms=0.414
+gdn total_ms=1136.862 calls=2304 avg_ms=0.493
+mlp total_ms=1692.812 calls=1024 avg_ms=1.653
+
+Stage totals for seq_len=1:
+full_attn:attn_gate total_ms=30.439 calls=128 avg_ms=0.238
+full_attn:decode_attn_contiguous total_ms=34.319 calls=128 avg_ms=0.268
+full_attn:kv_write total_ms=29.606 calls=128 avg_ms=0.231
+full_attn:o_proj total_ms=94.133 calls=128 avg_ms=0.735
+full_attn:q_transpose total_ms=0.252 calls=128 avg_ms=0.002
+full_attn:qk_norm total_ms=33.498 calls=128 avg_ms=0.262
+full_attn:qkv_proj total_ms=186.086 calls=128 avg_ms=1.454
+full_attn:qkv_split total_ms=37.136 calls=128 avg_ms=0.290
+full_attn:rope total_ms=31.433 calls=128 avg_ms=0.246
+gdn:gated_norm total_ms=0.933 calls=384 avg_ms=0.002
+gdn:gates_recur_gated_norm total_ms=141.417 calls=384 avg_ms=0.368
+gdn:in_proj total_ms=587.298 calls=384 avg_ms=1.529
+gdn:out_proj total_ms=289.838 calls=384 avg_ms=0.755
+gdn:post_transpose total_ms=0.086 calls=384 avg_ms=0.000
+gdn:qkv_conv_norm total_ms=117.290 calls=384 avg_ms=0.305
+mlp:down_proj total_ms=634.105 calls=512 avg_ms=1.238
+mlp:gate_up_fused total_ms=1058.707 calls=512 avg_ms=2.068

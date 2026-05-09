@@ -17597,3 +17597,72 @@ bs=1 decode, with `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED=1` as a
 rollback to the existing shared mode6 path. CUDA/Vulkan source behavior is
 unchanged; Vulkan checks pass locally, and CUDA cannot be checked on this host
 because `nvcc` is not installed.
+
+## 2026-05-09 - E434 current paged serial profile after E432/E433
+
+### Purpose
+
+Refresh the synchronized Metal paged serial profile after accepting the
+dedicated batch-8 down-projection tile8 kernel and the dedicated bs=1 MLP
+gate/up serial kernel. This is target-selection evidence only; the same-binary
+synthetic benches in E432/E433 remain the source-change A/B evidence.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 434`
+
+### Results
+
+The measured latency run reported:
+
+- Prefill: `516.592 ms`
+- Mean inter-token latency: `251.957 ms`
+- P50 / P99 inter-token latency: `251.919 ms` / `265.110 ms`
+- Decode throughput: `3.969 tok/s`
+- Tokens generated: `9`
+
+Compared with E429's previous synchronized profile, this run is directionally
+lower on the endpoint (`306.214 -> 251.957 ms` mean ITL, `17.7%` lower) and on
+the dominant serial stages. This profile is not a rollback-controlled A/B test,
+so use it to choose the next target rather than to attribute every movement to
+one patch.
+
+Filtering measured `seq_len=1` profile rows:
+
+| stage | calls | total | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | 512 | `1058.707 ms` | `2.068 ms` |
+| `mlp:down_proj` | 512 | `634.105 ms` | `1.238 ms` |
+| `gdn:in_proj` | 384 | `587.298 ms` | `1.529 ms` |
+| `gdn:out_proj` | 384 | `289.838 ms` | `0.755 ms` |
+| `full_attn:qkv_proj` | 128 | `186.086 ms` | `1.454 ms` |
+| `gdn:gates_recur_gated_norm` | 384 | `141.417 ms` | `0.368 ms` |
+| `gdn:qkv_conv_norm` | 384 | `117.290 ms` | `0.305 ms` |
+| `full_attn:o_proj` | 128 | `94.133 ms` | `0.735 ms` |
+| `full_attn:qkv_split` | 128 | `37.136 ms` | `0.290 ms` |
+| `full_attn:decode_attn_contiguous` | 128 | `34.319 ms` | `0.268 ms` |
+| `full_attn:qk_norm` | 128 | `33.498 ms` | `0.262 ms` |
+| `full_attn:rope` | 128 | `31.433 ms` | `0.246 ms` |
+| `full_attn:attn_gate` | 128 | `30.439 ms` | `0.238 ms` |
+| `full_attn:kv_write` | 128 | `29.606 ms` | `0.231 ms` |
+
+Kind totals:
+
+- MLP: `1692.812 ms` (`1835.329 -> 1692.812 ms`, `7.8%` lower than E429)
+- GDN: `1136.862 ms` (`1296.125 -> 1136.862 ms`, `12.3%` lower than E429)
+- full attention: `476.902 ms` (`587.651 -> 476.902 ms`, `18.8%` lower than E429)
+
+### Artifacts
+
+- `e434_current_paged_serial_release_bench_build.log`
+- `e434_current_paged_serial_profile.log`
+- `e434_current_paged_serial_profile_summary.txt`
+- `e434_current_paged_serial_diff_check.log`
+
+### Decision
+
+Accepted as refreshed target-selection evidence. The serial decode target list
+is still led by MLP gate/up, MLP down-projection, and GDN input projection.
+Batch-only work should continue to use rollback-controlled synthetic benches,
+while serial endpoint work should prioritize these dominant projection stages
+before the smaller full-attention point kernels.
