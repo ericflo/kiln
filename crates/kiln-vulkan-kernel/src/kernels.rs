@@ -65,6 +65,12 @@ fn gdn_in_proj_batch_row_pair_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
 }
 
+fn gdn_gates_batched_transfers_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS").is_err())
+}
+
 fn prefill_row_pair_matmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
@@ -500,6 +506,111 @@ fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo {
         (*ptr).p_signal_semaphores = std::ptr::null();
     }
     unsafe { info.assume_init() }
+}
+
+fn upload_buffers_with_command_pool(
+    device: &Arc<ash::Device>,
+    host_mem_type: u32,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    uploads: &[(&VulkanBuffer, &[u8])],
+) -> Result<()> {
+    if uploads.is_empty() {
+        return Ok(());
+    }
+
+    let mut staging = Vec::with_capacity(uploads.len());
+    for (_, data) in uploads {
+        let stage = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        VulkanBuffer::write_host_visible(device, &stage, data)?;
+        staging.push(stage);
+    }
+
+    let alloc_info = make_cmd_alloc_info(command_pool);
+    let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+        .context("failed to allocate batched transfer command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin batched transfer command buffer")?;
+        for ((dst, data), stage) in uploads.iter().zip(staging.iter()) {
+            device.cmd_copy_buffer(
+                cmd,
+                stage.handle(),
+                dst.handle(),
+                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+            );
+        }
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end batched transfer command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit batched transfer")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for batched transfer")?;
+        device.free_command_buffers(command_pool, &command_buffers);
+    }
+
+    Ok(())
+}
+
+fn read_back_buffers_with_command_pool(
+    device: &Arc<ash::Device>,
+    host_mem_type: u32,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    buffers: &[&VulkanBuffer],
+) -> Result<Vec<Vec<u8>>> {
+    if buffers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut staging = Vec::with_capacity(buffers.len());
+    for buffer in buffers {
+        staging.push(VulkanBuffer::create_host_visible(
+            device,
+            host_mem_type,
+            buffer.size(),
+        )?);
+    }
+
+    let alloc_info = make_cmd_alloc_info(command_pool);
+    let command_buffers = crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+        .context("failed to allocate batched readback command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin batched readback command buffer")?;
+        for (src, stage) in buffers.iter().zip(staging.iter()) {
+            device.cmd_copy_buffer(
+                cmd,
+                src.handle(),
+                stage.handle(),
+                &[vk::BufferCopy::builder().size(src.size()).build()],
+            );
+        }
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end batched readback command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit batched readback")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for batched readback")?;
+        device.free_command_buffers(command_pool, &command_buffers);
+    }
+
+    staging
+        .iter()
+        .map(|stage| VulkanBuffer::read_host_visible(device, stage))
+        .collect()
 }
 
 /// Create a zero-init WriteDescriptorSet for STORAGE_BUFFER with fixed sType.
@@ -3645,21 +3756,36 @@ pub fn dispatch_gdn_gates_cached(
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
     // Create input buffers + upload
-    let make_input_buf = |data: &[u8]| -> Result<VulkanBuffer> {
-        let buf = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)?;
+    let a_buf = VulkanBuffer::create_device_local(device, device_local_mt, a_data.len() as u64)?;
+    let b_buf = VulkanBuffer::create_device_local(device, device_local_mt, b_data.len() as u64)?;
+    if gdn_gates_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        upload_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[(&a_buf, &a_data), (&b_buf, &b_data)],
+        )?;
+    } else {
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
             device,
             host_visible_mt,
             queue,
             *command_pool,
-            &buf,
-            data,
+            &a_buf,
+            &a_data,
         )?;
-        Ok(buf)
-    };
-    let a_buf = make_input_buf(&a_data)?;
-    let b_buf = make_input_buf(&b_data)?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &b_buf,
+            &b_data,
+        )?;
+    }
 
     // Create output buffers
     let elem_count: usize = out_shape.iter().product();
@@ -3694,7 +3820,21 @@ pub fn dispatch_gdn_gates_cached(
     )?;
 
     // Read back both outputs
-    let (beta_data, g_data) = {
+    let (beta_data, g_data) = if gdn_gates_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        let mut data = read_back_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[&beta_buf, &g_buf],
+        )?;
+        anyhow::ensure!(
+            data.len() == 2,
+            "gdn_gates batched readback returned wrong count"
+        );
+        (data.remove(0), data.remove(0))
+    } else {
         let command_pool = vk_device.transient_command_pool()?;
         let beta_data = VulkanBuffer::read_back_with_command_pool(
             device,

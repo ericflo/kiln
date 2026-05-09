@@ -2464,6 +2464,123 @@ Verdict:
   compact resident window, or a smaller per-layer/per-request capacity model
   rather than duplicating the entire paged-KV allocation.
 
+### 2026-05-09 A053: Inconclusive Post-PR1004 Prompt Probe
+
+Goal:
+- Reconfirm post-merge Vulkan GPU-routed correctness after merging PR #1004 and
+  before further performance changes.
+
+Setup:
+- Rebuilt from `main` with `cargo build --release --features vulkan --bin kiln
+  --bin kiln-bench`.
+- Ran four concurrent streaming requests after `/health` reported
+  `inference_prewarm_complete=true`, with `KILN_DECODE_BATCH_WAIT_US=5000`, all
+  built-in profile flags, `max_tokens=3`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Evidence:
+- The server log showed `Vulkan device initialized`,
+  `Vulkan decode weight cache prewarmed`, and `background inference prewarm
+  complete`.
+- Responses were HTTP 200 with non-empty visible text and empty reasoning, but
+  the prompt wording was ambiguous (`"number after N"`). The model answered
+  `"5"`, `"1"`, `"5"`, and `"13"` against an expected arithmetic-style
+  checker of `"6"`, `"11"`, `"16"`, and `"13"`.
+- This was not treated as a backend correctness failure; it showed the harness
+  prompts were not strong enough for a strict expected-string smoke.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a053-post-pr1004-current-profile-*`
+
+Verdict:
+- Inconclusive prompt-probe only. Superseded by A054 with corrected arithmetic
+  prompts.
+
+### 2026-05-09 A054: Post-PR1004 Vulkan Correctness/Profile Confirmation
+
+Goal:
+- Reconfirm current `main` after PR #1004 with unambiguous prompts before
+  accepting any new Vulkan performance work.
+
+Setup:
+- Reused the release Vulkan build from A053.
+- Ran four concurrent streaming requests after `/health` reported
+  `inference_prewarm_complete=true`, with `KILN_DECODE_BATCH_WAIT_US=5000`, all
+  built-in profile flags, `max_tokens=3`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Evidence:
+- The server log showed `Vulkan device initialized`,
+  `Vulkan decode weight cache prewarmed`, and `background inference prewarm
+  complete` before requests.
+- All four responses were HTTP 200 with correct visible text and empty
+  reasoning: `"6"`, `"11"`, `"16"`, `"13"`.
+- Wall time was `3.258736s` with profiling enabled; decode-batcher counters
+  moved by `7` jobs, `3` worker batches, `7` rows, and max batch `3`.
+- Post-prewarm live `seq_len=1` stage totals were:
+  - `paged_layer:linear`: `156.669ms`, `24` samples.
+  - `mlp:fused`: `127.327ms`, `96` samples.
+  - `gdn:recurrent`: `111.416ms`, `72` samples.
+  - `gdn:in_proj`: `95.951ms`, `72` samples.
+  - `gdn:gates`: `59.722ms`, `72` samples.
+  - `gdn:out_proj`: `51.414ms`, `72` samples.
+  - `gdn:gated_norm`: `32.676ms`, `72` samples.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a054-post-pr1004-current-profile-corrected-prompts-*`
+
+Verdict:
+- Keep as post-PR1004 correctness/profile evidence; no source change. Current
+  Vulkan path is GPU-routed and produces correct visible text with explicit
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+### 2026-05-09 A055: Batch Vulkan GDN Gates Transfer Submissions
+
+Hypothesis:
+- The Vulkan GDN gates dispatch still uploaded `a` and `b` through two separate
+  transfer submits and read `beta` and `g` back through two more. Batching the
+  two uploads into one transfer command and the two readbacks into one readback
+  command should reduce small-transfer overhead without changing shader math.
+
+Change:
+- Added Vulkan-only batched transfer/readback helpers in
+  `crates/kiln-vulkan-kernel/src/kernels.rs`.
+- Routed `dispatch_gdn_gates_cached` through one upload submission for `a`/`b`
+  and one readback submission for `beta`/`g`.
+- Added rollback env
+  `KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS=1`.
+
+Validation:
+- `cargo fmt --check`.
+- `cargo check -p kiln-vulkan-kernel`.
+- `cargo check -p kiln-model --features vulkan`.
+- `cargo test -p kiln-vulkan-kernel gdn_gates_and_gated_rms_norm_match_f32_cpu_reference --test gdn_parity -- --nocapture`.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` (`29`
+  tests passed).
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+
+Evidence:
+- Profiled same-binary endpoint A/B, both arms waited for
+  `inference_prewarm_complete=true`, both returned correct texts `"6"`,
+  `"11"`, `"16"`, `"13"` with empty reasoning, and both used the same `7` jobs
+  / `3` batches / `7` rows shape.
+- Profiled candidate: wall `3.277474s`; live `gdn:gates seq_len=1`
+  `60.203ms` / `72` samples.
+- Profiled rollback with
+  `KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS=1`: wall `3.314415s`; live
+  `gdn:gates seq_len=1` `72.540ms` / `72` samples.
+- No-profile same-binary pairs were noisy but correctness-preserving:
+  - candidate `3.306108s` vs rollback `3.202056s`;
+  - reverse-order rollback `3.306822s` vs candidate `3.291073s`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-*`
+
+Verdict:
+- Accepted as a targeted Vulkan GDN gates overhead reduction. The stage bucket
+  improved by `12.337ms` in the profiled same-shape run; no-profile wall time
+  was mixed within short-run noise and all endpoint checks stayed correct.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2471,14 +2588,15 @@ Verdict:
   mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
   resident mirroring prevented prewarm readiness on the current Qwen3.5-4B
   Strix Halo serving shape.
-- Use A049, not A039, for warmed-serving target selection. After A048, do not
-  use measurements taken before `inference_prewarm_complete=true` as serving
+- Use A054/A055, not A039, for warmed-serving target selection. After A048, do
+  not use measurements taken before `inference_prewarm_complete=true` as serving
   evidence.
-- A049's post-prewarm profile has MLP as the largest explicit live `seq_len=1`
-  stage (`129.645ms`), but GDN recurrent/in-proj/gates/gated-norm are comparable
-  in aggregate. Next work should target either packed-BF16 MLP boundary/data
-  movement or a GDN path that materially reduces movement, not just a direct
-  fused-hook route.
+- A054's post-PR1004 post-prewarm profile still has MLP as the largest explicit
+  live `seq_len=1` stage (`127.327ms`), while GDN recurrent/in-proj/gates and
+  GDN transfer overhead remain comparable in aggregate. Next work should target
+  either packed-BF16 MLP boundary/data movement, sparse/active K/V movement, or
+  a GDN path that materially reduces movement, not just a direct fused-hook
+  route.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

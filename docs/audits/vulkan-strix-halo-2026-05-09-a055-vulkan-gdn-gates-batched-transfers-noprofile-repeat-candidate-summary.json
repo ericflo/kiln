@@ -1,0 +1,71 @@
+{
+  "all_outputs_match_expected": true,
+  "all_reasoning_empty": true,
+  "label": "candidate",
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "worker_batches": 3.0
+  },
+  "prewarm_complete_log_seen": true,
+  "prewarm_weight_log_seen": true,
+  "ready_after_s": 28.034148587001255,
+  "responses": [
+    {
+      "elapsed_s": 3.107917230001476,
+      "error": null,
+      "expected_text": "6",
+      "finish": "stop",
+      "index": 0,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-candidate-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "elapsed_s": 3.289861288998509,
+      "error": null,
+      "expected_text": "11",
+      "finish": "stop",
+      "index": 1,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-candidate-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "elapsed_s": 3.2893934449966764,
+      "error": null,
+      "expected_text": "16",
+      "finish": "stop",
+      "index": 2,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-candidate-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "elapsed_s": 3.1070634000061546,
+      "error": null,
+      "expected_text": "13",
+      "finish": "stop",
+      "index": 3,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-candidate-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "vulkan_device_log_seen": true,
+  "wall_s": 3.2910725429974264
+}

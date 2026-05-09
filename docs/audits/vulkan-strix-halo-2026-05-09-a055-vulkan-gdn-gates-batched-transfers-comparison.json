@@ -1,0 +1,24 @@
+{
+  "candidate_gates_seq1": {
+    "avg_ms": 0.8361527777777777,
+    "count": 72,
+    "kind": "gdn_stage",
+    "seq_len": 1,
+    "stage": "gates",
+    "total_ms": 60.202999999999996
+  },
+  "candidate_outputs_ok": true,
+  "candidate_wall_s": 3.277473556001496,
+  "gates_total_delta_ms_candidate_minus_rollback": -12.337000000000053,
+  "rollback_gates_seq1": {
+    "avg_ms": 1.0075000000000007,
+    "count": 72,
+    "kind": "gdn_stage",
+    "seq_len": 1,
+    "stage": "gates",
+    "total_ms": 72.54000000000005
+  },
+  "rollback_outputs_ok": true,
+  "rollback_wall_s": 3.314415270004247,
+  "wall_delta_s_candidate_minus_rollback": -0.036941714002750814
+}

@@ -1,0 +1,464 @@
+{
+  "all_outputs_match_expected": true,
+  "all_reasoning_empty": true,
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8505",
+    "KILN_PROFILE_FULL_ATTN_STAGES": "1",
+    "KILN_PROFILE_GDN_STAGES": "1",
+    "KILN_PROFILE_MLP_STAGES": "1",
+    "KILN_PROFILE_PAGED_LAYERS": "1"
+  },
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 17,
+    "version": "0.2.13"
+  },
+  "label": "candidate",
+  "metrics_after": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "worker_batches": 3.0
+  },
+  "metrics_before": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch_after": 0.0,
+    "worker_batches": 0.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "worker_batches": 3.0
+  },
+  "prewarm_complete_log_seen": true,
+  "prewarm_weight_log_seen": true,
+  "profile_rows": 2360,
+  "ready_after_s": 31.072282082997845,
+  "responses": [
+    {
+      "bytes": 599,
+      "elapsed_s": 3.0814589630026603,
+      "error": null,
+      "expected_text": "6",
+      "finish": "stop",
+      "index": 0,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-candidate-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.271305456000846,
+      "error": null,
+      "expected_text": "11",
+      "finish": "stop",
+      "index": 1,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-candidate-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.079551699003787,
+      "error": null,
+      "expected_text": "16",
+      "finish": "stop",
+      "index": 2,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-candidate-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "bytes": 789,
+      "elapsed_s": 3.2706158259970834,
+      "error": null,
+      "expected_text": "13",
+      "finish": "stop",
+      "index": 3,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-candidate-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "top_live_seq1_stage_totals": [
+    {
+      "avg_ms": 7.4671249999999985,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "linear",
+      "total_ms": 179.21099999999996
+    },
+    {
+      "avg_ms": 1.4472395833333334,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 138.935
+    },
+    {
+      "avg_ms": 1.5861666666666667,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 114.20400000000001
+    },
+    {
+      "avg_ms": 1.3695277777777775,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 98.60599999999998
+    },
+    {
+      "avg_ms": 0.8361527777777777,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 60.202999999999996
+    },
+    {
+      "avg_ms": 0.623611111111111,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 44.89999999999999
+    },
+    {
+      "avg_ms": 0.611486111111111,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 44.02699999999999
+    },
+    {
+      "avg_ms": 1.6473124999999997,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 26.356999999999996
+    },
+    {
+      "avg_ms": 0.2457638888888889,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 17.695
+    },
+    {
+      "avg_ms": 2.190125,
+      "count": 8,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "full",
+      "total_ms": 17.521
+    },
+    {
+      "avg_ms": 0.6951875,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "total_ms": 11.123
+    },
+    {
+      "avg_ms": 0.46781249999999996,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "total_ms": 7.484999999999999
+    },
+    {
+      "avg_ms": 0.6431250000000001,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "total_ms": 5.1450000000000005
+    },
+    {
+      "avg_ms": 0.314125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj",
+      "total_ms": 2.513
+    },
+    {
+      "avg_ms": 0.027111111111111107,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 1.9519999999999997
+    },
+    {
+      "avg_ms": 0.076125,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "rope_batch",
+      "total_ms": 1.218
+    },
+    {
+      "avg_ms": 0.037250000000000005,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm_batch",
+      "total_ms": 0.5960000000000001
+    },
+    {
+      "avg_ms": 0.066125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_scores",
+      "total_ms": 0.529
+    },
+    {
+      "avg_ms": 0.023312500000000007,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "attn_gate_batch",
+      "total_ms": 0.3730000000000001
+    },
+    {
+      "avg_ms": 0.016187500000000004,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "kv_write_batch",
+      "total_ms": 0.25900000000000006
+    }
+  ],
+  "top_stage_totals_all": [
+    {
+      "avg_ms": 82.54040624999998,
+      "count": 96,
+      "kind": "paged_layer",
+      "seq_len": 25,
+      "stage": "linear",
+      "total_ms": 7923.878999999998
+    },
+    {
+      "avg_ms": 22.677648437499997,
+      "count": 128,
+      "kind": "mlp_stage",
+      "seq_len": 25,
+      "stage": "fused",
+      "total_ms": 2902.7389999999996
+    },
+    {
+      "avg_ms": 63.9710625,
+      "count": 32,
+      "kind": "paged_layer",
+      "seq_len": 25,
+      "stage": "full",
+      "total_ms": 2047.074
+    },
+    {
+      "avg_ms": 15.8539375,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "in_proj",
+      "total_ms": 1521.978
+    },
+    {
+      "avg_ms": 14.447739583333343,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "gated_norm",
+      "total_ms": 1386.9830000000009
+    },
+    {
+      "avg_ms": 11.841364583333336,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "gates",
+      "total_ms": 1136.7710000000002
+    },
+    {
+      "avg_ms": 11.299447916666667,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "out_proj",
+      "total_ms": 1084.747
+    },
+    {
+      "avg_ms": 30.816062499999997,
+      "count": 32,
+      "kind": "full_attn_stage",
+      "seq_len": 25,
+      "stage": "qkv_proj",
+      "total_ms": 986.1139999999999
+    },
+    {
+      "avg_ms": 3.3553229166666667,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "recurrent",
+      "total_ms": 322.111
+    },
+    {
+      "avg_ms": 2.3110312500000014,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "conv",
+      "total_ms": 221.85900000000015
+    },
+    {
+      "avg_ms": 7.4671249999999985,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "linear",
+      "total_ms": 179.21099999999996
+    },
+    {
+      "avg_ms": 1.4472395833333334,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 138.935
+    },
+    {
+      "avg_ms": 1.5861666666666667,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 114.20400000000001
+    },
+    {
+      "avg_ms": 1.3695277777777775,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 98.60599999999998
+    },
+    {
+      "avg_ms": 0.8361527777777777,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 60.202999999999996
+    },
+    {
+      "avg_ms": 0.623611111111111,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 44.89999999999999
+    },
+    {
+      "avg_ms": 0.611486111111111,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 44.02699999999999
+    },
+    {
+      "avg_ms": 1.6473124999999997,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 26.356999999999996
+    },
+    {
+      "avg_ms": 0.2248333333333333,
+      "count": 96,
+      "kind": "gdn_stage",
+      "seq_len": 25,
+      "stage": "qk_norm",
+      "total_ms": 21.583999999999996
+    },
+    {
+      "avg_ms": 0.2457638888888889,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 17.695
+    }
+  ],
+  "vulkan_device_log_seen": true,
+  "wall_s": 3.277473556001496
+}

@@ -1,0 +1,35 @@
+label=rollback-disabled
+ready_after_s=26.039849
+wall_s=3.314415
+all_outputs_match_expected=True
+all_reasoning_empty=True
+vulkan_device_log_seen=True
+prewarm_weight_log_seen=True
+prewarm_complete_log_seen=True
+metrics_delta={'jobs_submitted': 7.0, 'jobs_failed': 0.0, 'worker_batches': 3.0, 'batcher_rows': 7.0, 'max_batch_after': 4.0}
+profile_rows=2360
+top_live_seq1_stage_totals:
+- paged_layer:linear seq_len=1 total_ms=223.730 count=24 avg_ms=9.322
+- mlp_stage:fused seq_len=1 total_ms=145.976 count=96 avg_ms=1.521
+- gdn_stage:recurrent seq_len=1 total_ms=122.064 count=72 avg_ms=1.695
+- gdn_stage:in_proj seq_len=1 total_ms=110.581 count=72 avg_ms=1.536
+- gdn_stage:gates seq_len=1 total_ms=72.540 count=72 avg_ms=1.008
+- gdn_stage:out_proj seq_len=1 total_ms=58.652 count=72 avg_ms=0.815
+- gdn_stage:gated_norm seq_len=1 total_ms=58.220 count=72 avg_ms=0.809
+- paged_layer:full seq_len=1 total_ms=33.891 count=8 avg_ms=4.236
+- full_attn_stage:qkv_proj_batch seq_len=1 total_ms=26.449 count=16 avg_ms=1.653
+- gdn_stage:conv seq_len=1 total_ms=17.245 count=72 avg_ms=0.240
+- full_attn_stage:decode_attn_contiguous_batch seq_len=1 total_ms=11.132 count=16 avg_ms=0.696
+- full_attn_stage:o_proj seq_len=1 total_ms=10.091 count=8 avg_ms=1.261
+- full_attn_stage:o_proj_batch seq_len=1 total_ms=8.065 count=16 avg_ms=0.504
+- full_attn_stage:qkv_proj seq_len=1 total_ms=4.321 count=8 avg_ms=0.540
+- gdn_stage:qk_norm seq_len=1 total_ms=1.874 count=72 avg_ms=0.026
+- full_attn_stage:rope_batch seq_len=1 total_ms=1.236 count=16 avg_ms=0.077
+- full_attn_stage:qk_norm_batch seq_len=1 total_ms=0.730 count=16 avg_ms=0.046
+- full_attn_stage:decode_scores seq_len=1 total_ms=0.471 count=8 avg_ms=0.059
+- full_attn_stage:attn_gate_batch seq_len=1 total_ms=0.406 count=16 avg_ms=0.025
+- full_attn_stage:kv_write_batch seq_len=1 total_ms=0.260 count=16 avg_ms=0.016
+response_0 status=200 finish=stop elapsed_s=3.130948 text='6' expected='6' matches=True reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=3.313818 text='11' expected='11' matches=True reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=3.130625 text='16' expected='16' matches=True reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=3.313109 text='13' expected='13' matches=True reasoning_len=0 error=None

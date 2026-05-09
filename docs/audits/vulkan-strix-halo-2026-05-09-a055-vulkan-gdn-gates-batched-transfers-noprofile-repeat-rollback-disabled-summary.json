@@ -1,0 +1,71 @@
+{
+  "all_outputs_match_expected": true,
+  "all_reasoning_empty": true,
+  "label": "rollback-disabled",
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 3.0,
+    "worker_batches": 3.0
+  },
+  "prewarm_complete_log_seen": true,
+  "prewarm_weight_log_seen": true,
+  "ready_after_s": 26.028479906999564,
+  "responses": [
+    {
+      "elapsed_s": 2.7523081329927663,
+      "error": null,
+      "expected_text": "6",
+      "finish": "stop",
+      "index": 0,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-rollback-disabled-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "elapsed_s": 3.3055377839991706,
+      "error": null,
+      "expected_text": "11",
+      "finish": "stop",
+      "index": 1,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-rollback-disabled-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "elapsed_s": 3.3052546480030287,
+      "error": null,
+      "expected_text": "16",
+      "finish": "stop",
+      "index": 2,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-rollback-disabled-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "elapsed_s": 3.304769344002125,
+      "error": null,
+      "expected_text": "13",
+      "finish": "stop",
+      "index": 3,
+      "matches_expected": true,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a055-vulkan-gdn-gates-batched-transfers-noprofile-repeat-rollback-disabled-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "vulkan_device_log_seen": true,
+  "wall_s": 3.3068217289983295
+}

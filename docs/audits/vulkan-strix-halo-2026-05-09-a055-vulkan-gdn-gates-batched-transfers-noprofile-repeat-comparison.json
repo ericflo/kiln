@@ -1,0 +1,7 @@
+{
+  "candidate_outputs_ok": true,
+  "candidate_wall_s": 3.2910725429974264,
+  "rollback_outputs_ok": true,
+  "rollback_wall_s": 3.3068217289983295,
+  "wall_delta_s_candidate_minus_rollback": -0.015749186000903137
+}
