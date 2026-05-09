@@ -6502,3 +6502,51 @@ Interpretation:
 Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile.log`
+
+### 2026-05-09 A109: Rejected MLP BF16 Gate/Up Rows8
+
+Scope:
+- Tested a Vulkan-only row-octet BF16 gate/up shader for large flattened MLP
+  prefill batches.
+- Candidate eligibility was BF16 gate/up + F32 down only, `batch >= 16`, with
+  rollback env `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS8=1`.
+- Source code was removed after measurement; audit artifacts remain.
+
+Validation while candidate was present:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused parity
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+  with temporary batch-16 coverage for the rows8 path.
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary no-profile A/B:
+- All runs stayed on backend `vulkan`.
+- All runs kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Seed `130`: candidate `1039.024ms` prefill / `80.969ms` mean ITL /
+  `98.595ms` p99; rollback `998.912ms` / `79.518ms` / `93.797ms`.
+- Seed `131` counter-order: rollback `1010.297ms` / `79.917ms` /
+  `87.125ms`; candidate `965.863ms` / `78.569ms` / `87.421ms`.
+- Seed `132`: candidate `1031.526ms` / `78.661ms` / `85.500ms`; rollback
+  `945.555ms` / `79.053ms` / `85.489ms`.
+- Three-pair average: candidate `1012.138ms` prefill / `79.400ms` mean ITL /
+  `90.505ms` p99; rollback `984.921ms` / `79.496ms` / `88.804ms`.
+- Approximate 64 prompt + 8 ITL total: candidate `1647.337ms`; rollback
+  `1620.890ms`.
+
+Verdict:
+- Reject.
+- The shader preserved correctness but lost about `27.217ms` average prefill.
+  The result reinforces the recent Metal E461 lesson: larger row grouping has
+  to be proven on the live path, not inferred from row reuse alone.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-rejected-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-kernel-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-focused-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-model-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-seed*.log`

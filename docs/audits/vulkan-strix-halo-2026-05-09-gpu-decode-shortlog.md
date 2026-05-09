@@ -492,3 +492,17 @@ Additional validation after A027:
 - `KILN_BATCHING_ENGINE=1 KILN_MODEL_PATH=Qwen3.5-4B ./target/release/kiln serve`
   direct, explicit batch, and concurrent live-batcher smokes with
   `chat_template_kwargs: {"enable_thinking": false}`
+
+Additional validation after rejected A109:
+
+- Temporary Vulkan MLP BF16 gate/up rows8 shader passed `cargo fmt --check`,
+  `git diff --check`, `cargo check -p kiln-vulkan-kernel`, focused Vulkan
+  parity with a batch-16 case, `cargo check -p kiln-model --features vulkan`,
+  and the release Vulkan `kiln-bench` build.
+- Same-binary A/B kept backend `vulkan` and token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Three-pair averages rejected the candidate: rows8 `1012.138ms` prefill /
+  `79.400ms` mean ITL / `90.505ms` p99 vs rollback `984.921ms` /
+  `79.496ms` / `88.804ms`.
+- Source code for rows8 was removed; audit artifacts are retained under
+  `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-*`.
