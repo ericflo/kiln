@@ -1,0 +1,47 @@
+E379 Metal GDN in-projection row-quad summary
+
+Change:
+- Added a row-quad branch to the Metal GDN in-projection decode kernel.
+- The branch is selected only for batch >= 8.
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1 disables only the new row-quad branch.
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1 still disables row grouping entirely, including row-quad.
+- Batch 1/2/3 remain on the previous non-row-grouped path; batch 4 remains on the E369 row-pair path.
+
+Validation:
+- cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture
+- KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture
+- cargo build --release --features metal --bin kiln
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench
+- cargo fmt --check
+- git diff --check
+
+Synthetic Qwen3.5 GDN in-proj batch bench:
+- row-quad disabled batch 1: 1374.146 us
+- row-quad default batch 1: 1377.100 us
+- row-quad disabled batch 2: 1709.662 us
+- row-quad default batch 2: 1519.567 us
+- row-quad disabled batch 3: 2629.508 us
+- row-quad default batch 3: 2740.042 us
+- row-quad disabled batch 4: 1810.883 us
+- row-quad default batch 4: 1740.175 us
+- row-quad disabled batch 8: 3227.646 us
+- row-quad default batch 8: 2187.417 us
+
+Only batch 8 uses the new row-quad branch. The intended batch-8 synthetic improvement is 32.2287%.
+
+Same-binary n8 endpoint A/B, max_tokens=8:
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1: wall 7.902035s, 64 generated tokens, 56 jobs, 8 worker batches, 56 rows, max batch 8
+- default row-quad: wall 7.904900s, 64 generated tokens, 56 jobs, 9 worker batches, 56 rows, max batch 8
+
+The short endpoint was inconclusive because the worker-batch count differed.
+
+Same-binary n8 endpoint A/B, max_tokens=16:
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1: wall 13.541063s, 128 generated tokens, 120 jobs, 17 worker batches, 120 rows, max batch 8
+- default row-quad: wall 12.862253s, 128 generated tokens, 120 jobs, 17 worker batches, 120 rows, max batch 8
+
+The longer same-shape endpoint improved by 5.0130%.
+
+Decision:
+Accepted. Keep GDN in-projection row-quad enabled by default only for batch >= 8.

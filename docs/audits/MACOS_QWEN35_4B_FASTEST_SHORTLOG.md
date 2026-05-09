@@ -1418,3 +1418,13 @@
   `333.302 ms`, `gdn:in_proj` `331.652 ms`, and `gdn:out_proj` `136.584 ms`.
   Accepted as target-selection evidence; no source change. Next target set is
   MLP gate/up first, then GDN in-projection and MLP down-projection.
+- 2026-05-09 E379: Accepted Metal GDN in-projection row-quad mode for full
+  batches. The new branch is selected only for batch `>=8`, with
+  `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1` as targeted rollback; batch
+  `1/2/3` stay on the previous path and batch `4` stays on E369 row-pair.
+  Focused parity, Metal/Vulkan checks, fmt check, diff check, and release build
+  passed. Synthetic batch `8` improved `3227.646 -> 2187.417 us` (`32.2%`).
+  The short n8 endpoint was inconclusive because worker batches differed
+  (`8` vs `9`), but the longer n8 `max_tokens=16` endpoint improved row-quad
+  disabled to default from `13.541063s` to `12.862253s` (`5.0%`) with identical
+  `128` generated tokens, `120` jobs, `17` worker batches, and max batch `8`.

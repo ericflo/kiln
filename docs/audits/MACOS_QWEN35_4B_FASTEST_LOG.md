@@ -13594,3 +13594,140 @@ MLP gate/up first, then GDN in-projection and MLP down-projection together.
 Accepted as target-selection evidence. No source change. Continue investigating
 full-batch MLP gate/up first, with GDN in-projection now effectively tied with
 MLP down-projection as the next decode target.
+
+## 2026-05-09 E379 - Add GDN in-projection row-quad for full Metal batches
+
+### Goal
+
+Target the GDN in-projection decode stage after E378. The existing E369
+row-pair path improves batch `4+` by reusing each GDN in-projection weight load
+across two rows. The current default Metal serving path can form batch `8`, so
+this experiment tests a rows `>=8` row-quad branch.
+
+### Change
+
+- Added a row-quad branch to `kiln_gdn_in_proj_decode_bf16`.
+- The new branch is selected only for batch `>=8`.
+- Batch `1/2/3` remain on the previous non-row-grouped path; batch `4` remains
+  on the E369 row-pair path.
+- Added `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1` as the targeted rollback.
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` still disables all row grouping,
+  including row-quad.
+- Extended the focused GDN in-projection decode parity test to cover batch `8`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- Same-binary eight-request streaming endpoint A/B, greedy `max_tokens=8`.
+- Same-binary eight-request streaming endpoint A/B, greedy `max_tokens=16`.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Qwen-shaped BF16 GDN in-projection synthetic bench, same source with row-quad
+disabled versus default:
+
+- batch `1`: disabled `1374.146 us`, default `1377.100 us`
+- batch `2`: disabled `1709.662 us`, default `1519.567 us`
+- batch `3`: disabled `2629.508 us`, default `2740.042 us`
+- batch `4`: disabled `1810.883 us`, default `1740.175 us`
+- batch `8`: disabled `3227.646 us`, default `2187.417 us`
+
+Only batch `8` selects the new row-quad branch. The intended batch-8 synthetic
+shape improved by `32.2%`.
+
+Same-binary endpoint A/B on the eight-request short-prompt streaming shape,
+greedy `max_tokens=8`:
+
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1`: wall `7.902035s`, `64`
+  generated tokens, `56` jobs, `8` worker batches, `56` rows, max batch `8`
+- default row-quad: wall `7.904900s`, `64` generated tokens, `56` jobs, `9`
+  worker batches, `56` rows, max batch `8`
+
+That short run was inconclusive because the batcher formed a different number
+of worker batches.
+
+Longer same-binary endpoint A/B, greedy `max_tokens=16`:
+
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1`: wall `13.541063s`, `128`
+  generated tokens, `120` jobs, `17` worker batches, `120` rows, max batch `8`
+- default row-quad: wall `12.862253s`, `128` generated tokens, `120` jobs,
+  `17` worker batches, `120` rows, max batch `8`
+
+The longer same-shape endpoint improved by `5.0%`.
+
+### Artifact
+
+- `e379_gdn_in_proj_row_quad_parity.log`
+- `e379_gdn_in_proj_row_quad_disabled_baseline.log`
+- `e379_gdn_in_proj_row_quad_candidate.log`
+- `e379_release_build_metal.log`
+- `e379_gdn_in_proj_row_quad_endpoint_summary.json`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_server.log`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_health.json`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_metrics.prom`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_time.json`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_0.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_1.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_2.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_3.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_4.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_5.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_6.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_disabled_response_7.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_server.log`
+- `e379_gdn_in_proj_row_quad_endpoint_default_health.json`
+- `e379_gdn_in_proj_row_quad_endpoint_default_metrics.prom`
+- `e379_gdn_in_proj_row_quad_endpoint_default_time.json`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_0.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_1.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_2.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_3.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_4.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_5.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_6.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_default_response_7.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_summary.json`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_server.log`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_health.json`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_metrics.prom`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_time.json`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_0.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_1.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_2.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_3.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_4.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_5.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_6.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_disabled_response_7.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_server.log`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_health.json`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_metrics.prom`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_time.json`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_0.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_1.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_2.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_3.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_4.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_5.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_6.sse`
+- `e379_gdn_in_proj_row_quad_endpoint_long_default_response_7.sse`
+- `e379_cargo_check_metal.log`
+- `e379_cargo_check_vulkan.log`
+- `e379_cargo_fmt_check.log`
+- `e379_git_diff_check.log`
+- `e379_gdn_in_proj_row_quad_summary.txt`
+
+### Decision
+
+Accepted. Enable Metal GDN in-projection row-quad by default only for batch
+`>=8`, with `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1` as the targeted
+rollback. This improves the longer full-batch decode serving shape without
+changing the batch `1/2/3` or batch `4` kernel selection, and without changing
+CUDA/Vulkan.
