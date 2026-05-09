@@ -10510,8 +10510,28 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(5);
 
-        bench_metal_lora_linear_case(&device, "mlp_gate_or_up", 4, 2560, 9216, 16, warmup, iters)?;
-        bench_metal_lora_linear_case(&device, "down_proj", 4, 9216, 2560, 16, warmup, iters)?;
+        for batch in [1usize, 4usize] {
+            bench_metal_lora_linear_case(
+                &device,
+                "mlp_gate_or_up",
+                batch,
+                2560,
+                9216,
+                16,
+                warmup,
+                iters,
+            )?;
+            bench_metal_lora_linear_case(
+                &device,
+                "down_proj",
+                batch,
+                9216,
+                2560,
+                16,
+                warmup,
+                iters,
+            )?;
+        }
 
         Ok(())
     }
@@ -10534,7 +10554,12 @@ mod tests {
             a: patterned_bf16(&[rank, input_dim], 0.0002, device)?,
             b: patterned_bf16(&[output_dim, rank], 0.0002, device)?,
         };
-        if !crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t) {
+        let supported = if batch == 1 {
+            crate::backend::metal::metal_transposed_coop_gemv_supports(&x, &weight_t)
+        } else {
+            crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t)
+        };
+        if !supported {
             eprintln!("metal_lora_linear_bench label={label} skipped unsupported shape");
             return Ok(());
         }

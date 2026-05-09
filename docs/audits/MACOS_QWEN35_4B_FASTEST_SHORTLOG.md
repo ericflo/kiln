@@ -1750,3 +1750,15 @@
   (`candidate 596.760 us` vs rollback-width `522.242 us`), and the longest
   `10/100` pair was only `307.081 us` vs `313.117 us`. Temporary source was
   reverted; keep the original next-power-of-two selector.
+- 2026-05-09 E421: Accepted enabling the existing Metal LoRA fused delta/add
+  helper for serial `batch=1` decode by broadening its support gate from
+  `batch > 1` to `batch > 0`, with the rank/dimension/BF16/contiguity guards
+  unchanged and rollback via `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+  Isolated Qwen3.5 rank-16 delta/add benches were exact and favored the fused
+  path for batch1 gate/up `914.798 -> 223.958 us` (`4.085x`) and down
+  `1116.465 -> 271.552 us` (`4.111x`). Full LoRA linear benches also improved
+  versus the old disabled-delta behavior: batch1 gate/up `1.520 -> 1.280 ms`
+  (`15.8%` faster) and down `1.753 -> 1.141 ms` (`34.9%` faster), while batch4
+  stayed faster. Batch1/2/4 delta parity, full LoRA linear parity, Metal/Vulkan
+  checks, server Metal bin checks, and fmt passed; CUDA check remains blocked on
+  this host by missing `nvcc`.

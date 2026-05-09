@@ -6851,7 +6851,7 @@ pub(crate) fn metal_lora_add_decode_supports(
         return false;
     };
 
-    batch > 1
+    batch > 0
         && seq_len == 1
         && base_batch == batch
         && base_seq_len == 1
@@ -15774,7 +15774,7 @@ mod tests {
         let input_dim = 1024usize;
         let output_dim = 1152usize;
         let rank = 16usize;
-        for batch in [2usize, 4usize] {
+        for batch in [1usize, 2usize, 4usize] {
             let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
             let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
             let a = patterned_bf16_2d(rank, input_dim, &device, 29, 0.002)?;
@@ -15811,26 +15811,28 @@ mod tests {
         let warmup = env_usize("KILN_METAL_LORA_DELTA_BENCH_WARMUP", 5);
         let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
 
-        bench_lora_decode_add_case(
-            &device,
-            "mlp_gate_or_up",
-            4,
-            QWEN35_HIDDEN,
-            QWEN35_INTERMEDIATE,
-            16,
-            warmup,
-            iters,
-        )?;
-        bench_lora_decode_add_case(
-            &device,
-            "down_proj",
-            4,
-            QWEN35_INTERMEDIATE,
-            QWEN35_HIDDEN,
-            16,
-            warmup,
-            iters,
-        )?;
+        for batch in [1usize, 4usize] {
+            bench_lora_decode_add_case(
+                &device,
+                "mlp_gate_or_up",
+                batch,
+                QWEN35_HIDDEN,
+                QWEN35_INTERMEDIATE,
+                16,
+                warmup,
+                iters,
+            )?;
+            bench_lora_decode_add_case(
+                &device,
+                "down_proj",
+                batch,
+                QWEN35_INTERMEDIATE,
+                QWEN35_HIDDEN,
+                16,
+                warmup,
+                iters,
+            )?;
+        }
 
         Ok(())
     }

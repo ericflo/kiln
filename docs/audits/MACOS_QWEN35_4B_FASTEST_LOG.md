@@ -16543,3 +16543,96 @@ or running endpoint A/B.
 Rejected and reverted before commit. Keep the original next-power-of-two thread
 selector for the GDN prefill qkv-conv/split kernel until a future candidate
 shows a stable full-path win.
+
+## 2026-05-09 - E421 accepted Metal LoRA serial decode delta/add
+
+### Purpose
+
+Earlier Metal LoRA work accelerated decode-batch LoRA by fusing the LoRA
+delta/add helper for Qwen-class BF16 rank-16 shapes, but the support gate still
+required `batch > 1`. Serial LoRA (`batch=1`, `seq_len=1`) therefore kept paying
+the slower broadcast-matmul fallback for the adapter delta even though the
+existing fused kernel already supports arbitrary batch counts.
+
+### Change
+
+Broadened `metal_lora_add_decode_supports` from `batch > 1` to `batch > 0`.
+The rest of the guard remains unchanged: Metal BF16 tensors, contiguous layout,
+decode-only `seq_len == 1`, matching base/input batches, Qwen-class dimensions
+(`input_dim >= 1024`, `output_dim >= 1024`), and `rank >= 16`.
+
+Added batch-1 coverage to the fused delta/add parity test and to the synthetic
+LoRA benches. The full LoRA linear synthetic bench now checks the serial
+transposed-coop GEMV support predicate for `batch=1` and the decode-batch
+predicate for `batch>1`, so the same benchmark covers serial and batch paths.
+
+Rollback remains available with `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+
+### Isolated Delta/Add Bench
+
+Warmup `5`, iterations `20`; all rows had exact parity
+(`max_abs_diff=0`, `mean_abs_diff=0`).
+
+| shape | batch | fused | fallback | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| MLP gate/up `2560 -> 9216`, rank 16 | 1 | `223.958 us` | `914.798 us` | `4.085x` |
+| MLP down `9216 -> 2560`, rank 16 | 1 | `271.552 us` | `1116.465 us` | `4.111x` |
+| MLP gate/up `2560 -> 9216`, rank 16 | 4 | `240.508 us` | `1076.583 us` | `4.476x` |
+| MLP down `9216 -> 2560`, rank 16 | 4 | `244.350 us` | `1735.296 us` | `7.102x` |
+
+### Full LoRA Linear Bench
+
+Warmup `5`, iterations `20`; values are full base projection plus LoRA adapter
+application. The default path is the candidate with batch-1 fused delta/add
+enabled. The disabled row uses `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+
+| shape | batch | default fast | disabled fast | fallback | default vs disabled |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MLP gate/up `2560 -> 9216`, rank 16 | 1 | `1.280 ms` | `1.520 ms` | `1.690 ms` | `15.8%` faster |
+| MLP down `9216 -> 2560`, rank 16 | 1 | `1.141 ms` | `1.753 ms` | `2.033 ms` | `34.9%` faster |
+| MLP gate/up `2560 -> 9216`, rank 16 | 4 | `2.604 ms` | `3.503 ms` | `140.363 ms` | `25.7%` faster |
+| MLP down `9216 -> 2560`, rank 16 | 4 | `2.491 ms` | `3.950 ms` | `153.665 ms` | `36.9%` faster |
+
+The full-path numerical checks matched the previous Metal LoRA tolerances:
+gate/up rows were exact, and down-projection rows had
+`max_abs_diff=1.5625e-2` with mean diff at most `6.1035156e-5`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+  - passed for batch `1`, `2`, and `4`
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed with default and with `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda`
+  - blocked by local environment: `nvcc` is not installed, so `cudarc` and
+    `candle-kernels` build scripts fail before checking Kiln source
+- `git diff --check`
+
+### Artifacts
+
+- `e421_lora_delta_add_batch1_parity.log`
+- `e421_lora_delta_add_batch1_bench.log`
+- `e421_lora_linear_batch1_parity.log`
+- `e421_lora_linear_batch1_default_bench.log`
+- `e421_lora_linear_batch1_delta_disabled_bench.log`
+- `e421_lora_batch1_fmt_check.log`
+- `e421_lora_batch1_metal_check.log`
+- `e421_lora_batch1_vulkan_check.log`
+- `e421_lora_batch1_server_metal_check.log`
+- `e421_lora_batch1_cuda_check.log`
+- `e421_lora_batch1_diff_check.log`
+
+### Decision
+
+Accepted. This is a narrowly gated LoRA/no-LoRA improvement for serial
+`batch=1` decode without changing the no-LoRA path, and it keeps the existing
+decode-batch LoRA win. Non-Metal runtime code is unchanged; Vulkan type-checks,
+and CUDA could not be checked on this host because the CUDA toolkit is absent.
