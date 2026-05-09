@@ -1,0 +1,23 @@
+E472 rejected Metal transposed GEMV batch-3 row-triple tile8 unroll2.
+
+Candidate:
+- Temporarily added KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8_UNROLL2=1.
+- Temporarily threaded an unroll2 flag into the dedicated
+  kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16 kernel.
+- The candidate used stride 64 in the vector-load-safe loop and accumulated
+  row+32 inside the same iteration.
+
+Validation:
+- cargo fmt --check passed before and after reverting.
+- cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture passed.
+
+Synthetic Qwen3.5 batch-3 transposed GEMV A/B:
+- mlp_down_proj: candidate 1121.958 us vs rollback 1022.104 us, 9.77% slower.
+- gdn_out_proj: candidate 434.556 us vs rollback 533.552 us, 18.55% faster.
+- attn_output: candidate 386.273 us vs rollback 328.156 us, 17.71% slower.
+- attn_qkv_like: candidate 468.767 us vs rollback 479.756 us, 2.29% faster.
+- All batch-3 rows reported exact BF16 diffs in the benchmark output.
+
+Decision:
+- Rejected and reverted. The target MLP down-projection shape regressed, and
+  the smaller-shape wins do not justify changing the shared row-triple kernel.

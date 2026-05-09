@@ -2259,3 +2259,12 @@
   `row_triple_fast_exp` `1851.871 us` versus rollback `row_triple`
   `1845.058 us`, `0.37%` slower. No endpoint A/B was run. Source was reverted;
   keep E466's accepted row-triple path.
+- 2026-05-09 E472: Rejected a batch-3-only transposed GEMV row-triple tile8
+  unroll2 mode. The temporary
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8_UNROLL2=1` guard
+  controlled a stride-64 vector-load loop that accumulated `row + 32` inside
+  the dedicated row-triple kernel. Focused parity passed, but the target
+  `mlp_down_proj` batch `3` shape regressed: candidate `1121.958 us` versus
+  rollback `1022.104 us`, `9.77%` slower. `gdn_out_proj` improved, but
+  `attn_output` also regressed, so the shared kernel change was rejected and
+  reverted.

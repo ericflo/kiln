@@ -20393,3 +20393,58 @@ improve.
 
 Rejected and reverted. Keep E466's accepted batch-3 row-triple MLP gate/up
 path with the regular sigmoid expression.
+
+## E472 - Rejected Batch-3 Transposed GEMV Row-Triple Tile8 Unroll2
+
+### Hypothesis
+
+E470 ranks `mlp:down_proj` second after MLP gate/up. That projection uses the
+shared batch transposed GEMV path, where E464 added a dedicated batch-3
+row-triple tile8 kernel. The current row-triple kernel has each SIMD lane walk
+the reduction dimension by `32`; test whether unrolling to consume `row + 32`
+inside the same loop iteration reduces loop overhead for batch-3 tile8 shapes.
+
+### Candidate
+
+Temporarily added rollback env
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8_UNROLL2=1` and
+threaded an `unroll2` constant into
+`kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16`. The candidate kept the
+same output mapping and accumulation order per row but used a stride-`64` loop
+in the vector-load-safe path, accumulating `row` and `row + 32` before the next
+iteration. The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture`
+
+Qwen3.5 batch transposed GEMV shape A/B with warmup `5`, iters `20`:
+
+| label | candidate policy | candidate batch-3 fused | rollback policy | rollback batch-3 fused | result |
+| --- | --- | ---: | --- | ---: | --- |
+| `mlp_down_proj` | row_triple_tile8_unroll2 | `1121.958 us` | row_triple_tile8 | `1022.104 us` | rejected, `9.77%` slower |
+| `gdn_out_proj` | row_triple_tile8_unroll2 | `434.556 us` | row_triple_tile8 | `533.552 us` | `18.55%` faster |
+| `attn_output` | row_triple_tile8_unroll2 | `386.273 us` | row_triple_tile8 | `328.156 us` | `17.71%` slower |
+| `attn_qkv_like` | row_triple_tile8_unroll2 | `468.767 us` | row_triple_tile8 | `479.756 us` | `2.29%` faster |
+
+All batch-3 rows reported exact BF16 diffs. Other batch rows use the same policy
+in both arms and are treated as same-path timing noise. No endpoint A/B was run
+because the main target shape (`mlp_down_proj`) regressed.
+
+### Artifacts
+
+- `e472_transposed_rowtriple_tile8_unroll2_b3_candidate.diff`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_fmt_initial.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_fmt.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_parity.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_shapes_default_w5_i20.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_shapes_disabled_w5_i20.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_fmt_reverted.log`
+- `e472_transposed_rowtriple_tile8_unroll2_b3_summary.txt`
+
+### Decision
+
+Rejected and reverted. Keep E464's accepted row-triple tile8 batch-3 transposed
+GEMV kernel.
