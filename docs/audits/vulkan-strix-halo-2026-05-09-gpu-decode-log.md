@@ -5289,12 +5289,82 @@ Verdict:
   `matmul_prep`, and broader GDN residency/fusion. Do not spend time on
   `slice_inputs` or `cat_out`.
 
+### 2026-05-09 A094: Current Profile After A093
+
+Purpose:
+- Re-profile serial Vulkan after A093 changed single-token F32 GDN recurrence
+  from fallback to the Vulkan backend recurrent-step path.
+- Include current MLP, GDN, full-attention, Vulkan MLP-kernel, and Vulkan
+  GDN-in-proj inner-stage timers in one measured run.
+- Review recent Metal row-policy work before selecting a follow-up target.
+
+Command:
+- `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 KILN_PROFILE_MLP_STAGES=1 KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1 KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 97 --quiet`
+
+Evidence:
+- Profile run reported backend `vulkan` on AMD Radeon 8060S Graphics
+  (RADV_STRIX_HALO), token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`, prefill
+  `1040.499152ms`, mean ITL `83.173244ms`, p50 ITL `82.222157ms`, p99 ITL
+  `92.504914ms`, and 9 generated tokens.
+- Measured-pass prefill buckets:
+  - MLP fused `231.962ms`.
+  - GDN recurrent `217.895ms`.
+  - GDN conv `154.415ms`.
+  - GDN in-proj `122.372ms`.
+  - Full-attn QKV `96.645ms`.
+- Measured-pass decode buckets:
+  - MLP fused `240.587ms`.
+  - GDN in-proj `99.970ms`.
+  - GDN recurrent `72.924ms`.
+  - GDN out-proj `44.351ms`.
+  - GDN gated-norm `39.852ms`.
+  - GDN gates `33.284ms`.
+  - Full-attn QKV `26.572ms`.
+- Vulkan MLP inner split:
+  - Batch=64 total `231.017ms`: gate/up dispatch `133.264ms`, down dispatch
+    `84.946ms`, upload_x `4.510ms`, readback `4.385ms`.
+  - Batch=1 total `235.588ms`: gate/up dispatch `119.961ms`, down dispatch
+    `76.384ms`, upload_x `14.642ms`, readback `11.470ms`.
+- Vulkan GDN in-proj inner split:
+  - Batch=64 total `121.372ms`: record/submit/wait `100.502ms`,
+    read_host_visible `11.925ms`.
+  - Batch=1 total `95.853ms`: record/submit/wait `83.952ms`,
+    read_host_visible `1.188ms`.
+- GDN recurrent inner split:
+  - Prefill: `chunk_scan` `71.922ms`, `matmul_prep` `56.014ms`,
+    `chunk_prep` `52.576ms`, `state_update` `33.868ms`.
+  - Decode: `single_token_backend_step` `71.471ms`,
+    `single_token_precopy` `0.191ms`.
+- Recent Metal E441-E443 notes were checked for inspiration. They confirm
+  current row-pair/row-quad policies for small batch transposed-GEMV and reject
+  noisy rowwise exceptions, so they do not justify a direct Vulkan rowwise
+  selector exception for this serial profile.
+- Raw log:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a094-current-post-f32-recurrent-profile.log`.
+- Durable aggregate summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a094-current-post-f32-recurrent-profile-summary.txt`.
+
+Verdict:
+- Keep as target-selection evidence. No source change.
+- Next serial decode targets are MLP fused first, then GDN in-proj, then the
+  now-GPU-routed GDN recurrent step.
+- Next prefill targets are MLP fused and GDN recurrent. For recurrent prefill,
+  target `chunk_scan`, `chunk_prep`, `matmul_prep`, or broader residency/fusion
+  rather than `slice_inputs`/`cat_out`.
+
 ## Current Open Work
 
 - After A093, serial F32 GDN decode recurrence is GPU-routed on Vulkan via the
   backend recurrent-step path. Re-profile before further serial decode target
   selection; the prior A092 `single_token_fallback` bucket is no longer the
   active shape.
+- A094 is the current post-A093 serial profile: decode is led by MLP fused
+  `240.587ms`, GDN in-proj `99.970ms`, and GDN recurrent `72.924ms`; prefill
+  is led by MLP fused `231.962ms`, GDN recurrent `217.895ms`, GDN conv
+  `154.415ms`, and GDN in-proj `122.372ms`. Recent Metal row-policy work does
+  not justify a direct rowwise exception; target Vulkan MLP compute, GDN
+  in-proj submit/movement, or recurrent prefill inner work instead.
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads, but do not do this by
   mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
@@ -5429,6 +5499,11 @@ Verdict:
   (`71.461ms`) instead of `single_token_fallback`. Re-profile before picking
   the next serial decode target; prefill recurrent targets remain
   `chunk_scan`, `chunk_prep`, `matmul_prep`, or broader residency/fusion.
+- A094 refreshes the target set after A093: serial decode is again MLP-led,
+  followed by GDN in-proj and recurrent; prefill remains MLP/GDN-recurrent led.
+  Recent Metal E441-E443 row-policy measurements support keeping row-pair/
+  row-quad there and do not provide a clean rowwise exception to mirror into
+  Vulkan.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
