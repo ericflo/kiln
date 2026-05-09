@@ -81,6 +81,7 @@ before or with each accepted change and each measured rejection.
 | A071 | Refresh current Vulkan profile after A070 and recent Metal work. | Profiled current `main` with full-attn, GDN, MLP, paged-layer timers, and token logging. Backend JSON reported `vulkan` on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, and the measured run emitted non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. Profiling-heavy latency was `2325.135ms` prefill / `120.371ms` mean ITL. Top prefill concrete buckets were `mlp:fused` `916.453ms`, `gdn:recurrent` `315.745ms`, `gdn:in_proj` `254.924ms`, `gdn:conv` `222.692ms`, and full-attn `qkv_proj` `181.910ms`. Short decode profile kept `mlp:fused` first, then GDN recurrent/in-proj. | Keep as target-selection evidence only; no source change. Next Vulkan work should target MLP boundary/data movement or residency-level GDN recurrent/in-proj/conv changes. Recent Metal MLP pointwise and GDN combined-projection wins do not directly map to the current Vulkan bottleneck shape. |
 | A072 | Reconfirm current Vulkan server visible-text correctness. | Started `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 ./target/release/kiln serve`; server log showed Vulkan GPU selection, `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, decode weight prewarm, and background inference prewarm complete. With `chat_template_kwargs: {"enable_thinking": false}`, direct chat returned `content == "blue green"`, streaming chat deltas reconstructed to `red yellow`, and `/v1/completions/batch` returned `blue green`, `red yellow`, `north south`, and `silver gold`; all requests were HTTP 200 and batch finish reasons were `stop`. | Keep as endpoint correctness evidence. Current `main` is GPU-routed and visible text is not empty when callers use the real template config. No CUDA/Metal/Vulkan source paths changed. |
 | A073 | Label and profile standard full-attention prefill fallback stages. | Added profile-only labels around the standard full-attention prefill fallback path. The measured Vulkan run kept the same non-empty token IDs and reported `2258.407ms` prefill / `96.489ms` mean ITL. Newly exposed `seq_len=64` full-attn fallback internals were small: `prefill_scores` `6.368ms`, `prefill_mask` `1.446ms`, `prefill_softmax` `2.281ms`, `prefill_weighted_sum` `3.178ms`, `prefill_gqa_expand` `0.640ms`, and `prefill_output_layout` `0.516ms`, about `14.429ms` total across all 8 full-attn layers. Full-attn `qkv_proj` was `183.112ms` and `o_proj` `46.860ms`; MLP/GDN buckets remained much larger. | Keep the profile labels. Do not prioritize a Metal E412-style Vulkan full-SDPA prefill port for the current 64-token Strix Halo shape; focus next on MLP boundary/data movement or GDN in-proj/recurrent/conv residency/transfer shape. CUDA/Metal source behavior unchanged; local feature checks remain environment-blocked. |
+| A074 | Split Vulkan MLP fused bucket into inner dispatcher stages. | Added profile-only `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` timing in the Vulkan MLP dispatcher. The measured Vulkan run kept non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]` and reported `2303.108ms` prefill / `95.160ms` mean ITL. Measured-pass `batch=64` MLP inner total was `861.116ms` / `32` calls: `gate_up_dispatch` `643.090ms`, `down_dispatch` `130.483ms`, `readback` `75.811ms`, and `upload_x` only `7.228ms`. A no-profile rebuilt server smoke selected Vulkan, enabled the decode batcher, and returned direct chat `content == "blue green"` with `chat_template_kwargs: {"enable_thinking": false}`. | Keep the profile-only instrumentation. MLP prefill is gate/up compute dominated, not x-upload dominated; next MLP work should target gate/up prefill shader shape, weight format, or broader layer-boundary residency. CUDA/Metal source paths are untouched; local feature checks remain environment-blocked. |
 
 Additional validation after rejected A069:
 
@@ -129,6 +130,23 @@ Additional validation after A073:
 - `cargo check -p kiln-model`
 - `cargo check -p kiln-model --features vulkan`
 - `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo check -p kiln-model --features cuda` attempted and blocked by missing
+  `nvcc`.
+- `cargo check -p kiln-model --features metal` attempted and blocked because
+  `objc2` requires an Apple target.
+
+Additional validation after A074:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- No-profile server smoke returned direct chat `content == "blue green"` on
+  backend `vulkan`, with `kiln_requests_total{status="ok"} 1`,
+  `kiln_requests_total{status="error"} 0`, and
+  `kiln_decode_batcher_enabled 1`.
 - `cargo check -p kiln-model --features cuda` attempted and blocked by missing
   `nvcc`.
 - `cargo check -p kiln-model --features metal` attempted and blocked because

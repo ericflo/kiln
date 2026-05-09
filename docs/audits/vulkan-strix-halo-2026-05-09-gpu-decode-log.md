@@ -21,8 +21,8 @@ were taken while the Vulkan path was producing unusable token IDs.
 - Host GPU: AMD Radeon 8060S Graphics (RADV_STRIX_HALO), 98304 MB VRAM from
   Linux DRM sysfs.
 - Model: local `Qwen3.5-4B`.
-- Branch: `codex/vulkan-gpu-decode-correctness`.
-- PR: `https://github.com/ericflo/kiln/pull/1001`.
+- Branch: `main` for A074 and later follow-up work.
+- Earlier PR: `https://github.com/ericflo/kiln/pull/1001`.
 - Base as of A011: `origin/main` at
   `459162855b5cb00265e53a44ed1c8bce642bcde2`
   (`fix(metal): drop &mut from paged_kv_write_token_major helpers (#1002)`).
@@ -3685,6 +3685,89 @@ Verdict:
 - The next Vulkan work should stay focused on MLP boundary/data movement and
   GDN in-proj/recurrent/conv residency or transfer shape.
 
+### 2026-05-09 A074: Split Vulkan MLP Inner Stages
+
+Goal:
+- Split the large `mlp_stage:fused` Vulkan prefill bucket from A071/A073 into
+  CPU extraction/upload, Vulkan buffer creation, gate/up dispatch, down
+  dispatch, readback, and tensor reconstruction before choosing the next MLP
+  optimization.
+
+Change:
+- Added profile-only Vulkan MLP dispatcher timing behind
+  `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`.
+- The new rows use the `kiln_profile_vulkan_mlp_kernel_stage` prefix and cover
+  `extract_x`, `create_x_buffer`, `upload_x`, `create_work_buffers`,
+  `gate_up_shader`, `gate_up_dispatch`, `down_shader`, `down_dispatch`,
+  `readback`, `create_tensor`, and `total`.
+- With the env var unset, normal runtime behavior is unchanged apart from one
+  cached boolean check in the Vulkan MLP dispatcher.
+
+Evidence:
+- The profiled run reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- The measured run emitted non-empty token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Profiling-heavy latency was `2303.107761ms` prefill,
+  `95.160011875ms` mean ITL, `95.223019ms` p50, and `96.153489ms` p99 for
+  `9` generated tokens.
+- The raw profile includes warmup and measured passes; the following aggregates
+  are from the measured pass only.
+- Top prefill `seq_len=64` buckets:
+  - `paged_layer:linear`: `1826.282ms`, `24` calls, `76.095083ms` avg.
+  - `mlp_stage:fused`: `862.122ms`, `32` calls, `26.941313ms` avg.
+  - `paged_layer:full`: `470.671ms`, `8` calls, `58.833875ms` avg.
+  - `gdn_stage:in_proj`: `417.114ms`, `24` calls, `17.379750ms` avg.
+  - `gdn_stage:recurrent`: `260.493ms`, `24` calls, `10.853875ms` avg.
+  - `full_attn_stage:qkv_proj`: `178.741ms`, `8` calls, `22.342625ms` avg.
+- Vulkan MLP inner buckets for `batch=64`:
+  - `total`: `861.116ms`, `32` calls, `26.909875ms` avg.
+  - `gate_up_dispatch`: `643.090ms`, `32` calls, `20.096563ms` avg.
+  - `down_dispatch`: `130.483ms`, `32` calls, `4.077594ms` avg.
+  - `readback`: `75.811ms`, `32` calls, `2.369094ms` avg.
+  - `upload_x`: `7.228ms`, `32` calls, `0.225875ms` avg.
+  - `extract_x`, buffer creation, tensor creation, and shader lookup rows were
+    all below `1ms` total each except work-buffer creation at `0.696ms`.
+- A no-profile rebuilt server smoke on port `18421` selected the same Vulkan
+  GPU, enabled the live greedy decode batcher with backend `vulkan`, and
+  returned direct chat `content == "blue green"` for
+  `Reply with exactly: blue green` using
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Metrics after the server smoke showed `kiln_requests_total{status="ok"} 1`,
+  `kiln_requests_total{status="error"} 0`, and
+  `kiln_decode_batcher_enabled 1`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-vulkan-mlp-inner-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-vulkan-mlp-inner-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-server-correctness.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-metrics-snippet.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a074-vulkan-mlp-inner-profile-*.log`
+
+Validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- CUDA check attempted but blocked by missing `nvcc`.
+- Metal check attempted but blocked because `objc2` requires an Apple target.
+
+Verdict:
+- Keep the profile-only Vulkan MLP inner-stage instrumentation.
+- The current MLP prefill bucket is compute dominated: `gate_up_dispatch`
+  accounts for about `643.090ms / 861.116ms`, or roughly `74.7%`, of the
+  measured MLP inner total.
+- Do not expect a small x-upload cleanup to solve the MLP prefill bucket;
+  `upload_x` is only `7.228ms` total across all MLP layers in the measured
+  prefill pass.
+- The next useful MLP work needs a gate/up prefill compute-shape or weight
+  format improvement, or a broader layer-boundary residency plan. Readback is
+  visible at `75.811ms`, but it is secondary until gate/up improves.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3724,6 +3807,13 @@ Verdict:
   only about `14.429ms` across all full-attention layers, while QKV projection,
   MLP, and GDN buckets are much larger. Revisit only for longer prompts or
   after projection/GDN work moves the bottleneck.
+- A074 shows the current Vulkan MLP prefill bucket is mostly gate/up compute,
+  not x upload or host extraction: measured `batch=64` MLP inner totals were
+  `861.116ms`, with `643.090ms` in `gate_up_dispatch`, `130.483ms` in
+  `down_dispatch`, `75.811ms` in readback, and only `7.228ms` in `upload_x`.
+  Next MLP work should target gate/up prefill shader shape, weight format, or
+  broader layer-boundary residency; do not spend the next attempt on a small
+  x-upload-only cleanup.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

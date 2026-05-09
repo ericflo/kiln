@@ -5,6 +5,41 @@ use ash::vk;
 use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
+
+fn env_truthy_for_profile(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_vulkan_mlp_kernel_stage_profile(
+    stage: &str,
+    batch: usize,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+    bf16_weights: bool,
+    use_rows2: bool,
+    start: Option<Instant>,
+) {
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={bf16_weights} rows2={use_rows2} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
 
 fn gdn_decode_host_visible_state_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -2969,21 +3004,46 @@ fn dispatch_mlp_decode_cached_impl(
         x_dims
     );
     let batch = x_dims[0];
+    let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
+    let use_rows2 = use_prefill_row_pair_matmul(batch);
+    let total_start = profile_stages.then(Instant::now);
+    let stage_start = profile_stages.then(Instant::now);
     let x_data = extract_tensor_bytes(x)?.0;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "extract_x",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "mlp_decode: x buffer has {} bytes, expected {}",
         x_data.len(),
         batch * hidden * 4
     );
-    let use_rows2 = use_prefill_row_pair_matmul(batch);
     anyhow::ensure!(
         !bf16_weights || !use_rows2,
         "mlp_decode packed BF16 weights currently support batch below row-pair threshold, got {batch}"
     );
+    let stage_start = profile_stages.then(Instant::now);
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create mlp_decode x buffer")?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "create_x_buffer",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
     {
+        let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
             device,
@@ -2994,8 +3054,19 @@ fn dispatch_mlp_decode_cached_impl(
             &x_data,
         )
         .context("failed to upload mlp_decode x buffer")?;
+        finish_vulkan_mlp_kernel_stage_profile(
+            "upload_x",
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+            bf16_weights,
+            use_rows2,
+            stage_start,
+        );
     }
 
+    let stage_start = profile_stages.then(Instant::now);
     let hidden_buf = VulkanBuffer::create_device_local(
         device,
         device_local_mt,
@@ -3005,6 +3076,16 @@ fn dispatch_mlp_decode_cached_impl(
     let out_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
             .context("failed to create mlp_decode output buffer")?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "create_work_buffers",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
 
     let gate_up_glsl = if bf16_weights {
         if batch == 1 {
@@ -3034,7 +3115,18 @@ fn dispatch_mlp_decode_cached_impl(
             "/csrc/shaders/mlp_gate_up_decode_batched.comp"
         )
     };
+    let stage_start = profile_stages.then(Instant::now);
     let gate_up_spirv = crate::pipeline::ShaderPipeline::compile_shader(gate_up_glsl)?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "gate_up_shader",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
     let mut gate_up_push = vec![hidden as u32, intermediate as u32];
     if batch > 1 {
         gate_up_push.push(batch as u32);
@@ -3045,6 +3137,7 @@ fn dispatch_mlp_decode_cached_impl(
         up_weight_t.handle(),
         hidden_buf.handle(),
     ];
+    let stage_start = profile_stages.then(Instant::now);
     run_compute_pipeline(
         vk_device,
         &gate_up_spirv,
@@ -3060,6 +3153,16 @@ fn dispatch_mlp_decode_cached_impl(
         },
     )
     .context("mlp_decode gate/up kernel failed")?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "gate_up_dispatch",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
 
     let linear_glsl = if bf16_weights {
         if batch == 1 {
@@ -3089,7 +3192,18 @@ fn dispatch_mlp_decode_cached_impl(
             "/csrc/shaders/linear_decode_batched.comp"
         )
     };
+    let stage_start = profile_stages.then(Instant::now);
     let linear_spirv = crate::pipeline::ShaderPipeline::compile_shader(linear_glsl)?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "down_shader",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
     let mut linear_push = vec![intermediate as u32, out_dim as u32];
     if batch > 1 {
         linear_push.push(batch as u32);
@@ -3099,6 +3213,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_weight_t.handle(),
         out_buf.handle(),
     ];
+    let stage_start = profile_stages.then(Instant::now);
     run_compute_pipeline(
         vk_device,
         &linear_spirv,
@@ -3114,19 +3229,63 @@ fn dispatch_mlp_decode_cached_impl(
         },
     )
     .context("mlp_decode down kernel failed")?;
+    finish_vulkan_mlp_kernel_stage_profile(
+        "down_dispatch",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
 
     let out_data = {
+        let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
+        let out_data = VulkanBuffer::read_back_with_command_pool(
             device,
             host_visible_mt,
             queue,
             *command_pool,
             &out_buf,
         )
-        .context("failed to read back mlp_decode output")?
+        .context("failed to read back mlp_decode output")?;
+        finish_vulkan_mlp_kernel_stage_profile(
+            "readback",
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+            bf16_weights,
+            use_rows2,
+            stage_start,
+        );
+        out_data
     };
-    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+    let stage_start = profile_stages.then(Instant::now);
+    let out = create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32);
+    finish_vulkan_mlp_kernel_stage_profile(
+        "create_tensor",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        stage_start,
+    );
+    finish_vulkan_mlp_kernel_stage_profile(
+        "total",
+        batch,
+        hidden,
+        intermediate,
+        out_dim,
+        bf16_weights,
+        use_rows2,
+        total_start,
+    );
+    out
 }
 
 /// Dispatch fused single-token GDN gates + recurrent update + gated RMSNorm.
