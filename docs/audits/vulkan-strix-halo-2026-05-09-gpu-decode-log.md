@@ -7077,3 +7077,58 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-release-server-build.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-comparison-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-final2-comparison-summary.json`
+
+### 2026-05-09 A117: Recheck Vulkan Recurrent Parallel-Reduce Policy At Live Batch 3
+
+Scope:
+
+- No source change.
+- Rechecked the current Vulkan GDN recurrent-step parallel-reduce default after
+  A115 changed multi-row recurrent state to device-local memory.
+- Rollback arm:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`.
+
+Validation:
+
+- Release Vulkan server build passed:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-release-server-build.log`.
+- The first non-rerun harness attempt used the old top-level health field and
+  was aborted before any measured requests. The measured rerun uses the
+  current `/health` `checks[]` shape.
+- Both measured arms waited for background inference prewarm, selected Vulkan,
+  and used `chat_template_kwargs: {"enable_thinking": false}` with
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and
+  `KILN_PREFIX_CACHE_ENABLED=0`.
+
+Live endpoint A/B:
+
+- Shape: eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`.
+- Both arms returned 8/8 HTTP 200 responses with exact visible text:
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Both arms had identical counters:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `runner_busy_jobs=0`, `jobs_failed=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+
+Wall-time evidence:
+
+- Default parallel reduce: `18.736848328000633s`.
+- Rollback serial reduce: `18.71155272499891s`.
+- Rollback was only `0.135%` faster, which is inside endpoint noise.
+
+Decision:
+
+- No source change. Keep the existing parallel-reduce default.
+- This post-A115 live batch-3 shape is effectively tied, and earlier A059/A067
+  evidence still supports the guarded default in serial/resident decode shapes.
+- Do not spend more time simply toggling between the current serial and
+  parallel recurrent shaders. The next useful recurrent change needs a broader
+  state/gate/output residency or layout change.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-comparison-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-default-parallel-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-rollback-serial-reduce-summary.json`

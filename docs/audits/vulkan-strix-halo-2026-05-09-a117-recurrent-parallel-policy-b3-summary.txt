@@ -1,0 +1,59 @@
+2026-05-09 A117: Recheck Vulkan Recurrent Parallel-Reduce Policy At Live Batch 3
+
+Scope:
+- No source change.
+- Rechecked the existing Vulkan GDN recurrent-step parallel-reduce default
+  against its existing rollback env after A115 changed multi-row recurrent
+  state to device-local memory.
+- Rollback arm:
+  KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1.
+
+Validation:
+- Release Vulkan server build passed:
+  docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-release-server-build.log
+- Both live arms selected Vulkan, waited for background inference prewarm, and
+  used:
+  KILN_DECODE_BATCH_WAIT_US=5000
+  KILN_DECODE_BATCH_MAX=3
+  KILN_PREFIX_CACHE_ENABLED=0
+  chat_template_kwargs: {"enable_thinking": false}
+- The first harness attempt used the old top-level health field and was
+  aborted before measured requests. The rerun uses the current checks[] health
+  shape.
+
+Live endpoint evidence:
+- Shape: eight distinct streaming chat prompts, max_tokens=16, temperature=0.
+- Default parallel arm:
+  - Wall: 18.736848328000633s.
+  - HTTP 200: 8/8.
+  - Visible text for every stream:
+    "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+  - Counters: requests_ok=8, requests_error=0, tokens_generated=128,
+    jobs_submitted=120, runner_busy_jobs=0, jobs_failed=0, worker_batches=41,
+    batcher_rows=120, max_batch_after=3.
+- Rollback serial-reduce arm:
+  - Wall: 18.71155272499891s.
+  - HTTP 200: 8/8.
+  - Visible text for every stream:
+    "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+  - Counters: requests_ok=8, requests_error=0, tokens_generated=128,
+    jobs_submitted=120, runner_busy_jobs=0, jobs_failed=0, worker_batches=41,
+    batcher_rows=120, max_batch_after=3.
+
+Decision:
+- No code change. The current default and rollback are effectively tied in
+  this post-A115 live batch-3 shape. Rollback was only 0.135% faster, which is
+  well inside endpoint noise.
+- Keep the existing parallel-reduce default because earlier A059/A067 evidence
+  showed small serial/resident wins and this recheck does not justify changing
+  the default.
+- Next useful recurrent work still needs a broader state/gate/output residency
+  or layout change, not just switching back to the serial per-output-column
+  recurrent shader at batch 3.
+
+Artifacts:
+- docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-comparison-summary.json
+- docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-default-parallel-summary.json
+- docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-rollback-serial-reduce-summary.json
+- docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-default-parallel-server.log
+- docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-rollback-serial-reduce-server.log

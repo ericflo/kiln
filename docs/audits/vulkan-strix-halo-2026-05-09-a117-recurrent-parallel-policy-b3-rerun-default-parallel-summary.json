@@ -1,0 +1,108 @@
+{
+  "all_expected_text": true,
+  "arm": "default-parallel",
+  "case": "vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-default-parallel",
+  "env_extra": {},
+  "http_ok": 8,
+  "metrics_after": {
+    "batcher_rows": 120.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 120.0,
+    "max_batch": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 128.0,
+    "worker_batches": 41.0
+  },
+  "metrics_before": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch": 0.0,
+    "requests_error": 0.0,
+    "requests_ok": 0.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 0.0,
+    "worker_batches": 0.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 120.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 120.0,
+    "max_batch": 3.0,
+    "max_batch_after": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 128.0,
+    "worker_batches": 41.0
+  },
+  "results": [
+    {
+      "elapsed_s": 18.533750939997844,
+      "error": null,
+      "events": 18,
+      "index": 0,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.532276115001878,
+      "error": null,
+      "events": 18,
+      "index": 1,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.720221341005526,
+      "error": null,
+      "events": 18,
+      "index": 2,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.233954776995233,
+      "error": null,
+      "events": 18,
+      "index": 3,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.719859961987822,
+      "error": null,
+      "events": 18,
+      "index": 4,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 15.505459145002533,
+      "error": null,
+      "events": 18,
+      "index": 5,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 15.808486339999945,
+      "error": null,
+      "events": 18,
+      "index": 6,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.531904046001728,
+      "error": null,
+      "events": 18,
+      "index": 7,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    }
+  ],
+  "wall_s": 18.736848328000633
+}
