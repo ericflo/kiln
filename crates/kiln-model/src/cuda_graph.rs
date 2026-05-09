@@ -37,8 +37,8 @@ use candle_core::Tensor;
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;
 use std::sync::{
-    Mutex, TryLockError,
-    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use tracing;
 
@@ -164,13 +164,27 @@ pub struct CudaGraphRunners {
 }
 
 enum CudaGraphSlots {
-    Single(Mutex<CudaGraphRunner>),
-    Pool(CudaGraphPool),
+    Single(Arc<Mutex<CudaGraphRunner>>),
+    Pool(Arc<CudaGraphPool>),
 }
 
 struct CudaGraphPool {
     slots: Vec<Mutex<CudaGraphRunner>>,
-    next_slot: AtomicUsize,
+    leased: Vec<AtomicBool>,
+}
+
+/// Stable ownership of one CUDA graph runner slot for a decode loop.
+pub struct CudaGraphRunnerLease {
+    slot: CudaGraphRunnerLeaseSlot,
+}
+
+enum CudaGraphRunnerLeaseSlot {
+    Single(Arc<Mutex<CudaGraphRunner>>),
+    Pool {
+        pool: Arc<CudaGraphPool>,
+        slot_idx: usize,
+    },
+    Eager,
 }
 
 impl CudaGraphRunners {
@@ -179,20 +193,23 @@ impl CudaGraphRunners {
         let disable_pool = per_stream_graph_disabled();
         let slots = if runner_enabled && !disable_pool {
             let slot_count = decode_parallelism();
-            tracing::info!(slots = slot_count, "per-stream CUDA graph runner pool enabled");
-            CudaGraphSlots::Pool(CudaGraphPool {
+            tracing::info!(
+                slots = slot_count,
+                "per-stream CUDA graph runner pool enabled"
+            );
+            CudaGraphSlots::Pool(Arc::new(CudaGraphPool {
                 slots: (0..slot_count)
                     .map(|_| Mutex::new(CudaGraphRunner::new(device, enabled)))
                     .collect(),
-                next_slot: AtomicUsize::new(0),
-            })
+                leased: (0..slot_count).map(|_| AtomicBool::new(false)).collect(),
+            }))
         } else {
             if runner_enabled && disable_pool {
                 tracing::info!(
                     "KILN_DISABLE_PER_STREAM_GRAPH=1; using legacy single CUDA graph runner"
                 );
             }
-            CudaGraphSlots::Single(Mutex::new(CudaGraphRunner::new(device, enabled)))
+            CudaGraphSlots::Single(Arc::new(Mutex::new(CudaGraphRunner::new(device, enabled))))
         };
 
         Self {
@@ -229,6 +246,38 @@ impl CudaGraphRunners {
         }
     }
 
+    pub fn lease(&self) -> CudaGraphRunnerLease {
+        match &self.slots {
+            CudaGraphSlots::Single(slot) => CudaGraphRunnerLease {
+                slot: CudaGraphRunnerLeaseSlot::Single(Arc::clone(slot)),
+            },
+            CudaGraphSlots::Pool(pool) => {
+                let slot_count = pool.slots.len();
+                for slot_idx in 0..slot_count {
+                    if pool.leased[slot_idx]
+                        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                        .is_ok()
+                    {
+                        return CudaGraphRunnerLease {
+                            slot: CudaGraphRunnerLeaseSlot::Pool {
+                                pool: Arc::clone(pool),
+                                slot_idx,
+                            },
+                        };
+                    }
+                }
+
+                tracing::debug!(
+                    slots = slot_count,
+                    "all CUDA graph runner slots leased; falling back to eager decode"
+                );
+                CudaGraphRunnerLease {
+                    slot: CudaGraphRunnerLeaseSlot::Eager,
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn decode_step_paged(
         &self,
@@ -242,8 +291,61 @@ impl CudaGraphRunners {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<candle_core::Tensor> {
-        match &self.slots {
-            CudaGraphSlots::Single(slot) => {
+        self.lease().decode_step_paged(
+            backend,
+            token_id,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            linear_state,
+            lora,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged_eager(
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<candle_core::Tensor> {
+        CudaGraphRunner::eager_forward(
+            backend,
+            token_id,
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            linear_state,
+            lora,
+        )
+    }
+}
+
+impl CudaGraphRunnerLease {
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged(
+        &self,
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<candle_core::Tensor> {
+        match &self.slot {
+            CudaGraphRunnerLeaseSlot::Single(slot) => {
                 let mut runner = slot
                     .lock()
                     .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
@@ -259,38 +361,11 @@ impl CudaGraphRunners {
                     lora,
                 )
             }
-            CudaGraphSlots::Pool(pool) => {
-                let slot_count = pool.slots.len();
-                let start = pool.next_slot.fetch_add(1, Ordering::Relaxed) % slot_count;
-                for offset in 0..slot_count {
-                    let slot_idx = (start + offset) % slot_count;
-                    match pool.slots[slot_idx].try_lock() {
-                        Ok(mut runner) => {
-                            return runner.decode_step_paged(
-                                backend,
-                                token_id,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_table,
-                                seq_len,
-                                linear_state,
-                                lora,
-                            );
-                        }
-                        Err(TryLockError::WouldBlock) => continue,
-                        Err(TryLockError::Poisoned(e)) => {
-                            tracing::warn!(slot = slot_idx, "CUDA graph runner slot poisoned: {e}");
-                            continue;
-                        }
-                    }
-                }
-
-                tracing::debug!(
-                    slots = slot_count,
-                    "all CUDA graph runner slots busy; falling back to eager decode"
-                );
-                CudaGraphRunner::eager_forward(
+            CudaGraphRunnerLeaseSlot::Pool { pool, slot_idx } => {
+                let mut runner = pool.slots[*slot_idx].lock().map_err(|e| {
+                    anyhow::anyhow!("failed to lock CUDA graph runner slot {slot_idx}: {e}")
+                })?;
+                runner.decode_step_paged(
                     backend,
                     token_id,
                     weights,
@@ -302,6 +377,25 @@ impl CudaGraphRunners {
                     lora,
                 )
             }
+            CudaGraphRunnerLeaseSlot::Eager => CudaGraphRunners::decode_step_paged_eager(
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
+            ),
+        }
+    }
+}
+
+impl Drop for CudaGraphRunnerLease {
+    fn drop(&mut self) {
+        if let CudaGraphRunnerLeaseSlot::Pool { pool, slot_idx } = &self.slot {
+            pool.leased[*slot_idx].store(false, Ordering::Release);
         }
     }
 }
@@ -1205,15 +1299,49 @@ mod tests {
     }
 
     #[test]
+    fn test_runner_pool_lease_owns_slot_until_drop() {
+        let runners = CudaGraphRunners {
+            enabled: true,
+            slots: CudaGraphSlots::Pool(Arc::new(CudaGraphPool {
+                slots: (0..2)
+                    .map(|_| Mutex::new(CudaGraphRunner::new(&Device::Cpu, false)))
+                    .collect(),
+                leased: (0..2).map(|_| AtomicBool::new(false)).collect(),
+            })),
+        };
+
+        let first = runners.lease();
+        let second = runners.lease();
+        let third = runners.lease();
+
+        assert!(matches!(
+            &first.slot,
+            CudaGraphRunnerLeaseSlot::Pool { slot_idx: 0, .. }
+        ));
+        assert!(matches!(
+            &second.slot,
+            CudaGraphRunnerLeaseSlot::Pool { slot_idx: 1, .. }
+        ));
+        assert!(matches!(&third.slot, CudaGraphRunnerLeaseSlot::Eager));
+
+        drop(first);
+        let fourth = runners.lease();
+        assert!(matches!(
+            &fourth.slot,
+            CudaGraphRunnerLeaseSlot::Pool { slot_idx: 0, .. }
+        ));
+    }
+
+    #[test]
     fn test_pool_invalidation_reaches_every_slot() {
         let runners = CudaGraphRunners {
             enabled: true,
-            slots: CudaGraphSlots::Pool(CudaGraphPool {
+            slots: CudaGraphSlots::Pool(Arc::new(CudaGraphPool {
                 slots: (0..3)
                     .map(|_| Mutex::new(CudaGraphRunner::new(&Device::Cpu, false)))
                     .collect(),
-                next_slot: AtomicUsize::new(0),
-            }),
+                leased: (0..3).map(|_| AtomicBool::new(false)).collect(),
+            })),
         };
 
         runners.invalidate();

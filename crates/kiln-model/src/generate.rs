@@ -20,7 +20,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
-use crate::cuda_graph::CudaGraphRunners;
+use crate::cuda_graph::{CudaGraphRunnerLease, CudaGraphRunners};
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_head, model_forward_paged,
@@ -147,6 +147,7 @@ pub struct PagedBatchedDecodeState {
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+    pub cuda_graph_lease: Option<CudaGraphRunnerLease>,
 }
 
 fn decode_buffer_max_batch() -> usize {
@@ -1904,6 +1905,11 @@ impl ModelRunner {
             allocated_blocks,
             prefill_duration,
             decode_duration: std::time::Duration::ZERO,
+            cuda_graph_lease: if self.cuda_graph.is_enabled() {
+                Some(self.cuda_graph.lease())
+            } else {
+                None
+            },
         })
     }
 
@@ -1929,10 +1935,6 @@ impl ModelRunner {
             .map(|state| state.block_table.clone())
             .collect();
         let sequence_lengths: Vec<usize> = states.iter().map(|state| state.seq_len).collect();
-        let mut linear_states: Vec<&mut LinearAttentionState> = states
-            .iter_mut()
-            .map(|state| &mut state.linear_state)
-            .collect();
 
         let started = std::time::Instant::now();
 
@@ -1954,6 +1956,10 @@ impl ModelRunner {
         if try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let result = if self.has_linear_attention_layers() {
+                let mut linear_states: Vec<&mut LinearAttentionState> = states
+                    .iter_mut()
+                    .map(|state| &mut state.linear_state)
+                    .collect();
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
                 self.decode_next_tokens_paged_contiguous_batch_greedy(
@@ -1990,7 +1996,11 @@ impl ModelRunner {
         } else {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if self.cuda_graph.is_enabled() && row_count == 1 {
-                let row = self.cuda_graph
+                let state = &mut states[0];
+                let lease = state
+                    .cuda_graph_lease
+                    .get_or_insert_with(|| self.cuda_graph.lease());
+                let row = lease
                     .decode_step_paged(
                         &*self.backend,
                         input_tokens[0],
@@ -1999,7 +2009,7 @@ impl ModelRunner {
                         pc_guard,
                         &block_tables[0],
                         sequence_lengths[0],
-                        &mut *linear_states[0],
+                        &mut state.linear_state,
                         self.active_lora.as_ref(),
                     )
                     .context("batched decode CUDA graph row failed")?;
@@ -2016,6 +2026,10 @@ impl ModelRunner {
                 };
                 vec![token]
             } else {
+                let mut linear_states: Vec<&mut LinearAttentionState> = states
+                    .iter_mut()
+                    .map(|state| &mut state.linear_state)
+                    .collect();
                 let hidden = model_forward_paged_batched_decode_hidden(
                     &*self.backend,
                     &input_tokens,
@@ -2684,6 +2698,7 @@ impl ModelRunner {
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
+        let cuda_graph_lease = self.cuda_graph.lease();
 
         let mut next_token = match prefill_source {
             PrefillSampleSource::GreedyToken(token) => token,
@@ -2766,7 +2781,7 @@ impl ModelRunner {
                 // concurrent requests can interleave on the next step.
                 let logits = {
                     let pc_guard = lock_paged_cache(paged_cache)?;
-                    self.cuda_graph.decode_step_paged(
+                    cuda_graph_lease.decode_step_paged(
                         &*self.backend,
                         next_token,
                         &self.weights,
@@ -3049,6 +3064,7 @@ impl ModelRunner {
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
+        let cuda_graph_lease = self.cuda_graph.lease();
 
         let mut next_token = match prefill_source {
             PrefillSampleSource::GreedyToken(token) => token,
@@ -3127,7 +3143,7 @@ impl ModelRunner {
                 token
             } else {
                 // Decode step: use CUDA graph runner (captures/replays when enabled)
-                let logits = self.cuda_graph.decode_step_paged(
+                let logits = cuda_graph_lease.decode_step_paged(
                     &*self.backend,
                     next_token,
                     &self.weights,
@@ -5230,6 +5246,7 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
+        let cuda_graph_lease = self.cuda_graph.lease();
 
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
@@ -5319,7 +5336,7 @@ impl ModelRunner {
                 token
             } else {
                 // Decode step: use CUDA graph runner
-                let logits = match self.cuda_graph.decode_step_paged(
+                let logits = match cuda_graph_lease.decode_step_paged(
                     &*self.backend,
                     next_token,
                     &self.weights,
