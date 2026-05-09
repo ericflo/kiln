@@ -17666,3 +17666,77 @@ is still led by MLP gate/up, MLP down-projection, and GDN input projection.
 Batch-only work should continue to use rollback-controlled synthetic benches,
 while serial endpoint work should prioritize these dominant projection stages
 before the smaller full-attention point kernels.
+
+## 2026-05-09 - E435 rejected dedicated Metal GDN in-proj serial kernel
+
+### Purpose
+
+Test whether the bs=1 GDN input-projection serial vector path benefits from
+the same isolation that helped MLP gate/up in E433. The candidate split the
+serial path out of the large shared GDN in-proj shader while leaving batch
+paths on the existing kernel.
+
+### Candidate
+
+- Added temporary `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_DEDICATED=1`.
+- Added temporary Metal kernel `kiln_gdn_in_proj_decode_serial_bf16`.
+- Selected the dedicated kernel only for bs=1 serial-vector-safe input
+  projection; batch `2/3/4/8` continued selecting the existing shared kernel.
+- Preserved the candidate diff as an artifact, then reverted runtime source
+  before documenting the rejected result.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_DEDICATED=1`
+- Counter-order disabled/default benchmark repeat
+- Longer `warmup=5`, `iters=30` default and disabled runs
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The candidate was numerically correct. The short 10-iteration pairs were noisy:
+the first pair favored the existing shared serial path, while the counter-order
+pair favored the dedicated kernel:
+
+| config | b1 | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| default dedicated | `1233.638 us` | `1585.546 us` | `2827.421 us` | `1841.621 us` | `2201.604 us` |
+| rollback shared | `1203.804 us` | `1791.233 us` | `2613.883 us` | `1794.362 us` | `2219.921 us` |
+| rollback shared rerun | `1377.029 us` | `1700.763 us` | `2761.442 us` | `1956.021 us` | `2254.262 us` |
+| default dedicated rerun | `1218.229 us` | `1712.125 us` | `2882.446 us` | `1854.204 us` | `2231.579 us` |
+
+The longer 30-iteration run gave the intended bs=1 signal to the existing
+shared serial branch:
+
+| config | b1 | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| default dedicated 30 iters | `1330.275 us` | `1595.517 us` | `2623.660 us` | `1696.185 us` | `2063.069 us` |
+| rollback shared 30 iters | `1253.375 us` | `1578.842 us` | `2602.186 us` | `1710.828 us` | `1979.707 us` |
+
+The only intended affected shape, bs=1, regressed from `1253.375 us` to
+`1330.275 us` in the longer run (`6.1%` slower). Batch timings are unrelated
+noise because those shapes did not select the temporary dedicated serial
+kernel.
+
+### Artifacts
+
+- `e435_gdn_in_proj_serial_dedicated_candidate.diff`
+- `e435_gdn_in_proj_serial_dedicated_parity.log`
+- `e435_gdn_in_proj_serial_dedicated_default.log`
+- `e435_gdn_in_proj_serial_dedicated_disabled.log`
+- `e435_gdn_in_proj_serial_dedicated_disabled_rerun.log`
+- `e435_gdn_in_proj_serial_dedicated_default_rerun.log`
+- `e435_gdn_in_proj_serial_dedicated_default_30iters.log`
+- `e435_gdn_in_proj_serial_dedicated_disabled_30iters.log`
+- `e435_gdn_in_proj_serial_dedicated_source_reverted.log`
+- `e435_gdn_in_proj_serial_dedicated_git_diff_check.log`
+
+### Decision
+
+Rejected. Keep the existing shared GDN in-proj shader for the bs=1 serial
+vector path. Splitting the identical serial math into a dedicated kernel did
+not produce a stable win and lost the longer bs=1 comparison, so the runtime
+source was reverted.

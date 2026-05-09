@@ -1888,3 +1888,10 @@
   full-attn `qkv_proj` `186.086 ms`, and GDN `gates_recur_gated_norm`
   `141.417 ms`. Keep serial source targeting focused on MLP gate/up/down and
   GDN input projection before smaller full-attention point kernels.
+- 2026-05-09 E435: Rejected a dedicated Metal GDN in-proj serial kernel. The
+  temporary `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_DEDICATED=1` candidate
+  passed focused parity, but same-source timings were mixed and the longer
+  `warmup=5`, `iters=30` bs=1 comparison favored the existing shared serial
+  branch: rollback shared `1253.375 us` versus dedicated `1330.275 us` (`6.1%`
+  slower). Runtime source was reverted; keep the current shared GDN in-proj
+  serial vector path.
