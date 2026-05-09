@@ -14298,3 +14298,80 @@ Same-binary improvement:
 Accepted for batched Qwen-class BF16 rank-16+ LoRA decode projections. This
 does not change serial bs=1 LoRA or small-rank/small-dimension adapters; those
 continue through the generic delta path. No CUDA/Vulkan source behavior changed.
+
+## 2026-05-09 E386 - Validate Metal LoRA decode delta on an active adapter endpoint
+
+### Goal
+
+Add serving-path evidence for E385. The E385 result was synthetic at the
+projection and linear-call level, so this run tested the same rollback toggle
+through the OpenAI-compatible streaming endpoint with an active LoRA adapter.
+
+### Method
+
+- Generated a temporary zero-valued PEFT adapter outside the repository at
+  `/tmp/kiln-e386-adapters/zero-r16-mlp`.
+- Adapter shape:
+  - BF16 rank `16`, `lora_alpha=16`
+  - all `32` Qwen3.5-4B layers
+  - MLP `gate_proj`, `up_proj`, and `down_proj`
+  - `192` tensors, `36,201,108` byte safetensors file
+- Committed only the adapter manifest, not the large generated binary.
+- Started `target/release/kiln serve` on Metal with:
+  - `KILN_ADAPTER_DIR=/tmp/kiln-e386-adapters`
+  - `KILN_DECODE_BATCH_WAIT_US=200`
+- Loaded the adapter once via `POST /v1/adapters/load`.
+- Ran a one-token active-adapter warmup outside the timed window.
+- Timed eight concurrent varied streaming `/v1/chat/completions` requests,
+  greedy `max_tokens=8`, each with `adapter="zero-r16-mlp"`.
+- Repeated the run with `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+
+The adapter is zero-valued so it preserves base-model behavior while forcing
+the active-adapter LoRA projection path. This is still synthetic adapter
+evidence, not a quality or output-shift test of a trained adapter.
+
+### Results
+
+Both runs loaded the adapter successfully and reported Metal backend readiness.
+Both timed windows had identical decode-batcher counters:
+
+- `64` generated tokens
+- `56` submitted decode jobs
+- `8` worker batches
+- `56` batcher rows
+- max observed batch `8`
+
+Endpoint wall time, lower is better:
+
+- Default Metal LoRA delta path: `9.386522s`
+- `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`: `11.110328s`
+
+Same-counters improvement: `15.5%` faster for the default Metal LoRA delta path.
+
+### Artifact
+
+- `e386_zero_lora_adapter_manifest.json`
+- `e386_zero_lora_endpoint_default_server.log`
+- `e386_zero_lora_endpoint_default_health.json`
+- `e386_zero_lora_endpoint_default_load.json`
+- `e386_zero_lora_endpoint_default_warmup.json`
+- `e386_zero_lora_endpoint_default_metrics_before.prom`
+- `e386_zero_lora_endpoint_default_metrics_after.prom`
+- `e386_zero_lora_endpoint_default_response_*.sse`
+- `e386_zero_lora_endpoint_default_summary.json`
+- `e386_zero_lora_endpoint_disabled_server.log`
+- `e386_zero_lora_endpoint_disabled_health.json`
+- `e386_zero_lora_endpoint_disabled_load.json`
+- `e386_zero_lora_endpoint_disabled_warmup.json`
+- `e386_zero_lora_endpoint_disabled_metrics_before.prom`
+- `e386_zero_lora_endpoint_disabled_metrics_after.prom`
+- `e386_zero_lora_endpoint_disabled_response_*.sse`
+- `e386_zero_lora_endpoint_disabled_summary.json`
+- `e386_zero_lora_endpoint_comparison.json`
+
+### Decision
+
+Accepted as serving-path confirmation for E385. With an active rank-16
+Qwen-shaped MLP LoRA adapter and identical decode-batcher counters, the default
+Metal LoRA delta path was `15.5%` faster than the rollback path. No source
+change was made in this experiment, and no CUDA/Vulkan behavior changed.

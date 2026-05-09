@@ -1483,3 +1483,13 @@
   speedups were `4.253x` gate/up and `8.445x` down. End-to-end LoRA linear
   projection improved default versus disabled from `3.453 -> 2.481 ms`
   (`28.1%`) for gate/up and `3.994 -> 2.494 ms` (`37.6%`) for down.
+- 2026-05-09 E386: Added serving-path confirmation for E385 with a temporary
+  zero-valued PEFT adapter outside the repo (`/tmp/kiln-e386-adapters/zero-r16-mlp`):
+  BF16 rank `16`, all 32 Qwen3.5-4B layers, MLP gate/up/down. Eight concurrent
+  varied streaming adapter requests, greedy `max_tokens=8`, wait200, were run
+  after loading the adapter and warming one token. Default Metal LoRA delta
+  path completed in `9.386522s`; `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`
+  completed in `11.110328s`. Both windows had identical counters (`64` tokens,
+  `56` submitted jobs, `8` worker batches, `56` rows, max batch `8`), so the
+  active-adapter endpoint evidence is a `15.5%` same-counters improvement.
+  No source change.

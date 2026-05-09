@@ -1,0 +1,15 @@
+{
+  "adapter_dir": "/tmp/kiln-e386-adapters/zero-r16-mlp",
+  "rank": 16,
+  "layers": 32,
+  "target_modules": [
+    "gate_proj",
+    "up_proj",
+    "down_proj"
+  ],
+  "dtype": "BF16",
+  "tensor_count": 192,
+  "data_bytes": 36175872,
+  "total_bytes": 36201108,
+  "sha256": "617588ca709c5edf1246d4ed5e1e482a5151fdca85d7ca038bbf96a3e11de819"
+}

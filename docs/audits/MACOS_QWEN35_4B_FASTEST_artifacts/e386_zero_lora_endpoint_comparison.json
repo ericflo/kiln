@@ -1,0 +1,22 @@
+{
+  "experiment": "E386 synthetic zero LoRA active-adapter endpoint A/B",
+  "default_elapsed_s": 9.3865224160254,
+  "disabled_elapsed_s": 11.11032779107336,
+  "improvement_percent": 15.515342188490228,
+  "default_counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "disabled_counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "adapter": "synthetic zero BF16 rank16 MLP gate/up/down for all 32 Qwen3.5-4B layers",
+  "decision": "accepted-serving-evidence"
+}
