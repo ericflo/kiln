@@ -1184,3 +1184,11 @@
   `KILN_DECODE_BATCH_WAIT_US` as the opt-in admission-delay knob until an
   adaptive policy beats zero wait across both four-way and eight-way serving
   probes.
+- 2026-05-09 E355: Accepted current-main Metal post-Vulkan-merge baseline.
+  `cargo check --locked -p kiln-server --features metal --bin kiln --bin
+  kiln-bench`, release `kiln`/`kiln-bench` build, strict Metal paged-attention
+  batch parity, hybrid model-forward batch parity, and two-job live decode
+  batcher parity all passed. Warm serial paged p64/o16 greedy measured
+  `454.0 ms` prefill and `169.3 ms` mean ITL (`5.91 tok/s`) after a cold
+  warmup run. No source change; this establishes the control before targeting
+  Metal's missing divergent-length batch attention path.

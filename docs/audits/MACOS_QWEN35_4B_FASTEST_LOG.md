@@ -11590,3 +11590,61 @@ zero wait. Keep the live decode batcher enabled because immediate draining
 still batches already-arrived peers, but leave admission delay as opt-in until
 an adaptive policy beats zero wait across both the E352 four-request and this
 eight-request serving shape.
+
+## 2026-05-09 E355 - Current-main Metal baseline after Vulkan merge
+
+### Goal
+
+Re-anchor Metal correctness and serial latency on current `main` before
+changing the Metal backend. Since the branch now includes later CUDA/Vulkan
+decode-batch work, this experiment checks that existing Metal strict batching
+still passes and captures a warm bs=1 paged decode control.
+
+### Change
+
+No source change. Generated validation and benchmark artifacts only.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_matches_rowwise --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 16 --temperature 0.0 --seed 355`
+
+### Results
+
+Validation passed. The hybrid Metal model-forward batch parity test reported
+`max_abs_diff=0` and `mean_abs_diff=0` for both logits rows and all three GDN
+state rows. The two-job live decode batcher test also passed.
+
+Warm serial paged p64/o16 greedy latency:
+
+- prefill `453.961 ms`
+- generated tokens `17`
+- mean ITL `169.283 ms`
+- p50 ITL `166.230 ms`
+- p99 ITL `192.908 ms`
+- decode throughput `5.907 tok/s`
+
+The first warmup pass paid Metal/Candle first-use cost (`8547.9 ms` prefill,
+`208.8 ms` mean ITL) and was not used as the control.
+
+### Artifact
+
+- `e355_cargo_check_metal.log`
+- `e355_metal_paged_attn_batch_parity.log`
+- `e355_metal_hybrid_batch_parity.log`
+- `e355_metal_decode_batcher_parity.log`
+- `e355_release_build_metal.log`
+- `e355_m1_bs1_p64_o16_current.json`
+- `e355_m1_bs1_p64_o16_current.stderr.log`
+
+### Decision
+
+Accepted as the current-main Metal control. The next measured target is Metal's
+missing divergent-length batch attention path: generic forward now carries the
+CUDA/Vulkan-style dyn-seqlen plumbing, but Metal still only implements the
+strict uniform-length contiguous batch kernel, so mixed-prompt continuous
+batching cannot use true Metal batch attention yet.

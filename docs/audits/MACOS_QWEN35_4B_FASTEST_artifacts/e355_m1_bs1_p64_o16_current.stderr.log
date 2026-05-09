@@ -1,0 +1,35 @@
+
+  kiln-bench v0.2.13
+  GPU                    unknown (10240 MB)
+  Model path             /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  Model loaded           15.70s (backend: metal, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 8547.9ms (7 tok/s)
+    Decode (paged): 17 tokens, mean ITL 208.8ms (4.8 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 454.0ms (141 tok/s)
+    Decode (paged): 17 tokens, mean ITL 169.3ms (5.9 tok/s)
+
+  ▌ Benchmark results
+  GPU                    unknown (10240 MB VRAM, source: apple-silicon-unified)
+  Model load             15.70s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                454.0 ms (141 tok/s)
+  Time to first token    454.0 ms
+  Mean inter-token       169.3 ms (5.9 tok/s)
+  P50 inter-token        166.2 ms
+  P99 inter-token        192.9 ms
+  Tokens generated       17
+  Spec method            off
+
