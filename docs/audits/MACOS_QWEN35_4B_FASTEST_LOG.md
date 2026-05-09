@@ -16461,3 +16461,85 @@ Accepted as decode-batch target evidence; no source change. Row-pair mode is
 clearly required for all tested batch sizes. Row-quad mode regresses batch 8
 when disabled, while the batch 3/4 differences in the short run are noisy and
 not worth a shape-specific policy change.
+
+## 2026-05-09 - E420 rejected GDN prefill qkv-conv/split thread-width change
+
+### Purpose
+
+E413 shows `gdn:qkv_conv_split_norm` at `17.131 ms` total for the 64-token
+prefill profile. The current Metal qkv-conv/split kernel chooses
+`seq_len.next_power_of_two().clamp(32, 256)` threads per channel. This
+experiment tested whether a different thread width improves the Qwen3.5
+`[1,T,8192]` qkv-conv/split sub-kernel.
+
+### Temporary Change
+
+Temporarily added:
+
+- `KILN_METAL_GDN_PREFILL_QKV_CONV_SPLIT_THREADS` to force thread widths
+  `32`, `64`, `128`, or `256`
+- an ignored synthetic benchmark for Qwen3.5 GDN qkv-conv/split shapes
+- a candidate selector that used `128` threads only for `seq_len == 64`
+
+The temporary source was reverted before commit.
+
+### Initial Sweep
+
+Warmup `3`, iterations `10`; values are `fused=` qkv-conv/split kernel timings.
+
+| config | seq16 | seq64 | seq128 |
+| --- | ---: | ---: | ---: |
+| default (`32/64/128`) | `234.750 us` | `764.683 us` | `994.283 us` |
+| force 32 | `236.471 us` | `887.721 us` | `1237.808 us` |
+| force 64 | `283.825 us` | `680.375 us` | `1387.996 us` |
+| force 128 | `378.583 us` | `295.504 us` | `927.321 us` |
+| force 256 | `1044.025 us` | `1129.571 us` | `994.104 us` |
+
+The first pass suggested that `128` threads might be much better at `seq_len=64`.
+All checked outputs matched the channel-major conv reference within the existing
+tolerance (`max_abs_diff < 5e-3`).
+
+### Confirmation
+
+The higher-iteration runs were not stable enough to accept:
+
+| run | seq64 timing |
+| --- | ---: |
+| original default, warmup/iters `5/30` | `609.663 us` |
+| force 128, warmup/iters `5/30` | `506.250 us` |
+| candidate selector, warmup/iters `5/30` | `596.760 us` |
+| rollback force 64, warmup/iters `5/30` | `522.242 us` |
+| candidate selector, warmup/iters `10/100` | `307.081 us` |
+| rollback force 64, warmup/iters `10/100` | `313.117 us` |
+
+The longest candidate-vs-rollback pair was only `6.036 us` apart on the
+synthetic kernel (`1.9%`), while the shorter confirmation pair contradicted the
+candidate. That is too small and noisy to justify changing a production selector
+or running endpoint A/B.
+
+### Validation
+
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+
+### Artifacts
+
+- `e420_gdn_qkv_conv_split_threads_default.log`
+- `e420_gdn_qkv_conv_split_threads_32.log`
+- `e420_gdn_qkv_conv_split_threads_64.log`
+- `e420_gdn_qkv_conv_split_threads_128.log`
+- `e420_gdn_qkv_conv_split_threads_256.log`
+- `e420_gdn_qkv_conv_split_threads_default_w5_i30.log`
+- `e420_gdn_qkv_conv_split_threads_128_w5_i30.log`
+- `e420_gdn_qkv_conv_split_threads_candidate_default_w5_i30.log`
+- `e420_gdn_qkv_conv_split_threads_rollback64_w5_i30.log`
+- `e420_gdn_qkv_conv_split_threads_candidate_default_w10_i100.log`
+- `e420_gdn_qkv_conv_split_threads_rollback64_w10_i100.log`
+- `e420_gdn_qkv_conv_split_threads_fmt_check.log`
+- `e420_gdn_qkv_conv_split_threads_source_reverted.diffcheck.log`
+
+### Decision
+
+Rejected and reverted before commit. Keep the original next-power-of-two thread
+selector for the GDN prefill qkv-conv/split kernel until a future candidate
+shows a stable full-path win.

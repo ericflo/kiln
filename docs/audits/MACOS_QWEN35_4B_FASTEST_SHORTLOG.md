@@ -1743,3 +1743,10 @@
   row-pair is required (`no row pair` batch2/3/4/8
   `2101.067/2912.983/3714.633/7427.292 us`), and disabling row-quad regressed
   batch8 (`3886.700 us`). Keep the current batch GEMV row policy.
+- 2026-05-09 E420: Rejected changing the GDN prefill qkv-conv/split thread
+  width selector. A temporary override/benchmark initially suggested forcing
+  `128` threads could improve `seq_len=64` (`764.683 -> 295.504 us`, warmup/iters
+  `3/10`), but confirmation was noisy: `5/30` contradicted the candidate
+  (`candidate 596.760 us` vs rollback-width `522.242 us`), and the longest
+  `10/100` pair was only `307.081 us` vs `313.117 us`. Temporary source was
+  reverted; keep the original next-power-of-two selector.
