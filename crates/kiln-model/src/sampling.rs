@@ -24,11 +24,6 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::sampling::gumbel_softmax;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use std::io::Write;
-use std::sync::{
-    OnceLock,
-    atomic::{AtomicU64, Ordering},
-};
 
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
@@ -57,60 +52,7 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     let flat = last_position_logits(logits)?;
     // Argmax stays on device; only the scalar u32 token ID is transferred to host.
     let idx = flat.argmax(0)?.to_scalar::<u32>()?;
-    trace_greedy_topk_if_requested(&flat, idx)?;
     Ok(idx)
-}
-
-fn greedy_trace_path() -> Option<&'static str> {
-    static TRACE_PATH: OnceLock<Option<String>> = OnceLock::new();
-    TRACE_PATH
-        .get_or_init(|| std::env::var("KILN_GREEDY_TRACE_TOPK_PATH").ok())
-        .as_deref()
-}
-
-fn greedy_trace_top_k() -> usize {
-    static TRACE_TOP_K: OnceLock<usize> = OnceLock::new();
-    *TRACE_TOP_K.get_or_init(|| {
-        std::env::var("KILN_GREEDY_TRACE_TOPK")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(5)
-    })
-}
-
-fn trace_greedy_topk_if_requested(logits: &Tensor, selected_token: u32) -> Result<()> {
-    let Some(path) = greedy_trace_path() else {
-        return Ok(());
-    };
-
-    static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
-    let top_k = greedy_trace_top_k();
-    let top = topk_via_host_sort(&logits.to_dtype(DType::F32)?, Some(top_k))?;
-    let margin = match top.as_slice() {
-        [first, second, ..] => first.1 - second.1,
-        [_] => f32::INFINITY,
-        [] => f32::NAN,
-    };
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("failed to open greedy trace path {path}"))?;
-    write!(
-        file,
-        "{{\"seq\":{seq},\"selected_token\":{selected_token},\"margin\":{margin:.9},\"top\":["
-    )?;
-    for (idx, (token, logit)) in top.iter().enumerate() {
-        if idx > 0 {
-            write!(file, ",")?;
-        }
-        write!(file, "{{\"token\":{token},\"logit\":{logit:.9}}}")?;
-    }
-    writeln!(file, "]}}")?;
-    Ok(())
 }
 
 /// Greedy sampling for every row in a `[..., vocab_size]` logits tensor.
