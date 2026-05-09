@@ -44,9 +44,14 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_GDN_DECODE_GATES_RECURRENT_RMSNORM,
     ),
     ("gdn_in_proj_decode", SPIR_V_GDN_IN_PROJ_DECODE),
+    ("gdn_in_proj_decode_bf16w", SPIR_V_GDN_IN_PROJ_DECODE_BF16W),
     (
         "gdn_in_proj_decode_batched",
         SPIR_V_GDN_IN_PROJ_DECODE_BATCHED,
+    ),
+    (
+        "gdn_in_proj_decode_batched_bf16w",
+        SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_BF16W,
     ),
     ("gdn_gated_rms_norm", SPIR_V_GDN_GATED_RMS_NORM),
     ("causal_conv1d", SPIR_V_CAUSAL_CONV1D),
@@ -60,7 +65,12 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("gdn_full_chunk_forward", SPIR_V_GDN_FULL_CHUNK_FORWARD),
     ("gdn_chunk_scan", SPIR_V_GDN_CHUNK_SCAN),
     ("linear_decode", SPIR_V_LINEAR_DECODE),
+    ("linear_decode_bf16w", SPIR_V_LINEAR_DECODE_BF16W),
     ("linear_decode_batched", SPIR_V_LINEAR_DECODE_BATCHED),
+    (
+        "linear_decode_batched_bf16w",
+        SPIR_V_LINEAR_DECODE_BATCHED_BF16W,
+    ),
     (
         "linear_decode_batched_rows2",
         SPIR_V_LINEAR_DECODE_BATCHED_ROWS2,
@@ -70,12 +80,20 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS,
     ),
     (
+        "linear_decode_argmax_blocks_bf16w",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS_BF16W,
+    ),
+    (
         "linear_decode_argmax_reduce",
         SPIR_V_LINEAR_DECODE_ARGMAX_REDUCE,
     ),
     (
         "linear_decode_argmax_batched_blocks",
         SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS,
+    ),
+    (
+        "linear_decode_argmax_batched_blocks_bf16w",
+        SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W,
     ),
     (
         "linear_decode_argmax_batched_reduce",
@@ -90,6 +108,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "mlp_gate_up_decode_batched_rows2",
         SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2,
     ),
+    ("paged_attn_decode_batch", SPIR_V_PAGED_ATTN_DECODE_BATCH),
     ("flash_attn", SPIR_V_FLASH_ATTN),
 ];
 
