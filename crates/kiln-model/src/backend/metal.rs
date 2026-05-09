@@ -6861,7 +6861,7 @@ pub(crate) fn metal_lora_add_decode_supports(
         && output_dim > 0
         && input_dim >= 1024
         && output_dim >= 1024
-        && rank >= 16
+        && rank >= 8
         && a_input_dim == input_dim
         && b_output_dim == output_dim
         && b_rank == rank
@@ -15780,30 +15780,31 @@ mod tests {
 
         let input_dim = 1024usize;
         let output_dim = 1152usize;
-        let rank = 16usize;
-        for batch in [1usize, 2usize, 4usize] {
-            let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
-            let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
-            let a = patterned_bf16_2d(rank, input_dim, &device, 29, 0.002)?;
-            let b = patterned_bf16_2d(output_dim, rank, &device, 31, 0.003)?;
+        for rank in [8usize, 16usize] {
+            for batch in [1usize, 2usize, 4usize] {
+                let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
+                let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+                let a = patterned_bf16_2d(rank, input_dim, &device, 29, 0.002)?;
+                let b = patterned_bf16_2d(output_dim, rank, &device, 31, 0.003)?;
 
-            assert!(metal_lora_add_decode_supports(&base, &x, &a, &b));
-            let reference = lora_add_reference(&base, &x, &a, &b, 0.75)?;
-            let fused = metal_lora_add_decode_bf16(&base, &x, &a, &b, 0.75)?;
+                assert!(metal_lora_add_decode_supports(&base, &x, &a, &b));
+                let reference = lora_add_reference(&base, &x, &a, &b, 0.75)?;
+                let fused = metal_lora_add_decode_bf16(&base, &x, &a, &b, 0.75)?;
 
-            assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
-            assert_eq!(fused.dtype(), DType::BF16);
+                assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
+                assert_eq!(fused.dtype(), DType::BF16);
 
-            let max = max_abs_diff(&reference, &fused)?;
-            let mean = mean_abs_diff(&reference, &fused)?;
-            assert!(
-                max < 2e-2,
-                "Metal LoRA decode add batch={batch} max_abs_diff={max:e} exceeds tolerance"
-            );
-            assert!(
-                mean < 3e-3,
-                "Metal LoRA decode add batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
-            );
+                let max = max_abs_diff(&reference, &fused)?;
+                let mean = mean_abs_diff(&reference, &fused)?;
+                assert!(
+                    max < 2e-2,
+                    "Metal LoRA decode add rank={rank} batch={batch} max_abs_diff={max:e} exceeds tolerance"
+                );
+                assert!(
+                    mean < 3e-3,
+                    "Metal LoRA decode add rank={rank} batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+                );
+            }
         }
 
         Ok(())
@@ -15818,27 +15819,29 @@ mod tests {
         let warmup = env_usize("KILN_METAL_LORA_DELTA_BENCH_WARMUP", 5);
         let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
 
-        for batch in [1usize, 4usize] {
-            bench_lora_decode_add_case(
-                &device,
-                "mlp_gate_or_up",
-                batch,
-                QWEN35_HIDDEN,
-                QWEN35_INTERMEDIATE,
-                16,
-                warmup,
-                iters,
-            )?;
-            bench_lora_decode_add_case(
-                &device,
-                "down_proj",
-                batch,
-                QWEN35_INTERMEDIATE,
-                QWEN35_HIDDEN,
-                16,
-                warmup,
-                iters,
-            )?;
+        for rank in [8usize, 16usize] {
+            for batch in [1usize, 4usize] {
+                bench_lora_decode_add_case(
+                    &device,
+                    "mlp_gate_or_up",
+                    batch,
+                    QWEN35_HIDDEN,
+                    QWEN35_INTERMEDIATE,
+                    rank,
+                    warmup,
+                    iters,
+                )?;
+                bench_lora_decode_add_case(
+                    &device,
+                    "down_proj",
+                    batch,
+                    QWEN35_INTERMEDIATE,
+                    QWEN35_HIDDEN,
+                    rank,
+                    warmup,
+                    iters,
+                )?;
+            }
         }
 
         Ok(())

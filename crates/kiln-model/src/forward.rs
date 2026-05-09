@@ -10510,27 +10510,29 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(5);
 
-        for batch in [1usize, 4usize] {
-            bench_metal_lora_linear_case(
-                &device,
-                "mlp_gate_or_up",
-                batch,
-                2560,
-                9216,
-                16,
-                warmup,
-                iters,
-            )?;
-            bench_metal_lora_linear_case(
-                &device,
-                "down_proj",
-                batch,
-                9216,
-                2560,
-                16,
-                warmup,
-                iters,
-            )?;
+        for rank in [8usize, 16usize] {
+            for batch in [1usize, 4usize] {
+                bench_metal_lora_linear_case(
+                    &device,
+                    "mlp_gate_or_up",
+                    batch,
+                    2560,
+                    9216,
+                    rank,
+                    warmup,
+                    iters,
+                )?;
+                bench_metal_lora_linear_case(
+                    &device,
+                    "down_proj",
+                    batch,
+                    9216,
+                    2560,
+                    rank,
+                    warmup,
+                    iters,
+                )?;
+            }
         }
 
         Ok(())

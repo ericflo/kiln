@@ -1785,3 +1785,14 @@
   (`173.796 -> 212.442 us`). A shape selector using 64 for large outputs also
   looked noisy because down rows slowed despite using the same 256-thread path.
   Temporary source was reverted; keep fixed 256 threads.
+- 2026-05-09 E424: Accepted lowering Metal LoRA delta/add support from
+  `rank >= 16` to `rank >= 8` for the same Qwen-class BF16 contiguous decode
+  shapes. Rank-8 isolated delta/add was exact and much faster than fallback:
+  batch1 gate/up `834.635 -> 142.160 us` (`5.871x`), batch1 down
+  `986.615 -> 180.675 us` (`5.461x`), batch4 gate/up
+  `909.085 -> 152.988 us` (`5.942x`), and batch4 down
+  `1198.008 -> 167.488 us` (`7.153x`). Full rank-8 LoRA projection also
+  improved strongly versus the old fallback adapter path, e.g. serial down
+  `1.940 -> 1.139 ms` and batch4 down `153.167 -> 2.487 ms`. Rank-8/16 parity,
+  benches, Metal/Vulkan/server Metal checks, fmt, and diff check passed; CUDA
+  remains locally blocked by missing `nvcc`.

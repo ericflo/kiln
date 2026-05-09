@@ -16799,3 +16799,102 @@ width, showing run noise large enough to make the selector unsafe.
 Rejected and reverted before commit. Keep the E422 fixed 256-thread add-kernel
 launch until a future candidate shows a stable full-projection win, not just a
 noisy isolated row.
+
+## 2026-05-09 - E424 accepted Metal LoRA rank-8 decode support
+
+### Purpose
+
+The Metal LoRA delta/add helper supported Qwen-class BF16 decode tensors but
+still required `rank >= 16`. Rank-8 LoRA adapters are common, and the two Metal
+kernels do not depend on rank being at least 16. This experiment tested lowering
+the support gate to rank 8 without changing smaller-rank adapters.
+
+### Change
+
+Changed `metal_lora_add_decode_supports` from `rank >= 16` to `rank >= 8`.
+The rest of the gate remains unchanged: Metal BF16 contiguous tensors,
+`batch > 0`, decode-only `seq_len == 1`, matching base/input batches, and
+Qwen-class `input_dim >= 1024`, `output_dim >= 1024`.
+
+Added rank-8 coverage to the focused Metal LoRA delta/add parity test and to
+the synthetic LoRA delta/full-linear benches. Rank 16 remains covered in the
+same benches as a regression check.
+
+Rollback remains `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+
+### Isolated Delta/Add Bench
+
+Warmup `5`, iterations `20`; all rows had exact parity against the reference
+LoRA delta/add path.
+
+| rank | shape | batch | fused | fallback | speedup |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 8 | MLP gate/up `2560 -> 9216` | 1 | `142.160 us` | `834.635 us` | `5.871x` |
+| 8 | MLP down `9216 -> 2560` | 1 | `180.675 us` | `986.615 us` | `5.461x` |
+| 8 | MLP gate/up `2560 -> 9216` | 4 | `152.988 us` | `909.085 us` | `5.942x` |
+| 8 | MLP down `9216 -> 2560` | 4 | `167.488 us` | `1198.008 us` | `7.153x` |
+| 16 | MLP gate/up `2560 -> 9216` | 1 | `148.519 us` | `519.729 us` | `3.499x` |
+| 16 | MLP down `9216 -> 2560` | 1 | `151.925 us` | `853.862 us` | `5.620x` |
+| 16 | MLP gate/up `2560 -> 9216` | 4 | `163.177 us` | `1157.023 us` | `7.091x` |
+| 16 | MLP down `9216 -> 2560` | 4 | `177.346 us` | `1660.167 us` | `9.361x` |
+
+### Full LoRA Linear Bench
+
+Warmup `5`, iterations `20`; values include base projection plus LoRA adapter
+application. For rank 8, the old support gate would have forced the fallback
+adapter delta path, so the speedup column is the practical rank-8 benefit.
+
+| rank | shape | batch | fast | fallback | speedup |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 8 | MLP gate/up `2560 -> 9216` | 1 | `1.139 ms` | `1.663 ms` | `1.460x` |
+| 8 | MLP down `9216 -> 2560` | 1 | `1.139 ms` | `1.940 ms` | `1.703x` |
+| 8 | MLP gate/up `2560 -> 9216` | 4 | `2.318 ms` | `139.968 ms` | `60.377x` |
+| 8 | MLP down `9216 -> 2560` | 4 | `2.487 ms` | `153.167 ms` | `61.579x` |
+| 16 | MLP gate/up `2560 -> 9216` | 1 | `1.221 ms` | `1.707 ms` | `1.398x` |
+| 16 | MLP down `9216 -> 2560` | 1 | `1.095 ms` | `2.057 ms` | `1.879x` |
+| 16 | MLP gate/up `2560 -> 9216` | 4 | `2.574 ms` | `140.740 ms` | `54.674x` |
+| 16 | MLP down `9216 -> 2560` | 4 | `2.456 ms` | `154.014 ms` | `62.700x` |
+
+Numerics stayed in the same BF16 envelope as the existing Metal decode paths:
+isolated rank-8 delta/add was exact, full rank-8 gate/up rows were exact, serial
+rank-8 down was exact, and batch4 rank-8 down reported `max_abs_diff=3.125e-2`
+with `mean_abs_diff=4.5776367e-5`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+  - passed for rank `8` and `16`, batch `1`, `2`, and `4`
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda`
+  - blocked by local environment: `nvcc` is not installed, so `cudarc` and
+    `candle-kernels` build scripts fail before checking Kiln source
+- `git diff --check`
+
+### Artifacts
+
+- `e424_lora_rank8_delta_parity.log`
+- `e424_lora_rank8_delta_bench.log`
+- `e424_lora_rank8_linear_parity.log`
+- `e424_lora_rank8_linear_bench.log`
+- `e424_lora_rank8_fmt_check.log`
+- `e424_lora_rank8_metal_check.log`
+- `e424_lora_rank8_vulkan_check.log`
+- `e424_lora_rank8_server_metal_check.log`
+- `e424_lora_rank8_cuda_check.log`
+- `e424_lora_rank8_diff_check.log`
+
+### Decision
+
+Accepted. Rank-8 LoRA now uses the same Metal delta/add helper as rank-16 LoRA
+for Qwen-class decode shapes, giving large serial and batch wins over the old
+fallback adapter path. Smaller ranks stay on the existing fallback path, and
+no-LoRA/CUDA/Vulkan runtime paths are unchanged.
