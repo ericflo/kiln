@@ -491,12 +491,52 @@ Verdict:
   avoid that compaction/upload by reading the paged KV pool and block table
   directly in Vulkan or by making K/V residency explicit.
 
+### 2026-05-09 A012: Reject MLP Gate/Up Retiles
+
+Hypothesis:
+- Current serial decode profiling after A011 showed the largest remaining
+  decode-stage bucket was `mlp:fused`: over a short profiled run with three
+  generated tokens, `mlp:fused total=200.336ms`, `count=96`,
+  `mean=2.087ms`.
+- The single-token `mlp_gate_up_decode.comp` shader used `64x4` local geometry:
+  64 output columns per workgroup and 4 reduction lanes per column.
+- Testing one higher-reduction variant (`32x8`) and one lower-overhead variant
+  (`128x2`) would show whether this simple geometry is a real serial hotspot
+  lever.
+
+Experiment:
+- Trial 1 changed single-token `mlp_gate_up_decode.comp` to `32x8` and changed
+  the dispatch width to `intermediate.div_ceil(32)`.
+- Trial 2 changed the same shader to `128x2` and changed dispatch width to
+  `intermediate.div_ceil(128)`.
+- Both trials were kept uncommitted and restored before this entry.
+
+Evidence:
+- Trial 1 focused parity:
+  `cargo test -p kiln-vulkan-kernel mlp_decode_matches_cpu_reference --test gdn_parity -- --nocapture`
+  passed.
+- Trial 1 serial bench preserved token IDs
+  `[2838,6587,310,5227,1024,75119,220]` but regressed to prefill `464.4ms`,
+  mean ITL `134.1ms`, `7.5 tok/s`.
+- Trial 2 focused parity passed with the same command.
+- Trial 2 serial bench preserved the same token IDs but regressed to prefill
+  `451.9ms`, mean ITL `134.6ms`, `7.4 tok/s`.
+- Current accepted anchors before the trials are A010/A011: serial mean ITL
+  roughly `130.0ms` to `132.3ms` with the same token IDs.
+
+Verdict:
+- Reject both retiles and keep the original `64x4` single-token MLP gate/up
+  geometry.
+- The next MLP attempt should target arithmetic intensity, reduced memory
+  traffic, data residency, or a model-specific fused gate/up/down design; simple
+  workgroup geometry changes were not enough.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
-- Continue profiling the remaining serial decode hotspots after A008: GDN
-  `in_proj`, fused MLP decode, and full-attention QKV projection.
+- Continue profiling the remaining serial decode hotspots: fused MLP decode,
+  GDN `in_proj`, GDN recurrent/gated norm, and full-attention QKV projection.
 - Keep updating this log and
   `docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md` for every
   accepted or rejected optimization experiment.
