@@ -1,0 +1,197 @@
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:797:13
+    |
+797 |         let mut cache = PagedKvCache::new(
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:867:13
+    |
+867 |         let mut cache = PagedKvCache::new(1, 4, 4, 2, 3, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:907:13
+    |
+907 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:961:13
+    |
+961 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::BF16, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1016:13
+     |
+1016 |         let mut cache = PagedKvCache::new_uninit(1, 4, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1066:13
+     |
+1066 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1125:13
+     |
+1125 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1163:13
+     |
+1163 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1202:13
+     |
+1202 |         let mut cache = PagedKvCache::new(1, 2, 4, 2, 3, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1236:13
+     |
+1236 |         let mut paged = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1318:13
+     |
+1318 |         let mut cache = PagedKvCache::new(3, 2, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1359:13
+     |
+1359 |         let mut cache = PagedKvCache::new_with_fp8(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1407:21
+     |
+1407 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1429:13
+     |
+1429 |         let mut cache = PagedKvCache::new_with_fp8(1, 2, 4, 2, 3, DType::F32, &device, true)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3645:4
+     |
+3645 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8537:15
+     |
+8537 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: calls to `std::mem::drop` with a reference instead of an owned value does nothing
+    --> crates/kiln-model/src/generate.rs:2079:17
+     |
+2079 |                 drop(pc_guard);
+     |                 ^^^^^--------^
+     |                      |
+     |                      argument has type `&paged_kv_cache::PagedKvCache`
+     |
+     = note: `#[warn(dropping_references)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+     |
+2079 -                 drop(pc_guard);
+2079 +                 let _ = pc_guard;
+     |
+
+warning: `kiln-model` (lib test) generated 23 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 16 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=gdn_or_full_attn_out seq_len=16 x=[1,16,4096] weight_t=[4096,2560] route_enabled=true warmup=2 iters=5 broadcast=1523.008 us flat=1095.658 us speedup=1.390x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=gdn_or_full_attn_out seq_len=64 x=[1,64,4096] weight_t=[4096,2560] route_enabled=true warmup=2 iters=5 broadcast=1149.050 us flat=1149.783 us speedup=0.999x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=gdn_or_full_attn_out seq_len=128 x=[1,128,4096] weight_t=[4096,2560] route_enabled=true warmup=2 iters=5 broadcast=2267.792 us flat=2091.692 us speedup=1.084x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=mlp_down seq_len=16 x=[1,16,9216] weight_t=[9216,2560] route_enabled=true warmup=2 iters=5 broadcast=2439.833 us flat=2190.950 us speedup=1.114x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=mlp_down seq_len=64 x=[1,64,9216] weight_t=[9216,2560] route_enabled=true warmup=2 iters=5 broadcast=2134.758 us flat=2387.675 us speedup=0.894x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+synthetic Metal Qwen3.5 prefill output flat-matmul BF16: label=mlp_down seq_len=128 x=[1,128,9216] weight_t=[9216,2560] route_enabled=true warmup=2 iters=5 broadcast=4081.467 us flat=4034.900 us speedup=1.012x max_abs_diff=0.000000e0 mean_abs_diff=0.000000e0
+test backend::metal::tests::bench_prefill_output_flat_matmul_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 375 filtered out; finished in 2.27s
+

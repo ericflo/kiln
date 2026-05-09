@@ -1702,3 +1702,11 @@
   but full paged 64-token endpoint A/B was neutral: default `380.304292 ms`
   vs rollback `380.260500 ms` prefill, with decode unchanged. Temporary source
   was reverted; keep current broadcast-matmul route.
+- 2026-05-09 E415: Rejected a Metal prefill output-projection flat-matmul
+  route for `[1,T,4096/9216] @ [*,2560]` output projections. Parity was exact,
+  but synthetic timings were noisy at `seq_len=64`: GDN/full-attn out
+  `1149.050 -> 1149.783 us` (`0.999x`) and MLP down `2134.758 -> 2387.675 us`
+  (`0.894x`). Endpoint A/B did not reproduce a win: pair 1 favored default
+  `379.116000 ms` vs rollback `381.452792 ms`, but counter-ordered pair favored
+  rollback `369.355250 ms` vs default `380.529541 ms`; aggregate default was
+  slower (`379.822771 ms` vs `375.404021 ms`). Temporary source was reverted.

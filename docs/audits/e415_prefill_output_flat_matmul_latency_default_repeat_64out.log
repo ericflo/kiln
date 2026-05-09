@@ -1,0 +1,61 @@
+
+  kiln-bench v0.2.13
+  GPU                    unknown (10240 MB)
+  Model path             /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  Model loaded           11.26s (backend: metal, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 3925.7ms (16 tok/s)
+    Decode (paged): 65 tokens, mean ITL 160.6ms (6.2 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 380.5ms (168 tok/s)
+    Decode (paged): 65 tokens, mean ITL 159.9ms (6.3 tok/s)
+
+  ▌ Benchmark results
+  GPU                    unknown (10240 MB VRAM, source: apple-silicon-unified)
+  Model load             11.26s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                380.5 ms (168 tok/s)
+  Time to first token    380.5 ms
+  Mean inter-token       159.9 ms (6.3 tok/s)
+  P50 inter-token        159.0 ms
+  P99 inter-token        171.4 ms
+  Tokens generated       65
+  Spec method            off
+
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 11.256507958,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 380.52954100000005,
+    "prefill_tokens_per_sec": 168.18667962495977,
+    "time_to_first_token_ms": 380.52954100000005,
+    "mean_inter_token_ms": 159.93988085937497,
+    "p50_inter_token_ms": 158.996083,
+    "p99_inter_token_ms": 171.36175,
+    "num_tokens_generated": 65,
+    "decode_tokens_per_sec": 6.25234928666251,
+    "spec_method": "off"
+  },
+  "training": null
+}

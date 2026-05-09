@@ -16125,3 +16125,82 @@ isolated matmul timings, but it did not reduce the serving-path paged prefill
 measurement. Keep the current broadcast-matmul route for these prefill
 projections unless a future candidate can prove the lower-level win survives in
 the full endpoint.
+
+## 2026-05-09 - E415 rejected prefill output-projection flat-matmul routing
+
+### Purpose
+
+E414 only routed hidden-input, large-output prefill projections through a
+`[T,K].matmul([K,N])` reshape. This experiment tested the adjacent output
+projection shapes that E414 deliberately left disabled:
+
+- GDN/full-attention output projection shape `[1,T,4096] @ [4096,2560]`
+- MLP down-projection shape `[1,T,9216] @ [9216,2560]`
+
+### Temporary Change
+
+Added a temporary Metal BF16 helper that reshaped supported prefill output
+projections from `[1,T,K]` to `[T,K]`, ran `.matmul(weight_t)`, and reshaped the
+result back to `[1,T,2560]`. It was guarded by
+`KILN_DISABLE_METAL_PREFILL_OUTPUT_FLAT_MATMUL=1`, wired through the shared
+`linear_with_lora_t` prefill path, then reverted before commit after endpoint
+A/B did not reproduce a stable win.
+
+### Synthetic Results
+
+The focused parity test passed exactly for the Qwen-shaped 4096-input output
+projection. The ignored synthetic benchmark also found exact parity for all
+measured shapes. Final broad-route timings were noisy:
+
+- `gdn_or_full_attn_out`, `seq_len=16`: broadcast `1523.008 us`, flat
+  `1095.658 us` (`1.390x`)
+- `gdn_or_full_attn_out`, `seq_len=64`: broadcast `1149.050 us`, flat
+  `1149.783 us` (`0.999x`)
+- `gdn_or_full_attn_out`, `seq_len=128`: broadcast `2267.792 us`, flat
+  `2091.692 us` (`1.084x`)
+- `mlp_down`, `seq_len=16`: broadcast `2439.833 us`, flat `2190.950 us`
+  (`1.114x`)
+- `mlp_down`, `seq_len=64`: broadcast `2134.758 us`, flat `2387.675 us`
+  (`0.894x`)
+- `mlp_down`, `seq_len=128`: broadcast `4081.467 us`, flat `4034.900 us`
+  (`1.012x`)
+
+### Endpoint A/B
+
+Same release binary, Qwen3.5-4B paged, `--prompt-tokens 64`,
+`--max-output-tokens 64`, one latency warmup:
+
+- Pair 1: default flat route prefill `379.116000 ms` vs rollback
+  `381.452792 ms` (`0.613%` lower)
+- Pair 2, counter-ordered: rollback `369.355250 ms` vs default flat route
+  `380.529541 ms` (`3.025%` higher)
+
+Aggregate default was `379.822771 ms`; aggregate rollback was `375.404021 ms`.
+The candidate therefore did not reproduce a serving-path prefill win. Decode
+ITL differences were noise because the route was prefill-only.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_prefill_output_flat_matmul_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_PREFILL_OUTPUT_FLAT_MATMUL_BENCH_WARMUP=2 KILN_METAL_PREFILL_OUTPUT_FLAT_MATMUL_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_prefill_output_flat_matmul_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo fmt --check`
+
+### Artifacts
+
+- `e415_prefill_output_flat_matmul_parity.log`
+- `e415_prefill_output_flat_matmul_synthetic.log`
+- `e415_prefill_output_flat_matmul_release_bench_build.log`
+- `e415_prefill_output_flat_matmul_latency_default_64out.log`
+- `e415_prefill_output_flat_matmul_latency_disabled_64out.log`
+- `e415_prefill_output_flat_matmul_latency_disabled_repeat_64out.log`
+- `e415_prefill_output_flat_matmul_latency_default_repeat_64out.log`
+
+### Decision
+
+Rejected and reverted before commit. Output-projection flat-matmul routing is
+not stable enough to keep: the low-level timings vary by shape and run, and the
+counter-ordered endpoint pair favored rollback. Keep the current
+`broadcast_matmul` route for prefill output projections unless a future
+candidate provides a stronger fused or shape-specific kernel with repeatable
+serving-path improvement.
