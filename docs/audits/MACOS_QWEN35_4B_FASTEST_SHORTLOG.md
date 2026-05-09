@@ -1269,3 +1269,16 @@
   max diffs `0` and `1.5625e-2`. No real-adapter endpoint run was available;
   this is a LoRA-config targeted win and leaves the no-LoRA fused MLP path
   unchanged.
+- 2026-05-09 E364: Accepted batched row-pair mode for the Metal MLP gate/up
+  decode kernel. The old per-row two-column path remains for batch `1`; for
+  batched decode, one thread now computes the same gate/up column pair for two
+  rows so the large BF16 weights are reused across adjacent rows. A same-binary
+  kill-switch bench with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1` measured
+  fused times `1774.656/1868.708/2879.318/3061.026/5737.609 us` at batch
+  `1/2/3/4/8`; default row-pair measured
+  `1823.479/1864.781/1842.755/1926.594/3320.719 us`. Batch `3/4/8` improved
+  `36.0%/37.1%/42.1%`; batch `2` was flat and batch `1` uses the same path
+  with noise-level drift. Dedicated parity, Metal/Vulkan checks, and release
+  build passed. Same-binary four-request endpoint probe was flat:
+  disabled/enabled `6.582271/6.576782s` with `32` generated tokens, `28`
+  submitted jobs, `14` worker batches, and max batch `3`.

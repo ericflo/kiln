@@ -12278,3 +12278,97 @@ decode while leaving the no-LoRA fused MLP path unchanged.
 
 Accepted. This is a scoped Metal LoRA decode improvement with parity coverage
 and no CUDA/Vulkan dispatch changes beyond reusing the same delta-add helper.
+
+## 2026-05-09 E364 - Accepted batched row-pair MLP gate/up decode
+
+### Goal
+
+E362 still ranked `mlp:gate_up_fused` as the largest live `seq_len=1` decode
+stage. E349 rejected a simdgroup-cooperative rewrite, E359 rejected wider
+four-column serial work, and E360 rejected `fast::exp`. This experiment kept
+the existing per-thread two-column shape but reused each gate/up weight load
+across two adjacent decode rows when `batch > 1`.
+
+### Change
+
+- Added a row-pair mode to `kiln_mlp_gate_up_bf16` for batched decode.
+- The old per-row two-column loop remains available and is still used for
+  `rows == 1`.
+- Added `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1` as a same-binary kill
+  switch for testing and rollback.
+- Extended the synthetic MLP gate/up bench to include batch `3`, matching the
+  max batch observed in recent four-request endpoint probes.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up --lib -- --nocapture`
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Same-binary four-request streaming endpoint probe with row-pair disabled and
+  enabled, greedy `max_tokens=8`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Dedicated parity passed for both single-row and batch MLP gate/up tests.
+
+Qwen-shaped BF16 MLP gate/up synthetic bench, same binary, lower is better:
+
+- batch `1`: disabled `1774.656 us`, row-pair `1823.479 us`
+- batch `2`: disabled `1868.708 us`, row-pair `1864.781 us`
+- batch `3`: disabled `2879.318 us`, row-pair `1842.755 us`
+- batch `4`: disabled `3061.026 us`, row-pair `1926.594 us`
+- batch `8`: disabled `5737.609 us`, row-pair `3320.719 us`
+
+The batched cases that actually use row-pairing improved by `0.2%`, `36.0%`,
+`37.1%`, and `42.1%` at batch `2/3/4/8`. Batch `1` uses the same old path in
+both modes; the `2.8%` difference here is treated as measurement noise rather
+than a row-pair effect.
+
+Same-binary endpoint probe, four varied prompts, greedy `max_tokens=8`,
+zero decode-batch wait:
+
+- row-pair disabled: wall `6.582271s`, generated `32` tokens, submitted `28`
+  jobs, `14` worker batches, `28` rows, max batch `3`
+- row-pair enabled: wall `6.576782s`, generated `32` tokens, submitted `28`
+  jobs, `14` worker batches, `28` rows, max batch `3`
+
+The endpoint comparison is flat (`0.08%` faster), not a clear live win, but it
+shows no measurable regression on this probe while the synthetic batch `3/4/8`
+path improves substantially.
+
+### Artifact
+
+- `e364_mlp_gate_up_rows2_parity.log`
+- `e364_mlp_gate_up_rows2_disabled_baseline.log`
+- `e364_mlp_gate_up_rows2_candidate.log`
+- `e364_cargo_check_metal.log`
+- `e364_cargo_check_vulkan.log`
+- `e364_release_build_metal.log`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_server.log`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_health.json`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_metrics.prom`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_time.json`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_response_0.sse`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_response_1.sse`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_response_2.sse`
+- `e364_mlp_gate_up_rows2_endpoint_disabled_response_3.sse`
+- `e364_mlp_gate_up_rows2_endpoint_server.log`
+- `e364_mlp_gate_up_rows2_endpoint_health.json`
+- `e364_mlp_gate_up_rows2_endpoint_metrics.prom`
+- `e364_mlp_gate_up_rows2_endpoint_time.json`
+- `e364_mlp_gate_up_rows2_endpoint_response_0.sse`
+- `e364_mlp_gate_up_rows2_endpoint_response_1.sse`
+- `e364_mlp_gate_up_rows2_endpoint_response_2.sse`
+- `e364_mlp_gate_up_rows2_endpoint_response_3.sse`
+- `e364_cargo_fmt_check.log`
+- `e364_git_diff_check.log`
+
+### Decision
+
+Accepted. Keep row-pair mode enabled by default for batched Metal MLP gate/up
+decode, with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1` as the rollback knob.
