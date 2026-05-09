@@ -1,0 +1,214 @@
+{
+  "arms": [
+    {
+      "arm": "candidate-default",
+      "case": "vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-candidate-default",
+      "metrics_after": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "metrics_before": {
+        "batcher_rows": 0.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 0.0,
+        "max_batch": 0.0,
+        "requests_error": 0.0,
+        "requests_ok": 0.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 0.0,
+        "worker_batches": 0.0
+      },
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "results": [
+        {
+          "elapsed_s": 16.317727759000263,
+          "error": null,
+          "events": 18,
+          "index": 0,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.317261193995364,
+          "error": null,
+          "events": 18,
+          "index": 1,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.614694214003976,
+          "error": null,
+          "events": 18,
+          "index": 2,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.61501824199513,
+          "error": null,
+          "events": 18,
+          "index": 3,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.00563492400397,
+          "error": null,
+          "events": 18,
+          "index": 4,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.81301168599748,
+          "error": null,
+          "events": 18,
+          "index": 5,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.81322941801045,
+          "error": null,
+          "events": 18,
+          "index": 6,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 13.557633299991721,
+          "error": null,
+          "events": 18,
+          "index": 7,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        }
+      ],
+      "wall_s": 16.821006949990988
+    },
+    {
+      "arm": "rollback-disabled",
+      "case": "vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-rollback-disabled",
+      "metrics_after": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "metrics_before": {
+        "batcher_rows": 0.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 0.0,
+        "max_batch": 0.0,
+        "requests_error": 0.0,
+        "requests_ok": 0.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 0.0,
+        "worker_batches": 0.0
+      },
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "results": [
+        {
+          "elapsed_s": 15.916629953004303,
+          "error": null,
+          "events": 18,
+          "index": 0,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.19875473099819,
+          "error": null,
+          "events": 18,
+          "index": 1,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.41904966699076,
+          "error": null,
+          "events": 18,
+          "index": 2,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 14.180739239003742,
+          "error": null,
+          "events": 18,
+          "index": 3,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.418457756997668,
+          "error": null,
+          "events": 18,
+          "index": 4,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 14.471966787008569,
+          "error": null,
+          "events": 18,
+          "index": 5,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 15.337883435000549,
+          "error": null,
+          "events": 18,
+          "index": 6,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.19684741301171,
+          "error": null,
+          "events": 18,
+          "index": 7,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        }
+      ],
+      "wall_s": 16.422035290001077
+    }
+  ]
+}

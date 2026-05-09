@@ -1,0 +1,19 @@
+{
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Continue sequences tersely and do not end early.",
+      "role": "system"
+    },
+    {
+      "content": "Continue this comma-separated number sequence for a116 final2 candidate-default request charlie: one, two, three, four, five, six, seven,",
+      "role": "user"
+    }
+  ],
+  "model": "kiln",
+  "stream": true,
+  "temperature": 0
+}

@@ -7004,3 +7004,76 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-comparison-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-final-comparison-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-final2-comparison-summary.json`
+
+### 2026-05-09 A116: Reject Vulkan Parallel Gates+Recurrent Decode Fusion
+
+Scope:
+
+- Vulkan-only candidate, reverted after measurement.
+- Temporarily added `gdn_decode_gates_recurrent_parallel.comp`, embedded it in
+  the Vulkan build, added a wrapper in `kiln-vulkan-kernel`, and wired the
+  Vulkan `BackendRuntime::gdn_decode_gates_recurrent` hook for batch decode.
+- The candidate kept gated RMSNorm split and preserved the accepted parallel
+  recurrent reduction shape; it did not reuse A050's serial fused RMSNorm
+  shader.
+- CUDA and Metal source paths were untouched.
+
+Validation:
+
+- `cargo fmt --check` passed after formatting.
+- Focused candidate parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent_parallel -- --nocapture`.
+- Existing decode fused tests also passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_decode_gates_recurrent -- --nocapture`
+  (`3` tests).
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- `cargo check -p kiln-server --features vulkan --bin kiln` passed with
+  existing warnings.
+- Candidate release server build passed with existing warnings.
+- After rejection, the candidate source was reverted and `cargo fmt --check`
+  still passed.
+
+Live endpoint A/B:
+
+- Shape: eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, `chat_template_kwargs: {"enable_thinking": false}`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, and `KILN_DECODE_BATCH_MAX=3`.
+- Candidate default vs rollback env
+  `KILN_DISABLE_VULKAN_GDN_DECODE_GATES_RECURRENT=1`.
+- Every arm returned 8/8 HTTP 200 responses with visible text
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm had identical counters:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `runner_busy_jobs=0`, `jobs_failed=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+
+Wall-time evidence:
+
+- Pair 1:
+  - Candidate default: `16.821007s`.
+  - Rollback disabled: `16.422035s`.
+- Reversed pair:
+  - Rollback disabled: `16.708538s`.
+  - Candidate default: `17.074345s`.
+- Aggregate:
+  - Candidate average: `16.947676s`.
+  - Rollback average: `16.565287s`.
+  - Candidate was `2.31%` slower.
+
+Decision:
+
+- Rejected and reverted. Correctness was fine, but folding gate math into every
+  per-output-column recurrent workgroup did not pay for itself at batch 3.
+- Keep A115's accepted multi-row device-local recurrent-state policy as the
+  current default.
+- Do not retry this exact gates+recurrent fusion shape. A viable next recurrent
+  change needs a different state/gate/output layout or broader residency change
+  that avoids redundant gate math and host/device boundary churn.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-comparison-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a116-gdn-gates-recurrent-parallel-b3-final2-comparison-summary.json`
