@@ -31,6 +31,11 @@ fn mlp_f32_down_rows4_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
 }
 
+fn mlp_chained_dispatch_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
+}
+
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
@@ -3494,38 +3499,15 @@ fn dispatch_mlp_decode_cached_impl(
         up_weight_t.handle(),
         hidden_buf.handle(),
     ];
-    let stage_start = profile_stages.then(Instant::now);
-    run_compute_pipeline(
-        vk_device,
-        &gate_up_spirv,
-        &gate_up_handles,
-        gate_up_handles.len(),
-        &gate_up_push,
-        if batch == 1 {
-            intermediate.div_ceil(64) as u32
-        } else if gate_up_rows4 {
-            (batch.div_ceil(4) * intermediate.div_ceil(64)) as u32
-        } else if gate_up_rows2 {
-            (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
-        } else {
-            (batch * intermediate.div_ceil(128)) as u32
-        },
-    )
-    .context("mlp_decode gate/up kernel failed")?;
-    finish_vulkan_mlp_kernel_stage_profile(
-        "gate_up_dispatch",
-        batch,
-        hidden,
-        intermediate,
-        out_dim,
-        gate_up_bf16_weights,
-        down_bf16_weights,
-        gate_up_rows2,
-        gate_up_rows4,
-        down_rows4,
-        down_rows2,
-        stage_start,
-    );
+    let gate_up_workgroups = if batch == 1 {
+        intermediate.div_ceil(64) as u32
+    } else if gate_up_rows4 {
+        (batch.div_ceil(4) * intermediate.div_ceil(64)) as u32
+    } else if gate_up_rows2 {
+        (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
+    } else {
+        (batch * intermediate.div_ceil(128)) as u32
+    };
 
     let linear_glsl = if down_bf16_weights {
         if batch == 1 {
@@ -3585,38 +3567,94 @@ fn dispatch_mlp_decode_cached_impl(
         down_weight_t.handle(),
         out_buf.handle(),
     ];
-    let stage_start = profile_stages.then(Instant::now);
-    run_compute_pipeline(
-        vk_device,
-        &linear_spirv,
-        &linear_handles,
-        linear_handles.len(),
-        &linear_push,
-        if batch == 1 {
-            out_dim.div_ceil(16) as u32
-        } else if down_rows4 {
-            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
-        } else if down_rows2 {
-            (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
-        } else {
-            (batch * out_dim.div_ceil(32)) as u32
-        },
-    )
-    .context("mlp_decode down kernel failed")?;
-    finish_vulkan_mlp_kernel_stage_profile(
-        "down_dispatch",
-        batch,
-        hidden,
-        intermediate,
-        out_dim,
-        gate_up_bf16_weights,
-        down_bf16_weights,
-        gate_up_rows2,
-        gate_up_rows4,
-        down_rows4,
-        down_rows2,
-        stage_start,
-    );
+    let linear_workgroups = if batch == 1 {
+        out_dim.div_ceil(16) as u32
+    } else if down_rows4 {
+        (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
+    } else if down_rows2 {
+        (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
+    } else {
+        (batch * out_dim.div_ceil(32)) as u32
+    };
+
+    if mlp_chained_dispatch_enabled() {
+        let stage_start = profile_stages.then(Instant::now);
+        run_two_stage_compute_pipeline(
+            vk_device,
+            &gate_up_spirv,
+            &gate_up_handles,
+            &gate_up_push,
+            gate_up_workgroups,
+            &linear_spirv,
+            &linear_handles,
+            &linear_push,
+            linear_workgroups,
+        )
+        .context("mlp_decode chained gate/up + down kernels failed")?;
+        finish_vulkan_mlp_kernel_stage_profile(
+            "chained_dispatch",
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+            gate_up_bf16_weights,
+            down_bf16_weights,
+            gate_up_rows2,
+            gate_up_rows4,
+            down_rows4,
+            down_rows2,
+            stage_start,
+        );
+    } else {
+        let stage_start = profile_stages.then(Instant::now);
+        run_compute_pipeline(
+            vk_device,
+            &gate_up_spirv,
+            &gate_up_handles,
+            gate_up_handles.len(),
+            &gate_up_push,
+            gate_up_workgroups,
+        )
+        .context("mlp_decode gate/up kernel failed")?;
+        finish_vulkan_mlp_kernel_stage_profile(
+            "gate_up_dispatch",
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+            gate_up_bf16_weights,
+            down_bf16_weights,
+            gate_up_rows2,
+            gate_up_rows4,
+            down_rows4,
+            down_rows2,
+            stage_start,
+        );
+        let stage_start = profile_stages.then(Instant::now);
+        run_compute_pipeline(
+            vk_device,
+            &linear_spirv,
+            &linear_handles,
+            linear_handles.len(),
+            &linear_push,
+            linear_workgroups,
+        )
+        .context("mlp_decode down kernel failed")?;
+        finish_vulkan_mlp_kernel_stage_profile(
+            "down_dispatch",
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+            gate_up_bf16_weights,
+            down_bf16_weights,
+            gate_up_rows2,
+            gate_up_rows4,
+            down_rows4,
+            down_rows2,
+            stage_start,
+        );
+    }
 
     let out_data = {
         let stage_start = profile_stages.then(Instant::now);
@@ -5069,6 +5107,184 @@ pub fn run_compute_pipeline(
         device
             .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
             .context("failed to reset transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_two_stage_compute_pipeline(
+    vk_device: &VulkanDevice,
+    first_spirv: &[u8],
+    first_handles: &[vk::Buffer],
+    first_push_constants: &[u32],
+    first_workgroup_count: u32,
+    second_spirv: &[u8],
+    second_handles: &[vk::Buffer],
+    second_push_constants: &[u32],
+    second_workgroup_count: u32,
+) -> Result<()> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let (first_set_layout, first_layout, first_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            first_spirv,
+            first_handles.len(),
+            (first_push_constants.len() * 4) as u32,
+        )?;
+    let (second_set_layout, second_layout, second_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            second_spirv,
+            second_handles.len(),
+            (second_push_constants.len() * 4) as u32,
+        )?;
+    anyhow::ensure!(
+        first_handles.len() + second_handles.len() <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {}",
+        first_handles.len() + second_handles.len()
+    );
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let set_layouts = [first_set_layout, second_set_layout];
+    let descriptor_sets = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate two-stage descriptor sets")?
+    };
+    let first_descriptor_set = descriptor_sets[0];
+    let second_descriptor_set = descriptor_sets[1];
+
+    {
+        let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
+            Vec::with_capacity(first_buf_infos.len() + second_buf_infos.len());
+        descriptor_write_infos.extend(
+            first_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(first_descriptor_set, i as u32, info)
+            }),
+        );
+        descriptor_write_infos.extend(
+            second_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(second_descriptor_set, i as u32, info)
+            }),
+        );
+        unsafe {
+            device.update_descriptor_sets(&descriptor_write_infos, &[]);
+        }
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate two-stage command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin two-stage command buffer")?;
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, first_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            first_layout,
+            0,
+            &[first_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            first_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(first_push_constants),
+        );
+        device.cmd_dispatch(cmd, first_workgroup_count, 1, 1);
+
+        let first_to_second_barrier =
+            make_memory_barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[first_to_second_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, second_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            second_layout,
+            0,
+            &[second_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            second_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(second_push_constants),
+        );
+        device.cmd_dispatch(cmd, second_workgroup_count, 1, 1);
+
+        let second_to_readback_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[second_to_readback_barrier],
+            &[],
+            &[],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end two-stage command buffer")?;
+    }
+
+    unsafe {
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit two-stage compute dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for two-stage queue")?;
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset two-stage transient descriptor pool")?;
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 

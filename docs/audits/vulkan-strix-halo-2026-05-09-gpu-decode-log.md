@@ -5937,3 +5937,83 @@ Verdict:
 Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-*.log`
+
+### 2026-05-09 A100: Accept MLP Chained Dispatch
+
+Goal:
+- Reduce Vulkan CPU/GPU boundary overhead in the largest remaining decode
+  bucket without retuning shader tiles.
+- Use the CUDA-graph-style lesson that stable command boundaries matter, but
+  keep the change local to Vulkan MLP dispatch.
+
+Implementation:
+- Added `run_two_stage_compute_pipeline`, which allocates two descriptor sets
+  from the reusable transient descriptor pool, records two compute dispatches
+  into one command buffer, inserts a compute-to-compute barrier between them,
+  then submits/waits once.
+- `dispatch_mlp_decode_cached_impl` now uses that helper for the gate/up stage
+  followed by down projection.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH=1`.
+
+Correctness and compile validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- All candidate and rollback latency/profile runs stayed on backend `vulkan`
+  and kept token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Live server smoke with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200 and
+  visible `content == "Red Blue"`; metrics reported
+  `kiln_requests_total{status="ok"} 1` and
+  `kiln_requests_total{status="error"} 0`.
+
+No-profile A/B:
+- Seed 109:
+  - candidate prefill `974.825019ms`, mean ITL `80.3875675ms`,
+    p99 `88.264491ms`
+  - rollback prefill `1009.779828ms`, mean ITL `81.414262ms`,
+    p99 `90.150941ms`
+- Seed 110 counter-order:
+  - rollback prefill `965.25146ms`, mean ITL `81.29783125ms`,
+    p99 `88.605094ms`
+  - candidate prefill `952.165659ms`, mean ITL `81.043109375ms`,
+    p99 `96.077606ms`
+
+Focused MLP profile, seed 111:
+- Candidate: prefill `944.810553ms`, mean ITL `82.797547625ms`,
+  p99 `90.497587ms`.
+- Rollback: prefill `1009.611486ms`, mean ITL `83.79880025ms`,
+  p99 `91.305076ms`.
+- Outer MLP totals:
+  - `seq_len=64`: rollback `232.760ms`, candidate `230.893ms`
+  - `seq_len=1`: rollback `246.136ms`, candidate `234.216ms`
+- Vulkan MLP kernel totals:
+  - batch `64`: rollback `231.757ms`, candidate `229.836ms`
+  - batch `1`: rollback `240.425ms`, candidate `228.764ms`
+
+CUDA/Metal checks:
+- `cargo check -p kiln-model --features cuda` was attempted and remains
+  host-blocked by missing `nvcc` / `NvccNotFound`.
+- `cargo check -p kiln-model --features metal` was attempted and remains
+  host-blocked because `objc2` requires an Apple target.
+- CUDA and Metal source paths are untouched.
+
+Verdict:
+- Accepted. The main measured benefit is on serial decode MLP by eliminating
+  one submit/wait boundary per MLP call. Prefill is positive but noisier; p99
+  was mixed in the no-profile counter-order pair.
+- This is a safer Vulkan analogue of the recent CUDA boundary/residency lesson
+  than another direct Metal tile port.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-server-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-server-metrics.txt`
