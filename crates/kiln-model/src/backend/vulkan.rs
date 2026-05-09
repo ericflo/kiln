@@ -35,6 +35,7 @@ pub struct VulkanBackend {
     gdn_full_chunk_forward_enabled: bool,
     fused_conv1d_update_enabled: bool,
     fused_conv1d_prefill_enabled: bool,
+    conv1d_prefill_single_submit_enabled: bool,
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
     linear_decode_enabled: bool,
@@ -129,6 +130,8 @@ impl VulkanBackend {
                 || std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE").is_ok());
         let fused_conv1d_prefill_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL").is_err();
+        let conv1d_prefill_single_submit_enabled = fused_conv1d_prefill_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT").is_err();
         let gdn_forward_sub_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_FORWARD_SUB").is_ok();
         // The fused GDN decode path is validated, but for bs=1 it remains
@@ -199,6 +202,7 @@ impl VulkanBackend {
             gdn_full_chunk_forward_enabled,
             fused_conv1d_update_enabled,
             fused_conv1d_prefill_enabled,
+            conv1d_prefill_single_submit_enabled,
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
             linear_decode_enabled,
@@ -1825,14 +1829,26 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (out, new_state) = kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill(
-            vk_device,
-            x,
-            weight,
-            conv_state,
-            kernel_size,
-        )
-        .context("causal_conv1d_prefill kernel failed")?;
+        let (out, new_state) = if self.conv1d_prefill_single_submit_enabled {
+            let weight_buf = self.cached_f32_weight_buffer(weight)?;
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight(
+                vk_device,
+                x,
+                &weight_buf,
+                conv_state,
+                kernel_size,
+            )
+            .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?
+        } else {
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill(
+                vk_device,
+                x,
+                weight,
+                conv_state,
+                kernel_size,
+            )
+            .context("causal_conv1d_prefill kernel failed")?
+        };
         *conv_state = new_state;
         Ok(Some(out))
     }

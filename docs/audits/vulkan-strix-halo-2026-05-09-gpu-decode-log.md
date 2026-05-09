@@ -6369,3 +6369,99 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-rollback-seed*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-cuda-check.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-metal-check.log`
+
+### 2026-05-09 A106: Current Profile After A105
+
+Scope:
+- No source change.
+- Refresh the profiled hotspot map on `main` after A105 and after
+  fast-forwarding over upstream Metal audit commit `5c5cf5d3`.
+
+Profile result:
+- Backend stayed `vulkan`.
+- Token IDs stayed `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Final measured latency: `1009.095ms` prefill / `80.283ms` mean ITL /
+  `90.147ms` p99.
+- Prefill buckets: GDN recurrent `257.754ms`, MLP fused `231.141ms`, GDN
+  in-proj `127.791ms`, full-attention QKV `102.657ms`, GDN conv `67.696ms`.
+- Decode buckets: MLP fused `214.108ms`, GDN in-proj `100.085ms`, GDN
+  recurrent `72.495ms`, GDN out-proj `44.482ms`, gated norm `40.923ms`,
+  gates `35.465ms`.
+- MLP is lower than before A105 but remains a top decode bucket. GDN conv is
+  smaller than the pre-A096 shape but still visible enough to justify a
+  different boundary experiment, not another transfer-only grouping retry.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a106-current-after-mlp-transfer-submit-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a106-current-after-mlp-transfer-submit-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a106-current-after-mlp-transfer-submit-profile.log`
+
+### 2026-05-09 A107: Accept Conv1d Prefill Cached Single Submit
+
+Scope:
+- Vulkan-only multi-token causal conv1d prefill route.
+- Cache the immutable conv weight as a f32 device-local buffer at the model
+  backend layer.
+- Fold x/state uploads, `causal_conv1d.comp`,
+  `causal_conv1d_state_advance.comp`, and out/state readbacks into one command
+  buffer and one queue submit.
+- Rollback env: `KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT=1`.
+- Broader rollback remains `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1`.
+- CUDA and Metal source paths are untouched.
+
+Correctness and build evidence:
+- `cargo fmt --check` and `git diff --check` passed.
+- `cargo check -p kiln-model` passed with existing warnings.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- Focused conv parity passed (`2 passed`) and now exercises both old and new
+  prefill routes.
+- Full Vulkan parity passed (`34 passed`).
+- Release Vulkan bench and server builds passed with existing warnings.
+- Live server smoke selected Vulkan on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)` and returned visible
+  `content: "Red Blue"` with
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Metrics after smoke: `kiln_requests_total{status="ok"} 1` and
+  `kiln_tokens_generated_total 3`.
+- CUDA check remains host-blocked by missing `nvcc`.
+- Metal check remains host-blocked by `objc2` requiring an Apple target.
+
+Same-binary no-profile A/B:
+- All runs stayed on backend `vulkan`.
+- All runs kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Seed `127`: candidate `947.458ms` prefill / `77.879ms` mean ITL /
+  `85.453ms` p99; rollback `954.561ms` / `77.796ms` / `85.828ms`.
+- Seed `128` counter-order: rollback `996.320ms` / `79.955ms` /
+  `88.077ms`; candidate `994.116ms` / `79.020ms` / `86.767ms`.
+- Seed `129`: candidate `964.346ms` / `79.058ms` / `88.162ms`; rollback
+  `1026.315ms` / `79.287ms` / `88.906ms`.
+- Three-pair average: candidate `968.640ms` prefill / `78.652ms` mean ITL /
+  `86.794ms` p99; rollback `992.398ms` / `79.013ms` / `87.604ms`.
+- Approximate 64 prompt + 8 ITL total: candidate `1597.859ms`; rollback
+  `1624.502ms`.
+
+Verdict:
+- Keep.
+- This is a small same-token Vulkan-only win with a narrow rollback. It is not
+  a repeat of the rejected transfer-only conv batching attempts; the accepted
+  shape includes cached weight and compute/readback boundary folding.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-kernel-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-model-plain-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-model-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-full-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-server-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-metrics-snippet.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-candidate-seed*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-rollback-seed*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-cuda-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-metal-check.log`

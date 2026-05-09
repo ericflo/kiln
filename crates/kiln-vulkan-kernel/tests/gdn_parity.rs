@@ -927,13 +927,38 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         assert_close(
             &format!("causal conv1d prefill out seq_len={seq_len}"),
             &got_out,
-            &cpu_f32(exp_out, (batch, channels, seq_len))?,
+            &cpu_f32(exp_out.clone(), (batch, channels, seq_len))?,
             1e-5,
         )?;
         assert_close(
             &format!("causal conv1d prefill state seq_len={seq_len}"),
             &got_state,
-            &cpu_f32(exp_state, (batch, channels, kernel_size - 1))?,
+            &cpu_f32(exp_state.clone(), (batch, channels, kernel_size - 1))?,
+            1e-5,
+        )?;
+
+        let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &weight)?;
+        let (got_cached_out, got_cached_state) =
+            kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight(
+                &vk,
+                &x,
+                &weight_buf,
+                &state,
+                kernel_size,
+            )
+            .with_context(|| {
+                format!("dispatch_causal_conv1d_prefill_cached_weight seq_len={seq_len}")
+            })?;
+        assert_close(
+            &format!("causal conv1d cached prefill out seq_len={seq_len}"),
+            &got_cached_out,
+            &cpu_f32(exp_out.clone(), (batch, channels, seq_len))?,
+            1e-5,
+        )?;
+        assert_close(
+            &format!("causal conv1d cached prefill state seq_len={seq_len}"),
+            &got_cached_state,
+            &cpu_f32(exp_state.clone(), (batch, channels, kernel_size - 1))?,
             1e-5,
         )?;
     }

@@ -1,0 +1,60 @@
+A106 Current Vulkan Profile After A105
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Profiled source:
+- `main` after A105 `fold vulkan mlp transfer submit`, with upstream Metal
+  audit commit `5c5cf5d3` fast-forwarded first.
+- No source changes in A106.
+
+Final measured latency JSON:
+- backend: `vulkan`
+- token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- prefill: `1009.094967ms`
+- mean ITL: `80.28344725ms`
+- p50 ITL: `78.880718ms`
+- p99 ITL: `90.146932ms`
+- output tokens: `9`
+
+Measured-pass prefill buckets:
+- GDN recurrent: `257.754ms` / `24` calls.
+- MLP fused: `231.141ms` / `32` calls.
+- GDN in-proj: `127.791ms` / `24` calls.
+- Full-attention QKV: `102.657ms` / `8` calls.
+- GDN conv: `67.696ms` / `24` calls.
+
+Measured-pass decode buckets:
+- MLP fused: `214.108ms` / `256` calls.
+- GDN in-proj: `100.085ms` / `192` calls.
+- GDN recurrent: `72.495ms` / `192` calls.
+- GDN out-proj: `44.482ms` / `192` calls.
+- GDN gated norm: `40.923ms` / `192` calls.
+- GDN gates: `35.465ms` / `192` calls.
+- Full-attention QKV: `26.804ms` / `64` calls.
+
+Kernel-stage notes:
+- Vulkan MLP batch64 `chained_transfer_dispatch_readback` was
+  `225.270ms` / `32`, with total `230.031ms` / `32`.
+- Vulkan MLP batch1 `chained_transfer_dispatch_readback` was
+  `199.412ms` / `256`, with total `209.265ms` / `256`.
+- Vulkan GDN in-proj batch64 `record_submit_wait` remained dominant at
+  `100.168ms` / `24`, total `126.714ms` / `24`.
+- Vulkan GDN in-proj batch1 `record_submit_wait` was `84.090ms` / `192`,
+  total `95.717ms` / `192`.
+- GDN recurrent prefill was split across `matmul_prep` `79.645ms`,
+  `chunk_scan` `76.834ms`, `chunk_prep` `59.129ms`, and `state_update`
+  `37.865ms`.
+
+Interpretation:
+- A105 moved the MLP dispatch/readback boundary down, but MLP remains the
+  largest decode bucket and a top prefill bucket.
+- GDN recurrent and GDN in-proj remain high-value targets, but previous
+  standalone gates/norm submit folds were rejected. Further work should change
+  a broader boundary, residency, or algorithmic shape.
+- GDN conv prefill is smaller than before A096 but still visible; any conv
+  retry must differ from the rejected A088/A089 transfer-only grouping.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a106-current-after-mlp-transfer-submit-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a106-current-after-mlp-transfer-submit-profile.log`

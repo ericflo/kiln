@@ -1,0 +1,9 @@
+   Compiling kiln-vulkan-kernel v0.2.13 (/home/ericflo/Development/kiln/crates/kiln-vulkan-kernel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.55s
+     Running tests/gdn_parity.rs (target/debug/deps/gdn_parity-76b8eec335dda4df)
+
+running 2 tests
+test causal_conv1d_update_matches_stateful_cpu_reference ... ok
+test causal_conv1d_prefill_matches_stateful_cpu_reference ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.03s

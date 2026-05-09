@@ -1,0 +1,51 @@
+    Checking kiln-vulkan-kernel v0.2.13 (/home/ericflo/Development/kiln/crates/kiln-vulkan-kernel)
+    Checking kiln-model v0.2.13 (/home/ericflo/Development/kiln/crates/kiln-model)
+warning: variable `slots_fit_u32` is assigned to, but never used
+   --> crates/kiln-model/src/paged_kv_cache.rs:346:13
+    |
+346 |         let mut slots_fit_u32 = true;
+    |             ^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_slots_fit_u32` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `slots_fit_u32` is never read
+   --> crates/kiln-model/src/paged_kv_cache.rs:350:27
+    |
+350 |                 Err(_) => slots_fit_u32 = false,
+    |                           ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3675:4
+     |
+3675 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `apply_causal_mask` is never used
+    --> crates/kiln-model/src/forward.rs:7542:4
+     |
+7542 | fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8682:15
+     |
+8682 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib) generated 6 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.95s

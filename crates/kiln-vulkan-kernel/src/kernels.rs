@@ -5051,6 +5051,98 @@ pub fn dispatch_causal_conv1d_prefill(
     Ok((out_tensor, state_tensor))
 }
 
+/// Dispatch causal_conv1d prefill with an immutable cached f32 weight buffer.
+///
+/// This keeps the old tensor-weight entry point available as a rollback path,
+/// while avoiding one per-layer weight upload and folding the two uploads, two
+/// compute dispatches, and two readbacks into one command buffer/queue submit.
+pub fn dispatch_causal_conv1d_prefill_cached_weight(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_buf: &VulkanBuffer,
+    conv_state: &Tensor,
+    kernel_size: usize,
+) -> Result<(Tensor, Tensor)> {
+    if kernel_size != 4 {
+        anyhow::bail!("causal_conv1d: only kernel_size=4 supported");
+    }
+
+    let device = vk_device.device();
+    let device_local_mt = vk_device.device_local_mem_type();
+
+    let x_data = extract_tensor_bytes(x)?.0;
+    let state_data = extract_tensor_bytes(conv_state)?.0;
+
+    let dims = x.dims();
+    let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
+
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
+    let state_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?;
+    let out_size = (batch * channels * seq_len * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
+
+    let glsl_output = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d.comp"
+    );
+    let spirv_output = crate::pipeline::ShaderPipeline::compile_shader(glsl_output)?;
+    let output_handles: Vec<vk::Buffer> = vec![
+        x_buf.handle(),
+        weight_buf.handle(),
+        state_buf.handle(),
+        out_buf.handle(),
+    ];
+    let output_push: [u32; 4] = [
+        batch as u32,
+        channels as u32,
+        seq_len as u32,
+        kernel_size as u32,
+    ];
+    let output_wg = ((batch * channels * seq_len).div_ceil(256)) as u32;
+
+    let glsl_state = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d_state_advance.comp"
+    );
+    let spirv_state = crate::pipeline::ShaderPipeline::compile_shader(glsl_state)?;
+    let state_handles: Vec<vk::Buffer> = vec![x_buf.handle(), state_buf.handle()];
+    let state_push: [u32; 4] = [
+        batch as u32,
+        channels as u32,
+        seq_len as u32,
+        kernel_size as u32,
+    ];
+    let state_wg = (batch * channels) as u32;
+
+    let readbacks = run_two_stage_compute_pipeline_with_transfers(
+        vk_device,
+        &[(&x_buf, &x_data), (&state_buf, &state_data)],
+        &[&out_buf, &state_buf],
+        &spirv_output,
+        &output_handles,
+        &output_push,
+        output_wg,
+        &spirv_state,
+        &state_handles,
+        &state_push,
+        state_wg,
+    )
+    .context("causal_conv1d prefill cached-weight single-submit failed")?;
+    anyhow::ensure!(
+        readbacks.len() == 2,
+        "causal_conv1d prefill expected 2 readbacks, got {}",
+        readbacks.len()
+    );
+    let out_data = &readbacks[0];
+    let state_data = &readbacks[1];
+
+    let out_shape = x.dims().as_ref().to_vec();
+    let out_tensor = create_tensor_from_data(out_data, &out_shape, DType::F32)?;
+    let state_tensor = create_tensor_from_data(state_data, conv_state.dims().as_ref(), DType::F32)?;
+    Ok((out_tensor, state_tensor))
+}
+
 // ---------------------------------------------------------------------------
 // Common pipeline build + dispatch helper to reduce code duplication
 // ---------------------------------------------------------------------------
@@ -5579,6 +5671,245 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
 
     VulkanBuffer::read_host_visible(device, &readback_stage)
         .context("failed to read transfer two-stage output")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_two_stage_compute_pipeline_with_transfers(
+    vk_device: &VulkanDevice,
+    uploads: &[(&VulkanBuffer, &[u8])],
+    readbacks: &[&VulkanBuffer],
+    first_spirv: &[u8],
+    first_handles: &[vk::Buffer],
+    first_push_constants: &[u32],
+    first_workgroup_count: u32,
+    second_spirv: &[u8],
+    second_handles: &[vk::Buffer],
+    second_push_constants: &[u32],
+    second_workgroup_count: u32,
+) -> Result<Vec<Vec<u8>>> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let mut upload_stages = Vec::with_capacity(uploads.len());
+    for (_, data) in uploads {
+        let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)
+            .context("failed to create two-stage upload staging buffer")?;
+        VulkanBuffer::write_host_visible(device, &stage, data)?;
+        upload_stages.push(stage);
+    }
+
+    let mut readback_stages = Vec::with_capacity(readbacks.len());
+    for buffer in readbacks {
+        readback_stages.push(
+            VulkanBuffer::create_host_visible(device, host_visible_mt, buffer.size())
+                .context("failed to create two-stage readback staging buffer")?,
+        );
+    }
+
+    let (first_set_layout, first_layout, first_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            first_spirv,
+            first_handles.len(),
+            (first_push_constants.len() * 4) as u32,
+        )?;
+    let (second_set_layout, second_layout, second_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            second_spirv,
+            second_handles.len(),
+            (second_push_constants.len() * 4) as u32,
+        )?;
+    anyhow::ensure!(
+        first_handles.len() + second_handles.len() <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {}",
+        first_handles.len() + second_handles.len()
+    );
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let set_layouts = [first_set_layout, second_set_layout];
+    let descriptor_sets = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate transfer two-stage descriptor sets")?
+    };
+    let first_descriptor_set = descriptor_sets[0];
+    let second_descriptor_set = descriptor_sets[1];
+
+    {
+        let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
+            Vec::with_capacity(first_buf_infos.len() + second_buf_infos.len());
+        descriptor_write_infos.extend(
+            first_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(first_descriptor_set, i as u32, info)
+            }),
+        );
+        descriptor_write_infos.extend(
+            second_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(second_descriptor_set, i as u32, info)
+            }),
+        );
+        unsafe {
+            device.update_descriptor_sets(&descriptor_write_infos, &[]);
+        }
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate transfer two-stage command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin transfer two-stage command buffer")?;
+
+        for ((dst, data), stage) in uploads.iter().zip(upload_stages.iter()) {
+            device.cmd_copy_buffer(
+                cmd,
+                stage.handle(),
+                dst.handle(),
+                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+            );
+        }
+        if !uploads.is_empty() {
+            let upload_barrier = make_memory_barrier(
+                vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+                vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            );
+            device.cmd_pipeline_barrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[upload_barrier],
+                &[],
+                &[],
+            );
+        }
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, first_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            first_layout,
+            0,
+            &[first_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            first_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(first_push_constants),
+        );
+        device.cmd_dispatch(cmd, first_workgroup_count, 1, 1);
+
+        let first_to_second_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[first_to_second_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, second_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            second_layout,
+            0,
+            &[second_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            second_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(second_push_constants),
+        );
+        device.cmd_dispatch(cmd, second_workgroup_count, 1, 1);
+
+        let readback_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::DependencyFlags::empty(),
+            &[readback_barrier],
+            &[],
+            &[],
+        );
+
+        for (src, stage) in readbacks.iter().zip(readback_stages.iter()) {
+            device.cmd_copy_buffer(
+                cmd,
+                src.handle(),
+                stage.handle(),
+                &[vk::BufferCopy::builder().size(src.size()).build()],
+            );
+        }
+
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end transfer two-stage command buffer")?;
+    }
+
+    unsafe {
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit transfer two-stage compute dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for transfer two-stage queue")?;
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transfer two-stage transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    readback_stages
+        .iter()
+        .map(|stage| VulkanBuffer::read_host_visible(device, stage))
+        .collect::<Result<Vec<_>>>()
+        .context("failed to read transfer two-stage outputs")
 }
 
 // ---------------------------------------------------------------------------
