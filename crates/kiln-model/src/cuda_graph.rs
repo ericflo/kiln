@@ -36,6 +36,10 @@ use candle_core::Device;
 use candle_core::Tensor;
 #[cfg(feature = "cuda")]
 use std::collections::HashMap;
+use std::sync::{
+    Mutex, TryLockError,
+    atomic::{AtomicUsize, Ordering},
+};
 use tracing;
 
 use kiln_core::config::ModelConfig;
@@ -145,6 +149,183 @@ pub struct CudaGraphRunner {
     adapter_generation: u64,
     /// Whether warmup is complete.
     warmup_done: bool,
+}
+
+/// Decode graph runners for concurrent generation streams.
+///
+/// The legacy path used one `Mutex<CudaGraphRunner>` for every request, so a
+/// decode step that captured or replayed a CUDA graph serialized all streams
+/// behind one CPU-side lock. The pool gives each active stream an independent
+/// runner/graph cache. If all slots are busy, the caller runs one eager decode
+/// step instead of waiting behind the global graph mutex.
+pub struct CudaGraphRunners {
+    enabled: bool,
+    slots: CudaGraphSlots,
+}
+
+enum CudaGraphSlots {
+    Single(Mutex<CudaGraphRunner>),
+    Pool(CudaGraphPool),
+}
+
+struct CudaGraphPool {
+    slots: Vec<Mutex<CudaGraphRunner>>,
+    next_slot: AtomicUsize,
+}
+
+impl CudaGraphRunners {
+    pub fn new(device: &Device, enabled: bool) -> Self {
+        let runner_enabled = enabled && device.is_cuda();
+        let disable_pool = per_stream_graph_disabled();
+        let slots = if runner_enabled && !disable_pool {
+            let slot_count = decode_parallelism();
+            tracing::info!(slots = slot_count, "per-stream CUDA graph runner pool enabled");
+            CudaGraphSlots::Pool(CudaGraphPool {
+                slots: (0..slot_count)
+                    .map(|_| Mutex::new(CudaGraphRunner::new(device, enabled)))
+                    .collect(),
+                next_slot: AtomicUsize::new(0),
+            })
+        } else {
+            if runner_enabled && disable_pool {
+                tracing::info!(
+                    "KILN_DISABLE_PER_STREAM_GRAPH=1; using legacy single CUDA graph runner"
+                );
+            }
+            CudaGraphSlots::Single(Mutex::new(CudaGraphRunner::new(device, enabled)))
+        };
+
+        Self {
+            enabled: runner_enabled,
+            slots,
+        }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn invalidate(&self) {
+        match &self.slots {
+            CudaGraphSlots::Single(slot) => {
+                if let Ok(mut runner) = slot.lock() {
+                    runner.invalidate();
+                }
+            }
+            CudaGraphSlots::Pool(pool) => {
+                for slot in &pool.slots {
+                    if let Ok(mut runner) = slot.lock() {
+                        runner.invalidate();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn slot_count(&self) -> usize {
+        match &self.slots {
+            CudaGraphSlots::Single(_) => 1,
+            CudaGraphSlots::Pool(pool) => pool.slots.len(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged(
+        &self,
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<candle_core::Tensor> {
+        match &self.slots {
+            CudaGraphSlots::Single(slot) => {
+                let mut runner = slot
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
+                runner.decode_step_paged(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                )
+            }
+            CudaGraphSlots::Pool(pool) => {
+                let slot_count = pool.slots.len();
+                let start = pool.next_slot.fetch_add(1, Ordering::Relaxed) % slot_count;
+                for offset in 0..slot_count {
+                    let slot_idx = (start + offset) % slot_count;
+                    match pool.slots[slot_idx].try_lock() {
+                        Ok(mut runner) => {
+                            return runner.decode_step_paged(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            );
+                        }
+                        Err(TryLockError::WouldBlock) => continue,
+                        Err(TryLockError::Poisoned(e)) => {
+                            tracing::warn!(slot = slot_idx, "CUDA graph runner slot poisoned: {e}");
+                            continue;
+                        }
+                    }
+                }
+
+                tracing::debug!(
+                    slots = slot_count,
+                    "all CUDA graph runner slots busy; falling back to eager decode"
+                );
+                CudaGraphRunner::eager_forward(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                )
+            }
+        }
+    }
+}
+
+fn per_stream_graph_disabled() -> bool {
+    std::env::var("KILN_DISABLE_PER_STREAM_GRAPH")
+        .map(|v| env_flag_enabled(&v))
+        .unwrap_or(false)
+}
+
+fn decode_parallelism() -> usize {
+    std::env::var("KILN_DECODE_PARALLELISM")
+        .ok()
+        .as_deref()
+        .and_then(decode_parallelism_value)
+        .unwrap_or(8)
+}
+
+fn env_flag_enabled(value: &str) -> bool {
+    matches!(value, "1" | "true" | "TRUE" | "yes" | "on")
+}
+
+fn decode_parallelism_value(value: &str) -> Option<usize> {
+    value.parse::<usize>().ok().filter(|v| *v > 0)
 }
 
 impl CudaGraphRunner {
@@ -734,7 +915,7 @@ impl CudaGraphRunner {
 
     /// Eager (non-graph) paged decode.
     #[allow(clippy::too_many_arguments)]
-    fn eager_forward(
+    pub(crate) fn eager_forward(
         backend: &dyn BackendRuntime,
         token_id: u32,
         weights: &GpuWeights,
@@ -998,9 +1179,59 @@ mod tests {
         runner.invalidate();
         assert_eq!(runner.adapter_generation, 3);
     }
+
+    #[test]
+    fn test_decode_parallelism_value_rejects_invalid() {
+        assert_eq!(decode_parallelism_value("0"), None);
+        assert_eq!(decode_parallelism_value("not-a-number"), None);
+        assert_eq!(decode_parallelism_value("16"), Some(16));
+    }
+
+    #[test]
+    fn test_env_flag_enabled_accepts_kill_switch_values() {
+        assert!(env_flag_enabled("1"));
+        assert!(env_flag_enabled("true"));
+        assert!(env_flag_enabled("TRUE"));
+        assert!(env_flag_enabled("yes"));
+        assert!(env_flag_enabled("on"));
+        assert!(!env_flag_enabled("0"));
+    }
+
+    #[test]
+    fn test_runner_pool_cpu_uses_single_disabled_slot() {
+        let runners = CudaGraphRunners::new(&Device::Cpu, true);
+        assert!(!runners.is_enabled());
+        assert_eq!(runners.slot_count(), 1);
+    }
+
+    #[test]
+    fn test_pool_invalidation_reaches_every_slot() {
+        let runners = CudaGraphRunners {
+            enabled: true,
+            slots: CudaGraphSlots::Pool(CudaGraphPool {
+                slots: (0..3)
+                    .map(|_| Mutex::new(CudaGraphRunner::new(&Device::Cpu, false)))
+                    .collect(),
+                next_slot: AtomicUsize::new(0),
+            }),
+        };
+
+        runners.invalidate();
+
+        match &runners.slots {
+            CudaGraphSlots::Pool(pool) => {
+                for slot in &pool.slots {
+                    let runner = slot.lock().expect("slot lock");
+                    assert_eq!(runner.adapter_generation, 1);
+                    assert!(!runner.warmup_done);
+                }
+            }
+            CudaGraphSlots::Single(_) => panic!("expected pool"),
+        }
+    }
 }
 
-// SAFETY: CudaGraphRunner is protected by a Mutex in ModelRunner. The inner
+// SAFETY: CudaGraphRunner is protected by a Mutex in CudaGraphRunners. The inner
 // CudaGraph/CudaGraphExec are GPU-side recorded command sequences. Launching a
 // graph is thread-safe — the CUDA driver serialises access on the stream.
 // The raw pointers (*mut CUgraph_st, *mut CUgraphExec_st) are opaque handles

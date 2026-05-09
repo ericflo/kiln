@@ -20,7 +20,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 
 use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
-use crate::cuda_graph::CudaGraphRunner;
+use crate::cuda_graph::CudaGraphRunners;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward, model_forward_head, model_forward_paged,
@@ -66,9 +66,8 @@ pub struct ModelRunner {
     eos_token_ids: Vec<TokenId>,
     /// Currently active LoRA adapter weights (None = base model only).
     active_lora: Option<LoraWeights>,
-    /// CUDA graph runner for accelerated decode steps.
-    /// Uses Mutex for interior mutability (graph state changes during &self generation).
-    cuda_graph: Mutex<CudaGraphRunner>,
+    /// CUDA graph runners for accelerated decode steps.
+    cuda_graph: CudaGraphRunners,
     /// Phase A explicit decode weight registry. Decode kernels address weights
     /// by enum keys instead of safetensors/Candle names.
     /// Phase A.5: lazily built on first hot-path access via `packed_weight_registry()`.
@@ -796,7 +795,7 @@ impl ModelRunner {
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         let device = weights.embed_tokens.device().clone();
-        let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
+        let cuda_graph = CudaGraphRunners::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
         // Phase A.5: registry + decode-buffer config are deferred to first hot-path
         // access. Building them eagerly here regressed c=1 paged decode by 22%
@@ -808,7 +807,7 @@ impl ModelRunner {
             config,
             eos_token_ids,
             active_lora: None,
-            cuda_graph: Mutex::new(cuda_graph),
+            cuda_graph,
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
             decode_buffer_config: OnceLock::new(),
@@ -826,18 +825,14 @@ impl ModelRunner {
         let lora =
             LoraWeights::load(path, num_layers, &device).context("failed to load LoRA adapter")?;
         self.active_lora = Some(lora);
-        if let Ok(mut graph) = self.cuda_graph.lock() {
-            graph.invalidate();
-        }
+        self.cuda_graph.invalidate();
         Ok(())
     }
 
     /// Unload the currently active LoRA adapter, reverting to base model.
     pub fn unload_adapter(&mut self) {
         self.active_lora = None;
-        if let Ok(mut graph) = self.cuda_graph.lock() {
-            graph.invalidate();
-        }
+        self.cuda_graph.invalidate();
     }
 
     /// Returns a reference to the active LoRA weights, if any.
@@ -897,9 +892,7 @@ impl ModelRunner {
     /// weight tensor pointers embedded in the graph.
     pub fn swap_lora(&mut self, lora: Option<LoraWeights>) {
         self.active_lora = lora;
-        if let Ok(mut graph) = self.cuda_graph.lock() {
-            graph.invalidate();
-        }
+        self.cuda_graph.invalidate();
     }
 
     fn snapshot_draft_linear_state(
@@ -975,11 +968,7 @@ impl ModelRunner {
     }
 
     pub fn cuda_graph_enabled(&self) -> Result<bool> {
-        Ok(self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
-            .is_enabled())
+        Ok(self.cuda_graph.is_enabled())
     }
 
     /// Generate text token-by-token, sending each token to a channel as it is produced.
@@ -1515,11 +1504,7 @@ impl ModelRunner {
     ) -> Result<GenerationOutput> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
-        let cuda_graph_enabled = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
-            .is_enabled();
+        let cuda_graph_enabled = self.cuda_graph.is_enabled();
 
         // Phase 12-B'': allocate blocks under a one-shot BlockManager lock and
         // wrap them in `SharedBlockReservation` so the BM lock is released
@@ -2004,12 +1989,8 @@ impl ModelRunner {
             tokens
         } else {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let mut graph_runner = self
-                .cuda_graph
-                .lock()
-                .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-            if graph_runner.is_enabled() && row_count == 1 {
-                let row = graph_runner
+            if self.cuda_graph.is_enabled() && row_count == 1 {
+                let row = self.cuda_graph
                     .decode_step_paged(
                         &*self.backend,
                         input_tokens[0],
@@ -2784,11 +2765,8 @@ impl ModelRunner {
                 // paged cache for one step, then drop both before sampling so
                 // concurrent requests can interleave on the next step.
                 let logits = {
-                    let mut graph_runner = self.cuda_graph.lock().map_err(|e| {
-                        anyhow::anyhow!("failed to lock CUDA graph runner: {e}")
-                    })?;
                     let pc_guard = lock_paged_cache(paged_cache)?;
-                    graph_runner.decode_step_paged(
+                    self.cuda_graph.decode_step_paged(
                         &*self.backend,
                         next_token,
                         &self.weights,
@@ -3072,12 +3050,6 @@ impl ModelRunner {
         let mut generated_tokens: Vec<TokenId> = Vec::new();
         let mut step_seed = params.seed;
 
-        // Acquire the CUDA graph runner for decode steps
-        let mut graph_runner = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-
         let mut next_token = match prefill_source {
             PrefillSampleSource::GreedyToken(token) => token,
             PrefillSampleSource::Logits(logits) => {
@@ -3155,7 +3127,7 @@ impl ModelRunner {
                 token
             } else {
                 // Decode step: use CUDA graph runner (captures/replays when enabled)
-                let logits = graph_runner.decode_step_paged(
+                let logits = self.cuda_graph.decode_step_paged(
                     &*self.backend,
                     next_token,
                     &self.weights,
@@ -4668,11 +4640,7 @@ impl ModelRunner {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
 
-        let cuda_graph_enabled = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
-            .is_enabled();
+        let cuda_graph_enabled = self.cuda_graph.is_enabled();
         if cuda_graph_enabled {
             let mut bm_guard = lock_block_manager(block_manager)?;
             let pc_guard = lock_paged_cache(paged_cache)?;
@@ -5263,12 +5231,6 @@ impl ModelRunner {
         let mut step_seed = params.seed;
         let mut finish_reason = FinishReason::MaxTokens;
 
-        // Acquire CUDA graph runner for decode steps
-        let mut graph_runner = self
-            .cuda_graph
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
-
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
@@ -5357,7 +5319,7 @@ impl ModelRunner {
                 token
             } else {
                 // Decode step: use CUDA graph runner
-                let logits = match graph_runner.decode_step_paged(
+                let logits = match self.cuda_graph.decode_step_paged(
                     &*self.backend,
                     next_token,
                     &self.weights,
