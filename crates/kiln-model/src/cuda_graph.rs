@@ -333,6 +333,22 @@ impl CudaGraphRunners {
 }
 
 impl CudaGraphRunnerLease {
+    pub fn replay_ready(
+        &self,
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        seq_len: usize,
+    ) -> bool {
+        match &self.slot {
+            CudaGraphRunnerLeaseSlot::Single(_) => false,
+            CudaGraphRunnerLeaseSlot::Pool { pool, slot_idx } => pool.slots[*slot_idx]
+                .lock()
+                .map(|runner| runner.replay_ready(block_table, paged_cache, seq_len))
+                .unwrap_or(false),
+            CudaGraphRunnerLeaseSlot::Eager => true,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn decode_step_paged(
         &self,
@@ -429,6 +445,32 @@ fn decode_parallelism_value(value: &str) -> Option<usize> {
 }
 
 impl CudaGraphRunner {
+    fn replay_ready(
+        &self,
+        block_table: &BlockTable,
+        paged_cache: &PagedKvCache,
+        seq_len: usize,
+    ) -> bool {
+        if !self.enabled {
+            return true;
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            let requested_key = CudaGraphKey::new(block_table, paged_cache, seq_len);
+            return self
+                .captured
+                .get(&requested_key)
+                .map(|captured| captured.adapter_gen == self.adapter_generation)
+                .unwrap_or(false);
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
+    }
+
     /// Create a new graph runner. Enabled only on CUDA devices with the `cuda` feature.
     pub fn new(device: &Device, enabled: bool) -> Self {
         let actually_enabled = enabled && device.is_cuda();

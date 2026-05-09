@@ -1962,6 +1962,87 @@ impl ModelRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn decode_cuda_rowwise_serial(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+        input_tokens: &[TokenId],
+        block_tables: &[BlockTable],
+        sequence_lengths: &[usize],
+    ) -> Result<Vec<TokenId>> {
+        let mut sampled = Vec::with_capacity(states.len());
+        for idx in 0..states.len() {
+            let state = &mut states[idx];
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let row = if self.cuda_graph.is_enabled() {
+                let lease = state
+                    .cuda_graph_lease
+                    .get_or_insert_with(|| self.cuda_graph.lease());
+                lease
+                    .decode_step_paged(
+                        &*self.backend,
+                        input_tokens[idx],
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_tables[idx],
+                        sequence_lengths[idx],
+                        &mut state.linear_state,
+                        self.active_lora.as_ref(),
+                    )
+                    .with_context(|| format!("CUDA rowwise decode row {idx} failed"))?
+            } else {
+                CudaGraphRunners::decode_step_paged_eager(
+                    &*self.backend,
+                    input_tokens[idx],
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables[idx],
+                    sequence_lengths[idx],
+                    &mut state.linear_state,
+                    self.active_lora.as_ref(),
+                )
+                .with_context(|| format!("CUDA rowwise eager decode row {idx} failed"))?
+            };
+            let params = &params[idx];
+            let token = if params.temperature == 0.0 {
+                greedy_sample(&row)?
+            } else {
+                sample_with_params(
+                    &row,
+                    params.temperature,
+                    params.top_p,
+                    params.top_k,
+                    state.step_seed,
+                )?
+            };
+            sampled.push(token);
+        }
+        Ok(sampled)
+    }
+
+    fn cuda_rowwise_parallel_ready(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        paged_cache: &PagedKvCache,
+        block_tables: &[BlockTable],
+        sequence_lengths: &[usize],
+    ) -> bool {
+        if !self.cuda_graph.is_enabled() {
+            return true;
+        }
+        states.iter_mut().enumerate().all(|(idx, state)| {
+            state
+                .cuda_graph_lease
+                .as_ref()
+                .map(|lease| lease.replay_ready(&block_tables[idx], paged_cache, sequence_lengths[idx]))
+                .unwrap_or(false)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn decode_cuda_rowwise_parallel(
         &self,
         states: &mut [&mut PagedBatchedDecodeState],
@@ -2181,14 +2262,30 @@ impl ModelRunner {
                 vec![token]
             } else if self.backend.name() == "cuda" {
                 let _ = pc_guard;
-                self.decode_cuda_rowwise_parallel(
+                if self.cuda_rowwise_parallel_ready(
                     states,
-                    params,
                     paged_cache,
-                    &input_tokens,
                     &block_tables,
                     &sequence_lengths,
-                )?
+                ) {
+                    self.decode_cuda_rowwise_parallel(
+                        states,
+                        params,
+                        paged_cache,
+                        &input_tokens,
+                        &block_tables,
+                        &sequence_lengths,
+                    )?
+                } else {
+                    self.decode_cuda_rowwise_serial(
+                        states,
+                        params,
+                        paged_cache,
+                        &input_tokens,
+                        &block_tables,
+                        &sequence_lengths,
+                    )?
+                }
             } else {
                 let mut linear_states: Vec<&mut LinearAttentionState> = states
                     .iter_mut()
