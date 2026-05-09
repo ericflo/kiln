@@ -3399,6 +3399,62 @@ Verdict:
 - Keep. This is a Vulkan-only deployment/prewarm correctness fix for the
   accepted parallel recurrent shader, with no CUDA/Metal source changes.
 
+### 2026-05-09 A069: Reject GDN Chunk Prep/Scan Batched Transfers
+
+Problem:
+- A066 still showed Vulkan GDN recurrent prefill/decode work as a major target,
+  and A055/A056/A063 showed that reducing transfer submissions can help nearby
+  Vulkan paths.
+- The GDN prefill chunk helpers still performed many separate transfer helpers:
+  `dispatch_gdn_chunk_prep` uploaded `g`, `v`, `kkt`, `qkt`, `ks_entry`, and
+  `q_s`, then read back six intermediate products; `dispatch_gdn_chunk_scan`
+  uploaded six inputs and read back two outputs.
+
+Temporary change:
+- Batched those prep/scan uploads and readbacks behind
+  `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`.
+- Kept shader math unchanged.
+- Removed the source change before commit after the final no-profile A/B did
+  not support taking the default path.
+
+Evidence:
+- Profiled candidate improved the concrete GDN recurrent prefill stage:
+  `gdn_stage:recurrent seq_len=64` moved from exact rollback `242.102ms`
+  total / `10.087583ms` avg to candidate `229.076ms` total / `9.544833ms`
+  avg over `24` calls.
+- Profiled prefill also favored candidate:
+  `2241.253470ms` exact rollback to `2219.944554ms` candidate.
+- Fresh no-profile exact rollback/candidate did not confirm a default-safe
+  prefill win:
+  - rollback `2173.140301ms` prefill, `97.937331094ms` mean ITL
+  - candidate `2188.749211ms` prefill, `96.187313594ms` mean ITL
+- The candidate helped mean decode ITL in the fresh pair, but this experiment
+  targeted GDN prefill chunk movement and the prefill regression risk was not
+  acceptable.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-comparison.json`
+- Raw candidate and rollback benchmark logs under
+  `docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-*.log`
+
+Validation while the temporary candidate existed:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture`
+- `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `git diff --check`
+
+Verdict:
+- Rejected and removed. Do not retry by simply batching the current GDN
+  prefill chunk prep/scan transfers.
+- Future GDN prefill work should reduce the CPU boundary/readback shape or
+  keep prep/scan products resident across adjacent stages.
+- Final committed state has no CUDA or Metal source path changes.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3427,6 +3483,9 @@ Verdict:
   does not materially shrink the profiled recurrent bucket. Further recurrent
   work should reduce boundary/data-movement cost or fuse adjacent GDN stages,
   not only swap the inner reduction shape.
+- Do not retry GDN chunk prep/scan transfer batching alone; A069 improved the
+  profiled recurrent substage but did not produce a default-safe no-profile
+  prefill win.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

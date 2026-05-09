@@ -1,0 +1,61 @@
+
+  kiln-bench v0.2.13
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB)
+  Model path             Qwen3.5-4B
+  Model loaded           12.38s (backend: vulkan, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=6] (64 prompt tokens)...
+    Prefill (paged): 2337.1ms (27 tok/s)
+    Decode (paged): 33 tokens, mean ITL 95.9ms (10.4 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=6] (64 prompt tokens)...
+    Prefill (paged): 2188.7ms (29 tok/s)
+    Decode (paged): 33 tokens, mean ITL 96.2ms (10.4 tok/s)
+
+  ▌ Benchmark results
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB VRAM, source: linux-drm-sysfs)
+  Model load             12.38s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                2188.7 ms (29 tok/s)
+  Time to first token    2188.7 ms
+  Mean inter-token       96.2 ms (10.4 tok/s)
+  P50 inter-token        96.1 ms
+  P99 inter-token        101.0 ms
+  Tokens generated       33
+  Spec method            off
+
+{
+  "backend": "vulkan",
+  "gpu_info": {
+    "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+    "total_vram_mb": 98304,
+    "vram_source": "linux-drm-sysfs"
+  },
+  "model_load": {
+    "load_time_secs": 12.379820416,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 2188.7492110000003,
+    "prefill_tokens_per_sec": 29.24044457828019,
+    "time_to_first_token_ms": 2188.7492110000003,
+    "mean_inter_token_ms": 96.18731359375,
+    "p50_inter_token_ms": 96.11860899999999,
+    "p99_inter_token_ms": 100.966055,
+    "num_tokens_generated": 33,
+    "decode_tokens_per_sec": 10.396381421187517,
+    "spec_method": "off"
+  },
+  "training": null
+}

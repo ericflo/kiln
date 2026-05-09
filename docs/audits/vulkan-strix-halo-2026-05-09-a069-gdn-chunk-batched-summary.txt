@@ -1,0 +1,90 @@
+A069: rejected Vulkan GDN chunk prep/scan batched transfers
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+
+Candidate
+---------
+
+Batch the host/device transfers in the Vulkan GDN prefill chunk helpers:
+
+- dispatch_gdn_chunk_prep:
+  - batch uploads for g, v, kkt, qkt, ks_entry, q_s
+  - batch readbacks for a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last
+- dispatch_gdn_chunk_scan:
+  - batch uploads for a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col
+  - batch readbacks for out, p_out
+
+The temporary candidate was guarded by:
+
+- KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1
+
+Evidence
+--------
+
+Profiled same-binary candidate:
+
+- log: vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-candidate.log
+- prefill: 2219.944554 ms
+- mean ITL: 97.445554875 ms
+- p50 ITL: 97.314373 ms
+- p99 ITL: 101.079805 ms
+- generated tokens: 33
+- gdn_stage recurrent seq_len=64: 229.076 ms total / 24 calls / 9.544833 ms avg
+
+Profiled exact rollback:
+
+- log: vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-rollback-exact.log
+- prefill: 2241.253470 ms
+- mean ITL: 96.660065156 ms
+- p50 ITL: 96.176078 ms
+- p99 ITL: 104.216369 ms
+- generated tokens: 33
+- gdn_stage recurrent seq_len=64: 242.102 ms total / 24 calls / 10.087583 ms avg
+
+Fresh no-profile candidate:
+
+- log: vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-candidate-exact-noprofile.log
+- prefill: 2188.749211 ms
+- mean ITL: 96.187313594 ms
+- p50 ITL: 96.118609 ms
+- p99 ITL: 100.966055 ms
+- generated tokens: 33
+
+Fresh no-profile exact rollback:
+
+- log: vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-rollback-exact-noprofile.log
+- prefill: 2173.140301 ms
+- mean ITL: 97.937331094 ms
+- p50 ITL: 97.776681 ms
+- p99 ITL: 101.363512 ms
+- generated tokens: 33
+
+Validation While Temporary Candidate Existed
+-------------------------------------------
+
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture
+- KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture
+- cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+- git diff --check
+
+Verdict
+-------
+
+Rejected and removed before commit.
+
+The profiled recurrent substage improved, but the fresh no-profile A/B did not
+show a default-safe prefill win: candidate prefill was 2188.749211 ms versus
+rollback 2173.140301 ms. The candidate did improve mean decode ITL in that
+fresh pair, but this experiment targets prefill chunk movement and does not
+justify taking a default prefill regression risk.
+
+Do not retry this by simply batching the current chunk prep/scan transfers.
+Future GDN prefill work should reduce the CPU boundary/readback shape or make
+the prep/scan products resident across adjacent prefill stages.
+
+No CUDA or Metal source path was changed by the final committed state.

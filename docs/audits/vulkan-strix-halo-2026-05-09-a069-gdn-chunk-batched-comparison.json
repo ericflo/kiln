@@ -1,0 +1,55 @@
+{
+  "id": "A069",
+  "date": "2026-05-09",
+  "target": {
+    "model": "Qwen3.5-4B",
+    "backend": "vulkan",
+    "gpu": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)"
+  },
+  "candidate": "Batch Vulkan GDN chunk prep/scan uploads and readbacks.",
+  "rollback_env": "KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1",
+  "profiled": {
+    "candidate": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-candidate.log",
+      "prefill_time_ms": 2219.944554,
+      "mean_inter_token_ms": 97.445554875,
+      "p50_inter_token_ms": 97.314373,
+      "p99_inter_token_ms": 101.079805,
+      "num_tokens_generated": 33,
+      "gdn_stage_recurrent_seq64_total_ms": 229.076,
+      "gdn_stage_recurrent_seq64_calls": 24,
+      "gdn_stage_recurrent_seq64_avg_ms": 9.544833
+    },
+    "rollback_exact": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-rollback-exact.log",
+      "prefill_time_ms": 2241.25347,
+      "mean_inter_token_ms": 96.660065156,
+      "p50_inter_token_ms": 96.176078,
+      "p99_inter_token_ms": 104.216369,
+      "num_tokens_generated": 33,
+      "gdn_stage_recurrent_seq64_total_ms": 242.102,
+      "gdn_stage_recurrent_seq64_calls": 24,
+      "gdn_stage_recurrent_seq64_avg_ms": 10.087583
+    }
+  },
+  "no_profile": {
+    "candidate": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-candidate-exact-noprofile.log",
+      "prefill_time_ms": 2188.749211,
+      "mean_inter_token_ms": 96.187313594,
+      "p50_inter_token_ms": 96.118609,
+      "p99_inter_token_ms": 100.966055,
+      "num_tokens_generated": 33
+    },
+    "rollback_exact": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a069-gdn-chunk-batched-rollback-exact-noprofile.log",
+      "prefill_time_ms": 2173.140301,
+      "mean_inter_token_ms": 97.937331094,
+      "p50_inter_token_ms": 97.776681,
+      "p99_inter_token_ms": 101.363512,
+      "num_tokens_generated": 33
+    }
+  },
+  "verdict": "rejected",
+  "reason": "Profiled recurrent stage improved, but the fresh no-profile exact rollback had faster prefill than the default candidate."
+}

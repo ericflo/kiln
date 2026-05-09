@@ -76,6 +76,23 @@ before or with each accepted change and each measured rejection.
 | A066 | Refresh current Vulkan serial profile after A063-A065. | Profiled current `main` with full-attn, GDN, MLP, and paged-layer stage timers. Output stayed stable with the same first 32 token IDs as A064/A065. Latency was `2143.047ms` prefill, `97.878ms` mean ITL, `10.217 tok/s`. Top concrete decode buckets were `mlp:fused` `3932.765ms`, `gdn:in_proj` `1805.955ms`, `gdn:recurrent` `1694.722ms`, `gdn:out_proj` `946.798ms`, and full-attn `qkv_proj`/`decode_attn_contiguous` about `559ms` each; outer paged-layer timers were larger but less specific. | Keep as target-selection evidence. Next work should target MLP boundary/data movement or GDN recurrent/in-proj residency-level changes, not another direct Metal tile/vector-load port. |
 | A067 | Route resident-state GDN recurrent steps through the existing parallel-reduce shader. | Added resident `dk >= 32` selection for `gdn_recurrent_step_parallel.comp`, preserving rollback via `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`. Candidate and rollback first 32 token IDs matched. No-profile A/B improved mean ITL from rollback `96.538ms` to candidate `94.300ms`, while profiled A/B was neutral (`99.453ms` rollback, `99.554ms` candidate) and recurrent decode bucket only moved `1698.004ms -> 1692.770ms` over `3072` calls. Full Vulkan GDN parity passed (`32` tests); chat-template kwargs tests passed. | Keep as a guarded Vulkan-only mean-ITL win. Candidate p99 had one outlier (`130.534ms`), so recheck tail latency later. CUDA/Metal source paths untouched; local feature checks remain environment-blocked (`nvcc` missing; `objc2` requires Apple target). |
 | A068 | Fix embedded SPIR-V lookup for the accepted parallel recurrent shader. | Found `gdn_recurrent_step_parallel` in `build.rs` and the Vulkan prewarm list, but not in `pipeline.rs` `SHADER_SPIRVS`, so accepted A059/A067 dispatches could fall back to runtime shader compilation on hosts that otherwise have embedded SPIR-V. Added the missing lookup entry only. Validation passed: `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`, focused GDN recurrent parity, and `git diff --check` with the Rust toolchain path restored. | Keep as a Vulkan-only deployment/prewarm fix. No shader math, CUDA path, or Metal path changed. |
+| A069 | Trial batched transfers in Vulkan GDN chunk prep/scan. | Temporary candidate batched prep uploads/readbacks and scan uploads/readbacks behind `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`. Profiled `gdn_stage:recurrent seq_len=64` improved from exact rollback `242.102ms` total / `10.087583ms` avg to candidate `229.076ms` / `9.544833ms`, and profiled prefill improved `2241.253ms -> 2219.945ms`. Fresh no-profile exact rollback/candidate did not confirm a prefill win: rollback `2173.140ms` prefill / `97.937ms` mean ITL, candidate `2188.749ms` prefill / `96.187ms` mean ITL. | Rejected and removed before commit. Do not retry this by simply batching the current GDN chunk prep/scan transfers; next GDN prefill work needs fewer CPU boundary/readback steps or residency across adjacent stages. Final committed state has no CUDA/Metal source changes. |
+
+Additional validation after rejected A069:
+
+- Temporary candidate passed `cargo fmt --check`.
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed focused candidate and rollback GDN chunk parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture`
+  and
+  `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1 cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_chunk -- --nocapture`.
+- Temporary candidate passed full Vulkan kernel parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`.
+- Temporary candidate passed
+  `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`.
+- Source change was removed after the fresh no-profile exact rollback beat
+  candidate prefill.
 
 Additional validation after A044:
 
