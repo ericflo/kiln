@@ -2180,7 +2180,7 @@ impl ModelRunner {
                 };
                 vec![token]
             } else if self.backend.name() == "cuda" {
-                drop(pc_guard);
+                let _ = pc_guard;
                 self.decode_cuda_rowwise_parallel(
                     states,
                     params,
