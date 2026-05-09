@@ -1,0 +1,315 @@
+{
+  "all_outputs_match_expected": true,
+  "all_reasoning_empty": true,
+  "batching_engine_log_seen": false,
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8510",
+    "KILN_PROFILE_FULL_ATTN_STAGES": "1",
+    "KILN_PROFILE_GDN_STAGES": "1",
+    "KILN_PROFILE_MLP_STAGES": "1",
+    "KILN_PROFILE_PAGED_LAYERS": "1"
+  },
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 18,
+    "version": "0.2.13"
+  },
+  "live_decode_batcher_vulkan_log_seen": true,
+  "metrics_after": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 3.0
+  },
+  "metrics_before": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch_after": 0.0,
+    "requests_ok": 0.0,
+    "tokens_generated": 0.0,
+    "worker_batches": 0.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 3.0
+  },
+  "prewarm_complete_log_seen": true,
+  "prewarm_weight_log_seen": true,
+  "profile_rows": 2360,
+  "profile_slice": "after background inference prewarm complete",
+  "ready_after_s": 30.053121527998883,
+  "responses": [
+    {
+      "bytes": 796,
+      "elapsed_s": 2.899454872997012,
+      "error": null,
+      "expected_text": "blue green",
+      "finish": "stop",
+      "index": 0,
+      "matches_expected": true,
+      "prompt": "Reply with exactly this text and nothing else: blue green",
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a058-post-main-fast-forward-default-decode-batcher-response-0.sse",
+      "status": 200,
+      "text": "blue green"
+    },
+    {
+      "bytes": 796,
+      "elapsed_s": 3.153500051004812,
+      "error": null,
+      "expected_text": "red yellow",
+      "finish": "stop",
+      "index": 1,
+      "matches_expected": true,
+      "prompt": "Reply with exactly this text and nothing else: red yellow",
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a058-post-main-fast-forward-default-decode-batcher-response-1.sse",
+      "status": 200,
+      "text": "red yellow"
+    },
+    {
+      "bytes": 797,
+      "elapsed_s": 3.153054283000529,
+      "error": null,
+      "expected_text": "north south",
+      "finish": "stop",
+      "index": 2,
+      "matches_expected": true,
+      "prompt": "Reply with exactly this text and nothing else: north south",
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a058-post-main-fast-forward-default-decode-batcher-response-2.sse",
+      "status": 200,
+      "text": "north south"
+    },
+    {
+      "bytes": 797,
+      "elapsed_s": 3.152897257001314,
+      "error": null,
+      "expected_text": "silver gold",
+      "finish": "stop",
+      "index": 3,
+      "matches_expected": true,
+      "prompt": "Reply with exactly this text and nothing else: silver gold",
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a058-post-main-fast-forward-default-decode-batcher-response-3.sse",
+      "status": 200,
+      "text": "silver gold"
+    }
+  ],
+  "top_live_seq1_stage_totals": [
+    {
+      "avg_ms": 5.586666666666667,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "linear",
+      "total_ms": 134.08
+    },
+    {
+      "avg_ms": 1.3545833333333333,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 130.04
+    },
+    {
+      "avg_ms": 1.7258611111111115,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 124.26200000000003
+    },
+    {
+      "avg_ms": 1.3008888888888888,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 93.66399999999999
+    },
+    {
+      "avg_ms": 0.9100416666666664,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 65.52299999999998
+    },
+    {
+      "avg_ms": 0.5572222222222221,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 40.11999999999999
+    },
+    {
+      "avg_ms": 0.4023333333333332,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 28.967999999999993
+    },
+    {
+      "avg_ms": 1.6280000000000001,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 26.048000000000002
+    },
+    {
+      "avg_ms": 0.25690277777777787,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 18.497000000000007
+    },
+    {
+      "avg_ms": 1.9748750000000002,
+      "count": 8,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "full",
+      "total_ms": 15.799000000000001
+    },
+    {
+      "avg_ms": 0.8481250000000002,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "total_ms": 13.570000000000004
+    },
+    {
+      "avg_ms": 0.525125,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "total_ms": 8.402
+    },
+    {
+      "avg_ms": 0.563375,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "total_ms": 4.507
+    },
+    {
+      "avg_ms": 0.289625,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj",
+      "total_ms": 2.317
+    },
+    {
+      "avg_ms": 0.028055555555555556,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 2.02
+    },
+    {
+      "avg_ms": 0.08006250000000001,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "rope_batch",
+      "total_ms": 1.2810000000000001
+    },
+    {
+      "avg_ms": 0.039375000000000014,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm_batch",
+      "total_ms": 0.6300000000000002
+    },
+    {
+      "avg_ms": 0.02618750000000001,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "attn_gate_batch",
+      "total_ms": 0.41900000000000015
+    },
+    {
+      "avg_ms": 0.048374999999999994,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_scores",
+      "total_ms": 0.38699999999999996
+    },
+    {
+      "avg_ms": 0.020375,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "kv_write_batch",
+      "total_ms": 0.326
+    }
+  ],
+  "vulkan_device_log_seen": true,
+  "vulkan_selected_log_seen": true,
+  "wall_s": 3.1556478919956135
+}

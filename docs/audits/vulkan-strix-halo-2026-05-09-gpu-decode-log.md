@@ -2680,6 +2680,77 @@ Verdict:
 - Keep A056's batched-upload path. Do not retry gated-norm single-submit
   without a broader backend-boundary or residency change.
 
+### 2026-05-09 A058: Post-Fast-Forward Vulkan Correctness/Profile Check
+
+Goal:
+- Fast-forward local `main` to `origin/main` at `312a486` (`preserve mlp
+  fusion for partial lora`) and reconfirm that the current Vulkan path is
+  GPU-routed and produces visible, correct output before any further Vulkan
+  performance work.
+
+Setup:
+- No source changes were made for A058; this is a post-merge audit checkpoint.
+- Rebuilt from `main` with `cargo build --release --features vulkan --bin kiln
+  --bin kiln-bench`.
+- All endpoint runs waited for `/health` to report
+  `inference_prewarm_complete=true` and used
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Validation:
+- `cargo test -p kiln-model test_swiglu_ --lib` passed, including the new
+  partial-LoRA route tests from `312a486`.
+- `cargo check -p kiln-model --features vulkan` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+  passed.
+- `cargo fmt --check` passed.
+- `git diff --check` passed.
+- Best-effort CUDA/Metal feature checks are environment-blocked on this Linux
+  host before Kiln typecheck: CUDA fails because `nvcc` is not installed, and
+  Metal fails because `objc2` requires an Apple target.
+
+Evidence:
+- Arithmetic smoke:
+  - Prompted four concurrent streaming requests for exact integer answers.
+  - Responses were correct visible text `"6"`, `"11"`, `"16"`, `"13"` with
+    empty reasoning.
+  - This run used one visible token per request, so it did not exercise the
+    default decode-batcher counters.
+- `KILN_BATCHING_ENGINE=1` actor smoke:
+  - Four exact two-word outputs all matched: `"blue green"`, `"red yellow"`,
+    `"north south"`, and `"silver gold"`.
+  - Generated `8` visible tokens and produced post-prewarm live `seq_len=1`
+    Vulkan profile rows. The legacy `kiln_decode_batcher_*` counters stayed at
+    zero because this env selects the batching actor instead of the default
+    decode batcher.
+- Default decode-batcher smoke:
+  - Same four exact two-word outputs matched, with empty reasoning.
+  - Server log showed `Vulkan available`, `Vulkan device initialized`,
+    `Vulkan decode weight cache prewarmed`, and `background inference prewarm
+    complete`.
+  - Wall time was `3.155648s`.
+  - Metrics delta: `4` OK requests, `8` generated tokens, `8` decode-batcher
+    jobs, `3` worker batches, `8` rows, max observed batch `4`, `0` failed
+    jobs.
+  - Post-prewarm live `seq_len=1` top stages:
+    - `paged_layer:linear`: `134.080ms`, `24` samples.
+    - `mlp:fused`: `130.040ms`, `96` samples.
+    - `gdn:recurrent`: `124.262ms`, `72` samples.
+    - `gdn:in_proj`: `93.664ms`, `72` samples.
+    - `gdn:out_proj`: `65.523ms`, `72` samples.
+    - `gdn:gated_norm`: `40.120ms`, `72` samples.
+    - `gdn:gates`: `28.968ms`, `72` samples.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a058-post-main-fast-forward-*`
+
+Verdict:
+- Keep as post-fast-forward correctness/profile evidence. Current `main` is
+  GPU-routed on Vulkan and produces exact visible output after explicit
+  `enable_thinking=false`, including a default decode-batcher run with real
+  `seq_len=1` decode rows.
+- A058 is audit-only; it does not change CUDA, Metal, or Vulkan source code.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2687,10 +2758,10 @@ Verdict:
   mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
   resident mirroring prevented prewarm readiness on the current Qwen3.5-4B
   Strix Halo serving shape.
-- Use A054/A055, not A039, for warmed-serving target selection. After A048, do
+- Use A058/A056, not A039, for warmed-serving target selection. After A048, do
   not use measurements taken before `inference_prewarm_complete=true` as serving
   evidence.
-- A054/A055/A056 post-prewarm profiles still leave MLP, GDN recurrent,
+- A058/A056 post-prewarm profiles still leave MLP, GDN recurrent,
   GDN in-proj, and paged-layer linear work as the largest live decode buckets.
   Next work should target either packed-BF16 MLP boundary/data movement,
   sparse/active K/V movement, or a GDN path that materially reduces movement,
