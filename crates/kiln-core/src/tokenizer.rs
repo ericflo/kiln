@@ -33,6 +33,20 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ChatTemplateOptions {
+    pub template_kwargs: serde_json::Map<String, serde_json::Value>,
+}
+
+const RESERVED_CHAT_TEMPLATE_KWARGS: &[&str] = &[
+    "messages",
+    "tools",
+    "tool_choice",
+    "add_generation_prompt",
+    "bos_token",
+    "eos_token",
+];
+
 /// Wraps the HuggingFace tokenizers crate for Kiln's tokenization needs.
 #[derive(Clone)]
 pub struct KilnTokenizer {
@@ -138,8 +152,25 @@ impl KilnTokenizer {
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
     ) -> Result<String, TokenizerError> {
+        self.apply_chat_template_full_with_options(
+            messages,
+            tools,
+            tool_choice,
+            ChatTemplateOptions::default(),
+        )
+    }
+
+    pub fn apply_chat_template_full_with_options(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[serde_json::Value]>,
+        tool_choice: Option<&serde_json::Value>,
+        options: ChatTemplateOptions,
+    ) -> Result<String, TokenizerError> {
         match &self.chat_template {
-            Some(template) => self.render_jinja_template(template, messages, tools, tool_choice),
+            Some(template) => {
+                self.render_jinja_template(template, messages, tools, tool_choice, options)
+            }
             None => Ok(Self::apply_chatml(messages)),
         }
     }
@@ -173,6 +204,7 @@ impl KilnTokenizer {
         messages: &[ChatMessage],
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
+        options: ChatTemplateOptions,
     ) -> Result<String, TokenizerError> {
         // Most HF chat templates (Qwen2.5/3.5, Llama 3.1, Mistral v0.3) iterate
         // or `tojson`-serialize `tool_call.function.arguments` as a dict, so we
@@ -191,6 +223,7 @@ impl KilnTokenizer {
             messages,
             tools,
             tool_choice,
+            options.clone(),
             /* deserialize_arguments = */ true,
         ) {
             Err(TokenizerError::ChatTemplate(msg))
@@ -201,6 +234,7 @@ impl KilnTokenizer {
                     messages,
                     tools,
                     tool_choice,
+                    options,
                     /* deserialize_arguments = */ false,
                 )
             }
@@ -214,6 +248,7 @@ impl KilnTokenizer {
         messages: &[ChatMessage],
         tools: Option<&[serde_json::Value]>,
         tool_choice: Option<&serde_json::Value>,
+        options: ChatTemplateOptions,
         deserialize_arguments: bool,
     ) -> Result<String, TokenizerError> {
         let mut env = minijinja::Environment::new();
@@ -322,15 +357,35 @@ impl KilnTokenizer {
         // model-specific token strings is a follow-up — when needed,
         // populate from `KilnTokenizer::inner.get_added_tokens_decoder()`
         // similar to `eos_token_ids`.
-        tmpl.render(minijinja::context! {
-            messages => messages_value,
-            tools => tools_value,
-            tool_choice => tool_choice_value,
-            add_generation_prompt => true,
-            bos_token => "",
-            eos_token => "",
-        })
-        .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))
+        let mut context = options.template_kwargs;
+        for key in RESERVED_CHAT_TEMPLATE_KWARGS {
+            if context.contains_key(*key) {
+                return Err(TokenizerError::ChatTemplate(format!(
+                    "chat_template_kwargs cannot override reserved template variable `{key}`"
+                )));
+            }
+        }
+        context.insert(
+            "messages".to_string(),
+            serde_json::Value::Array(messages_value),
+        );
+        context.insert("tools".to_string(), tools_value);
+        context.insert("tool_choice".to_string(), tool_choice_value);
+        context.insert(
+            "add_generation_prompt".to_string(),
+            serde_json::Value::Bool(true),
+        );
+        context.insert(
+            "bos_token".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        context.insert(
+            "eos_token".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+
+        tmpl.render(serde_json::Value::Object(context))
+            .map_err(|e| TokenizerError::ChatTemplate(e.to_string()))
     }
 
     /// Plain ChatML framing fallback: `<|im_start|>role\n...<|im_end|>\n`.
@@ -851,6 +906,43 @@ ARG:{{ k }}={{ v }};\
         assert!(
             prompt.contains("<tool_response>"),
             "tool response not wrapped: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn test_qwen35_4b_chat_template_can_disable_thinking() {
+        let template = include_str!("../test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = tokenizer_with_template(template);
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Answer with one word.".to_string(),
+            ..Default::default()
+        }];
+
+        let default_prompt = tok
+            .apply_chat_template(&messages)
+            .expect("default Qwen3.5 template render failed");
+        assert!(
+            default_prompt.ends_with("<|im_start|>assistant\n<think>\n"),
+            "default prompt should prefill an open reasoning block: {default_prompt:?}"
+        );
+
+        let no_think_prompt = tok
+            .apply_chat_template_full_with_options(
+                &messages,
+                None,
+                None,
+                ChatTemplateOptions {
+                    template_kwargs: serde_json::Map::from_iter([(
+                        "enable_thinking".to_string(),
+                        serde_json::Value::Bool(false),
+                    )]),
+                },
+            )
+            .expect("Qwen3.5 template render with enable_thinking=false failed");
+        assert!(
+            no_think_prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "enable_thinking=false should pre-close the reasoning block: {no_think_prompt:?}"
         );
     }
 

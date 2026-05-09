@@ -1072,6 +1072,65 @@ Verdict:
   sampled continuous-batch shape below the A023-only result.
 - CUDA and Metal source paths remain unchanged.
 
+### 2026-05-09 A025: Accept Explicit Chat-Template Kwargs for Visible Output Correctness
+
+Issue:
+- Follow-up correctness check found that short Qwen3.5 chat requests could
+  return `choices[0].message.content == ""`. Full JSON inspection showed the
+  generated tokens were coherent and were being placed in `reasoning_content`
+  because the Qwen3.5 template prefills an open `<think>\n` block by default.
+- A prompt-text `/no_think` convention is not a safe API control: a user can
+  legitimately talk about that literal string. The fix should expose the real
+  template variable path instead of sniffing message content.
+
+Implementation:
+- Added `ChatTemplateOptions` to `kiln-core` and forward arbitrary
+  `template_kwargs` as top-level Jinja context variables, while reserving
+  Kiln-owned variables (`messages`, `tools`, `tool_choice`,
+  `add_generation_prompt`, `bos_token`, `eos_token`).
+- Added `chat_template_kwargs` to `/v1/chat/completions` and
+  `/v1/completions/batch`. Example:
+  `{"chat_template_kwargs":{"enable_thinking":false}}`.
+- Included `chat_template_kwargs` in rendered-prompt, deterministic chat, chat
+  choices, and batch cache keys so default-thinking and no-thinking prompts
+  cannot share stale cached responses.
+- Threaded the field through synthesized per-choice and per-batch chat
+  requests.
+
+Evidence:
+- `cargo check -p kiln-server` passed.
+- `cargo test -p kiln-core qwen35_4b_chat_template_can_disable_thinking`
+  passed.
+- `cargo test -p kiln-server chat_template_kwargs` passed, including chat and
+  batch cache-key coverage.
+- `cargo test -p kiln-server qwen35_no_think_text_is_not_a_control_flag`
+  passed.
+- Release Vulkan build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check` passed.
+- Rebuilt Vulkan server (`KILN_BATCHING_ENGINE=1`, Qwen3.5-4B) confirmed:
+  default direct chat at `max_tokens=12` still returns empty visible content
+  with coherent `reasoning_content` starting `Thinking Process...`; explicit
+  `chat_template_kwargs: {"enable_thinking": false}` returns
+  `content == "blue"`, `reasoning_content == null`, and `finish_reason == stop`
+  in `3` completion tokens; a prompt merely mentioning `/no_think` remains on
+  the default reasoning path.
+- Batch endpoint with a unique uncached prompt and
+  `chat_template_kwargs: {"enable_thinking": false}` returned two completions
+  with `text == "blue"`, `finish_reason == stop`, and no reasoning content.
+- CUDA and Metal feature checks were attempted on the shared server crate but
+  remain environment-blocked on this Linux host before reaching project code:
+  CUDA failed at `cudarc` because `nvcc` is absent; Metal failed because
+  `objc2` requires an Apple target.
+
+Verdict:
+- Keep. The observed empty `content` was a chat-template/output-channel issue,
+  not Vulkan compute garbage. The explicit template kwargs API fixes visible
+  output correctness for callers that want no-thinking Qwen behavior without
+  treating user prompt text as control metadata.
+- This changes shared tokenizer/server request wiring only; CUDA, Metal, and
+  Vulkan kernel code are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
