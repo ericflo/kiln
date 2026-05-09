@@ -1,0 +1,28 @@
+{
+  "candidate_repeat_gdn_recurrent_seq1_ms": 122.95600000000002,
+  "candidate_repeat_metrics_delta": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 4.0
+  },
+  "candidate_repeat_outputs_ok": true,
+  "candidate_repeat_wall_s": 3.245493672999146,
+  "repeat_gdn_recurrent_seq1_delta_ms_candidate_minus_rollback": 3.1760000000000304,
+  "repeat_wall_delta_s_candidate_minus_rollback": -0.0408254050053074,
+  "rollback_repeat_gdn_recurrent_seq1_ms": 119.77999999999999,
+  "rollback_repeat_metrics_delta": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 3.0
+  },
+  "rollback_repeat_outputs_ok": true,
+  "rollback_repeat_wall_s": 3.2863190780044533
+}

@@ -1565,6 +1565,105 @@ fn gdn_recurrent_step_matches_f32_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, heads, dk, dv) = (2usize, 2usize, 64usize, 7usize);
+    let q = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.011)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let k = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * -0.009)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let v = cpu_f32(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.013)
+            .collect(),
+        (batch, heads, dv),
+    )?;
+    let beta = cpu_f32(
+        (0..batch * heads)
+            .map(|i| 0.25 + (i as f32) * 0.07)
+            .collect(),
+        (batch, heads),
+    )?;
+    let g = cpu_f32(
+        (0..batch * heads)
+            .map(|i| -0.04 - (i as f32) * 0.03)
+            .collect(),
+        (batch, heads),
+    )?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+        &vk, &q, &k, &v, &beta, &g, &state,
+    )
+    .context("dispatch_gdn_recurrent_step parallel reduce f32")?;
+
+    let qd = tensor_data_f32(&q)?;
+    let kd = tensor_data_f32(&k)?;
+    let vd = tensor_data_f32(&v)?;
+    let bd = tensor_data_f32(&beta)?;
+    let gd = tensor_data_f32(&g)?;
+    let sd = tensor_data_f32(&state)?;
+    let mut expected_out = vec![0.0f32; batch * heads * dv];
+    let mut expected_state = sd.clone();
+
+    for b in 0..batch {
+        for h in 0..heads {
+            let bh = b * heads + h;
+            let q_base = bh * dk;
+            let k_base = bh * dk;
+            let v_base = bh * dv;
+            let state_base = bh * dk * dv;
+            let decay = gd[bh].exp();
+            for d in 0..dv {
+                let mut v_pred = 0.0f32;
+                for i in 0..dk {
+                    v_pred += kd[k_base + i] * decay * sd[state_base + i * dv + d];
+                }
+                let delta = bd[bh] * (vd[v_base + d] - v_pred);
+                let mut out_acc = 0.0f32;
+                for i in 0..dk {
+                    let new_s = decay * sd[state_base + i * dv + d] + kd[k_base + i] * delta;
+                    expected_state[state_base + i * dv + d] = new_s;
+                    out_acc += qd[q_base + i] * new_s;
+                }
+                expected_out[v_base + d] = out_acc;
+            }
+        }
+    }
+
+    assert_close(
+        "parallel recurrent out f32",
+        &got_out,
+        &cpu_f32(expected_out, (batch, heads, dv))?,
+        1e-4,
+    )?;
+    assert_close(
+        "parallel recurrent state f32",
+        &got_state,
+        &cpu_f32(expected_state, (batch, heads, dk, dv))?,
+        1e-4,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

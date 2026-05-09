@@ -1,0 +1,38 @@
+ready_after_s=25.036022
+wall_s=3.286319
+all_outputs_match_expected=True
+all_reasoning_empty=True
+vulkan_device_log_seen=True
+vulkan_selected_log_seen=True
+live_decode_batcher_vulkan_log_seen=True
+batching_engine_log_seen=False
+prewarm_weight_log_seen=True
+prewarm_complete_log_seen=True
+metrics_delta={'requests_ok': 4.0, 'tokens_generated': 8.0, 'jobs_submitted': 8.0, 'jobs_failed': 0.0, 'worker_batches': 3.0, 'batcher_rows': 8.0, 'max_batch_after': 4.0}
+profile_slice=after background inference prewarm complete
+profile_rows=2360
+top_live_seq1_stage_totals:
+- paged_layer:linear seq_len=1 total_ms=250.879 count=24 avg_ms=10.453
+- gdn_stage:in_proj seq_len=1 total_ms=174.641 count=72 avg_ms=2.426
+- mlp_stage:fused seq_len=1 total_ms=144.230 count=96 avg_ms=1.502
+- gdn_stage:recurrent seq_len=1 total_ms=119.780 count=72 avg_ms=1.664
+- gdn_stage:gates seq_len=1 total_ms=79.127 count=72 avg_ms=1.099
+- gdn_stage:gated_norm seq_len=1 total_ms=67.953 count=72 avg_ms=0.944
+- gdn_stage:out_proj seq_len=1 total_ms=53.740 count=72 avg_ms=0.746
+- full_attn_stage:qkv_proj_batch seq_len=1 total_ms=30.956 count=16 avg_ms=1.935
+- gdn_stage:conv seq_len=1 total_ms=18.268 count=72 avg_ms=0.254
+- paged_layer:full seq_len=1 total_ms=16.841 count=8 avg_ms=2.105
+- full_attn_stage:decode_attn_contiguous_batch seq_len=1 total_ms=12.762 count=16 avg_ms=0.798
+- full_attn_stage:o_proj_batch seq_len=1 total_ms=7.747 count=16 avg_ms=0.484
+- full_attn_stage:qkv_proj seq_len=1 total_ms=4.609 count=8 avg_ms=0.576
+- full_attn_stage:o_proj seq_len=1 total_ms=2.358 count=8 avg_ms=0.295
+- gdn_stage:qk_norm seq_len=1 total_ms=2.065 count=72 avg_ms=0.029
+- full_attn_stage:rope_batch seq_len=1 total_ms=1.250 count=16 avg_ms=0.078
+- full_attn_stage:qk_norm_batch seq_len=1 total_ms=0.610 count=16 avg_ms=0.038
+- full_attn_stage:attn_gate_batch seq_len=1 total_ms=0.417 count=16 avg_ms=0.026
+- full_attn_stage:decode_scores seq_len=1 total_ms=0.414 count=8 avg_ms=0.052
+- full_attn_stage:kv_write_batch seq_len=1 total_ms=0.296 count=16 avg_ms=0.019
+response_0 status=200 finish=stop elapsed_s=3.272427 text='blue green' expected='blue green' matches=True reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=2.986354 text='red yellow' expected='red yellow' matches=True reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=3.272056 text='north south' expected='north south' matches=True reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=3.271473 text='silver gold' expected='silver gold' matches=True reasoning_len=0 error=None

@@ -2751,6 +2751,84 @@ Verdict:
   `seq_len=1` decode rows.
 - A058 is audit-only; it does not change CUDA, Metal, or Vulkan source code.
 
+### 2026-05-09 A059: Parallel-Reduce Vulkan GDN Recurrent Decode
+
+Goal:
+- Reduce the live Vulkan `gdn:recurrent` decode bucket without touching CUDA or
+  Metal paths. A058 showed this stage as one of the largest post-prewarm
+  `seq_len=1` buckets.
+
+Change:
+- Added `gdn_recurrent_step_parallel.comp`, embedded it in the Vulkan build,
+  and prewarmed its pipeline.
+- The new shader uses one 32-lane workgroup per `(batch, head, dv column)` and
+  splits the two `dk` reductions across lanes through shared memory. It uses
+  the same bindings and push-constant ABI as the legacy
+  `gdn_recurrent_prefill.comp` shader.
+- The path is Vulkan-only, only selected for the regular single-submit
+  recurrent step when `dk >= 32`, and has rollback
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`.
+- The smaller-shape fallback, non-single-submit fallback, and resident-state
+  path remain on the existing shader.
+
+Validation:
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed
+  with `30` tests, including the new
+  `gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference` test.
+- `cargo check -p kiln-model --features vulkan` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+  passed.
+- `git diff --check` passed.
+- Best-effort CUDA/Metal checks remain environment-blocked on this Linux host
+  before project typecheck: CUDA fails because `nvcc` is not installed, and
+  Metal fails because `objc2` requires an Apple target.
+
+Endpoint evidence:
+- Both A/B pairs waited for `/health` to report
+  `inference_prewarm_complete=true`.
+- All requests used `chat_template_kwargs: {"enable_thinking": false}` and
+  returned exact visible texts `"blue green"`, `"red yellow"`,
+  `"north south"`, and `"silver gold"` with empty reasoning.
+- Both server logs showed Vulkan initialization, Vulkan device selection,
+  Vulkan decode weight prewarm, background inference prewarm completion, and
+  the default live decode-batcher on the Vulkan backend.
+
+Pair 1, candidate first:
+- Candidate: wall `3.183728s`; metrics delta `4` OK requests, `8` generated
+  tokens, `8` jobs, `3` worker batches, `8` rows, max batch `4`, `0` failed
+  jobs. Live `gdn_stage:recurrent seq_len=1` was `125.725ms` / `72` samples
+  (`1.746ms` mean).
+- Rollback with
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`: wall `3.209882s`;
+  same metrics shape. Live `gdn_stage:recurrent seq_len=1` was `128.020ms` /
+  `72` samples (`1.778ms` mean).
+
+Pair 2, rollback first:
+- Rollback: wall `3.286319s`; metrics delta `4` OK requests, `8` generated
+  tokens, `8` jobs, `3` worker batches, `8` rows, max batch `4`, `0` failed
+  jobs. Live `gdn_stage:recurrent seq_len=1` was `119.780ms` / `72` samples
+  (`1.664ms` mean).
+- Candidate: wall `3.245494s`; metrics delta `4` OK requests, `8` generated
+  tokens, `8` jobs, `4` worker batches, `8` rows, max batch `4`, `0` failed
+  jobs. Because this arm formed one more worker batch, recurrent totals are not
+  apples-to-apples; the per-sample average was `122.956ms` / `96` samples
+  (`1.281ms` mean).
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a059-gdn-recurrent-parallel-reduce-*`
+
+Verdict:
+- Accepted as a small guarded Vulkan-only win. The effect is modest and noisy,
+  but both same-binary pairs preserved exact visible output and favored the
+  candidate on wall time (`-26ms`, then `-41ms`). The first pair had identical
+  decode-batcher counters and showed a small targeted recurrent-stage win.
+- Keep the rollback env in place. Larger remaining wins likely still require
+  reducing data movement or backend-boundary overhead in MLP, GDN in-proj, or
+  paged attention rather than another direct shader-shape mirror.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2758,14 +2836,15 @@ Verdict:
   mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
   resident mirroring prevented prewarm readiness on the current Qwen3.5-4B
   Strix Halo serving shape.
-- Use A058/A056, not A039, for warmed-serving target selection. After A048, do
-  not use measurements taken before `inference_prewarm_complete=true` as serving
-  evidence.
-- A058/A056 post-prewarm profiles still leave MLP, GDN recurrent,
-  GDN in-proj, and paged-layer linear work as the largest live decode buckets.
-  Next work should target either packed-BF16 MLP boundary/data movement,
-  sparse/active K/V movement, or a GDN path that materially reduces movement,
-  not just a direct fused-hook route.
+- Use A059/A058/A056, not A039, for warmed-serving target selection. After
+  A048, do not use measurements taken before
+  `inference_prewarm_complete=true` as serving evidence.
+- A059 only gives a small guarded reduction in the GDN recurrent shape. The
+  post-prewarm profiles still leave MLP, GDN recurrent/in-proj, and
+  paged-layer linear work as the largest live decode buckets. Next work should
+  target either packed-BF16 MLP boundary/data movement, sparse/active K/V
+  movement, or a GDN path that materially reduces movement, not just a direct
+  fused-hook route.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

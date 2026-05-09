@@ -1,0 +1,93 @@
+// GDN recurrent single-token step with parallel reductions over dk.
+//
+// Inputs use the BackendRuntime::gdn_recurrent_step contract:
+//   q, k:  [B, H, dk]
+//   v:     [B, H, dv]
+//   beta:  [B, H]
+//   g:     [B, H]
+//   state: [B, H, dk, dv]
+// Output:
+//   out:   [B, H, dv]
+//
+// One workgroup owns one output column `(b, h, d)`. The 32 lanes split the
+// v-prediction and output dot products across dk, reducing through shared
+// memory. State updates are disjoint across output columns.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint seq_len;
+    uint dk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 4) readonly buffer GBuf { float data_g[]; };
+layout(binding = 5) buffer StateBuf { float data_state[]; };
+layout(binding = 6) writeonly buffer OutBuf { float data_out[]; };
+
+shared float reduce_scratch[32];
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    uint h = gl_WorkGroupID.y;
+    uint d = gl_WorkGroupID.z;
+    uint lane = gl_LocalInvocationID.x;
+
+    uint bh = b * heads + h;
+    uint q_off = bh * dk;
+    uint k_off = q_off;
+    uint v_off = bh * dv;
+    uint state_off = bh * dk * dv;
+
+    float beta_val = data_beta[bh];
+    float decay = exp(data_g[bh]);
+
+    float partial = 0.0;
+    for (uint i = lane; i < dk; i += 32) {
+        float s = data_state[state_off + i * dv + d];
+        partial += data_k[k_off + i] * (decay * s);
+    }
+
+    reduce_scratch[lane] = partial;
+    barrier();
+
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reduce_scratch[lane] += reduce_scratch[lane + stride];
+        }
+        barrier();
+    }
+
+    float v_pred = reduce_scratch[0];
+    float delta = beta_val * (data_v[v_off + d] - v_pred);
+
+    partial = 0.0;
+    for (uint i = lane; i < dk; i += 32) {
+        uint state_idx = state_off + i * dv + d;
+        float new_s = decay * data_state[state_idx] + data_k[k_off + i] * delta;
+        data_state[state_idx] = new_s;
+        partial += data_q[q_off + i] * new_s;
+    }
+
+    reduce_scratch[lane] = partial;
+    barrier();
+
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            reduce_scratch[lane] += reduce_scratch[lane + stride];
+        }
+        barrier();
+    }
+
+    if (lane == 0) {
+        data_out[bh * dv + d] = reduce_scratch[0];
+    }
+}

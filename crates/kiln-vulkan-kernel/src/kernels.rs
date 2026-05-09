@@ -30,6 +30,16 @@ fn gdn_recurrent_single_submit_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_SINGLE_SUBMIT").is_err())
 }
 
+fn gdn_recurrent_parallel_reduce_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE").is_err())
+}
+
+fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
+    dk >= 32 && dv > 0 && gdn_recurrent_parallel_reduce_enabled()
+}
+
 fn linear_decode_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
@@ -107,6 +117,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
         ("gdn_recurrent_prefill", 7, 20),
+        ("gdn_recurrent_step_parallel", 7, 20),
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
@@ -4599,20 +4610,28 @@ pub fn dispatch_gdn_recurrent_step(
     let g_data = extract_tensor_bytes(g)?.0;
     let state_data = extract_tensor_bytes(state)?.0;
 
-    // Compile shader
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/gdn_recurrent_prefill.comp"
-    );
-    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
     // Parse shape [B, H, dk/dv].
     let dims = q.dims();
     let (batch, heads, dk) = (dims[0], dims[1], dims[2]);
     let dims_v = v.dims();
     let dv = dims_v[2];
 
-    if gdn_recurrent_single_submit_enabled() {
+    let single_submit = gdn_recurrent_single_submit_enabled();
+    let parallel_reduce = single_submit && use_gdn_recurrent_parallel_reduce(dk, dv);
+    let glsl_path = if parallel_reduce {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_step_parallel.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_prefill.comp"
+        )
+    };
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+
+    if single_submit {
         return dispatch_gdn_recurrent_step_single_submit(
             vk_device,
             q,
@@ -4628,6 +4647,7 @@ pub fn dispatch_gdn_recurrent_step(
             heads,
             dk,
             dv,
+            parallel_reduce,
         );
     }
 
@@ -5007,6 +5027,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
     heads: usize,
     dk: usize,
     dv: usize,
+    parallel_reduce: bool,
 ) -> Result<(Tensor, Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -5053,6 +5074,11 @@ fn dispatch_gdn_recurrent_step_single_submit(
     let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
     let total = batch * heads * dv;
     let workgroup_count = total.div_ceil(256) as u32;
+    let dispatch_counts = if parallel_reduce {
+        (batch as u32, heads as u32, dv as u32)
+    } else {
+        (workgroup_count, 1, 1)
+    };
     let all_handles = vec![
         q_buf.handle(),
         k_buf.handle(),
@@ -5167,7 +5193,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
             0,
             bytemuck::cast_slice(&push_constants),
         );
-        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
+        device.cmd_dispatch(cmd, dispatch_counts.0, dispatch_counts.1, dispatch_counts.2);
 
         let compute_barrier = make_memory_barrier(
             vk::AccessFlags::SHADER_WRITE,

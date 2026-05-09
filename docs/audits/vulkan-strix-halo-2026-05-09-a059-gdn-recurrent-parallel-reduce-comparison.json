@@ -1,0 +1,30 @@
+{
+  "candidate_gdn_recurrent_seq1_ms": 125.72500000000004,
+  "candidate_metrics_delta": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 3.0
+  },
+  "candidate_outputs_ok": true,
+  "candidate_reasoning_empty": true,
+  "candidate_wall_s": 3.183727538002131,
+  "gdn_recurrent_seq1_delta_ms_candidate_minus_rollback": -2.2949999999999733,
+  "rollback_gdn_recurrent_seq1_ms": 128.02,
+  "rollback_metrics_delta": {
+    "batcher_rows": 8.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 8.0,
+    "max_batch_after": 4.0,
+    "requests_ok": 4.0,
+    "tokens_generated": 8.0,
+    "worker_batches": 3.0
+  },
+  "rollback_outputs_ok": true,
+  "rollback_reasoning_empty": true,
+  "rollback_wall_s": 3.2098820920000435,
+  "wall_delta_s_candidate_minus_rollback": -0.026154553997912444
+}
