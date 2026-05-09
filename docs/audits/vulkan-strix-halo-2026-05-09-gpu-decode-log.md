@@ -4655,6 +4655,68 @@ Verdict:
   correctly wired implementation before any accept/reject decision.
 - Final source has no A083 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A084: Reject Correctly Wired Conv1d Prefill Fused State
+
+Goal:
+- Run the intended A083 experiment with the dispatcher branch wired into
+  `dispatch_causal_conv1d_prefill`.
+- Test whether the Metal-style one-workgroup-per-channel conv prefill shape can
+  replace Vulkan's current two-dispatch prefill route.
+
+Temporary change:
+- Added a temporary `causal_conv1d_prefill_k4` Vulkan shader.
+- Wired it into `dispatch_causal_conv1d_prefill`, not the single-token update
+  path.
+- The shader used one workgroup per `(batch, channel)` stream, local size `64`,
+  shared initial state and weights, and in-place state advance after a
+  workgroup barrier.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_CONV1D_PREFILL_FUSED_STATE=1`
+- Extended focused conv prefill parity to include `seq_len=64` while testing.
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d_prefill_matches_stateful_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary rollback-env A/B, seed 86:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 86 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_CONV1D_PREFILL_FUSED_STATE=1`
+  - prefill `1050.457216ms`
+  - mean ITL `86.43616287500001ms`
+  - p99 ITL `89.998998ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-candidate.log`
+  - prefill `1090.344957ms`
+  - mean ITL `87.86817725ms`
+  - p99 ITL `91.912512ms`
+  - same token IDs
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a084-conv1d-prefill-fused-state-source-reverted-diffcheck.log`
+
+Verdict:
+- Reject and remove the temporary source. Same-token no-profile A/B showed a
+  clear prefill regression against the old two-dispatch path.
+- Do not retry Vulkan conv prefill by directly mirroring Metal's
+  one-workgroup-per-channel fused-state shape without a new hypothesis.
+- Final source has no A084 code, and CUDA/Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4743,6 +4805,10 @@ Verdict:
   conv1d prefill. The temporary route was accidentally wired into
   `dispatch_causal_conv1d_update`, not prefill, and was removed. A correctly
   wired prefill experiment is still required before judging that idea.
+- A084 correctly wires the Metal-style one-workgroup-per-channel conv1d prefill
+  fused-state shader and rejects it: same-token no-profile A/B regressed
+  prefill `1050.457ms` rollback to `1090.345ms` candidate. Do not retry that
+  direct conv prefill shape without a new hypothesis.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
