@@ -19358,3 +19358,90 @@ Profile-only experiment accepted as current evidence. After E456,
 `gdn:in_proj` are now effectively tied for the next optimization target.
 Continue with a small, reversible transposed-GEMV/MLP-down experiment before
 spending more effort on attention.
+
+## E458 - Metal Generic Batch Transposed-GEMV Row-Quad at Batch 3
+
+### Hypothesis
+
+E453 accepted generic batch transposed-GEMV row-quad grouping starting at batch
+`4`, and E457 showed `mlp:down_proj`, `gdn:out_proj`, and attention projection
+stages remain material in live batched decode. E454 also showed that a
+four-stream live profile reaches only `max_observed_batch=3`, so the current
+batch `4+` generic row-quad policy leaves that continuous-batching shape on
+row-pair. Test whether the existing partial row-quad tile8 path is also a win
+for batch `3`.
+
+### Change
+
+Lowered `metal_transposed_coop_gemv_batch_bf16` row-quad selection from
+batch `>=4` to batch `>=3`. Updated the synthetic policy helper accordingly
+and expanded the focused parity test to include batch `3`.
+
+Existing rollback env:
+
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1`
+
+### Results
+
+Focused parity passed for batch `3` and the existing batches `4/5/6/7/8`.
+
+Qwen3.5 shape synthetic A/B with warmup `5`, iters `20`:
+
+| label | batch | default policy | default | row-quad disabled | speedup |
+| --- | ---: | --- | ---: | ---: | ---: |
+| `mlp_down_proj` | 3 | row_quad_tile8 | `1260.492 us` | `1858.933 us` | `1.475x` |
+| `gdn_out_proj` | 3 | row_quad_tile8 | `577.758 us` | `823.529 us` | `1.425x` |
+| `attn_output` | 3 | row_quad_tile8 | `371.902 us` | `533.642 us` | `1.435x` |
+| `attn_qkv_like` | 3 | row_quad_tile8 | `527.129 us` | `897.885 us` | `1.703x` |
+
+The default run remained exact for all synthetic rows. Existing batch `4+`
+rows were still faster with row-quad than the full row-quad-disabled rollback,
+consistent with E453.
+
+Live four-stream endpoint A/B with `max_tokens=8`:
+
+| config | elapsed | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default batch>=3 | `4.720246 s` | `32` | `28` | `14` | `28` | `3` |
+| row-quad disabled | `4.871993 s` | `32` | `28` | `14` | `28` | `3` |
+
+This live run isolates the new threshold because the worker never exceeded
+batch `3`; the default candidate was `3.1%` faster wall-clock.
+
+Validation gates:
+
+- `cargo fmt --check`: passed
+- `git diff --check`: passed
+- `cargo build --release --features metal --bin kiln`: passed with existing warnings
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: blocked by local missing `nvcc`
+  / CUDA toolkit, matching the known local CUDA environment limitation
+
+### Artifacts
+
+- `e458_transposed_gemv_rowquad_ge3_fmt.log`
+- `e458_transposed_gemv_rowquad_ge3_fmt_rerun.log`
+- `e458_transposed_gemv_rowquad_ge3_parity.log`
+- `e458_transposed_gemv_rowquad_ge3_shapes_default_w5_i20.log`
+- `e458_transposed_gemv_rowquad_ge3_shapes_disabled_w5_i20.log`
+- `e458_transposed_gemv_rowquad_ge3_build.log`
+- `e458_transposed_gemv_rowquad_ge3_live_batch4_mt8_default_*`
+- `e458_transposed_gemv_rowquad_ge3_live_batch4_mt8_disabled_*`
+- `e458_transposed_gemv_rowquad_ge3_diff_check.log`
+- `e458_transposed_gemv_rowquad_ge3_check_metal.log`
+- `e458_transposed_gemv_rowquad_ge3_check_vulkan.log`
+- `e458_transposed_gemv_rowquad_ge3_check_server_metal.log`
+- `e458_transposed_gemv_rowquad_ge3_check_server_vulkan.log`
+- `e458_transposed_gemv_rowquad_ge3_check_cuda.log`
+- `e458_transposed_gemv_rowquad_ge3_summary.txt`
+
+### Decision
+
+Accepted. Lower generic Metal batch transposed-GEMV row-quad selection to batch
+`>=3`. The batch-3 partial row-quad path is correct, improves all targeted
+Qwen3.5 projection shapes synthetically, and improves the live four-stream
+continuous-batching shape that reaches max batch `3`. Roll back with
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` if needed.

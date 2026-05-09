@@ -2106,3 +2106,15 @@
   `306.160 ms`, `gdn:in_proj` `292.437 ms`, and `gdn:out_proj`
   `133.829 ms`. Use this as the next-target map; MLP down and GDN in-proj are
   the best immediate candidates after the E456 gate/up win.
+- 2026-05-09 E458: Accepted lowering generic Metal batch transposed-GEMV
+  row-quad selection from batch `>=4` to batch `>=3`, with rollback env
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1`. Focused parity passed
+  for batch `3` plus existing batches `4/5/6/7/8`. Qwen3.5 shape synthetic
+  batch-3 rows all favored row-quad with exact diffs: MLP down `1260.492 us`
+  versus `1858.933 us`, GDN out `577.758 us` versus `823.529 us`, attention
+  output `371.902 us` versus `533.642 us`, and attention QKV-like
+  `527.129 us` versus `897.885 us`. Four-stream live endpoint A/B isolated
+  the new threshold with max batch `3` and favored default: `4.720 s` versus
+  row-quad-disabled `4.872 s`, both `32` tokens and `28` submitted jobs.
+  Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
+  missing `nvcc`.

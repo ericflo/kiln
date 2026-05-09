@@ -1,0 +1,43 @@
+E458 Metal generic batch transposed-GEMV row-quad threshold >=3 summary
+
+Change:
+- Lowered metal_transposed_coop_gemv_batch_bf16 row-quad selection from
+  batch >=4 to batch >=3.
+- Updated the synthetic policy label helper to match.
+- Expanded focused parity to include batch 3.
+- Existing rollback env remains KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1.
+
+Focused parity:
+- test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul passed,
+  including batch 3 and batches 4/5/6/7/8.
+
+Qwen3.5 shape synthetic A/B, warmup=5, iters=20:
+
+| label | batch | default policy | default | row-quad disabled |
+| --- | ---: | --- | ---: | ---: |
+| mlp_down_proj | 3 | row_quad_tile8 | 1260.492 us | 1858.933 us |
+| gdn_out_proj | 3 | row_quad_tile8 | 577.758 us | 823.529 us |
+| attn_output | 3 | row_quad_tile8 | 371.902 us | 533.642 us |
+| attn_qkv_like | 3 | row_quad_tile8 | 527.129 us | 897.885 us |
+
+Live four-stream endpoint A/B, max_tokens=8:
+
+| config | elapsed | tokens | submitted jobs | batches | rows | max batch |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default batch>=3 | 4.720246 s | 32 | 28 | 14 | 28 | 3 |
+| row-quad disabled | 4.871993 s | 32 | 28 | 14 | 28 | 3 |
+
+Validation:
+- cargo fmt --check passed.
+- git diff --check passed.
+- cargo build --release --features metal --bin kiln passed.
+- cargo check -p kiln-model --features metal passed.
+- cargo check -p kiln-model --features vulkan passed.
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench passed.
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench passed.
+- cargo check -p kiln-model --features cuda remains locally blocked by missing nvcc.
+
+Decision:
+- Accepted. Batch 3 row-quad is correct, improves every targeted Qwen3.5
+  projection shape synthetically, and improves the four-stream live endpoint
+  shape that reaches max batch 3.

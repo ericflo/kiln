@@ -7048,7 +7048,7 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     let (_, output_dim) = weight_t.dims2()?;
     let row_grouping_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
     let row_quad_enabled =
-        row_grouping_enabled && batch >= 4 && !metal_transposed_coop_gemv_row_quad_disabled();
+        row_grouping_enabled && batch >= 3 && !metal_transposed_coop_gemv_row_quad_disabled();
     let row_quad_tile8_enabled =
         row_quad_enabled && !metal_transposed_coop_gemv_row_quad_tile8_disabled();
     let row_group_size = if row_quad_enabled {
@@ -14650,7 +14650,7 @@ mod tests {
 
     fn metal_transposed_coop_decode_batch_policy(batch: usize) -> &'static str {
         if batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled() {
-            if batch >= 4 && !metal_transposed_coop_gemv_row_quad_disabled() {
+            if batch >= 3 && !metal_transposed_coop_gemv_row_quad_disabled() {
                 if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
                     "row_quad_tile8"
                 } else {
@@ -16330,6 +16330,7 @@ mod tests {
 
         let input_dim = 128usize;
         for (batch, output_dim) in [
+            (3usize, 131usize),
             (4usize, 133usize),
             (5usize, 134usize),
             (6usize, 135usize),
