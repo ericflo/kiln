@@ -20261,3 +20261,81 @@ shape-matched.
 
 Accepted. Keep the batch-3-only GDN in-proj row-triple mode with rollback env
 `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE=1`.
+
+## E470 - Post-E469 Live Batch All-Stage Profile
+
+### Purpose
+
+Refresh the shape-matched four-stream all-stage profile after accepting E469,
+so the next source experiment is based on current-source hotspot ordering.
+
+### Run
+
+Rebuilt the release Metal server after the E469 rebase and ran four concurrent
+streaming chat requests with:
+
+- `KILN_DECODE_BATCHER=1`
+- `KILN_DECODE_BATCH_WAIT_US=0`
+- `KILN_PROFILE_FULL_ATTN_STAGES=1`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_MLP_STAGES=1`
+- `max_tokens=3`, `temperature=0`
+
+Used the same sequence-continuation prompt shape as E466/E467/E469. The run was
+settled after `/health` before launching the four streams.
+
+### Endpoint Shape
+
+| metric | value |
+| --- | ---: |
+| elapsed | `5.340857 s` |
+| HTTP statuses | `200 x4` |
+| stream events | `24` |
+| server generated tokens | `12` |
+| submitted decode jobs | `8` |
+| worker batches | `4` |
+| decode rows | `8` |
+| max observed batch | `3` |
+
+### Filtered Profile Totals
+
+Filtered to request decode rows with `seq_len=1`; start positions were
+`49`/`50`.
+
+| subsystem | total | records |
+| --- | ---: | ---: |
+| MLP | `616.335 ms` | `256` |
+| GDN | `383.974 ms` | `576` |
+| full attention | `186.320 ms` | `288` |
+
+Top filtered stages:
+
+| stage | total | records | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `378.123 ms` | `128` | `2.954 ms` |
+| `mlp:down_proj` | `238.212 ms` | `128` | `1.861 ms` |
+| `gdn:in_proj` | `197.945 ms` | `96` | `2.062 ms` |
+| `gdn:out_proj` | `95.131 ms` | `96` | `0.991 ms` |
+| `gdn:gates_recur_gated_norm` | `49.979 ms` | `96` | `0.521 ms` |
+| `gdn:qkv_conv_norm` | `40.457 ms` | `96` | `0.421 ms` |
+
+Versus E467, the same ranked checkpoint now has `gdn:in_proj` down from
+`232.506 ms` to `197.945 ms`. The absolute profile totals remain noisy enough
+that this is not source-decision evidence by itself, but the rank order is now
+clear: MLP gate/up first, MLP down-projection second, then GDN in-proj.
+
+### Artifacts
+
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_profile_build.log`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_health.json`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_request_*.json`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_response_*.sse`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_time.json`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_metrics.prom`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_server.log`
+- `e470_post_gdn_in_proj_rowtriple_b3_live_batch4_all_profile_summary.txt`
+
+### Decision
+
+Accepted as a no-source-change profile checkpoint. Use it for current-source
+target ordering only.

@@ -2241,3 +2241,13 @@
   GDN-stage profile showed `gdn:in_proj` down from `259.955 ms` to `222.855 ms`
   and total GDN down from `453.122 ms` to `394.053 ms`. Metal/Vulkan model and
   server checks passed; CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E470: Captured the post-E469 four-stream all-stage live batch
+  profile for the max-batch-3 shape. No source change. The run completed in
+  `5.341 s`, returned four HTTP `200` responses, generated `12` server tokens,
+  submitted `8` decode-batcher jobs, ran `4` worker batches, processed `8`
+  decode rows, and reached `max_observed_batch=3`. Filtered decode rows
+  (`seq_len=1`, start positions `49/50`) totaled MLP `616.335 ms`, GDN
+  `383.974 ms`, and full attention `186.320 ms`. Hottest stages are
+  `mlp:gate_up_fused` `378.123 ms`, `mlp:down_proj` `238.212 ms`,
+  `gdn:in_proj` `197.945 ms`, and `gdn:out_proj` `95.131 ms`; use this only as
+  current-source rank-order evidence.
