@@ -15904,3 +15904,107 @@ Accepted as target-selection evidence; no source change. E410 moved the MLP
 pointwise stage below the larger projection and GDN buckets. Remaining prefill
 work is still dominated by GDN qkv/z input projection and the three MLP
 projection matmuls.
+
+## 2026-05-09 - E412 accepted Metal full-SDPA prefill default
+
+### Purpose
+
+E411 still showed `full_attn:prefill_attn_fallback` as a smaller but isolated
+`seq_len=64` prefill bucket: `8` calls, `14.522 ms` total. The existing Metal
+full-SDPA path had been disabled for `q_seq > 8` because older
+candle-metal-kernels returned all-NaN at several Qwen3.5-4B BF16 prefill
+lengths. Retest that safety assumption on the current stack before spending
+more effort on projection matmuls.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_SDPA_FULL=1` as a prefill-only rollback.
+- Re-enabled Candle Metal full SDPA by default only for `head_dim=256` full
+  attention prefill shapes with `q_seq > 8`; other head dims still require the
+  old fallback path unless they hit the short vector path.
+- Kept `KILN_DISABLE_METAL_SDPA` as the broader global SDPA disable.
+- Added `test_metal_sdpa_full_qwen_shape_matches_reference`.
+- Added ignored bench `bench_metal_sdpa_full_qwen_safety_synthetic`.
+
+### Safety Results
+
+The Qwen-shaped synthetic compares Candle Metal SDPA against the current naive
+causal attention reference with BF16 tensors shaped `q=[1,16,T,256]` and
+`k/v=[1,4,T,256]`.
+
+| Seq len | Reference | SDPA | Speedup | Finite | Max diff | Mean diff |
+|---:|---:|---:|---:|:---:|---:|---:|
+| 64 | `4754.125 us` | `730.000 us` | `6.513x` | yes | `9.765625e-4` | `3.416673e-5` |
+| 120 | `6706.583 us` | `2831.666 us` | `2.368x` | yes | `9.765625e-4` | `2.381469e-5` |
+| 138 | `9566.417 us` | `966.125 us` | `9.902x` | yes | `9.765625e-4` | `2.254862e-5` |
+| 170 | `6836.959 us` | `941.625 us` | `7.261x` | yes | `9.765625e-4` | `1.906013e-5` |
+| 210 | `11013.667 us` | `1117.833 us` | `9.853x` | yes | `9.765625e-4` | `1.714945e-5` |
+| 266 | `12968.833 us` | `1361.625 us` | `9.525x` | yes | `9.765625e-4` | `1.503302e-5` |
+| 330 | `18685.416 us` | `1909.334 us` | `9.786x` | yes | `9.765625e-4` | `1.332059e-5` |
+| 410 | `26765.250 us` | `2451.834 us` | `10.916x` | yes | `9.765625e-4` | `1.201531e-5` |
+| 522 | `42039.875 us` | `3790.834 us` | `11.090x` | yes | `9.765625e-4` | `1.100842e-5` |
+| 610 | `56632.750 us` | `6555.541 us` | `8.639x` | yes | `9.765625e-4` | `1.000796e-5` |
+
+Live paged endpoint sanity also completed at the old unsafe range after making
+the default change: requested `--prompt-tokens 266`, measured `259` prompt
+tokens, prefill `1575.533458 ms`, mean ITL `212.612833 ms`, no non-finite
+failure.
+
+### Endpoint A/B
+
+Same release binary, Qwen3.5-4B paged, `--prompt-tokens 64`,
+`--max-output-tokens 64`, one latency warmup. Default is the new full-SDPA
+prefill path; rollback is `KILN_DISABLE_METAL_SDPA_FULL=1`.
+
+- Pair 1: default `379.033084 ms` prefill vs rollback `420.243666 ms`
+  (`9.81%` lower)
+- Pair 2, counter-ordered: default `377.413875 ms` prefill vs rollback
+  `432.617167 ms` (`12.76%` lower)
+- Aggregate: default `378.223480 ms` vs rollback `426.430417 ms`, saving
+  `48.206937 ms` (`11.31%` lower prefill latency)
+- Decode ITL was effectively unchanged: default `159.645831 ms` vs rollback
+  `160.154349 ms`
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_metal_sdpa_full_qwen_shape_matches_reference --lib -- --nocapture`
+- `KILN_METAL_SDPA_FULL_SAFETY_SEQS=64,120,138,170,210,266,330,410,522,610 KILN_METAL_SDPA_FULL_BENCH_WARMUP=1 KILN_METAL_SDPA_FULL_BENCH_ITERS=1 cargo test -p kiln-model --features metal bench_metal_sdpa_full_qwen_safety_synthetic --lib -- --ignored --nocapture`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+- `cargo check -p kiln-model --features cuda` was attempted and remains blocked
+  locally before compiling touched code because `nvcc` is unavailable
+
+### Artifacts
+
+- `e412_sdpa_full_summary.txt`
+- `e412_sdpa_full_optin_p64_o8.log`
+- `e412_sdpa_full_optin_p120_o2.log`
+- `e412_sdpa_full_optin_p266_o1.log`
+- `e412_sdpa_full_qwen_shape_test.log`
+- `e412_sdpa_full_safety_seq64.log`
+- `e412_sdpa_full_safety_historical_lengths.log`
+- `e412_sdpa_full_safety_all_lengths.log`
+- `e412_sdpa_full_latency_default_64out.log`
+- `e412_sdpa_full_latency_disabled_64out.log`
+- `e412_sdpa_full_latency_disabled_repeat_64out.log`
+- `e412_sdpa_full_latency_default_repeat_64out.log`
+- `e412_sdpa_full_default_p266_o1.log`
+- `e412_sdpa_full_check_metal.log`
+- `e412_sdpa_full_check_vulkan.log`
+- `e412_sdpa_full_check_cuda.log`
+- `e412_sdpa_full_release_bench_build.log`
+- `e412_sdpa_full_release_kiln_build.log`
+- `e412_sdpa_full_fmt_check.log`
+- `e412_sdpa_full_git_diff_check.log`
+
+### Decision
+
+Accepted. The current Candle Metal full-SDPA path is finite and numerically
+close at every retested Qwen3.5 historical failure length, and the endpoint
+prefill win is large and repeated. Keep the default scoped to the Qwen3.5
+`head_dim=256` full-attention shape; use `KILN_DISABLE_METAL_SDPA_FULL=1` to
+fall back to the naive prefill attention without disabling decode SDPA.

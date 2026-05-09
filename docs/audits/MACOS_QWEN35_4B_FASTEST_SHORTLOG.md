@@ -1675,3 +1675,15 @@
   `mlp:gate_proj` `68.202 ms`, `gdn:recurrent` `31.285 ms`, and
   `gdn:out_proj` `28.110 ms`. Accepted as target-selection evidence; no source
   change.
+- 2026-05-09 E412: Accepted re-enabling Metal full-SDPA prefill by default for
+  Qwen3.5 full-attention `head_dim=256` shapes, guarded by rollback
+  `KILN_DISABLE_METAL_SDPA_FULL=1`. A new Qwen-shaped direct SDPA-vs-naive test
+  passed, and the ignored safety bench passed at historical NaN lengths
+  `64,120,138,170,210,266,330,410,522,610`; all outputs were finite, with max
+  diff `9.765625e-4` and mean diff at most `3.416673e-5`. Full paged
+  64-token prefill A/B favored default in both pairs; aggregate prefill
+  improved `426.430417 -> 378.223480 ms`, saving `48.207 ms` (`11.31%` lower),
+  while decode ITL stayed effectively unchanged (`160.154349 -> 159.645831 ms`).
+  A default endpoint sanity run also completed at measured prompt length `259`.
+  Metal/Vulkan checks, focused Metal tests, release Metal builds, fmt, and diff
+  checks passed; CUDA check remains blocked locally by missing `nvcc`.

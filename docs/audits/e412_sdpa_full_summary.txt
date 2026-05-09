@@ -1,0 +1,36 @@
+E412 accepted Metal full-SDPA prefill default for Qwen3.5 head_dim=256
+
+Change:
+- Re-enabled Candle Metal full SDPA by default only for full-attention prefill
+  shapes with head_dim=256 and q_seq > 8.
+- Added rollback env KILN_DISABLE_METAL_SDPA_FULL=1. The broader
+  KILN_DISABLE_METAL_SDPA still disables Metal SDPA globally.
+- Added a non-ignored Qwen-shaped Metal SDPA-vs-naive reference test and an
+  ignored synthetic safety/latency bench over historical NaN lengths.
+
+Safety:
+- Qwen-shaped BF16 synthetic SDPA-vs-naive reference passed for seq_len
+  64, 120, 138, 170, 210, 266, 330, 410, 522, and 610.
+- All synthetic rows were finite; max_abs_diff was 9.765625e-4 and mean_abs_diff
+  was <= 3.416673e-5.
+- Live paged endpoint sanity passed at prompt length 259 after the default
+  change: prefill 1575.533458 ms, mean ITL 212.612833 ms.
+
+Endpoint A/B, Qwen3.5-4B paged, prompt_tokens=64, max_output_tokens=64:
+- Pair 1: default 379.033084 ms vs rollback 420.243666 ms.
+- Pair 2: default 377.413875 ms vs rollback 432.617167 ms.
+- Aggregate: default 378.223480 ms vs rollback 426.430417 ms, saving
+  48.206937 ms (11.31% lower prefill latency).
+- Decode ITL was effectively unchanged: default 159.645831 ms vs rollback
+  160.154349 ms.
+
+Validation:
+- cargo test -p kiln-model --features metal test_metal_sdpa_full_qwen_shape_matches_reference --lib -- --nocapture
+- KILN_METAL_SDPA_FULL_SAFETY_SEQS=64,120,138,170,210,266,330,410,522,610 KILN_METAL_SDPA_FULL_BENCH_WARMUP=1 KILN_METAL_SDPA_FULL_BENCH_ITERS=1 cargo test -p kiln-model --features metal bench_metal_sdpa_full_qwen_safety_synthetic --lib -- --ignored --nocapture
+- cargo fmt --check
+- cargo check -p kiln-model --features metal
+- cargo check -p kiln-model --features vulkan
+- cargo build --release --features metal --bin kiln-bench
+- cargo build --release --features metal --bin kiln
+- git diff --check
+- cargo check -p kiln-model --features cuda was attempted and remains blocked locally by missing nvcc.

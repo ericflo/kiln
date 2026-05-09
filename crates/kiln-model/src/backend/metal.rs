@@ -11,6 +11,8 @@ use candle_core::{DType, Device, Tensor};
 
 use super::BackendRuntime;
 
+const DISABLE_METAL_SDPA: &str = "KILN_DISABLE_METAL_SDPA";
+const DISABLE_METAL_SDPA_FULL: &str = "KILN_DISABLE_METAL_SDPA_FULL";
 const DISABLE_METAL_CONV1D_PREFILL: &str = "KILN_DISABLE_METAL_CONV1D_PREFILL";
 const DISABLE_FUSED_CONV1D: &str = "KILN_DISABLE_FUSED_CONV1D";
 const DISABLE_METAL_FUSED_CONV1D: &str = "KILN_DISABLE_METAL_FUSED_CONV1D";
@@ -242,11 +244,11 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        std::env::var("KILN_DISABLE_METAL_SDPA").is_err()
+        std::env::var(DISABLE_METAL_SDPA).is_err()
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        std::env::var("KILN_DISABLE_METAL_SDPA").is_err()
+        std::env::var(DISABLE_METAL_SDPA).is_err()
     }
 
     // Note: keep `supports_*` returning true so the planner picks the SDPA
@@ -417,7 +419,7 @@ impl BackendRuntime for MetalBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if std::env::var("KILN_DISABLE_METAL_SDPA").is_ok() {
+        if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
         // Decline (caller falls back to the portable path) when candle's SDPA
@@ -456,7 +458,7 @@ impl BackendRuntime for MetalBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if std::env::var("KILN_DISABLE_METAL_SDPA").is_ok() {
+        if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
         if !matches!(q.dtype(), DType::BF16 | DType::F16 | DType::F32) {
@@ -834,38 +836,20 @@ fn metal_sdpa_supports_head_dim(head_dim: usize) -> bool {
     matches!(head_dim, 32 | 64 | 72 | 80 | 96 | 128 | 256 | 512)
 }
 
-/// candle-metal-kernels 0.10.2's `call_sdpa_full` (steel attention) silently
-/// returns an all-NaN output buffer for many BF16 prefill shapes on the
-/// Qwen3.5-4B (head_dim=256) layout. Reproduced empirically by varying
-/// q_seq while holding all other model state constant (greedy, prefix cache
-/// off, no streaming prefill, no fused mlp/qkv/attn-gate kernels):
-///
-///   ptoks=120 → NaN     ptoks=266 → NaN
-///   ptoks=138 → finite  ptoks=330 → NaN
-///   ptoks=170 → finite  ptoks=410 → finite
-///   ptoks=210 → finite  ptoks=522 → NaN
-///                       ptoks=610 → NaN
-///
-/// There is no clean alignment / `q_seq mod bq` rule — the failure depends
-/// on internal kernel state we cannot inspect from outside candle.
-/// Short q_seq <= 8 (the "vector" kernel path) is unaffected, and a
-/// previously-suspected `8 < q_seq < bq` boundary turned out to be only
-/// one slice of a larger NaN surface.
-///
-/// Until upstream candle fixes the kernel, decline the SDPA full path for
-/// any q_seq > 8 and let the caller fall back to the naive softmax+matmul
-/// prefill (which is bit-exact, just ~5–10× slower per prefill — typically
-/// <1 s extra at chat-context sizes, and the per-token decode hot path is
-/// untouched). Set `KILN_ENABLE_METAL_SDPA_FULL=1` to opt back in for
-/// benchmarking once the upstream fix lands.
-fn metal_sdpa_full_safe_for_q_seq(_head_dim: usize, q_seq: usize) -> bool {
+/// Older candle-metal-kernels 0.10.2 builds returned all-NaN from the full
+/// SDPA kernel for several Qwen3.5-4B BF16 prefill lengths at `head_dim=256`.
+/// E412 retested the current stack against the naive causal attention reference
+/// at the historical lengths `120, 138, 170, 210, 266, 330, 410, 522, 610`,
+/// plus live paged endpoint probes at prompt lengths 64, 115, and 259. All were
+/// finite and within BF16 tolerance, so the Qwen3.5 full-attention prefill path
+/// can use Metal SDPA by default again. Keep this gate narrow and rollbackable:
+/// `KILN_DISABLE_METAL_SDPA_FULL=1` falls back to the naive prefill attention
+/// while leaving decode SDPA controlled by `KILN_DISABLE_METAL_SDPA`.
+fn metal_sdpa_full_safe_for_q_seq(head_dim: usize, q_seq: usize) -> bool {
     if q_seq <= 8 {
         return true;
     }
-    matches!(
-        std::env::var("KILN_ENABLE_METAL_SDPA_FULL").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
+    head_dim == 256 && !env_truthy(DISABLE_METAL_SDPA_FULL)
 }
 
 fn metal_gdn_qk_norm_disabled() -> bool {
@@ -12788,12 +12772,30 @@ mod tests {
             .to_scalar::<f32>()?)
     }
 
+    fn tensor_all_finite(t: &Tensor) -> Result<bool> {
+        let values = t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        Ok(values.iter().all(|value| value.is_finite()))
+    }
+
     fn env_usize(name: &str, default: usize) -> usize {
         std::env::var(name)
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|&value| value > 0)
             .unwrap_or(default)
+    }
+
+    fn env_usize_list(name: &str, default: &[usize]) -> Vec<usize> {
+        let values = std::env::var(name)
+            .ok()
+            .map(|raw| {
+                raw.split(',')
+                    .filter_map(|item| item.trim().parse::<usize>().ok())
+                    .filter(|&value| value > 0)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| !values.is_empty());
+        values.unwrap_or_else(|| default.to_vec())
     }
 
     fn patterned_bf16_2d(
@@ -12849,6 +12851,26 @@ mod tests {
         )
     }
 
+    fn patterned_bf16_head_major(
+        batch: usize,
+        heads: usize,
+        seq_len: usize,
+        head_dim: usize,
+        device: &Device,
+        modulus: usize,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let elems = batch * heads * seq_len * head_dim;
+        let data: Vec<f32> = (0..elems)
+            .map(|i| ((i % modulus) as f32 - (modulus / 2) as f32) * scale)
+            .collect();
+        Ok(
+            Tensor::from_slice(&data, (batch, heads, seq_len, head_dim), device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?,
+        )
+    }
+
     fn patterned_rotary_tables_3d(
         batch: usize,
         seq_len: usize,
@@ -12885,6 +12907,61 @@ mod tests {
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
         let gate = (gate * gate_sig)?;
         Ok((gate * up)?)
+    }
+
+    fn causal_attention_reference_head_major(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let (batch, num_heads, seq_len, head_dim) = q.dims4()?;
+        let (k_batch, num_kv_heads, kv_len, k_head_dim) = k.dims4()?;
+        anyhow::ensure!(batch == k_batch, "q/k batch mismatch");
+        anyhow::ensure!(v.dims() == k.dims(), "k/v shape mismatch");
+        anyhow::ensure!(head_dim == k_head_dim, "q/k head_dim mismatch");
+        anyhow::ensure!(
+            seq_len == kv_len,
+            "prefill reference expects q_len == kv_len"
+        );
+        anyhow::ensure!(
+            num_heads % num_kv_heads == 0,
+            "q heads must be a multiple of kv heads"
+        );
+
+        let gqa_ratio = num_heads / num_kv_heads;
+        let (k, v) = if gqa_ratio > 1 {
+            let k = k
+                .unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, seq_len, head_dim))?;
+            let v = v
+                .unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, seq_len, head_dim))?;
+            (k, v)
+        } else {
+            (k.contiguous()?, v.contiguous()?)
+        };
+
+        let scores = (q.broadcast_matmul(&k.t()?)? * scale as f64)?;
+        let mask: Vec<f32> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| if j <= i { 0.0 } else { f32::NEG_INFINITY }))
+            .collect();
+        let mask = Tensor::from_slice(&mask, (1usize, 1usize, seq_len, seq_len), q.device())?
+            .to_dtype(scores.dtype())?;
+        let scores = scores.broadcast_add(&mask)?;
+        let max_val = scores.max_keepdim(D::Minus1)?;
+        let shifted = scores.broadcast_sub(&max_val)?;
+        let exp_shifted = shifted.exp()?;
+        let sum_exp = exp_shifted.sum_keepdim(D::Minus1)?;
+        let weights = exp_shifted.broadcast_div(&sum_exp)?;
+        weights
+            .broadcast_matmul(&v)?
+            .contiguous()
+            .context("causal attention reference contiguous")
     }
 
     fn attn_gate_reference(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
@@ -13513,6 +13590,162 @@ mod tests {
                  q_max_abs_diff={q_max:.6e} k_max_abs_diff={k_max:.6e}",
                 rotary_dim / 2,
                 rowwise_us / batched_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_metal_sdpa_full_qwen_shape_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let batch = 1usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let seq_len = 64usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let q = patterned_bf16_head_major(
+            batch,
+            num_heads,
+            seq_len,
+            head_dim,
+            &device,
+            97,
+            0.001953125,
+        )?;
+        let k = patterned_bf16_head_major(
+            batch,
+            num_kv_heads,
+            seq_len,
+            head_dim,
+            &device,
+            89,
+            0.001953125,
+        )?;
+        let v = patterned_bf16_head_major(
+            batch,
+            num_kv_heads,
+            seq_len,
+            head_dim,
+            &device,
+            83,
+            0.00390625,
+        )?;
+        let reference = causal_attention_reference_head_major(&q, &k, &v, scale)?;
+        let sdpa = candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)?;
+        device.synchronize()?;
+
+        assert!(tensor_all_finite(&sdpa)?);
+        let max = max_abs_diff(&reference, &sdpa)?;
+        let mean = mean_abs_diff(&reference, &sdpa)?;
+        assert!(
+            max < 2e-3,
+            "Qwen-shaped Metal full SDPA max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 5e-3,
+            "Qwen-shaped Metal full SDPA mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_metal_sdpa_full_qwen_safety_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let seq_lens = env_usize_list(
+            "KILN_METAL_SDPA_FULL_SAFETY_SEQS",
+            &[64, 120, 138, 170, 210, 266, 330, 410, 522, 610],
+        );
+        let warmup = env_usize("KILN_METAL_SDPA_FULL_BENCH_WARMUP", 1);
+        let iters = env_usize("KILN_METAL_SDPA_FULL_BENCH_ITERS", 2);
+        let batch = 1usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        for seq_len in seq_lens {
+            let q = patterned_bf16_head_major(
+                batch,
+                num_heads,
+                seq_len,
+                head_dim,
+                &device,
+                97,
+                0.001953125,
+            )?;
+            let k = patterned_bf16_head_major(
+                batch,
+                num_kv_heads,
+                seq_len,
+                head_dim,
+                &device,
+                89,
+                0.001953125,
+            )?;
+            let v = patterned_bf16_head_major(
+                batch,
+                num_kv_heads,
+                seq_len,
+                head_dim,
+                &device,
+                83,
+                0.00390625,
+            )?;
+            device.synchronize()?;
+
+            let reference =
+                causal_attention_reference_head_major(&q, &k, &v, scale).with_context(|| {
+                    format!("Qwen-shaped causal reference failed for seq_len={seq_len}")
+                })?;
+            let sdpa = candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)
+                .with_context(|| format!("candle Metal full SDPA failed for seq_len={seq_len}"))?;
+            device.synchronize()?;
+
+            let finite = tensor_all_finite(&sdpa)?;
+            let (max, mean) = if finite {
+                (
+                    max_abs_diff(&reference, &sdpa)?,
+                    mean_abs_diff(&reference, &sdpa)?,
+                )
+            } else {
+                (f32::NAN, f32::NAN)
+            };
+
+            let reference_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                causal_attention_reference_head_major(&q, &k, &v, scale)
+                    .context("bench Qwen-shaped causal attention reference")
+            })?;
+            let sdpa_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)
+                    .context("bench candle Metal full SDPA")
+            })?;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 full SDPA safety BF16: seq_len={seq_len} \
+                 q=[{batch},{num_heads},{seq_len},{head_dim}] \
+                 k/v=[{batch},{num_kv_heads},{seq_len},{head_dim}] \
+                 warmup={warmup} iters={iters} reference={reference_us:.3} us \
+                 sdpa={sdpa_us:.3} us speedup={:.3}x finite={finite} \
+                 max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                reference_us / sdpa_us,
+            );
+
+            assert!(
+                finite,
+                "Qwen-shaped Metal full SDPA seq_len={seq_len} produced non-finite values"
+            );
+            assert!(
+                mean < 5e-3,
+                "Qwen-shaped Metal full SDPA seq_len={seq_len} mean_abs_diff={mean:e} exceeds tolerance"
             );
         }
 
