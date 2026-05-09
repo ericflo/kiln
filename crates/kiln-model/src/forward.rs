@@ -151,6 +151,11 @@ fn weighted_lm_head_prep_disabled() -> bool {
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
 }
 
+fn vulkan_gdn_recurrent_step_f32_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32").is_err())
+}
+
 fn synchronize_for_profile(device: &Device) -> Result<()> {
     if let Device::Metal(device) = device {
         device.synchronize()?;
@@ -3785,15 +3790,16 @@ fn gdn_chunkwise_recurrence(
     // kernel (CUDA today) collapses the whole recurrence into one block
     // per (B,H).
     if seq_len == 1 {
-        if dtype == DType::BF16
-            && state.dtype() == DType::BF16
+        let use_backend_recurrent_step = state.dtype() == dtype
             && backend.supports_gdn_recurrent_step()
-        {
-            // The five squeeze+contiguous calls below each emit a bf16 ucopy
-            // kernel before the recurrent forward runs. PROFILING.md (PR #107)
-            // marks this block as the suspected source of the 24-GDN-layer
-            // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
-            // it separately from the kernel itself.
+            && (dtype == DType::BF16
+                || (dtype == DType::F32
+                    && backend.name() == "vulkan"
+                    && vulkan_gdn_recurrent_step_f32_enabled()));
+        if use_backend_recurrent_step {
+            // The five squeeze+contiguous calls below can copy the single-row
+            // inputs before the recurrent forward runs. The dedicated NVTX
+            // range lets nsys attribute this separately from the kernel itself.
             let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let (q1, k1, v1, beta1, g1) = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/precopy");

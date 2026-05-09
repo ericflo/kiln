@@ -1,0 +1,65 @@
+2026-05-09 A093: Vulkan-only F32 GDN recurrent-step route
+
+Change:
+- In `gdn_chunkwise_recurrence`, allow the existing backend recurrent-step
+  path for single-token F32 tensors only when `backend.name() == "vulkan"`.
+- BF16 behavior is unchanged for all backends.
+- CUDA and Metal F32 decode routing is unchanged.
+- Rollback: set `KILN_DISABLE_VULKAN_GDN_RECURRENT_STEP_F32=1`.
+
+Correctness:
+- Focused Vulkan parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_matches_f32_cpu_reference -- --nocapture`
+- Short same-binary A/B seed 94 kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]` for candidate and rollback.
+- Longer same-binary A/B seed 95 kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144]`
+  for candidate and rollback.
+- Focused profile seed 96 kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+
+Performance evidence:
+- Short seed 94:
+  - Candidate: prefill `1140.799777ms`, mean ITL `81.860122375ms`,
+    p99 `90.274222ms`, 9 generated tokens.
+  - Rollback: prefill `1059.761793ms`, mean ITL `84.757541125ms`,
+    p99 `85.882211ms`, 9 generated tokens.
+  - Short decode mean improved by `2.89741875ms`; p99 and prefill were noisy.
+- Longer seed 95:
+  - Candidate: prefill `1040.197358ms`, mean ITL `81.1454149375ms`,
+    p99 `90.30850699999999ms`, 17 generated tokens.
+  - Rollback: prefill `1141.7328389999998ms`, mean ITL `86.11078575ms`,
+    p99 `88.973739ms`, 17 generated tokens.
+  - Longer decode mean improved by `4.9653708125ms` (`5.8%`).
+- Profile seed 96 candidate:
+  - Final JSON: prefill `1071.051439ms`, mean ITL `82.075229625ms`,
+    p99 `90.140462ms`, 9 generated tokens.
+  - Measured-pass GDN recurrent prefill (`seq_len=64`): outer
+    `232.247ms`; `chunk_scan` `77.575ms`; `chunk_prep` `58.879ms`;
+    `matmul_prep` `58.325ms`; `state_update` `34.068ms`.
+  - Measured-pass GDN recurrent decode (`seq_len=1`): outer
+    `72.815ms`; `single_token_backend_step` `71.461ms`;
+    `single_token_precopy` `0.188ms`.
+  - A092's prior measured decode recurrent fallback was outer `118.076ms`
+    with `single_token_fallback` `117.203ms`; A093 confirms the decode path
+    now reaches the Vulkan recurrent-step backend.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- CUDA feature check was attempted and remained host-blocked because `nvcc`
+  is unavailable.
+- Metal feature check was attempted and remained host-blocked because `objc2`
+  requires an Apple target.
+
+Verdict:
+- Keep. This is a narrow Vulkan-only decode correctness/performance route:
+  active F32 decode tensors now run the existing Vulkan recurrent-step kernel
+  instead of the CPU-style single-token fallback.
+- Next serial decode work should use a fresh post-A093 profile because GDN
+  recurrent is no longer the same fallback-shaped bucket.
+- Next prefill recurrent work should target `chunk_scan`, `chunk_prep`,
+  `matmul_prep`, or broader adjacent-stage residency/fusion, not
+  `slice_inputs` or `cat_out`.
