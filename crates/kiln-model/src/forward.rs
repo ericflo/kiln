@@ -271,7 +271,7 @@ fn try_metal_mlp_gate_up_hidden(
     mlp: &GpuFfnWeights,
     lora_layer: Option<&LoraLayerWeights>,
 ) -> Result<Option<Tensor>> {
-    if lora_layer.is_some()
+    if lora_layer.is_some_and(LoraLayerWeights::has_mlp_gate_up)
         || crate::mtp_debug::is_mtp_fp32_head_armed()
         || crate::backend::metal::metal_mlp_gate_up_fusion_disabled()
     {
@@ -2864,11 +2864,12 @@ fn swiglu_ffn_impl(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    if lora_layer.is_none()
-        && mlp.gate_proj_marlin.is_none()
-        && mlp.up_proj_marlin.is_none()
-        && mlp.down_proj_marlin.is_none()
-    {
+    let has_mlp_lora = lora_layer.is_some_and(LoraLayerWeights::has_mlp);
+    let has_mlp_gate_up_lora = lora_layer.is_some_and(LoraLayerWeights::has_mlp_gate_up);
+    let has_marlin = mlp.gate_proj_marlin.is_some()
+        || mlp.up_proj_marlin.is_some()
+        || mlp.down_proj_marlin.is_some();
+    if !has_mlp_lora && !has_marlin {
         if let Some(backend) = backend {
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             if let Some(out) =
@@ -2883,6 +2884,11 @@ fn swiglu_ffn_impl(
                 )?;
                 return Ok(out);
             }
+        }
+    }
+    if !has_mlp_gate_up_lora && !has_marlin {
+        if let Some(backend) = backend {
+            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             if let Some(hidden) = backend.mlp_gate_up_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t)? {
                 finish_mlp_stage_profile(
                     profile_device,
@@ -2900,7 +2906,7 @@ fn swiglu_ffn_impl(
                         &hidden,
                         &mlp.down_proj_t,
                         mlp.down_proj_marlin.as_ref(),
-                        None,
+                        lora_layer.and_then(|l| l.down_proj.as_ref()),
                         lora_scale,
                     )?
                 };
@@ -2935,7 +2941,7 @@ fn swiglu_ffn_impl(
                 &hidden,
                 &mlp.down_proj_t,
                 mlp.down_proj_marlin.as_ref(),
-                None,
+                lora_layer.and_then(|l| l.down_proj.as_ref()),
                 lora_scale,
             )?
         };
@@ -9913,6 +9919,64 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct FixedMlpBackend {
+        device: Device,
+        fused_values: Option<Vec<f32>>,
+        fused_dims: (usize, usize, usize),
+        gate_up_values: Option<Vec<f32>>,
+        gate_up_dims: (usize, usize, usize),
+        fused_calls: std::sync::atomic::AtomicUsize,
+        gate_up_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BackendRuntime for FixedMlpBackend {
+        fn name(&self) -> &'static str {
+            "fixed-mlp-test"
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn mlp_decode(
+            &self,
+            _x: &Tensor,
+            _gate_weight_t: &Tensor,
+            _up_weight_t: &Tensor,
+            _down_weight_t: &Tensor,
+        ) -> Result<Option<Tensor>> {
+            self.fused_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(match self.fused_values.as_ref() {
+                Some(values) => Some(Tensor::from_vec(
+                    values.clone(),
+                    self.fused_dims,
+                    &self.device,
+                )?),
+                None => None,
+            })
+        }
+
+        fn mlp_gate_up_decode(
+            &self,
+            _x: &Tensor,
+            _gate_weight_t: &Tensor,
+            _up_weight_t: &Tensor,
+        ) -> Result<Option<Tensor>> {
+            self.gate_up_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(match self.gate_up_values.as_ref() {
+                Some(values) => Some(Tensor::from_vec(
+                    values.clone(),
+                    self.gate_up_dims,
+                    &self.device,
+                )?),
+                None => None,
+            })
+        }
+    }
+
     #[test]
     fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
         let device = Device::Cpu;
@@ -9945,6 +10009,132 @@ mod tests {
                 "got {got}, expected {expected}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_swiglu_down_only_lora_keeps_backend_gate_up_decode() -> Result<()> {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
+        let zero_proj_t = zero_proj.t()?.contiguous()?;
+        let mlp = GpuFfnWeights {
+            gate_proj: zero_proj.clone(),
+            up_proj: zero_proj.clone(),
+            down_proj: zero_proj.clone(),
+            gate_proj_t: zero_proj_t.clone(),
+            up_proj_t: zero_proj_t.clone(),
+            down_proj_t: zero_proj_t,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+        let backend = FixedMlpBackend {
+            device: device.clone(),
+            fused_values: None,
+            fused_dims: (1, 1, 2),
+            gate_up_values: Some(vec![3.0, 5.0]),
+            gate_up_dims: (1, 1, 2),
+            fused_calls: std::sync::atomic::AtomicUsize::new(0),
+            gate_up_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let lora_layer = LoraLayerWeights {
+            down_proj: Some(LoraProjectionWeights {
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1), &device)?,
+            }),
+            ..Default::default()
+        };
+
+        let out = swiglu_ffn_impl(
+            Some(&backend),
+            &x,
+            &mlp,
+            Some((&lora_layer, 1.0)),
+            false,
+            None,
+        )?;
+
+        assert_eq!(
+            backend
+                .gate_up_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            backend
+                .fused_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let values = out.flatten_all()?.to_vec1::<f32>()?;
+        let expected = [6.0, 12.0];
+        for (got, expected) in values.iter().zip(expected) {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "got {got}, expected {expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_swiglu_attention_only_lora_keeps_backend_mlp_decode() -> Result<()> {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
+        let zero_proj_t = zero_proj.t()?.contiguous()?;
+        let mlp = GpuFfnWeights {
+            gate_proj: zero_proj.clone(),
+            up_proj: zero_proj.clone(),
+            down_proj: zero_proj.clone(),
+            gate_proj_t: zero_proj_t.clone(),
+            up_proj_t: zero_proj_t.clone(),
+            down_proj_t: zero_proj_t,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        };
+        let backend = FixedMlpBackend {
+            device: device.clone(),
+            fused_values: Some(vec![7.0, 11.0]),
+            fused_dims: (1, 1, 2),
+            gate_up_values: Some(vec![3.0, 5.0]),
+            gate_up_dims: (1, 1, 2),
+            fused_calls: std::sync::atomic::AtomicUsize::new(0),
+            gate_up_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let lora_layer = LoraLayerWeights {
+            q_proj: Some(LoraProjectionWeights {
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1), &device)?,
+            }),
+            ..Default::default()
+        };
+
+        let out = swiglu_ffn_impl(
+            Some(&backend),
+            &x,
+            &mlp,
+            Some((&lora_layer, 1.0)),
+            false,
+            None,
+        )?;
+
+        assert_eq!(
+            backend
+                .fused_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            backend
+                .gate_up_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let values = out.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(values, vec![7.0, 11.0]);
         Ok(())
     }
 

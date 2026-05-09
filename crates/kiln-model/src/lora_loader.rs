@@ -43,6 +43,16 @@ pub struct LoraLayerWeights {
     pub down_proj: Option<LoraProjectionWeights>,
 }
 
+impl LoraLayerWeights {
+    pub fn has_mlp(&self) -> bool {
+        self.gate_proj.is_some() || self.up_proj.is_some() || self.down_proj.is_some()
+    }
+
+    pub fn has_mlp_gate_up(&self) -> bool {
+        self.gate_proj.is_some() || self.up_proj.is_some()
+    }
+}
+
 /// Complete LoRA adapter weights for all layers.
 pub struct LoraWeights {
     /// Per-layer LoRA weights, indexed by layer number.

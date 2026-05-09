@@ -1,0 +1,13 @@
+{
+  "adapter_dir": "/tmp/kiln-e387-adapters/zero-r16-down",
+  "rank": 16,
+  "layers": 32,
+  "target_modules": [
+    "down_proj"
+  ],
+  "dtype": "BF16",
+  "tensor_count": 64,
+  "data_bytes": 12058624,
+  "total_bytes": 12067006,
+  "sha256": "35f6bf451f4e395d6d933773834ce2ae32caa2b7a2f0d2477130e18d1224199d"
+}

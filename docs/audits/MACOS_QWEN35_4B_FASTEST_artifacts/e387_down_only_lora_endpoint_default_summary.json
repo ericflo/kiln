@@ -1,0 +1,80 @@
+{
+  "case": "default",
+  "gate_up_fusion_disabled": false,
+  "adapter": "zero-r16-down",
+  "adapter_kind": "synthetic zero BF16 rank16 MLP down_proj for all 32 Qwen3.5-4B layers",
+  "port": 8499,
+  "request_elapsed_s": 8.288130041095428,
+  "statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "requests": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 8.28553720889613,
+      "bytes": 2010
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 7.643059832975268,
+      "bytes": 2015
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 8.284610875067301,
+      "bytes": 2016
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 8.285184915992431,
+      "bytes": 2010
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_s": 8.28420025005471,
+      "bytes": 2016
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_s": 8.283961458015256,
+      "bytes": 2010
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_s": 8.283913666964509,
+      "bytes": 2016
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_s": 8.284158374997787,
+      "bytes": 2016
+    }
+  ],
+  "counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "prompt_count": 8,
+  "max_tokens": 8,
+  "temperature": 0.0,
+  "stream": true,
+  "decode_wait_env": 200
+}

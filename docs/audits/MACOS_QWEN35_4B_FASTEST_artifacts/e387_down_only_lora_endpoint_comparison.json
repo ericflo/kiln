@@ -1,0 +1,22 @@
+{
+  "experiment": "E387 precise LoRA MLP fusion gating down-only endpoint A/B",
+  "default_elapsed_s": 8.288130041095428,
+  "gate_up_disabled_elapsed_s": 8.98638083296828,
+  "improvement_percent": 7.770100164364092,
+  "default_counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "gate_up_disabled_counters": {
+    "tokens_generated": 64.0,
+    "jobs_submitted": 56.0,
+    "worker_batches": 8.0,
+    "batcher_rows": 56.0,
+    "max_batch_after": 8.0
+  },
+  "adapter": "synthetic zero BF16 rank16 MLP down_proj for all 32 Qwen3.5-4B layers",
+  "decision": "accepted"
+}

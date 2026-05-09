@@ -14375,3 +14375,91 @@ Accepted as serving-path confirmation for E385. With an active rank-16
 Qwen-shaped MLP LoRA adapter and identical decode-batcher counters, the default
 Metal LoRA delta path was `15.5%` faster than the rollback path. No source
 change was made in this experiment, and no CUDA/Vulkan behavior changed.
+
+## 2026-05-09 E387 - Preserve MLP fusion for LoRA submodules that do not touch gate/up
+
+### Goal
+
+Reduce active-adapter overhead for LoRA adapters that do not modify MLP gate/up
+projections. Before this change, any `LoraLayerWeights` presence disabled the
+MLP fused routes, even when the adapter only contained attention weights or only
+`down_proj` weights. That made unaffected MLP work fall back to separate
+projection paths.
+
+### Change
+
+- Added `LoraLayerWeights::has_mlp` and `has_mlp_gate_up`.
+- In `swiglu_ffn_impl`:
+  - allow the backend full-MLP fused route when the active layer LoRA has no
+    MLP projections;
+  - allow backend/Metal MLP gate/up fusion when the active layer LoRA has no
+    `gate_proj` or `up_proj`;
+  - still apply `down_proj` LoRA after the fused gate/up hidden when
+    `down_proj` is present.
+- Updated the Metal direct gate/up helper to reject only gate/up LoRA, not an
+  unrelated `down_proj` LoRA.
+- Added CPU unit tests with a fixed backend:
+  - attention-only LoRA keeps backend full-MLP fusion;
+  - down-only LoRA keeps backend gate/up fusion and still applies the
+    down-projection LoRA delta.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_swiglu_ --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Generated a temporary zero-valued PEFT adapter outside the repository at
+`/tmp/kiln-e387-adapters/zero-r16-down`:
+
+- BF16 rank `16`, `lora_alpha=16`
+- all `32` Qwen3.5-4B layers
+- MLP `down_proj` only
+- `64` tensors, `12,067,006` byte safetensors file
+
+The adapter is zero-valued so outputs stay base-equivalent while forcing the
+active down-only LoRA path. The binary artifact was not committed; only the
+manifest and logs are stored.
+
+Endpoint A/B, eight varied concurrent streaming adapter requests, greedy
+`max_tokens=8`, `KILN_DECODE_BATCH_WAIT_US=200`:
+
+- Default precise LoRA MLP fusion gate: `8.288130s`
+- `KILN_DISABLE_METAL_MLP_GATE_UP_FUSION=1`: `8.986381s`
+
+Both timed windows had identical scheduler counters:
+
+- `64` generated tokens
+- `56` submitted decode jobs
+- `8` worker batches
+- `56` batcher rows
+- max observed batch `8`
+
+Same-counters endpoint improvement: `7.8%`.
+
+### Artifact
+
+- `e387_zero_down_lora_adapter_manifest.json`
+- `e387_precise_lora_mlp_fusion_swiglu_tests.log`
+- `e387_precise_lora_mlp_fusion_metal_lora_linear.log`
+- `e387_precise_lora_mlp_fusion_release_build_metal.log`
+- `e387_precise_lora_mlp_fusion_cargo_check_metal.log`
+- `e387_precise_lora_mlp_fusion_cargo_check_vulkan.log`
+- `e387_precise_lora_mlp_fusion_cargo_fmt_check.log`
+- `e387_precise_lora_mlp_fusion_git_diff_check.log`
+- `e387_down_only_lora_endpoint_default_*`
+- `e387_down_only_lora_endpoint_gate_up_disabled_*`
+- `e387_down_only_lora_endpoint_comparison.json`
+
+### Decision
+
+Accepted. The change is a correctness-preserving narrowing of the active-LoRA
+fusion gate and improves a down-only active-adapter serving run by `7.8%` with
+identical decode-batcher counters. It can also preserve full MLP fusion for
+attention-only adapters. Metal and Vulkan checks pass.

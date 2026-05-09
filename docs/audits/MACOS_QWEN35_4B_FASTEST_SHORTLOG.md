@@ -1493,3 +1493,14 @@
   `56` submitted jobs, `8` worker batches, `56` rows, max batch `8`), so the
   active-adapter endpoint evidence is a `15.5%` same-counters improvement.
   No source change.
+- 2026-05-09 E387: Accepted precise LoRA MLP fusion gating. `LoraLayerWeights`
+  now reports whether a layer has any MLP LoRA and whether it specifically has
+  gate/up LoRA. `swiglu_ffn_impl` keeps full MLP fusion for attention-only
+  adapters and keeps gate/up fusion for down-only adapters, while still adding
+  a `down_proj` LoRA delta after the fused hidden. Focused CPU backend tests,
+  Metal LoRA linear parity, release Metal build, Metal/Vulkan checks, fmt, and
+  diff checks passed. A temporary zero BF16 rank-16 down-only adapter across
+  all 32 Qwen3.5-4B layers improved endpoint wall from
+  `8.986381s` with `KILN_DISABLE_METAL_MLP_GATE_UP_FUSION=1` to `8.288130s`
+  by default (`7.8%`) with identical counters (`64` tokens, `56` jobs,
+  `8` worker batches, `56` rows, max batch `8`).
