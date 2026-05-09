@@ -1,0 +1,121 @@
+A072: current Vulkan server visible-text correctness smoke
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+
+Purpose
+-------
+
+Reconfirm user-facing endpoint correctness after the earlier empty-`text`
+concern and after A070/A071. A071 proved GPU-routed bench token generation, but
+the empty-`text` issue is an API response-shaping concern, so this run checks
+direct chat, streaming chat, and batch completions through the server.
+
+Setup
+-----
+
+Server command:
+
+`KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 ./target/release/kiln serve`
+
+All requests used:
+
+- `temperature: 0`
+- `chat_template_kwargs: {"enable_thinking": false}`
+
+GPU / Readiness Evidence
+------------------------
+
+The server log includes:
+
+- `Vulkan available - using Vulkan GPU (AMD/Intel)`
+- `selected first Vulkan device`, device
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`
+- `Vulkan device initialized`, vendor `AMD`
+- `live greedy decode batcher enabled`, backend `vulkan`
+- `Vulkan decode weight cache prewarmed`
+- `background inference prewarm complete`
+
+Direct Chat Evidence
+--------------------
+
+Request:
+
+- endpoint: `/v1/chat/completions`
+- prompt: `Reply with exactly: blue green`
+- `stream: false`
+
+Response:
+
+- content: `blue green`
+- reasoning: `null`
+- finish reason: `stop`
+- usage: `18` prompt tokens, `3` completion tokens, `21` total tokens
+
+Streaming Chat Evidence
+-----------------------
+
+Request:
+
+- endpoint: `/v1/chat/completions`
+- prompt: `Reply with exactly: red yellow`
+- `stream: true`
+
+SSE content deltas reconstructed to:
+
+- `red yellow`
+
+No streamed `reasoning_content` deltas were present.
+
+Batch Evidence
+--------------
+
+Request:
+
+- endpoint: `/v1/completions/batch`
+- prompts:
+  - `Reply with exactly: blue green`
+  - `Reply with exactly: red yellow`
+  - `Reply with exactly: north south`
+  - `Reply with exactly: silver gold`
+
+Response texts:
+
+- `blue green`
+- `red yellow`
+- `north south`
+- `silver gold`
+
+All four finish reasons were `stop`. Aggregate usage was `72` prompt tokens,
+`11` completion tokens, and `83` total tokens.
+
+Metrics Snippet
+---------------
+
+After the smoke:
+
+- `kiln_requests_total{status="ok"} 3`
+- `kiln_requests_total{status="error"} 0`
+- `kiln_decode_batcher_enabled 1`
+- `kiln_decode_batcher_jobs_total{result="submitted"} 2`
+- `kiln_decode_batcher_batches_total 2`
+- `kiln_decode_batcher_rows_total 2`
+
+Artifacts
+---------
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-server-correctness.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-stream-chat-response.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-batch-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-metrics-snippet.prom`
+
+Verdict
+-------
+
+Keep as current endpoint correctness evidence. Current `main` is GPU-routed
+through Vulkan and produces non-empty visible text for direct chat, streaming
+chat, and batch completions when callers pass the real Qwen template config
+`chat_template_kwargs: {"enable_thinking": false}`.
+
+No CUDA, Metal, or Vulkan source path changed.

@@ -79,6 +79,7 @@ before or with each accepted change and each measured rejection.
 | A069 | Trial batched transfers in Vulkan GDN chunk prep/scan. | Temporary candidate batched prep uploads/readbacks and scan uploads/readbacks behind `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`. Profiled `gdn_stage:recurrent seq_len=64` improved from exact rollback `242.102ms` total / `10.087583ms` avg to candidate `229.076ms` / `9.544833ms`, and profiled prefill improved `2241.253ms -> 2219.945ms`. Fresh no-profile exact rollback/candidate did not confirm a prefill win: rollback `2173.140ms` prefill / `97.937ms` mean ITL, candidate `2188.749ms` prefill / `96.187ms` mean ITL. | Rejected and removed before commit. Do not retry this by simply batching the current GDN chunk prep/scan transfers; next GDN prefill work needs fewer CPU boundary/readback steps or residency across adjacent stages. Final committed state has no CUDA/Metal source changes. |
 | A070 | Fix Vulkan `gdn_full_chunk_forward` parity and reject default enable. | Rewrote the stale full-chunk shader so it matches the split `gdn_chunk_prep` + `gdn_chunk_scan` + state-update contract, added `gdn_full_chunk_forward_matches_split_vulkan_path`, and kept the path opt-in via `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`. Candidate, rollback, and final default all emitted identical first 32 token IDs. Default enable regressed prefill: candidate `2216.728ms` versus rollback split path `2138.199ms`; final no-env default stayed on the split path at `2248.036ms` prefill / `94.611ms` mean ITL after rebasing onto the latest Metal MLP commits. | Keep the shader correctness/parity fix as opt-in tuning groundwork. Reject default enable; the current one-workgroup fused chunk serializes too much work. CUDA/Metal source paths untouched. |
 | A071 | Refresh current Vulkan profile after A070 and recent Metal work. | Profiled current `main` with full-attn, GDN, MLP, paged-layer timers, and token logging. Backend JSON reported `vulkan` on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, and the measured run emitted non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. Profiling-heavy latency was `2325.135ms` prefill / `120.371ms` mean ITL. Top prefill concrete buckets were `mlp:fused` `916.453ms`, `gdn:recurrent` `315.745ms`, `gdn:in_proj` `254.924ms`, `gdn:conv` `222.692ms`, and full-attn `qkv_proj` `181.910ms`. Short decode profile kept `mlp:fused` first, then GDN recurrent/in-proj. | Keep as target-selection evidence only; no source change. Next Vulkan work should target MLP boundary/data movement or residency-level GDN recurrent/in-proj/conv changes. Recent Metal MLP pointwise and GDN combined-projection wins do not directly map to the current Vulkan bottleneck shape. |
+| A072 | Reconfirm current Vulkan server visible-text correctness. | Started `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 ./target/release/kiln serve`; server log showed Vulkan GPU selection, `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, decode weight prewarm, and background inference prewarm complete. With `chat_template_kwargs: {"enable_thinking": false}`, direct chat returned `content == "blue green"`, streaming chat deltas reconstructed to `red yellow`, and `/v1/completions/batch` returned `blue green`, `red yellow`, `north south`, and `silver gold`; all requests were HTTP 200 and batch finish reasons were `stop`. | Keep as endpoint correctness evidence. Current `main` is GPU-routed and visible text is not empty when callers use the real template config. No CUDA/Metal/Vulkan source paths changed. |
 
 Additional validation after rejected A069:
 
@@ -111,6 +112,14 @@ Additional validation after A071:
 - Profile-only run, no source changed.
 - `KILN_BENCH_LOG_TOKENS=1` returned non-empty decode token IDs on the Vulkan
   backend.
+
+Additional validation after A072:
+
+- Direct non-streaming chat, streaming chat, and `/v1/completions/batch` all
+  returned non-empty visible text with
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Server log confirmed Vulkan device selection and background inference
+  prewarm completion before the endpoint requests.
 
 Additional validation after A044:
 

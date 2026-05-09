@@ -3570,6 +3570,56 @@ Verdict:
   the wider fused dispatch/boundary shape, not just by SiLU/multiply.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A072: Current Vulkan Server Visible-Text Correctness Smoke
+
+Goal:
+- Reconfirm endpoint-level correctness on current `main` after the earlier
+  empty-`text` concern. A071 showed non-empty bench token IDs, but this check
+  targets API response assembly and visible text.
+
+Setup:
+- Server command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 ./target/release/kiln serve`.
+- All requests used `temperature: 0` and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+GPU/readiness evidence:
+- Server log showed `Vulkan available - using Vulkan GPU (AMD/Intel)`.
+- Server log selected `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Server log showed `Vulkan device initialized`, `live greedy decode batcher
+  enabled` with backend `vulkan`, `Vulkan decode weight cache prewarmed`, and
+  `background inference prewarm complete`.
+
+Endpoint evidence:
+- Direct non-streaming `/v1/chat/completions` for
+  `Reply with exactly: blue green` returned HTTP 200 with
+  `content == "blue green"`, `reasoning_content == null`, finish `stop`,
+  and usage `18` prompt / `3` completion / `21` total tokens.
+- Streaming `/v1/chat/completions` for
+  `Reply with exactly: red yellow` returned SSE content deltas reconstructing
+  to `red yellow`, with no `reasoning_content` deltas.
+- `/v1/completions/batch` for four exact-answer prompts returned texts
+  `blue green`, `red yellow`, `north south`, and `silver gold`; all finish
+  reasons were `stop`, with aggregate usage `72` prompt / `11` completion /
+  `83` total tokens.
+- Metrics after the smoke showed `kiln_requests_total{status="ok"} 3`,
+  `kiln_requests_total{status="error"} 0`, and live decode batcher enabled.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-server-correctness-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-server-correctness.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-stream-chat-response.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-batch-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a072-metrics-snippet.prom`
+
+Verdict:
+- Keep as current endpoint correctness evidence. Current `main` is GPU-routed
+  through Vulkan and produces non-empty visible text for direct chat,
+  streaming chat, and batch completions when callers pass the real Qwen
+  template config.
+- No CUDA, Metal, or Vulkan source path changed.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3599,6 +3649,11 @@ Verdict:
   GDN recurrent/in-proj. Treat direct Metal MLP pointwise and GDN combined
   projection ports as low-confidence unless a Vulkan inner-stage profile shows
   the same inner operation, rather than boundary movement, is limiting.
+- A072 confirms current endpoint visible text is correct and GPU-routed on
+  Vulkan for direct chat, streaming chat, and batch completions when callers
+  pass `chat_template_kwargs: {"enable_thinking": false}`. Do not reintroduce
+  prompt-text control hacks for Qwen thinking; caller-provided template config
+  is the correct interface.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
