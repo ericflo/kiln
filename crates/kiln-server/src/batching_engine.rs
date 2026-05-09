@@ -935,6 +935,7 @@ mod tests {
                 allocated_blocks: Vec::new(),
                 prefill_duration: Duration::ZERO,
                 decode_duration: Duration::ZERO,
+                cuda_graph_lease: None,
             },
             hit_entry_id: None,
             adapter: None,
