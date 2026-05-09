@@ -53,6 +53,12 @@ fn gdn_in_proj_single_submit_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT").is_err())
 }
 
+fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z").is_err())
+}
+
 fn prefill_row_pair_matmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
@@ -742,6 +748,12 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     );
 
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
+    let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
+    let dispatch_cols = if pair_qkv_z {
+        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
+    } else {
+        total_out
+    };
     let glsl_path = if batch == 1 {
         if packed_bf16_weights {
             concat!(
@@ -756,9 +768,21 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         }
     } else {
         if packed_bf16_weights {
+            if pair_qkv_z {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_bf16w.comp"
+                )
+            } else {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/gdn_in_proj_decode_batched_bf16w.comp"
+                )
+            }
+        } else if pair_qkv_z {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/csrc/shaders/gdn_in_proj_decode_batched_bf16w.comp"
+                "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z.comp"
             )
         } else {
             concat!(
@@ -792,6 +816,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             a_dim,
             b_dim,
             total_out,
+            dispatch_cols,
             &spirv,
             &push_constants,
             &x_data,
@@ -834,7 +859,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         if batch == 1 {
             total_out.div_ceil(16) as u32
         } else {
-            (batch * total_out.div_ceil(80)) as u32
+            (batch * dispatch_cols.div_ceil(80)) as u32
         },
     )
     .context("gdn_in_proj_decode kernel failed")?;
@@ -867,6 +892,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     a_dim: usize,
     b_dim: usize,
     total_out: usize,
+    dispatch_cols: usize,
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
@@ -983,7 +1009,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             if batch == 1 {
                 total_out.div_ceil(16) as u32
             } else {
-                (batch * total_out.div_ceil(80)) as u32
+                (batch * dispatch_cols.div_ceil(80)) as u32
             },
             1,
             1,

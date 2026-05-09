@@ -42,6 +42,19 @@ before or with each accepted change and each measured rejection.
 | A029 | Trial packed-BF16 Vulkan MLP row-pair shaders for `row_count >= 8`. | Temporary row-pair gate/up and down BF16 shaders passed `cargo check`, focused parity including batch `9`, release Vulkan build, and `git diff --check`. Candidate stayed coherent and measured `384.1ms` prefill / `96.5ms` mean ITL, then `390.2ms` / `98.0ms` after adding a row-pair rollback env. Same-binary row-pair rollback with `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_ROWPAIR_WEIGHTS=1` produced the same tokens at `383.4ms` prefill / `96.5ms` mean ITL. | Rejected and removed; direct row-pair BF16 mirroring did not beat the current F32 row-pair path. |
 | A030 | Enable mixed-sequence live decode batching by default for Vulkan. | Pre-change streaming A/B showed mixed-seq grouping reduces default-wait live-batcher fragmentation (`12.921s`, `38` batches, max batch `3`) versus disabled (`13.470s`, `69` one-row batches), with a larger wait-50ms win (`12.444s` vs `17.034s`). Post-change no-env Vulkan server logged `mixed_seq_lens=true` and returned four correct visible streams in `13.365s`, `68` rows, `38` batches, max batch `3`. Focused policy test, `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, and release Vulkan build passed. | Keep; backend-aware default only, CPU/CUDA remain off by default, Metal default preserved. Rollback via `KILN_DECODE_BATCH_MIXED_SEQ=0`. |
 | A031 | Trial Vulkan actor mixed-sequence greedy rows through the contiguous-batch argmax path. | Temporary Vulkan-only gate relaxation passed `cargo check -p kiln-model --features vulkan` and release Vulkan build. Current-main actor baseline was `14.299s` for four varied-length greedy non-streaming requests. Candidate returned correct visible text but regressed to `19.584s`; same-binary rollback with `KILN_DISABLE_VULKAN_ACTOR_MIXED_SEQ_GREEDY_BATCH=1` and the exact candidate prompts returned `13.871s`. | Rejected and removed; admission-gate-only routing to dyn-seqlen actor argmax is slower than the existing hidden/logits fallback. |
+| A032 | Pair adjacent QKV and Z columns in batched Vulkan GDN input projection. | Added F32 and packed-BF16 paired batched shaders inspired by recent Metal column-pairing work. Focused GDN in-proj parity, full Vulkan GDN parity (`28 passed`), `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, release Vulkan build, and `git diff --check` passed. Four varied-length live streams returned HTTP 200 with non-empty visible text and empty reasoning text. Endpoint A/B improved candidate `13.076s` vs rollback `15.680s` with identical `68` rows / `38` batches / max batch `3`; second pair was candidate `13.735s` vs rollback `14.000s`. | Keep; Vulkan-only batched GDN in-proj win, batch `1` unchanged, CUDA/Metal sources untouched. Rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`. |
+
+Additional validation after A032:
+
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs crates/kiln-vulkan-kernel/src/pipeline.rs crates/kiln-vulkan-kernel/src/kernels.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel gdn_in_proj_decode_batched --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-server --features vulkan`
+- Two no-env Vulkan live streaming endpoint A/B pairs against
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`.
 
 Additional validation after rejected A031:
 

@@ -1447,6 +1447,71 @@ Verdict:
   would need to reduce the dyn-seqlen K/V movement or otherwise improve the
   mixed-sequence attention path itself.
 
+### 2026-05-09 A032: Accept Paired QKV/Z Columns for Batched Vulkan GDN In-Proj
+
+Issue:
+- Recent Metal work paired adjacent QKV and Z output columns in batched GDN
+  input projection so a lane can reuse the same input row while producing two
+  neighboring projection values.
+- The Vulkan batched GDN input-projection shaders still computed one output
+  column per lane, rereading the same input row for every QKV and Z column.
+- A/B testing needed to preserve the existing single-row decode path and avoid
+  touching CUDA or Metal source.
+
+Implementation:
+- Added `gdn_in_proj_decode_batched_pair_qkv_z.comp` and
+  `gdn_in_proj_decode_batched_pair_qkv_z_bf16w.comp`.
+- The new shaders pair adjacent QKV columns and adjacent Z columns in batched
+  decode. A and B projection columns remain single-column because their output
+  dims do not justify a wider lane shape in the same shader.
+- `dispatch_gdn_in_proj_decode_cached_impl` now dispatches fewer column groups
+  for batched GDN input projection when the paired path is enabled. `batch == 1`
+  remains on the existing single-row shader path.
+- Added rollback env
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`.
+- The change is Vulkan-only. CUDA and Metal source files were not modified.
+
+Evidence:
+- Focused Vulkan GDN parity passed for both F32 and packed-BF16 batched
+  projection:
+  `cargo test -p kiln-vulkan-kernel gdn_in_proj_decode_batched --test gdn_parity -- --nocapture`.
+- Full Vulkan GDN parity passed all `28` tests:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`.
+- The no-env Vulkan live streaming path returned HTTP 200 for all four varied
+  prompt-length streams with non-empty visible text and empty reasoning text.
+- First endpoint A/B, four concurrent streaming requests, `max_tokens=20`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Candidate: `13.076s`, `68` submitted rows, `38` batches, max observed
+    batch `3`.
+  - Rollback with
+    `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`: `15.680s`, `68`
+    submitted rows, `38` batches, max observed batch `3`.
+- Second endpoint A/B:
+  - Rollback first: `14.000s`, delta `68` submitted rows, `38` batches, max
+    observed batch `3`.
+  - Candidate second: `13.735s`, `68` submitted rows, `35` batches, max
+    observed batch `3`.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel gdn_in_proj_decode_batched --test
+  gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-server --features vulkan`
+
+Verdict:
+- Keep. This is a measured batched Vulkan GDN input-projection win inspired by
+  the recent Metal column-pairing approach, while preserving the existing
+  single-row path and leaving CUDA/Metal sources untouched.
+- Rollback/override: set
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
