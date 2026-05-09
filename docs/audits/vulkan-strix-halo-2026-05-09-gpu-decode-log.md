@@ -5650,3 +5650,101 @@ Verdict:
 - Keep updating this log and
   `docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md` for every
   accepted or rejected optimization experiment.
+
+### 2026-05-09 A096: Default-Enable Vulkan Conv1d Prefill Only
+
+Goal:
+- Revisit the existing Vulkan causal conv1d route on current `main`. The
+  route had stayed opt-in after older regressions, but A094 still showed a
+  meaningful GDN conv prefill bucket.
+
+Current-main retest:
+- Default seed 100:
+  - backend `vulkan`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+  - prefill `1138.956410ms`
+  - mean ITL `82.149500ms`
+  - p99 ITL `92.648328ms`
+- Existing broad opt-in `KILN_ENABLE_VULKAN_FUSED_CONV1D=1`, same seed:
+  - backend `vulkan`
+  - same token IDs
+  - prefill `948.826158ms`
+  - mean ITL `88.52735725ms`
+  - p99 ITL `98.174607ms`
+- This proved the current Vulkan conv prefill route is now useful, but
+  enabling single-token conv update at the same time still hurts decode.
+
+Implementation:
+- Split the single `fused_conv1d_enabled` backend gate into:
+  - `fused_conv1d_prefill_enabled`, default-on unless
+    `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1` is set.
+  - `fused_conv1d_update_enabled`, still opt-in via either
+    `KILN_ENABLE_VULKAN_FUSED_CONV1D=1` or
+    `KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE=1`.
+- Only `crates/kiln-model/src/backend/vulkan.rs` changed. CUDA and Metal
+  source paths were untouched.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d -- --nocapture`
+  (`2 passed`)
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `cargo check -p kiln-model --features cuda` was attempted and remained
+  host-blocked by missing `nvcc`.
+- `cargo check -p kiln-model --features metal` was attempted and remained
+  host-blocked because `objc2` only compiles for Apple targets.
+
+Same-binary no-profile A/B, seed 101:
+- Candidate default:
+  - backend `vulkan`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+  - prefill `990.743074ms`
+  - mean ITL `82.368292125ms`
+  - p99 ITL `91.283793ms`
+- Rollback with `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1`:
+  - backend `vulkan`
+  - same token IDs
+  - prefill `1088.395542ms`
+  - mean ITL `82.425059625ms`
+  - p99 ITL `96.824302ms`
+- Candidate improved prefill by `97.652468ms` with no meaningful no-profile
+  decode regression.
+
+Profile, seed 102:
+- Candidate final measured pass:
+  - prefill `1005.111505ms`
+  - mean ITL `83.98173725ms`
+  - `seq_len=64 stage=conv`: `76.519ms` total, `24` calls
+  - `seq_len=1 stage=conv`: `15.201ms` total, `192` calls
+- Rollback final measured pass:
+  - prefill `1084.276802ms`
+  - mean ITL `81.889359125ms`
+  - `seq_len=64 stage=conv`: `166.418ms` total, `24` calls
+  - `seq_len=1 stage=conv`: `15.370ms` total, `192` calls
+- The profile confirms the mechanism: prefill conv moved to the faster Vulkan
+  path, while single-token conv update stayed effectively unchanged/off.
+
+Server correctness smoke:
+- Started `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18431
+  KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0
+  ./target/release/kiln serve`.
+- Server selected `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)` through Vulkan
+  and completed background inference prewarm.
+- Direct `/v1/chat/completions` with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200 and
+  visible `content == "blue green"` with `3` completion tokens.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-current-fused-conv1d-retest-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-chat-smoke.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-health-*.json`
+
+Verdict:
+- Keep. This is a Vulkan-only prefill win with a clear rollback env and no
+  default decode-update regression.
+- Continue targeting MLP fused and GDN recurrent/adjacent-stage residency next.

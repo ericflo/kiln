@@ -33,7 +33,8 @@ pub struct VulkanBackend {
     gdn_gates_enabled: bool,
     gdn_gated_rms_norm_enabled: bool,
     gdn_full_chunk_forward_enabled: bool,
-    fused_conv1d_enabled: bool,
+    fused_conv1d_update_enabled: bool,
+    fused_conv1d_prefill_enabled: bool,
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
     linear_decode_enabled: bool,
@@ -120,10 +121,14 @@ impl VulkanBackend {
         // layout is not yet validated against CPU parity and may exceed
         // maxComputeSharedMemorySize on many GPUs.
         //
-        // conv1d remains opt-in while we A/B the corrected state-aware shader
-        // against the CPU fallback on Strix Halo.
-        let fused_conv1d_enabled =
-            gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok();
+        // Conv1d prefill now wins on Strix Halo, while single-token update
+        // still regresses decode latency. Keep update opt-in and leave a
+        // prefill rollback for driver/model-specific follow-up.
+        let fused_conv1d_update_enabled = gdn_enabled
+            && (std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D").is_ok()
+                || std::env::var("KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE").is_ok());
+        let fused_conv1d_prefill_enabled =
+            gdn_enabled && std::env::var("KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL").is_err();
         let gdn_forward_sub_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_FORWARD_SUB").is_ok();
         // The fused GDN decode path is validated, but for bs=1 it remains
@@ -192,7 +197,8 @@ impl VulkanBackend {
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
             gdn_full_chunk_forward_enabled,
-            fused_conv1d_enabled,
+            fused_conv1d_update_enabled,
+            fused_conv1d_prefill_enabled,
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
             linear_decode_enabled,
@@ -613,14 +619,12 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_causal_conv1d_update(&self) -> bool {
-        // Opt-in until Strix Halo latency confirms the two extra Vulkan
-        // dispatches beat the host fallback in the real decode loop.
-        self.has_vulkan() && self.fused_conv1d_enabled
+        // Single-token update still regresses Strix Halo decode latency.
+        self.has_vulkan() && self.fused_conv1d_update_enabled
     }
 
     fn supports_causal_conv1d_prefill(&self) -> bool {
-        // Same experimental status as _update.
-        self.has_vulkan() && self.fused_conv1d_enabled
+        self.has_vulkan() && self.fused_conv1d_prefill_enabled
     }
 
     fn flash_attn_prefill(
@@ -1780,7 +1784,7 @@ impl BackendRuntime for VulkanBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.fused_conv1d_enabled {
+        if !self.has_vulkan() || !self.fused_conv1d_update_enabled {
             return Ok(None);
         }
         if !matches!(x.dtype(), DType::BF16 | DType::F32) {
@@ -1810,7 +1814,7 @@ impl BackendRuntime for VulkanBackend {
         conv_state: &mut Tensor,
         kernel_size: usize,
     ) -> Result<Option<Tensor>> {
-        if !self.has_vulkan() || !self.fused_conv1d_enabled {
+        if !self.has_vulkan() || !self.fused_conv1d_prefill_enabled {
             return Ok(None);
         }
         if !matches!(x.dtype(), DType::BF16 | DType::F32) {

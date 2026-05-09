@@ -1,0 +1,91 @@
+A096 Vulkan Conv1d Prefill Default
+
+Change:
+- Split the Vulkan causal conv1d gates in `crates/kiln-model/src/backend/vulkan.rs`.
+- Multi-token conv1d prefill is now default-enabled for Vulkan when GDN is enabled.
+- Single-token conv1d update remains opt-in because it still regresses decode latency.
+- Rollback env for the accepted prefill route:
+  `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1`.
+- Existing broad opt-in `KILN_ENABLE_VULKAN_FUSED_CONV1D=1` still enables
+  single-token update; `KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE=1` is also
+  accepted for that narrower update opt-in.
+
+Pre-change current-main retest, seed 100:
+- Default:
+  - backend `vulkan`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+  - prefill `1138.956410ms`
+  - mean ITL `82.149500ms`
+  - p99 ITL `92.648328ms`
+- `KILN_ENABLE_VULKAN_FUSED_CONV1D=1`:
+  - backend `vulkan`
+  - same token IDs
+  - prefill `948.826158ms`
+  - mean ITL `88.52735725ms`
+  - p99 ITL `98.174607ms`
+- Interpretation: the existing opt-in proved conv prefill can win on current
+  main, but enabling single-token update at the same time still hurts decode.
+
+Same-binary new-default A/B, seed 101:
+- Candidate default:
+  - backend `vulkan`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+  - prefill `990.743074ms`
+  - mean ITL `82.368292125ms`
+  - p99 ITL `91.283793ms`
+- Rollback with `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1`:
+  - backend `vulkan`
+  - same token IDs
+  - prefill `1088.395542ms`
+  - mean ITL `82.425059625ms`
+  - p99 ITL `96.824302ms`
+- Decision: keep. Prefill improves by `97.652468ms` with no meaningful
+  no-profile decode regression.
+
+Profile evidence, seed 102:
+- Candidate default final measured pass:
+  - prefill `1005.111505ms`
+  - mean ITL `83.98173725ms`
+  - p99 ITL `108.682338ms` (profiled decode noise)
+  - `seq_len=64 stage=conv`: `76.519ms` total, `24` calls
+  - `seq_len=1 stage=conv`: `15.201ms` total, `192` calls
+- Rollback final measured pass:
+  - prefill `1084.276802ms`
+  - mean ITL `81.889359125ms`
+  - p99 ITL `90.982904ms`
+  - `seq_len=64 stage=conv`: `166.418ms` total, `24` calls
+  - `seq_len=1 stage=conv`: `15.370ms` total, `192` calls
+- Interpretation: the prefill win is the GDN conv bucket moving to the Vulkan
+  prefill path. Single-token conv update remains off by default, and the
+  decode conv bucket is unchanged.
+
+Validation:
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-model` passed with existing warnings.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- Focused Vulkan conv parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d -- --nocapture`
+  (`2 passed`).
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+  passed with existing warnings.
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+  passed with existing warnings.
+- CUDA feature check was attempted and remained host-blocked by missing `nvcc`.
+- Metal feature check was attempted and remained host-blocked because `objc2`
+  only compiles for Apple targets.
+
+Server correctness smoke:
+- Started `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18431
+  KILN_REQUEST_TIMEOUT_SECS=600 KILN_PREFIX_CACHE_ENABLED=0
+  ./target/release/kiln serve`.
+- Server selected Vulkan on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Health reported `inference_prewarm_complete` with `pass=true`.
+- Direct `/v1/chat/completions` with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200 and
+  visible `content == "blue green"` with `3` completion tokens.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-current-fused-conv1d-retest-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-chat-smoke.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a096-vulkan-conv1d-prefill-default-health-*.json`
