@@ -1410,3 +1410,11 @@
   Same-binary n8 endpoint with default wait100 improved row-quad disabled to
   default from `8.328718s` to `8.034134s` (`3.5%`) with identical `64`
   generated tokens, `56` jobs, `9` worker batches, and max batch `8`.
+- 2026-05-09 E378: Refreshed synchronized stage profiling on the current
+  default Metal n8 path after E377. The run generated `24` tokens from eight
+  short streaming requests, submitted `16` decode-batcher jobs through `3`
+  worker batches, and observed max batch `8`. Post-marker `seq_len=1` decode
+  totals were led by `mlp:gate_up_fused` `432.515 ms`, `mlp:down_proj`
+  `333.302 ms`, `gdn:in_proj` `331.652 ms`, and `gdn:out_proj` `136.584 ms`.
+  Accepted as target-selection evidence; no source change. Next target set is
+  MLP gate/up first, then GDN in-projection and MLP down-projection.

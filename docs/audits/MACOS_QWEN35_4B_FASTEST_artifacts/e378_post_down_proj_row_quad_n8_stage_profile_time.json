@@ -1,0 +1,69 @@
+{
+  "port": 8499,
+  "request_elapsed_s": 11.605749125010334,
+  "statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "requests": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 11.6036418749718,
+      "bytes": 1016
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 11.604239874985069,
+      "bytes": 1016
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 11.603364125010557,
+      "bytes": 1016
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 11.604088291991502,
+      "bytes": 1016
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_s": 11.603248375002295,
+      "bytes": 1016
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_s": 10.712331917020492,
+      "bytes": 1021
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_s": 11.604783791932277,
+      "bytes": 1016
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_s": 11.603138916078024,
+      "bytes": 1016
+    }
+  ],
+  "prompt_count": 8,
+  "max_tokens": 3,
+  "temperature": 0.0,
+  "stream": true,
+  "decode_wait_env": null
+}

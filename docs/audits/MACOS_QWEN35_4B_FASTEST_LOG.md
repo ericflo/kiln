@@ -13512,3 +13512,85 @@ Accepted. Enable Metal batched transposed GEMV row-quad mode by default only
 for batch `>=8`, with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` as
 the targeted rollback. This improves the full-batch MLP down-projection path
 without changing the batch `2/3/4` row-pair selection or non-Metal backends.
+
+## 2026-05-09 E378 - Profile current default n8 path after down-projection row-quad
+
+### Goal
+
+Refresh synchronized Metal stage profiling after E377. E376 still measured the
+old down-projection batch path, so this profile identifies the next target after
+the full-batch batched GEMV row-quad change.
+
+### Method
+
+- Rebuilt release `kiln` with `--features metal`.
+- Started `target/release/kiln serve` with:
+  - no `KILN_DECODE_BATCH_WAIT_US` env, so Metal uses the `100us` default
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Wrote `E378_MEASURE_START` to the server log after prewarm.
+- Issued eight concurrent short streaming chat requests, greedy
+  `max_tokens=3`.
+- Parsed only stage lines after `E378_MEASURE_START`.
+
+### Results
+
+The server logged backend `metal`, `max_batch=8`, `wait_us=100`, and
+`mixed_seq_lens=true`.
+
+The profiled endpoint run:
+
+- wall `11.605749s`
+- `24` generated tokens
+- `16` submitted decode-batcher jobs
+- `3` worker batches
+- `16` batcher rows
+- max observed batch `8`
+- all eight requests returned `200`
+
+Kind totals after the marker:
+
+- GDN: `22631.621 ms`
+- MLP: `13908.903 ms`
+- full attention: `6116.608 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `432.515 ms`
+- `mlp:down_proj`: `333.302 ms`
+- `gdn:in_proj`: `331.652 ms`
+- `gdn:out_proj`: `136.584 ms`
+- `full_attn:qkv_proj`: `65.197 ms`
+- `gdn:gates_recur_gated_norm`: `61.190 ms`
+- `full_attn:qkv_proj_batch`: `57.984 ms`
+- `gdn:qkv_conv_norm`: `42.756 ms`
+
+Compared with E376 on the same profiled shape, MLP down-projection moved from
+`340.353 ms` to `333.302 ms` in the synchronized decode-stage total while
+`gdn:in_proj` rose to roughly the same level. The next target set is therefore
+MLP gate/up first, then GDN in-projection and MLP down-projection together.
+
+### Artifact
+
+- `e378_release_build_metal.log`
+- `e378_post_down_proj_row_quad_n8_stage_profile_server.log`
+- `e378_post_down_proj_row_quad_n8_stage_profile_health.json`
+- `e378_post_down_proj_row_quad_n8_stage_profile_metrics.prom`
+- `e378_post_down_proj_row_quad_n8_stage_profile_time.json`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_0.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_1.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_2.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_3.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_4.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_5.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_6.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_response_7.sse`
+- `e378_post_down_proj_row_quad_n8_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue investigating
+full-batch MLP gate/up first, with GDN in-projection now effectively tied with
+MLP down-projection as the next decode target.
