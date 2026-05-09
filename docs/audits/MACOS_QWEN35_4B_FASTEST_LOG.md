@@ -12130,3 +12130,80 @@ the prior cumulative metrics shows the lone request added `7` submitted jobs,
 
 Accepted. This is a measured low-level and endpoint win on the current Metal
 mixed-seq path, while preserving the old single-row GDN in-proj dispatch shape.
+
+## 2026-05-09 E362 - Refreshed live stage profile after GDN in-proj win
+
+### Goal
+
+Re-profile the current Metal mixed-seq serving path after E361 so the next
+implementation target reflects the accepted GDN in-projection change. E358 was
+taken before E361 and still ranked GDN in-proj third; this run checks whether
+that bottleneck moved and what now dominates live decode.
+
+### Change
+
+No source change. Ran one prewarmed release server with
+`KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`, and
+`KILN_PROFILE_MLP_STAGES=1`. The server log includes an `E362_MEASURE_START`
+marker after background prewarm. The measured request used the same
+varied-prompt four-request shape as E358, greedy `max_tokens=3`.
+
+### Validation
+
+- Server reported `backend="metal"`, `mixed_seq_lens=true`, and `wait_us=0`.
+- The measurement waited for the `inference_prewarm_complete` health check.
+- All four streaming chat requests returned `200`.
+- Metrics and parsed profile summary were captured.
+
+### Results
+
+Profiled live run:
+
+- wall time `6.153190s` with profiling synchronization enabled
+- `12` generated tokens
+- active request peak `4`
+- `8` submitted batcher jobs
+- `4` worker batches
+- `8` rows
+- max batch `3`
+
+Stage totals after `E362_MEASURE_START`, including live request prefill and
+decode:
+
+- GDN total `5303.808 ms`
+- MLP total `4349.367 ms`
+- full attention total `1523.606 ms`
+
+Top `seq_len=1` live decode stages:
+
+- `mlp:gate_up_fused`: `328.811 ms`
+- `mlp:down_proj`: `258.280 ms`
+- `gdn:in_proj`: `209.395 ms`
+- `gdn:out_proj`: `105.372 ms`
+- `full_attn:qkv_proj_batch`: `49.102 ms`
+- `gdn:gates_recur_gated_norm`: `41.106 ms`
+- `gdn:qkv_conv_norm`: `30.589 ms`
+- `full_attn:qkv_proj`: `28.772 ms`
+
+Compared with E358, live decode GDN in-proj moved from `255.876 ms` to
+`209.395 ms`, while MLP gate/up and down-projection remain the top two decode
+stage totals. Full-attention decode remains much smaller than the main
+projection-heavy MLP/GDN slices.
+
+### Artifact
+
+- `e362_post_gdn_in_proj_stage_profile_server.log`
+- `e362_post_gdn_in_proj_stage_profile_health.json`
+- `e362_post_gdn_in_proj_stage_profile_metrics.prom`
+- `e362_post_gdn_in_proj_stage_profile_time.json`
+- `e362_post_gdn_in_proj_stage_profile_response_0.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_1.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_2.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_3.sse`
+- `e362_post_gdn_in_proj_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue Metal work
+on MLP decode projection stages, with `mlp:gate_up_fused` and `mlp:down_proj`
+as the current top targets.

@@ -1249,3 +1249,12 @@
   varied-prompt four-request endpoint probe improved from E357's zero-wait
   `5.733101s` to `5.502041s` with the same `28` jobs, `14` worker batches, and
   max batch `3`; a single-request smoke completed in `1.497457s`.
+- 2026-05-09 E362: Refreshed synchronized stage profiling after E361. Four
+  varied prompts with greedy `max_tokens=3` generated `12` tokens, submitted
+  `8` decode jobs through `4` worker batches, and observed max batch `3`; wall
+  time was `6.153190s` with profiling synchronization enabled. Live `seq_len=1`
+  stage totals now rank MLP `gate_up_fused` `328.811 ms`, MLP `down_proj`
+  `258.280 ms`, GDN `in_proj` `209.395 ms`, GDN `out_proj` `105.372 ms`, and
+  full-attention `qkv_proj_batch` `49.102 ms`. No source change; E361 moved GDN
+  in-proj down from E358's `255.876 ms`, and the next Metal attempts should
+  prioritize MLP gate/up or down-projection instead.
