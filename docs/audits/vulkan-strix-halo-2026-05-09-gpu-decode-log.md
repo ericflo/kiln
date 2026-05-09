@@ -2293,17 +2293,105 @@ Verdict:
   warmed request shape from a prewarm race (`~17.1s`) into a stable warmed run
   (`~3.1s`) with correct visible output.
 
+### 2026-05-09 A049: Post-Prewarm Vulkan Stage Profile
+
+Goal:
+- Refresh target selection after A048 fixed readiness and decode-weight warmup,
+  using only measurements taken after `inference_prewarm_complete=true`.
+
+Setup:
+- Rebuilt from `main` with `cargo build --release --features vulkan --bin kiln
+  --bin kiln-bench`.
+- Ran four concurrent streaming requests with `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_PROFILE_PAGED_LAYERS=1`, `KILN_PROFILE_GDN_STAGES=1`,
+  `KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_MLP_STAGES=1`,
+  `max_tokens=3`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- The first summary was corrected to slice profile rows after
+  `background inference prewarm complete`; the ad-hoc marker write was lost due
+  to stdout file-offset buffering, but `/health` passed
+  `inference_prewarm_complete` before requests were submitted.
+
+Evidence:
+- Wall time was `4.082501s` with profiling enabled.
+- Decode-batcher counters moved by `7` jobs, `3` batches, `7` rows, max batch
+  `4`.
+- All four responses returned HTTP 200 with correct visible text and empty
+  reasoning: `"6"`, `"11"`, `"16"`, `"13"`.
+- Post-prewarm live `seq_len=1` stage totals:
+  - `paged_layer:linear`: `185.157ms`, `24` samples.
+  - `mlp:fused`: `129.645ms`, `96` samples.
+  - `gdn:recurrent`: `110.270ms`, `72` samples.
+  - `gdn:in_proj`: `101.692ms`, `72` samples.
+  - `gdn:gates`: `80.466ms`, `72` samples.
+  - `gdn:gated_norm`: `51.386ms`, `72` samples.
+  - `gdn:out_proj`: `36.940ms`, `72` samples.
+  - `full_attn:qkv_proj_batch`: `23.442ms`, `16` samples.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a049-post-prewarm-stage-profile-*`
+
+Verdict:
+- Keep as target-selection evidence; no source change.
+- A049 supersedes A039 as warmed-serving target evidence. MLP remains the
+  largest explicit single stage, but GDN recurrent/in-proj/gates/gated-norm
+  together are a comparable remaining live decode target.
+
+### 2026-05-09 A050: Reject Wiring Vulkan Fused GDN Gates+Recurrent+RMSNorm
+
+Hypothesis:
+- Vulkan already had a fused `gdn_decode_gates_recurrent_rmsnorm` kernel. The
+  forward path only tried the Metal-specific fused RMSNorm branch before falling
+  back to split Vulkan GDN gates/recurrent/gated-norm stages.
+- Wiring the generic backend hook for Vulkan batch decode might reduce A049's
+  combined GDN live decode cost.
+
+Experiment:
+- Temporarily added a backend support hook and routed supported backends through
+  `BackendRuntime::gdn_decode_gates_recurrent_rmsnorm` before the Metal-specific
+  fallback.
+- Added a temporary rollback env
+  `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED=1` for same-binary endpoint A/B.
+- Focused Vulkan kernel parity passed:
+  `gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference` and
+  `gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference`.
+- Release Vulkan build passed with existing warnings.
+
+Evidence:
+- Candidate default and rollback both waited for prewarm, returned HTTP 200, and
+  produced the same correct visible texts `"6"`, `"11"`, `"16"`, `"13"` with
+  empty reasoning.
+- Same-binary no-profile endpoint A/B favored rollback:
+  - Candidate: `4.950954s`, `7` jobs, `3` worker batches, `7` rows, max batch
+    `3`.
+  - Rollback: `4.055286s`, `7` jobs, `3` worker batches, `7` rows, max batch
+    `4`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a050-vulkan-gdn-fused-rmsnorm-*`
+
+Verdict:
+- Rejected and removed. Do not wire the generic Vulkan fused
+  gates+recurrent+RMSNorm hook into the forward path without first changing its
+  data movement/residency behavior. This confirms the older A013 warning still
+  applies after A048: the kernel is correct, but the current end-to-end route is
+  slower than the split path.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
-- Use A039's post-A038 profile to drive the next Vulkan experiment: `mlp:fused`
-  dominates live `seq_len=1` work (`2635.685ms`) and total profiled time
-  (`12790.460ms`), so split or optimize packed-BF16 MLP decode before spending
-  more time on smaller GDN residuals.
-- After A048, do not use measurements taken before
-  `inference_prewarm_complete=true` as warmed-serving evidence. The next Vulkan
-  performance target should be based on post-prewarm stage profiles.
+- Use A049, not A039, for warmed-serving target selection. After A048, do not
+  use measurements taken before `inference_prewarm_complete=true` as serving
+  evidence.
+- A049's post-prewarm profile has MLP as the largest explicit live `seq_len=1`
+  stage (`129.645ms`), but GDN recurrent/in-proj/gates/gated-norm are comparable
+  in aggregate. Next work should target either packed-BF16 MLP boundary/data
+  movement or a GDN path that materially reduces movement, not just a direct
+  fused-hook route.
+- Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
+  forward hook without changing residency/data movement first; A050 regressed
+  same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).
 - Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
   direct shader mirroring; A040 and A041 measured both full MLP row-pair and
   gate/up-only row-pair as slower or unstable against rollback.

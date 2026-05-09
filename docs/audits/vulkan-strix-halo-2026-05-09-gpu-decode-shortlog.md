@@ -56,6 +56,8 @@ before or with each accepted change and each measured rejection.
 | A043 | Trial Metal-inspired F32 Vulkan MLP gate/up row-quad for full batch `8`. | Temporary row-quad gate/up shader passed focused candidate and rollback batched MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Eight-request endpoint A/B with wait `5000us` exercised max batch `8` with identical `56` jobs / `8` batches / `56` rows: candidate lost pair 1 (`25.939s` vs rollback `22.018s`) and won pair 2 (`24.860s` vs rollback `27.180s`). | Rejected and removed; not a reliable n8 endpoint win, so Metal row-quad does not directly transfer to Vulkan F32 MLP gate/up. |
 | A044 | Temporarily split Vulkan MLP inner-stage timings. | Temporary `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` instrumentation timed extract, alloc, upload, gate/up, down, readback, and tensor creation inside `dispatch_mlp_decode_cached_impl`; release Vulkan build passed. Four streaming requests with wait `5000us` returned coherent visible text and empty reasoning. Live packed-BF16 inner totals were gate/up `83.117ms`, down `58.250ms`, readback `37.642ms`, upload `34.392ms`, with tiny alloc/extract/tensor times. The outer `mlp:fused seq_len=1` profile bucket was still much larger at `4875.221ms`. | Keep as target-selection evidence; no source change retained. Next MLP work should target residency/transfer or backend boundary overhead before another direct shader-shape trial. |
 | A045-A048 | Fix Vulkan prewarm readiness and decode-weight warmup. | A045 backend-boundary timers showed first live packed-BF16 MLP was paying lazy weight-cache upload, not shader math: live BF16 `kernel_dispatch` was `172.441ms` but batch-1 BF16 gate/up/down cache misses cost about `2.454s`; request wall was `17.144901s`. A046 wired backend decode-weight prewarm but showed health still reported ready before prewarm completed (`17.314253s`). A047 made Vulkan readiness wait for background prewarm and dropped the same measured request shape to `3.039910s`. A048 removed temporary instrumentation; no-profile final was `3.086735s`, `7` tokens, `7` jobs, `3` batches, `7` rows, max batch `4`, with texts `6`, `11`, `16`, `13` and empty reasoning. | Accepted. Server background prewarm now calls backend decode-weight prewarm, and readiness treats Vulkan as needing inference prewarm even though Candle's model device is CPU. |
+| A049 | Profile Vulkan after prewarm readiness and weight warmup. | Rebuilt release Vulkan binary and profiled four concurrent streams after `/health` reported `inference_prewarm_complete=true`, with wait `5000us`, all built-in layer/stage profile flags, `max_tokens=3`, and `chat_template_kwargs: {"enable_thinking": false}`. Wall was `4.082501s`; counters were `7` jobs / `3` worker batches / `7` rows / max batch `4`; outputs were correct texts `6`, `11`, `16`, `13` with empty reasoning. Corrected post-prewarm live `seq_len=1` totals: `mlp:fused` `129.645ms`, `gdn:recurrent` `110.270ms`, `gdn:in_proj` `101.692ms`, `gdn:gates` `80.466ms`, `gdn:gated_norm` `51.386ms`. | Keep as target-selection evidence; no source change. Supersedes A039 for warmed-serving decisions. |
+| A050 | Trial wiring Vulkan fused GDN gates+recurrent+RMSNorm into the generic forward hook. | Temporary support hook and rollback env `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED=1` were added, then removed. Focused Vulkan fused GDN parity passed (`2` tests), release Vulkan build passed, and both endpoint arms returned correct texts `6`, `11`, `16`, `13` with empty reasoning. Same-binary no-profile A/B favored rollback: candidate `4.950954s`, `7` jobs / `3` batches / `7` rows / max batch `3`; rollback `4.055286s`, same jobs/batches/rows and max batch `4`. | Rejected and removed; do not reuse the fused hook without changing its residency/data movement behavior. |
 
 Additional validation after A044:
 
@@ -80,6 +82,16 @@ Additional validation after A048:
   `Vulkan decode weight cache prewarmed` and `background inference prewarm
   complete` before `A048_MEASURE_START`, and returned four HTTP 200 streaming
   responses with non-empty visible content and empty reasoning.
+
+Additional validation after rejected A050:
+
+- `cargo fmt --check`.
+- `cargo check -p kiln-model --features vulkan`.
+- `cargo test -p kiln-vulkan-kernel gdn_decode_gates_recurrent_rmsnorm -- --nocapture`.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Same-binary candidate/rollback endpoint A/B with prewarm readiness confirmed
+  and `chat_template_kwargs: {"enable_thinking": false}`.
+- Candidate source changes were removed after the rejected A/B.
 
 Additional validation after rejected A043:
 

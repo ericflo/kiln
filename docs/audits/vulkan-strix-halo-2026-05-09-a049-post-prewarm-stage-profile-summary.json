@@ -1,0 +1,699 @@
+{
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8495",
+    "KILN_PROFILE_FULL_ATTN_STAGES": "1",
+    "KILN_PROFILE_GDN_STAGES": "1",
+    "KILN_PROFILE_MLP_STAGES": "1",
+    "KILN_PROFILE_PAGED_LAYERS": "1"
+  },
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 19,
+    "version": "0.2.13"
+  },
+  "marker": "A049_MEASURE_START",
+  "marker_after_prewarm_complete": false,
+  "marker_present_in_server_log": false,
+  "metrics_after": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "tokens_generated": 7.0,
+    "worker_batches": 3.0
+  },
+  "metrics_before": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch_after": 0.0,
+    "tokens_generated": 0.0,
+    "worker_batches": 0.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "tokens_generated": 7.0,
+    "worker_batches": 3.0
+  },
+  "prewarm_complete_log_seen": true,
+  "prewarm_weight_log_seen": true,
+  "profile_rows": 2352,
+  "profile_slice": "after background inference prewarm complete",
+  "ready_after_s": 31.044572226994205,
+  "responses": [
+    {
+      "bytes": 598,
+      "elapsed_s": 3.8929890010040253,
+      "error": null,
+      "finish": "stop",
+      "index": 0,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a049-post-prewarm-stage-profile-response-0.sse",
+      "status": 200,
+      "text": "6"
+    },
+    {
+      "bytes": 788,
+      "elapsed_s": 4.074640072001785,
+      "error": null,
+      "finish": "stop",
+      "index": 1,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a049-post-prewarm-stage-profile-response-1.sse",
+      "status": 200,
+      "text": "11"
+    },
+    {
+      "bytes": 788,
+      "elapsed_s": 3.8923311830003513,
+      "error": null,
+      "finish": "stop",
+      "index": 2,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a049-post-prewarm-stage-profile-response-2.sse",
+      "status": 200,
+      "text": "16"
+    },
+    {
+      "bytes": 788,
+      "elapsed_s": 4.073864996003977,
+      "error": null,
+      "finish": "stop",
+      "index": 3,
+      "reasoning": "",
+      "reasoning_len": 0,
+      "response_path": "docs/audits/vulkan-strix-halo-2026-05-09-a049-post-prewarm-stage-profile-response-3.sse",
+      "status": 200,
+      "text": "13"
+    }
+  ],
+  "top_live_seq1_stage_totals": [
+    {
+      "avg_ms": 7.714875000000002,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "linear",
+      "total_ms": 185.15700000000004
+    },
+    {
+      "avg_ms": 1.3504687500000003,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 129.64500000000004
+    },
+    {
+      "avg_ms": 1.531527777777777,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 110.26999999999994
+    },
+    {
+      "avg_ms": 1.4123888888888885,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 101.69199999999996
+    },
+    {
+      "avg_ms": 1.1175833333333334,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 80.46600000000001
+    },
+    {
+      "avg_ms": 0.7136944444444446,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 51.38600000000002
+    },
+    {
+      "avg_ms": 0.5130555555555556,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 36.940000000000005
+    },
+    {
+      "avg_ms": 3.591125,
+      "count": 8,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "full",
+      "total_ms": 28.729
+    },
+    {
+      "avg_ms": 1.4651249999999998,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 23.441999999999997
+    },
+    {
+      "avg_ms": 0.23166666666666658,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 16.679999999999993
+    },
+    {
+      "avg_ms": 0.7375,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "total_ms": 11.8
+    },
+    {
+      "avg_ms": 0.4845625,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "total_ms": 7.753
+    },
+    {
+      "avg_ms": 0.683125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "total_ms": 5.465
+    },
+    {
+      "avg_ms": 0.585875,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj",
+      "total_ms": 4.687
+    },
+    {
+      "avg_ms": 0.026083333333333326,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 1.8779999999999994
+    },
+    {
+      "avg_ms": 0.07137500000000001,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "rope_batch",
+      "total_ms": 1.1420000000000001
+    },
+    {
+      "avg_ms": 0.075625,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_scores",
+      "total_ms": 0.605
+    },
+    {
+      "avg_ms": 0.035500000000000004,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm_batch",
+      "total_ms": 0.5680000000000001
+    },
+    {
+      "avg_ms": 0.023500000000000007,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "attn_gate_batch",
+      "total_ms": 0.3760000000000001
+    },
+    {
+      "avg_ms": 0.01725,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "kv_write_batch",
+      "total_ms": 0.276
+    },
+    {
+      "avg_ms": 0.024999999999999998,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "rope",
+      "total_ms": 0.19999999999999998
+    },
+    {
+      "avg_ms": 0.0023750000000000017,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "qkv_split",
+      "total_ms": 0.17100000000000012
+    },
+    {
+      "avg_ms": 0.017875000000000002,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "kv_read",
+      "total_ms": 0.14300000000000002
+    },
+    {
+      "avg_ms": 0.015125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 0.121
+    },
+    {
+      "avg_ms": 0.012624999999999999,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_weighted_sum",
+      "total_ms": 0.10099999999999999
+    },
+    {
+      "avg_ms": 0.005750000000000001,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_split_batch",
+      "total_ms": 0.09200000000000001
+    },
+    {
+      "avg_ms": 0.008125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "kv_write",
+      "total_ms": 0.065
+    },
+    {
+      "avg_ms": 0.007,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "attn_gate",
+      "total_ms": 0.056
+    },
+    {
+      "avg_ms": 0.006499999999999999,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_softmax",
+      "total_ms": 0.05199999999999999
+    },
+    {
+      "avg_ms": 0.003375,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "q_transpose",
+      "total_ms": 0.027
+    }
+  ],
+  "top_stage_totals": [
+    {
+      "avg_ms": 104.50576388888886,
+      "count": 72,
+      "kind": "paged_layer",
+      "seq_len": 32,
+      "stage": "linear",
+      "total_ms": 7524.414999999998
+    },
+    {
+      "avg_ms": 112.70608333333332,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 33,
+      "stage": "linear",
+      "total_ms": 2704.946
+    },
+    {
+      "avg_ms": 28.123656249999996,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 32,
+      "stage": "fused",
+      "total_ms": 2699.8709999999996
+    },
+    {
+      "avg_ms": 93.11749999999999,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 32,
+      "stage": "full",
+      "total_ms": 2234.8199999999997
+    },
+    {
+      "avg_ms": 21.63981944444445,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "gated_norm",
+      "total_ms": 1558.0670000000002
+    },
+    {
+      "avg_ms": 19.781444444444443,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "in_proj",
+      "total_ms": 1424.264
+    },
+    {
+      "avg_ms": 15.454875000000007,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "gates",
+      "total_ms": 1112.7510000000004
+    },
+    {
+      "avg_ms": 45.13229166666667,
+      "count": 24,
+      "kind": "full_attn_stage",
+      "seq_len": 32,
+      "stage": "qkv_proj",
+      "total_ms": 1083.175
+    },
+    {
+      "avg_ms": 29.709468750000003,
+      "count": 32,
+      "kind": "mlp_stage",
+      "seq_len": 33,
+      "stage": "fused",
+      "total_ms": 950.7030000000001
+    },
+    {
+      "avg_ms": 13.031736111111108,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "out_proj",
+      "total_ms": 938.2849999999999
+    },
+    {
+      "avg_ms": 83.20625000000001,
+      "count": 8,
+      "kind": "paged_layer",
+      "seq_len": 33,
+      "stage": "full",
+      "total_ms": 665.6500000000001
+    },
+    {
+      "avg_ms": 23.717791666666667,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "in_proj",
+      "total_ms": 569.227
+    },
+    {
+      "avg_ms": 16.746499999999997,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "gated_norm",
+      "total_ms": 401.91599999999994
+    },
+    {
+      "avg_ms": 16.693291666666667,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "gates",
+      "total_ms": 400.639
+    },
+    {
+      "avg_ms": 47.47625,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 33,
+      "stage": "qkv_proj",
+      "total_ms": 379.81
+    },
+    {
+      "avg_ms": 15.022666666666668,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "out_proj",
+      "total_ms": 360.54400000000004
+    },
+    {
+      "avg_ms": 4.142569444444444,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "recurrent",
+      "total_ms": 298.26499999999993
+    },
+    {
+      "avg_ms": 3.067277777777778,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "conv",
+      "total_ms": 220.84400000000002
+    },
+    {
+      "avg_ms": 7.714875000000002,
+      "count": 24,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "linear",
+      "total_ms": 185.15700000000004
+    },
+    {
+      "avg_ms": 1.3504687500000003,
+      "count": 96,
+      "kind": "mlp_stage",
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 129.64500000000004
+    },
+    {
+      "avg_ms": 1.531527777777777,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 110.26999999999994
+    },
+    {
+      "avg_ms": 4.555166666666667,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "recurrent",
+      "total_ms": 109.324
+    },
+    {
+      "avg_ms": 1.4123888888888885,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 101.69199999999996
+    },
+    {
+      "avg_ms": 1.1175833333333334,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 80.46600000000001
+    },
+    {
+      "avg_ms": 3.2601666666666667,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "conv",
+      "total_ms": 78.244
+    },
+    {
+      "avg_ms": 0.7136944444444446,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 51.38600000000002
+    },
+    {
+      "avg_ms": 0.5130555555555556,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 36.940000000000005
+    },
+    {
+      "avg_ms": 3.591125,
+      "count": 8,
+      "kind": "paged_layer",
+      "seq_len": 1,
+      "stage": "full",
+      "total_ms": 28.729
+    },
+    {
+      "avg_ms": 1.4651249999999998,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 23.441999999999997
+    },
+    {
+      "avg_ms": 0.2943055555555556,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "qk_norm",
+      "total_ms": 21.190000000000005
+    },
+    {
+      "avg_ms": 0.23166666666666658,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 16.679999999999993
+    },
+    {
+      "avg_ms": 0.19099999999999995,
+      "count": 72,
+      "kind": "gdn_stage",
+      "seq_len": 32,
+      "stage": "qkv_split",
+      "total_ms": 13.751999999999997
+    },
+    {
+      "avg_ms": 0.7375,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "total_ms": 11.8
+    },
+    {
+      "avg_ms": 0.4329583333333334,
+      "count": 24,
+      "kind": "full_attn_stage",
+      "seq_len": 32,
+      "stage": "rope",
+      "total_ms": 10.391000000000002
+    },
+    {
+      "avg_ms": 0.34775,
+      "count": 24,
+      "kind": "full_attn_stage",
+      "seq_len": 32,
+      "stage": "qk_norm",
+      "total_ms": 8.346
+    },
+    {
+      "avg_ms": 0.4845625,
+      "count": 16,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "total_ms": 7.753
+    },
+    {
+      "avg_ms": 0.3039166666666668,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "qk_norm",
+      "total_ms": 7.294000000000002
+    },
+    {
+      "avg_ms": 0.683125,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "total_ms": 5.465
+    },
+    {
+      "avg_ms": 0.2076666666666667,
+      "count": 24,
+      "kind": "gdn_stage",
+      "seq_len": 33,
+      "stage": "qkv_split",
+      "total_ms": 4.984000000000001
+    },
+    {
+      "avg_ms": 0.585875,
+      "count": 8,
+      "kind": "full_attn_stage",
+      "seq_len": 1,
+      "stage": "o_proj",
+      "total_ms": 4.687
+    }
+  ],
+  "wall_s": 4.082500597003673
+}

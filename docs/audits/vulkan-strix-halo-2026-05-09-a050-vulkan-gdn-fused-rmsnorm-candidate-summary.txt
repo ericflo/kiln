@@ -1,0 +1,10 @@
+label=candidate
+ready_after_s=23.030280
+wall_s=4.950954
+metrics_delta={'batcher_rows': 7.0, 'jobs_failed': 0.0, 'jobs_submitted': 7.0, 'max_batch_after': 3.0, 'tokens_generated': 7.0, 'worker_batches': 3.0}
+prewarm_weight_log_seen=True
+prewarm_complete_log_seen=True
+response_0 status=200 finish=stop elapsed_s=3.442095 text='6' reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=4.888823 text='11' reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=4.884442 text='16' reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=4.883824 text='13' reasoning_len=0 error=None

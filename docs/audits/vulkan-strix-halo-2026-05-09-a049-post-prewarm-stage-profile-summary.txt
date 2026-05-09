@@ -1,0 +1,54 @@
+ready_after_s=31.044572
+wall_s=4.082501
+metrics_delta={'batcher_rows': 7.0, 'jobs_failed': 0.0, 'jobs_submitted': 7.0, 'max_batch_after': 4.0, 'tokens_generated': 7.0, 'worker_batches': 3.0}
+prewarm_weight_log_seen=True
+prewarm_complete_log_seen=True
+marker_present_in_server_log=False
+profile_slice=after background inference prewarm complete
+profile_rows=2352
+top_live_seq1_stage_totals:
+- paged_layer:linear seq_len=1 total_ms=185.157 count=24 avg_ms=7.715
+- mlp_stage:fused seq_len=1 total_ms=129.645 count=96 avg_ms=1.350
+- gdn_stage:recurrent seq_len=1 total_ms=110.270 count=72 avg_ms=1.532
+- gdn_stage:in_proj seq_len=1 total_ms=101.692 count=72 avg_ms=1.412
+- gdn_stage:gates seq_len=1 total_ms=80.466 count=72 avg_ms=1.118
+- gdn_stage:gated_norm seq_len=1 total_ms=51.386 count=72 avg_ms=0.714
+- gdn_stage:out_proj seq_len=1 total_ms=36.940 count=72 avg_ms=0.513
+- paged_layer:full seq_len=1 total_ms=28.729 count=8 avg_ms=3.591
+- full_attn_stage:qkv_proj_batch seq_len=1 total_ms=23.442 count=16 avg_ms=1.465
+- gdn_stage:conv seq_len=1 total_ms=16.680 count=72 avg_ms=0.232
+- full_attn_stage:decode_attn_contiguous_batch seq_len=1 total_ms=11.800 count=16 avg_ms=0.738
+- full_attn_stage:o_proj_batch seq_len=1 total_ms=7.753 count=16 avg_ms=0.485
+- full_attn_stage:qkv_proj seq_len=1 total_ms=5.465 count=8 avg_ms=0.683
+- full_attn_stage:o_proj seq_len=1 total_ms=4.687 count=8 avg_ms=0.586
+- gdn_stage:qk_norm seq_len=1 total_ms=1.878 count=72 avg_ms=0.026
+- full_attn_stage:rope_batch seq_len=1 total_ms=1.142 count=16 avg_ms=0.071
+- full_attn_stage:decode_scores seq_len=1 total_ms=0.605 count=8 avg_ms=0.076
+- full_attn_stage:qk_norm_batch seq_len=1 total_ms=0.568 count=16 avg_ms=0.036
+- full_attn_stage:attn_gate_batch seq_len=1 total_ms=0.376 count=16 avg_ms=0.024
+- full_attn_stage:kv_write_batch seq_len=1 total_ms=0.276 count=16 avg_ms=0.017
+top_stage_totals_all:
+- paged_layer:linear seq_len=32 total_ms=7524.415 count=72 avg_ms=104.506
+- paged_layer:linear seq_len=33 total_ms=2704.946 count=24 avg_ms=112.706
+- mlp_stage:fused seq_len=32 total_ms=2699.871 count=96 avg_ms=28.124
+- paged_layer:full seq_len=32 total_ms=2234.820 count=24 avg_ms=93.117
+- gdn_stage:gated_norm seq_len=32 total_ms=1558.067 count=72 avg_ms=21.640
+- gdn_stage:in_proj seq_len=32 total_ms=1424.264 count=72 avg_ms=19.781
+- gdn_stage:gates seq_len=32 total_ms=1112.751 count=72 avg_ms=15.455
+- full_attn_stage:qkv_proj seq_len=32 total_ms=1083.175 count=24 avg_ms=45.132
+- mlp_stage:fused seq_len=33 total_ms=950.703 count=32 avg_ms=29.709
+- gdn_stage:out_proj seq_len=32 total_ms=938.285 count=72 avg_ms=13.032
+- paged_layer:full seq_len=33 total_ms=665.650 count=8 avg_ms=83.206
+- gdn_stage:in_proj seq_len=33 total_ms=569.227 count=24 avg_ms=23.718
+- gdn_stage:gated_norm seq_len=33 total_ms=401.916 count=24 avg_ms=16.746
+- gdn_stage:gates seq_len=33 total_ms=400.639 count=24 avg_ms=16.693
+- full_attn_stage:qkv_proj seq_len=33 total_ms=379.810 count=8 avg_ms=47.476
+- gdn_stage:out_proj seq_len=33 total_ms=360.544 count=24 avg_ms=15.023
+- gdn_stage:recurrent seq_len=32 total_ms=298.265 count=72 avg_ms=4.143
+- gdn_stage:conv seq_len=32 total_ms=220.844 count=72 avg_ms=3.067
+- paged_layer:linear seq_len=1 total_ms=185.157 count=24 avg_ms=7.715
+- mlp_stage:fused seq_len=1 total_ms=129.645 count=96 avg_ms=1.350
+response_0 status=200 finish=stop elapsed_s=3.892989 text='6' reasoning_len=0 error=None
+response_1 status=200 finish=stop elapsed_s=4.074640 text='11' reasoning_len=0 error=None
+response_2 status=200 finish=stop elapsed_s=3.892331 text='16' reasoning_len=0 error=None
+response_3 status=200 finish=stop elapsed_s=4.073865 text='13' reasoning_len=0 error=None
