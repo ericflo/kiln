@@ -243,6 +243,9 @@ button, input, select, textarea { font-family: inherit; }
   font-size: var(--text-xl);
   font-weight: 700;
   letter-spacing: -0.01em;
+  margin: 0;
+  line-height: 1;
+  display: inline;
 }
 .brand-version {
   font-family: var(--font-mono);
@@ -316,20 +319,20 @@ button, input, select, textarea { font-family: inherit; }
   100% { transform: scale(1.6); opacity: 0;    }
 }
 
-.topbar-help {
+.header-help {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   font-size: var(--text-xs);
   flex-shrink: 0;
 }
-.topbar-help a {
+.header-help a {
   color: var(--text-muted);
   white-space: nowrap;
   padding: 4px 0;
 }
-.topbar-help a:hover { color: var(--text); }
-.topbar-help .gh {
+.header-help a:hover { color: var(--text); }
+.header-help .gh {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -338,7 +341,7 @@ button, input, select, textarea { font-family: inherit; }
   border: 1px solid var(--border);
   color: var(--text-2);
 }
-.topbar-help .gh:hover { border-color: var(--border-strong); color: var(--text); }
+.header-help .gh:hover { border-color: var(--border-strong); color: var(--text); }
 
 /* =====================================================================
    Primary navigation (page tabs)
@@ -1393,8 +1396,13 @@ select {
    ===================================================================== */
 @media (max-width: 720px) {
   .topbar { padding: var(--space-3) var(--space-4); flex-wrap: wrap; gap: var(--space-3); }
-  .topbar-help { gap: var(--space-2); }
-  .topbar-help a:not(.gh) { display: none; }
+  .header-help {
+    gap: var(--space-2);
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-start;
+    font-size: var(--text-xs);
+  }
   .primary-nav { padding: var(--space-2) var(--space-4); top: auto; }
   .main { padding: var(--space-4); gap: var(--space-4); }
   .card-head, .card-body { padding: var(--space-4); }
@@ -1406,11 +1414,11 @@ select {
 <body>
 <a class="skip-link" href="#content">Skip to content</a>
 
-<header class="topbar" role="banner">
+<header class="topbar header" role="banner">
   <a class="brand" href="/" aria-label="Kiln dashboard home">
     <span class="brand-mark" aria-hidden="true"></span>
     <span class="brand-text">
-      <span class="brand-name">kiln</span>
+      <h1 class="brand-name">kiln</h1>
       <span class="brand-version" id="brand-version">dashboard</span>
     </span>
   </a>
@@ -1419,11 +1427,13 @@ select {
     <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting…</span></span>
   </div>
 
-  <nav class="topbar-help" aria-label="Documentation">
+  <nav class="header-help" aria-label="Help links">
     <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
-    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO</a>
-    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API</a>
-    <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI</a>
+    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
+    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
+    <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI Reference</a>
+    <a href="https://ericflo.github.io/kiln/demo/" target="_blank" rel="noopener noreferrer">Demo</a>
+    <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
     <a href="https://ericflo.github.io/kiln/architecture.html" target="_blank" rel="noopener noreferrer">Architecture</a>
     <a class="gh" href="https://github.com/ericflo/kiln" target="_blank" rel="noopener noreferrer" aria-label="View Kiln on GitHub">
       <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -1548,7 +1558,7 @@ select {
               <input type="text" id="upload-name" placeholder="my-adapter" aria-describedby="upload-adapter-help upload-adapter-state">
             </div>
             <div class="form-group" style="margin-bottom: 0;">
-              <label for="upload-archive">Archive</label>
+              <label for="upload-archive">Adapter archive</label>
               <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state">
             </div>
             <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
@@ -2154,7 +2164,7 @@ function renderRecentRequests(rows) {
     el.innerHTML = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No recent requests yet.</div>
       <div>Recent chat completions will appear here with prompt and completion previews, token counts, finish status, and streaming/error badges.</div>
-      <div style="margin-top:var(--space-2);">Use <strong>Playground</strong> above to create the first entry.</div>
+      <div style="margin-top:var(--space-2);">Use <strong>Playground</strong> above to create the first entry, or walk through the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>.</div>
     </div>`;
     return;
   }
@@ -2241,6 +2251,7 @@ function renderAdapters(data) {
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No adapters found yet.</div>
       <div>Use the base model now, submit an SFT job to create your first adapter, or upload a PEFT-compatible adapter below.</div>
       <div style="margin-top:var(--space-2);">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
+      <div style="margin-top:var(--space-2);">New here? Walk through the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or check <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
     </div>`;
     return;
   }
@@ -2738,9 +2749,9 @@ function renderTrainingQueue(data) {
           <span class="job-state Queued">Queued</span>
         </div>
         <div class="job-meta">
-          <span>Type ${escapeHtml(q.job_type)}</span>
-          <span>Adapter ${escapeHtml(q.adapter_name)}</span>
-          <span>Position #${q.position}</span>
+          <span>Type: ${escapeHtml(q.job_type)}</span>
+          <span>Adapter: ${escapeHtml(q.adapter_name)}</span>
+          <span>Position: #${q.position}</span>
         </div>
         <div>${renderCancelJobButton(q.job_id)}</div>
       </div>`;
@@ -2775,10 +2786,10 @@ function renderJobCard(j, isRunning) {
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
     <div class="job-meta">
-      <span>Progress ${pct}%</span>
-      ${j.current_loss != null ? `<span>Loss <span class="tabular-nums" style="color:var(--text-2);">${j.current_loss.toFixed(4)}</span></span>` : ''}
-      ${j.adapter_name ? `<span>Adapter <code>${escapeHtml(j.adapter_name)}</code></span>` : ''}
-      <span>Elapsed ${fmtDuration(j.elapsed_secs)}</span>
+      <span>Progress: ${pct}%</span>
+      ${j.current_loss != null ? `<span>Loss: <span class="tabular-nums" style="color:var(--text-2);">${j.current_loss.toFixed(4)}</span></span>` : ''}
+      ${j.adapter_name ? `<span>Adapter: <code>${escapeHtml(j.adapter_name)}</code></span>` : ''}
+      <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
     </div>
     ${isRunning ? `<div>${renderCancelJobButton(j.job_id)}</div>` : ''}
   </div>`;

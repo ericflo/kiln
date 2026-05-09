@@ -57,13 +57,14 @@
         <span>kiln</span>
         <span class="brand-version">v0.2.13</span>
       </a>
-      <nav class="nav" aria-label="Primary">
+      <nav class="nav site-nav" aria-label="Primary">
         <a href="quickstart.html">Quickstart</a>
-        <a href="grpo.html">GRPO</a>
-        <a href="api.html">API</a>
-        <a href="cli.html">CLI</a>
-        <a href="architecture.html">Architecture</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="api.html">API Reference</a>
+        <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
         <a href="https://github.com/ericflo/kiln" class="nav-ext" rel="noopener">
           <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 .2a8 8 0 0 0-2.5 15.6c.4.07.55-.17.55-.38v-1.34c-2.23.49-2.7-1.07-2.7-1.07-.36-.93-.89-1.18-.89-1.18-.73-.5.05-.49.05-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.88 2.34.67.07-.52.28-.88.5-1.08-1.78-.2-3.65-.89-3.65-3.95 0-.87.31-1.59.83-2.15-.08-.2-.36-1.02.08-2.13 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.11.16 1.93.08 2.13.52.56.83 1.28.83 2.15 0 3.07-1.87 3.75-3.66 3.95.29.25.54.74.54 1.5v2.22c0 .21.15.46.55.38A8 8 0 0 0 8 .2z"/></svg>
           GitHub
@@ -195,6 +196,7 @@
       </div>
     </section>
 
+    <!-- the GRPO loop -->
     <section class="section section--accent" id="grpo">
       <div class="page">
         <header class="section-head">
@@ -214,30 +216,31 @@
               <span class="code-title">grpo_loop.py</span>
               <button class="copy-btn" type="button" data-target="grpo-py" aria-label="Copy code">copy</button>
             </div>
-<pre id="grpo-py"><code><span class="hl-c"># Drop-in OpenAI client. Same endpoint, same model.</span>
-<span class="hl-k">from</span> openai <span class="hl-k">import</span> OpenAI
-<span class="hl-k">import</span> requests, json
+<pre id="grpo-py"><code># Drop-in OpenAI client. Same endpoint, same model.
+import openai
+import requests, json
 
-client = OpenAI(base_url=<span class="hl-s">"http://localhost:8420/v1"</span>, api_key=<span class="hl-s">"local"</span>)
+client = openai.OpenAI(base_url="http://localhost:8420/v1", api_key="unused")
 
-<span class="hl-c"># 1. Generate N rollouts on the same prompt.</span>
-prompt = <span class="hl-s">"Write a short, friendly email reply."</span>
+# 1. Generate N rollouts on the same prompt.
+prompt = "Write a short, friendly email reply."
 rollouts = [client.chat.completions.create(
-    model=<span class="hl-s">"Qwen/Qwen3.5-4B"</span>,
-    messages=[{<span class="hl-s">"role"</span>: <span class="hl-s">"user"</span>, <span class="hl-s">"content"</span>: prompt}],
-    temperature=<span class="hl-n">1.0</span>, n=<span class="hl-n">1</span>).choices[<span class="hl-n">0</span>].message.content
-    <span class="hl-k">for</span> _ <span class="hl-k">in</span> <span class="hl-b">range</span>(<span class="hl-n">8</span>)]
+    model="Qwen/Qwen3.5-4B",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=1.0, n=1).choices[0].message.content
+    for _ in range(8)]
 
-<span class="hl-c"># 2. Score with whatever reward you want.</span>
-rewards = [score(prompt, r) <span class="hl-k">for</span> r <span class="hl-k">in</span> rollouts]
+# 2. Score with whatever reward you want.
+import requests  # noqa: F811 — same module, kept inline for clarity
+rewards = [score(prompt, r) for r in rollouts]
 
-<span class="hl-c"># 3. Send the batch back. Adapter is live on the next request.</span>
-requests.post(<span class="hl-s">"http://localhost:8420/v1/train/grpo"</span>, json={
-    <span class="hl-s">"adapter"</span>:       <span class="hl-s">"helpful-v3"</span>,
-    <span class="hl-s">"prompt"</span>:        prompt,
-    <span class="hl-s">"completions"</span>:   rollouts,
-    <span class="hl-s">"rewards"</span>:       rewards,
-    <span class="hl-s">"learning_rate"</span>: <span class="hl-n">1e-4</span>,
+# 3. Send the batch back. Adapter is live on the next request.
+requests.post("http://localhost:8420/v1/train/grpo", json={
+    "adapter":       "helpful-v3",
+    "prompt":        prompt,
+    "completions":   rollouts,
+    "rewards":       rewards,
+    "learning_rate": 1e-4,
 })</code></pre>
           </div>
 
@@ -431,11 +434,33 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
           </div>
         </div>
 
+        <h3 id="desktop-app">Desktop App</h3>
         <p class="install-foot">
-          Prefer a GUI? Download
-          <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">Kiln Desktop</a>
-          for macOS, Windows, or Linux.
+          The Kiln Desktop app and the Kiln server use
+          <strong>separate GitHub release tags/version numbers</strong>
+          so each can ship at its own cadence. The latest desktop build is
+          <a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2"><code>desktop-v0.2.2</code></a>;
+          the server tracks the latest <code>kiln-v*</code> tag.
         </p>
+        <table class="installer-table">
+          <thead>
+            <tr><th scope="col">Platform</th><th scope="col">Download</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">macOS (Apple Silicon)</th>
+              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">desktop-v0.2.2 · macOS</a></td>
+            </tr>
+            <tr>
+              <th scope="row">Windows</th>
+              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">desktop-v0.2.2 · Windows</a></td>
+            </tr>
+            <tr>
+              <th scope="row">Linux</th>
+              <td><a href="https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.2">desktop-v0.2.2 · Linux</a></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </section>
 
@@ -521,7 +546,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
         <h3>Docs</h3>
         <ul>
           <li><a href="quickstart.html">Quickstart</a></li>
-          <li><a href="grpo.html">GRPO guide</a></li>
+          <li><a href="grpo.html">GRPO Guide</a></li>
           <li><a href="architecture.html">Architecture</a></li>
           <li><a href="troubleshooting.html">Troubleshooting</a></li>
         </ul>
@@ -529,10 +554,10 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
       <div>
         <h3>Reference</h3>
         <ul>
-          <li><a href="api.html">HTTP API</a></li>
-          <li><a href="cli.html">CLI</a></li>
+          <li><a href="api.html">API Reference</a></li>
+          <li><a href="cli.html">CLI Reference</a></li>
           <li><a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a></li>
-          <li><a href="demo/">Demo asciicasts</a></li>
+          <li><a href="demo/">Demo</a></li>
         </ul>
       </div>
       <div>
@@ -541,7 +566,8 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
           <li><a href="https://github.com/ericflo/kiln">GitHub</a></li>
           <li><a href="https://github.com/ericflo/kiln/releases/latest">Latest release</a></li>
           <li><a href="https://github.com/ericflo/kiln/issues">Issues</a></li>
-          <li><a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License (MIT)</a></li>
+          <li><a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a></li>
+          <li><a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a></li>
         </ul>
       </div>
     </div>
