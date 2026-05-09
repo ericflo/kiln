@@ -336,6 +336,39 @@ Verdict:
   decode, and full-attention QKV projection work; do not start there until this
   change is committed and pushed.
 
+### 2026-05-09 A009: Reject MLP Decode Single-Submit Recording
+
+Hypothesis:
+- Recent CUDA work moved toward graph replay and reduced per-step synchronization.
+  Vulkan MLP decode still records and submits separate operations around upload,
+  gate/up, down projection, and readback.
+- A single command buffer containing upload, gate/up, down projection, and
+  readback might reduce queue-submit overhead for the MLP hotspot.
+
+Experiment:
+- Implemented an uncommitted `dispatch_mlp_decode_cached_single_submit` path in
+  `crates/kiln-vulkan-kernel/src/kernels.rs`, default-enabled behind
+  `KILN_DISABLE_VULKAN_MLP_DECODE_SINGLE_SUBMIT`.
+- The focused parity test `cargo test -p kiln-vulkan-kernel
+  mlp_decode_matches_cpu_reference --test gdn_parity -- --nocapture` passed.
+- The release Vulkan bench build also passed.
+
+Evidence:
+- Default single-submit trial preserved token IDs
+  `[2838,6587,310,5227,1024,75119,220]` but regressed the serial harness to
+  prefill `529.5ms`, mean ITL `159.6ms`, `6.3 tok/s`.
+- Rerunning the same binary with
+  `KILN_DISABLE_VULKAN_MLP_DECODE_SINGLE_SUBMIT=1` preserved the same token IDs
+  and returned to prefill `446.7ms`, mean ITL `135.8ms`, `7.4 tok/s`, matching
+  the A008 anchor.
+
+Verdict:
+- Rejected and removed before commit. The single-submit recording changed
+  synchronization shape but did not improve wall-clock decode on Strix Halo.
+- Do not retry this exact MLP single-submit path without profiling why the
+  combined command buffer loses; the next MLP attempt should target shader
+  arithmetic or residency, not merely submit count.
+
 ## Current Open Work
 
 - Implement a real Vulkan batched paged full-attention backend if sampled or

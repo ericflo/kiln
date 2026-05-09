@@ -19,6 +19,7 @@ before or with each accepted change and each measured rejection.
 | A006 | Add rowwise full-attention fallback for generic continuous batch when backend declines batched paged attention. | Same sampled actor batch now returns HTTP 200; rebuilt server rerun was `time_total=9.525668s`, 72 prompt tokens, 48 completion tokens, all finish reasons `length`. Serial bench stayed coherent at token IDs `[2838,6587,310,5227,1024,75119,220]`, `174.7ms` mean ITL. | Keep, commit `b6e699f`; correctness/availability fix, not a throughput win. |
 | A007 | Recheck existing Vulkan feature gates. | Tokens stayed coherent. Fused conv1d regressed to `197.3ms`; disabling MLP decode regressed to `209.8ms`; GDN fused did not prove a win; disabling full-attn QKV was noisy and not better than default on rerun. | Reject toggles; keep defaults. |
 | A008 | Route full-attention `o_proj` through backend decode. | Full-attn `o_proj` profile dropped from `68.313ms total / 4.270ms mean` to `5.413ms total / 0.338ms mean`. Unprofiled serial bench stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`, `480.8ms` prefill, `135.1ms` mean ITL, `7.4 tok/s`. | Keep; serial throughput win. |
+| A009 | Trial Vulkan MLP decode single-submit command recording. | Focused MLP parity passed, but default single-submit regressed serial bench to `159.6ms` mean ITL; disabling it in the same binary returned to `135.8ms` with the same token IDs. | Rejected and removed before commit. |
 
 Validation snapshot after A008:
 
