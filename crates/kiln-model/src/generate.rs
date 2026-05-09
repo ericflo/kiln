@@ -12,6 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc,
 };
+use std::thread;
 
 use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
@@ -1960,6 +1961,109 @@ impl ModelRunner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn decode_cuda_rowwise_parallel(
+        &self,
+        states: &mut [&mut PagedBatchedDecodeState],
+        params: &[SamplingParams],
+        paged_cache: &PagedKvCache,
+        input_tokens: &[TokenId],
+        block_tables: &[BlockTable],
+        sequence_lengths: &[usize],
+    ) -> Result<Vec<TokenId>> {
+        let row_count = states.len();
+        anyhow::ensure!(
+            params.len() == row_count
+                && input_tokens.len() == row_count
+                && block_tables.len() == row_count
+                && sequence_lengths.len() == row_count,
+            "CUDA rowwise decode metadata length mismatch"
+        );
+
+        let backend = &*self.backend;
+        let weights = &self.weights;
+        let config = &self.config;
+        let cuda_graph = &self.cuda_graph;
+        let cuda_graph_enabled = cuda_graph.is_enabled();
+        let active_lora = self.active_lora.as_ref();
+
+        let row_results = thread::scope(|scope| -> Result<Vec<(usize, TokenId)>> {
+            let mut handles = Vec::with_capacity(row_count);
+            for (idx, state_slot) in states.iter_mut().enumerate() {
+                let state = &mut **state_slot;
+                let params = params[idx].clone();
+                let input_token = input_tokens[idx];
+                let block_table = &block_tables[idx];
+                let sequence_length = sequence_lengths[idx];
+                let step_seed = state.step_seed;
+
+                handles.push(scope.spawn(move || -> Result<(usize, TokenId)> {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    let row = if cuda_graph_enabled {
+                        let lease = state
+                            .cuda_graph_lease
+                            .get_or_insert_with(|| cuda_graph.lease());
+                        lease
+                            .decode_step_paged(
+                                backend,
+                                input_token,
+                                weights,
+                                config,
+                                pc_guard,
+                                block_table,
+                                sequence_length,
+                                &mut state.linear_state,
+                                active_lora,
+                            )
+                            .with_context(|| format!("CUDA rowwise decode row {idx} failed"))?
+                    } else {
+                        CudaGraphRunners::decode_step_paged_eager(
+                            backend,
+                            input_token,
+                            weights,
+                            config,
+                            pc_guard,
+                            block_table,
+                            sequence_length,
+                            &mut state.linear_state,
+                            active_lora,
+                        )
+                        .with_context(|| format!("CUDA rowwise eager decode row {idx} failed"))?
+                    };
+
+                    let token = if params.temperature == 0.0 {
+                        greedy_sample(&row)?
+                    } else {
+                        sample_with_params(
+                            &row,
+                            params.temperature,
+                            params.top_p,
+                            params.top_k,
+                            step_seed,
+                        )?
+                    };
+                    Ok((idx, token))
+                }));
+            }
+
+            let mut row_results = Vec::with_capacity(row_count);
+            for handle in handles {
+                row_results.push(
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("CUDA rowwise decode worker panicked"))??,
+                );
+            }
+            Ok(row_results)
+        })?;
+
+        let mut sampled = vec![0; row_count];
+        for (idx, token) in row_results {
+            sampled[idx] = token;
+        }
+        Ok(sampled)
+    }
+
     pub fn paged_batched_decode_step(
         &self,
         states: &mut [&mut PagedBatchedDecodeState],
@@ -2077,56 +2181,14 @@ impl ModelRunner {
                 vec![token]
             } else if self.backend.name() == "cuda" {
                 drop(pc_guard);
-                let mut sampled = Vec::with_capacity(states.len());
-                for idx in 0..states.len() {
-                    let state = &mut states[idx];
-                    let pc_guard = lock_paged_cache(paged_cache)?;
-                    let row = if self.cuda_graph.is_enabled() {
-                        let lease = state
-                            .cuda_graph_lease
-                            .get_or_insert_with(|| self.cuda_graph.lease());
-                        lease
-                            .decode_step_paged(
-                                &*self.backend,
-                                input_tokens[idx],
-                                &self.weights,
-                                &self.config,
-                                pc_guard,
-                                &block_tables[idx],
-                                sequence_lengths[idx],
-                                &mut state.linear_state,
-                                self.active_lora.as_ref(),
-                            )
-                            .with_context(|| format!("CUDA rowwise decode row {idx} failed"))?
-                    } else {
-                        CudaGraphRunners::decode_step_paged_eager(
-                            &*self.backend,
-                            input_tokens[idx],
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            &block_tables[idx],
-                            sequence_lengths[idx],
-                            &mut state.linear_state,
-                            self.active_lora.as_ref(),
-                        )
-                        .with_context(|| format!("CUDA rowwise eager decode row {idx} failed"))?
-                    };
-                    let params = &params[idx];
-                    let token = if params.temperature == 0.0 {
-                        greedy_sample(&row)?
-                    } else {
-                        sample_with_params(
-                            &row,
-                            params.temperature,
-                            params.top_p,
-                            params.top_k,
-                            state.step_seed,
-                        )?
-                    };
-                    sampled.push(token);
-                }
-                sampled
+                self.decode_cuda_rowwise_parallel(
+                    states,
+                    params,
+                    paged_cache,
+                    &input_tokens,
+                    &block_tables,
+                    &sequence_lengths,
+                )?
             } else {
                 let mut linear_states: Vec<&mut LinearAttentionState> = states
                     .iter_mut()
