@@ -17449,3 +17449,79 @@ full-batch-only win.
 Rejected and reverted before commit. Keep the existing shared row-quad tile4
 down-projection path; the tile8 row-quad idea is only worth revisiting as a
 separate dedicated full-batch kernel that cannot pollute row-pair batches.
+
+## 2026-05-09 - E432 accepted dedicated Metal down-proj row-quad tile8
+
+### Purpose
+
+E431 showed that row-quad tile8 for the batched transposed-GEMV
+down-projection can improve the intended batch-8 shape, but adding the wider
+branch to the shared batch kernel polluted the row-pair batch `2/3/4` paths.
+This experiment isolates the wider row-quad branch in a dedicated full-batch
+kernel so partial batches keep the existing shared shader.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8=1` to fall
+  back to the existing row-quad tile4 path.
+- Added dedicated Metal kernel
+  `kiln_transposed_coop_gemv8_batch_row_quad_tile8_bf16`.
+- Added a separate pipeline cache/precompile path for that kernel.
+- Selected the dedicated tile8 kernel only when row-quad is enabled, so batch
+  `>=8` uses it by default and batch `2/3/4` continue using the existing
+  row-pair tile8 shared kernel.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8=1`
+- Counter-order disabled/default benchmark repeat
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda` remains locally blocked by missing `nvcc`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Qwen-shaped BF16 transposed-GEMV decode-batch synthetic bench,
+`[B,1,9216] x [9216,2560]`, same source default tile8 versus rollback tile4:
+
+| config | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: |
+| default tile8 | `1332.263 us` | `1957.654 us` | `2162.083 us` | `2958.113 us` |
+| rollback tile4 | `1519.667 us` | `2007.383 us` | `2141.179 us` | `3051.496 us` |
+| rollback tile4 rerun | `1341.542 us` | `1996.592 us` | `2253.550 us` | `3085.221 us` |
+| default tile8 rerun | `1266.796 us` | `2186.088 us` | `2020.867 us` | `2857.921 us` |
+
+Only batch `8` selects the new dedicated kernel. Batch `8` improved by `3.1%`
+in the first pair and `7.4%` in the counter-order pair. Batch `2/3/4` timings
+remain noisy but no longer show the consistent row-pair regressions seen in
+E431 because they use the old shared kernel.
+
+### Artifacts
+
+- `e432_down_proj_row_quad_tile8_dedicated_parity.log`
+- `e432_down_proj_row_quad_tile8_dedicated_default.log`
+- `e432_down_proj_row_quad_tile8_dedicated_disabled.log`
+- `e432_down_proj_row_quad_tile8_dedicated_disabled_rerun.log`
+- `e432_down_proj_row_quad_tile8_dedicated_default_rerun.log`
+- `e432_down_proj_row_quad_tile8_dedicated_check_metal.log`
+- `e432_down_proj_row_quad_tile8_dedicated_check_vulkan.log`
+- `e432_down_proj_row_quad_tile8_dedicated_check_server_metal.log`
+- `e432_down_proj_row_quad_tile8_dedicated_check_server_vulkan.log`
+- `e432_down_proj_row_quad_tile8_dedicated_check_cuda.log`
+- `e432_down_proj_row_quad_tile8_dedicated_fmt_check.log`
+- `e432_down_proj_row_quad_tile8_dedicated_git_diff_check.log`
+
+### Decision
+
+Accepted. Use the dedicated Metal row-quad tile8 kernel for full batch
+transposed-GEMV down-projection, with
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8=1` as a targeted
+rollback to the existing row-quad tile4 path. CUDA/Vulkan source behavior is
+unchanged; Vulkan checks pass locally, and CUDA cannot be checked on this host
+because `nvcc` is not installed.

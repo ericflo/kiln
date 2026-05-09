@@ -1861,3 +1861,12 @@
   `2059.537 -> 2440.371/2551.733 us`, batch4 `2195.654 ->
   2387.146/2419.783 us`. Runtime source was reverted; keep row-quad tile4
   unless tile8 is isolated in a separate full-batch kernel.
+- 2026-05-09 E432: Accepted a dedicated Metal down-proj row-quad tile8 kernel
+  for full decode batches, with
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8=1` falling back to
+  the existing tile4 row-quad path. Same-binary synthetic batch8 improved from
+  tile4 `3051.496/3085.221 us` to dedicated tile8 `2958.113/2857.921 us`
+  (`3.1-7.4%`). Batch2/3/4 stay on the existing row-pair shared kernel and no
+  longer show E431's consistent partial-batch regressions. Metal/Vulkan checks,
+  server Metal/Vulkan checks, parity, fmt, and diff check passed; CUDA remains
+  locally blocked by missing `nvcc`.
