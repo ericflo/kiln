@@ -1776,3 +1776,12 @@
   about `2.9%` faster on batch down. Metal/Vulkan/server Metal checks, parity,
   benches, fmt, and diff check passed; CUDA remains locally blocked by missing
   `nvcc`.
+- 2026-05-09 E423: Rejected changing the E422 Metal LoRA add-kernel
+  threadgroup width. A temporary `KILN_METAL_LORA_ADD_THREADS` override swept
+  `32/64/128/256/512`; no width won all Qwen3.5 rank-16 rows. Examples:
+  `64` helped batch4 gate/up (`174.723 -> 160.160 us` vs 256) but regressed
+  batch4 down (`171.773 -> 253.829 us`), while `128` helped batch1 gate/up
+  (`168.065 -> 166.090 us`) but regressed batch1 down
+  (`173.796 -> 212.442 us`). A shape selector using 64 for large outputs also
+  looked noisy because down rows slowed despite using the same 256-thread path.
+  Temporary source was reverted; keep fixed 256 threads.

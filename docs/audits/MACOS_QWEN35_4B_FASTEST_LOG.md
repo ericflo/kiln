@@ -16326,6 +16326,7 @@ All cases had exact parity against separate K/V matmuls
 
 - `cargo fmt --check`
 - `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
 
 ### Artifacts
 
@@ -16739,3 +16740,62 @@ consistently faster and does less work, while full-projection timing is
 effectively neutral-to-slightly-better within run noise. The change is Metal
 LoRA-only, preserves the previous BF16 rounding behavior, and leaves CUDA,
 Vulkan, and no-LoRA runtime paths unchanged.
+
+## 2026-05-09 - E423 rejected Metal LoRA add thread-width selector
+
+### Purpose
+
+After E422, the remaining LoRA add kernel is a simple per-output rank loop. It
+used a fixed 256-thread group. This experiment tested whether smaller or larger
+threadgroups improve the Qwen3.5 rank-16 LoRA delta/add helper, especially for
+large-output gate/up projections.
+
+### Temporary Change
+
+Temporarily added `KILN_METAL_LORA_ADD_THREADS` to force add-kernel threadgroup
+widths `32`, `64`, `128`, `256`, or `512`. Also tested a shape selector that
+used `64` only for `output_dim >= 8192` and kept `256` otherwise. The temporary
+source was reverted before commit.
+
+### Sweep
+
+Warmup `5`, iterations `20`; values are fused delta/add timings and all rows
+had exact parity.
+
+| add threads | b1 gate/up | b1 down | b4 gate/up | b4 down |
+| ---: | ---: | ---: | ---: | ---: |
+| 32 | `174.219 us` | `168.606 us` | `177.394 us` | `221.129 us` |
+| 64 | `168.348 us` | `169.592 us` | `160.160 us` | `253.829 us` |
+| 128 | `166.090 us` | `212.442 us` | `178.360 us` | `177.208 us` |
+| 256 | `168.065 us` | `173.796 us` | `174.723 us` | `171.773 us` |
+| 512 | `177.202 us` | `187.081 us` | `173.946 us` | `180.729 us` |
+| selector 64 for large output, else 256 | `164.944 us` | `201.292 us` | `162.658 us` | `179.469 us` |
+
+The sweep did not identify one robust policy. `64` helped batch4 gate/up but
+badly regressed batch4 down. `128` helped batch1 gate/up but regressed batch1
+down. The shape selector improved gate/up rows in this run, but its down rows
+were slower than the direct 256-thread run even though they should use the same
+width, showing run noise large enough to make the selector unsafe.
+
+### Validation
+
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+
+### Artifacts
+
+- `e423_lora_add_threads_32.log`
+- `e423_lora_add_threads_64.log`
+- `e423_lora_add_threads_128.log`
+- `e423_lora_add_threads_256.log`
+- `e423_lora_add_threads_512.log`
+- `e423_lora_add_threads_candidate.log`
+- `e423_lora_add_threads_fmt_check.log`
+- `e423_lora_add_threads_source_reverted.diffcheck.log`
+- `e423_lora_add_threads_diff_check.log`
+
+### Decision
+
+Rejected and reverted before commit. Keep the E422 fixed 256-thread add-kernel
+launch until a future candidate shows a stable full-projection win, not just a
+noisy isolated row.
