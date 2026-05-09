@@ -1846,3 +1846,10 @@
   `gates_recur_gated_norm` `159.912 ms`. Keep serial source targeting focused
   on MLP gate/up/down and GDN input projection before smaller full-attention
   point kernels.
+- 2026-05-09 E430: Rejected Metal MLP gate/up row-oct for full decode batches.
+  The temporary `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_OCT=1` candidate passed
+  focused parity and appeared faster than its same-binary rollback at batch8
+  (`3744.550 -> 3431.238 us`), but the enlarged shader polluted the rollback:
+  a clean-source rerun kept current row-quad/vector-load at `2514.229 us`.
+  Against clean source, row-oct was `36.5%` slower at batch8 and also slowed
+  batch3/4. Runtime source was reverted; candidate diff and logs were kept.

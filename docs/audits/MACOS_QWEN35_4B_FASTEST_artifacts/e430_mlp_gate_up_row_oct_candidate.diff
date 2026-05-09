@@ -1,0 +1,144 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index cf3ab62..7d28934 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -38,6 +38,7 @@ const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
+ const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD";
++const DISABLE_METAL_MLP_GATE_UP_ROW_OCT: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_OCT";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
+     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
+ const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
+@@ -927,6 +928,10 @@ fn metal_mlp_gate_up_row_quad_disabled() -> bool {
+     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD)
+ }
+ 
++fn metal_mlp_gate_up_row_oct_disabled() -> bool {
++    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_OCT)
++}
++
+ fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
+     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD)
+ }
+@@ -2558,6 +2563,93 @@ kernel void kiln_mlp_gate_up_bf16(
+         return;
+     }
+ 
++    if (row_pair_mode == 8 || row_pair_mode == 9) {
++        const uint row_octs = (rows + 7) >> 3;
++        const uint total = row_octs * cols2;
++        if (gid >= total) {
++            return;
++        }
++
++        const uint row_oct = gid / cols2;
++        const uint row0 = row_oct << 3;
++        const uint col0 = (gid - row_oct * cols2) << 1;
++        const uint col1 = col0 + 1;
++        const bool has_col1 = col1 < intermediate;
++        float gate_acc0[8];
++        float up_acc0[8];
++        float gate_acc1[8];
++        float up_acc1[8];
++        for (uint r = 0; r < 8; ++r) {
++            gate_acc0[r] = 0.0f;
++            up_acc0[r] = 0.0f;
++            gate_acc1[r] = 0.0f;
++            up_acc1[r] = 0.0f;
++        }
++
++        if (row_pair_mode == 9) {
++            for (uint i = 0; i < hidden; ++i) {
++                const uint w_idx0 = i * intermediate + col0;
++                const bfloat2 gate_w = *(device const bfloat2*)(gate_t + w_idx0);
++                const bfloat2 up_w = *(device const bfloat2*)(up_t + w_idx0);
++                const float gate_w0 = static_cast<float>(gate_w[0]);
++                const float gate_w1 = static_cast<float>(gate_w[1]);
++                const float up_w0 = static_cast<float>(up_w[0]);
++                const float up_w1 = static_cast<float>(up_w[1]);
++
++                for (uint r = 0; r < 8; ++r) {
++                    const uint row = row0 + r;
++                    if (row < rows) {
++                        const float xv = static_cast<float>(x[row * hidden + i]);
++                        gate_acc0[r] += xv * gate_w0;
++                        up_acc0[r] += xv * up_w0;
++                        gate_acc1[r] += xv * gate_w1;
++                        up_acc1[r] += xv * up_w1;
++                    }
++                }
++            }
++        } else {
++            for (uint i = 0; i < hidden; ++i) {
++                const uint w_idx0 = i * intermediate + col0;
++                const float gate_w0 = static_cast<float>(gate_t[w_idx0]);
++                const float up_w0 = static_cast<float>(up_t[w_idx0]);
++                float gate_w1 = 0.0f;
++                float up_w1 = 0.0f;
++                if (has_col1) {
++                    const uint w_idx1 = w_idx0 + 1;
++                    gate_w1 = static_cast<float>(gate_t[w_idx1]);
++                    up_w1 = static_cast<float>(up_t[w_idx1]);
++                }
++
++                for (uint r = 0; r < 8; ++r) {
++                    const uint row = row0 + r;
++                    if (row < rows) {
++                        const float xv = static_cast<float>(x[row * hidden + i]);
++                        gate_acc0[r] += xv * gate_w0;
++                        up_acc0[r] += xv * up_w0;
++                        if (has_col1) {
++                            gate_acc1[r] += xv * gate_w1;
++                            up_acc1[r] += xv * up_w1;
++                        }
++                    }
++                }
++            }
++        }
++
++        for (uint r = 0; r < 8; ++r) {
++            const uint row = row0 + r;
++            if (row < rows) {
++                const uint out_base = row * intermediate;
++                const float gate_sigmoid0 = 1.0f / (1.0f + exp(-gate_acc0[r]));
++                out[out_base + col0] = static_cast<bfloat>((gate_acc0[r] * gate_sigmoid0) * up_acc0[r]);
++                if (has_col1) {
++                    const float gate_sigmoid1 = 1.0f / (1.0f + exp(-gate_acc1[r]));
++                    out[out_base + col1] = static_cast<bfloat>((gate_acc1[r] * gate_sigmoid1) * up_acc1[r]);
++                }
++            }
++        }
++        return;
++    }
++
+     if (row_pair_mode == 4 || row_pair_mode == 5) {
+         const uint row_quads = (rows + 3) >> 2;
+         const uint total = row_quads * cols2;
+@@ -6121,6 +6213,12 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
+     let row_group_size = if rows >= 8
+         && !metal_mlp_gate_up_row_pair_disabled()
+         && !metal_mlp_gate_up_row_quad_disabled()
++        && !metal_mlp_gate_up_row_oct_disabled()
++    {
++        8
++    } else if rows >= 8
++        && !metal_mlp_gate_up_row_pair_disabled()
++        && !metal_mlp_gate_up_row_quad_disabled()
+     {
+         4
+     } else if rows > 1 && !metal_mlp_gate_up_row_pair_disabled() {
+@@ -6191,6 +6289,13 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
+             } else {
+                 0
+             }
++        } else if row_group_size == 8
++            && !metal_mlp_gate_up_row_quad_vector_load_disabled()
++            && intermediate % 2 == 0
++            && gate_buf.offset_in_bytes % 4 == 0
++            && up_buf.offset_in_bytes % 4 == 0
++        {
++            9
+         } else if row_group_size == 4
+             && !metal_mlp_gate_up_row_quad_vector_load_disabled()
+             && intermediate % 2 == 0

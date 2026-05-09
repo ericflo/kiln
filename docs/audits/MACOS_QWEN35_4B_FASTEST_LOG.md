@@ -17323,3 +17323,66 @@ Accepted as target-selection evidence. The current serial path is still led by
 MLP gate/up, MLP down-projection, and GDN input projection. The smaller
 full-attention per-token stages are not the next best source target unless a
 new structural batching or projection route appears.
+
+## 2026-05-09 - E430 rejected Metal MLP gate/up row-oct
+
+### Purpose
+
+Continue targeting the hottest profiled decode stage, `mlp:gate_up_fused`.
+E375/E381 already made full Metal decode batches use row-quad plus `bfloat2`
+weight loads. This experiment tested whether grouping eight decode rows per
+thread could reuse each gate/up column-pair load across the entire default
+`max_batch=8`.
+
+### Candidate
+
+- Added temporary `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_OCT=1`.
+- Added a temporary `row_pair_mode=8/9` MSL branch for scalar/vector row-oct.
+- Selected row-oct only for rows `>=8`; smaller batches stayed on current
+  serial/row-pair paths.
+- Preserved the candidate diff as an artifact, then reverted runtime source
+  before documenting the rejected result.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_OCT=1`
+- Clean-source rerun after reverting the candidate
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The candidate was numerically correct. The same enlarged shader made row-oct
+look faster than its kill switch at batch `8`, but both were much slower than a
+clean-source rerun:
+
+| config | b1 | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| row-oct candidate | `1812.075 us` | `1945.992 us` | `3207.262 us` | `3163.171 us` | `3431.238 us` |
+| row-oct disabled in candidate shader | `1778.633 us` | `2089.725 us` | `3224.458 us` | `3150.721 us` | `3744.550 us` |
+| clean current source | `1647.642 us` | `2145.671 us` | `2166.325 us` | `2067.525 us` | `2514.229 us` |
+
+Compared with the clean current source, the intended batch-8 row-oct candidate
+regressed from `2514.229 us` to `3431.238 us` (`36.5%` slower). The extra
+branch/local accumulators also polluted the shared kernel enough that the
+same-binary rollback timing was not valid decision evidence.
+
+### Artifacts
+
+- `e430_mlp_gate_up_row_oct_candidate.diff`
+- `e430_mlp_gate_up_row_oct_parity.log`
+- `e430_mlp_gate_up_row_oct_default.log`
+- `e430_mlp_gate_up_row_oct_disabled.log`
+- `e430_mlp_gate_up_row_oct_clean_baseline.log`
+- `e430_mlp_gate_up_row_oct_fmt_check.log`
+- `e430_mlp_gate_up_row_oct_source_reverted.diffcheck.log`
+- `e430_mlp_gate_up_row_oct_git_diff_check.log`
+
+### Decision
+
+Rejected and reverted before commit. Keep the existing row-quad/vector-load MLP
+gate/up policy for full Metal decode batches; row-oct reduces thread count but
+does not beat the current kernel once measured against clean source.
