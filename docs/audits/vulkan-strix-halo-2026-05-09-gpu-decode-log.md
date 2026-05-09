@@ -5353,6 +5353,81 @@ Verdict:
   target `chunk_scan`, `chunk_prep`, `matmul_prep`, or broader residency/fusion
   rather than `slice_inputs`/`cat_out`.
 
+### 2026-05-09 A095: Reject Single-Row GDN In-Proj `32x8`
+
+Hypothesis:
+- A094 showed GDN in-proj as the second-largest serial decode bucket after MLP
+  fused, with batch=1 Vulkan GDN in-proj total `95.853ms` and record/submit/
+  wait `83.952ms`.
+- Try a single-row packed-BF16 GDN in-proj shader variant with 32 output
+  columns and 8 reduction lanes per workgroup, halving workgroup count versus
+  the current `16x16` shader. This is intentionally isolated because A087
+  already rejected the same lane trade for generic single-row BF16 linear.
+
+Temporary change:
+- Added `gdn_in_proj_decode_bf16w_x32y8.comp`.
+- Routed only batch=1 packed-BF16 GDN in-proj through it by default.
+- Added rollback `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_ROW_X32Y8=1`.
+- The source change was reverted after measurement; final source has no A095
+  runtime behavior and no CUDA/Metal changes.
+
+Command:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- No-profile candidate:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 98 --quiet`
+- No-profile rollback:
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_ROW_X32Y8=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 98 --quiet`
+- Focused profile candidate:
+  `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 99 --quiet`
+- Focused profile rollback:
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_ROW_X32Y8=1 KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 99 --quiet`
+
+Evidence:
+- Formatting, Vulkan kernel check, focused GDN in-proj packed-BF16 parity,
+  Vulkan model check, and release Vulkan bench build passed; warnings only
+  where applicable.
+- No-profile A/B, seed 98:
+  - Candidate reported backend `vulkan`, token IDs
+    `[271,1206,1423,680,1204,1691,51864,3520,506]`, prefill
+    `1039.020892ms`, mean ITL `83.230604375ms`, p99 ITL `89.816292ms`.
+  - Rollback reported backend `vulkan`, the same token IDs, prefill
+    `1064.724954ms`, mean ITL `81.3120635ms`, p99 ITL `88.791686ms`.
+  - Candidate decode regressed by `1.918540875ms`; the prefill difference is
+    not meaningful for this batch=1 decode-only shader route.
+- Focused profile A/B, seed 99:
+  - Candidate reported prefill `1100.579349ms`, mean ITL `83.239265ms`, p99
+    ITL `92.576552ms`, and the same token IDs.
+  - Rollback reported prefill `1040.940957ms`, mean ITL `82.57425125ms`, p99
+    ITL `89.885855ms`, and the same token IDs.
+  - Measured-pass Vulkan GDN in-proj batch=1 regressed: candidate total
+    `102.044ms`, record/submit/wait `89.353ms`; rollback total `97.650ms`,
+    record/submit/wait `85.375ms`.
+  - Measured-pass Vulkan GDN in-proj batch=64 was also slightly worse despite
+    unchanged routing: candidate total `120.009ms`, rollback total `117.002ms`.
+- Raw logs:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-fmt.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-check-kernel.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-parity.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-check-model-vulkan.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-release-bench-build.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-candidate.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-rollback.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-candidate-profile.log`,
+  and
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-rollback-profile.log`.
+- Durable aggregate summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a095-gdn-in-proj-x32y8-summary.txt`.
+
+Verdict:
+- Reject and revert. The direct single-row `16x16 -> 32x8` GDN in-proj retile
+  did not reduce the target bucket and regressed wall-facing decode.
+- Do not retry this lane trade for GDN in-proj without a materially different
+  shader or residency hypothesis.
+
 ## Current Open Work
 
 - After A093, serial F32 GDN decode recurrence is GPU-routed on Vulkan via the
@@ -5504,6 +5579,11 @@ Verdict:
   Recent Metal E441-E443 row-policy measurements support keeping row-pair/
   row-quad there and do not provide a clean rowwise exception to mirror into
   Vulkan.
+- A095 rejects a direct single-row GDN in-proj `32x8` retile: the focused
+  profile regressed batch=1 GDN in-proj total from `97.650ms` rollback to
+  `102.044ms` candidate and no-profile decode mean from `81.312ms` rollback to
+  `83.231ms` candidate. This mirrors A087's generic single-row BF16 linear
+  `32x8` rejection.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

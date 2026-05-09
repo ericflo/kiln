@@ -1,0 +1,49 @@
+2026-05-09 A095: Reject single-row GDN in-proj `32x8`
+
+Hypothesis:
+- A094 showed GDN in-proj as the second-largest serial decode bucket after
+  MLP fused, with batch=1 Vulkan GDN in-proj total `95.853ms` and
+  record/submit/wait `83.952ms`.
+- Try a single-row packed-BF16 GDN in-proj shader variant with 32 output
+  columns and 8 reduction lanes per workgroup, halving workgroup count versus
+  the current `16x16` shader.
+
+Temporary change:
+- Added `gdn_in_proj_decode_bf16w_x32y8.comp`.
+- Routed only batch=1 packed-BF16 GDN in-proj to it by default.
+- Added rollback `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_ROW_X32Y8=1`.
+- Final source was reverted after measurement; no runtime code remains.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+No-profile A/B, seed 98:
+- Candidate: backend `vulkan`, token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`, prefill
+  `1039.020892ms`, mean ITL `83.230604375ms`, p99 `89.816292ms`.
+- Rollback: backend `vulkan`, same token IDs, prefill `1064.724954ms`,
+  mean ITL `81.3120635ms`, p99 `88.791686ms`.
+- Candidate decode regressed by `1.918540875ms`; the prefill difference is not
+  meaningful for this batch=1 decode-only shader route.
+
+Focused profile A/B, seed 99:
+- Candidate: prefill `1100.579349ms`, mean ITL `83.239265ms`, p99
+  `92.576552ms`, same token IDs.
+- Rollback: prefill `1040.940957ms`, mean ITL `82.57425125ms`, p99
+  `89.885855ms`, same token IDs.
+- Measured-pass Vulkan GDN in-proj batch=1:
+  - Candidate total `102.044ms`, record/submit/wait `89.353ms`.
+  - Rollback total `97.650ms`, record/submit/wait `85.375ms`.
+- Measured-pass Vulkan GDN in-proj batch=64 was also slightly worse despite
+  unchanged routing: candidate total `120.009ms`, rollback total `117.002ms`.
+
+Verdict:
+- Rejected and reverted. The direct single-row `16x16 -> 32x8` GDN in-proj
+  retile did not reduce the target bucket and regressed wall-facing decode.
+- This mirrors A087's generic single-row BF16 linear `32x8` rejection; do not
+  retry this lane trade for GDN in-proj without a materially different shader
+  or residency hypothesis.
