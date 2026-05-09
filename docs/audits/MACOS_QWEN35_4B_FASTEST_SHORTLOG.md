@@ -1504,3 +1504,13 @@
   `8.986381s` with `KILN_DISABLE_METAL_MLP_GATE_UP_FUSION=1` to `8.288130s`
   by default (`7.8%`) with identical counters (`64` tokens, `56` jobs,
   `8` worker batches, `56` rows, max batch `8`).
+- 2026-05-09 E388: Rejected precise LoRA QKV fusion gating. A temporary
+  source change allowed fused QKV decode when an active adapter had no q/k/v
+  LoRA projections, and a fixed-backend unit test plus release Metal build
+  passed. Reusing the E387 zero BF16 rank-16 down-only adapter, endpoint A/B
+  with eight varied streaming requests, greedy `max_tokens=8`, wait200 showed
+  default temporary source at `8.392413s` versus
+  `KILN_DISABLE_METAL_FUSED_QKV_PROJ=1` at `8.437917s` (`0.5%` apparent
+  improvement), but worker batches differed (`8` vs `9`). Source reverted; no
+  clean same-counters serving win, consistent with E384's effectively tied
+  LoRA fused-QKV base projection result.

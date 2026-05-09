@@ -14463,3 +14463,71 @@ Accepted. The change is a correctness-preserving narrowing of the active-LoRA
 fusion gate and improves a down-only active-adapter serving run by `7.8%` with
 identical decode-batcher counters. It can also preserve full MLP fusion for
 attention-only adapters. Metal and Vulkan checks pass.
+
+## 2026-05-09 - E388 rejected precise LoRA QKV fusion gating
+
+### Hypothesis
+
+E387 showed that active LoRA fusion gates should be projection-specific. The
+same idea might preserve fused QKV projection for active adapters that only
+touch unrelated projections, such as a down-only MLP adapter.
+
+### Temporary change
+
+The temporary source change added a `has_qkv` predicate on
+`LoraLayerWeights`, then changed the decode fused-QKV gate from "any active
+LoRA layer disables fused QKV" to "only q/k/v LoRA disables fused QKV." A fixed
+backend unit test confirmed that an MLP-only active adapter still used the
+backend QKV fused decode path.
+
+The source change was reverted after measurement.
+
+### Validation
+
+Before reverting the source change:
+
+- `cargo test -p kiln-model --features metal test_full_attn_mlp_only_lora_keeps_backend_qkv_decode --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln`
+
+### Results
+
+Reused the temporary zero-valued PEFT adapter from E387 at
+`/tmp/kiln-e387-adapters/zero-r16-down`:
+
+- BF16 rank `16`, `lora_alpha=16`
+- all `32` Qwen3.5-4B layers
+- MLP `down_proj` only
+- `64` tensors, `12,067,006` byte safetensors file
+
+Endpoint A/B, eight varied concurrent streaming adapter requests, greedy
+`max_tokens=8`, `KILN_DECODE_BATCH_WAIT_US=200`:
+
+- Default temporary precise LoRA QKV fusion gate: `8.392413s`
+- `KILN_DISABLE_METAL_FUSED_QKV_PROJ=1`: `8.437917s`
+
+Counters were not identical:
+
+- Default: `64` generated tokens, `56` submitted jobs, `8` worker batches,
+  `56` batcher rows, max observed batch `8`
+- Fused QKV disabled: `64` generated tokens, `56` submitted jobs, `9` worker
+  batches, `56` batcher rows, max observed batch `8`
+
+The apparent wall-time improvement was only `0.5%`, and the worker-batch count
+differed.
+
+### Artifact
+
+- `e388_precise_lora_qkv_fusion_tests.log`
+- `e388_precise_lora_qkv_fusion_release_build_metal.log`
+- `e388_down_only_lora_qkv_endpoint_default_*`
+- `e388_down_only_lora_qkv_endpoint_fused_qkv_disabled_*`
+- `e388_down_only_lora_qkv_endpoint_comparison.json`
+
+### Decision
+
+Rejected. The source change was correct in the focused unit test, but the
+serving delta was too small and did not have identical scheduler counters.
+This is consistent with E384, where the fused-QKV base projection was
+effectively tied for the LoRA serial decode shape. Keep the source reverted and
+continue targeting the rank-small LoRA delta path and larger same-counters
+serving wins.
