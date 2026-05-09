@@ -1895,3 +1895,11 @@
   branch: rollback shared `1253.375 us` versus dedicated `1330.275 us` (`6.1%`
   slower). Runtime source was reverted; keep the current shared GDN in-proj
   serial vector path.
+- 2026-05-09 E436: Rejected global Metal transposed-GEMV simdgroup8. A first
+  dispatch-only attempt was invalid because MSL still mapped columns with
+  `tgroup * 4`; the corrected temporary candidate passed focused parity and
+  improved some single-row tile8 timings, but the current down-proj selector's
+  tile16 path regressed `935.973 -> 948.233 us` and decode-batch GEMV regressed
+  recent batch2/4/8 baselines. Runtime source was reverted. A future
+  single-row-only simdgroup8/tile8 selector experiment may still be worth
+  testing, but batch/fused-QKV paths should stay on simdgroup4.

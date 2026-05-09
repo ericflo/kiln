@@ -1,0 +1,67 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index 33f6591..e7cfcdc 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -76,7 +76,7 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8: &str =
+ const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS: usize = 16;
+-const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
++const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 8;
+ const METAL_TRANSPOSED_COOP_GEMV_THREADS: usize = 32 * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+@@ -2899,7 +2899,7 @@ kernel void kiln_transposed_coop_gemv4_bf16(
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 4;
++    const uint col_base = (tgroup * 8 + simd_group) * 4;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -2964,7 +2964,7 @@ kernel void kiln_transposed_coop_gemv8_bf16(
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 8;
++    const uint col_base = (tgroup * 8 + simd_group) * 8;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -3066,7 +3066,7 @@ kernel void kiln_transposed_coop_gemv16_bf16(
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 16;
++    const uint col_base = (tgroup * 8 + simd_group) * 16;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -3248,7 +3248,7 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+     const uint row_group_size = grouped_mode ? row_group_size_arg : 1;
+     const bool row_quad_mode = grouped_mode && row_group_size == 4;
+     const uint tile_cols = row_quad_mode ? 4 : 8;
+-    const uint col_base = (tgroup.x * 4 + simd_group) * tile_cols;
++    const uint col_base = (tgroup.x * 8 + simd_group) * tile_cols;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -3667,7 +3667,7 @@ kernel void kiln_transposed_coop_gemv8_batch_row_quad_tile8_bf16(
+ ) {
+     constexpr uint TILE_COLS = 8;
+     constexpr uint ROW_GROUP_SIZE = 4;
+-    const uint col_base = (tgroup.x * 4 + simd_group) * TILE_COLS;
++    const uint col_base = (tgroup.x * 8 + simd_group) * TILE_COLS;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -3984,7 +3984,7 @@ kernel void kiln_fused_qkv_transposed_coop_gemv8_bf16(
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+     constexpr uint TILE_COLS = 8;
+-    constexpr uint SIMD_GROUPS = 4;
++    constexpr uint SIMD_GROUPS = 8;
+     constexpr uint COLS_PER_TGROUP = TILE_COLS * SIMD_GROUPS;
+ 
+     const uint q_groups = (q_output_dim + COLS_PER_TGROUP - 1) / COLS_PER_TGROUP;

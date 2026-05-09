@@ -17740,3 +17740,80 @@ Rejected. Keep the existing shared GDN in-proj shader for the bs=1 serial
 vector path. Splitting the identical serial math into a dedicated kernel did
 not produce a stable win and lost the longer bs=1 comparison, so the runtime
 source was reverted.
+
+## 2026-05-09 - E436 rejected global Metal transposed-GEMV simdgroup8
+
+### Purpose
+
+Test whether using eight simdgroups per Metal transposed cooperative GEMV
+threadgroup improves the remaining projection-heavy serial path, especially
+MLP down-projection. Current kernels use four simdgroups per threadgroup.
+
+### Candidate
+
+- Temporarily changed the Rust dispatch constant from `4` to `8`.
+- The first dispatch-only attempt was invalid because the MSL kernels still
+  mapped columns with `tgroup * 4`; the timing log is kept only to explain why
+  it was disregarded.
+- Corrected the temporary candidate by changing the matching MSL column mapping
+  and fused-QKV `SIMD_GROUPS` constant to `8`.
+- Preserved the corrected candidate diff as an artifact, then reverted runtime
+  source before documenting the rejected result.
+
+### Validation
+
+- Current clean-source serial projection bench:
+  `KILN_METAL_TRANSPOSED_COOP_BENCH_WARMUP=5 KILN_METAL_TRANSPOSED_COOP_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_synthetic --lib -- --ignored --nocapture`
+- Corrected candidate parity:
+  `cargo test -p kiln-model --features metal transposed_coop_gemv --lib -- --nocapture`
+- Corrected candidate serial projection bench with the same warmup/iters
+- Corrected candidate decode-batch down-projection synthetic bench:
+  `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The corrected candidate was numerically correct for focused single-row, batch,
+and fused-QKV transposed GEMV parity.
+
+Serial projection synthetic bench:
+
+| shape / tile | current simd4 | fixed simd8 |
+| --- | ---: | ---: |
+| gate/up tile8 | `1177.179 us` | `1064.263 us` |
+| gate/up tile16 | `1137.552 us` | `1049.290 us` |
+| down tile8 | `924.692 us` | `902.698 us` |
+| down tile16 | `935.973 us` | `948.233 us` |
+| attn output tile8 | `293.231 us` | `280.312 us` |
+| attn qkv-like tile8 | `466.756 us` | `465.208 us` |
+
+This is not directly promotable because the current down-projection selector
+chooses tile16 for `[1,1,9216] x [9216,2560]`; with the fixed simd8 candidate,
+that intended default path moved from `935.973 us` to `948.233 us` (`1.3%`
+slower). Tile8 improved, but accepting that would need a separate selector
+change and endpoint validation.
+
+The global change also touched decode-batch GEMV and regressed recent batch
+baselines. The fixed simd8 candidate measured batch `2/3/4/8` at
+`1441.129/2053.983/2367.517/3029.729 us`, versus the current E432 same-source
+default/rerun ranges of roughly `1266-1332`, `1958-2186`, `2021-2162`, and
+`2858-2958 us`.
+
+### Artifacts
+
+- `e436_transposed_serial_simd8_current.log`
+- `e436_transposed_serial_simd8_candidate.log`
+- `e436_transposed_serial_simd8_fixed_parity.log`
+- `e436_transposed_serial_simd8_fixed_candidate.log`
+- `e436_transposed_serial_simd8_fixed_batch.log`
+- `e436_transposed_serial_simd8_candidate.diff`
+- `e436_transposed_serial_simd8_source_reverted.log`
+- `e436_transposed_serial_simd8_git_diff_check.log`
+
+### Decision
+
+Rejected as a global change. The runtime source was reverted. A future
+single-row-only simdgroup8 experiment may still be worthwhile, but batch and
+fused-QKV paths should stay on the current four-simdgroup mapping unless they
+win their own rollback-controlled comparisons.
