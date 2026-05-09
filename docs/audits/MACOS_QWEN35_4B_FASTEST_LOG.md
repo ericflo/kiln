@@ -15185,3 +15185,59 @@ Accepted. Keep tile16 only for the Qwen-shaped serial MLP down-projection
 GEMV. The isolated kernel win is small but repeats in same-binary paged latency
 with the targeted rollback knob, while the shape gate avoids the measured
 attention-output regression.
+
+## 2026-05-09 - E399 current paged serial profile after E398
+
+### Purpose
+
+Refresh the synchronized paged serial stage profile after accepting E398's
+shape-gated tile16 MLP down-projection GEMV. This is a profiling run, not a
+source change.
+
+### Results
+
+The measured second latency run reported:
+
+- Prefill: `703.831958 ms`
+- Mean inter-token latency: `303.106401 ms`
+- P50 / P99 inter-token latency: `308.358709 ms` / `336.502542 ms`
+- Decode throughput: `3.299172 tok/s`
+- Tokens generated: `9`
+
+Filtering the second run to `seq_len=1` decode profile rows:
+
+- `gate_up_fused`: `256` calls, `516.120 ms` total, `2.016 ms` average
+- `down_proj`: `256` calls, `333.458 ms` total, `1.303 ms` average
+- `in_proj`: `192` calls, `303.376 ms` total, `1.580 ms` average
+- `out_proj`: `192` calls, `151.359 ms` total, `0.788 ms` average
+- `qkv_proj`: `64` calls, `91.150 ms` total, `1.424 ms` average
+- `gates_recur_gated_norm`: `192` calls, `81.090 ms` total,
+  `0.422 ms` average
+- `qkv_conv_norm`: `192` calls, `72.061 ms` total, `0.375 ms` average
+- `o_proj`: `64` calls, `51.072 ms` total, `0.798 ms` average
+- `decode_attn_contiguous`: `64` calls, `24.135 ms` total,
+  `0.377 ms` average
+- `qkv_split`: `64` calls, `23.304 ms` total, `0.364 ms` average
+- `attn_gate`: `64` calls, `21.813 ms` total, `0.341 ms` average
+- `rope`: `64` calls, `21.195 ms` total, `0.331 ms` average
+- `qk_norm`: `64` calls, `20.574 ms` total, `0.321 ms` average
+- `kv_write`: `64` calls, `20.332 ms` total, `0.318 ms` average
+
+Compared with E397's same profiled shape, MLP `gate_up_fused` moved from
+`528.049 ms` to `516.120 ms`, while MLP `down_proj` remained essentially flat
+under intrusive stage profiling (`333.357 ms` to `333.458 ms`). Use the E398
+same-binary rollback latency A/B, not this profile, for the accepted tile16
+claim.
+
+### Artifact
+
+- `e399_current_paged_latency_profile_after_e398.log`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. MLP gate/up remains
+the largest serial decode bucket, followed by MLP down-projection and GDN
+in-projection. The next source experiment should either materially change
+gate/up execution without repeating rejected wider-serial/fast-exp/shared-X
+ideas, or target the remaining projection buckets with same-binary rollback
+evidence.

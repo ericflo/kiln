@@ -1587,3 +1587,9 @@
   mean ITL improved `160.631 -> 159.948 ms` (`0.43%`). Metal/Vulkan checks,
   release Metal builds, fmt, env fallback test, and diff checks passed; CUDA
   check was blocked locally by missing `nvcc`.
+- 2026-05-09 E399: Refreshed the current paged serial profile after E398.
+  The measured run reported `303.106 ms` mean ITL and `3.299 tok/s`.
+  Filtered decode totals kept MLP projections at the top:
+  `gate_up_fused` `516.120 ms`, `down_proj` `333.458 ms`, `gdn:in_proj`
+  `303.376 ms`, `gdn:out_proj` `151.359 ms`, and `full_attn:qkv_proj`
+  `91.150 ms`. Accepted as target-selection evidence; no source change.
