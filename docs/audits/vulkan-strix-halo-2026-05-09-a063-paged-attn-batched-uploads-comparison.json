@@ -1,0 +1,49 @@
+{
+  "candidate_metrics_delta": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch_after": 0.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 64.0,
+    "worker_batches": 0.0
+  },
+  "candidate_top_live_seq1_stage_totals": [],
+  "candidate_wall_s": 10.390566251000564,
+  "rollback_metrics_delta": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch_after": 0.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 64.0,
+    "worker_batches": 0.0
+  },
+  "rollback_top_live_seq1_stage_totals": [
+    {
+      "avg_ms": 1.3772812499999998,
+      "count": 32,
+      "key": "mlp_stage:fused seq_len=1",
+      "total_ms": 44.07299999999999
+    },
+    {
+      "avg_ms": 1.8150833333333332,
+      "count": 24,
+      "key": "gdn_stage:recurrent seq_len=1",
+      "total_ms": 43.562
+    },
+    {
+      "avg_ms": 1.711125,
+      "count": 24,
+      "key": "gdn_stage:in_proj seq_len=1",
+      "total_ms": 41.067
+    },
+    {
+      "avg_ms": 0.6819166666666666,
+      "count": 24,
+      "key": "gdn_stage:out_proj seq_len=1",
+      "total_ms": 16.366
+    }
+  ],
+  "rollback_wall_s": 11.091441299999133
+}

@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"lead"}}]}
+
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" tin"}}]}
+
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" zinc"}}]}
+
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" nickel"}}]}
+
+data: {"id":"chatcmpl-d75b0327-a41d-4e6d-abb9-bf9be2b56348","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

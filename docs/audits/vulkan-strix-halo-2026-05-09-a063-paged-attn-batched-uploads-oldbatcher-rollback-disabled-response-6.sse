@@ -1,0 +1,16 @@
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"pig"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" sheep"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" goat"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" chicken"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" duck"}}]}
+
+data: {"id":"chatcmpl-9d342b2d-3bb6-4c79-bb6b-dc207b864e43","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

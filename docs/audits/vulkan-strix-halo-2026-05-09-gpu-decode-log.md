@@ -3057,6 +3057,80 @@ Verdict:
 - Keep A059's guarded parallel recurrent runtime path. The CI failure was a
   tolerance mismatch, not a CUDA/Metal/source-path regression.
 
+### 2026-05-09 A063: Batch Paged-Attention Decode Input Uploads
+
+Context:
+- The dyn-seqlen Vulkan paged-attention decode path still materializes compact
+  K/V windows on the CPU and uploads inputs for each attention call.
+- `dispatch_paged_attn_decode_batch_f32` uploaded `q`, compacted `k`,
+  compacted `v`, and `seq_lens` through separate transfer submissions before
+  the compute dispatch.
+
+Change:
+- Create the four device-local input buffers first, then upload all four inputs
+  through one `upload_buffers_with_command_pool` call.
+- Add rollback env
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS=1`, which returns to the
+  previous sequential upload calls.
+- Keep the transient transfer command-pool guard scoped to the upload block.
+  An early local trial that held this guard across the later compute dispatch
+  could hang the focused paged-attention test; the accepted version drops it
+  before `run_compute_pipeline`.
+
+Evidence:
+- Focused candidate parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`.
+- Focused rollback parity passed:
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`.
+- Full Vulkan parity passed after rebasing onto latest `origin/main`:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`31` tests).
+- The first endpoint A/B used `KILN_BATCHING_ENGINE=1` and returned non-empty
+  visible text with empty reasoning for all eight requests, but it did not
+  exercise the old live-batcher counters:
+  `jobs_submitted=0`, `worker_batches=0`, `batcher_rows=0`,
+  `max_batch_after=0`. Treat this run as non-decision evidence for this
+  transfer-submission change.
+- The old live-batcher A/B left `KILN_BATCHING_ENGINE` unset, used
+  `KILN_DECODE_BATCH_WAIT_US=5000`, and reached identical candidate/rollback
+  counters: `requests_ok=8`, `tokens_generated=39`, `jobs_submitted=39`,
+  `jobs_failed=0`, `worker_batches=7`, `batcher_rows=39`,
+  `max_batch_after=8`.
+- All old-batcher responses were HTTP 200 with non-empty visible text and empty
+  reasoning. The visible completions matched the expected short-list shape,
+  for example `"blue green red yellow orange purple"` and
+  `"north south east west"`.
+- Targeted profiled stage improved:
+  `full_attn_stage:decode_attn_contiguous_batch seq_len=1` moved from rollback
+  `51.409ms total`, `count=48`, `1.071ms avg` to candidate
+  `43.977ms total`, `count=48`, `0.916ms avg`.
+- Endpoint wall time was neutral/slightly noisy against the candidate:
+  `9.015601s` candidate versus `8.987279s` rollback.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `git diff --check`
+
+Verdict:
+- Keep as a small guarded Vulkan-only transfer-submission improvement because
+  the targeted paged-attention decode stage improved with identical old-batcher
+  counters and correct visible output.
+- Do not cite this as an endpoint throughput win; wall time was effectively
+  flat in the measured A/B.
+- CUDA and Metal source paths were untouched. Roll back with
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS=1`.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU

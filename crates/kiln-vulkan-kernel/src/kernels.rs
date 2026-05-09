@@ -94,6 +94,12 @@ fn gdn_gated_norm_batched_uploads_enabled() -> bool {
     })
 }
 
+fn paged_attn_batched_uploads_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS").is_err())
+}
+
 fn prefill_row_pair_matmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
@@ -2682,22 +2688,49 @@ pub fn dispatch_paged_attn_decode_batch_f32(
     let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
         let buf = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
             .with_context(|| format!("failed to create paged_attn_decode_batch {label} buffer"))?;
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &buf,
-            data,
-        )
-        .with_context(|| format!("failed to upload paged_attn_decode_batch {label} buffer"))?;
         Ok(buf)
     };
     let q_buf = make_input(&q_data, "q")?;
     let k_buf = make_input(&k_data, "k")?;
     let v_buf = make_input(&v_data, "v")?;
     let seq_buf = make_input(&seq_data, "seq_lens")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        if paged_attn_batched_uploads_enabled() {
+            upload_buffers_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &[
+                    (&q_buf, &q_data),
+                    (&k_buf, &k_data),
+                    (&v_buf, &v_data),
+                    (&seq_buf, &seq_data),
+                ],
+            )
+            .context("failed to upload paged_attn_decode_batch inputs")?;
+        } else {
+            for (buf, data, label) in [
+                (&q_buf, &q_data, "q"),
+                (&k_buf, &k_data, "k"),
+                (&v_buf, &v_data, "v"),
+                (&seq_buf, &seq_data, "seq_lens"),
+            ] {
+                VulkanBuffer::upload_data_with_command_pool(
+                    device,
+                    host_visible_mt,
+                    queue,
+                    *command_pool,
+                    buf,
+                    data,
+                )
+                .with_context(|| {
+                    format!("failed to upload paged_attn_decode_batch {label} buffer")
+                })?;
+            }
+        }
+    }
 
     let out_size = (batch * num_heads * head_dim * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)

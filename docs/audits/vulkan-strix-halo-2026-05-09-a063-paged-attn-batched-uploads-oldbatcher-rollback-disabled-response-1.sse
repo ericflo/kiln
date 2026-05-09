@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"north"}}]}
+
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" south"}}]}
+
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" east"}}]}
+
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" west"}}]}
+
+data: {"id":"chatcmpl-b5bb6c7c-96a2-4975-81f1-9826ca9b9955","object":"chat.completion.chunk","created":1778332846,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
