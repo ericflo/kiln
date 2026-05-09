@@ -33,3 +33,16 @@ Date: 2026-05-09
   `cargo fmt --all --check`;
   `cargo build --release --features cuda --bin kiln`;
   `cargo test --release -p kiln-model --features cuda cuda_graph --lib`.
+- Rejected current CUDA continuous-batch knobs:
+  - `KILN_BATCHING_ENGINE=1` c=2 non-streaming fell to 19.2046s wall,
+    6.67 aggregate tok/s, with about 13.0 GiB residency;
+  - streaming `KILN_DECODE_BATCH_WAIT_US=1000` coalesced to batch 2 but fell to
+    19.3178s wall, 6.63 aggregate tok/s;
+  - disabling the live streaming batcher was also worse for unique c=2 prompts
+    (7.4672s wall, 17.14 aggregate tok/s).
+- Rejected CUDA native-MTP auto-default:
+  - warmed latency improved from explicit opt-out 2.8463s to 2.5971s
+    (24.64 tok/s), but output parity failed on a deterministic 32-token greedy
+    prompt;
+  - `KILN_MTP_ARGMAX_FP32=1` stayed non-parity and measured 2.6259s.
+- No code shipped for those rejected paths; native MTP remains opt-in only.
