@@ -15521,3 +15521,44 @@ touched Metal code.
 Accepted. Keep the precomputed-decay path enabled by default for supported
 Metal GDN prefill shapes, with
 `KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT=1` as the specific rollback.
+
+## 2026-05-09 - E405 current Metal prefill profile after E404
+
+### Purpose
+
+Refresh the `seq_len=64` Metal prefill target list after E404's accepted GDN
+precomputed-decay recurrent path. This run uses stage profiling and is
+therefore target-selection evidence, not endpoint latency evidence.
+
+### Results
+
+Filtering the measured second run to `seq_len=64` profile rows:
+
+- `gdn:in_proj`: `24` calls, `88.250 ms` total, `3.677 ms` average
+- `mlp:down_proj`: `32` calls, `76.579 ms` total, `2.393 ms` average
+- `mlp:up_proj`: `32` calls, `68.926 ms` total, `2.154 ms` average
+- `mlp:gate_proj`: `32` calls, `67.594 ms` total, `2.112 ms` average
+- `gdn:recurrent`: `24` calls, `36.002 ms` total, `1.500 ms` average
+- `gdn:out_proj`: `24` calls, `30.199 ms` total, `1.258 ms` average
+- `full_attn:qkv_proj`: `8` calls, `20.309 ms` total, `2.539 ms` average
+- `mlp:gate_silu`: `32` calls, `19.723 ms` total, `0.616 ms` average
+- `gdn:qkv_conv_split_norm`: `24` calls, `16.829 ms` total,
+  `0.701 ms` average
+- `full_attn:prefill_attn_fallback`: `8` calls, `14.926 ms` total,
+  `1.866 ms` average
+- `mlp:hidden_mul`: `32` calls, `13.400 ms` total, `0.419 ms` average
+- `full_attn:qkv_split`: `8` calls, `9.974 ms` total, `1.247 ms` average
+- `gdn:gated_norm`: `24` calls, `9.170 ms` total, `0.382 ms` average
+- `gdn:gates`: `24` calls, `6.417 ms` total, `0.267 ms` average
+
+### Artifacts
+
+- `e405_current_paged_latency_profile_after_e404.log`
+- `e405_prefill_profile_after_e404_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. E404 lowered the
+GDN gates/recurrent area, but prefill remains led by GDN input projection and
+split MLP projection matmuls. Do not retry E403's rejected `[T,1,H]` batch-GEMV
+reshape route for GDN prefill.

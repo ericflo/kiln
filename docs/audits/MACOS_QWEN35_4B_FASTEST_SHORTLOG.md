@@ -1625,3 +1625,9 @@
   prefill improved `437.754979 -> 433.537729 ms` (`0.96%`). Metal/Vulkan checks,
   focused Metal tests, release Metal builds, fmt, and diff checks passed; CUDA
   check remains blocked locally by missing `nvcc`.
+- 2026-05-09 E405: Refreshed the intrusive Metal `seq_len=64` prefill profile
+  after E404. Current prefill totals are led by `gdn:in_proj` `88.250 ms`,
+  `mlp:down_proj` `76.579 ms`, `mlp:up_proj` `68.926 ms`,
+  `mlp:gate_proj` `67.594 ms`, `gdn:recurrent` `36.002 ms`, and
+  `gdn:out_proj` `30.199 ms`. Accepted as target-selection evidence; no source
+  change.

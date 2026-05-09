@@ -1,0 +1,43 @@
+E405 current Metal paged prefill profile after E404
+
+Source artifact:
+- e405_current_paged_latency_profile_after_e404.log
+
+Command:
+- KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 405
+
+Notes:
+- Profile timing is intrusive and should be used for target selection, not as
+  endpoint latency evidence.
+- Totals below filter the measured second run to profile rows with seq_len=64.
+
+Prefill stage totals:
+- gdn:in_proj count=24 total=88.250 ms avg=3.677 ms
+- mlp:down_proj count=32 total=76.579 ms avg=2.393 ms
+- mlp:up_proj count=32 total=68.926 ms avg=2.154 ms
+- mlp:gate_proj count=32 total=67.594 ms avg=2.112 ms
+- gdn:recurrent count=24 total=36.002 ms avg=1.500 ms
+- gdn:out_proj count=24 total=30.199 ms avg=1.258 ms
+- full_attn:qkv_proj count=8 total=20.309 ms avg=2.539 ms
+- mlp:gate_silu count=32 total=19.723 ms avg=0.616 ms
+- gdn:qkv_conv_split_norm count=24 total=16.829 ms avg=0.701 ms
+- full_attn:prefill_attn_fallback count=8 total=14.926 ms avg=1.866 ms
+- mlp:hidden_mul count=32 total=13.400 ms avg=0.419 ms
+- full_attn:qkv_split count=8 total=9.974 ms avg=1.247 ms
+- gdn:gated_norm count=24 total=9.170 ms avg=0.382 ms
+- gdn:gates count=24 total=6.417 ms avg=0.267 ms
+- full_attn:q_transpose count=8 total=5.192 ms avg=0.649 ms
+- full_attn:kv_read count=8 total=4.296 ms avg=0.537 ms
+- full_attn:prefill_kv_head_layout count=8 total=3.578 ms avg=0.447 ms
+- full_attn:qk_norm count=8 total=3.286 ms avg=0.411 ms
+- full_attn:kv_write count=8 total=3.088 ms avg=0.386 ms
+- full_attn:rope count=8 total=2.804 ms avg=0.351 ms
+- full_attn:prefill_attn_head_major count=8 total=0.039 ms avg=0.005 ms
+- gdn:post_transpose count=24 total=0.011 ms avg=0.000 ms
+
+Target notes:
+- E404 moved the GDN gates+recurrent area down, but recurrent remains nonzero.
+- The next prefill target should again avoid the rejected E403 batch-GEMV
+  reshape route.
+- The current prefill leaders are GDN input projection and the split MLP
+  projection matmuls.
