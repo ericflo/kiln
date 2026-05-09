@@ -30,6 +30,7 @@ const DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT: &str =
     "KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT";
 const DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT: &str =
     "KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT";
+const DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ: &str = "KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ";
 const DISABLE_RMSNORM_KERNEL: &str = "KILN_DISABLE_RMSNORM_KERNEL";
 const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
@@ -164,12 +165,15 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     metal_gdn_decode_qkv_conv_norm_pipeline(metal_device)?;
     metal_gdn_prefill_qkv_conv_split_pipeline(metal_device)?;
     metal_gdn_gates_pipeline(metal_device)?;
+    metal_gdn_gates_decay_pipeline(metal_device)?;
+    metal_gdn_gates_decay_ab_pipeline(metal_device)?;
     metal_gdn_decode_gates_recurrent_pipeline(metal_device)?;
     metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(metal_device)?;
     metal_gated_rms_norm_pipeline(metal_device)?;
     metal_gdn_in_proj_pipeline(metal_device)?;
     metal_gdn_recurrent_pipeline(metal_device)?;
     metal_gdn_recurrent_prefill_head_last_pipeline(metal_device)?;
+    metal_gdn_recurrent_prefill_head_last_decay_pipeline(metal_device)?;
     metal_gdn_forward_substitution_pipeline(metal_device)?;
     metal_gdn_chunk_prep_pipeline(metal_device)?;
     metal_gdn_full_chunk_forward_pipeline(metal_device)?;
@@ -905,6 +909,10 @@ fn metal_gdn_prefill_decay_recurrent_disabled() -> bool {
         || env_truthy(DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT)
 }
 
+fn metal_gdn_prefill_ab_in_proj_disabled() -> bool {
+    env_truthy(DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ)
+}
+
 fn metal_gdn_decode_gates_recurrent_disabled() -> bool {
     metal_gdn_gates_disabled()
         || metal_gdn_recurrent_disabled()
@@ -1154,6 +1162,71 @@ pub(crate) fn metal_gdn_gates_decay_supports(
     dt_bias: &Tensor,
 ) -> bool {
     !metal_gdn_prefill_decay_recurrent_disabled() && metal_gdn_gates_supports(a, b, a_log, dt_bias)
+}
+
+pub(crate) fn metal_gdn_prefill_ab_in_proj_supports(
+    x: &Tensor,
+    in_proj_ab_t: &Tensor,
+    nv: usize,
+) -> bool {
+    if metal_gdn_prefill_ab_in_proj_disabled() {
+        return false;
+    }
+    if x.dtype() != DType::BF16 || in_proj_ab_t.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(x.device(), Device::Metal(_)) || !matches!(in_proj_ab_t.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !x.is_contiguous() || !in_proj_ab_t.is_contiguous() || nv == 0 {
+        return false;
+    }
+    let Ok((_batch, seq_len, hidden)) = x.dims3() else {
+        return false;
+    };
+    let Some(ab_dim) = nv.checked_mul(2) else {
+        return false;
+    };
+    seq_len > 1 && in_proj_ab_t.dims() == [hidden, ab_dim]
+}
+
+pub(crate) fn metal_gdn_gates_decay_ab_supports(
+    ab: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    nv: usize,
+) -> bool {
+    if metal_gdn_prefill_ab_in_proj_disabled() || metal_gdn_prefill_decay_recurrent_disabled() {
+        return false;
+    }
+    if ab.dtype() != DType::BF16 || a_log.dtype() != DType::F32 || dt_bias.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(ab.device(), Device::Metal(_))
+        || !matches!(a_log.device(), Device::Metal(_))
+        || !matches!(dt_bias.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !ab.is_contiguous() || nv == 0 || nv > 256 {
+        return false;
+    }
+    let Ok((batch, seq_len, channels)) = ab.dims3() else {
+        return false;
+    };
+    let Some(ab_dim) = nv.checked_mul(2) else {
+        return false;
+    };
+    let Some(total) = batch.checked_mul(seq_len).and_then(|n| n.checked_mul(nv)) else {
+        return false;
+    };
+    channels == ab_dim
+        && total > 0
+        && total <= u32::MAX as usize
+        && nv <= u32::MAX as usize
+        && a_log.dims() == [nv]
+        && dt_bias.dims() == [nv]
 }
 
 fn metal_gdn_forward_substitution_supports(
@@ -8791,6 +8864,37 @@ kernel void kiln_gdn_gates_decay_bf16(
     beta_out[gid] = static_cast<bfloat>(beta);
     decay_out[gid] = static_cast<bfloat>(exp(static_cast<float>(g_bf)));
 }
+
+kernel void kiln_gdn_gates_decay_ab_bf16(
+    device const bfloat* ab [[buffer(0)]],
+    device const float* a_log [[buffer(1)]],
+    device const bfloat* dt_bias [[buffer(2)]],
+    device bfloat* beta_out [[buffer(3)]],
+    device bfloat* decay_out [[buffer(4)]],
+    constant uint& nv [[buffer(5)]],
+    constant uint& total [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total) {
+        return;
+    }
+
+    const uint h = gid % nv;
+    const uint row = gid / nv;
+    const uint ab_base = row * (nv * 2);
+    const float a_val = static_cast<float>(ab[ab_base + h]);
+    const float b_val = static_cast<float>(ab[ab_base + nv + h]);
+    const float a_log_val = static_cast<float>(a_log[h]);
+    const float dt_bias_val = static_cast<float>(dt_bias[h]);
+
+    const float beta = kiln_stable_sigmoid(b_val);
+    const float sp = kiln_stable_softplus(a_val + dt_bias_val);
+    const float g = sp * -exp(a_log_val);
+    const bfloat g_bf = static_cast<bfloat>(g);
+
+    beta_out[gid] = static_cast<bfloat>(beta);
+    decay_out[gid] = static_cast<bfloat>(exp(static_cast<float>(g_bf)));
+}
 "#;
 
 const METAL_GDN_DECODE_GATES_RECURRENT_KERNEL: &str = r#"
@@ -9026,6 +9130,35 @@ fn metal_gdn_gates_decay_pipeline(
     Ok(pipeline)
 }
 
+fn metal_gdn_gates_decay_ab_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal gdn_gates decay A/B pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_gates_decay_ab_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn_gates decay A/B function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn_gates decay A/B pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_gdn_decode_gates_recurrent_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -9192,6 +9325,23 @@ fn metal_gdn_gates_bf16(
     Ok((beta, g))
 }
 
+pub(crate) fn metal_gdn_prefill_ab_in_proj_bf16(
+    x: &Tensor,
+    in_proj_ab_t: &Tensor,
+    nv: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_gdn_prefill_ab_in_proj_supports(x, in_proj_ab_t, nv),
+        "metal gdn prefill A/B in-proj unsupported shape"
+    );
+    let ab = x
+        .broadcast_matmul(in_proj_ab_t)
+        .context("metal gdn prefill A/B in-proj matmul")?;
+    let a = ab.narrow(2, 0, nv)?;
+    let b = ab.narrow(2, nv, nv)?;
+    Ok((ab, a, b))
+}
+
 pub(crate) fn metal_gdn_gates_decay_bf16(
     a: &Tensor,
     b: &Tensor,
@@ -9289,6 +9439,114 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
         let total_u32 = total as u32;
         encoder.set_bytes(6, &nv_u32);
         encoder.set_bytes(7, &total_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok((beta, decay))
+}
+
+pub(crate) fn metal_gdn_gates_decay_ab_bf16(
+    ab: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    nv: usize,
+) -> Result<(Tensor, Tensor)> {
+    anyhow::ensure!(
+        metal_gdn_gates_decay_ab_supports(ab, a_log, dt_bias, nv),
+        "metal gdn_gates decay A/B unsupported shape"
+    );
+    let (batch, seq_len, _channels) = ab.dims3()?;
+    let total = batch
+        .checked_mul(seq_len)
+        .and_then(|n| n.checked_mul(nv))
+        .ok_or_else(|| anyhow::anyhow!("metal gdn_gates decay A/B input too large"))?;
+    anyhow::ensure!(
+        total <= u32::MAX as usize,
+        "metal gdn_gates decay A/B input too large"
+    );
+    anyhow::ensure!(
+        nv <= u32::MAX as usize,
+        "metal gdn_gates decay A/B nv too large"
+    );
+
+    let ab = ab.contiguous()?;
+    let a_log = a_log.contiguous()?;
+    let dt_bias = dt_bias.contiguous()?;
+    let shape = vec![batch, seq_len, nv];
+    let beta = unsafe { Tensor::empty(shape.clone(), DType::BF16, ab.device())? };
+    let decay = unsafe { Tensor::empty(shape, DType::BF16, ab.device())? };
+
+    let Device::Metal(device) = ab.device() else {
+        anyhow::bail!("metal gdn_gates decay A/B requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_gates_decay_ab_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_gates_decay_ab_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (ab_storage, ab_layout) = ab.storage_and_layout();
+        let (al_storage, al_layout) = a_log.storage_and_layout();
+        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (decay_storage, decay_layout) = decay.storage_and_layout();
+
+        let ab_metal = match &*ab_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates decay A/B input must be on Metal"),
+        };
+        let al_metal = match &*al_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates decay A/B a_log must be on Metal"),
+        };
+        let dt_metal = match &*dt_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates decay A/B dt_bias must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates decay A/B beta output must be on Metal"),
+        };
+        let decay_metal = match &*decay_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn_gates decay A/B output must be on Metal"),
+        };
+
+        let ab_buf =
+            candle_core::metal_backend::buffer_o(ab_metal.buffer(), &ab_layout, ab.dtype());
+        let al_buf =
+            candle_core::metal_backend::buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
+        let dt_buf =
+            candle_core::metal_backend::buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let decay_buf = candle_core::metal_backend::buffer_o(
+            decay_metal.buffer(),
+            &decay_layout,
+            decay.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(ab_buf.buffer), ab_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(al_buf.buffer), al_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(dt_buf.buffer), dt_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(decay_buf.buffer), decay_buf.offset_in_bytes);
+
+        let nv_u32 = nv as u32;
+        let total_u32 = total as u32;
+        encoder.set_bytes(5, &nv_u32);
+        encoder.set_bytes(6, &total_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
@@ -12770,6 +13028,15 @@ mod tests {
         ))
     }
 
+    fn gdn_in_proj_prefill_ab_combined_reference(
+        x: &Tensor,
+        a_b_t: &Tensor,
+        nv: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let (_ab, a, b) = metal_gdn_prefill_ab_in_proj_bf16(x, a_b_t, nv)?;
+        Ok((a, b))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qkv_conv_norm_split_reference(
         mixed_qkv: &Tensor,
@@ -14030,6 +14297,86 @@ mod tests {
                  warmup={warmup} iters={iters} broadcast={broadcast_us:.3} us \
                  fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max_diff:.6e}",
                 broadcast_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_gdn_in_proj_prefill_ab_combined_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_GDN_IN_PROJ_PREFILL_AB_BENCH_WARMUP", 3);
+        let iters = env_usize("KILN_METAL_GDN_IN_PROJ_PREFILL_AB_BENCH_ITERS", 20);
+        let hidden = QWEN35_HIDDEN;
+        let qkv_dim = 8192usize;
+        let z_dim = 4096usize;
+        let nv = 32usize;
+        let qkv_t = patterned_bf16_2d(hidden, qkv_dim, &device, 37, 0.0009765625)?;
+        let z_t = patterned_bf16_2d(hidden, z_dim, &device, 43, 0.0009765625)?;
+        let a_t = patterned_bf16_2d(hidden, nv, &device, 29, 0.00390625)?;
+        let b_t = patterned_bf16_2d(hidden, nv, &device, 31, 0.00390625)?;
+        let a_b_t = Tensor::cat(&[&a_t, &b_t], D::Minus1)?.contiguous()?;
+        device.synchronize()?;
+
+        for seq_len in [16usize, 64, 128] {
+            let x_rows = patterned_bf16_decode_batch(seq_len, hidden, &device)?;
+            let x = x_rows.reshape((1usize, seq_len, hidden))?.contiguous()?;
+            let a_ref = x.broadcast_matmul(&a_t)?;
+            let b_ref = x.broadcast_matmul(&b_t)?;
+            let (a_combined, b_combined) =
+                gdn_in_proj_prefill_ab_combined_reference(&x, &a_b_t, nv)?;
+            device.synchronize()?;
+            let a_max = max_abs_diff(&a_ref, &a_combined)?;
+            let b_max = max_abs_diff(&b_ref, &b_combined)?;
+            let max = a_max.max(b_max);
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 GDN prefill combined A/B seq_len={seq_len} max_abs_diff={max:e} exceeds tolerance"
+            );
+
+            let qkv_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&qkv_t)
+                    .context("bench GDN prefill qkv projection")
+            })?;
+            let z_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&z_t)
+                    .context("bench GDN prefill z projection")
+            })?;
+            let a_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&a_t)
+                    .context("bench GDN prefill a projection")
+            })?;
+            let b_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                x.broadcast_matmul(&b_t)
+                    .context("bench GDN prefill b projection")
+            })?;
+            let ab_split_us = bench_metal_pair_op(&device, warmup, iters, || {
+                Ok((
+                    x.broadcast_matmul(&a_t)
+                        .context("bench GDN prefill split a projection")?,
+                    x.broadcast_matmul(&b_t)
+                        .context("bench GDN prefill split b projection")?,
+                ))
+            })?;
+            let ab_combined_us = bench_metal_pair_op(&device, warmup, iters, || {
+                gdn_in_proj_prefill_ab_combined_reference(&x, &a_b_t, nv)
+                    .context("bench GDN prefill combined a/b projection")
+            })?;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 GDN in-proj prefill A/B combined BF16: \
+                 seq_len={seq_len} x=[1,{seq_len},{hidden}] qkv_t=[{hidden},{qkv_dim}] \
+                 z_t=[{hidden},{z_dim}] a/b_t=[{hidden},{nv}] a_b_t=[{hidden},{}] \
+                 warmup={warmup} iters={iters} qkv={qkv_us:.3} us z={z_us:.3} us \
+                 a={a_us:.3} us b={b_us:.3} us ab_split={ab_split_us:.3} us \
+                 ab_combined={ab_combined_us:.3} us ab_speedup={:.3}x \
+                 max_abs_diff={max:.6e}",
+                nv * 2,
+                ab_split_us / ab_combined_us,
             );
         }
 
@@ -16124,24 +16471,31 @@ mod tests {
 
         let a = Tensor::from_slice(&a_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
         let b = Tensor::from_slice(&b_data, (batch, seq_len, nv), device)?.to_dtype(DType::BF16)?;
+        let ab = Tensor::cat(&[&a, &b], D::Minus1)?.contiguous()?;
         let a_log = Tensor::from_slice(&a_log_data, nv, device)?;
         let dt_bias = Tensor::from_slice(&dt_bias_data, nv, device)?.to_dtype(DType::BF16)?;
 
         assert!(metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias));
         assert!(metal_gdn_gates_decay_supports(&a, &b, &a_log, &dt_bias));
+        assert!(metal_gdn_gates_decay_ab_supports(&ab, &a_log, &dt_bias, nv));
         let (beta_ref, g_ref) = gdn_gates_reference(&a, &b, &a_log, &dt_bias)?;
         let (beta_fused, g_fused) = metal_gdn_gates_bf16(&a, &b, &a_log, &dt_bias)?;
         let decay_ref = g_ref.to_dtype(DType::F32)?.exp()?.to_dtype(DType::BF16)?;
         let (beta_decay, decay_fused) = metal_gdn_gates_decay_bf16(&a, &b, &a_log, &dt_bias)?;
+        let (beta_decay_ab, decay_ab) = metal_gdn_gates_decay_ab_bf16(&ab, &a_log, &dt_bias, nv)?;
 
         assert_eq!(beta_fused.dims(), &[batch, seq_len, nv]);
         assert_eq!(g_fused.dims(), &[batch, seq_len, nv]);
         assert_eq!(beta_decay.dims(), &[batch, seq_len, nv]);
         assert_eq!(decay_fused.dims(), &[batch, seq_len, nv]);
+        assert_eq!(beta_decay_ab.dims(), &[batch, seq_len, nv]);
+        assert_eq!(decay_ab.dims(), &[batch, seq_len, nv]);
         assert_eq!(beta_fused.dtype(), DType::BF16);
         assert_eq!(g_fused.dtype(), DType::BF16);
         assert_eq!(beta_decay.dtype(), DType::BF16);
         assert_eq!(decay_fused.dtype(), DType::BF16);
+        assert_eq!(beta_decay_ab.dtype(), DType::BF16);
+        assert_eq!(decay_ab.dtype(), DType::BF16);
 
         let beta_max = max_abs_diff(&beta_ref, &beta_fused)?;
         let beta_mean = mean_abs_diff(&beta_ref, &beta_fused)?;
@@ -16150,6 +16504,9 @@ mod tests {
         let beta_decay_max = max_abs_diff(&beta_ref, &beta_decay)?;
         let decay_max = max_abs_diff(&decay_ref, &decay_fused)?;
         let decay_mean = mean_abs_diff(&decay_ref, &decay_fused)?;
+        let beta_decay_ab_max = max_abs_diff(&beta_ref, &beta_decay_ab)?;
+        let decay_ab_max = max_abs_diff(&decay_ref, &decay_ab)?;
+        let decay_ab_mean = mean_abs_diff(&decay_ref, &decay_ab)?;
         assert!(
             beta_max < 2e-2,
             "GDN beta parity failed: max_abs_diff={beta_max}"
@@ -16171,6 +16528,18 @@ mod tests {
         assert!(
             decay_mean < 5e-3,
             "GDN decay parity failed: mean_abs_diff={decay_mean}"
+        );
+        assert!(
+            beta_decay_ab_max < 2e-2,
+            "GDN decay A/B beta parity failed: max_abs_diff={beta_decay_ab_max}"
+        );
+        assert!(
+            decay_ab_max < 2e-2,
+            "GDN decay A/B parity failed: max_abs_diff={decay_ab_max}"
+        );
+        assert!(
+            decay_ab_mean < 5e-3,
+            "GDN decay A/B parity failed: mean_abs_diff={decay_ab_mean}"
         );
 
         Ok(())

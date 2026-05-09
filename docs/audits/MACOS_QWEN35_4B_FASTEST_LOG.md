@@ -15608,3 +15608,85 @@ Rejected before endpoint measurement. Even with the combined weight prebuilt
 outside the timed region, the single wider prefill matmul is slower than the
 current split gate/up projection path. Do not add a combined gate/up prefill
 weight layout for this purpose.
+
+## 2026-05-09 - E407 accepted Metal GDN prefill combined A/B projection
+
+### Hypothesis
+
+E405 shows `gdn:in_proj` is the largest remaining measured prefill bucket after
+E404. E403 already rejected reshaping the full GDN prefill input projection
+through the decode batch-GEMV path, and E262 rejected a much larger combined
+GDN qkv+z+a+b layout. A narrower variant may still help: only the tiny A/B
+gate projections each produce `[B,T,32]`, so prebuilding one Metal-only
+`[hidden,64]` transpose and running one prefill matmul can remove one launch
+without perturbing the large qkv/z matmuls.
+
+### Change
+
+Accepted a guarded Metal-only prefill path:
+
+- load-time caches `in_proj_ab_t = cat(in_proj_a_t, in_proj_b_t, dim=-1)` only
+  for Metal devices
+- prefill-only GDN input projection uses one `x @ in_proj_ab_t` for A/B when
+  `seq_len > 1`; decode keeps the existing GDN in-proj backend path
+- added `kiln_gdn_gates_decay_ab_bf16`, so the E404 prefill gate-decay path can
+  read the combined `[a,b]` tensor directly instead of forcing split views
+  through extra contiguous copies
+- rollback: `KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ=1`
+- CUDA/Vulkan leave `in_proj_ab_t` empty and keep the previous projection path
+
+### Synthetic Results
+
+Same-binary ignored synthetic benchmark using Qwen3.5-4B shapes:
+
+- `seq_len=16`: split A/B `948.969 us`, combined A/B `479.969 us`,
+  speedup `1.977x`
+- `seq_len=64`: split A/B `961.158 us`, combined A/B `448.529 us`,
+  speedup `2.143x`
+- `seq_len=128`: split A/B `1075.879 us`, combined A/B `492.712 us`,
+  speedup `2.184x`
+- max absolute diff was `0` for all tested sequence lengths
+
+### Endpoint Results
+
+Full paged Qwen3.5-4B latency, same release binary, one warmup run,
+`prompt_tokens=64`, `max_output_tokens=64`, temperature `0.0`:
+
+- Pair 1: default `421.554042 ms` prefill vs rollback `430.046375 ms`
+  (`1.97%` faster)
+- Pair 2, counter-ordered: default `420.707875 ms` prefill vs rollback
+  `432.086875 ms` (`2.63%` faster)
+- Aggregate: default `421.130959 ms` vs rollback `431.066625 ms`, saving
+  `9.935666 ms` (`2.30%` faster)
+- Decode ITL also favored default in these runs (`159.182832 ms` default vs
+  `160.108212 ms` rollback average), treated as noise because the new path is
+  prefill-only
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_gates_matches_fallback_decode_shape -- --nocapture`
+- `cargo test -p kiln-model --features metal test_gdn_gates_matches_fallback_prefill_shape -- --nocapture`
+- `cargo test -p kiln-model --features metal test_gdn_recurrent_prefill_head_last_matches_sequential -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_PREFILL_AB_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_PREFILL_AB_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_gdn_in_proj_prefill_ab_combined_synthetic -- --ignored --nocapture`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+- `cargo check -p kiln-model --features cuda` was attempted and remains blocked
+  locally before compiling touched code because `nvcc --version` is unavailable
+
+### Artifacts
+
+- `e407_gdn_prefill_ab_combined_synthetic.log`
+- `e407_prefill_ab_latency_default_64out.log`
+- `e407_prefill_ab_latency_disabled_64out.log`
+- `e407_prefill_ab_latency_disabled_repeat_64out.log`
+- `e407_prefill_ab_latency_default_repeat_64out.log`
+- `e407_cuda_check.log`
+
+### Decision
+
+Accepted. The narrow A/B-only combined prefill layout produces a repeatable
+full-model prefill win without touching decode or non-Metal runtime behavior.

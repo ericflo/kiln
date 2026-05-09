@@ -1636,3 +1636,13 @@
   matmuls. Parity was exact, but same-binary synthetic timing regressed:
   `seq_len=64` current `4671.175 us` versus combined `5835.092 us` (`0.801x`).
   Temporary benchmark source reverted; do not add this combined prefill layout.
+- 2026-05-09 E407: Accepted a guarded Metal-only GDN prefill A/B projection
+  cache (`in_proj_ab_t = cat(in_proj_a_t, in_proj_b_t)`) plus a matching
+  combined-A/B gate-decay kernel. Rollback:
+  `KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ=1`. Synthetic Qwen-shaped A/B
+  prefill at `seq_len=64` improved `961.158 -> 448.529 us` (`2.143x`) with
+  zero diff. Full paged 64-token prefill A/B favored default in both pairs;
+  aggregate prefill improved `431.066625 -> 421.130959 ms` (`2.30%`, saving
+  `9.936 ms`). Metal/Vulkan checks, focused Metal tests, release Metal builds,
+  fmt, and diff checks passed; CUDA check remains blocked locally by missing
+  `nvcc`.

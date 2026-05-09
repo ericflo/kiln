@@ -942,6 +942,9 @@ pub struct GpuLinearAttentionWeights {
     pub in_proj_z_t: Tensor,
     pub in_proj_a_t: Tensor,
     pub in_proj_b_t: Tensor,
+    /// Metal-only cached `[hidden, 2 * nv]` transpose that combines the small
+    /// prefill A/B projections into one matmul. Other backends leave this empty.
+    pub in_proj_ab_t: Option<Tensor>,
     pub out_proj_t: Tensor,
 }
 
@@ -2081,6 +2084,27 @@ impl GpuWeights {
                         attn_proj.next().context(ctx("in_proj_a missing"))?;
                     let (in_proj_b, in_proj_b_t) =
                         attn_proj.next().context(ctx("in_proj_b missing"))?;
+                    let in_proj_ab_t = {
+                        #[cfg(feature = "metal")]
+                        {
+                            if matches!(device, Device::Metal(_)) {
+                                Some(
+                                    Tensor::cat(
+                                        &[&in_proj_a_t, &in_proj_b_t],
+                                        candle_core::D::Minus1,
+                                    )?
+                                    .contiguous()
+                                    .context(ctx("in_proj_ab_t contiguous"))?,
+                                )
+                            } else {
+                                None
+                            }
+                        }
+                        #[cfg(not(feature = "metal"))]
+                        {
+                            None
+                        }
+                    };
                     (
                         input_layernorm,
                         post_attention_layernorm,
@@ -2099,6 +2123,7 @@ impl GpuWeights {
                             in_proj_z_t,
                             in_proj_a_t,
                             in_proj_b_t,
+                            in_proj_ab_t,
                             out_proj_t,
                         }),
                     )
@@ -4198,7 +4223,7 @@ fn gated_deltanet_forward_decode_if(
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-    let (mixed_qkv, z, a, b) = {
+    let (mixed_qkv, z, a, b, prefill_ab_for_gates) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
             x,
@@ -4207,13 +4232,46 @@ fn gated_deltanet_forward_decode_if(
             &weights.in_proj_a_t,
             &weights.in_proj_b_t,
         )? {
-            (mixed_qkv, z, a, b)
+            (mixed_qkv, z, a, b, None::<Tensor>)
         } else {
             let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
             let z = broadcast_matmul_cpu_compatible(x, &weights.in_proj_z_t)?; // [B, T, v_dim]
-            let a = broadcast_matmul_cpu_compatible(x, &weights.in_proj_a_t)?; // [B, T, nv]
-            let b = broadcast_matmul_cpu_compatible(x, &weights.in_proj_b_t)?; // [B, T, nv]
-            (mixed_qkv, z, a, b)
+            let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
+                #[cfg(feature = "metal")]
+                {
+                    if let Some(in_proj_ab_t) = weights.in_proj_ab_t.as_ref() {
+                        if crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports(
+                            x,
+                            in_proj_ab_t,
+                            nv,
+                        ) {
+                            let (ab, a, b) =
+                                crate::backend::metal::metal_gdn_prefill_ab_in_proj_bf16(
+                                    x,
+                                    in_proj_ab_t,
+                                    nv,
+                                )
+                                .context("metal gdn prefill A/B in-proj")?;
+                            Some((ab, a, b))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    None
+                }
+            };
+            if let Some((ab, a, b)) = prefill_ab {
+                (mixed_qkv, z, a, b, Some(ab))
+            } else {
+                let a = broadcast_matmul_cpu_compatible(x, &weights.in_proj_a_t)?; // [B, T, nv]
+                let b = broadcast_matmul_cpu_compatible(x, &weights.in_proj_b_t)?; // [B, T, nv]
+                (mixed_qkv, z, a, b, None::<Tensor>)
+            }
         }
     };
     finish_gdn_stage_profile(
@@ -4223,6 +4281,8 @@ fn gated_deltanet_forward_decode_if(
         seq_len,
         stage_profile,
     )?;
+    #[cfg(not(feature = "metal"))]
+    let _ = &prefill_ab_for_gates;
 
     // Phase B11b tap: `gdn_in_proj`. Matches the HF reference layout
     // `concat([in_proj_qkvz(x), in_proj_ba(x)], dim=-1)` = [q, k, v, z, b, a]
@@ -4801,13 +4861,38 @@ fn gated_deltanet_forward_decode_if(
                     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
                     let (beta, decay) = {
                         kiln_nvtx::range!(c"kiln/gdn/gates");
-                        crate::backend::metal::metal_gdn_gates_decay_bf16(
-                            &a,
-                            &b,
-                            &weights.a_log,
-                            &weights.dt_bias,
-                        )
-                        .context("metal gdn prefill gates decay kernel failed")?
+                        if let Some(ab) = prefill_ab_for_gates.as_ref() {
+                            if crate::backend::metal::metal_gdn_gates_decay_ab_supports(
+                                ab,
+                                &weights.a_log,
+                                &weights.dt_bias,
+                                nv,
+                            ) {
+                                crate::backend::metal::metal_gdn_gates_decay_ab_bf16(
+                                    ab,
+                                    &weights.a_log,
+                                    &weights.dt_bias,
+                                    nv,
+                                )
+                                .context("metal gdn prefill A/B gates decay kernel failed")?
+                            } else {
+                                crate::backend::metal::metal_gdn_gates_decay_bf16(
+                                    &a,
+                                    &b,
+                                    &weights.a_log,
+                                    &weights.dt_bias,
+                                )
+                                .context("metal gdn prefill gates decay kernel failed")?
+                            }
+                        } else {
+                            crate::backend::metal::metal_gdn_gates_decay_bf16(
+                                &a,
+                                &b,
+                                &weights.a_log,
+                                &weights.dt_bias,
+                            )
+                            .context("metal gdn prefill gates decay kernel failed")?
+                        }
                     };
                     finish_gdn_stage_profile(
                         profile_device,
@@ -11260,6 +11345,7 @@ mod tests {
                     in_proj_z_t: in_proj_z.t()?.contiguous()?,
                     in_proj_a_t: in_proj_a.t()?.contiguous()?,
                     in_proj_b_t: in_proj_b.t()?.contiguous()?,
+                    in_proj_ab_t: None,
                     out_proj_t: out_proj.t()?.contiguous()?,
                     in_proj_qkv,
                     in_proj_z,
@@ -12428,6 +12514,7 @@ mod tests {
                 in_proj_z_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_a_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_b_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                in_proj_ab_t: None,
                 out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
             }),
             mlp: GpuFfnWeights {
@@ -13121,6 +13208,7 @@ mod tests {
                     in_proj_z_t,
                     in_proj_a_t,
                     in_proj_b_t,
+                    in_proj_ab_t: None,
                     out_proj_t,
                 })
             };
