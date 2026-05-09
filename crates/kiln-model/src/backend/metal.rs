@@ -16450,7 +16450,7 @@ mod tests {
 
         let input_dim = 1024usize;
         let output_dim = 1152usize;
-        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize, 32usize, 64usize] {
             for batch in [1usize, 2usize, 4usize, 8usize] {
                 let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
                 let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
@@ -16489,7 +16489,7 @@ mod tests {
         let warmup = env_usize("KILN_METAL_LORA_DELTA_BENCH_WARMUP", 5);
         let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
 
-        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize, 32usize, 64usize] {
             for batch in [1usize, 2usize, 4usize, 8usize] {
                 bench_lora_decode_add_case(
                     &device,

@@ -2038,3 +2038,15 @@
   BF16 diffs, but same-binary synthetic was a clear loss: `540.096 us` tile16
   versus `493.633 us` tile8. No endpoint A/B was run. Source reverted; keep
   fused-QKV on tile8.
+- 2026-05-09 E452: Accepted high-rank Metal LoRA coverage. Expanded delta-add
+  parity and synthetic benches plus full linear LoRA parity/MLP/QKV synthetic
+  benches from rank coverage up to `16` to include ranks `32` and `64` where
+  relevant. Delta-add parity passed for ranks `1/2/4/8/16/32/64`, batches
+  `1/2/4/8`; full linear parity passed for ranks `4/32/64`, batches `1/4`.
+  High-rank delta-add rows were exact and stayed faster than fallback:
+  rank-32 speedups `3.508-14.114x`, rank-64 speedups `3.565-24.083x`.
+  Quiet rerun full-linear MLP rows showed rank-32 speedups `3.407-88.499x`
+  and rank-64 speedups `2.424-94.356x`; QKV-shaped rows were exact with
+  rank-32 speedups `2.964-75.217x` and rank-64 speedups `2.721-70.866x`.
+  `cargo fmt --check`, Metal check, and Vulkan check passed; CUDA remains
+  locally blocked by missing `nvcc`. Runtime behavior is unchanged.

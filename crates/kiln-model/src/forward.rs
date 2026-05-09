@@ -10605,45 +10605,46 @@ mod tests {
 
         let input_dim = 128usize;
         let output_dim = 133usize;
-        let rank = 4usize;
         let mut exercised_fast_path = false;
-        for batch in [1usize, 4usize] {
-            let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, &device)?;
-            let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0078125, &device)?;
-            let lora = LoraProjectionWeights {
-                a: patterned_bf16(&[rank, input_dim], 0.001, &device)?,
-                b: patterned_bf16(&[output_dim, rank], 0.0015, &device)?,
-            };
-            let supported = if batch == 1 {
-                crate::backend::metal::metal_transposed_coop_gemv_supports(&x, &weight_t)
-            } else {
-                crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
-                    &x, &weight_t,
-                )
-            };
-            if !supported {
-                eprintln!(
-                    "Metal transposed coop GEMV disabled for batch={batch}, skipping LoRA parity row"
+        for rank in [4usize, 32usize, 64usize] {
+            for batch in [1usize, 4usize] {
+                let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, &device)?;
+                let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0078125, &device)?;
+                let lora = LoraProjectionWeights {
+                    a: patterned_bf16(&[rank, input_dim], 0.001, &device)?,
+                    b: patterned_bf16(&[output_dim, rank], 0.0015, &device)?,
+                };
+                let supported = if batch == 1 {
+                    crate::backend::metal::metal_transposed_coop_gemv_supports(&x, &weight_t)
+                } else {
+                    crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+                        &x, &weight_t,
+                    )
+                };
+                if !supported {
+                    eprintln!(
+                        "Metal transposed coop GEMV disabled for rank={rank} batch={batch}, skipping LoRA parity row"
+                    );
+                    continue;
+                }
+                exercised_fast_path = true;
+
+                let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 0.75)?;
+                let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 0.75)?;
+
+                assert_eq!(fast.dims(), &[batch, 1usize, output_dim]);
+                assert_eq!(fast.dtype(), DType::BF16);
+
+                let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
+                assert!(
+                    max < 2e-2,
+                    "Metal LoRA linear decode rank={rank} batch={batch} max_abs_diff={max:e} exceeds tolerance"
                 );
-                continue;
+                assert!(
+                    mean < 3e-3,
+                    "Metal LoRA linear decode rank={rank} batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+                );
             }
-            exercised_fast_path = true;
-
-            let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 0.75)?;
-            let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 0.75)?;
-
-            assert_eq!(fast.dims(), &[batch, 1usize, output_dim]);
-            assert_eq!(fast.dtype(), DType::BF16);
-
-            let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
-            assert!(
-                max < 2e-2,
-                "Metal LoRA linear decode batch={batch} max_abs_diff={max:e} exceeds tolerance"
-            );
-            assert!(
-                mean < 3e-3,
-                "Metal LoRA linear decode batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
-            );
         }
 
         if !exercised_fast_path {
@@ -10668,7 +10669,7 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(5);
 
-        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize, 32usize, 64usize] {
             for batch in [1usize, 2usize, 4usize, 8usize] {
                 bench_metal_lora_linear_case(
                     &device,
@@ -10714,7 +10715,7 @@ mod tests {
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(5);
 
-        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize, 32usize, 64usize] {
             for batch in [1usize, 2usize, 4usize, 8usize] {
                 bench_metal_lora_linear_case(
                     &device, "q_proj", batch, 2560, 8192, rank, warmup, iters,

@@ -1,0 +1,232 @@
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:797:13
+    |
+797 |         let mut cache = PagedKvCache::new(
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:867:13
+    |
+867 |         let mut cache = PagedKvCache::new(1, 4, 4, 2, 3, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:907:13
+    |
+907 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:961:13
+    |
+961 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::BF16, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1016:13
+     |
+1016 |         let mut cache = PagedKvCache::new_uninit(1, 4, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1066:13
+     |
+1066 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1125:13
+     |
+1125 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1163:13
+     |
+1163 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1202:13
+     |
+1202 |         let mut cache = PagedKvCache::new(1, 2, 4, 2, 3, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1236:13
+     |
+1236 |         let mut paged = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1318:13
+     |
+1318 |         let mut cache = PagedKvCache::new(3, 2, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1359:13
+     |
+1359 |         let mut cache = PagedKvCache::new_with_fp8(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1407:21
+     |
+1407 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1429:13
+     |
+1429 |         let mut cache = PagedKvCache::new_with_fp8(1, 2, 4, 2, 3, DType::F32, &device, true)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3675:4
+     |
+3675 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8682:15
+     |
+8682 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib test) generated 22 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 16 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=1 iters=3 fused_us=221.667 fallback_us=738.764 speedup=3.333 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=1 iters=3 fused_us=312.917 fallback_us=1625.875 speedup=5.196 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=1 iters=3 fused_us=213.111 fallback_us=899.625 speedup=4.221 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=1 iters=3 fused_us=306.083 fallback_us=1660.708 speedup=5.426 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=1 iters=3 fused_us=236.945 fallback_us=1091.417 speedup=4.606 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=1 iters=3 fused_us=318.208 fallback_us=1773.945 speedup=5.575 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=1 iters=3 fused_us=264.069 fallback_us=1448.486 speedup=5.485 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=1 iters=3 fused_us=317.000 fallback_us=1908.736 speedup=6.021 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=2 iters=3 fused_us=240.750 fallback_us=959.014 speedup=3.983 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=2 iters=3 fused_us=327.764 fallback_us=1796.194 speedup=5.480 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=2 iters=3 fused_us=239.083 fallback_us=1066.306 speedup=4.460 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=2 iters=3 fused_us=338.681 fallback_us=1934.153 speedup=5.711 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=2 iters=3 fused_us=263.792 fallback_us=1331.500 speedup=5.048 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=2 iters=3 fused_us=322.167 fallback_us=2186.653 speedup=6.787 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=2 iters=3 fused_us=264.875 fallback_us=1899.181 speedup=7.170 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=2 iters=3 fused_us=635.236 fallback_us=3019.167 speedup=4.753 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=4 iters=3 fused_us=235.889 fallback_us=1064.889 speedup=4.514 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=4 iters=3 fused_us=331.111 fallback_us=2008.208 speedup=6.065 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=4 iters=3 fused_us=254.042 fallback_us=1258.264 speedup=4.953 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=4 iters=3 fused_us=331.847 fallback_us=2162.819 speedup=6.518 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=4 iters=3 fused_us=257.417 fallback_us=1681.611 speedup=6.533 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=4 iters=3 fused_us=375.528 fallback_us=2758.778 speedup=7.346 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=4 iters=3 fused_us=301.000 fallback_us=2525.153 speedup=8.389 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=4 iters=3 fused_us=426.014 fallback_us=3591.611 speedup=8.431 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=8 iters=3 fused_us=276.167 fallback_us=1068.542 speedup=3.869 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=8 iters=3 fused_us=386.486 fallback_us=1888.320 speedup=4.886 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=8 iters=3 fused_us=326.000 fallback_us=1626.764 speedup=4.990 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=8 iters=3 fused_us=409.361 fallback_us=2689.181 speedup=6.569 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=8 iters=3 fused_us=362.180 fallback_us=2342.430 speedup=6.468 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=8 iters=3 fused_us=440.847 fallback_us=3693.319 speedup=8.378 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=8 iters=3 fused_us=354.431 fallback_us=3655.472 speedup=10.314 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=8 iters=3 fused_us=366.097 fallback_us=4267.417 speedup=11.657 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=16 iters=3 fused_us=374.347 fallback_us=1309.139 speedup=3.497 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=16 iters=3 fused_us=416.417 fallback_us=2596.153 speedup=6.235 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=16 iters=3 fused_us=384.306 fallback_us=2098.819 speedup=5.461 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=16 iters=3 fused_us=384.028 fallback_us=3720.167 speedup=9.687 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=16 iters=3 fused_us=378.097 fallback_us=3301.222 speedup=8.731 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=16 iters=3 fused_us=330.792 fallback_us=4171.167 speedup=12.610 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=16 iters=3 fused_us=388.903 fallback_us=3813.875 speedup=9.807 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=16 iters=3 fused_us=233.722 fallback_us=3617.764 speedup=15.479 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=32 iters=3 fused_us=220.611 fallback_us=773.875 speedup=3.508 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=32 iters=3 fused_us=220.653 fallback_us=1171.903 speedup=5.311 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=32 iters=3 fused_us=250.194 fallback_us=1198.306 speedup=4.789 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=32 iters=3 fused_us=244.319 fallback_us=1783.653 speedup=7.300 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=32 iters=3 fused_us=455.403 fallback_us=2566.444 speedup=5.636 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=32 iters=3 fused_us=392.264 fallback_us=4886.972 speedup=12.458 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=32 iters=3 fused_us=1109.014 fallback_us=7998.958 speedup=7.213 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=32 iters=3 fused_us=548.722 fallback_us=7744.930 speedup=14.114 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=64 iters=3 fused_us=383.944 fallback_us=1368.945 speedup=3.565 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=64 iters=3 fused_us=303.403 fallback_us=1874.222 speedup=6.177 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=64 iters=3 fused_us=481.514 fallback_us=2506.250 speedup=5.205 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=64 iters=3 fused_us=367.417 fallback_us=5236.597 speedup=14.252 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=64 iters=3 fused_us=848.764 fallback_us=5888.708 speedup=6.938 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=64 iters=3 fused_us=387.472 fallback_us=5699.458 speedup=14.709 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=64 iters=3 fused_us=851.972 fallback_us=8173.083 speedup=9.593 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_delta_add_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=64 iters=3 fused_us=427.472 fallback_us=10294.944 speedup=24.083 max_abs_diff=0e0 mean_abs_diff=0e0
+test backend::metal::tests::bench_lora_decode_add_qwen35_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 371 filtered out; finished in 2.90s
+

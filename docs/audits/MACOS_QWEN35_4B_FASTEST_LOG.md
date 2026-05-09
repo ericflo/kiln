@@ -18781,3 +18781,81 @@ The regression is large enough that no endpoint A/B was run.
 Rejected. Actual fused-QKV tile16 regressed versus the current tile8 fused
 kernel, despite older generic QKV-like tile16 proxy wins. Source was reverted;
 keep fused-QKV on tile8.
+
+## 2026-05-09 - E452 accepted high-rank Metal LoRA coverage
+
+### Purpose
+
+Fill the remaining Metal LoRA coverage gap for higher adapter ranks. E426 made
+the runtime LoRA decode-add helper support any positive rank, but the focused
+tests and Qwen3.5 synthetic benches still only covered ranks up to 16. This
+experiment adds rank `32` and `64` coverage without changing runtime behavior.
+
+### Change
+
+Expanded Metal LoRA delta-add parity and Qwen3.5 synthetic coverage from ranks
+`1/2/4/8/16` to `1/2/4/8/16/32/64`. Expanded full Metal linear LoRA parity
+from a single rank-4 row to ranks `4/32/64` for batch `1/4`, and expanded both
+MLP-shaped and QKV-shaped synthetic linear LoRA benches to ranks
+`1/2/4/8/16/32/64`.
+
+### Results
+
+Focused parity passed:
+
+- delta-add LoRA parity: ranks `1/2/4/8/16/32/64`, batches `1/2/4/8`
+- full linear LoRA parity: ranks `4/32/64`, batches `1/4`
+
+High-rank delta-add synthetic rows remained exact:
+
+| rank | label | fused range | fallback range | speedup range | diff |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 32 | mlp_gate_or_up | `220.611-1109.014 us` | `773.875-7998.958 us` | `3.508-7.213x` | `0e0` |
+| 32 | down_proj | `220.653-548.722 us` | `1171.903-7744.930 us` | `5.311-14.114x` | `0e0` |
+| 64 | mlp_gate_or_up | `383.944-851.972 us` | `1368.945-8173.083 us` | `3.565-9.593x` | `0e0` |
+| 64 | down_proj | `303.403-427.472 us` | `1874.222-10294.944 us` | `6.177-24.083x` | `0e0` |
+
+The first full-linear synthetic run was kept as an artifact but superseded for
+decision notes by a quiet rerun after concurrent local activity. Quiet high-rank
+MLP-shaped rows:
+
+| rank | label | fast range | fallback range | speedup range | diff |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 32 | mlp_gate_or_up | `1.440-3.369 ms` | `4.922-298.134 ms` | `3.418-88.499x` | `0e0` |
+| 32 | down_proj | `1.254-3.908 ms` | `4.272-326.353 ms` | `3.407-83.513x` | max `1.5625e-2` |
+| 64 | mlp_gate_or_up | `1.437-3.900 ms` | `3.484-306.120 ms` | `2.424-78.492x` | `0e0` |
+| 64 | down_proj | `1.362-3.512 ms` | `5.213-331.344 ms` | `3.827-94.356x` | max `3.125e-2` |
+
+High-rank QKV-shaped rows stayed exact:
+
+| rank | label | fast range | fallback range | speedup range | diff |
+| ---: | --- | ---: | ---: | ---: | --- |
+| 32 | q_proj | `1.326-3.532 ms` | `4.731-265.679 ms` | `2.964-75.217x` | `0e0` |
+| 32 | k_or_v_proj | `0.437-0.647 ms` | `1.686-34.677 ms` | `3.630-53.603x` | `0e0` |
+| 64 | q_proj | `1.228-3.798 ms` | `3.340-269.118 ms` | `2.721-70.866x` | `0e0` |
+| 64 | k_or_v_proj | `0.363-0.673 ms` | `1.612-37.220 ms` | `4.447-55.316x` | `0e0` |
+
+Compile guards:
+
+- `cargo fmt --check`: passed
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: locally blocked by missing
+  `nvcc`/CUDA toolkit; captured as an environment/toolchain failure, not a
+  source regression
+
+### Artifacts
+
+- `e452_lora_rank32_64_delta_parity.log`
+- `e452_lora_rank32_64_linear_parity.log`
+- `e452_lora_rank32_64_delta_bench.log`
+- `e452_lora_rank32_64_linear_bench.log`
+- `e452_lora_rank32_64_linear_bench_rerun_quiet.log`
+- `e452_lora_rank32_64_qkv_linear_bench.log`
+- `e452_cuda_check.log`
+
+### Decision
+
+Accepted as measurement and regression coverage. The runtime Metal, CUDA, and
+Vulkan paths are unchanged; this only makes future LoRA work exercise ranks
+`32` and `64` in the focused Metal tests and synthetic benches.
