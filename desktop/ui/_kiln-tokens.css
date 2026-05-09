@@ -1,0 +1,644 @@
+/* =====================================================================
+   Kiln Desktop — shared design tokens & component overrides
+   ---------------------------------------------------------------------
+   Mirrors the tokens used by the embedded server `/ui` so the Tauri
+   shell (toolbar, settings, logs, about, install pane) reads as one
+   continuous product surface — warm amber accents on warm-tinted
+   charcoal, Inter typography, 4px spacing grid.
+
+   This sheet is linked AFTER each window's inline <style>, so it wins
+   the cascade on selector ties without rewriting every existing rule.
+   ===================================================================== */
+
+:root {
+  /* Brand — kiln amber, derived from the logo's fire-cube ramp */
+  --kiln-50:  #fff7ed;
+  --kiln-100: #ffedd5;
+  --kiln-200: #fed7aa;
+  --kiln-300: #fdba74;
+  --kiln-400: #fb923c;
+  --kiln-500: #f97316;
+  --kiln-600: #ea580c;
+  --kiln-700: #c2410c;
+  --kiln-800: #9a3412;
+  --kiln-900: #7c2d12;
+
+  /* Surface — warm-tinted charcoal */
+  --ink-950: #08090c;
+  --ink-900: #0d0e12;
+  --ink-850: #11131a;
+  --ink-800: #14161e;
+  --ink-750: #181b24;
+  --ink-700: #1c1f29;
+  --ink-650: #232732;
+  --ink-600: #2a2f3b;
+  --ink-500: #353a48;
+  --ink-400: #4b5163;
+  --ink-300: #6b7280;
+  --ink-200: #9ca3af;
+  --ink-100: #d1d5db;
+  --ink-50:  #f4f5f7;
+
+  /* Semantic */
+  --success-fg: #4ade80;
+  --success-bg: #0f2c1c;
+  --success-bd: #1a4d2e;
+  --warning-fg: #fbbf24;
+  --warning-bg: #2c220a;
+  --warning-bd: #4a3a14;
+  --danger-fg:  #f87171;
+  --danger-bg:  #2a1414;
+  --danger-bd:  #4a1f1f;
+  --info-fg:    #60a5fa;
+  --info-bg:    #0f1c2c;
+  --info-bd:    #1a3050;
+
+  --bg:           var(--ink-950);
+  --canvas:       var(--ink-900);
+  --surface:      var(--ink-800);
+  --surface-2:    var(--ink-750);
+  --surface-3:    var(--ink-700);
+  --border:       var(--ink-650);
+  --border-strong:var(--ink-500);
+  --text:         var(--ink-50);
+  --text-2:       var(--ink-100);
+  --text-3:       var(--ink-200);
+  --text-muted:   var(--ink-300);
+  --text-quiet:   var(--ink-400);
+  --accent:       var(--kiln-500);
+  --accent-hover: var(--kiln-400);
+  --accent-press: var(--kiln-600);
+  --accent-soft:  rgba(249, 115, 22, 0.12);
+  --accent-ring:  rgba(249, 115, 22, 0.42);
+
+  --font-sans:    'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono:    'SF Mono', 'JetBrains Mono', 'Berkeley Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-7: 32px; --space-8: 40px;
+
+  --radius-xs: 3px;  --radius-sm: 5px;  --radius-md: 8px;
+  --radius-lg: 12px; --radius-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --glow-brand: 0 0 0 1px rgba(249, 115, 22, 0.18), 0 12px 28px rgba(249, 115, 22, 0.18);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 140ms;
+  --t-base: 220ms;
+
+  color-scheme: dark;
+}
+
+/* ---------------------------------------------------------------------
+   Base — page chrome, typography, scrollbars
+   --------------------------------------------------------------------- */
+html, body {
+  background: var(--bg) !important;
+  color: var(--text) !important;
+  font-family: var(--font-sans) !important;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--ink-700);
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--bg);
+}
+*::-webkit-scrollbar-thumb:hover { background: var(--ink-600); }
+
+::selection { background: var(--accent-soft); color: var(--text); }
+
+a, a.doc-link, .meta a, .help-row a, #status a.doc-link, #install a.doc-link {
+  color: var(--kiln-300) !important;
+  text-decoration: none;
+}
+a:hover, a.doc-link:hover, .meta a:hover, .help-row a:hover { text-decoration: underline; }
+
+code, kbd, pre, samp,
+.modal-card kbd,
+#install code, #status code,
+header input[type="search"],
+#log,
+#base-url, #model-path, #vram-value, #adapter-name, #training-value {
+  font-family: var(--font-mono) !important;
+  font-feature-settings: 'liga' 0, 'calt' 0, 'tnum' 1;
+}
+
+/* ---------------------------------------------------------------------
+   Buttons — default to secondary, opt-in to primary
+
+   Rationale: a desktop shell has many small action buttons (Copy, Save,
+   Clear, Close, Reload, Browse…). Making them all amber CTAs visually
+   shouts. Default to a quiet surface-2 chip; reserve amber for the
+   primary action of each window.
+   --------------------------------------------------------------------- */
+button {
+  background: var(--surface-2) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  font-family: var(--font-sans) !important;
+  font-weight: 500;
+  letter-spacing: 0;
+  transition: background var(--t-fast) var(--ease-out),
+              border-color var(--t-fast) var(--ease-out),
+              color var(--t-fast) var(--ease-out),
+              box-shadow var(--t-fast) var(--ease-out);
+  cursor: pointer;
+}
+button:hover {
+  background: var(--surface-3) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+}
+button:active { background: var(--surface-3) !important; }
+button:focus-visible {
+  outline: 2px solid var(--accent-ring) !important;
+  outline-offset: 2px;
+}
+button:disabled {
+  background: var(--surface-2) !important;
+  color: var(--text-quiet) !important;
+  cursor: default;
+  border-color: var(--border) !important;
+  opacity: 0.55;
+}
+
+/* Primary action — amber CTA. Opt-in via .primary, type="submit",
+   or the well-known dashboard IDs below (one true CTA per window).
+   #save is intentionally NOT in this list because logs.html and
+   settings.html both use that ID; settings.html opts in via class.
+   `#toolbar #copy-url` chained selector is required to outweigh the
+   `#toolbar button` rule (specificity 1,1,0,0 > 1,0,0,1) further down. */
+button.primary,
+button[type="submit"],
+#toolbar #copy-url,
+#copy-url,
+#install-download-btn,
+#start-server,
+#hf-start {
+  background: var(--accent) !important;
+  color: #1a0c00 !important;
+  border: 1px solid transparent !important;
+  font-weight: 600;
+}
+button.primary:hover,
+button[type="submit"]:hover,
+#toolbar #copy-url:hover,
+#copy-url:hover,
+#install-download-btn:hover,
+#start-server:hover,
+#hf-start:hover {
+  background: var(--accent-hover) !important;
+  color: #1a0c00 !important;
+  border-color: transparent !important;
+}
+button.primary:active,
+button[type="submit"]:active,
+#toolbar #copy-url:active,
+#copy-url:active,
+#install-download-btn:active,
+#start-server:active,
+#hf-start:active {
+  background: var(--accent-press) !important;
+}
+button.primary:disabled,
+#hf-start:disabled,
+#install-download-btn:disabled {
+  background: var(--ink-700) !important;
+  color: var(--text-quiet) !important;
+  border-color: var(--border) !important;
+  opacity: 0.65;
+}
+
+/* Explicit secondary class kept as alias of the new default,
+   so existing markup with class="secondary" / class="browse" still works. */
+button.secondary,
+button.browse,
+#install-actions button.secondary,
+footer button.secondary {
+  background: var(--surface-2) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border) !important;
+  font-weight: 500;
+}
+button.secondary:hover,
+button.browse:hover,
+#install-actions button.secondary:hover,
+footer button.secondary:hover {
+  background: var(--surface-3) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+}
+
+/* ---------------------------------------------------------------------
+   Status / install panes (dashboard.html landing states)
+   --------------------------------------------------------------------- */
+#status, #install {
+  background: radial-gradient(
+      120% 80% at 50% -20%,
+      rgba(249, 115, 22, 0.08),
+      transparent 60%
+    ),
+    var(--bg) !important;
+}
+#status h1, #install h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text) !important;
+}
+#status p, #install p {
+  color: var(--text-3) !important;
+  line-height: 1.55;
+}
+#status p.help-links { color: var(--text-muted) !important; }
+#status code, #install code {
+  background: var(--surface-2) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+#install-progress-wrap {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-pill) !important;
+  height: 8px !important;
+  overflow: hidden;
+}
+#install-progress-bar {
+  background: linear-gradient(90deg, var(--kiln-600), var(--kiln-400)) !important;
+  box-shadow: 0 0 18px rgba(249, 115, 22, 0.45);
+  height: 100% !important;
+  transition: width var(--t-base) var(--ease-out);
+}
+#install-progress-label {
+  color: var(--text-muted) !important;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------------
+   Toolbar (dashboard top-right pill rail)
+   --------------------------------------------------------------------- */
+#toolbar {
+  background: rgba(13, 14, 18, 0.78) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  box-shadow: var(--shadow-1);
+  padding: 6px 8px !important;
+  gap: 6px !important;
+}
+
+#toolbar button {
+  background: var(--surface-2) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border) !important;
+  font-weight: 500;
+  font-size: 12px;
+}
+#toolbar button:hover {
+  background: var(--surface-3) !important;
+  border-color: var(--border-strong) !important;
+  color: var(--text) !important;
+}
+
+#toolbar button#stop-server:hover {
+  background: var(--danger-bg) !important;
+  border-color: var(--danger-bd) !important;
+  color: var(--danger-fg) !important;
+}
+#toolbar button#restart-server:hover {
+  background: var(--info-bg) !important;
+  border-color: var(--info-bd) !important;
+  color: var(--info-fg) !important;
+}
+
+#toolbar .toolbar-divider {
+  background: var(--border) !important;
+  width: 1px !important;
+  margin: 4px 4px !important;
+}
+
+/* Pills (status, base-url, model-path, vram, adapter, training) */
+#status-badge,
+#base-url,
+#model-path-pill,
+#vram-pill,
+#adapter-pill,
+#training-pill {
+  background: var(--surface-2) !important;
+  color: var(--text-3) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+#status-badge .dot {
+  width: 8px !important;
+  height: 8px !important;
+  border-radius: var(--radius-pill);
+  box-shadow: 0 0 0 0 transparent;
+  transition: box-shadow var(--t-base) var(--ease-out);
+}
+#status-badge.state-stopped .dot { background: var(--ink-400) !important; }
+#status-badge.state-starting .dot {
+  background: var(--warning-fg) !important;
+  box-shadow: 0 0 8px rgba(251, 191, 36, 0.45);
+}
+#status-badge.state-running .dot {
+  background: var(--success-fg) !important;
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.45);
+}
+#status-badge.state-training .dot {
+  background: var(--accent) !important;
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.55);
+  animation: kiln-pulse 1.6s ease-in-out infinite;
+}
+#status-badge.state-error .dot {
+  background: var(--danger-fg) !important;
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.45);
+}
+#status-badge.state-unknown .dot { background: var(--ink-400) !important; }
+
+@keyframes kiln-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.55; transform: scale(0.85); }
+}
+
+#model-path-pill .model-label,
+#vram-pill .vram-label,
+#adapter-pill .adapter-label,
+#training-pill .training-label {
+  color: var(--text-quiet) !important;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+#base-url, #model-path, #vram-value, #adapter-name, #training-value {
+  color: var(--text-2) !important;
+}
+#base-url.empty, #model-path.empty, #vram-value.empty, #adapter-name.empty, #training-value.empty {
+  color: var(--text-quiet) !important;
+}
+
+/* Pill flash states */
+#copy-url.flash,
+#check-updates-btn.flash,
+#model-path-pill.flash,
+#adapter-pill.flash,
+#vram-pill.flash,
+#base-url.flash {
+  background: var(--success-bg) !important;
+  border-color: var(--success-bd) !important;
+  color: var(--success-fg) !important;
+}
+#copy-url.flash-warn,
+#check-updates-btn.flash-warn,
+#model-path-pill.flash-warn,
+#adapter-pill.flash-warn,
+#vram-pill.flash-warn,
+#base-url.flash-warn,
+#stop-server.flash-warn,
+#restart-server.flash-warn {
+  background: var(--danger-bg) !important;
+  border-color: var(--danger-bd) !important;
+  color: var(--danger-fg) !important;
+}
+
+/* ---------------------------------------------------------------------
+   Update banner (warm amber, not generic blue)
+   --------------------------------------------------------------------- */
+#update-banner {
+  background: linear-gradient(180deg, var(--warning-bg), var(--ink-800)) !important;
+  border: 1px solid var(--warning-bd) !important;
+  color: var(--warning-fg) !important;
+  border-radius: var(--radius-md) !important;
+  font-size: 13px;
+}
+#update-banner button {
+  background: var(--warning-bg) !important;
+  color: var(--warning-fg) !important;
+  border: 1px solid var(--warning-bd) !important;
+}
+#update-banner button:hover { background: var(--ink-700) !important; }
+#update-banner button.secondary {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: var(--warning-fg) !important;
+}
+#update-banner button.secondary:hover {
+  background: rgba(251, 191, 36, 0.08) !important;
+}
+
+/* ---------------------------------------------------------------------
+   Settings window
+   --------------------------------------------------------------------- */
+.wrap { padding: 28px 32px !important; max-width: 560px !important; }
+.wrap > h1 {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 4px 0;
+}
+fieldset {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 14px 18px 18px 18px !important;
+  margin: 0 0 16px 0 !important;
+}
+fieldset legend {
+  color: var(--text-muted) !important;
+  font-size: 11px !important;
+  font-weight: 600;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  padding: 0 8px !important;
+}
+label.row { padding: 8px 0 !important; }
+label.row > span.name { color: var(--text-2) !important; font-weight: 500; }
+label.row > span.hint { color: var(--text-quiet) !important; }
+label.row > span.path-warning { color: var(--warning-fg) !important; }
+
+label.row > input[type="text"],
+label.row > input[type="number"],
+.hf-form input[type="text"],
+.hf-form input[type="password"],
+header input[type="search"] {
+  background: var(--canvas) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  font-family: var(--font-mono);
+  font-size: 12px !important;
+  padding: 6px 10px !important;
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+}
+label.row > input[type="text"]:focus,
+label.row > input[type="number"]:focus,
+.hf-form input[type="text"]:focus,
+.hf-form input[type="password"]:focus,
+header input[type="search"]:focus {
+  outline: 0;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+header input[type="checkbox"] { accent-color: var(--accent) !important; }
+
+.update-status.up-to-date { color: var(--success-fg) !important; }
+.update-status.available  { color: var(--warning-fg) !important; }
+.update-status.warn       { color: var(--warning-fg) !important; }
+.update-status.error      { color: var(--danger-fg) !important; }
+.update-status .badge {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+.update-status.available .badge {
+  background: var(--warning-bg) !important;
+  border-color: var(--warning-bd);
+  color: var(--warning-fg) !important;
+}
+.update-status.up-to-date .badge {
+  background: var(--success-bg) !important;
+  border-color: var(--success-bd);
+  color: var(--success-fg) !important;
+}
+.update-status.warn .badge {
+  background: var(--warning-bg) !important;
+  border-color: var(--warning-bd);
+  color: var(--warning-fg) !important;
+}
+
+.update-download-bar {
+  background: var(--canvas) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-pill) !important;
+  height: 6px !important;
+  overflow: hidden;
+}
+.update-download-fill {
+  background: linear-gradient(90deg, var(--kiln-600), var(--kiln-400)) !important;
+  box-shadow: 0 0 12px rgba(249, 115, 22, 0.45);
+}
+.update-download-line { color: var(--text-muted) !important; font-family: var(--font-mono); }
+.update-download-line.error   { color: var(--danger-fg) !important; }
+.update-download-line.success { color: var(--success-fg) !important; }
+
+.help-row { color: var(--text-muted) !important; }
+.status        { color: var(--success-fg) !important; }
+.status.error  { color: var(--danger-fg) !important; }
+.todo          { color: var(--text-muted) !important; }
+.version-footer { color: var(--text-quiet) !important; font-family: var(--font-mono); }
+
+/* ---------------------------------------------------------------------
+   Logs window
+   --------------------------------------------------------------------- */
+header {
+  background: rgba(13, 14, 18, 0.92) !important;
+  border-bottom: 1px solid var(--border) !important;
+  backdrop-filter: blur(8px) saturate(140%);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+}
+header h1 { color: var(--text) !important; font-weight: 600; letter-spacing: -0.005em; }
+header label { color: var(--text-3) !important; }
+#filter-count { color: var(--text-muted) !important; font-family: var(--font-mono); }
+#log {
+  background: var(--bg) !important;
+  color: var(--text-2) !important;
+  font-size: 12px;
+  line-height: 1.55 !important;
+}
+#log.empty { color: var(--text-quiet) !important; }
+#log .line-stderr { color: var(--kiln-300) !important; }
+
+/* ---------------------------------------------------------------------
+   About window
+   --------------------------------------------------------------------- */
+.wrap > h1, .desc, .meta, .platform, .version {
+  font-family: var(--font-sans);
+}
+.version, .platform { color: var(--text-muted) !important; font-family: var(--font-mono); }
+p.desc { color: var(--text-2) !important; line-height: 1.6 !important; }
+.meta { color: var(--text-muted) !important; }
+footer {
+  background: var(--surface) !important;
+  border-top: 1px solid var(--border) !important;
+}
+
+/* ---------------------------------------------------------------------
+   Modals (shortcuts dialog, HF token dialog)
+   --------------------------------------------------------------------- */
+.modal-overlay {
+  background: rgba(8, 9, 12, 0.66) !important;
+  backdrop-filter: blur(8px) saturate(140%);
+  -webkit-backdrop-filter: blur(8px) saturate(140%);
+}
+.modal-card {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-lg) !important;
+  box-shadow: var(--shadow-3) !important;
+  padding: 22px 26px !important;
+}
+.modal-card header {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+}
+.modal-card header h2 {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text) !important;
+}
+.modal-card header button#shortcuts-close,
+.modal-card header button#shortcuts-close:hover {
+  color: var(--text-muted) !important;
+  background: transparent !important;
+}
+.modal-card header button#shortcuts-close:hover { color: var(--text) !important; }
+.modal-card dt { color: var(--text-2) !important; }
+.modal-card kbd {
+  background: var(--canvas) !important;
+  color: var(--text-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-xs) !important;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+.modal-card p.hint { color: var(--text-muted) !important; }
+
+/* ---------------------------------------------------------------------
+   Index window — system tray placeholder
+   --------------------------------------------------------------------- */
+body > .wrap > h1 + p,
+body > .wrap > p,
+body > .wrap > p.hint {
+  color: var(--text-3) !important;
+}
+body > .wrap > p.hint { color: var(--text-muted) !important; }
