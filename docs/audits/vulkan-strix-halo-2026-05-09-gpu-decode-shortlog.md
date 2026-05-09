@@ -116,6 +116,9 @@ before or with each accepted change and each measured rejection.
 | A106 | Profile current Vulkan after A105 and upstream Metal audit fast-forward. | No code change. Backend `vulkan`, same token IDs, `1009.095ms` prefill / `80.283ms` mean ITL / `90.147ms` p99. Prefill buckets: GDN recurrent `257.754ms`, MLP fused `231.141ms`, GDN in-proj `127.791ms`, full-attn QKV `102.657ms`, GDN conv `67.696ms`. Decode buckets: MLP fused `214.108ms`, GDN in-proj `100.085ms`, GDN recurrent `72.495ms`. | Profile only. MLP remains high after A105; GDN conv is smaller but still visible enough for a different boundary experiment, not transfer-only grouping. |
 | A107 | Cache Vulkan conv1d prefill weights and fold prefill transfer/compute/readbacks into one submit. | Added default-enabled cached-weight single-submit conv prefill behind `KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT=1`; broader rollback remains `KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL=1`. Focused conv parity passed for old and new routes; full Vulkan parity passed (`34 passed`); release bench/server builds passed; server smoke selected Vulkan and returned `content: "Red Blue"`. Three same-token A/B pairs averaged candidate `968.640ms` prefill / `78.652ms` mean ITL / `86.794ms` p99 vs rollback `992.398ms` / `79.013ms` / `87.604ms`; approximate total improved `1624.502ms -> 1597.859ms`. | Keep. Small Vulkan-only win; CUDA/Metal source paths untouched, local feature checks still host-blocked by missing `nvcc` and Apple-only `objc2`. |
 | A108 | Profile current Vulkan after A107. | No code change. Backend `vulkan`, same token IDs, `928.769ms` prefill / `80.681ms` mean ITL / `91.724ms` p99. Prefill buckets: MLP fused `227.884ms`, GDN recurrent `216.954ms`, GDN in-proj `121.848ms`, full-attn QKV `98.250ms`, GDN out-proj `56.897ms`, GDN conv `53.639ms`. Decode buckets: MLP fused `215.036ms`, GDN in-proj `100.779ms`, GDN recurrent `73.352ms`. | Profile only. A107 moved conv prefill down; remaining targets are MLP fused, GDN recurrent, GDN in-proj, and full-attn QKV. Avoid blind small-batch row-quad threshold changes based on latest Metal E461 rejection. |
+| A109 | Reject Vulkan MLP BF16 gate/up rows8. | Temporary candidate passed formatting, diff, kernel check, focused parity with a batch-16 case, Vulkan model check, and release bench build. Same-token A/B stayed on backend `vulkan`; three-pair average was candidate `1012.138ms` prefill / `79.400ms` ITL / `90.505ms` p99 vs rollback `984.921ms` / `79.496ms` / `88.804ms`. | Rejected and reverted. Do not keep the rows8 gate/up shape; source removed, artifacts retained. |
+| A110 | Lower Vulkan packed-BF16 GDN in-proj row-pair selection to batch `>=3`. | Focused row-pair parity now covers batch 3 and batch 5; full Vulkan parity passed (`34 passed`), and Vulkan model/server checks plus release server build passed. Two valid live batch-3 A/B pairs kept identical counters (`6` rows / `3` worker batches / max batch `3`) and matching visible outputs. Average wall improved from rollback `1.871787s` to candidate `1.723976s` (`7.9%`). | Keep. Vulkan-only threshold transfer from Metal E462; rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`. |
+| A111 | Reject Vulkan packed-BF16 generic linear row-triple at batch 3. | Temporary Metal E464-inspired row-triple shader passed candidate and rollback focused parity, full Vulkan parity (`34 passed`), Vulkan model/server checks, and release server build. Live batch-3 A/B kept identical counters and matching visible outputs; two-pair average was candidate `1.723962s` vs rollback `1.737988s`, only `0.8%` faster. | Rejected and reverted. Correct but too small/noisy to justify another generic linear shader; final source has no A111 runtime changes. |
 
 Additional validation after rejected A069:
 
@@ -521,3 +524,21 @@ Additional validation after A110:
   candidate `1.723976s` (`7.9%`).
 - CUDA/Metal checks remain environment-blocked on this Linux host (`nvcc`
   missing; `objc2` requires Apple target).
+
+Additional validation after rejected A111:
+
+- Temporary candidate passed `cargo fmt --check`.
+- Temporary candidate passed `git diff --check`.
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate passed focused BF16 generic linear parity and focused
+  rollback parity with `KILN_DISABLE_VULKAN_LINEAR_BF16_ROWS3=1`.
+- Temporary candidate passed full Vulkan kernel parity (`34 passed`).
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`.
+- Temporary candidate passed
+  `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Two live old-batcher A/B pairs preserved visible output and identical decode
+  batcher counters, but only showed a `0.8%` average wall-time win.
+- Source change was removed after measurement; final source has no A111 runtime
+  changes and CUDA/Metal source paths are untouched.

@@ -1,0 +1,78 @@
+A111 rejected candidate: Vulkan packed-BF16 generic linear row-triple at batch 3
+
+Scope
+-----
+- Temporarily added `linear_decode_batched_rows3_bf16w.comp`.
+- Routed packed-BF16 generic `linear_decode` batch exactly `3` through the
+  row-triple shader.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_LINEAR_BF16_ROWS3=1`.
+- CUDA and Metal source paths were not changed.
+- Final source was reverted after measurement; only this audit trail remains.
+
+Why
+---
+- Metal E464 accepted a batch-3 transposed GEMV row-triple tile8 path.
+- Vulkan A110 made batch-3 live decode-batcher traffic a meaningful shape to
+  isolate.
+- A036 already rejected a direct generic row-pair port, so this was treated as
+  a narrow candidate requiring clear live evidence.
+
+Validation While Present
+------------------------
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused Vulkan parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_batched_bf16_packed_weights_match_cpu_reference -- --nocapture`
+  covering batch 3 and batch 4 while present.
+- Focused rollback parity with
+  `KILN_DISABLE_VULKAN_LINEAR_BF16_ROWS3=1`.
+- Full Vulkan kernel parity: `34 passed`.
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Live Batch-3 A/B
+----------------
+- Server env for valid probes:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_DECODE_BATCH_WAIT_US=5000`
+- Rollback env additionally:
+  `KILN_DISABLE_VULKAN_LINEAR_BF16_ROWS3=1`
+- The old live decode-batcher path was used; `KILN_BATCHING_ENGINE=1` was not
+  used for these measurements.
+- Pair 1: candidate `1.566030s`; rollback `1.566556s`.
+- Pair 2, counter-order with fresh prompts: rollback `1.909421s`;
+  candidate `1.881894s`.
+- Every valid arm had identical counters:
+  `requests_ok=3`, `tokens_generated=9`, `jobs_submitted=6`,
+  `worker_batches=3`, `batcher_rows=6`, `max_batch_after=3`,
+  `jobs_failed=0`.
+- Pair 1 visible outputs matched:
+  `"The sequence you"` for all three streams.
+- Pair 2 visible outputs matched: `"26,"`, `"36,"`, `"46,"`.
+- Two-pair average: candidate `1.723962s`; rollback `1.737988s`.
+- Candidate average win: `0.014027s`, about `0.8%`.
+
+Verdict
+-------
+- Rejected and reverted.
+- The candidate was correct, but the live win was within noise and not large
+  enough to justify another generic linear decode shader.
+- Do not retry generic packed-BF16 row grouping for Vulkan by direct Metal
+  mirroring without a stronger, Vulkan-specific scheduling or residency
+  hypothesis.
+
+Artifacts
+---------
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-fmt.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-diffcheck.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-kernel-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-focused-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-focused-parity-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-full-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-model-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-server-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-candidate-batch3*`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-rollback-batch3*`
