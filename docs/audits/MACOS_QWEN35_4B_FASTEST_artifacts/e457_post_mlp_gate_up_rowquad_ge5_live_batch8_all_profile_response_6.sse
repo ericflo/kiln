@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-a0e55c69-cf0e-412c-ade8-d73f88ad2bd8","object":"chat.completion.chunk","created":1778360701,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-a0e55c69-cf0e-412c-ade8-d73f88ad2bd8","object":"chat.completion.chunk","created":1778360701,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"安装在"}}]}
+
+data: {"id":"chatcmpl-a0e55c69-cf0e-412c-ade8-d73f88ad2bd8","object":"chat.completion.chunk","created":1778360701,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":" --"}}]}
+
+data: {"id":"chatcmpl-a0e55c69-cf0e-412c-ade8-d73f88ad2bd8","object":"chat.completion.chunk","created":1778360701,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":" installed"}}]}
+
+data: {"id":"chatcmpl-a0e55c69-cf0e-412c-ade8-d73f88ad2bd8","object":"chat.completion.chunk","created":1778360701,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

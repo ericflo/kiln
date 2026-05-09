@@ -2095,3 +2095,14 @@
   `gate_up_fused` from `484.276 ms` to `378.058 ms` across the profiled decode
   rows. Metal/Vulkan model and server checks passed; CUDA remains locally
   blocked by missing `nvcc`.
+- 2026-05-09 E457: Captured post-E456 all-stage live batch profile. No source
+  change. Rebuilt the release Metal server, ran eight concurrent streaming
+  requests with `max_tokens=3`, all MLP/GDN/full-attention stage profiling
+  enabled, and reached the same continuous-batching shape: `24` generated
+  tokens, `16` submitted jobs, `4` worker batches, max batch `7`. Filtered
+  decode rows (`seq_len=1`, excluding prewarm `start_pos=64`) totaled MLP
+  `680.800 ms`, GDN `525.066 ms`, and full attention `226.338 ms`. Hottest
+  stages are `mlp:gate_up_fused` `374.640 ms`, `mlp:down_proj`
+  `306.160 ms`, `gdn:in_proj` `292.437 ms`, and `gdn:out_proj`
+  `133.829 ms`. Use this as the next-target map; MLP down and GDN in-proj are
+  the best immediate candidates after the E456 gate/up win.

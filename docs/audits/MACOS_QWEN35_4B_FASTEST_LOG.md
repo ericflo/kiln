@@ -19293,3 +19293,68 @@ row-quad, the live MLP-stage profile shows the targeted `gate_up_fused`
 improvement for the observed continuous-batching shape, and the clean
 no-profile endpoint A/B is neutral within noise. Roll back with
 `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` if needed.
+
+## E457 - Post-E456 All-Stage Live Batch Profile
+
+### Purpose
+
+Refresh the current hotspot map after E456's accepted MLP gate/up row-quad
+threshold change. No source changes.
+
+### Run
+
+Rebuilt the release Metal server at current `main`, then ran eight concurrent
+streaming chat requests with `max_tokens=3`, live decode batching enabled,
+`KILN_DECODE_BATCH_WAIT_US=0`, and:
+
+- `KILN_PROFILE_MLP_STAGES=1`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_FULL_ATTN_STAGES=1`
+
+The parsed summary filters to decode rows with `seq_len=1`, excluding the
+background-prewarm `start_pos=64` rows.
+
+### Results
+
+- wall elapsed: `7.878347 s`
+- HTTP statuses: all `200`
+- server tokens generated: `24`
+- decode batcher submitted jobs: `16`
+- worker batches: `4`
+- decode rows: `16`
+- max observed live batch: `7`
+- parsed decode profile rows: `1104`
+
+By subsystem:
+
+| subsystem | decode time |
+| --- | ---: |
+| MLP | `680.800 ms` |
+| GDN | `525.066 ms` |
+| full attention | `226.338 ms` |
+
+Top decode stages:
+
+| stage | time | count | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `374.640 ms` | `128` | `2.927 ms` |
+| `mlp:down_proj` | `306.160 ms` | `128` | `2.392 ms` |
+| `gdn:in_proj` | `292.437 ms` | `96` | `3.046 ms` |
+| `gdn:out_proj` | `133.829 ms` | `96` | `1.394 ms` |
+| `gdn:gates_recur_gated_norm` | `54.090 ms` | `96` | `0.563 ms` |
+| `gdn:qkv_conv_norm` | `44.070 ms` | `96` | `0.459 ms` |
+| `full_attn:qkv_proj_batch` | `43.253 ms` | `16` | `2.703 ms` |
+
+### Artifacts
+
+- `e457_post_mlp_gate_up_rowquad_ge5_profile_build.log`
+- `e457_post_mlp_gate_up_rowquad_ge5_live_batch8_all_profile_*`
+- `e457_post_mlp_gate_up_rowquad_ge5_live_batch8_all_profile_summary.txt`
+
+### Decision
+
+Profile-only experiment accepted as current evidence. After E456,
+`mlp:gate_up_fused` remains the largest single stage, but `mlp:down_proj` and
+`gdn:in_proj` are now effectively tied for the next optimization target.
+Continue with a small, reversible transposed-GEMV/MLP-down experiment before
+spending more effort on attention.
