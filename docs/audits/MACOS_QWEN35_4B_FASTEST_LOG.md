@@ -16636,3 +16636,106 @@ Accepted. This is a narrowly gated LoRA/no-LoRA improvement for serial
 `batch=1` decode without changing the no-LoRA path, and it keeps the existing
 decode-batch LoRA win. Non-Metal runtime code is unchanged; Vulkan type-checks,
 and CUDA could not be checked on this host because the CUDA toolkit is absent.
+
+## 2026-05-09 - E422 accepted Metal LoRA in-kernel base add
+
+### Purpose
+
+E421 enabled the existing fused Metal LoRA delta/add helper for serial decode,
+but the helper still launched a separate elementwise add after the Metal LoRA
+kernel: it computed the rank hidden state, wrote the scaled adapter delta, then
+returned `base + delta` through Candle. This experiment tested removing that
+extra output allocation and elementwise pass.
+
+### Change
+
+`kiln_lora_add_decode_bf16` now receives the base projection buffer and writes
+the final LoRA-adjusted output directly. To preserve the existing arithmetic
+order, the kernel rounds the scaled adapter delta to BF16 first, then adds it
+to the BF16 base value and rounds the final output to BF16. This matches the
+old `delta: BF16` followed by `base + delta` path while avoiding the separate
+Candle add.
+
+The support gate is unchanged from E421, and the no-LoRA path is untouched.
+Rollback remains `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`, which disables the
+entire Metal LoRA delta helper.
+
+### Isolated Delta/Add Bench
+
+Warmup `5`, iterations `20`; all rows had exact parity against the reference
+LoRA delta/add path.
+
+| shape | batch | E421 fused | E422 fused | delta |
+| --- | ---: | ---: | ---: | ---: |
+| MLP gate/up `2560 -> 9216`, rank 16 | 1 | `223.958 us` | `166.990 us` | `25.4%` faster |
+| MLP down `9216 -> 2560`, rank 16 | 1 | `271.552 us` | `182.250 us` | `32.9%` faster |
+| MLP gate/up `2560 -> 9216`, rank 16 | 4 | `240.508 us` | `192.679 us` | `19.9%` faster |
+| MLP down `9216 -> 2560`, rank 16 | 4 | `244.350 us` | `238.298 us` | `2.5%` faster |
+
+E422 speedups versus the generic fallback were `5.869x`, `6.521x`, `5.994x`,
+and `7.465x` respectively.
+
+### Full LoRA Linear Bench
+
+Same-harness confirmation used warmup `10`, iterations `50`. The E421 baseline
+was run from a detached worktree at commit `3fc8cdf`; E422 was run twice after
+the candidate change.
+
+| shape | batch | E421 baseline | E422 run 1 | E422 run 2 |
+| --- | ---: | ---: | ---: | ---: |
+| MLP gate/up `2560 -> 9216`, rank 16 | 1 | `1.182 ms` | `1.211 ms` | `1.153 ms` |
+| MLP down `9216 -> 2560`, rank 16 | 1 | `1.056 ms` | `1.019 ms` | `1.050 ms` |
+| MLP gate/up `2560 -> 9216`, rank 16 | 4 | `2.202 ms` | `2.192 ms` | `2.256 ms` |
+| MLP down `9216 -> 2560`, rank 16 | 4 | `2.131 ms` | `1.987 ms` | `2.150 ms` |
+
+Full-projection timing is close to noise because the base GEMV dominates this
+microbench. The candidate showed no robust full-path regression; the averaged
+E422 rows were neutral on serial gate/up, about `2.0%` faster on serial down,
+about `1.0%` slower on batch gate/up, and about `2.9%` faster on batch down.
+
+Numerical results matched the E421 BF16 parity envelope: gate/up rows were exact,
+and down-projection rows had `max_abs_diff=1.5625e-2` with mean diff at most
+`6.1035156e-5`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed for warmup/iters `5/20` and `10/50`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda`
+  - blocked by local environment: `nvcc` is not installed, so `cudarc` and
+    `candle-kernels` build scripts fail before checking Kiln source
+- `git diff --check`
+
+### Artifacts
+
+- `e422_lora_inkernel_base_add_parity.log`
+- `e422_lora_inkernel_base_add_linear_parity.log`
+- `e422_lora_inkernel_base_add_delta_bench.log`
+- `e422_lora_inkernel_base_add_linear_bench.log`
+- `e422_lora_inkernel_base_add_linear_bench_w10_i50.log`
+- `e422_lora_inkernel_base_add_linear_bench_w10_i50_repeat.log`
+- `e422_lora_inkernel_base_add_e421_baseline_w10_i50.log`
+- `e422_lora_inkernel_base_add_fmt_check.log`
+- `e422_lora_inkernel_base_add_metal_check.log`
+- `e422_lora_inkernel_base_add_vulkan_check.log`
+- `e422_lora_inkernel_base_add_server_metal_check.log`
+- `e422_lora_inkernel_base_add_cuda_check.log`
+- `e422_lora_inkernel_base_add_diff_check.log`
+
+### Decision
+
+Accepted as a low-risk LoRA helper improvement. The targeted helper is
+consistently faster and does less work, while full-projection timing is
+effectively neutral-to-slightly-better within run noise. The change is Metal
+LoRA-only, preserves the previous BF16 rounding behavior, and leaves CUDA,
+Vulkan, and no-LoRA runtime paths unchanged.

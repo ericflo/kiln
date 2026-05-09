@@ -1762,3 +1762,17 @@
   stayed faster. Batch1/2/4 delta parity, full LoRA linear parity, Metal/Vulkan
   checks, server Metal bin checks, and fmt passed; CUDA check remains blocked on
   this host by missing `nvcc`.
+- 2026-05-09 E422: Accepted fusing the final Metal LoRA base add into
+  `kiln_lora_add_decode_bf16`. The kernel now reads the base projection and
+  writes final `base + delta` output directly, while still rounding the scaled
+  adapter delta to BF16 before the add to preserve E421 arithmetic. Isolated
+  delta/add timings improved versus E421: batch1 gate/up `223.958 -> 166.990 us`
+  (`25.4%` faster), batch1 down `271.552 -> 182.250 us` (`32.9%` faster),
+  batch4 gate/up `240.508 -> 192.679 us` (`19.9%` faster), and batch4 down
+  `244.350 -> 238.298 us` (`2.5%` faster), all exact. Full LoRA projection
+  confirmation against an E421 detached-worktree baseline was noisy but showed
+  no robust regression: averaged E422 rows were neutral on serial gate/up,
+  about `2.0%` faster on serial down, about `1.0%` slower on batch gate/up, and
+  about `2.9%` faster on batch down. Metal/Vulkan/server Metal checks, parity,
+  benches, fmt, and diff check passed; CUDA remains locally blocked by missing
+  `nvcc`.

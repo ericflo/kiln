@@ -3780,11 +3780,12 @@ kernel void kiln_lora_hidden_decode_bf16(
 kernel void kiln_lora_add_decode_bf16(
     device const bfloat* hidden [[buffer(0)]],
     device const bfloat* b [[buffer(1)]],
-    device bfloat* out [[buffer(2)]],
-    constant float& scale [[buffer(3)]],
-    constant uint& batch [[buffer(4)]],
-    constant uint& output_dim [[buffer(5)]],
-    constant uint& rank [[buffer(6)]],
+    device const bfloat* base [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant float& scale [[buffer(4)]],
+    constant uint& batch [[buffer(5)]],
+    constant uint& output_dim [[buffer(6)]],
+    constant uint& rank [[buffer(7)]],
     uint gid [[thread_position_in_grid]]
 ) {
     const uint total = batch * output_dim;
@@ -3800,7 +3801,8 @@ kernel void kiln_lora_add_decode_bf16(
     for (uint r = 0; r < rank; ++r) {
         delta += static_cast<float>(hidden[hidden_base + r]) * static_cast<float>(b[b_base + r]);
     }
-    out[gid] = static_cast<bfloat>(scale * delta);
+    const bfloat delta_bf16 = static_cast<bfloat>(scale * delta);
+    out[gid] = static_cast<bfloat>(static_cast<float>(base[gid]) + static_cast<float>(delta_bf16));
 }
 "#;
 
@@ -6887,7 +6889,7 @@ pub(crate) fn metal_lora_add_decode_bf16(
     let (rank, _) = a.dims2()?;
 
     let hidden = unsafe { Tensor::empty((batch, rank), DType::BF16, x.device())? };
-    let delta = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, base.device())? };
+    let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, base.device())? };
 
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal LoRA decode add requires Metal tensors");
@@ -6955,7 +6957,8 @@ pub(crate) fn metal_lora_add_decode_bf16(
 
         let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
         let (b_storage, b_layout) = b.storage_and_layout();
-        let (delta_storage, delta_layout) = delta.storage_and_layout();
+        let (base_storage, base_layout) = base.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
 
         let hidden_metal = match &*hidden_storage {
             candle_core::Storage::Metal(s) => s,
@@ -6965,9 +6968,13 @@ pub(crate) fn metal_lora_add_decode_bf16(
             candle_core::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA add B must be on Metal"),
         };
-        let delta_metal = match &*delta_storage {
+        let base_metal = match &*base_storage {
             candle_core::Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA delta output must be on Metal"),
+            _ => anyhow::bail!("metal LoRA add base must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA add output must be on Metal"),
         };
 
         let hidden_buf = candle_core::metal_backend::buffer_o(
@@ -6976,23 +6983,23 @@ pub(crate) fn metal_lora_add_decode_bf16(
             hidden.dtype(),
         );
         let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
-        let delta_buf = candle_core::metal_backend::buffer_o(
-            delta_metal.buffer(),
-            &delta_layout,
-            delta.dtype(),
-        );
+        let base_buf =
+            candle_core::metal_backend::buffer_o(base_metal.buffer(), &base_layout, base.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
 
         encoder.set_buffer(0, Some(hidden_buf.buffer), hidden_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
-        encoder.set_buffer(2, Some(delta_buf.buffer), delta_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(base_buf.buffer), base_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
 
         let batch_u32 = batch as u32;
         let output_dim_u32 = output_dim as u32;
         let rank_u32 = rank as u32;
-        encoder.set_bytes(3, &scale);
-        encoder.set_bytes(4, &batch_u32);
-        encoder.set_bytes(5, &output_dim_u32);
-        encoder.set_bytes(6, &rank_u32);
+        encoder.set_bytes(4, &scale);
+        encoder.set_bytes(5, &batch_u32);
+        encoder.set_bytes(6, &output_dim_u32);
+        encoder.set_bytes(7, &rank_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: batch * output_dim,
@@ -7008,7 +7015,7 @@ pub(crate) fn metal_lora_add_decode_bf16(
     }
 
     drop(encoder);
-    Ok((base.clone() + delta)?)
+    Ok(out)
 }
 
 fn metal_gdn_in_proj_decode_supports(
