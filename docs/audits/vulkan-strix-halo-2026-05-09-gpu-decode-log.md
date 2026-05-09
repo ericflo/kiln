@@ -531,12 +531,55 @@ Verdict:
   traffic, data residency, or a model-specific fused gate/up/down design; simple
   workgroup geometry changes were not enough.
 
+### 2026-05-09 A013: Reject Generic Vulkan Fused GDN Batch Hook
+
+Hypothesis:
+- Vulkan already had an implementation of
+  `gdn_decode_gates_recurrent_rmsnorm`, but the generic GDN forward path did
+  not call that backend trait hook.
+- Wiring the hook for `seq_len == 1` could let sampled continuous batches use
+  Vulkan's fused gates + recurrent update + gated RMSNorm path, instead of the
+  split gates/recurrent/gated-norm stages shown in profiling.
+
+Experiment:
+- Added an uncommitted generic call to
+  `backend.gdn_decode_gates_recurrent_rmsnorm(...)` after the existing Metal
+  direct fast path.
+- Added an uncommitted rollback env,
+  `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_BATCH=1`, around Vulkan batch use.
+- Kept Vulkan serial `batch == 1` behavior behind the existing opt-in
+  `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED` gate.
+
+Evidence:
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Serial paged bench stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, prefill `427.4ms`, mean ITL
+  `131.3ms`.
+- Primary sampled actor batch with the fused GDN batch hook returned HTTP 200
+  but regressed badly: `time_total=14.470374s` for `48` completion tokens.
+- The same binary with
+  `KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_BATCH=1` returned HTTP 200 with
+  `time_total=7.668599s`, matching the A011 performance envelope.
+
+Verdict:
+- Rejected and removed before commit. The existing fused GDN batch kernel is
+  correct enough to return HTTP 200 on this smoke, but it is much slower in the
+  current pathway.
+- Do not simply wire this trait hook by default. A future GDN batch fusion
+  should first address state/input residency and avoid extra upload/readback
+  churn around the fused kernel.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
 - Continue profiling the remaining serial decode hotspots: fused MLP decode,
   GDN `in_proj`, GDN recurrent/gated norm, and full-attention QKV projection.
+- For GDN batch fusion, do not reuse the generic
+  `gdn_decode_gates_recurrent_rmsnorm` hook without first changing its
+  residency/data-movement behavior; A013 measured it as a large regression.
 - Keep updating this log and
   `docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md` for every
   accepted or rejected optimization experiment.
