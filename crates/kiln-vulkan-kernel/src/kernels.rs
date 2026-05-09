@@ -3288,7 +3288,7 @@ fn dispatch_mlp_decode_cached_impl(
     );
     let batch = x_dims[0];
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
-    let use_rows2 = use_prefill_row_pair_matmul(batch);
+    let use_rows2 = !bf16_weights && use_prefill_row_pair_matmul(batch);
     let total_start = profile_stages.then(Instant::now);
     let stage_start = profile_stages.then(Instant::now);
     let x_data = extract_tensor_bytes(x)?.0;

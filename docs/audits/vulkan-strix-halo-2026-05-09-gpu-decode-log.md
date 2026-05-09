@@ -4097,6 +4097,133 @@ Verdict:
   `chat_template_kwargs: {"enable_thinking": false}`.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A079: Use Packed-BF16 Vulkan MLP Weights for Large Prefill Batches
+
+Goal:
+- After A078 removed the readback bottleneck, the largest concrete 64-token
+  prefill bucket was again MLP gate/up compute.
+- Re-test packed-BF16 MLP weights for large prefill batches, but without
+  reviving A029's rejected BF16 row-pair shader. The hypothesis is that lower
+  weight bandwidth in the existing batched BF16 shaders may now beat F32
+  row-pair reuse for the Qwen3.5 prefill shape.
+
+Change:
+- Removed the Vulkan backend's `row_count < 8` restriction before selecting
+  packed-BF16 MLP weights.
+- Kept `use_rows2=false` whenever `bf16_weights=true`, so the candidate uses
+  the existing non-row-pair batched BF16 shaders for large batches.
+- Extended `mlp_decode_bf16_packed_weights_match_cpu_reference` to include
+  `batch=9`, covering the newly enabled large-batch route.
+- CUDA and Metal source paths are untouched.
+
+No-profile cross-build A/B:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 79 --quiet`
+- Baseline:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-baseline.log`
+  - prefill `1641.175290ms`
+  - mean ITL `85.918545125ms`
+  - p99 ITL `88.418564ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate.log`
+  - prefill `1451.344525ms`
+  - mean ITL `87.346026125ms`
+  - p99 ITL `88.761854ms`
+  - same token IDs
+
+Same-binary rollback-env A/B:
+- Rollback env:
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 80 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-rollback-env-seed80.log`
+  - prefill `1630.604882ms`
+  - mean ITL `102.946932ms`
+  - p99 ITL `104.133591ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate-seed80.log`
+  - prefill `1570.236822ms`
+  - mean ITL `89.670709375ms`
+  - p99 ITL `96.882849ms`
+  - same token IDs
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate-profile.log`
+- Candidate profile latency:
+  - prefill `1614.042322ms`
+  - mean ITL `90.208737875ms`
+  - p99 ITL `92.839663ms`
+  - same token IDs
+- A078 measured-pass MLP `batch=64`:
+  - total `812.985ms`
+  - `gate_up_dispatch` `664.670ms`
+  - `down_dispatch` `130.466ms`
+  - `readback` `7.885ms`
+  - `bf16_weights=false rows2=true`
+- A079 measured-pass MLP `batch=64`:
+  - total `678.129ms`
+  - `gate_up_dispatch` `426.340ms`
+  - `down_dispatch` `234.627ms`
+  - `readback` `6.541ms`
+  - `bf16_weights=true rows2=false`
+- The net MLP `batch=64` inner total improved by `134.856ms`. The gate/up
+  dispatch improvement more than paid for the slower down dispatch.
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18424 ./target/release/kiln serve`
+- Server log showed:
+  - Vulkan GPU selected:
+    `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`
+  - cached host-visible staging memory type `5`, `cached=true`
+  - live greedy decode batcher enabled with backend `vulkan`
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-baseline.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-rollback-env-seed80.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-candidate-seed80.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a079-mlp-bf16-prefill-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. Same-binary rollback-env evidence preserved token IDs and improved
+  both prefill and decode latency; profile evidence shows the targeted MLP
+  bucket moved in the expected direction.
+- This does not overturn A029. The rejected BF16 row-pair shader remains
+  rejected; A079 uses the existing batched BF16 shaders for large batches.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4162,6 +4289,10 @@ Verdict:
   `read_host_visible` is now `9.733ms`, down from A077 `246.909ms`; the
   remaining target in that inner bucket is `record_submit_wait` / compute and
   broader adjacent-stage residency.
+- A079 enables packed-BF16 MLP weights for large batches using the existing
+  non-row-pair BF16 shaders. It improves the measured `batch=64` MLP inner
+  total from A078 `812.985ms` to `678.129ms`; do not revive the rejected A029
+  BF16 row-pair shader without a new hypothesis.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
