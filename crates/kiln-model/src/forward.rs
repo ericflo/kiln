@@ -1553,36 +1553,57 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
 
 #[derive(Clone)]
 struct ProjectionLoadCache {
-    metal_bf16_stub: Option<Tensor>,
-    metal_f16_stub: Option<Tensor>,
-    metal_f32_stub: Option<Tensor>,
+    drop_projection_originals: bool,
+    bf16_stub: Option<Tensor>,
+    f16_stub: Option<Tensor>,
+    f32_stub: Option<Tensor>,
 }
 
 impl ProjectionLoadCache {
     fn new(device: &Device) -> Result<Self> {
-        if matches!(device, Device::Metal(_)) {
+        let drop_projection_originals =
+            matches!(device, Device::Metal(_)) || drop_projection_originals_enabled();
+        if drop_projection_originals {
             Ok(Self {
-                metal_bf16_stub: Some(Tensor::zeros((1usize,), DType::BF16, device)?),
-                metal_f16_stub: Some(Tensor::zeros((1usize,), DType::F16, device)?),
-                metal_f32_stub: Some(Tensor::zeros((1usize,), DType::F32, device)?),
+                drop_projection_originals,
+                bf16_stub: Some(Tensor::zeros((1usize,), DType::BF16, device)?),
+                f16_stub: Some(Tensor::zeros((1usize,), DType::F16, device)?),
+                f32_stub: Some(Tensor::zeros((1usize,), DType::F32, device)?),
             })
         } else {
             Ok(Self {
-                metal_bf16_stub: None,
-                metal_f16_stub: None,
-                metal_f32_stub: None,
+                drop_projection_originals,
+                bf16_stub: None,
+                f16_stub: None,
+                f32_stub: None,
             })
         }
     }
 
-    fn metal_stub_for(&self, dtype: DType) -> Option<Tensor> {
+    fn stub_for(&self, dtype: DType) -> Option<Tensor> {
         match dtype {
-            DType::BF16 => self.metal_bf16_stub.clone(),
-            DType::F16 => self.metal_f16_stub.clone(),
-            DType::F32 => self.metal_f32_stub.clone(),
+            DType::BF16 => self.bf16_stub.clone(),
+            DType::F16 => self.f16_stub.clone(),
+            DType::F32 => self.f32_stub.clone(),
             _ => None,
         }
     }
+
+    fn drops_projection_originals(&self) -> bool {
+        self.drop_projection_originals
+    }
+}
+
+fn drop_projection_originals_enabled() -> bool {
+    matches!(
+        std::env::var("KILN_DROP_PROJECTION_ORIGINALS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 fn projection_tensors_for_load(
@@ -1590,9 +1611,9 @@ fn projection_tensors_for_load(
     device: &Device,
     cache: &ProjectionLoadCache,
 ) -> Result<(Tensor, Tensor)> {
-    if matches!(device, Device::Metal(_)) {
+    if cache.drops_projection_originals() {
         let transposed = weight_to_transposed_tensor_2d(w, device)?;
-        let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
+        let original_stub = match cache.stub_for(weight_dtype(w)) {
             Some(stub) => stub,
             None => dropped_weight_stub(w, device)?,
         };
@@ -1650,7 +1671,7 @@ fn projection_tensors_for_load_batch(
             let transposed =
                 Tensor::from_raw_buffer(data.as_bytes(), weight_dtype(w), &data.shape(), &device)
                     .with_context(|| format!("{name} transposed projection upload"))?;
-            let original_stub = match cache.metal_stub_for(weight_dtype(w)) {
+            let original_stub = match cache.stub_for(weight_dtype(w)) {
                 Some(stub) => stub,
                 None => dropped_weight_stub(w, &device)
                     .with_context(|| format!("{name} projection stub"))?,
@@ -1995,6 +2016,9 @@ impl GpuWeights {
                 .context("rotary_inv_freq")?;
         let projection_load_cache =
             ProjectionLoadCache::new(device).context("projection load cache")?;
+        if projection_load_cache.drops_projection_originals() {
+            tracing::info!("projection original tensors are dropped after transposed upload");
+        }
 
         // Per-layer `pack_from_bf16` used to run inline during weight load,
         // serializing ~104 calls (8 × q_proj + 96 × MLP gate/up/down) behind
