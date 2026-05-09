@@ -1,0 +1,68 @@
+Vulkan Strix Halo A082 summary, 2026-05-09
+
+Change:
+- Added `linear_decode_batched_rows4.comp`.
+- The shader computes four adjacent F32 input rows per workgroup for the MLP
+  down projection, sharing the same F32 weight loads across rows.
+- The dispatcher selects it only for the A080/A081 large-batch hybrid MLP path:
+  `bf16_weights=true down_bf16_weights=false row_count >= 8`.
+- Rollback:
+  `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4=1`
+
+No-profile same-binary A/B, seed 84:
+- Rollback:
+  - prefill `1099.69895ms`
+  - mean ITL `87.05870675ms`
+  - p99 ITL `93.161769ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - prefill `1097.204546ms`
+  - mean ITL `86.810411875ms`
+  - p99 ITL `89.401872ms`
+  - same token IDs
+
+Profile:
+- Candidate flags for prefill MLP:
+  `bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false`
+- A081 `batch=64` MLP inner total:
+  - total `279.313ms`
+  - gate/up `132.253ms`
+  - down `128.874ms`
+  - readback `7.009ms`
+- A082 measured-pass `batch=64` MLP inner total:
+  - total `232.591ms`
+  - gate/up `132.293ms`
+  - down `85.732ms`
+  - readback `5.100ms`
+- Current measured-pass prefill concrete buckets after A082:
+  - `mlp:fused` `233.559ms`
+  - `gdn:recurrent` `230.371ms`
+  - `gdn:conv` `163.942ms`
+  - `gdn:in_proj` `121.632ms`
+  - full-attention `qkv_proj` `97.752ms`
+
+Correctness:
+- Candidate and rollback benches reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Candidate and rollback benches produced the same token IDs.
+- Server smoke with
+  `chat_template_kwargs: {"enable_thinking": false}` returned visible
+  `content == "blue green"` and `finish_reason == "stop"`.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA check attempted and host-blocked by missing `nvcc`.
+- Metal check attempted and host-blocked because `objc2` requires an Apple
+  target.
+
+Verdict:
+- Accept as a Vulkan-only prefill win.
+- The no-profile wall gain is small on this seed, but the profile shows the
+  intended down-projection stage reduction and no correctness drift.
+- CUDA and Metal source paths are untouched.

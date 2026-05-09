@@ -26,6 +26,11 @@ fn mlp_bf16_gate_up_rows4_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4").is_err())
 }
 
+fn mlp_f32_down_rows4_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
+}
+
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
@@ -42,6 +47,7 @@ fn finish_vulkan_mlp_kernel_stage_profile(
     down_bf16_weights: bool,
     gate_up_rows2: bool,
     gate_up_rows4: bool,
+    down_rows4: bool,
     down_rows2: bool,
     start: Option<Instant>,
 ) {
@@ -49,7 +55,7 @@ fn finish_vulkan_mlp_kernel_stage_profile(
         return;
     };
     eprintln!(
-        "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={gate_up_bf16_weights} down_bf16_weights={down_bf16_weights} rows2={gate_up_rows2} gate_up_rows4={gate_up_rows4} down_rows2={down_rows2} elapsed_ms={:.3}",
+        "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={gate_up_bf16_weights} down_bf16_weights={down_bf16_weights} rows2={gate_up_rows2} gate_up_rows4={gate_up_rows4} down_rows4={down_rows4} down_rows2={down_rows2} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
 }
@@ -210,6 +216,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_batched", 3, 12),
         ("linear_decode_batched_bf16w", 3, 12),
         ("linear_decode_batched_rows2", 3, 12),
+        ("linear_decode_batched_rows4", 3, 12),
         ("linear_decode_argmax_blocks", 4, 12),
         ("linear_decode_argmax_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_reduce", 3, 4),
@@ -3332,7 +3339,9 @@ fn dispatch_mlp_decode_cached_impl(
         && !down_bf16_weights
         && batch >= 8
         && mlp_bf16_gate_up_rows4_enabled();
-    let down_rows2 = !down_bf16_weights && use_prefill_row_pair_matmul(batch);
+    let down_rows4 =
+        gate_up_bf16_weights && !down_bf16_weights && batch >= 8 && mlp_f32_down_rows4_enabled();
+    let down_rows2 = !down_bf16_weights && !down_rows4 && use_prefill_row_pair_matmul(batch);
     let total_start = profile_stages.then(Instant::now);
     let stage_start = profile_stages.then(Instant::now);
     let x_data = extract_tensor_bytes(x)?.0;
@@ -3346,6 +3355,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3368,6 +3378,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3393,6 +3404,7 @@ fn dispatch_mlp_decode_cached_impl(
             down_bf16_weights,
             gate_up_rows2,
             gate_up_rows4,
+            down_rows4,
             down_rows2,
             stage_start,
         );
@@ -3418,6 +3430,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3467,6 +3480,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3508,6 +3522,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3528,6 +3543,11 @@ fn dispatch_mlp_decode_cached_impl(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode.comp"
+        )
+    } else if down_rows4 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_batched_rows4.comp"
         )
     } else if down_rows2 {
         concat!(
@@ -3552,6 +3572,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3573,6 +3594,8 @@ fn dispatch_mlp_decode_cached_impl(
         &linear_push,
         if batch == 1 {
             out_dim.div_ceil(16) as u32
+        } else if down_rows4 {
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
         } else if down_rows2 {
             (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
         } else {
@@ -3590,6 +3613,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3615,6 +3639,7 @@ fn dispatch_mlp_decode_cached_impl(
             down_bf16_weights,
             gate_up_rows2,
             gate_up_rows4,
+            down_rows4,
             down_rows2,
             stage_start,
         );
@@ -3632,6 +3657,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         stage_start,
     );
@@ -3645,6 +3671,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_bf16_weights,
         gate_up_rows2,
         gate_up_rows4,
+        down_rows4,
         down_rows2,
         total_start,
     );

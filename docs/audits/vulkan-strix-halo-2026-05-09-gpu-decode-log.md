@@ -4463,6 +4463,118 @@ Verdict:
   decode remains on the all-BF16 MLP route.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A082: F32 MLP Down Rows4 for the Hybrid Prefill Path
+
+Goal:
+- A081 reduced packed-BF16 MLP gate/up enough that F32 down projection was
+  again roughly tied with gate/up in the MLP inner profile.
+- Test the same row-quad reuse idea on the F32 down projection, but keep it
+  scoped to the existing large-batch hybrid path.
+
+Change:
+- Added `linear_decode_batched_rows4.comp`.
+- The shader computes four adjacent F32 input rows per workgroup for the same
+  output-column tile, sharing F32 down-weight loads across rows.
+- The dispatcher selects rows4 down only for the A080/A081 hybrid route:
+  `bf16_weights=true down_bf16_weights=false row_count >= 8`.
+- The old F32 rows2 down path remains available and is selected when rows4 is
+  disabled or the hybrid route is not active.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4=1`
+- Existing focused parity
+  `mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference` exercises this
+  path for multi-row batches.
+- CUDA and Metal source paths are untouched.
+
+Same-binary rollback-env A/B, seed 84:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 84 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4=1`
+  - prefill `1099.69895ms`
+  - mean ITL `87.05870675ms`
+  - p99 ITL `93.161769ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-candidate.log`
+  - prefill `1097.204546ms`
+  - mean ITL `86.810411875ms`
+  - p99 ITL `89.401872ms`
+  - same token IDs
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-candidate-profile.log`
+- Candidate profile latency:
+  - prefill `1061.526972ms`
+  - mean ITL `89.599841375ms`
+  - p99 ITL `91.957584ms`
+  - same token IDs
+- Profile flags for `batch=64`:
+  `bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false`
+- A081 measured-pass MLP `batch=64`:
+  - total `279.313ms`
+  - `gate_up_dispatch` `132.253ms`
+  - `down_dispatch` `128.874ms`
+  - `readback` `7.009ms`
+- A082 measured-pass MLP `batch=64`:
+  - total `232.591ms`
+  - `gate_up_dispatch` `132.293ms`
+  - `down_dispatch` `85.732ms`
+  - `readback` `5.100ms`
+- The net MLP `batch=64` inner total improved by `46.722ms`, with the gain
+  coming from down projection.
+- Current measured-pass prefill concrete buckets after A082:
+  - `mlp:fused` `233.559ms`
+  - `gdn:recurrent` `230.371ms`
+  - `gdn:conv` `163.942ms`
+  - `gdn:in_proj` `121.632ms`
+  - full-attention `qkv_proj` `97.752ms`
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18427 ./target/release/kiln serve`
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a082-mlp-f32-down-rows4-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. The no-profile wall gain is small on seed 84, but token IDs match,
+  visible server output is correct, and the profile shows a real reduction in
+  the targeted down-dispatch stage.
+- This is scoped to the large-batch hybrid MLP path; single-token decode and
+  non-hybrid F32/BF16 linear routes are unchanged.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4541,6 +4653,12 @@ Verdict:
   `132.253ms` and down `128.874ms`. The next prefill targets are no longer a
   single obvious MLP gate/up bucket; current measured buckets are MLP fused,
   GDN recurrent, GDN conv, GDN in-proj, and full-attention QKV in that order.
+- A082 applies a Vulkan-specific F32 rows4 down shader to the same hybrid path.
+  Measured `batch=64` MLP inner total is now `232.591ms`, with gate/up
+  `132.293ms` and down `85.732ms`. Current measured buckets are MLP fused
+  `233.559ms`, GDN recurrent `230.371ms`, GDN conv `163.942ms`, GDN in-proj
+  `121.632ms`, and full-attention QKV `97.752ms`; next prefill work should not
+  assume one remaining MLP projection is dominant without a fresh profile.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

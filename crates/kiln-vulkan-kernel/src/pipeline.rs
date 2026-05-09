@@ -100,6 +100,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_LINEAR_DECODE_BATCHED_ROWS2,
     ),
     (
+        "linear_decode_batched_rows4",
+        SPIR_V_LINEAR_DECODE_BATCHED_ROWS4,
+    ),
+    (
         "linear_decode_argmax_blocks",
         SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS,
     ),
