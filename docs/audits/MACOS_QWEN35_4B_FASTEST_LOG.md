@@ -18954,3 +18954,145 @@ Accepted. Start generic Metal batch transposed-GEMV row-quad grouping at batch
 `4` instead of batch `8`. Batches `2/3` are unchanged, batch `8+` keeps the
 accepted row-quad path, and the existing row-quad disable env remains the
 rollback. CUDA/Vulkan runtime behavior is unchanged.
+
+## 2026-05-09 - E454 post-E453 live batching profile
+
+### Purpose
+
+Measure the live server path after E453's Metal batch4+ row-quad GEMV policy,
+and confirm whether continuous batching reaches the newly affected batch sizes.
+This is measurement only; no source files changed.
+
+### Method
+
+- Built the release server with `cargo build --release --features metal --bin kiln`.
+- Started the Metal server with:
+  - `KILN_DECODE_BATCHER=1`
+  - `KILN_DECODE_BATCH_WAIT_US=0`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+- Sent concurrent streaming `/v1/chat/completions` requests to the local Qwen3.5
+  4B snapshot with `max_tokens=3` and `temperature=0`.
+
+The first four-stream probe is retained because it matches the earlier live
+profile shape, but it did not exercise E453: the decode batcher reached only
+`max_observed_batch=3`.
+
+### Results
+
+Release build passed with existing warnings.
+
+Four-stream profile:
+
+- elapsed: `6.671843 s`
+- HTTP statuses: `200,200,200,200`
+- server generated tokens: `12`
+- decode batcher: enabled, `8` submitted jobs, `4` worker batches, `8` rows,
+  `max_observed_batch=3`
+- request decode rows (`seq_len=1`, `start_pos=18/19`): `1120`
+- stage totals: MLP `858.746 ms`, GDN `601.014 ms`, full attention
+  `204.350 ms`
+- top stages: `mlp:gate_up_fused` `536.196 ms`, `gdn:in_proj`
+  `397.019 ms`, `mlp:down_proj` `322.550 ms`, `gdn:out_proj`
+  `126.845 ms`
+
+Eight-stream profile:
+
+- elapsed: `8.401115 s`
+- HTTP statuses: `200,200,200,200,200,200,200,200`
+- server generated tokens: `24`
+- decode batcher: enabled, `16` submitted jobs, `4` worker batches, `16` rows,
+  `max_observed_batch=7`
+- request decode rows (`seq_len=1`, `start_pos=18/19/20`): `1104`
+- stage totals: MLP `786.212 ms`, GDN `556.318 ms`, full attention
+  `196.873 ms`
+- top stages: `mlp:gate_up_fused` `476.133 ms`, `mlp:down_proj`
+  `310.079 ms`, `gdn:in_proj` `264.745 ms`, `gdn:out_proj`
+  `127.653 ms`
+- full-attention batch-named stages totaled `104.646 ms`
+
+Because local machine activity overlapped with the first eight-stream run, a
+quiet rerun was kept under a separate artifact prefix.
+
+Eight-stream quiet rerun:
+
+- elapsed: `8.158592 s`
+- HTTP statuses: `200,200,200,200,200,200,200,200`
+- server generated tokens: `24`
+- decode batcher: enabled, `16` submitted jobs, `4` worker batches, `16` rows,
+  `max_observed_batch=7`
+- request decode rows (`seq_len=1`, `start_pos=18/19/20`): `1104`
+- stage totals: MLP `752.478 ms`, GDN `540.650 ms`, full attention
+  `250.749 ms`
+- top stages: `mlp:gate_up_fused` `457.279 ms`, `gdn:in_proj`
+  `301.899 ms`, `mlp:down_proj` `295.199 ms`, `gdn:out_proj`
+  `148.650 ms`
+- full-attention batch-named stages totaled `103.916 ms`
+
+### Artifacts
+
+- `e454_post_batch4_rowquad_live_batch_build.log`
+- `e454_post_batch4_rowquad_live_batch_profile_health.json`
+- `e454_post_batch4_rowquad_live_batch_profile_metrics.prom`
+- `e454_post_batch4_rowquad_live_batch_profile_request_0.json`
+- `e454_post_batch4_rowquad_live_batch_profile_request_1.json`
+- `e454_post_batch4_rowquad_live_batch_profile_request_2.json`
+- `e454_post_batch4_rowquad_live_batch_profile_request_3.json`
+- `e454_post_batch4_rowquad_live_batch_profile_response_0.sse`
+- `e454_post_batch4_rowquad_live_batch_profile_response_1.sse`
+- `e454_post_batch4_rowquad_live_batch_profile_response_2.sse`
+- `e454_post_batch4_rowquad_live_batch_profile_response_3.sse`
+- `e454_post_batch4_rowquad_live_batch_profile_server.log`
+- `e454_post_batch4_rowquad_live_batch_profile_summary.txt`
+- `e454_post_batch4_rowquad_live_batch_profile_time.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_health.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_metrics.prom`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_0.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_1.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_2.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_3.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_4.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_5.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_6.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_request_7.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_0.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_1.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_2.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_3.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_4.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_5.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_6.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_response_7.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_server.log`
+- `e454_post_batch4_rowquad_live_batch8_profile_summary.txt`
+- `e454_post_batch4_rowquad_live_batch8_profile_time.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_health.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_metrics.prom`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_0.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_1.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_2.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_3.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_4.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_5.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_6.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_request_7.json`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_0.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_1.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_2.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_3.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_4.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_5.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_6.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_response_7.sse`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_server.log`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_summary.txt`
+- `e454_post_batch4_rowquad_live_batch8_profile_rerun_quiet_time.json`
+
+### Decision
+
+Accepted as post-change measurement. The four-stream probe was not sufficient
+to exercise E453, but the eight-stream profile and quiet rerun both reached
+`max_observed_batch=7`, confirming that the live Metal server path now hits the
+new batch4+ row-quad policy under concurrent decoding. The hottest remaining
+live batch stages are still MLP gate/up, GDN in-proj, MLP down, and GDN out.

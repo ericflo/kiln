@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-9066f04f-6d18-4fa6-8f76-8e550a1b6529","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-9066f04f-6d18-4fa6-8f76-8e550a1b6529","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"用户"}}]}
+
+data: {"id":"chatcmpl-9066f04f-6d18-4fa6-8f76-8e550a1b6529","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"的问题是"}}]}
+
+data: {"id":"chatcmpl-9066f04f-6d18-4fa6-8f76-8e550a1b6529","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"要求"}}]}
+
+data: {"id":"chatcmpl-9066f04f-6d18-4fa6-8f76-8e550a1b6529","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

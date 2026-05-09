@@ -1,0 +1,36 @@
+{
+  "elapsed_secs": 6.671842999989167,
+  "results": [
+    {
+      "status": 200,
+      "elapsed_secs": 6.669849709025584,
+      "bytes": 1019,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 6.268575667054392,
+      "bytes": 1018,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 6.6698372919345275,
+      "bytes": 1032,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 6.669474375084974,
+      "bytes": 1025,
+      "error": null
+    }
+  ],
+  "max_tokens": 3,
+  "prompts": [
+    "Write one short sentence about topic alpha.",
+    "Write one short sentence about topic beta.",
+    "Write one short sentence about topic gamma.",
+    "Write one short sentence about topic delta."
+  ]
+}

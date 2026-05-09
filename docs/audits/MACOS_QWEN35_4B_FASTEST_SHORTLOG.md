@@ -2062,3 +2062,13 @@
   batches `4/5/6/7` (`1481/2213/2426/2472 us` versus
   `1967/2769/2772/3569 us`). Metal/Vulkan model and server checks passed;
   CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E454: Captured post-E453 live batching profiles. No source
+  change. The four-stream profile completed in `6.672 s`, generated `12`
+  tokens, and reached only `max_observed_batch=3`, so it did not exercise the
+  new batch4+ row-quad policy. The eight-stream profile completed in
+  `8.401 s`, generated `24` tokens, and reached `max_observed_batch=7`; a
+  quiet rerun after local-machine noise completed in `8.159 s` with the same
+  `24` tokens and `max_observed_batch=7`. Both eight-stream runs submitted
+  `16` decode-batcher jobs over `4` worker batches. Quiet-rerun hot decode
+  stages remained MLP gate/up `457.279 ms`, GDN in-proj `301.899 ms`, MLP down
+  `295.199 ms`, and GDN out `148.650 ms`.

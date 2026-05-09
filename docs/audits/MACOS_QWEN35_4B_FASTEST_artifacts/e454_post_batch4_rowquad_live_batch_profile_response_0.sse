@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-4c4d12de-cc1c-4d84-a7cd-ad54a81f281c","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-4c4d12de-cc1c-4d84-a7cd-ad54a81f281c","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"可梦"}}]}
+
+data: {"id":"chatcmpl-4c4d12de-cc1c-4d84-a7cd-ad54a81f281c","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"dorf"}}]}
+
+data: {"id":"chatcmpl-4c4d12de-cc1c-4d84-a7cd-ad54a81f281c","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":","}}]}
+
+data: {"id":"chatcmpl-4c4d12de-cc1c-4d84-a7cd-ad54a81f281c","object":"chat.completion.chunk","created":1778357710,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

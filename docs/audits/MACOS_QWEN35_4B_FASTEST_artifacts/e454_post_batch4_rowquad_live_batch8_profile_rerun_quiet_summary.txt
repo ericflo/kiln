@@ -1,0 +1,57 @@
+E454 post-E453 live streaming batch8 profile summary (quiet rerun)
+
+elapsed_s=8.158592
+statuses=200,200,200,200,200,200,200,200
+stream_token_events_total=24
+kiln_requests_total{status="ok"} 8
+kiln_requests_total{status="error"} 0
+kiln_tokens_generated_total 24
+kiln_decode_batcher_enabled 1
+kiln_decode_batcher_jobs_total{result="submitted"} 16
+kiln_decode_batcher_jobs_total{result="runner_busy"} 0
+kiln_decode_batcher_jobs_total{result="failed"} 0
+kiln_decode_batcher_batches_total 4
+kiln_decode_batcher_rows_total 16
+kiln_decode_batcher_max_observed_batch 7
+
+profile_rows_total=4768
+request_decode_rows_seq1_pos18_20=1104
+
+By subsystem (seq_len=1 start_pos=18/19/20):
+- full_attn: 250.749 ms
+- gdn: 540.650 ms
+- mlp: 752.478 ms
+
+By decode start_pos:
+- start_pos=18: 607.177 ms
+- start_pos=19: 558.509 ms
+- start_pos=20: 378.191 ms
+
+Top stages (seq_len=1 start_pos=18/19/20):
+- mlp:gate_up_fused: 457.279 ms count=128 avg=3.572 ms
+- gdn:in_proj: 301.899 ms count=96 avg=3.145 ms
+- mlp:down_proj: 295.199 ms count=128 avg=2.306 ms
+- gdn:out_proj: 148.650 ms count=96 avg=1.548 ms
+- gdn:gates_recur_gated_norm: 55.093 ms count=96 avg=0.574 ms
+- full_attn:qkv_proj_batch: 43.722 ms count=16 avg=2.733 ms
+- full_attn:kv_write: 42.024 ms count=16 avg=2.627 ms
+- full_attn:qkv_proj: 34.762 ms count=16 avg=2.173 ms
+- full_attn:qkv_split: 33.668 ms count=16 avg=2.104 ms
+- gdn:qkv_conv_norm: 32.677 ms count=96 avg=0.340 ms
+- full_attn:o_proj_batch: 21.257 ms count=16 avg=1.329 ms
+- full_attn:o_proj: 17.424 ms count=16 avg=1.089 ms
+- full_attn:rope_batch: 14.601 ms count=16 avg=0.913 ms
+- full_attn:qk_norm: 7.011 ms count=16 avg=0.438 ms
+- full_attn:qkv_split_batch: 5.752 ms count=16 avg=0.359 ms
+- full_attn:decode_attn_contiguous_batch: 5.474 ms count=16 avg=0.342 ms
+- full_attn:kv_write_batch: 5.025 ms count=16 avg=0.314 ms
+- full_attn:decode_attn_contiguous: 4.597 ms count=16 avg=0.287 ms
+- full_attn:qk_norm_batch: 4.052 ms count=16 avg=0.253 ms
+- full_attn:attn_gate_batch: 4.033 ms count=16 avg=0.252 ms
+- full_attn:attn_gate: 3.686 ms count=16 avg=0.230 ms
+- full_attn:rope: 3.631 ms count=16 avg=0.227 ms
+- gdn:gated_norm: 2.327 ms count=96 avg=0.024 ms
+- full_attn:q_transpose: 0.030 ms count=16 avg=0.002 ms
+- gdn:post_transpose: 0.004 ms count=96 avg=0.000 ms
+
+full_attn_batch_named_total=103.916 ms

@@ -1,0 +1,12 @@
+{
+  "model": "qwen3.5-4b-kiln",
+  "stream": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Write one short sentence about topic epsilon."
+    }
+  ],
+  "max_tokens": 3,
+  "temperature": 0.0
+}

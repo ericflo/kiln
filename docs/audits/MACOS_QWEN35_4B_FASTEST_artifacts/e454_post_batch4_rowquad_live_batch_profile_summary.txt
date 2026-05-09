@@ -1,0 +1,41 @@
+E454 post-E453 live streaming batch profile summary
+
+profile_rows_total=3280
+request_decode_rows_seq1_pos18_19=1120
+
+By subsystem (seq_len=1 start_pos=18/19):
+- mlp: 858.746 ms
+- gdn: 601.014 ms
+- full_attn: 204.350 ms
+
+By decode start_pos:
+- start_pos=18: 1205.092 ms
+- start_pos=19: 459.018 ms
+
+Top stages (seq_len=1 start_pos=18/19):
+- mlp:gate_up_fused: 536.196 ms count=128 avg=4.189 ms
+- gdn:in_proj: 397.019 ms count=96 avg=4.136 ms
+- mlp:down_proj: 322.550 ms count=128 avg=2.520 ms
+- gdn:out_proj: 126.845 ms count=96 avg=1.321 ms
+- full_attn:qkv_proj: 52.769 ms count=16 avg=3.298 ms
+- gdn:gates_recur_gated_norm: 49.623 ms count=96 avg=0.517 ms
+- full_attn:qkv_proj_batch: 32.448 ms count=16 avg=2.028 ms
+- full_attn:o_proj: 30.323 ms count=16 avg=1.895 ms
+- gdn:qkv_conv_norm: 27.337 ms count=96 avg=0.285 ms
+- full_attn:kv_write: 19.045 ms count=16 avg=1.190 ms
+- full_attn:o_proj_batch: 16.509 ms count=16 avg=1.032 ms
+- full_attn:rope_batch: 11.077 ms count=16 avg=0.692 ms
+- full_attn:decode_attn_contiguous_batch: 5.012 ms count=16 avg=0.313 ms
+- full_attn:qkv_split: 4.773 ms count=16 avg=0.298 ms
+- full_attn:qkv_split_batch: 4.731 ms count=16 avg=0.296 ms
+- full_attn:decode_attn_contiguous: 4.460 ms count=16 avg=0.279 ms
+- full_attn:kv_write_batch: 4.273 ms count=16 avg=0.267 ms
+- full_attn:qk_norm: 4.156 ms count=16 avg=0.260 ms
+- full_attn:rope: 3.798 ms count=16 avg=0.237 ms
+- full_attn:qk_norm_batch: 3.794 ms count=16 avg=0.237 ms
+- full_attn:attn_gate: 3.680 ms count=16 avg=0.230 ms
+- full_attn:attn_gate_batch: 3.455 ms count=16 avg=0.216 ms
+- gdn:gated_norm: 0.184 ms count=96 avg=0.002 ms
+- full_attn:q_transpose: 0.032 ms count=16 avg=0.002 ms
+
+full_attn_batch_named_total=81.314 ms
