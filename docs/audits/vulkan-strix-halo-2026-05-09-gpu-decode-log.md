@@ -5014,6 +5014,70 @@ Verdict:
 - Do not retry conv1d transfer batching by only grouping copy submissions.
 - Final source has no A089 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A090: Current Vulkan Profile After A089
+
+Context:
+- Refresh the serial target set after A083-A089 removed their temporary source
+  and before starting post-PR1008 follow-up work directly on `main`.
+- The release build/profile command was started on `63a66767`, before PR #1008
+  was merged. PR #1008 changes unsupported-backend batched greedy LM-head
+  admission/fallback logic in `generate.rs`; it is not expected to change this
+  single-request paged latency harness. Follow-up source edits are now on
+  merged `main`.
+
+Command:
+- Build:
+  `PATH="$HOME/.cargo/bin:$PATH" cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Profile:
+  `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_MLP_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1 KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 90 --quiet`
+
+Evidence:
+- Release build passed; warnings only.
+- Final measured JSON reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Paged decode token IDs stayed non-empty and stable:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Final measured latency:
+  prefill `1110.496991ms`, mean ITL `89.516732ms`, p50 ITL
+  `89.820869ms`, p99 ITL `91.070380ms`, `9` tokens generated.
+- Measured-pass top prefill buckets, excluding warmup:
+  GDN recurrent `253.580ms`, MLP fused `231.666ms`, GDN conv
+  `175.091ms`, GDN in-proj `123.833ms`, and full-attn QKV
+  `97.001ms`.
+- MLP inner prefill detail (`batch=64`):
+  total `230.648ms`, gate/up dispatch `132.464ms`, down dispatch
+  `85.330ms`, readback `4.520ms`, upload x `4.227ms`.
+- GDN in-proj inner prefill detail (`batch=64`):
+  total `122.837ms`, record/submit/wait `100.249ms`,
+  host-visible read `12.255ms`.
+- Measured-pass top decode buckets:
+  MLP fused `241.639ms`, GDN recurrent `109.122ms`, GDN in-proj
+  `101.946ms`, GDN out-proj `45.501ms`, GDN gates `40.689ms`,
+  and GDN gated norm `38.697ms`.
+- Raw profile logs:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a090-current-profile.log`
+  and
+  `docs/audits/vulkan-strix-halo-2026-05-09-a090-current-profile-release-bench-build.log`.
+- Durable aggregate summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a090-current-profile-summary.txt`.
+
+Verdict:
+- Keep as target-selection evidence; no source change.
+- Current prefill priority is GDN recurrent, MLP fused, GDN conv, GDN
+  in-proj, and full-attention QKV. This confirms A082 did not leave one simple
+  MLP projection as the sole obvious prefill target.
+- MLP prefill is still dispatch/compute dominated, not x-upload or readback
+  dominated.
+- GDN in-proj is now mostly `record_submit_wait`; A078 already removed the
+  worst host-visible readback cost, so the next GDN in-proj work needs fewer
+  output boundaries or adjacent-stage fusion/residency.
+- Decode remains dominated by single-row MLP, then GDN recurrent/in-proj. A087
+  already rejected the direct single-row BF16 `32x8` retile, so the next serial
+  attempt should not be another small lane trade without changing the boundary
+  or fusion shape.
+- A088/A089 already rejected conv1d transfer batching by grouped copy
+  submissions. Further conv work needs a different algorithmic shape.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -5126,6 +5190,13 @@ Verdict:
   regressed prefill `1089.390ms` rollback to `1112.361ms` candidate and
   worsened mean/p99 ITL. Do not retry conv1d transfer batching by only grouping
   copy submissions.
+- A090 refreshes the serial target set after A089: prefill buckets are GDN
+  recurrent `253.580ms`, MLP fused `231.666ms`, GDN conv `175.091ms`, GDN
+  in-proj `123.833ms`, and full-attn QKV `97.001ms`; decode buckets are MLP
+  fused `241.639ms`, GDN recurrent `109.122ms`, and GDN in-proj `101.946ms`.
+  Next work should target GDN recurrent/conv or MLP/GDN boundary/fusion/
+  residency, not another direct conv transfer batching attempt or simple
+  row/lane retile already rejected by A085-A087.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

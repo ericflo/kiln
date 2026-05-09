@@ -1,0 +1,119 @@
+# A090 Current Vulkan Profile Summary
+
+Date: 2026-05-09
+Host: AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+Model: Qwen3.5-4B
+Backend: vulkan
+
+Profiled source:
+- Release build and profile were started on `63a66767` after A089 removed its
+  temporary conv1d prefill-transfer source.
+- PR #1008 was merged after this profile completed. That PR changes batched
+  greedy LM-head admission/fallback logic in `generate.rs`; it is not expected
+  to change this single-request paged latency harness. Follow-up code work is
+  now directly on merged `main`.
+
+Command:
+
+```text
+KILN_BENCH_LOG_TOKENS=1 \
+KILN_PROFILE_MLP_STAGES=1 \
+KILN_PROFILE_GDN_STAGES=1 \
+KILN_PROFILE_FULL_ATTN_STAGES=1 \
+KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1 \
+KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 \
+./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only \
+  --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 90 --quiet
+```
+
+Final measured latency JSON:
+- `backend`: `vulkan`
+- GPU: `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, 98304 MB VRAM from
+  linux-drm-sysfs
+- Token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1110.496991ms` (`57.631854 tok/s`)
+- Mean ITL: `89.516732ms` (`11.171096 tok/s`)
+- P50 ITL: `89.820869ms`
+- P99 ITL: `91.070380ms`
+- Tokens generated: `9`
+
+Measured-pass top concrete prefill buckets (`seq_len=64`, warmup excluded):
+
+| Bucket | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| GDN recurrent | 253.580 | 24 | 10.566 |
+| MLP fused | 231.666 | 32 | 7.240 |
+| GDN conv | 175.091 | 24 | 7.295 |
+| GDN in_proj | 123.833 | 24 | 5.160 |
+| Full-attn QKV | 97.001 | 8 | 12.125 |
+| GDN out_proj | 57.006 | 24 | 2.375 |
+
+Measured-pass MLP kernel prefill detail (`batch=64`):
+
+| Stage | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| total | 230.648 | 32 | 7.208 |
+| gate_up_dispatch | 132.464 | 32 | 4.139 |
+| down_dispatch | 85.330 | 32 | 2.667 |
+| readback | 4.520 | 32 | 0.141 |
+| upload_x | 4.227 | 32 | 0.132 |
+
+Measured-pass GDN in-proj kernel prefill detail (`batch=64`):
+
+| Stage | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| total | 122.837 | 24 | 5.118 |
+| record_submit_wait | 100.249 | 24 | 4.177 |
+| read_host_visible | 12.255 | 24 | 0.511 |
+| create_tensors | 3.742 | 24 | 0.156 |
+| create_out_buffers | 3.022 | 24 | 0.126 |
+
+Measured-pass top concrete decode buckets (`seq_len=1`, warmup excluded):
+
+| Bucket | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| MLP fused | 241.639 | 256 | 0.944 |
+| GDN recurrent | 109.122 | 192 | 0.568 |
+| GDN in_proj | 101.946 | 192 | 0.531 |
+| GDN out_proj | 45.501 | 192 | 0.237 |
+| GDN gates | 40.689 | 192 | 0.212 |
+| GDN gated_norm | 38.697 | 192 | 0.202 |
+| Full-attn QKV | 27.308 | 64 | 0.427 |
+| Full-attn o_proj | 17.084 | 64 | 0.267 |
+| GDN conv | 16.673 | 192 | 0.087 |
+
+Measured-pass MLP kernel decode detail (`batch=1`):
+
+| Stage | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| total | 236.234 | 256 | 0.923 |
+| gate_up_dispatch | 118.664 | 256 | 0.464 |
+| down_dispatch | 77.303 | 256 | 0.302 |
+| upload_x | 13.834 | 256 | 0.054 |
+| readback | 12.679 | 256 | 0.050 |
+
+Measured-pass GDN in-proj kernel decode detail (`batch=1`):
+
+| Stage | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| total | 97.425 | 192 | 0.507 |
+| record_submit_wait | 83.803 | 192 | 0.436 |
+| create_x_stage_write | 3.175 | 192 | 0.017 |
+| create_out_buffers | 2.886 | 192 | 0.015 |
+| read_host_visible | 1.443 | 192 | 0.008 |
+
+Interpretation:
+- Current prefill priority is GDN recurrent, MLP fused, GDN conv, GDN in-proj,
+  and full-attention QKV. This confirms A082 did not leave one simple MLP
+  projection as the only obvious prefill target.
+- MLP prefill is still dispatch/compute dominated, not x upload or readback
+  dominated.
+- GDN in-proj is now mostly `record_submit_wait`; A078 already removed the
+  worst host-visible readback cost, so the next GDN in-proj work needs fewer
+  output boundaries or adjacent-stage fusion/residency.
+- Decode remains dominated by single-row MLP, then GDN recurrent/in-proj.
+  A087 already rejected the direct single-row BF16 `32x8` retile, so the next
+  serial attempt should not be another small lane trade without changing the
+  boundary or fusion shape.
+- A088/A089 already rejected conv1d transfer batching by grouped copy
+  submissions. Further conv work needs a different algorithmic shape.
