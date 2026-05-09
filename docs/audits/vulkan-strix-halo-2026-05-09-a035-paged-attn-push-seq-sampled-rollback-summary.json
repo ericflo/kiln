@@ -1,0 +1,59 @@
+{
+  "items": [
+    {
+      "completion_index": 0,
+      "finish_reason": "length",
+      "prompt_index": 0,
+      "reasoning_len": 0,
+      "text": "Careful GPU correctness checks are essential to prevent silent data corruption",
+      "usage": {
+        "completion_tokens": 12,
+        "prompt_tokens": 24,
+        "total_tokens": 36
+      }
+    },
+    {
+      "completion_index": 0,
+      "finish_reason": "length",
+      "prompt_index": 1,
+      "reasoning_len": 0,
+      "text": "11 12 13 14 ",
+      "usage": {
+        "completion_tokens": 12,
+        "prompt_tokens": 43,
+        "total_tokens": 55
+      }
+    },
+    {
+      "completion_index": 0,
+      "finish_reason": "stop",
+      "prompt_index": 2,
+      "reasoning_len": 0,
+      "text": "Red, blue, green",
+      "usage": {
+        "completion_tokens": 7,
+        "prompt_tokens": 20,
+        "total_tokens": 27
+      }
+    },
+    {
+      "completion_index": 0,
+      "finish_reason": "stop",
+      "prompt_index": 3,
+      "reasoning_len": 0,
+      "text": "thirteen",
+      "usage": {
+        "completion_tokens": 4,
+        "prompt_tokens": 34,
+        "total_tokens": 38
+      }
+    }
+  ],
+  "status": 200,
+  "usage": {
+    "completion_tokens": 35,
+    "prompt_tokens": 121,
+    "total_tokens": 156
+  },
+  "wall_s": 16.94401377900067
+}

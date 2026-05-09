@@ -1,0 +1,28 @@
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+:
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"6"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"7"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"8"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"9"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"0"}}]}
+
+data: {"id":"chatcmpl-bc31a0fb-7d0e-455f-85fe-ccc78a885ec2","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

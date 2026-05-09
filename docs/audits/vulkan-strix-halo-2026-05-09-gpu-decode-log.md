@@ -1645,10 +1645,81 @@ Verdict:
   single-dispatch Q/K/V shape. A future attempt needs a different tiling or
   residency strategy and should be justified by shader-level timing first.
 
+### 2026-05-09 A035: Reject Dyn-Seqlen Seq-Lens Push Constants
+
+Hypothesis:
+- A011/A016 left the Vulkan dyn-seqlen paged-attention path bottlenecked by
+  data movement around compact K/V windows.
+- A very small piece of that movement is the per-dispatch `seq_lens` storage
+  buffer upload. Since the live actor and decode-batcher paths normally use
+  `batch <= 8`, a shader variant could carry the row lengths in push constants
+  and remove one tiny upload plus one descriptor binding from every full-attn
+  dyn-seqlen dispatch.
+
+Implementation Tried:
+- Added temporary `paged_attn_decode_batch_push_seq.comp`.
+- Added temporary build/pipeline/prewarm entries for the shader.
+- Routed `dispatch_paged_attn_decode_batch_f32` to the push-constant variant
+  when `batch <= 8`, with rollback env
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_PUSH_SEQ_LENS=1`.
+- Removed all source after measurement favored the old storage-buffer path on
+  the more relevant sampled actor fixture.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_PAGED_ATTN_PUSH_SEQ_LENS=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Candidate and rollback parity both passed the focused paged-attention test.
+- Greedy streaming actor smoke, four varied prompts, `max_tokens=20`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Candidate: `20.085937s`, HTTP 200 for all streams, visible text
+    `"6 7 8 9 10"`, `"11 12 13 14 15 16 17"`,
+    `"16 17 18 19 20 21 22"`, and `"thirteen"`, empty reasoning text.
+  - Rollback: `20.857460s`, same visible text shape and empty reasoning text.
+  - Decode-batcher metrics stayed at zero because `KILN_BATCHING_ENGINE=1`
+    routes this smoke through the actor path rather than the live greedy
+    decode batcher.
+- More relevant sampled actor batch, `/v1/completions/batch`, four varied
+  prompts, `max_tokens=12`, `temperature=0.7`, `top_p=0.95`, `top_k=40`,
+  `seed=1234`, and explicit thinking disabled:
+  - Rollback first:
+    `KILN_DISABLE_VULKAN_PAGED_ATTN_PUSH_SEQ_LENS=1` returned HTTP 200 in
+    `16.944014s`, usage `121` prompt tokens, `35` completion tokens, all
+    visible text non-empty, reasoning length `0`.
+  - Candidate second returned HTTP 200 in `17.466573s` with identical usage,
+    matching visible outputs, and reasoning length `0`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a035-paged-attn-push-seq-candidate-*`
+- `vulkan-strix-halo-2026-05-09-a035-paged-attn-push-seq-rollback-*`
+- `vulkan-strix-halo-2026-05-09-a035-paged-attn-push-seq-sampled-candidate-*`
+- `vulkan-strix-halo-2026-05-09-a035-paged-attn-push-seq-sampled-rollback-*`
+
+Verdict:
+- Rejected and removed. Moving only `seq_lens` from a storage buffer to push
+  constants is too small and may be slightly slower on the sampled actor path.
+- The next dyn-seqlen paged-attention attempt should target K/V residency,
+  compact-window upload size, or attention/output materialization boundaries
+  rather than just eliminating the row-length descriptor.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Do not retry dyn-seqlen paged-attention optimization by only pushing
+  `seq_lens` through push constants; A035 measured that as slower on the
+  sampled actor fixture.
 - Do not retry full-attention QKV prefill batching by only fusing the three
   projections into one flattened batched dispatch; A034 measured it as a large
   server regression.

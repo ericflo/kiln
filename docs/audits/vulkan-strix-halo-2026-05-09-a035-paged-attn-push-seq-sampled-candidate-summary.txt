@@ -1,0 +1,7 @@
+status=200
+wall_s=17.466573
+usage={"completion_tokens": 35, "prompt_tokens": 121, "total_tokens": 156}
+item_0 prompt=0 finish=length text='Careful GPU correctness checks are essential to prevent silent data corruption' reasoning_len=0 usage={"completion_tokens": 12, "prompt_tokens": 24, "total_tokens": 36}
+item_1 prompt=1 finish=length text='11 12 13 14 ' reasoning_len=0 usage={"completion_tokens": 12, "prompt_tokens": 43, "total_tokens": 55}
+item_2 prompt=2 finish=stop text='Red, blue, green' reasoning_len=0 usage={"completion_tokens": 7, "prompt_tokens": 20, "total_tokens": 27}
+item_3 prompt=3 finish=stop text='thirteen' reasoning_len=0 usage={"completion_tokens": 4, "prompt_tokens": 34, "total_tokens": 38}

@@ -1,0 +1,48 @@
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+:
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"6"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"7"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"8"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"9"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"2"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"0"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"2"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"1"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":" "}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"2"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{"content":"2"}}]}
+
+data: {"id":"chatcmpl-dedcffe5-93f4-431f-8bb8-36ab02e494ce","object":"chat.completion.chunk","created":1778315763,"model":"Qwen3.5-4B","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

@@ -45,6 +45,20 @@ before or with each accepted change and each measured rejection.
 | A032 | Pair adjacent QKV and Z columns in batched Vulkan GDN input projection. | Added F32 and packed-BF16 paired batched shaders inspired by recent Metal column-pairing work. Focused GDN in-proj parity, full Vulkan GDN parity (`28 passed`), `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, release Vulkan build, and `git diff --check` passed. Four varied-length live streams returned HTTP 200 with non-empty visible text and empty reasoning text. Endpoint A/B improved candidate `13.076s` vs rollback `15.680s` with identical `68` rows / `38` batches / max batch `3`; second pair was candidate `13.735s` vs rollback `14.000s`. | Keep; Vulkan-only batched GDN in-proj win, batch `1` unchanged, CUDA/Metal sources untouched. Rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`. |
 | A033 | Profile current Vulkan live path after A032. | Profiled four varied prompt-length streams with `max_tokens=3` and thinking disabled. All streams returned HTTP 200 with visible text and empty reasoning text. Filtered live totals, excluding prewarm rows: MLP `5203.672 ms`, GDN `11274.449 ms`, full-attention `1931.328 ms`. Top decode-only `seq_len=1` stages were `mlp:fused` `198.206 ms`, `gdn:gates` `178.687 ms`, `gdn:recurrent` `120.919 ms`, and `gdn:in_proj` `117.978 ms`. | Keep as target-selection evidence; no source change. |
 | A034 | Trial flattened batched Vulkan full-attention QKV fusion for prefill rows. | Temporary F32 and packed-BF16 batched QKV shaders passed focused parity and full Vulkan parity (`30 passed`), plus `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, release Vulkan build, and `git diff --check`. Candidate returned correct visible text but regressed to `9.856s`; same-binary rollback was `5.490s` with the same `8` jobs / `4` batches / `8` rows / max batch `3`. | Rejected and removed; do not retry by only flattening rows into a fused Q/K/V dispatch. |
+| A035 | Trial push-constant `seq_lens` for Vulkan dyn-seqlen paged attention. | Temporary shader/dispatcher path passed focused paged-attn parity for candidate and rollback, `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Greedy streaming actor smoke was inconclusive (`20.086s` candidate vs `20.857s` rollback) with correct visible text, but the more relevant sampled actor batch regressed: rollback `16.944s`, candidate `17.467s`, same usage and outputs. | Rejected and removed; row-length push constants are not enough. Next dyn-seqlen work needs K/V residency or compact-window upload/materialization changes. |
+
+Additional validation after rejected A035:
+
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate and rollback passed focused paged-attn parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate and rollback server runs returned HTTP 200 with non-empty visible
+  content and empty reasoning text.
+- Source change was removed after the sampled actor rollback beat candidate.
 
 Additional validation after rejected A034:
 
