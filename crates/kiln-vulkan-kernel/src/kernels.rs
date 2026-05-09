@@ -21,6 +21,11 @@ fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
 }
 
+fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_vulkan_mlp_kernel_stage_profile(
     stage: &str,
@@ -37,6 +42,30 @@ fn finish_vulkan_mlp_kernel_stage_profile(
     };
     eprintln!(
         "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={bf16_weights} rows2={use_rows2} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_vulkan_gdn_in_proj_kernel_stage_profile(
+    stage: &str,
+    batch: usize,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+    packed_bf16_weights: bool,
+    pair_qkv_z: bool,
+    row_group_size: usize,
+    single_submit: bool,
+    start: Option<Instant>,
+) {
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_profile_vulkan_gdn_in_proj_kernel_stage stage={stage} batch={batch} hidden={hidden} qkv_dim={qkv_dim} z_dim={z_dim} a_dim={a_dim} b_dim={b_dim} packed_bf16_weights={packed_bf16_weights} pair_qkv_z={pair_qkv_z} row_group_size={row_group_size} single_submit={single_submit} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
 }
@@ -932,14 +961,8 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         x_dims
     );
     let batch = x_dims[0];
-    let x_data = extract_tensor_bytes(x)?.0;
-    anyhow::ensure!(
-        x_data.len() == batch * hidden * 4,
-        "gdn_in_proj_decode: x buffer has {} bytes, expected {}",
-        x_data.len(),
-        batch * hidden * 4
-    );
-
+    let profile_stages = profile_vulkan_gdn_in_proj_kernel_stages_enabled();
+    let total_start = profile_stages.then(Instant::now);
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
     let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
     let row_grouping =
@@ -956,6 +979,30 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     } else {
         total_out
     };
+    let single_submit = gdn_in_proj_single_submit_enabled();
+    let stage_start = profile_stages.then(Instant::now);
+    let x_data = extract_tensor_bytes(x)?.0;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "extract_x",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
+    anyhow::ensure!(
+        x_data.len() == batch * hidden * 4,
+        "gdn_in_proj_decode: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        batch * hidden * 4
+    );
+
     let glsl_path = if batch == 1 {
         if packed_bf16_weights {
             concat!(
@@ -1003,7 +1050,22 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             )
         }
     };
+    let stage_start = profile_stages.then(Instant::now);
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "shader",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
     let mut push_constants = vec![
         hidden as u32,
         qkv_dim as u32,
@@ -1015,7 +1077,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     if batch > 1 {
         push_constants.push(batch as u32);
     }
-    if gdn_in_proj_single_submit_enabled() {
+    if single_submit {
         return dispatch_gdn_in_proj_decode_cached_single_submit(
             vk_device,
             qkv_weight_t,
@@ -1023,6 +1085,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             a_weight_t,
             b_weight_t,
             batch,
+            hidden,
             qkv_dim,
             z_dim,
             a_dim,
@@ -1030,15 +1093,35 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             total_out,
             dispatch_cols,
             row_group_size,
+            packed_bf16_weights,
+            pair_qkv_z,
+            profile_stages,
+            total_start,
             &spirv,
             &push_constants,
             &x_data,
         );
     }
 
+    let stage_start = profile_stages.then(Instant::now);
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create gdn_in_proj x buffer")?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_x_buffer",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
     {
+        let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
             device,
@@ -1049,11 +1132,40 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             &x_data,
         )
         .context("failed to upload gdn_in_proj x buffer")?;
+        finish_vulkan_gdn_in_proj_kernel_stage_profile(
+            "upload_x",
+            batch,
+            hidden,
+            qkv_dim,
+            z_dim,
+            a_dim,
+            b_dim,
+            packed_bf16_weights,
+            pair_qkv_z,
+            row_group_size,
+            single_submit,
+            stage_start,
+        );
     }
 
+    let stage_start = profile_stages.then(Instant::now);
     let out_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, (batch * total_out * 4) as u64)
             .context("failed to create gdn_in_proj output buffer")?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_out_buffer",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
     let all_handles = vec![
         x_buf.handle(),
         qkv_weight_t.handle(),
@@ -1063,6 +1175,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         out_buf.handle(),
     ];
 
+    let stage_start = profile_stages.then(Instant::now);
     run_compute_pipeline(
         vk_device,
         &spirv,
@@ -1078,20 +1191,80 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         },
     )
     .context("gdn_in_proj_decode kernel failed")?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "dispatch",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
 
     let out_data = {
+        let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
+        let out_data = VulkanBuffer::read_back_with_command_pool(
             device,
             host_visible_mt,
             queue,
             *command_pool,
             &out_buf,
         )
-        .context("failed to read back gdn_in_proj output")?
+        .context("failed to read back gdn_in_proj output")?;
+        finish_vulkan_gdn_in_proj_kernel_stage_profile(
+            "readback",
+            batch,
+            hidden,
+            qkv_dim,
+            z_dim,
+            a_dim,
+            b_dim,
+            packed_bf16_weights,
+            pair_qkv_z,
+            row_group_size,
+            single_submit,
+            stage_start,
+        );
+        out_data
     };
 
-    create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
+    let stage_start = profile_stages.then(Instant::now);
+    let out = create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim);
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_tensors",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        stage_start,
+    );
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "total",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        single_submit,
+        total_start,
+    );
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,6 +1275,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     a_weight_t: &VulkanBuffer,
     b_weight_t: &VulkanBuffer,
     batch: usize,
+    hidden: usize,
     qkv_dim: usize,
     z_dim: usize,
     a_dim: usize,
@@ -1109,6 +1283,10 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     total_out: usize,
     dispatch_cols: usize,
     row_group_size: usize,
+    packed_bf16_weights: bool,
+    pair_qkv_z: bool,
+    profile_stages: bool,
+    total_start: Option<Instant>,
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
@@ -1118,18 +1296,49 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
+    let stage_start = profile_stages.then(Instant::now);
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create gdn_in_proj x buffer")?;
     let x_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, x_data.len() as u64)
         .context("failed to create gdn_in_proj x staging buffer")?;
     VulkanBuffer::write_host_visible(device, &x_stage, x_data)?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_x_stage_write",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
 
     let out_size = (batch * total_out * 4) as u64;
+    let stage_start = profile_stages.then(Instant::now);
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
         .context("failed to create gdn_in_proj output buffer")?;
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)
         .context("failed to create gdn_in_proj output staging buffer")?;
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_out_buffers",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
 
+    let stage_start = profile_stages.then(Instant::now);
     let all_handles = vec![
         x_buf.handle(),
         qkv_weight_t.handle(),
@@ -1173,6 +1382,20 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     unsafe {
         device.update_descriptor_sets(&descriptor_writes, &[]);
     }
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "pipeline_descriptor_setup",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
 
     let cmd_pool = vk_device.transient_command_pool()?;
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
@@ -1181,6 +1404,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             .context("failed to allocate command buffer")?;
     let cmd = command_buffers[0];
 
+    let stage_start = profile_stages.then(Instant::now);
     unsafe {
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
@@ -1265,9 +1489,68 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             .context("failed to reset transient descriptor pool")?;
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "record_submit_wait",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
 
+    let stage_start = profile_stages.then(Instant::now);
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim)
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "read_host_visible",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
+    let stage_start = profile_stages.then(Instant::now);
+    let out = create_gdn_in_proj_tensors_from_data(&out_data, batch, qkv_dim, z_dim, a_dim, b_dim);
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "create_tensors",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        stage_start,
+    );
+    finish_vulkan_gdn_in_proj_kernel_stage_profile(
+        "total",
+        batch,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        packed_bf16_weights,
+        pair_qkv_z,
+        row_group_size,
+        true,
+        total_start,
+    );
+    out
 }
 
 fn create_gdn_in_proj_tensors_from_data(

@@ -3876,6 +3876,113 @@ Verdict:
   same-harness no-profile comparison.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A077: Profile Vulkan GDN In-Projection Inner Stages
+
+Goal:
+- After A075 and A076 rejected direct MLP row-pair tile changes, split the next
+  large concrete prefill bucket, GDN in-projection, into inner Vulkan
+  dispatcher stages.
+- Keep this as profile-only instrumentation so the normal Vulkan, CUDA, and
+  Metal runtime paths are unchanged when the new env var is unset.
+
+Change:
+- Added `KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1`.
+- The log row is
+  `kiln_profile_vulkan_gdn_in_proj_kernel_stage`.
+- The profiler records context fields: `batch`, `hidden`, `qkv_dim`, `z_dim`,
+  `a_dim`, `b_dim`, `packed_bf16_weights`, `pair_qkv_z`,
+  `row_group_size`, and `single_submit`.
+- The default single-submit path now reports:
+  - `extract_x`
+  - `shader`
+  - `create_x_stage_write`
+  - `create_out_buffers`
+  - `pipeline_descriptor_setup`
+  - `record_submit_wait`
+  - `read_host_visible`
+  - `create_tensors`
+  - `total`
+- The older multi-submit fallback reports the analogous upload, dispatch, and
+  readback stages.
+
+Profile evidence:
+- Command:
+  `KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1 KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 77 --quiet`
+- Measured pass:
+  - backend `vulkan`
+  - GPU `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+  - prefill `2193.262508ms`
+  - mean ITL `99.140491875ms`
+  - p50 ITL `98.900620ms`
+  - p99 ITL `100.821073ms`
+  - tokens generated `9`
+- Measured-pass GDN in-proj inner stages:
+  - `batch=64 single_submit=true total`: `363.733ms` / `24` calls
+    (`15.156ms` mean)
+  - `batch=64 read_host_visible`: `246.909ms`
+  - `batch=64 record_submit_wait`: `108.461ms`
+  - `batch=64 create_tensors`: `2.794ms`
+  - `batch=64 create_out_buffers`: `1.778ms`
+  - `batch=64 create_x_stage_write`: `1.696ms`
+  - `batch=1 single_submit=true total`: `133.239ms` / `192` calls
+    (`0.694ms` mean)
+  - `batch=1 record_submit_wait`: `82.976ms`
+  - `batch=1 read_host_visible`: `36.940ms`
+- Surrounding measured-pass GDN `seq_len=64` buckets:
+  - `in_proj` `364.616ms`
+  - `recurrent` `238.993ms`
+  - `conv` `151.255ms`
+  - `out_proj` `123.227ms`
+  - `gated_norm` `109.423ms`
+- The matching MLP `batch=64` inner profile was still larger:
+  `total` `876.746ms`, `gate_up_dispatch` `657.821ms`,
+  `down_dispatch` `129.983ms`, `readback` `77.298ms`.
+
+No-profile correctness smoke:
+- Rebuilt `kiln` with Vulkan features and started:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18422 ./target/release/kiln serve`.
+- Server log showed:
+  - Vulkan GPU selected:
+    `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`
+  - Vulkan device initialized
+  - live greedy decode batcher enabled with backend `vulkan`
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-gdn-in-proj-inner-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-gdn-in-proj-inner-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a077-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Keep the profile-only instrumentation.
+- The current 64-token GDN in-projection bucket is dominated by output
+  transfer/readback (`read_host_visible`) with compute/submit next; setup and
+  tensor creation are small. The next GDN in-proj attempt should reduce the
+  output boundary, keep adjacent GDN stages resident, or fuse away the
+  split/readback path. A pure arithmetic tile tweak is unlikely to be enough.
+- No-profile endpoint correctness remains good on Vulkan GPU when callers pass
+  the real template configuration instead of prompt-text hacks.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3931,6 +4038,11 @@ Verdict:
   IDs, but no-profile prefill lost badly to restored `64x2` (`2486.717907ms`
   candidate versus `2280.474615ms` rollback on the same harness and seed).
   Keep `64x2`; more reduction lanes alone are not the MLP prefill fix.
+- A077 shows the current GDN in-projection prefill bucket is mostly output
+  movement/readback: `batch=64` inner total `363.733ms`, with
+  `246.909ms` in `read_host_visible` and `108.461ms` in
+  `record_submit_wait`. Next GDN in-proj work should reduce or fuse the output
+  boundary, not just retile arithmetic.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
