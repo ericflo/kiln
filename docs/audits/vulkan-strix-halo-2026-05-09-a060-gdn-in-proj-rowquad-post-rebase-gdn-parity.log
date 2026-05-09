@@ -1,0 +1,42 @@
+$ cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
+
+   Compiling kiln-vulkan-kernel v0.2.13 (/home/ericflo/Development/kiln/crates/kiln-vulkan-kernel)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
+     Running tests/gdn_parity.rs (target/debug/deps/gdn_parity-76b8eec335dda4df)
+
+running 31 tests
+test linear_decode_argmax_batched_bf16_packed_weights_matches_cpu_reference ... ok
+test causal_conv1d_prefill_matches_stateful_cpu_reference ... ok
+test gdn_gates_and_gated_rms_norm_match_f32_cpu_reference ... ok
+test linear_decode_bf16_packed_weights_match_cpu_reference ... ok
+test mlp_decode_matches_cpu_reference ... ok
+test full_attn_qkv_decode_bf16_packed_weights_match_cpu_reference ... ok
+test full_attn_qkv_decode_matches_cpu_reference ... ok
+test gdn_in_proj_decode_batched_bf16_packed_weights_row_pair_matches_cpu_reference ... ok
+test gdn_recurrent_step_matches_cpu_reference ... ok
+test gdn_recurrent_resident_state_matches_two_step_reference ... ok
+test gdn_chunk_prep_and_scan_match_cpu_reference ... ok
+test linear_decode_argmax_batched_matches_cpu_reference ... ok
+test mlp_decode_bf16_packed_weights_match_cpu_reference ... ok
+test linear_decode_batched_bf16_packed_weights_match_cpu_reference ... ok
+test linear_decode_matches_cpu_reference ... ok
+test gdn_in_proj_decode_matches_cpu_reference ... ok
+test paged_attn_decode_batch_matches_cpu_reference ... ok
+test linear_decode_argmax_matches_cpu_reference ... ok
+test gdn_in_proj_decode_batched_bf16_packed_weights_row_quad_matches_cpu_reference ... ok
+test mlp_gate_up_decode_matches_cpu_reference ... ok
+test gdn_in_proj_decode_batched_bf16_packed_weights_match_cpu_reference ... ok
+test causal_conv1d_update_matches_stateful_cpu_reference ... ok
+test gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference ... ok
+test gdn_in_proj_decode_batched_matches_cpu_reference ... ok
+test gdn_recurrent_step_matches_f32_cpu_reference ... ok
+test gdn_in_proj_decode_bf16_packed_weights_match_cpu_reference ... ok
+test linear_decode_argmax_bf16_packed_weights_matches_cpu_reference ... ok
+test gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference ... ok
+test linear_decode_batched_matches_cpu_reference ... ok
+test mlp_decode_batched_matches_cpu_reference ... ok
+test gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+exit_status=0

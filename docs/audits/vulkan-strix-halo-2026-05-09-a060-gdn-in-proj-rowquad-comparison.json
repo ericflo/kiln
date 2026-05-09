@@ -1,0 +1,30 @@
+{
+  "candidate_gdn_in_proj_seq1_ms": 186.63299999999995,
+  "candidate_metrics_delta": {
+    "batcher_rows": 16.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 16.0,
+    "max_batch_after": 8.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 16.0,
+    "worker_batches": 4.0
+  },
+  "candidate_outputs_ok": true,
+  "candidate_reasoning_empty": true,
+  "candidate_wall_s": 6.378047366000828,
+  "gdn_in_proj_seq1_delta_ms_candidate_minus_rollback": -26.458000000000084,
+  "rollback_gdn_in_proj_seq1_ms": 213.09100000000004,
+  "rollback_metrics_delta": {
+    "batcher_rows": 16.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 16.0,
+    "max_batch_after": 8.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 16.0,
+    "worker_batches": 4.0
+  },
+  "rollback_outputs_ok": true,
+  "rollback_reasoning_empty": true,
+  "rollback_wall_s": 6.510371664000559,
+  "wall_delta_s_candidate_minus_rollback": -0.13232429799973033
+}

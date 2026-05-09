@@ -1,0 +1,4 @@
+$ cargo check -p kiln-vulkan-kernel
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+exit_status=0

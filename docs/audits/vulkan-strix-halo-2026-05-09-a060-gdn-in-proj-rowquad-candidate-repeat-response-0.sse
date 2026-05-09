@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-6ba7621d-ec6d-46c8-8349-2cf37e3cd492","object":"chat.completion.chunk","created":1778330058,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-6ba7621d-ec6d-46c8-8349-2cf37e3cd492","object":"chat.completion.chunk","created":1778330058,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"blue"}}]}
+
+data: {"id":"chatcmpl-6ba7621d-ec6d-46c8-8349-2cf37e3cd492","object":"chat.completion.chunk","created":1778330058,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" green"}}]}
+
+data: {"id":"chatcmpl-6ba7621d-ec6d-46c8-8349-2cf37e3cd492","object":"chat.completion.chunk","created":1778330058,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

@@ -1,0 +1,5 @@
+$ cargo check -p kiln-vulkan-kernel
+
+   Compiling kiln-vulkan-kernel v0.2.13 (/home/ericflo/Development/kiln/crates/kiln-vulkan-kernel)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.73s
+exit_status=0

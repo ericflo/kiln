@@ -2829,6 +2829,110 @@ Verdict:
   reducing data movement or backend-boundary overhead in MLP, GDN in-proj, or
   paged attention rather than another direct shader-shape mirror.
 
+### 2026-05-09 A060: Vulkan GDN In-Projection Row-Quad for Full Batches
+
+Goal:
+- Transfer the useful part of Metal E379 to Vulkan without repeating the A043
+  mistake of assuming every Metal row-quad shape transfers. Metal E379 accepted
+  a GDN in-projection row-quad mode only for full batches (`batch >= 8`) and
+  left smaller batches on earlier paths.
+- Reduce the live `gdn_stage:in_proj seq_len=1` bucket in the warmed Vulkan
+  decode-batcher path while preserving exact visible output and keeping CUDA and
+  Metal source paths untouched.
+
+Change:
+- Added
+  `crates/kiln-vulkan-kernel/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w.comp`.
+- Embedded and prewarmed the new shader as
+  `gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w`.
+- Layered the shader on top of the existing Vulkan A032/A038 routing: it is
+  selected only for packed-BF16 GDN in-projection weights, paired QKV/Z columns,
+  row grouping enabled, and `batch >= 8`.
+- Existing batch `4..7` packed-BF16 traffic stays on the accepted row-pair
+  shader. Batch `1..3`, the F32 Vulkan GDN in-proj path, CPU, CUDA, and Metal
+  routing are unchanged.
+- Added targeted rollback
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD=1`.
+
+Validation:
+- `cargo fmt --check` passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` passed
+  with `31` tests, including the new
+  `gdn_in_proj_decode_batched_bf16_packed_weights_row_quad_matches_cpu_reference`
+  batch-8 row-quad test.
+- `cargo check -p kiln-model --features vulkan` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+  passed.
+- `git diff --check` passed.
+- After rebasing onto `origin/main` at `35283027`, the same Vulkan validation
+  set was repeated and passed: `cargo fmt --check`,
+  `cargo check -p kiln-vulkan-kernel`, full `gdn_parity`,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan`, release Vulkan build, and
+  `git diff --check`.
+- Best-effort CUDA/Metal checks remain environment-blocked on this Linux host
+  before project typecheck: CUDA fails because `nvcc` is not installed, and
+  Metal fails because `objc2` requires an Apple target. The captured status is
+  in
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cuda-metal-status.txt`.
+
+Endpoint evidence:
+- Both A/B pairs waited for `/health` to report
+  `inference_prewarm_complete=true`.
+- All requests used `chat_template_kwargs: {"enable_thinking": false}` and
+  returned exact visible texts `"blue green"`, `"red yellow"`,
+  `"north south"`, `"silver gold"`, `"orange purple"`, `"circle square"`,
+  `"alpha omega"`, and `"winter summer"` with empty reasoning.
+- Both server logs showed Vulkan initialization, Vulkan device selection,
+  Vulkan decode weight prewarm, background inference prewarm completion, and
+  the default live decode-batcher on the Vulkan backend.
+
+Pair 1, candidate first:
+- Candidate: wall `6.378047s`; metrics delta `8` OK requests, `16` generated
+  tokens, `16` jobs, `4` worker batches, `16` rows, max batch `8`, `0` failed
+  jobs. Live `gdn_stage:in_proj seq_len=1` was `186.633ms` / `96` samples
+  (`1.944ms` mean).
+- Rollback with `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD=1`: wall
+  `6.510372s`; same metrics shape. Live `gdn_stage:in_proj seq_len=1` was
+  `213.091ms` / `96` samples (`2.220ms` mean).
+
+Pair 2, rollback first:
+- Rollback: wall `6.524940s`; metrics delta `8` OK requests, `16` generated
+  tokens, `16` jobs, `3` worker batches, `16` rows, max batch `8`, `0` failed
+  jobs. Live `gdn_stage:in_proj seq_len=1` was `209.437ms` / `72` samples
+  (`2.909ms` mean).
+- Candidate: wall `6.471523s`; same metrics shape. Live
+  `gdn_stage:in_proj seq_len=1` was `186.394ms` / `72` samples (`2.589ms`
+  mean).
+
+Artifacts:
+- Endpoint artifacts:
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-*`
+- Logged validation artifacts:
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-fmt-check.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-check-vulkan-kernel.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-gdn-parity.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-check-model-vulkan.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-check-server-vulkan.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-release-build.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-git-diff-check.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-check-model-cuda.log`
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-cargo-check-model-metal.log`
+- Post-rebase validation artifacts:
+  `vulkan-strix-halo-2026-05-09-a060-gdn-in-proj-rowquad-post-rebase-*`
+
+Verdict:
+- Accepted as a guarded full-batch Vulkan GDN in-proj win. The same-binary
+  endpoint pairs preserved exact output correctness and empty reasoning, and
+  the targeted in-proj stage improved in both orderings (`-26.458ms`, then
+  `-23.043ms`). Wall time also favored the candidate in both pairs (`-132ms`,
+  then `-53ms`).
+- Keep the rollback env in place. This improves the full-batch GDN in-proj
+  shape, but the warmed profile still has meaningful work in MLP, GDN
+  recurrent, paged-layer linear/K/V movement, and backend-boundary overhead.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2836,15 +2940,16 @@ Verdict:
   mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
   resident mirroring prevented prewarm readiness on the current Qwen3.5-4B
   Strix Halo serving shape.
-- Use A059/A058/A056, not A039, for warmed-serving target selection. After
+- Use A060/A059/A058/A056, not A039, for warmed-serving target selection. After
   A048, do not use measurements taken before
   `inference_prewarm_complete=true` as serving evidence.
-- A059 only gives a small guarded reduction in the GDN recurrent shape. The
-  post-prewarm profiles still leave MLP, GDN recurrent/in-proj, and
-  paged-layer linear work as the largest live decode buckets. Next work should
-  target either packed-BF16 MLP boundary/data movement, sparse/active K/V
-  movement, or a GDN path that materially reduces movement, not just a direct
-  fused-hook route.
+- A059 only gives a small guarded reduction in the GDN recurrent shape, and
+  A060 only helps full-batch packed-BF16 GDN in-proj. The post-prewarm profiles
+  still leave MLP, GDN recurrent, paged-layer linear work, K/V movement, and
+  backend-boundary overhead as the main target set. Next work should target
+  either packed-BF16 MLP boundary/data movement, sparse/active K/V movement, or
+  a GDN path that materially reduces movement, not just a direct fused-hook
+  route.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

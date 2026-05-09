@@ -421,6 +421,72 @@ fn gdn_in_proj_decode_batched_bf16_packed_weights_row_pair_matches_cpu_reference
 }
 
 #[test]
+fn gdn_in_proj_decode_batched_bf16_packed_weights_row_quad_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, qkv_dim, z_dim, a_dim, b_dim) =
+        (8usize, 8usize, 5usize, 3usize, 2usize, 4usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * 0.047)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let qkv_w = make_weight(qkv_dim, 0.03125)?;
+    let z_w = make_weight(z_dim, 0.043)?;
+    let a_w = make_weight(a_dim, -0.027)?;
+    let b_w = make_weight(b_dim, 0.019)?;
+
+    let qkv_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &qkv_w)?;
+    let z_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &z_w)?;
+    let a_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &a_w)?;
+    let b_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &b_w)?;
+
+    let (got_qkv, got_z, got_a, got_b) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
+            &vk, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        )
+        .context("dispatch_gdn_in_proj_decode_cached_bf16_weights row-quad batched")?;
+
+    assert_close(
+        "row-quad batched in_proj bf16 qkv",
+        &got_qkv,
+        &x.broadcast_matmul(&qkv_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "row-quad batched in_proj bf16 z",
+        &got_z,
+        &x.broadcast_matmul(&z_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "row-quad batched in_proj bf16 a",
+        &got_a,
+        &x.broadcast_matmul(&a_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "row-quad batched in_proj bf16 b",
+        &got_b,
+        &x.broadcast_matmul(&b_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn linear_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

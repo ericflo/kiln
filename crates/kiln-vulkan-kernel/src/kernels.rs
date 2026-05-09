@@ -75,6 +75,12 @@ fn gdn_in_proj_batch_row_pair_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
 }
 
+fn gdn_in_proj_batch_row_quad_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD").is_err())
+}
+
 fn gdn_gates_batched_transfers_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
@@ -113,6 +119,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_in_proj_decode_batched", 6, 28),
         ("gdn_in_proj_decode_batched_bf16w", 6, 28),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w", 6, 28),
+        ("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
@@ -894,8 +901,15 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
 
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
     let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
-    let row_pair =
+    let row_grouping =
         packed_bf16_weights && pair_qkv_z && batch >= 4 && gdn_in_proj_batch_row_pair_enabled();
+    let row_group_size = if row_grouping && batch >= 8 && gdn_in_proj_batch_row_quad_enabled() {
+        4usize
+    } else if row_grouping {
+        2usize
+    } else {
+        1usize
+    };
     let dispatch_cols = if pair_qkv_z {
         qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
     } else {
@@ -915,7 +929,12 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         }
     } else {
         if packed_bf16_weights {
-            if row_pair {
+            if row_group_size == 4 {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w.comp"
+                )
+            } else if row_group_size == 2 {
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w.comp"
@@ -969,7 +988,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             b_dim,
             total_out,
             dispatch_cols,
-            row_pair,
+            row_group_size,
             &spirv,
             &push_constants,
             &x_data,
@@ -1011,8 +1030,8 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         &push_constants,
         if batch == 1 {
             total_out.div_ceil(16) as u32
-        } else if row_pair {
-            (batch.div_ceil(2) * dispatch_cols.div_ceil(80)) as u32
+        } else if row_group_size > 1 {
+            (batch.div_ceil(row_group_size) * dispatch_cols.div_ceil(80)) as u32
         } else {
             (batch * dispatch_cols.div_ceil(80)) as u32
         },
@@ -1048,7 +1067,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     b_dim: usize,
     total_out: usize,
     dispatch_cols: usize,
-    row_pair: bool,
+    row_group_size: usize,
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
@@ -1164,8 +1183,8 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             cmd,
             if batch == 1 {
                 total_out.div_ceil(16) as u32
-            } else if row_pair {
-                (batch.div_ceil(2) * dispatch_cols.div_ceil(80)) as u32
+            } else if row_group_size > 1 {
+                (batch.div_ceil(row_group_size) * dispatch_cols.div_ceil(80)) as u32
             } else {
                 (batch * dispatch_cols.div_ceil(80)) as u32
             },
