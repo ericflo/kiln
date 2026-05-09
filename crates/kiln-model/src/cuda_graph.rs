@@ -191,8 +191,8 @@ impl CudaGraphRunners {
     pub fn new(device: &Device, enabled: bool) -> Self {
         let runner_enabled = enabled && device.is_cuda();
         let disable_pool = per_stream_graph_disabled();
-        let slots = if runner_enabled && !disable_pool {
-            let slot_count = decode_parallelism();
+        let slot_count = decode_parallelism();
+        let slots = if use_runner_pool(runner_enabled, disable_pool, slot_count) {
             tracing::info!(
                 slots = slot_count,
                 "per-stream CUDA graph runner pool enabled"
@@ -208,6 +208,8 @@ impl CudaGraphRunners {
                 tracing::info!(
                     "KILN_DISABLE_PER_STREAM_GRAPH=1; using legacy single CUDA graph runner"
                 );
+            } else if runner_enabled && slot_count == 1 {
+                tracing::info!("KILN_DECODE_PARALLELISM=1; using legacy single CUDA graph runner");
             }
             CudaGraphSlots::Single(Arc::new(Mutex::new(CudaGraphRunner::new(device, enabled))))
         };
@@ -412,6 +414,10 @@ fn decode_parallelism() -> usize {
         .as_deref()
         .and_then(decode_parallelism_value)
         .unwrap_or(8)
+}
+
+fn use_runner_pool(runner_enabled: bool, disable_pool: bool, slot_count: usize) -> bool {
+    runner_enabled && !disable_pool && slot_count > 1
 }
 
 fn env_flag_enabled(value: &str) -> bool {
@@ -1296,6 +1302,14 @@ mod tests {
         let runners = CudaGraphRunners::new(&Device::Cpu, true);
         assert!(!runners.is_enabled());
         assert_eq!(runners.slot_count(), 1);
+    }
+
+    #[test]
+    fn test_runner_pool_requires_more_than_one_slot() {
+        assert!(!use_runner_pool(true, false, 1));
+        assert!(use_runner_pool(true, false, 2));
+        assert!(!use_runner_pool(true, true, 2));
+        assert!(!use_runner_pool(false, false, 8));
     }
 
     #[test]
