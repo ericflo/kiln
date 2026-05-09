@@ -1836,3 +1836,13 @@
   rollback comparison at batch4/8 (`246.749 -> 273.558 us`, `546.089 ->
   582.941 us`). Runtime source was reverted; keep the existing stable GDN
   decode gate math.
+- 2026-05-09 E429: Refreshed the current Metal paged serial profile after the
+  LoRA work and rejected E428 fast-exp experiment. No source change. The
+  measured `prompt_tokens=64`, `max_output_tokens=8` paged latency run reported
+  prefill `711.099 ms`, mean ITL `306.214 ms`, and `3.266 tok/s`. Filtered
+  `seq_len=1` stage totals remain led by MLP `gate_up_fused` `1138.326 ms`,
+  MLP `down_proj` `697.003 ms`, GDN `in_proj` `678.582 ms`, GDN `out_proj`
+  `323.357 ms`, full-attn `qkv_proj` `211.662 ms`, and GDN
+  `gates_recur_gated_norm` `159.912 ms`. Keep serial source targeting focused
+  on MLP gate/up/down and GDN input projection before smaller full-attention
+  point kernels.

@@ -17263,3 +17263,63 @@ All measured rows stayed within the existing parity tolerance
 Rejected. The simple all-fast candidate was not acceptable for serial bs=1, and
 the production-shaped split fast-exp kernel was slower than its rollback for
 batch `4` and `8`. Keep the existing stable GDN decode gate math.
+
+## 2026-05-09 - E429 current paged serial profile refresh
+
+### Purpose
+
+Refresh the current Metal paged serial target list after the LoRA work and the
+rejected E428 fast-exp experiment. This is synchronized stage-profile evidence,
+not a source change.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 429`
+
+### Results
+
+The measured latency run reported:
+
+- Prefill: `711.099 ms`
+- Mean inter-token latency: `306.214 ms`
+- P50 / P99 inter-token latency: `318.004 ms` / `321.623 ms`
+- Decode throughput: `3.266 tok/s`
+- Tokens generated: `9`
+
+Filtering measured `seq_len=1` profile rows:
+
+| stage | calls | total | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | 512 | `1138.326 ms` | `2.223 ms` |
+| `mlp:down_proj` | 512 | `697.003 ms` | `1.361 ms` |
+| `gdn:in_proj` | 384 | `678.582 ms` | `1.767 ms` |
+| `gdn:out_proj` | 384 | `323.357 ms` | `0.842 ms` |
+| `full_attn:qkv_proj` | 128 | `211.662 ms` | `1.654 ms` |
+| `gdn:gates_recur_gated_norm` | 384 | `159.912 ms` | `0.416 ms` |
+| `gdn:qkv_conv_norm` | 384 | `131.744 ms` | `0.343 ms` |
+| `full_attn:o_proj` | 128 | `108.187 ms` | `0.845 ms` |
+| `full_attn:kv_write` | 128 | `53.392 ms` | `0.417 ms` |
+| `full_attn:qkv_split` | 128 | `49.237 ms` | `0.385 ms` |
+| `full_attn:decode_attn_contiguous` | 128 | `45.457 ms` | `0.355 ms` |
+| `full_attn:qk_norm` | 128 | `43.425 ms` | `0.339 ms` |
+| `full_attn:rope` | 128 | `39.319 ms` | `0.307 ms` |
+| `full_attn:attn_gate` | 128 | `36.480 ms` | `0.285 ms` |
+
+Kind totals:
+
+- MLP: `1835.329 ms`
+- GDN: `1296.125 ms`
+- full attention: `587.651 ms`
+
+### Artifacts
+
+- `e429_current_paged_serial_profile.log`
+- `e429_current_paged_serial_profile_summary.txt`
+- `e429_current_paged_serial_diff_check.log`
+
+### Decision
+
+Accepted as target-selection evidence. The current serial path is still led by
+MLP gate/up, MLP down-projection, and GDN input projection. The smaller
+full-attention per-token stages are not the next best source target unless a
+new structural batching or projection route appears.
