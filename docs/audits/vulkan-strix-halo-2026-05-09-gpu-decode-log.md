@@ -921,6 +921,54 @@ Verdict:
 - Do not port Metal's two-column gate/up decode shape directly to Vulkan
   without a different shader structure or new hardware/profile evidence.
 
+### 2026-05-09 A022: Reject Direct Decode-Loop GDN Resident-State Scope
+
+Hypothesis:
+- The Vulkan backend already has a resident recurrent-state path for GDN
+  decode, and the serial bench uses a resident-state scope around its decode
+  loop. The real direct generation loops did not. Wrapping those direct loops
+  could avoid recurrent-state readback/upload across generated tokens in
+  non-streaming and non-batched streaming paths.
+
+Experiment:
+- Temporarily added a small RAII guard in `crates/kiln-model/src/generate.rs`
+  that called `BackendRuntime::enter_gdn_recurrent_resident_state_scope` before
+  direct decode loops and exited it on drop.
+- Applied it to `generate_from_tokens_paged_interleaved`.
+- Applied it to `run_stream_decode_loop_with_first` only when the greedy live
+  decode batcher would not handle the decode step. This avoided handing a stale
+  CPU `LinearAttentionState` to the batcher worker after a caller-thread
+  resident-state direct fallback.
+- Removed the code after measurement.
+
+Evidence:
+- `rustfmt --edition 2024 --check crates/kiln-model/src/generate.rs` passed
+  while the temporary source was applied.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate direct non-streaming `/v1/chat/completions` requests used Vulkan
+  on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)` and returned HTTP 200.
+- Candidate 24-token sampled direct requests measured `time_total=4.975489s`
+  and `4.920384s` for `30` prompt tokens and `24` completion tokens.
+- Same-binary rollback with
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` measured
+  `time_total=4.796903s` for the same `30` prompt-token /
+  `24` completion-token shape; nearby rollback runs were `4.969028s` and
+  `4.949892s` with `31` prompt tokens.
+- Longer 48-token check also regressed: rollback measured
+  `time_total=8.307010s` for `28` prompt tokens and `48` completion tokens,
+  while the candidate measured `time_total=8.477510s` for the same token
+  shape.
+
+Verdict:
+- Rejected and removed before commit. The resident-state scope is useful for
+  the benchmark's long-lived decode loop, but in the real direct API path the
+  added residency bookkeeping did not beat the current state readback/upload
+  behavior.
+- A production resident-state win likely needs recurrent state to become an
+  owned request/batcher resource instead of a thread-local temporary scope.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
