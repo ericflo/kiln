@@ -1,0 +1,24 @@
+E373 single-request decode-batch wait latency check
+
+Shape:
+- Current Metal release server rebuilt in E372.
+- Qwen3.5-4B, one streaming chat request.
+- Prompt reused from E353:
+  "Write a detailed paragraph about the practical tradeoffs in low latency inference serving."
+- Greedy decoding, max_tokens=32, temperature=0.0.
+- One fresh prewarmed server per KILN_DECODE_BATCH_WAIT_US value.
+
+Results:
+
+wait_us  wall_s     generated  jobs  worker_batches  rows  max_batch
+0        5.524226   32         31    31              31    1
+100      5.526043   32         31    31              31    1
+
+Both requests returned HTTP 200 and identical response byte counts. The 100us
+run was 0.0329% slower than zero wait, which is noise-level on this endpoint
+probe.
+
+Decision:
+- No material bs=1 latency regression from a 100us wait on this prompt.
+- Combined with E371 and E372, this is enough to accept a Metal-only 100us
+  default wait while preserving explicit KILN_DECODE_BATCH_WAIT_US overrides.

@@ -1359,3 +1359,23 @@
   E354 showed fixed waits can regress eight concurrent streams despite fuller
   batches. Next default-policy work needs a post-E369 eight-way check or an
   adaptive admission rule.
+- 2026-05-09 E372: Rechecked the old E354 eight-request guardrail after E369
+  with the same short prompt shape and wait `0us` versus `100us`. Zero wait
+  took `8.664563s`, generated `64` tokens, submitted `56` jobs through `16`
+  worker batches, and observed max batch `6`; `100us` took `8.383792s` with
+  the same tokens/jobs/rows, only `8` worker batches, and max batch `8`.
+  `100us` is now `3.24%` faster on the larger-concurrency shape that
+  previously blocked a default wait.
+- 2026-05-09 E373: Checked bs=1 latency before changing the wait default.
+  Same prompt as E353, greedy `max_tokens=32`: wait `0us` took `5.524226s`;
+  wait `100us` took `5.526043s`. Both generated `32` tokens through `31`
+  one-row decode-batcher jobs/batches and max batch `1`; the `0.03%` delta is
+  noise-level, so `100us` does not show a material single-request regression.
+- 2026-05-09 E374: Accepted a Metal-only default decode-batcher admission wait
+  of `100us`. `DecodeBatcherConfig::default()` remains zero and
+  `from_env_for_backend` applies `100us` only when the backend is Metal and
+  `KILN_DECODE_BATCH_WAIT_US` is absent; CPU/CUDA/Vulkan keep zero-wait
+  defaults and env overrides still win. Focused unit test, Metal/Vulkan checks,
+  and release build passed. A no-env Metal n8 endpoint probe logged
+  `wait_us=100`, generated `64` tokens, submitted `56` jobs through `9` worker
+  batches, observed max batch `8`, and completed in `8.570439s`.

@@ -247,10 +247,10 @@ enum StreamTokenDisposition {
 
 /// Configuration for the live greedy decode rendezvous worker.
 ///
-/// The worker is enabled by default and drains immediately available decode
-/// rows without delaying single-step progress. Set `KILN_DECODE_BATCHER=0` to
-/// force the legacy direct rowwise path, or `KILN_DECODE_BATCH_WAIT_US` to
-/// experiment with an admission delay.
+/// The worker is enabled by default. Metal uses a small default admission delay
+/// to collect compatible peers; other backends drain immediately available
+/// decode rows. Set `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise
+/// path, or `KILN_DECODE_BATCH_WAIT_US` to override the admission delay.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
@@ -292,6 +292,9 @@ impl DecodeBatcherConfig {
 
     pub fn from_env_for_backend(device: &Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
+        if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
+            config.wait = default_decode_batcher_wait(device, backend_name);
+        }
         if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
             config.allow_mixed_seq_lens =
                 default_decode_batcher_allow_mixed_seq_lens(device, backend_name);
@@ -311,6 +314,14 @@ impl DecodeBatcherConfig {
 
 fn default_decode_batcher_allow_mixed_seq_lens(device: &Device, backend_name: &str) -> bool {
     matches!(device, Device::Metal(_)) || backend_name == "vulkan"
+}
+
+fn default_decode_batcher_wait(device: &Device, backend_name: &str) -> std::time::Duration {
+    if matches!(device, Device::Metal(_)) || backend_name == "metal" {
+        std::time::Duration::from_micros(100)
+    } else {
+        std::time::Duration::ZERO
+    }
 }
 
 fn env_flag_value(name: &str) -> Option<bool> {
@@ -5639,6 +5650,28 @@ mod tests {
         assert!(default_decode_batcher_allow_mixed_seq_lens(
             &device, "vulkan"
         ));
+    }
+
+    #[test]
+    fn test_decode_batcher_default_wait_backend_policy() {
+        let device = Device::Cpu;
+
+        assert_eq!(
+            default_decode_batcher_wait(&device, "cpu"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            default_decode_batcher_wait(&device, "cuda"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            default_decode_batcher_wait(&device, "vulkan"),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            default_decode_batcher_wait(&device, "metal"),
+            std::time::Duration::from_micros(100)
+        );
     }
 
     #[cfg(feature = "metal")]

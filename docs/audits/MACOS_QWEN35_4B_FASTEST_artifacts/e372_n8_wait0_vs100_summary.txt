@@ -1,0 +1,24 @@
+E372 post-E369 eight-request decode-batch wait guardrail
+
+Shape:
+- Current Metal release server rebuilt after remote Vulkan changes.
+- Qwen3.5-4B, eight concurrent short streaming chat requests.
+- Greedy decoding, max_tokens=8, temperature=0.0.
+- Same prompt shape as the E354 n8 guardrail:
+  "Write one short sentence about benchmark topic {0..7}."
+- One fresh prewarmed server per KILN_DECODE_BATCH_WAIT_US value.
+
+Results:
+
+wait_us  wall_s     generated  jobs  worker_batches  rows  max_batch
+0        8.664563   64         56    16              56    6
+100      8.383792   64         56    8               56    8
+
+All requests returned HTTP 200. The 100us wait was 3.2405% faster than zero
+wait, halving worker batches and reaching max batch 8.
+
+Decision:
+- The old E354 reason for rejecting fixed wait as a default no longer holds on
+  current Metal code after E369. The post-E369 eight-request shape now prefers
+  100us over zero wait.
+- Check single-request latency next before changing the Metal default.

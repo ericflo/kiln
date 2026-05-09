@@ -12979,3 +12979,204 @@ global in `DecodeBatcherConfig`, and E354 showed fixed wait admission can
 regress eight concurrent streams even while forming fuller batches. Before a
 default or adaptive-policy change, rerun the larger-concurrency check on the
 post-E369 code.
+
+## 2026-05-09 E372 - Recheck n8 decode wait after GDN in-proj row-pair
+
+### Goal
+
+Revisit the E354 blocker against a default admission wait. E371 showed `100us`
+is now a clear win on the current four-request varied-prompt Metal shape after
+E369, but E354 previously found a fixed wait regressed eight concurrent streams.
+Before changing the default, remeasure the old larger-concurrency prompt shape
+on the current Metal code.
+
+### Change
+
+No source change. Rebuilt the current release `kiln` binary with Metal and ran
+two fresh prewarmed servers with `KILN_DECODE_BATCH_WAIT_US=0` and `100`.
+
+### Validation
+
+- `cargo build --release --features metal --bin kiln`
+- Each server reported backend `metal`, `max_batch=8`, `mixed_seq_lens=true`,
+  and the expected `wait_us`.
+- Each measured run waited for the `inference_prewarm_complete` health check.
+- Each run returned `200` for all eight streaming chat requests.
+- Metrics were captured after each run.
+
+### Results
+
+Eight concurrent short-prompt streaming chat requests, greedy `max_tokens=8`,
+`64` total generated tokens each run:
+
+- `0us`: wall `8.664563s`, `56` submitted jobs, `16` worker batches, `56` rows,
+  max batch `6`
+- `100us`: wall `8.383792s`, `56` submitted jobs, `8` worker batches, `56`
+  rows, max batch `8`
+
+The `100us` wait was `3.24%` faster than zero wait, halved worker batches, and
+reached max batch `8`.
+
+### Artifact
+
+- `e372_release_build_metal.log`
+- `e372_n8_wait0_vs100_summary.json`
+- `e372_n8_wait0_vs100_summary.txt`
+- `e372_n8_wait0_server.log`
+- `e372_n8_wait0_health.json`
+- `e372_n8_wait0_metrics.prom`
+- `e372_n8_wait0_time.json`
+- `e372_n8_wait0_response_0.sse`
+- `e372_n8_wait0_response_1.sse`
+- `e372_n8_wait0_response_2.sse`
+- `e372_n8_wait0_response_3.sse`
+- `e372_n8_wait0_response_4.sse`
+- `e372_n8_wait0_response_5.sse`
+- `e372_n8_wait0_response_6.sse`
+- `e372_n8_wait0_response_7.sse`
+- `e372_n8_wait100_server.log`
+- `e372_n8_wait100_health.json`
+- `e372_n8_wait100_metrics.prom`
+- `e372_n8_wait100_time.json`
+- `e372_n8_wait100_response_0.sse`
+- `e372_n8_wait100_response_1.sse`
+- `e372_n8_wait100_response_2.sse`
+- `e372_n8_wait100_response_3.sse`
+- `e372_n8_wait100_response_4.sse`
+- `e372_n8_wait100_response_5.sse`
+- `e372_n8_wait100_response_6.sse`
+- `e372_n8_wait100_response_7.sse`
+
+### Decision
+
+Accepted as post-E369 larger-concurrency guardrail evidence. The old E354
+reason for keeping a universal zero wait no longer holds for the current Metal
+code at `100us`; check bs=1 latency next before changing the default.
+
+## 2026-05-09 E373 - Check bs=1 latency for wait100
+
+### Goal
+
+Validate that a `100us` Metal admission wait does not materially harm a single
+streaming request. E371 and E372 now favor `100us` for four-request and
+eight-request concurrency, but the fastest-path target still includes bs=1
+latency.
+
+### Change
+
+No source change. Ran one prewarmed server with `KILN_DECODE_BATCH_WAIT_US=0`
+and one with `100`, using the same single-request prompt shape as E353.
+
+### Validation
+
+- Each server reported backend `metal`, `max_batch=8`, `mixed_seq_lens=true`,
+  and the expected `wait_us`.
+- Each measured run waited for the `inference_prewarm_complete` health check.
+- Both requests returned `200` with identical response byte counts.
+- Metrics were captured after each run.
+
+### Results
+
+Single streaming chat request, greedy `max_tokens=32`, `32` generated tokens:
+
+- `0us`: wall `5.524226s`, `31` submitted jobs, `31` worker batches, `31` rows,
+  max batch `1`
+- `100us`: wall `5.526043s`, `31` submitted jobs, `31` worker batches, `31`
+  rows, max batch `1`
+
+The `100us` run was `0.03%` slower than zero wait, which is noise-level for
+this endpoint probe.
+
+### Artifact
+
+- `e373_single_wait0_vs100_summary.json`
+- `e373_single_wait0_vs100_summary.txt`
+- `e373_single_wait0_server.log`
+- `e373_single_wait0_health.json`
+- `e373_single_wait0_metrics.prom`
+- `e373_single_wait0_time.json`
+- `e373_single_wait0_response.sse`
+- `e373_single_wait100_server.log`
+- `e373_single_wait100_health.json`
+- `e373_single_wait100_metrics.prom`
+- `e373_single_wait100_time.json`
+- `e373_single_wait100_response.sse`
+
+### Decision
+
+Accepted as bs=1 latency guardrail evidence. `100us` does not show a material
+single-request penalty, so it is safe to make the wait default Metal-specific
+instead of global.
+
+## 2026-05-09 E374 - Set Metal default decode wait to 100us
+
+### Goal
+
+Turn the E371/E372/E373 evidence into a source change while preserving
+non-Metal behavior. The earlier blocker was not correctness but default policy:
+the wait default lived in `DecodeBatcherConfig`, so a global change could affect
+CUDA/Vulkan and other backends.
+
+### Change
+
+- Kept `DecodeBatcherConfig::default().wait` at zero.
+- Added a backend-aware default wait policy in
+  `DecodeBatcherConfig::from_env_for_backend`.
+- When `KILN_DECODE_BATCH_WAIT_US` is absent and the backend is Metal, the live
+  greedy decode batcher now uses `100us`.
+- CPU/CUDA/Vulkan keep zero wait by default.
+- `KILN_DECODE_BATCH_WAIT_US=0` remains the explicit zero-wait override.
+- Added a pure unit test for the backend default-wait policy.
+
+### Validation
+
+- `cargo test -p kiln-model test_decode_batcher_default_wait_backend_policy --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- No-env Metal live endpoint probe, eight concurrent short streaming chat
+  requests, greedy `max_tokens=8`.
+
+### Results
+
+The no-env default server logged backend `metal`, `max_batch=8`, `wait_us=100`,
+and `mixed_seq_lens=true`.
+
+Default Metal eight-request endpoint probe:
+
+- wall `8.570439s`
+- `64` generated tokens
+- `56` submitted jobs
+- `9` worker batches
+- `56` rows
+- max batch `8`
+- all eight requests returned `200`
+
+The focused unit test, Metal/Vulkan checks, and release build passed.
+
+### Artifact
+
+- `e374_default_wait_policy_unit.log`
+- `e374_cargo_check_metal.log`
+- `e374_cargo_check_vulkan.log`
+- `e374_release_build_metal.log`
+- `e374_default_wait100_summary.txt`
+- `e374_default_wait100_n8_server.log`
+- `e374_default_wait100_n8_health.json`
+- `e374_default_wait100_n8_metrics.prom`
+- `e374_default_wait100_n8_time.json`
+- `e374_default_wait100_n8_response_0.sse`
+- `e374_default_wait100_n8_response_1.sse`
+- `e374_default_wait100_n8_response_2.sse`
+- `e374_default_wait100_n8_response_3.sse`
+- `e374_default_wait100_n8_response_4.sse`
+- `e374_default_wait100_n8_response_5.sse`
+- `e374_default_wait100_n8_response_6.sse`
+- `e374_default_wait100_n8_response_7.sse`
+
+### Decision
+
+Accepted. Metal live greedy decode batching now defaults to `100us` admission
+wait, backed by current four-request, eight-request, and bs=1 endpoint probes.
+Non-Metal backends retain zero wait by default, so CUDA/Vulkan behavior is not
+changed by this policy.

@@ -1,0 +1,18 @@
+{
+  "bytes": 6909,
+  "decode_batch_wait_us": 0,
+  "elapsed_s": 5.52422616595868,
+  "headers": {
+    "access-control-allow-origin": "*",
+    "access-control-expose-headers": "*",
+    "cache-control": "no-cache",
+    "connection": "close",
+    "content-type": "text/event-stream",
+    "date": "Sat, 09 May 2026 09:22:49 GMT",
+    "transfer-encoding": "chunked",
+    "vary": "origin, access-control-request-method, access-control-request-headers"
+  },
+  "max_tokens": 32,
+  "prompt": "Write a detailed paragraph about the practical tradeoffs in low latency inference serving.",
+  "status": 200
+}

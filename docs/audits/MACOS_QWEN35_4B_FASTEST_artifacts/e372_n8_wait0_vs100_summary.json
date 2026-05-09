@@ -1,0 +1,10 @@
+[
+  {
+    "request_elapsed_s": 8.664563333033584,
+    "wait_us": 0
+  },
+  {
+    "request_elapsed_s": 8.383792290929705,
+    "wait_us": 100
+  }
+]

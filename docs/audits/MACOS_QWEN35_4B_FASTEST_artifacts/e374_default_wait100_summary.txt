@@ -1,0 +1,30 @@
+E374 Metal-only default decode-batch wait acceptance
+
+Change:
+- Keep DecodeBatcherConfig::default().wait at zero.
+- In DecodeBatcherConfig::from_env_for_backend, when
+  KILN_DECODE_BATCH_WAIT_US is absent, use 100us only for the Metal backend.
+- Leave CPU/CUDA/Vulkan default wait at zero.
+- Preserve KILN_DECODE_BATCH_WAIT_US=0 as the explicit zero-wait override.
+
+Validation:
+- cargo test -p kiln-model test_decode_batcher_default_wait_backend_policy --lib -- --nocapture
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench
+- cargo build --release --features metal --bin kiln
+- No-env live default endpoint probe on Metal, eight concurrent short streaming
+  requests, greedy max_tokens=8.
+
+Default live probe:
+
+wait_us  wall_s     generated  jobs  worker_batches  rows  max_batch
+100      8.570439   64         56    9               56    8
+
+The server startup log reported backend=metal, max_batch=8, wait_us=100, and
+mixed_seq_lens=true. All eight requests returned HTTP 200.
+
+Decision:
+- Accepted. Metal serving now uses 100us as the default live greedy decode
+  batcher admission wait.
+- Non-Metal backends keep zero wait by default, and explicit env overrides
+  still win.
