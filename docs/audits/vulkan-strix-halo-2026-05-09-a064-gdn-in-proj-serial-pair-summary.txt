@@ -1,0 +1,10 @@
+candidate: prefill_ms=2240.737437 mean_itl_ms=97.584315 decode_tps=10.247548
+candidate: gdn_in_proj_seq1_total_ms=2012.048000 count=3072 avg_ms=0.654964
+candidate: first32_token_ids=[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6, 2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682, 2047, 1238, 11834, 321, 26912, 13, 2838, 8211]
+rollback: prefill_ms=2180.297699 mean_itl_ms=95.919017 decode_tps=10.425461
+rollback: gdn_in_proj_seq1_total_ms=1823.252000 count=3072 avg_ms=0.593507
+rollback: first32_token_ids=[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6, 2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682, 2047, 1238, 11834, 321, 26912, 13, 2838, 8211]
+delta_mean_itl_ms=1.665298
+delta_prefill_ms=60.439738
+delta_gdn_in_proj_seq1_total_ms=188.796000
+delta_gdn_in_proj_seq1_avg_ms=0.061457

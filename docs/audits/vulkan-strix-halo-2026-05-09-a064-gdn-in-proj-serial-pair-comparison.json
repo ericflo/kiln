@@ -1,0 +1,400 @@
+{
+  "candidate": {
+    "latency": {
+      "prompt_tokens": 64,
+      "prefill_time_ms": 2240.7374369999998,
+      "prefill_tokens_per_sec": 28.56202558283048,
+      "time_to_first_token_ms": 2240.7374369999998,
+      "mean_inter_token_ms": 97.58431503125,
+      "p50_inter_token_ms": 97.28173,
+      "p99_inter_token_ms": 103.845082,
+      "num_tokens_generated": 65,
+      "decode_tokens_per_sec": 10.247548488502114,
+      "spec_method": "off"
+    },
+    "token_ids_first32": [
+      271,
+      1206,
+      1423,
+      680,
+      1204,
+      1691,
+      51864,
+      3520,
+      506,
+      279,
+      19719,
+      6,
+      2981,
+      11,
+      567,
+      1118,
+      1144,
+      310,
+      7995,
+      1204,
+      1599,
+      18237,
+      1292,
+      682,
+      2047,
+      1238,
+      11834,
+      321,
+      26912,
+      13,
+      2838,
+      8211
+    ],
+    "top_seq1": [
+      {
+        "key": "in_proj seq_len=1",
+        "total_ms": 2012.048000000001,
+        "count": 3072,
+        "avg_ms": 0.6549635416666669
+      },
+      {
+        "key": "recurrent seq_len=1",
+        "total_ms": 1611.234999999999,
+        "count": 3072,
+        "avg_ms": 0.524490559895833
+      },
+      {
+        "key": "out_proj seq_len=1",
+        "total_ms": 977.9090000000015,
+        "count": 3072,
+        "avg_ms": 0.3183297526041671
+      },
+      {
+        "key": "gated_norm seq_len=1",
+        "total_ms": 758.0010000000018,
+        "count": 3072,
+        "avg_ms": 0.24674511718750058
+      },
+      {
+        "key": "gates seq_len=1",
+        "total_ms": 563.3989999999991,
+        "count": 3072,
+        "avg_ms": 0.18339811197916636
+      },
+      {
+        "key": "conv seq_len=1",
+        "total_ms": 246.63999999999967,
+        "count": 3072,
+        "avg_ms": 0.08028645833333323
+      },
+      {
+        "key": "qk_norm seq_len=1",
+        "total_ms": 38.09300000000025,
+        "count": 3072,
+        "avg_ms": 0.012400065104166748
+      },
+      {
+        "key": "qkv_split seq_len=1",
+        "total_ms": 0.8480000000000006,
+        "count": 3072,
+        "avg_ms": 0.0002760416666666669
+      },
+      {
+        "key": "post_transpose seq_len=1",
+        "total_ms": 0.017000000000000005,
+        "count": 3072,
+        "avg_ms": 5.533854166666668e-06
+      }
+    ],
+    "profile": {
+      "in_proj seq_len=64": {
+        "total_ms": 818.9189999999999,
+        "count": 48,
+        "avg_ms": 17.060812499999997
+      },
+      "conv seq_len=64": {
+        "total_ms": 323.417,
+        "count": 48,
+        "avg_ms": 6.737854166666666
+      },
+      "qkv_split seq_len=64": {
+        "total_ms": 18.400000000000002,
+        "count": 48,
+        "avg_ms": 0.38333333333333336
+      },
+      "qk_norm seq_len=64": {
+        "total_ms": 27.817999999999998,
+        "count": 48,
+        "avg_ms": 0.5795416666666666
+      },
+      "gates seq_len=64": {
+        "total_ms": 39.337,
+        "count": 48,
+        "avg_ms": 0.8195208333333334
+      },
+      "recurrent seq_len=64": {
+        "total_ms": 495.85299999999984,
+        "count": 48,
+        "avg_ms": 10.33027083333333
+      },
+      "post_transpose seq_len=64": {
+        "total_ms": 0.011000000000000003,
+        "count": 48,
+        "avg_ms": 0.00022916666666666672
+      },
+      "gated_norm seq_len=64": {
+        "total_ms": 228.447,
+        "count": 48,
+        "avg_ms": 4.7593125
+      },
+      "out_proj seq_len=64": {
+        "total_ms": 223.936,
+        "count": 48,
+        "avg_ms": 4.665333333333334
+      },
+      "in_proj seq_len=1": {
+        "total_ms": 2012.048000000001,
+        "count": 3072,
+        "avg_ms": 0.6549635416666669
+      },
+      "conv seq_len=1": {
+        "total_ms": 246.63999999999967,
+        "count": 3072,
+        "avg_ms": 0.08028645833333323
+      },
+      "qkv_split seq_len=1": {
+        "total_ms": 0.8480000000000006,
+        "count": 3072,
+        "avg_ms": 0.0002760416666666669
+      },
+      "qk_norm seq_len=1": {
+        "total_ms": 38.09300000000025,
+        "count": 3072,
+        "avg_ms": 0.012400065104166748
+      },
+      "gates seq_len=1": {
+        "total_ms": 563.3989999999991,
+        "count": 3072,
+        "avg_ms": 0.18339811197916636
+      },
+      "recurrent seq_len=1": {
+        "total_ms": 1611.234999999999,
+        "count": 3072,
+        "avg_ms": 0.524490559895833
+      },
+      "post_transpose seq_len=1": {
+        "total_ms": 0.017000000000000005,
+        "count": 3072,
+        "avg_ms": 5.533854166666668e-06
+      },
+      "gated_norm seq_len=1": {
+        "total_ms": 758.0010000000018,
+        "count": 3072,
+        "avg_ms": 0.24674511718750058
+      },
+      "out_proj seq_len=1": {
+        "total_ms": 977.9090000000015,
+        "count": 3072,
+        "avg_ms": 0.3183297526041671
+      }
+    }
+  },
+  "rollback": {
+    "latency": {
+      "prompt_tokens": 64,
+      "prefill_time_ms": 2180.297699,
+      "prefill_tokens_per_sec": 29.353789635862015,
+      "time_to_first_token_ms": 2180.297699,
+      "mean_inter_token_ms": 95.91901667187497,
+      "p50_inter_token_ms": 95.367334,
+      "p99_inter_token_ms": 104.675852,
+      "num_tokens_generated": 65,
+      "decode_tokens_per_sec": 10.425461339130017,
+      "spec_method": "off"
+    },
+    "token_ids_first32": [
+      271,
+      1206,
+      1423,
+      680,
+      1204,
+      1691,
+      51864,
+      3520,
+      506,
+      279,
+      19719,
+      6,
+      2981,
+      11,
+      567,
+      1118,
+      1144,
+      310,
+      7995,
+      1204,
+      1599,
+      18237,
+      1292,
+      682,
+      2047,
+      1238,
+      11834,
+      321,
+      26912,
+      13,
+      2838,
+      8211
+    ],
+    "top_seq1": [
+      {
+        "key": "in_proj seq_len=1",
+        "total_ms": 1823.2519999999968,
+        "count": 3072,
+        "avg_ms": 0.5935065104166656
+      },
+      {
+        "key": "recurrent seq_len=1",
+        "total_ms": 1716.7949999999971,
+        "count": 3072,
+        "avg_ms": 0.5588525390624991
+      },
+      {
+        "key": "out_proj seq_len=1",
+        "total_ms": 1018.409000000002,
+        "count": 3072,
+        "avg_ms": 0.33151334635416735
+      },
+      {
+        "key": "gated_norm seq_len=1",
+        "total_ms": 799.2720000000041,
+        "count": 3072,
+        "avg_ms": 0.26017968750000137
+      },
+      {
+        "key": "gates seq_len=1",
+        "total_ms": 578.2909999999985,
+        "count": 3072,
+        "avg_ms": 0.18824576822916617
+      },
+      {
+        "key": "conv seq_len=1",
+        "total_ms": 252.62299999999902,
+        "count": 3072,
+        "avg_ms": 0.08223404947916635
+      },
+      {
+        "key": "qk_norm seq_len=1",
+        "total_ms": 39.44000000000046,
+        "count": 3072,
+        "avg_ms": 0.012838541666666816
+      },
+      {
+        "key": "qkv_split seq_len=1",
+        "total_ms": 1.1929999999999807,
+        "count": 3072,
+        "avg_ms": 0.0003883463541666604
+      },
+      {
+        "key": "post_transpose seq_len=1",
+        "total_ms": 0.03200000000000002,
+        "count": 3072,
+        "avg_ms": 1.0416666666666673e-05
+      }
+    ],
+    "profile": {
+      "in_proj seq_len=64": {
+        "total_ms": 744.7880000000001,
+        "count": 48,
+        "avg_ms": 15.51641666666667
+      },
+      "conv seq_len=64": {
+        "total_ms": 330.2840000000001,
+        "count": 48,
+        "avg_ms": 6.880916666666669
+      },
+      "qkv_split seq_len=64": {
+        "total_ms": 18.237999999999992,
+        "count": 48,
+        "avg_ms": 0.3799583333333332
+      },
+      "qk_norm seq_len=64": {
+        "total_ms": 28.249000000000002,
+        "count": 48,
+        "avg_ms": 0.5885208333333334
+      },
+      "gates seq_len=64": {
+        "total_ms": 42.15299999999998,
+        "count": 48,
+        "avg_ms": 0.8781874999999996
+      },
+      "recurrent seq_len=64": {
+        "total_ms": 473.72499999999985,
+        "count": 48,
+        "avg_ms": 9.86927083333333
+      },
+      "post_transpose seq_len=64": {
+        "total_ms": 0.01900000000000001,
+        "count": 48,
+        "avg_ms": 0.00039583333333333354
+      },
+      "gated_norm seq_len=64": {
+        "total_ms": 230.43200000000004,
+        "count": 48,
+        "avg_ms": 4.800666666666667
+      },
+      "out_proj seq_len=64": {
+        "total_ms": 240.37099999999998,
+        "count": 48,
+        "avg_ms": 5.007729166666667
+      },
+      "in_proj seq_len=1": {
+        "total_ms": 1823.2519999999968,
+        "count": 3072,
+        "avg_ms": 0.5935065104166656
+      },
+      "conv seq_len=1": {
+        "total_ms": 252.62299999999902,
+        "count": 3072,
+        "avg_ms": 0.08223404947916635
+      },
+      "qkv_split seq_len=1": {
+        "total_ms": 1.1929999999999807,
+        "count": 3072,
+        "avg_ms": 0.0003883463541666604
+      },
+      "qk_norm seq_len=1": {
+        "total_ms": 39.44000000000046,
+        "count": 3072,
+        "avg_ms": 0.012838541666666816
+      },
+      "gates seq_len=1": {
+        "total_ms": 578.2909999999985,
+        "count": 3072,
+        "avg_ms": 0.18824576822916617
+      },
+      "recurrent seq_len=1": {
+        "total_ms": 1716.7949999999971,
+        "count": 3072,
+        "avg_ms": 0.5588525390624991
+      },
+      "post_transpose seq_len=1": {
+        "total_ms": 0.03200000000000002,
+        "count": 3072,
+        "avg_ms": 1.0416666666666673e-05
+      },
+      "gated_norm seq_len=1": {
+        "total_ms": 799.2720000000041,
+        "count": 3072,
+        "avg_ms": 0.26017968750000137
+      },
+      "out_proj seq_len=1": {
+        "total_ms": 1018.409000000002,
+        "count": 3072,
+        "avg_ms": 0.33151334635416735
+      }
+    }
+  },
+  "delta": {
+    "mean_inter_token_ms": 1.6652983593750292,
+    "prefill_time_ms": 60.43973799999958,
+    "gdn_in_proj_seq1_total_ms": 188.79600000000414,
+    "gdn_in_proj_seq1_avg_ms": 0.06145703125000135
+  }
+}

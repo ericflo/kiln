@@ -3131,6 +3131,60 @@ Verdict:
 - CUDA and Metal source paths were untouched. Roll back with
   `KILN_DISABLE_VULKAN_PAGED_ATTN_BATCHED_UPLOADS=1`.
 
+### 2026-05-09 A064: Reject Serial Packed-BF16 GDN In-Proj QKV/Z Pairing
+
+Context:
+- Recent Metal optimization work included serial packed-BF16 GDN in-projection
+  QKV/Z pair loads. The Vulkan batched GDN in-proj path already has accepted
+  QKV/Z column pairing and larger row grouping, so this trial tested only the
+  analogous single-token decode case.
+- The candidate added a guarded single-token packed-BF16 shader that paired
+  QKV and Z columns while leaving A/B scalar and preserving the existing
+  16-lane reduction shape.
+
+Evidence:
+- Candidate focused parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_in_proj_decode_bf16_packed_weights_pair_qkv_z_matches_cpu_reference
+  -- --nocapture`.
+- Rollback focused parity passed with
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SERIAL_PAIR_QKV_Z=1`.
+- The temporary candidate also passed `cargo check -p kiln-vulkan-kernel`,
+  full Vulkan parity (`32` tests while present), and
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Same-prompt candidate and rollback runs produced identical first 32 token
+  IDs:
+  `[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6,
+  2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682,
+  2047, 1238, 11834, 321, 26912, 13, 2838, 8211]`.
+- Targeted `in_proj seq_len=1` regressed from rollback `1823.252ms total`,
+  `count=3072`, `0.593507ms avg` to candidate `2012.048ms total`,
+  `count=3072`, `0.654964ms avg`.
+- Wall-facing latency also regressed: candidate `2240.737ms` prefill and
+  `97.584ms` mean ITL versus rollback `2180.298ms` prefill and `95.919ms`
+  mean ITL.
+
+Cleanup validation after removing the source trial:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`31` tests)
+- `git diff --check`
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a064-gdn-in-proj-serial-pair-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a064-gdn-in-proj-serial-pair-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a064-gdn-in-proj-serial-pair-comparison.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a064-gdn-in-proj-serial-pair-summary.txt`
+
+Verdict:
+- Reject and remove the source change. The candidate was correct, but slower
+  on the target GDN in-proj bucket and slower in end-to-end latency.
+- Do not retry direct Metal E396-style serial QKV/Z pairing with the same
+  16x16 Vulkan reduction shape. Any future single-token GDN in-proj work needs
+  a Vulkan-specific tile, reduced data movement, or stronger profiler evidence
+  that the existing scalar column path is the bottleneck.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3174,6 +3228,9 @@ Verdict:
 - Do not retry generic packed-BF16 linear row-quad by directly mirroring Metal
   E377; A061 measured full-batch target-stage regressions despite a noisy wall
   win.
+- Do not retry serial packed-BF16 GDN in-proj QKV/Z pairing by directly
+  mirroring Metal E396; A064 measured target-stage and wall-facing latency
+  regressions on the single-token Vulkan path.
 - Do not retry dyn-seqlen paged-attention optimization by only pushing
   `seq_lens` through push constants; A035 measured that as slower on the
   sampled actor fixture.
