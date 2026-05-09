@@ -40,6 +40,7 @@ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
 const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD";
+const DISABLE_METAL_MLP_SILU_MUL: &str = "KILN_DISABLE_METAL_MLP_SILU_MUL";
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_LORA_DELTA_DECODE: &str = "KILN_DISABLE_METAL_LORA_DELTA_DECODE";
@@ -195,6 +196,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
     }
+    metal_mlp_silu_mul_pipeline(metal_device)?;
     if !metal_attn_gate_fusion_disabled() {
         metal_attn_gate_sigmoid_mul_pipeline(metal_device)?;
     }
@@ -947,6 +949,10 @@ fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
 
 fn metal_mlp_gate_up_serial_vector_load_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD)
+}
+
+fn metal_mlp_silu_mul_disabled() -> bool {
+    env_truthy(DISABLE_METAL_MLP_SILU_MUL)
 }
 
 fn metal_attn_gate_fusion_disabled() -> bool {
@@ -2799,6 +2805,23 @@ kernel void kiln_mlp_gate_up_bf16(
             out[out_base1 + col1] = static_cast<bfloat>((gate_acc11 * gate_sigmoid11) * up_acc11);
         }
     }
+}
+
+kernel void kiln_mlp_silu_mul_bf16(
+    device const bfloat* gate [[buffer(0)]],
+    device const bfloat* up [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& total [[buffer(3)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total) {
+        return;
+    }
+
+    const float gate_val = static_cast<float>(gate[gid]);
+    const float up_val = static_cast<float>(up[gid]);
+    const float sigmoid = 1.0f / (1.0f + exp(-gate_val));
+    out[gid] = static_cast<bfloat>((gate_val * sigmoid) * up_val);
 }
 "#;
 
@@ -5156,6 +5179,35 @@ fn metal_mlp_gate_up_pipeline(
     Ok(pipeline)
 }
 
+fn metal_mlp_silu_mul_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal mlp silu*mul pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_mlp_silu_mul_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal mlp silu*mul function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal mlp silu*mul pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_attn_gate_sigmoid_mul_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -6167,6 +6219,88 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
         encoder.set_bytes(5, &hidden_u32);
         encoder.set_bytes(6, &intermediate_u32);
         encoder.set_bytes(7, &row_pair_mode_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: total,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+pub(crate) fn metal_mlp_silu_mul_supports(gate: &Tensor, up: &Tensor) -> bool {
+    if metal_mlp_silu_mul_disabled() {
+        return false;
+    }
+    if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
+        return false;
+    }
+    if !matches!(gate.device(), Device::Metal(_)) || !matches!(up.device(), Device::Metal(_)) {
+        return false;
+    }
+    if !gate.is_contiguous() || !up.is_contiguous() || gate.shape() != up.shape() {
+        return false;
+    }
+    gate.elem_count() > 0 && gate.elem_count() <= u32::MAX as usize
+}
+
+pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_mlp_silu_mul_supports(gate, up),
+        "metal mlp silu*mul supports only matching contiguous BF16 Metal tensors"
+    );
+    let total = gate.elem_count();
+    let gate = gate.contiguous()?;
+    let up = up.contiguous()?;
+    let out = unsafe { Tensor::empty(gate.dims(), DType::BF16, gate.device())? };
+
+    let Device::Metal(device) = gate.device() else {
+        anyhow::bail!("metal mlp silu*mul requires Metal tensors");
+    };
+    let pipeline = metal_mlp_silu_mul_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_mlp_silu_mul_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (gate_storage, gate_layout) = gate.storage_and_layout();
+        let (up_storage, up_layout) = up.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let gate_metal = match &*gate_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp silu*mul gate must be on Metal"),
+        };
+        let up_metal = match &*up_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp silu*mul up must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal mlp silu*mul out must be on Metal"),
+        };
+
+        let gate_buf =
+            candle_core::metal_backend::buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
+        let up_buf =
+            candle_core::metal_backend::buffer_o(up_metal.buffer(), &up_layout, up.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(up_buf.buffer), up_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let total_u32 = total as u32;
+        encoder.set_bytes(3, &total_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,
@@ -12747,6 +12881,12 @@ mod tests {
         Ok((gate * up)?)
     }
 
+    fn mlp_silu_mul_reference(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let gate = (gate * gate_sig)?;
+        Ok((gate * up)?)
+    }
+
     fn attn_gate_reference(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
         let gate_sig = (gate.neg()?.exp()? + 1.0)?.recip()?;
         Ok((x * gate_sig)?)
@@ -13487,6 +13627,59 @@ mod tests {
                  gate_t/up_t=[{hidden},{intermediate}] warmup={warmup} iters={iters} \
                  fallback={fallback_us:.3} us fused={fused_us:.3} us \
                  speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                fallback_us / fused_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_mlp_silu_mul_prefill_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_MLP_SILU_MUL_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_MLP_SILU_MUL_BENCH_ITERS", 50);
+        let intermediate = QWEN35_INTERMEDIATE;
+
+        for seq_len in [16usize, 64, 128] {
+            let gate = patterned_bf16_decode_batch(seq_len, intermediate, &device)?
+                .reshape((1usize, seq_len, intermediate))?
+                .contiguous()?;
+            let up = patterned_bf16_2d(seq_len, intermediate, &device, 43, 0.001953125)?
+                .reshape((1usize, seq_len, intermediate))?
+                .contiguous()?;
+            device.synchronize()?;
+            assert!(metal_mlp_silu_mul_supports(&gate, &up));
+
+            let reference = mlp_silu_mul_reference(&gate, &up)?;
+            let fused = metal_mlp_silu_mul_bf16(&gate, &up)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Qwen3.5 MLP silu*mul seq_len={seq_len} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "Qwen3.5 MLP silu*mul seq_len={seq_len} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fallback_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                mlp_silu_mul_reference(&gate, &up).context("bench fallback MLP silu*mul")
+            })?;
+            let fused_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_mlp_silu_mul_bf16(&gate, &up).context("bench fused MLP silu*mul")
+            })?;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 MLP silu*mul prefill BF16: seq_len={seq_len} \
+                 gate/up=[1,{seq_len},{intermediate}] warmup={warmup} iters={iters} \
+                 fallback={fallback_us:.3} us fused={fused_us:.3} us speedup={:.3}x \
+                 max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
                 fallback_us / fused_us,
             );
         }
@@ -15040,6 +15233,43 @@ mod tests {
         assert!(
             mean < 2e-3,
             "Metal MLP gate/up batch mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mlp_silu_mul_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 1usize;
+        let seq_len = 4usize;
+        let intermediate = 257usize;
+        let gate = patterned_bf16_decode_batch(seq_len, intermediate, &device)?
+            .reshape((batch, seq_len, intermediate))?
+            .contiguous()?;
+        let up = patterned_bf16_2d(seq_len, intermediate, &device, 37, 0.001953125)?
+            .reshape((batch, seq_len, intermediate))?
+            .contiguous()?;
+
+        assert!(metal_mlp_silu_mul_supports(&gate, &up));
+        let fused = metal_mlp_silu_mul_bf16(&gate, &up)?;
+        let reference = mlp_silu_mul_reference(&gate, &up)?;
+
+        assert_eq!(fused.dims(), &[batch, seq_len, intermediate]);
+        assert_eq!(fused.dtype(), DType::BF16);
+
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        assert!(
+            max < 2e-2,
+            "Metal MLP silu*mul max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2e-3,
+            "Metal MLP silu*mul mean_abs_diff={mean:e} exceeds tolerance"
         );
 
         Ok(())

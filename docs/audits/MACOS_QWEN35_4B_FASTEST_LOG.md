@@ -15785,3 +15785,77 @@ downstream kernels. Once qkv and z are materialized contiguously, the combined
 path is slower at every tested prefill length and would also require a very
 large duplicated weight cache. Do not add a combined qkv/z prefill layout unless
 a future fused downstream path can consume the combined tensor directly.
+
+## 2026-05-09 - E410 accepted Metal MLP SiLU multiply fusion
+
+### Hypothesis
+
+E408 ranks MLP prefill projections near the top and also shows non-trivial
+pointwise MLP work in `mlp:gate_silu` plus `mlp:hidden_mul`. E406 rejected
+combining the gate/up matmuls themselves, but after those matmuls have already
+produced `[B,T,intermediate]` tensors, a small Metal kernel can compute
+`silu(gate) * up` in one pass and avoid the separate sigmoid/multiply chain.
+
+### Change
+
+Accepted a guarded Metal pointwise fusion:
+
+- added `kiln_mlp_silu_mul_bf16`
+- precompiled the new pipeline with the other Kiln-owned Metal kernels
+- routed `swiglu_ffn_impl` through the fused kernel when gate/up tensors are
+  contiguous BF16 Metal tensors
+- fallback remains the original `cuda_silu(gate)` followed by `gate * up`
+- rollback: `KILN_DISABLE_METAL_MLP_SILU_MUL=1`
+- CUDA/Vulkan keep the original path
+
+### Synthetic Results
+
+Same-binary synthetic Metal Qwen3.5 MLP pointwise prefill:
+
+- `seq_len=16`: fallback `336.858 us`, fused `52.831 us`, speedup `6.376x`
+- `seq_len=64`: fallback `336.931 us`, fused `60.344 us`, speedup `5.583x`
+- `seq_len=128`: fallback `593.831 us`, fused `128.857 us`, speedup `4.608x`
+- max absolute diff `3.814697e-6`, mean absolute diff about `4.37e-7`
+
+### Endpoint Results
+
+Full paged Qwen3.5-4B latency, same release binary, one warmup run,
+`prompt_tokens=64`, `max_output_tokens=64`, temperature `0.0`:
+
+- Pair 1: default `417.655417 ms` prefill vs rollback `419.920375 ms`
+  (`0.54%` faster)
+- Pair 2, counter-ordered: default `422.315791 ms` prefill vs rollback
+  `422.377541 ms` (`0.015%` faster)
+- Aggregate: default `419.985604 ms` vs rollback `421.148958 ms`, saving
+  `1.163354 ms` (`0.276%` faster)
+- Decode ITL was effectively unchanged: default `159.687970 ms` vs rollback
+  `159.697365 ms`
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_silu_mul_matches_reference -- --nocapture`
+- `KILN_METAL_MLP_SILU_MUL_BENCH_WARMUP=5 KILN_METAL_MLP_SILU_MUL_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_mlp_silu_mul_prefill_synthetic -- --ignored --nocapture`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+- `cargo check -p kiln-model --features cuda` was attempted and remains blocked
+  locally before compiling touched code because `nvcc` is unavailable
+
+### Artifacts
+
+- `e410_mlp_silu_mul_prefill_synthetic.log`
+- `e410_mlp_silu_mul_latency_default_64out.log`
+- `e410_mlp_silu_mul_latency_disabled_64out.log`
+- `e410_mlp_silu_mul_latency_disabled_repeat_64out.log`
+- `e410_mlp_silu_mul_latency_default_repeat_64out.log`
+- `e410_cuda_check.log`
+
+### Decision
+
+Accepted. The endpoint gain is modest but positive in both pairs, the kernel is
+low-memory and Metal-only, and the rollback is simple. This avoids retesting the
+rejected E406 combined gate/up matmul layout while removing some remaining
+pointwise prefill overhead.

@@ -1660,3 +1660,12 @@
   combined-contiguous was `3513.310 us` (`0.890x`). Parity was exact. Temporary
   benchmark source reverted; do not add this layout without a downstream fused
   path that can consume the combined tensor directly.
+- 2026-05-09 E410: Accepted a guarded Metal MLP pointwise fusion for
+  `silu(gate) * up`, leaving the separate gate/up matmuls intact. Rollback:
+  `KILN_DISABLE_METAL_MLP_SILU_MUL=1`. Synthetic Qwen-shaped pointwise prefill
+  at `seq_len=64` improved `336.931 -> 60.344 us` (`5.583x`) with max diff
+  `3.814697e-6`. Full paged 64-token prefill A/B favored default in both pairs;
+  aggregate prefill improved `421.148958 -> 419.985604 ms` (`0.276%`, saving
+  `1.163 ms`). Metal/Vulkan checks, focused Metal test, release Metal builds,
+  fmt, and diff checks passed; CUDA check remains blocked locally by missing
+  `nvcc`.

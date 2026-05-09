@@ -3001,16 +3001,6 @@ fn swiglu_ffn_impl(
         seq_len,
         stage_profile,
     )?;
-    // SiLU activation: x * sigmoid(x)
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-    let gate = cuda_silu(&gate)?;
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "gate_silu",
-        seq_len,
-        stage_profile,
-    )?;
     // x @ up_proj_t -> [batch, seq_len, intermediate_size]
     let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let up = {
@@ -3032,16 +3022,68 @@ fn swiglu_ffn_impl(
         seq_len,
         stage_profile,
     )?;
-    // Element-wise multiply
-    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-    let hidden = (gate * up)?;
-    finish_mlp_stage_profile(
-        profile_device,
-        profile_context,
-        "hidden_mul",
-        seq_len,
-        stage_profile,
-    )?;
+    let hidden = {
+        #[cfg(feature = "metal")]
+        {
+            if crate::backend::metal::metal_mlp_silu_mul_supports(&gate, &up) {
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let hidden = crate::backend::metal::metal_mlp_silu_mul_bf16(&gate, &up)
+                    .context("metal mlp silu*mul kernel failed")?;
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gate_silu_hidden_mul",
+                    seq_len,
+                    stage_profile,
+                )?;
+                hidden
+            } else {
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let gate = cuda_silu(&gate)?;
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gate_silu",
+                    seq_len,
+                    stage_profile,
+                )?;
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let hidden = (gate * up)?;
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "hidden_mul",
+                    seq_len,
+                    stage_profile,
+                )?;
+                hidden
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            // SiLU activation: x * sigmoid(x)
+            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+            let gate = cuda_silu(&gate)?;
+            finish_mlp_stage_profile(
+                profile_device,
+                profile_context,
+                "gate_silu",
+                seq_len,
+                stage_profile,
+            )?;
+            // Element-wise multiply
+            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+            let hidden = (gate * up)?;
+            finish_mlp_stage_profile(
+                profile_device,
+                profile_context,
+                "hidden_mul",
+                seq_len,
+                stage_profile,
+            )?;
+            hidden
+        }
+    };
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
     let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let out = {
