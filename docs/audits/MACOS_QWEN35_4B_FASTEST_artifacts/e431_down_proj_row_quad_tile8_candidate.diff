@@ -1,0 +1,253 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index cf3ab62..c4a9124 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -3193,7 +3193,7 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+     const bool grouped_mode = row_pair_mode != 0;
+     const uint row_group_size = grouped_mode ? row_group_size_arg : 1;
+     const bool row_quad_mode = grouped_mode && row_group_size == 4;
+-    const uint tile_cols = row_quad_mode ? 4 : 8;
++    const uint tile_cols = 8;
+     const uint col_base = (tgroup.x * 4 + simd_group) * tile_cols;
+     if (col_base >= output_dim) {
+         return;
+@@ -3305,14 +3305,26 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+         float acc11 = 0.0f;
+         float acc12 = 0.0f;
+         float acc13 = 0.0f;
++        float acc14 = 0.0f;
++        float acc15 = 0.0f;
++        float acc16 = 0.0f;
++        float acc17 = 0.0f;
+         float acc20 = 0.0f;
+         float acc21 = 0.0f;
+         float acc22 = 0.0f;
+         float acc23 = 0.0f;
++        float acc24 = 0.0f;
++        float acc25 = 0.0f;
++        float acc26 = 0.0f;
++        float acc27 = 0.0f;
+         float acc30 = 0.0f;
+         float acc31 = 0.0f;
+         float acc32 = 0.0f;
+         float acc33 = 0.0f;
++        float acc34 = 0.0f;
++        float acc35 = 0.0f;
++        float acc36 = 0.0f;
++        float acc37 = 0.0f;
+ 
+         for (uint row = lane; row < input_dim; row += 32) {
+             const float xv0 = static_cast<float>(x[x_base + row]);
+@@ -3322,27 +3334,48 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+             const uint weight_base = row * output_dim + col_base;
+             if (vector_load_safe) {
+                 device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+-                const bfloat4 w = *w4_ptr;
+-                const float w0 = static_cast<float>(w[0]);
+-                const float w1 = static_cast<float>(w[1]);
+-                const float w2 = static_cast<float>(w[2]);
+-                const float w3 = static_cast<float>(w[3]);
++                const bfloat4 w_lo = w4_ptr[0];
++                const bfloat4 w_hi = w4_ptr[1];
++                const float w0 = static_cast<float>(w_lo[0]);
++                const float w1 = static_cast<float>(w_lo[1]);
++                const float w2 = static_cast<float>(w_lo[2]);
++                const float w3 = static_cast<float>(w_lo[3]);
++                const float w4 = static_cast<float>(w_hi[0]);
++                const float w5 = static_cast<float>(w_hi[1]);
++                const float w6 = static_cast<float>(w_hi[2]);
++                const float w7 = static_cast<float>(w_hi[3]);
+                 acc0 += xv0 * w0;
+                 acc1 += xv0 * w1;
+                 acc2 += xv0 * w2;
+                 acc3 += xv0 * w3;
++                acc4 += xv0 * w4;
++                acc5 += xv0 * w5;
++                acc6 += xv0 * w6;
++                acc7 += xv0 * w7;
+                 acc10 += xv1 * w0;
+                 acc11 += xv1 * w1;
+                 acc12 += xv1 * w2;
+                 acc13 += xv1 * w3;
++                acc14 += xv1 * w4;
++                acc15 += xv1 * w5;
++                acc16 += xv1 * w6;
++                acc17 += xv1 * w7;
+                 acc20 += xv2 * w0;
+                 acc21 += xv2 * w1;
+                 acc22 += xv2 * w2;
+                 acc23 += xv2 * w3;
++                acc24 += xv2 * w4;
++                acc25 += xv2 * w5;
++                acc26 += xv2 * w6;
++                acc27 += xv2 * w7;
+                 acc30 += xv3 * w0;
+                 acc31 += xv3 * w1;
+                 acc32 += xv3 * w2;
+                 acc33 += xv3 * w3;
++                acc34 += xv3 * w4;
++                acc35 += xv3 * w5;
++                acc36 += xv3 * w6;
++                acc37 += xv3 * w7;
+             } else {
+                 const float w0 = static_cast<float>(weight_t[weight_base + 0]);
+                 acc0 += xv0 * w0;
+@@ -3370,6 +3403,34 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+                     acc23 += xv2 * w3;
+                     acc33 += xv3 * w3;
+                 }
++                if (col_base + 4 < output_dim) {
++                    const float w4 = static_cast<float>(weight_t[weight_base + 4]);
++                    acc4 += xv0 * w4;
++                    acc14 += xv1 * w4;
++                    acc24 += xv2 * w4;
++                    acc34 += xv3 * w4;
++                }
++                if (col_base + 5 < output_dim) {
++                    const float w5 = static_cast<float>(weight_t[weight_base + 5]);
++                    acc5 += xv0 * w5;
++                    acc15 += xv1 * w5;
++                    acc25 += xv2 * w5;
++                    acc35 += xv3 * w5;
++                }
++                if (col_base + 6 < output_dim) {
++                    const float w6 = static_cast<float>(weight_t[weight_base + 6]);
++                    acc6 += xv0 * w6;
++                    acc16 += xv1 * w6;
++                    acc26 += xv2 * w6;
++                    acc36 += xv3 * w6;
++                }
++                if (col_base + 7 < output_dim) {
++                    const float w7 = static_cast<float>(weight_t[weight_base + 7]);
++                    acc7 += xv0 * w7;
++                    acc17 += xv1 * w7;
++                    acc27 += xv2 * w7;
++                    acc37 += xv3 * w7;
++                }
+             }
+         }
+ 
+@@ -3377,18 +3438,34 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+         acc1 = simd_sum(acc1);
+         acc2 = simd_sum(acc2);
+         acc3 = simd_sum(acc3);
++        acc4 = simd_sum(acc4);
++        acc5 = simd_sum(acc5);
++        acc6 = simd_sum(acc6);
++        acc7 = simd_sum(acc7);
+         acc10 = simd_sum(acc10);
+         acc11 = simd_sum(acc11);
+         acc12 = simd_sum(acc12);
+         acc13 = simd_sum(acc13);
++        acc14 = simd_sum(acc14);
++        acc15 = simd_sum(acc15);
++        acc16 = simd_sum(acc16);
++        acc17 = simd_sum(acc17);
+         acc20 = simd_sum(acc20);
+         acc21 = simd_sum(acc21);
+         acc22 = simd_sum(acc22);
+         acc23 = simd_sum(acc23);
++        acc24 = simd_sum(acc24);
++        acc25 = simd_sum(acc25);
++        acc26 = simd_sum(acc26);
++        acc27 = simd_sum(acc27);
+         acc30 = simd_sum(acc30);
+         acc31 = simd_sum(acc31);
+         acc32 = simd_sum(acc32);
+         acc33 = simd_sum(acc33);
++        acc34 = simd_sum(acc34);
++        acc35 = simd_sum(acc35);
++        acc36 = simd_sum(acc36);
++        acc37 = simd_sum(acc37);
+ 
+         if (lane == 0) {
+             const uint out_base = batch_idx * output_dim;
+@@ -3402,6 +3479,18 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+             if (col_base + 3 < output_dim) {
+                 out[out_base + col_base + 3] = static_cast<bfloat>(acc3);
+             }
++            if (col_base + 4 < output_dim) {
++                out[out_base + col_base + 4] = static_cast<bfloat>(acc4);
++            }
++            if (col_base + 5 < output_dim) {
++                out[out_base + col_base + 5] = static_cast<bfloat>(acc5);
++            }
++            if (col_base + 6 < output_dim) {
++                out[out_base + col_base + 6] = static_cast<bfloat>(acc6);
++            }
++            if (col_base + 7 < output_dim) {
++                out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
++            }
+             if (has_batch1) {
+                 const uint out_base1 = batch1 * output_dim;
+                 out[out_base1 + col_base + 0] = static_cast<bfloat>(acc10);
+@@ -3414,6 +3503,18 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+                 if (col_base + 3 < output_dim) {
+                     out[out_base1 + col_base + 3] = static_cast<bfloat>(acc13);
+                 }
++                if (col_base + 4 < output_dim) {
++                    out[out_base1 + col_base + 4] = static_cast<bfloat>(acc14);
++                }
++                if (col_base + 5 < output_dim) {
++                    out[out_base1 + col_base + 5] = static_cast<bfloat>(acc15);
++                }
++                if (col_base + 6 < output_dim) {
++                    out[out_base1 + col_base + 6] = static_cast<bfloat>(acc16);
++                }
++                if (col_base + 7 < output_dim) {
++                    out[out_base1 + col_base + 7] = static_cast<bfloat>(acc17);
++                }
+             }
+             if (has_batch2) {
+                 const uint out_base2 = batch2 * output_dim;
+@@ -3427,6 +3528,18 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+                 if (col_base + 3 < output_dim) {
+                     out[out_base2 + col_base + 3] = static_cast<bfloat>(acc23);
+                 }
++                if (col_base + 4 < output_dim) {
++                    out[out_base2 + col_base + 4] = static_cast<bfloat>(acc24);
++                }
++                if (col_base + 5 < output_dim) {
++                    out[out_base2 + col_base + 5] = static_cast<bfloat>(acc25);
++                }
++                if (col_base + 6 < output_dim) {
++                    out[out_base2 + col_base + 6] = static_cast<bfloat>(acc26);
++                }
++                if (col_base + 7 < output_dim) {
++                    out[out_base2 + col_base + 7] = static_cast<bfloat>(acc27);
++                }
+             }
+             if (has_batch3) {
+                 const uint out_base3 = batch3 * output_dim;
+@@ -3440,6 +3553,18 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
+                 if (col_base + 3 < output_dim) {
+                     out[out_base3 + col_base + 3] = static_cast<bfloat>(acc33);
+                 }
++                if (col_base + 4 < output_dim) {
++                    out[out_base3 + col_base + 4] = static_cast<bfloat>(acc34);
++                }
++                if (col_base + 5 < output_dim) {
++                    out[out_base3 + col_base + 5] = static_cast<bfloat>(acc35);
++                }
++                if (col_base + 6 < output_dim) {
++                    out[out_base3 + col_base + 6] = static_cast<bfloat>(acc36);
++                }
++                if (col_base + 7 < output_dim) {
++                    out[out_base3 + col_base + 7] = static_cast<bfloat>(acc37);
++                }
+             }
+         }
+         return;
+@@ -6624,11 +6749,7 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
+         encoder.set_bytes(5, &row_pair_mode_u32);
+         encoder.set_bytes(6, &row_group_size_u32);
+ 
+-        let tile_cols = if row_quad_enabled {
+-            METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS
+-        } else {
+-            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS
+-        };
++        let tile_cols = METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS;
+         let cols_per_threadgroup = tile_cols * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+         let threadgroups_per_grid = objc2_metal::MTLSize {
+             width: output_dim.div_ceil(cols_per_threadgroup),

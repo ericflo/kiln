@@ -17386,3 +17386,66 @@ same-binary rollback timing was not valid decision evidence.
 Rejected and reverted before commit. Keep the existing row-quad/vector-load MLP
 gate/up policy for full Metal decode batches; row-oct reduces thread count but
 does not beat the current kernel once measured against clean source.
+
+## 2026-05-09 - E431 rejected Metal down-proj row-quad tile8 in shared kernel
+
+### Purpose
+
+Continue on the second-largest current serial decode bucket and an important
+continuous-batching path: the Metal transposed-coop GEMV used by MLP
+down-projection. E377 accepted row-quad for batch `>=8` with four output
+columns per SIMD group. This experiment tested whether using eight output
+columns in the row-quad branch would reduce column threadgroups enough to
+improve full-batch throughput.
+
+### Candidate
+
+- Changed the shared `kiln_transposed_coop_gemv8_batch_bf16` batch kernel so
+  row-quad also used `tile_cols=8`.
+- Expanded the row-quad branch from four to eight output accumulators per row.
+- Changed the row-quad launcher grid width to use the existing tile8 width.
+- Preserved the candidate diff, then reverted runtime source before commit.
+
+### Validation
+
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul --lib -- --nocapture`
+- candidate benchmark repeated once
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The candidate was correct, and the intended batch-8 row-quad shape improved
+modestly. But adding the larger row-quad branch to the shared batch kernel
+slowed the row-pair batch `2/3/4` paths that should not logically select the
+modified branch.
+
+| config | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: |
+| clean current source | `1165.200 us` | `2059.537 us` | `2195.654 us` | `3077.825 us` |
+| candidate | `1298.246 us` | `2440.371 us` | `2387.146 us` | `2961.033 us` |
+| candidate rerun | `1252.450 us` | `2551.733 us` | `2419.783 us` | `2961.287 us` |
+
+Against the clean current source, batch `8` improved by `3.8%`, but batch `3`
+regressed by `18.5-23.9%` and batch `4` regressed by `8.7-10.2%`. That points
+to whole-kernel register-pressure or occupancy loss rather than a safe
+full-batch-only win.
+
+### Artifacts
+
+- `e431_down_proj_row_quad_tile8_clean_baseline.log`
+- `e431_down_proj_row_quad_tile8_candidate.diff`
+- `e431_down_proj_row_quad_tile8_parity.log`
+- `e431_down_proj_row_quad_tile8_candidate.log`
+- `e431_down_proj_row_quad_tile8_candidate_rerun.log`
+- `e431_down_proj_row_quad_tile8_fmt_check.log`
+- `e431_down_proj_row_quad_tile8_source_reverted.diffcheck.log`
+- `e431_down_proj_row_quad_tile8_git_diff_check.log`
+
+### Decision
+
+Rejected and reverted before commit. Keep the existing shared row-quad tile4
+down-projection path; the tile8 row-quad idea is only worth revisiting as a
+separate dedicated full-batch kernel that cannot pollute row-pair batches.

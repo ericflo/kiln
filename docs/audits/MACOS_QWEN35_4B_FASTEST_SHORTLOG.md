@@ -1853,3 +1853,11 @@
   a clean-source rerun kept current row-quad/vector-load at `2514.229 us`.
   Against clean source, row-oct was `36.5%` slower at batch8 and also slowed
   batch3/4. Runtime source was reverted; candidate diff and logs were kept.
+- 2026-05-09 E431: Rejected shared-kernel Metal down-proj row-quad tile8.
+  Expanding the existing batch transposed-GEMV row-quad branch from tile4 to
+  tile8 passed parity and improved the intended batch8 shape from `3077.825`
+  to `2961.033/2961.287 us` (`3.8%`), but it polluted the shared kernel and
+  regressed row-pair batches that do not select row-quad: batch3
+  `2059.537 -> 2440.371/2551.733 us`, batch4 `2195.654 ->
+  2387.146/2419.783 us`. Runtime source was reverted; keep row-quad tile4
+  unless tile8 is isolated in a separate full-batch kernel.
