@@ -11860,3 +11860,83 @@ the only E357 winner was narrow and not monotonic, while prior eight-way data
 showed wait-based admission can lose despite fuller batches. Keep
 `KILN_DECODE_BATCH_WAIT_US` as an explicit tuning knob for workloads that match
 the `100us` varied-prompt profile.
+
+## 2026-05-09 E358 - Refreshed mixed-seq live stage profile
+
+### Goal
+
+Pick the next Metal implementation target using the current E356 mixed-seq
+serving path instead of the older E348 profile. Mixed-length paged attention is
+no longer the serving blocker, so the next target should come from live
+post-E356 stage timings.
+
+### Change
+
+No source change. Ran one prewarmed release server with
+`KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`, and
+`KILN_PROFILE_MLP_STAGES=1`. The server log includes an `E358_MEASURE_START`
+marker after background prewarm so live request profile lines can be separated
+from warmup. The measured request used the same varied-prompt four-request
+shape as E356/E357, but with greedy `max_tokens=3` to keep synchronized profile
+overhead bounded.
+
+### Validation
+
+- Server reported `mixed_seq_lens=true` and `wait_us=0`.
+- The measurement waited for the `inference_prewarm_complete` health check.
+- All four streaming chat requests returned `200`.
+- Metrics and parsed profile summary were captured.
+
+### Results
+
+Profiled live run:
+
+- wall time `6.340215s` with profiling synchronization enabled
+- `12` generated tokens
+- active request peak `3`
+- `8` submitted batcher jobs
+- `4` worker batches
+- `8` rows
+- max batch `3`
+
+Stage totals after `E358_MEASURE_START`, including live request prefill and
+decode:
+
+- GDN total `5612.854 ms`
+- MLP total `4133.830 ms`
+- full attention total `1518.052 ms`
+
+Top `seq_len=1` live decode stages:
+
+- `mlp:gate_up_fused`: `376.300 ms`
+- `mlp:down_proj`: `279.810 ms`
+- `gdn:in_proj`: `255.876 ms`
+- `gdn:out_proj`: `115.709 ms`
+- `full_attn:qkv_proj_batch`: `50.610 ms`
+- `gdn:gates_recur_gated_norm`: `39.883 ms`
+- `full_attn:qkv_proj`: `36.909 ms`
+- `gdn:qkv_conv_norm`: `29.990 ms`
+
+The current live decode bottlenecks are still MLP/GDN projection-heavy stages.
+The E356 dyn-seqlen paged attention work made mixed prompt rows batchable, but
+full-attention decode attention itself is now far below the MLP and GDN
+projection slices in the synchronized profile.
+
+### Artifact
+
+- `e358_mixed_stage_profile_server.log`
+- `e358_mixed_stage_profile_health.json`
+- `e358_mixed_stage_profile_metrics.prom`
+- `e358_mixed_stage_profile_time.json`
+- `e358_mixed_stage_profile_response_0.sse`
+- `e358_mixed_stage_profile_response_1.sse`
+- `e358_mixed_stage_profile_response_2.sse`
+- `e358_mixed_stage_profile_response_3.sse`
+- `e358_mixed_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue Metal work on
+MLP/GDN projection kernels, with MLP `gate_up_fused` and `down_proj` as the
+largest current decode slices, rather than spending the next pass on paged
+attention.

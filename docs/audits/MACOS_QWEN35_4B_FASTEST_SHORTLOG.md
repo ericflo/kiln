@@ -1214,3 +1214,13 @@
   regressed badly and E354 already showed admission waits can hurt larger
   concurrency. No source change; keep zero wait as the default and retain
   `KILN_DECODE_BATCH_WAIT_US` for explicit workload tuning.
+- 2026-05-09 E358: Refreshed synchronized stage profiling on the current
+  Metal mixed-seq serving path. Four varied prompts with greedy `max_tokens=3`
+  generated `12` tokens, submitted `8` decode jobs through `4` worker batches,
+  and observed max batch `3`; wall time was `6.340215s` with profiling
+  synchronization enabled. Live `seq_len=1` stage totals still point at
+  projection-heavy decode work: MLP `gate_up_fused` `376.300 ms`, MLP
+  `down_proj` `279.810 ms`, GDN `in_proj` `255.876 ms`, GDN `out_proj`
+  `115.709 ms`, then full-attention `qkv_proj_batch` `50.610 ms`. No source
+  change; next Metal attempts should stay focused on MLP/GDN projection kernels
+  rather than paged attention.

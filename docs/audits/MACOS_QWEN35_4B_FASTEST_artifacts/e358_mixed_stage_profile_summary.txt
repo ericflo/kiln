@@ -1,0 +1,52 @@
+E358 mixed-seq live stage profile summary
+
+Kind totals after E358_MEASURE_START (includes live prefill and decode):
+- gdn: 5612.854 ms
+- mlp: 4133.830 ms
+- full_attn: 1518.052 ms
+
+Top stages after E358_MEASURE_START (includes live prefill and decode):
+- gdn:gates: 2506.340 ms (96 samples)
+- gdn:in_proj: 1553.026 ms (192 samples)
+- mlp:down_proj: 1118.778 ms (256 samples)
+- mlp:gate_proj: 833.040 ms (128 samples)
+- mlp:up_proj: 808.885 ms (128 samples)
+- mlp:gate_silu: 767.623 ms (128 samples)
+- gdn:out_proj: 543.568 ms (192 samples)
+- full_attn:qkv_proj: 379.099 ms (48 samples)
+- mlp:gate_up_fused: 376.300 ms (128 samples)
+- gdn:qkv_conv_split_norm: 359.190 ms (96 samples)
+- gdn:recurrent: 349.790 ms (96 samples)
+- gdn:gated_norm: 229.984 ms (192 samples)
+- mlp:hidden_mul: 229.204 ms (128 samples)
+- full_attn:prefill_attn_fallback: 192.741 ms (32 samples)
+- full_attn:qk_norm: 164.409 ms (48 samples)
+- full_attn:qkv_split: 133.575 ms (48 samples)
+- full_attn:kv_write: 127.843 ms (48 samples)
+- full_attn:prefill_kv_head_layout: 113.691 ms (32 samples)
+- full_attn:kv_read: 99.207 ms (32 samples)
+- full_attn:rope: 88.394 ms (48 samples)
+
+Top seq_len=1 decode stages:
+- mlp:gate_up_fused: 376.300 ms (128 samples)
+- mlp:down_proj: 279.810 ms (128 samples)
+- gdn:in_proj: 255.876 ms (96 samples)
+- gdn:out_proj: 115.709 ms (96 samples)
+- full_attn:qkv_proj_batch: 50.610 ms (16 samples)
+- gdn:gates_recur_gated_norm: 39.883 ms (96 samples)
+- full_attn:qkv_proj: 36.909 ms (16 samples)
+- gdn:qkv_conv_norm: 29.990 ms (96 samples)
+- full_attn:o_proj_batch: 20.445 ms (16 samples)
+- full_attn:o_proj: 17.178 ms (16 samples)
+- full_attn:rope_batch: 12.159 ms (16 samples)
+- full_attn:kv_write: 11.180 ms (16 samples)
+- full_attn:qkv_split_batch: 5.914 ms (16 samples)
+- full_attn:decode_attn_contiguous_batch: 5.296 ms (16 samples)
+- full_attn:qkv_split: 5.074 ms (16 samples)
+- full_attn:kv_write_batch: 5.062 ms (16 samples)
+- full_attn:decode_attn_contiguous: 4.673 ms (16 samples)
+- full_attn:qk_norm: 4.391 ms (16 samples)
+- full_attn:qk_norm_batch: 4.251 ms (16 samples)
+- full_attn:attn_gate_batch: 4.120 ms (16 samples)
+
+Profile lines parsed: 2736
