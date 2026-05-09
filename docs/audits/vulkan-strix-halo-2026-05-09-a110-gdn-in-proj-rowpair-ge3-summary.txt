@@ -1,0 +1,77 @@
+A110 accepted candidate: Vulkan GDN in-proj row-pair at batch >=3
+
+Scope
+-----
+- Lower Vulkan packed-BF16 GDN input-projection row-pair selection from
+  `batch >= 4` to `batch >= 3`.
+- Row-quad remains unchanged at `batch >= 8`.
+- Existing rollback env remains
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`.
+- This is a Vulkan-only routing threshold change; CPU, CUDA, Metal, and F32
+  Vulkan routing are unchanged.
+
+Why
+---
+- Metal E462 accepted the same policy move for Metal GDN in-proj after
+  synthetic and live batch-3 shape-isolation evidence.
+- The recent CUDA c>1 paged-decode fix is a useful caution: only count
+  throughput after verifying the batched path is actually correct for the
+  shape being measured. A110 therefore measures real live decode-batcher
+  traffic with max observed batch 3 and matching visible output.
+
+Validation
+----------
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused Vulkan parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj_decode_batched_bf16_packed_weights_row_pair_matches_cpu_reference -- --nocapture`
+  covering batch 3 and batch 5
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Full Vulkan kernel parity: `34 passed`
+- CUDA check remains host-blocked by missing `nvcc`.
+- Metal check remains host-blocked by `objc2` requiring an Apple target.
+
+Live batch-3 A/B
+----------------
+- Server env for valid probes:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_DECODE_BATCH_WAIT_US=5000`
+- Rollback env additionally:
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`
+- The separate `KILN_BATCHING_ENGINE=1` route was intentionally not used for
+  valid measurements because it did not exercise the live decode-batcher
+  counters for this threshold.
+- Pair 1: candidate `1.545693s`; rollback `1.710581s`.
+- Pair 2 counter-order with fresh prompts: rollback `2.032992s`; candidate
+  `1.902259s`.
+- Both valid pairs had identical counters in both arms:
+  `requests_ok=3`, `tokens_generated=9`, `jobs_submitted=6`,
+  `worker_batches=3`, `batcher_rows=6`, `max_batch_after=3`, `jobs_failed=0`.
+- Pair 1 visible outputs matched: all three responses emitted
+  `"The sequence you"`.
+- Pair 2 visible outputs matched: `"26,"`, `"36,"`, `"46,"`.
+- Two-pair average: candidate `1.723976s`; rollback `1.871787s`.
+- Candidate average win: `0.147811s`, about `7.9%` on this batch-3 live probe.
+
+Verdict
+-------
+- Keep.
+- This transfers the Metal E462 threshold lesson cleanly to Vulkan with a
+  narrow rollback and explicit batch-3 parity/live coverage.
+
+Artifacts
+---------
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-fmt.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-diffcheck.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-kernel-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-focused-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-full-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-model-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-server-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-candidate-batch3*`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-rollback-batch3*`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-cuda-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-metal-check.log`

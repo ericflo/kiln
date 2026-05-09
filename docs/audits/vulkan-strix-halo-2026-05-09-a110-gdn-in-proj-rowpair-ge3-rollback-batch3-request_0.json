@@ -1,0 +1,15 @@
+{
+  "model": "qwen3.5-4b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Continue the sequence: 1 2 3 4 5"
+    }
+  ],
+  "temperature": 0.0,
+  "max_tokens": 3,
+  "stream": true,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}

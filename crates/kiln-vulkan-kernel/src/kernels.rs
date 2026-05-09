@@ -999,7 +999,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
     let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
     let row_grouping =
-        packed_bf16_weights && pair_qkv_z && batch >= 4 && gdn_in_proj_batch_row_pair_enabled();
+        packed_bf16_weights && pair_qkv_z && batch >= 3 && gdn_in_proj_batch_row_pair_enabled();
     let row_group_size = if row_grouping && batch >= 8 && gdn_in_proj_batch_row_quad_enabled() {
         4usize
     } else if row_grouping {

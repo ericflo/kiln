@@ -1,0 +1,59 @@
+{
+  "case": "candidate-batch3b",
+  "ready_after_s": 0.014899981004418805,
+  "post_ready_wait_s": 12,
+  "wall_s": 1.9022588110092329,
+  "metrics_before": {
+    "requests_ok": 0.0,
+    "requests_error": 0.0,
+    "tokens_generated": 0.0,
+    "jobs_submitted": 0.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 0.0,
+    "batcher_rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "requests_ok": 3.0,
+    "requests_error": 0.0,
+    "tokens_generated": 9.0,
+    "jobs_submitted": 6.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 3.0,
+    "batcher_rows": 6.0,
+    "max_batch": 3.0
+  },
+  "metrics_delta": {
+    "requests_ok": 3.0,
+    "requests_error": 0.0,
+    "tokens_generated": 9.0,
+    "jobs_submitted": 6.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 3.0,
+    "batcher_rows": 6.0,
+    "max_batch_after": 3.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 1.6973544959910214,
+      "text": "26,",
+      "events": 5
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 1.8936168770014774,
+      "text": "36,",
+      "events": 5
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 1.893456260993844,
+      "text": "46,",
+      "events": 5
+    }
+  ]
+}

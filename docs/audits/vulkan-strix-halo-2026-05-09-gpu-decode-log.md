@@ -6550,3 +6550,58 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-model-check.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-release-bench-build.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-seed*.log`
+
+### 2026-05-09 A110: Vulkan GDN In-Proj Row-Pair At Batch 3
+
+Scope:
+- Lower Vulkan packed-BF16 GDN input-projection row-pair selection from
+  `batch >= 4` to `batch >= 3`.
+- Row-quad remains unchanged at `batch >= 8`.
+- Existing rollback env remains
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`.
+
+Inspiration:
+- Metal E462 accepted the same GDN in-proj row-pair threshold after synthetic
+  and live batch-3 evidence.
+- Recent CUDA c>1 paged-decode work is a reminder to measure only after the
+  intended batched route is actually exercised and correct. A110 therefore uses
+  live decode-batcher counters with max observed batch 3.
+
+Validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused Vulkan parity for GDN in-proj row-pair covering batch 3 and batch 5.
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Full Vulkan kernel parity: `34 passed`.
+- CUDA remains host-blocked by missing `nvcc`; Metal remains host-blocked by
+  `objc2` requiring an Apple target.
+
+Live batch-3 A/B:
+- Valid server env:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_DECODE_BATCH_WAIT_US=5000`.
+- Rollback additionally set
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`.
+- Pair 1: candidate `1.545693s`; rollback `1.710581s`.
+- Pair 2 counter-order with fresh prompts: rollback `2.032992s`; candidate
+  `1.902259s`.
+- Both valid pairs had identical counters in both arms:
+  `requests_ok=3`, `tokens_generated=9`, `jobs_submitted=6`,
+  `worker_batches=3`, `batcher_rows=6`, `max_batch_after=3`, `jobs_failed=0`.
+- Visible outputs matched per pair: pair 1 emitted `"The sequence you"` for
+  all three responses; pair 2 emitted `"26,"`, `"36,"`, `"46,"`.
+- Two-pair average: candidate `1.723976s`; rollback `1.871787s`, a
+  `0.147811s` / `7.9%` candidate win on this shape.
+
+Verdict:
+- Keep.
+- This is a narrow Vulkan-only threshold move with direct batch-3 parity and
+  live evidence. CPU, CUDA, Metal, and F32 Vulkan routing are unchanged.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-candidate-batch3*`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a110-gdn-in-proj-rowpair-ge3-rollback-batch3*`

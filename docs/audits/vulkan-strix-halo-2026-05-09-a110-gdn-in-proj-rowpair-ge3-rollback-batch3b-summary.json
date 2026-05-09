@@ -1,0 +1,57 @@
+{
+  "case": "rollback-batch3b",
+  "wall_s": 2.03299159600283,
+  "metrics_before": {
+    "requests_ok": 3.0,
+    "requests_error": 0.0,
+    "tokens_generated": 9.0,
+    "jobs_submitted": 6.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 3.0,
+    "batcher_rows": 6.0,
+    "max_batch": 3.0
+  },
+  "metrics_after": {
+    "requests_ok": 6.0,
+    "requests_error": 0.0,
+    "tokens_generated": 18.0,
+    "jobs_submitted": 12.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 6.0,
+    "batcher_rows": 12.0,
+    "max_batch": 3.0
+  },
+  "metrics_delta": {
+    "requests_ok": 3.0,
+    "requests_error": 0.0,
+    "tokens_generated": 9.0,
+    "jobs_submitted": 6.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 3.0,
+    "batcher_rows": 6.0,
+    "max_batch_after": 3.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 2.025865817005979,
+      "text": "26,",
+      "events": 5
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 2.025455768991378,
+      "text": "36,",
+      "events": 5
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 1.8257997640030226,
+      "text": "46,",
+      "events": 5
+    }
+  ]
+}

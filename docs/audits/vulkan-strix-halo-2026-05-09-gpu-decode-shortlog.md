@@ -506,3 +506,18 @@ Additional validation after rejected A109:
   `79.496ms` / `88.804ms`.
 - Source code for rows8 was removed; audit artifacts are retained under
   `docs/audits/vulkan-strix-halo-2026-05-09-a109-mlp-gateup-rows8-*`.
+
+Additional validation after A110:
+
+- Lowered Vulkan packed-BF16 GDN in-proj row-pair selection from `batch >= 4`
+  to `batch >= 3`; row-quad remains `batch >= 8`.
+- Focused row-pair parity now covers batch 3 and batch 5; full Vulkan kernel
+  parity passed (`34 passed`), and Vulkan model/server checks plus release
+  server build passed.
+- Two valid live batch-3 A/B pairs with
+  `KILN_DECODE_BATCH_WAIT_US=5000` kept identical counters
+  (`6` submitted rows / `3` worker batches / max batch `3`) and matching
+  visible outputs. Average wall time improved from rollback `1.871787s` to
+  candidate `1.723976s` (`7.9%`).
+- CUDA/Metal checks remain environment-blocked on this Linux host (`nvcc`
+  missing; `objc2` requires Apple target).
