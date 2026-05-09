@@ -14,6 +14,10 @@ use std::path::PathBuf;
 /// Shader files to compile. Format: (base_name, output_module_name).
 const SHADERS: &[(&str, &str)] = &[
     ("full_attn_qkv_decode", "SPIR_V_FULL_ATTN_QKV_DECODE"),
+    (
+        "full_attn_qkv_decode_bf16w",
+        "SPIR_V_FULL_ATTN_QKV_DECODE_BF16W",
+    ),
     ("gdn_gates", "SPIR_V_GDN_GATES"),
     (
         "gdn_decode_gates_recurrent_rmsnorm",

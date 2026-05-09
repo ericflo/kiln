@@ -1131,13 +1131,73 @@ Verdict:
 - This changes shared tokenizer/server request wiring only; CUDA, Metal, and
   Vulkan kernel code are untouched.
 
+### 2026-05-09 A026: Pack Full-Attention QKV BF16 Weights for Vulkan Decode
+
+Issue:
+- A023 and A024 showed that keeping BF16 weights packed on device and expanding
+  in-shader is faster than pre-expanding BF16 weights into cached F32 buffers
+  for high-traffic Vulkan decode projections.
+- The fused full-attention QKV decode path still used cached F32 weight buffers,
+  so every BF16 Q/K/V projection paid roughly 2x the weight bandwidth versus a
+  packed path.
+
+Implementation:
+- Added `full_attn_qkv_decode_bf16w.comp`, mirroring the existing fused
+  full-attention QKV decode kernel while reading packed BF16 weight buffers and
+  converting with `uintBitsToFloat(bf16_bits << 16)` in the shader.
+- Registered and prewarmed the new Vulkan shader/pipeline.
+- Added `dispatch_full_attn_qkv_decode_cached_bf16_weights` beside the existing
+  cached F32 dispatch.
+- Added a Vulkan backend gate that uses packed BF16 Q/K/V weights only when all
+  three projection weights are BF16; mixed or F32 groups stay on the existing
+  cached F32 path.
+- Reused the existing packed-BF16 weight cache and added rollback env
+  `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS=1`.
+- Added CPU-reference parity coverage for the packed-BF16 QKV shader.
+
+Evidence:
+- `rustfmt --edition 2024` on the touched Vulkan files passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed; warnings were existing
+  unused-code warnings.
+- Full Vulkan parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  returned `27 passed`, including the new packed-BF16 full-attention QKV test.
+- Release Vulkan build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check` passed.
+- Serial paged latency on `main` with Qwen3.5-4B stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]` and measured `398.8ms` prefill,
+  `111.5ms` mean ITL.
+- Same-binary rollback with
+  `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS=1` produced the same
+  token IDs and measured `621.6ms` prefill, `118.4ms` mean ITL.
+- Earlier same-binary A/B before the merge-to-main transition also favored the
+  candidate: candidate `111.8ms` / `113.3ms` mean ITL versus rollback
+  `115.8ms` / `120.9ms`, all with the same token IDs.
+- Main-branch Vulkan server smoke (`KILN_BATCHING_ENGINE=1`, Qwen3.5-4B) with
+  `chat_template_kwargs: {"enable_thinking": false}` returned non-empty visible
+  text:
+  - direct chat: `content == "Blue"`, `3` completion tokens, `1.218s` wall;
+  - explicit `/v1/completions/batch`: four `text == "Blue"` completions,
+    `12` total completion tokens, `5.796s` wall;
+  - four concurrent `/v1/chat/completions` requests through the live batcher:
+    all returned `content == "1 2 3 4 5 6 7 8 "`, no reasoning content,
+    `16` completion tokens each, `9.611s` total wall.
+
+Verdict:
+- Keep. This is a Vulkan-only serial decode win with matching token IDs,
+  focused shader parity coverage, and successful direct/batch/concurrent
+  visible-output smokes.
+- CUDA and Metal code paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
 - Extend the packed-BF16 weight strategy to the remaining high-traffic Vulkan
   projection kernels if profiling confirms the shader conversion cost stays
-  below the bandwidth savings: fused MLP gate/up/down and full-attention QKV.
+  below the bandwidth savings: fused MLP gate/up/down remains the main target.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: fused MLP decode,

@@ -70,6 +70,7 @@ fn use_prefill_row_pair_matmul(batch: usize) -> bool {
 pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
     let shaders = [
         ("full_attn_qkv_decode", 5usize, 20u32),
+        ("full_attn_qkv_decode_bf16w", 5usize, 20u32),
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
         ("gdn_in_proj_decode", 6, 24),
@@ -2097,6 +2098,43 @@ pub fn dispatch_full_attn_qkv_decode_cached(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<(Tensor, Tensor, Tensor)> {
+    dispatch_full_attn_qkv_decode_cached_impl(
+        vk_device, x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, false,
+    )
+}
+
+/// Dispatch fused single-token full-attention Q/K/V projections with packed
+/// BF16 immutable weights.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    dispatch_full_attn_qkv_decode_cached_impl(
+        vk_device, x, q_weight_t, k_weight_t, v_weight_t, hidden, q_dim, k_dim, v_dim, true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_full_attn_qkv_decode_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    bf16_weights: bool,
+) -> Result<(Tensor, Tensor, Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -2111,10 +2149,17 @@ pub fn dispatch_full_attn_qkv_decode_cached(
     );
 
     let total_out = q_dim + k_dim + v_dim;
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/full_attn_qkv_decode.comp"
-    );
+    let glsl_path = if bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode.comp"
+        )
+    };
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
     let push_constants: [u32; 5] = [
         hidden as u32,

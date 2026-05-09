@@ -36,6 +36,7 @@ before or with each accepted change and each measured rejection.
 | A023 | Store Vulkan linear-decode weights as packed BF16 buffers and expand in shader. | New packed-BF16 parity tests passed; full Vulkan parity passed `24` tests; `cargo check -p kiln-model --features vulkan`, release build, and `git diff --check` passed. Serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate mean ITL was `121.4ms` / `114.0ms` versus same-binary rollback `132.5ms`. Sampled continuous batch improved `9.049283s` rollback to `8.394559s`; greedy continuous batch improved `8.940242s` rollback to `8.284110s`. Synthetic rank-8 LoRA smoke returned HTTP 200. | Keep; measurable Vulkan-only serial and continuous-batch win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS=1`. |
 | A024 | Store Vulkan GDN `in_proj` weights as packed BF16 buffers and expand in shader. | Focused GDN in-proj parity passed for F32 and packed-BF16 single/batched variants; full Vulkan parity passed `26` tests; `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-model`, release build, and `git diff --check` passed. Serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate mean ITL was `115.5ms` / `118.2ms` versus same-binary GDN rollback `121.4ms`. Sampled continuous batch improved `8.525863s` rollback to `7.663571s`. | Keep; measurable Vulkan-only serial and sampled continuous-batch win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS=1`. |
 | A025 | Expose explicit `chat_template_kwargs` so callers can set Qwen `enable_thinking=false` without prompt-text hacks. | Full JSON showed empty `content` was coherent Qwen reasoning routed to `reasoning_content`, not Vulkan garbage. Added shared tokenizer/server kwargs plumbing and cache-key coverage. `cargo check -p kiln-server`, focused core/server tests, release Vulkan build, and `git diff --check` passed. Rebuilt Vulkan direct chat with `{"chat_template_kwargs":{"enable_thinking":false}}` returned `content == "blue"` / no reasoning in 3 completion tokens; literal `/no_think` prompt text stayed on default reasoning path; unique batch prompt returned two `text == "blue"` completions. | Keep; correctness/API fix, no CUDA/Metal/Vulkan kernel changes. |
+| A026 | Store Vulkan full-attention QKV BF16 weights as packed buffers and expand in shader. | Added packed-BF16 QKV shader, dispatcher, backend gate, and parity test. `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, full Vulkan parity (`27 passed`), release Vulkan build, and `git diff --check` passed. Main-branch serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate measured `398.8ms` prefill / `111.5ms` mean ITL versus same-binary rollback `621.6ms` prefill / `118.4ms` mean ITL. Direct, explicit batch, and concurrent live-batcher smokes with `enable_thinking=false` all returned non-empty visible text. | Keep; measurable Vulkan-only serial win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS=1`. |
 
 Additional validation after A025:
 
@@ -51,3 +52,17 @@ Additional validation after A025:
 CUDA and Metal checks were attempted but are environment-blocked on this Linux
 host before project typecheck: CUDA lacks `nvcc`; Metal `objc2` requires an
 Apple target.
+
+Additional validation after A026:
+
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs crates/kiln-vulkan-kernel/src/pipeline.rs crates/kiln-vulkan-kernel/src/kernels.rs crates/kiln-vulkan-kernel/tests/gdn_parity.rs crates/kiln-model/src/backend/vulkan.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `git diff --check`
+- Serial paged A/B on `main` with rollback env
+  `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS=1`
+- `KILN_BATCHING_ENGINE=1 KILN_MODEL_PATH=Qwen3.5-4B ./target/release/kiln serve`
+  direct, explicit batch, and concurrent live-batcher smokes with
+  `chat_template_kwargs: {"enable_thinking": false}`

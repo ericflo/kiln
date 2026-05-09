@@ -43,6 +43,7 @@ pub struct VulkanBackend {
     mlp_gate_up_enabled: bool,
     bf16_packed_linear_weights_enabled: bool,
     bf16_packed_gdn_in_proj_weights_enabled: bool,
+    bf16_packed_full_attn_qkv_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
@@ -130,6 +131,8 @@ impl VulkanBackend {
         let linear_argmax_batch_enabled =
             std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH").is_err();
         let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
+        let bf16_packed_full_attn_qkv_weights_enabled = full_attn_qkv_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS").is_err();
         let paged_attn_decode_batch_enabled =
             std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH").is_err();
         // Full fused MLP decode is validated for single-token no-LoRA decode.
@@ -187,6 +190,7 @@ impl VulkanBackend {
             mlp_gate_up_enabled,
             bf16_packed_linear_weights_enabled,
             bf16_packed_gdn_in_proj_weights_enabled,
+            bf16_packed_full_attn_qkv_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
@@ -236,6 +240,11 @@ impl VulkanBackend {
 
     fn use_bf16_packed_gdn_in_proj_weights(&self, weights: &[&Tensor]) -> bool {
         self.bf16_packed_gdn_in_proj_weights_enabled
+            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
+    }
+
+    fn use_bf16_packed_full_attn_qkv_weights(&self, weights: &[&Tensor]) -> bool {
+        self.bf16_packed_full_attn_qkv_weights_enabled
             && weights.iter().all(|weight| weight.dtype() == DType::BF16)
     }
 
@@ -329,6 +338,44 @@ impl VulkanBackend {
         } else {
             self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
         }
+    }
+
+    fn prewarm_full_attn_qkv_weights(
+        &self,
+        layer_idx: usize,
+        q_weight_t: &Tensor,
+        k_weight_t: &Tensor,
+        v_weight_t: &Tensor,
+        f32_count: &mut usize,
+        f32_bytes: &mut usize,
+        bf16_count: &mut usize,
+        bf16_bytes: &mut usize,
+    ) -> Result<()> {
+        let weights = [
+            ("q_proj_t", q_weight_t),
+            ("k_proj_t", k_weight_t),
+            ("v_proj_t", v_weight_t),
+        ];
+        if self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]) {
+            for (suffix, weight) in weights {
+                self.prewarm_bf16_packed_weight(
+                    &format!("layers.{layer_idx}.attention.{suffix}"),
+                    weight,
+                    bf16_count,
+                    bf16_bytes,
+                )?;
+            }
+        } else {
+            for (suffix, weight) in weights {
+                self.prewarm_f32_weight(
+                    &format!("layers.{layer_idx}.attention.{suffix}"),
+                    weight,
+                    f32_count,
+                    f32_bytes,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Dispatch FlashAttention-2 prefill kernel via Vulkan.
@@ -1111,23 +1158,15 @@ impl BackendRuntime for VulkanBackend {
         for (layer_idx, layer) in weights.layers.iter().enumerate() {
             match &layer.attention {
                 GpuAttentionWeights::Full(attn) => {
-                    self.prewarm_f32_weight(
-                        &format!("layers.{layer_idx}.attention.q_proj_t"),
+                    self.prewarm_full_attn_qkv_weights(
+                        layer_idx,
                         &attn.q_proj_t,
-                        &mut count,
-                        &mut bytes,
-                    )?;
-                    self.prewarm_f32_weight(
-                        &format!("layers.{layer_idx}.attention.k_proj_t"),
                         &attn.k_proj_t,
-                        &mut count,
-                        &mut bytes,
-                    )?;
-                    self.prewarm_f32_weight(
-                        &format!("layers.{layer_idx}.attention.v_proj_t"),
                         &attn.v_proj_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
                     self.prewarm_linear_weight(
                         &format!("layers.{layer_idx}.attention.o_proj_t"),
@@ -1254,13 +1293,23 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
-        let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
-        let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
-        let out = kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached(
-            vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
-        )
-        .context("full_attn_qkv_decode kernel failed")?;
+        let out =
+            if self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]) {
+                let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
+                let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
+                let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights(
+                    vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+                )
+            } else {
+                let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
+                let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
+                let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached(
+                    vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+                )
+            }
+            .context("full_attn_qkv_decode kernel failed")?;
         Ok(Some(out))
     }
 
