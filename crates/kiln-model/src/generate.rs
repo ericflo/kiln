@@ -2000,17 +2000,20 @@ impl ModelRunner {
 
         // Fast path: when row_count > 1, all rows greedy with a common seq_len,
         // and the cache is non-FP8, route through the contiguous-batched
-        // primitive. That single forward pass batches GQA across rows and uses
-        // the fused argmax LM head, eliminating the per-row GQA loop and
-        // per-row [1, 1, vocab] LM-head allocations that produce the c=8
-        // throughput collapse documented in
-        // docs/audits/PHASE12_B_PRIME_BATCHING_DIAGNOSIS.md.
+        // primitive only when the backend can reduce the LM head to token IDs
+        // without materializing [batch, 1, vocab] logits. CUDA/CPU do not yet
+        // implement batched LM-head argmax; letting them fall through to the
+        // portable full-logits projection OOMs at c>=8 on A6000.
         let common_seq_len = sequence_lengths[0];
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let all_greedy = params.iter().all(|p| p.temperature == 0.0);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
-        let try_contiguous_batched =
-            row_count > 1 && positions_uniform && all_greedy && !cache_is_fp8;
+        let batched_argmax_supported = self.supports_batched_greedy_lm_head_argmax();
+        let try_contiguous_batched = row_count > 1
+            && positions_uniform
+            && all_greedy
+            && !cache_is_fp8
+            && batched_argmax_supported;
 
         let mut sampled: Option<Vec<TokenId>> = None;
         if try_contiguous_batched {
@@ -2081,6 +2084,32 @@ impl ModelRunner {
                     )?
                 };
                 vec![token]
+            } else if row_count > 1 && all_greedy && !batched_argmax_supported {
+                let mut sampled = Vec::with_capacity(row_count);
+                for idx in 0..row_count {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    let linear_state = if self.has_linear_attention_layers() {
+                        Some(&mut *linear_states[idx])
+                    } else {
+                        None
+                    };
+                    sampled.push(
+                        model_forward_paged_next_token_greedy(
+                            &*self.backend,
+                            input_tokens[idx],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &block_tables[idx],
+                            sequence_lengths[idx],
+                            linear_state,
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .with_context(|| format!("rowwise greedy decode row {idx} failed"))?,
+                    );
+                }
+                sampled
             } else {
                 let hidden = model_forward_paged_batched_decode_hidden(
                     &*self.backend,
@@ -2131,6 +2160,19 @@ impl ModelRunner {
         }
 
         Ok(sampled)
+    }
+
+    fn supports_batched_greedy_lm_head_argmax(&self) -> bool {
+        if self.backend.supports_linear_decode_argmax_batch() {
+            return true;
+        }
+        #[cfg(feature = "metal")]
+        {
+            if matches!(self.backend.device(), candle_core::Device::Metal(_)) {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn finish_paged_batched_decode(
@@ -2357,6 +2399,12 @@ impl ModelRunner {
             .context("single-row greedy decode forward pass (paged) failed")?;
             return Ok(vec![token]);
         }
+
+        anyhow::ensure!(
+            self.supports_batched_greedy_lm_head_argmax(),
+            "backend {} lacks batched greedy lm-head argmax support; declining contiguous batched decode to avoid [batch, 1, vocab] LM-head materialization",
+            self.backend.name()
+        );
 
         let mut batch_state = if has_linear_layers {
             let state_refs: Vec<&LinearAttentionState> =
@@ -5700,6 +5748,47 @@ mod tests {
             default_decode_batcher_wait(&device, "metal"),
             std::time::Duration::from_micros(100)
         );
+    }
+
+    #[test]
+    fn test_batched_greedy_decode_declines_without_batched_argmax() -> Result<()> {
+        let config = tiny_config();
+        let device = Device::Cpu;
+        let weights = tiny_weights(&config, &device);
+        let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+        let paged_cache = PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            4,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::F32,
+            &device,
+        )?;
+        let block_table_0 = BlockTable { blocks: vec![0] };
+        let block_table_1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&block_table_0, &block_table_1];
+        let seq_lens = [1usize, 1usize];
+        let mut state_0 = LinearAttentionState::new(&config, &device)?;
+        let mut state_1 = LinearAttentionState::new(&config, &device)?;
+        let mut linear_states = [&mut state_0, &mut state_1];
+
+        let err = runner
+            .decode_next_tokens_paged_contiguous_batch_greedy(
+                &[1, 2],
+                &paged_cache,
+                &block_tables,
+                &seq_lens,
+                &mut linear_states,
+            )
+            .expect_err("CPU backend should decline batched argmax before LM-head forward");
+
+        assert!(
+            err.to_string()
+                .contains("lacks batched greedy lm-head argmax support"),
+            "unexpected error: {err:#}"
+        );
+        Ok(())
     }
 
     #[cfg(feature = "metal")]
