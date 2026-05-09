@@ -1,0 +1,103 @@
+{
+  "case": "current-live-batch3-profile-distinct8",
+  "metrics_after": {
+    "batcher_rows": 142.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 142.0,
+    "max_batch": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 16.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 152.0,
+    "worker_batches": 63.0
+  },
+  "metrics_before": {
+    "batcher_rows": 22.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 22.0,
+    "max_batch": 1.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 24.0,
+    "worker_batches": 22.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 120.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 120.0,
+    "max_batch_after": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 128.0,
+    "worker_batches": 41.0
+  },
+  "results": [
+    {
+      "elapsed_s": 16.444888992002234,
+      "error": null,
+      "events": 18,
+      "index": 0,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 13.298635733997799,
+      "error": null,
+      "events": 18,
+      "index": 1,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.443875086988555,
+      "error": null,
+      "events": 18,
+      "index": 2,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.125591453994275,
+      "error": null,
+      "events": 18,
+      "index": 3,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.442616648986586,
+      "error": null,
+      "events": 18,
+      "index": 4,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.67368328900193,
+      "error": null,
+      "events": 18,
+      "index": 5,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 13.61346985999262,
+      "error": null,
+      "events": 18,
+      "index": 6,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.673623631009832,
+      "error": null,
+      "events": 18,
+      "index": 7,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    }
+  ],
+  "wall_s": 16.68266761500854
+}

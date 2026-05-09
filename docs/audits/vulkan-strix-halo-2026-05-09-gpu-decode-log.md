@@ -6823,3 +6823,89 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-build.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile.log`
+
+### 2026-05-09 A114: Current Live Vulkan Batch-3 Correctness/Profile
+
+Scope:
+
+- No source change.
+- Confirm current live endpoint correctness on Vulkan after the earlier empty
+  `content` concern and before choosing further performance work.
+- Capture a valid live batch-3 profile, since A113's serial bench does not
+  exercise A110's exact batch-3 path.
+- CUDA and Metal source paths are untouched.
+
+Build and server:
+
+- `cargo build --release -p kiln-server --bin kiln --features vulkan` passed
+  with existing warnings.
+- Server ran with `KILN_MODEL_PATH=Qwen3.5-4B`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and the
+  MLP/GDN/full-attention/Vulkan kernel profile flags.
+- The server log showed Vulkan initialization, Vulkan decode-weight cache
+  prewarm, and background inference prewarm completion before measured
+  requests.
+
+Correctness and batch-shape notes:
+
+- The first two probes used identical deterministic prompts. They returned
+  coherent visible text, but only reached `max_observed_batch=1`; the response
+  cache shape made them invalid as batch-3 profile evidence.
+- The valid probe used eight distinct prompts to avoid cache collapse. It
+  returned 8/8 HTTP 200 with visible text
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Distinct-prompt metrics delta:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `jobs_failed=0`, `runner_busy_jobs=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+- The valid profile range in the server log is lines `23204..65235`.
+- The valid range contains Vulkan MLP and Vulkan GDN in-proj kernel rows with
+  `batch=3`, so the measured live endpoint exercised the intended GPU decode
+  kernels.
+
+Decode `seq_len=1` stage totals in the valid run:
+
+- GDN recurrent: `5296.912ms` across `984` calls.
+- MLP fused: `1564.591ms` across `1312` calls.
+- GDN in-proj: `1083.287ms` across `984` calls.
+- GDN gated norm: `782.558ms` across `984` calls.
+- GDN out-proj: `437.385ms` across `984` calls.
+- Full-attn QKV projection batch: `353.994ms` across `320` calls.
+- GDN conv: `282.467ms` across `984` calls.
+- GDN gates: `278.112ms` across `984` calls.
+- Full-attn decode attention batch: `233.778ms` across `320` calls.
+
+Kernel observations:
+
+- Batch-3 Vulkan MLP kernel total was `1443.743ms` across `1248` calls,
+  mean `1.157ms`. Its chained transfer/dispatch/readback bucket was
+  `1363.379ms`, mean `1.092ms`.
+- Batch-3 Vulkan GDN in-proj total was `978.831ms` across `936` calls,
+  mean `1.046ms`. Its record/submit/wait bucket was `864.845ms`,
+  mean `0.924ms`, with `pair_qkv_z=true` and `row_group_size=2`.
+- Batch-3 GDN recurrent `single_token_backend_step` totaled `5152.400ms`
+  across `936` calls, mean `5.505ms`. This is the dominant live batch-3
+  target.
+
+Interpretation:
+
+- Current live Vulkan output is reasonable on the tested path: visible text is
+  non-empty and coherent with `chat_template_kwargs: {"enable_thinking": false}`.
+- The path is not merely CPU fallback: the valid run reached batch 3 and logged
+  Vulkan MLP and Vulkan GDN in-proj kernel rows for that batch.
+- The recurrent step is on the Vulkan backend, but its current split-step state
+  boundary/readback cost dominates the valid batch-3 profile. The next
+  candidate should target GDN recurrent state movement/residency or a broader
+  MLP/GDN boundary change.
+- Do not treat the identical-prompt `max_batch=1` probes as throughput
+  evidence.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-long-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-distinct8-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-distinct8-profile-summary.json`

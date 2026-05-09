@@ -1,0 +1,2558 @@
+{
+  "counts": {
+    "full_attn_stage": 3624,
+    "gdn_in_proj_kernel": 10584,
+    "gdn_recurrent_inner": 3120,
+    "gdn_stage": 10584,
+    "mlp_kernel": 12544,
+    "mlp_stage": 1568
+  },
+  "decode_seq1_full_attn_stage_totals": [
+    {
+      "count": 320,
+      "mean_ms": 1.106,
+      "stage": "qkv_proj_batch",
+      "sum_ms": 353.994
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.731,
+      "stage": "decode_attn_contiguous_batch",
+      "sum_ms": 233.778
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.387,
+      "stage": "o_proj_batch",
+      "sum_ms": 123.984
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.072,
+      "stage": "rope_batch",
+      "sum_ms": 23.108
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.035,
+      "stage": "qk_norm_batch",
+      "sum_ms": 11.156
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.023,
+      "stage": "attn_gate_batch",
+      "sum_ms": 7.424
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.432,
+      "stage": "qkv_proj",
+      "sum_ms": 3.454
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.01,
+      "stage": "kv_write_batch",
+      "sum_ms": 3.192
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.27,
+      "stage": "o_proj",
+      "sum_ms": 2.156
+    },
+    {
+      "count": 320,
+      "mean_ms": 0.006,
+      "stage": "qkv_split_batch",
+      "sum_ms": 2.032
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.092,
+      "stage": "decode_scores",
+      "sum_ms": 0.737
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.068,
+      "stage": "kv_read",
+      "sum_ms": 0.542
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.025,
+      "stage": "rope",
+      "sum_ms": 0.201
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.023,
+      "stage": "decode_weighted_sum",
+      "sum_ms": 0.186
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.016,
+      "stage": "qk_norm",
+      "sum_ms": 0.129
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.007,
+      "stage": "attn_gate",
+      "sum_ms": 0.056
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.006,
+      "stage": "decode_softmax",
+      "sum_ms": 0.052
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.006,
+      "stage": "kv_write",
+      "sum_ms": 0.044
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.003,
+      "stage": "q_transpose",
+      "sum_ms": 0.024
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.003,
+      "stage": "qkv_split",
+      "sum_ms": 0.023
+    },
+    {
+      "count": 8,
+      "mean_ms": 0.001,
+      "stage": "decode_group_layout",
+      "sum_ms": 0.009
+    }
+  ],
+  "decode_seq1_gdn_stage_totals": [
+    {
+      "count": 984,
+      "mean_ms": 5.383,
+      "stage": "recurrent",
+      "sum_ms": 5296.912
+    },
+    {
+      "count": 984,
+      "mean_ms": 1.101,
+      "stage": "in_proj",
+      "sum_ms": 1083.287
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.795,
+      "stage": "gated_norm",
+      "sum_ms": 782.558
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.444,
+      "stage": "out_proj",
+      "sum_ms": 437.385
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.287,
+      "stage": "conv",
+      "sum_ms": 282.467
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.283,
+      "stage": "gates",
+      "sum_ms": 278.112
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.032,
+      "stage": "qk_norm",
+      "sum_ms": 31.446
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.003,
+      "stage": "qkv_split",
+      "sum_ms": 3.263
+    },
+    {
+      "count": 984,
+      "mean_ms": 0.0,
+      "stage": "post_transpose",
+      "sum_ms": 0.418
+    }
+  ],
+  "decode_seq1_mlp_stage_totals": [
+    {
+      "count": 1312,
+      "mean_ms": 1.193,
+      "stage": "fused",
+      "sum_ms": 1564.591
+    }
+  ],
+  "full_attn_stage_by_seq_stage": [
+    {
+      "count": 8,
+      "max_ms": 0.007,
+      "mean_ms": 0.007,
+      "p50_ms": 0.007,
+      "seq_len": 1,
+      "stage": "attn_gate",
+      "sum_ms": 0.056
+    },
+    {
+      "count": 320,
+      "max_ms": 0.056,
+      "mean_ms": 0.023,
+      "p50_ms": 0.023,
+      "seq_len": 1,
+      "stage": "attn_gate_batch",
+      "sum_ms": 7.424
+    },
+    {
+      "count": 320,
+      "max_ms": 1.283,
+      "mean_ms": 0.731,
+      "p50_ms": 0.69,
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "sum_ms": 233.778
+    },
+    {
+      "count": 8,
+      "max_ms": 0.002,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "seq_len": 1,
+      "stage": "decode_group_layout",
+      "sum_ms": 0.009
+    },
+    {
+      "count": 8,
+      "max_ms": 0.097,
+      "mean_ms": 0.092,
+      "p50_ms": 0.092,
+      "seq_len": 1,
+      "stage": "decode_scores",
+      "sum_ms": 0.737
+    },
+    {
+      "count": 8,
+      "max_ms": 0.008,
+      "mean_ms": 0.007,
+      "p50_ms": 0.006,
+      "seq_len": 1,
+      "stage": "decode_softmax",
+      "sum_ms": 0.052
+    },
+    {
+      "count": 8,
+      "max_ms": 0.024,
+      "mean_ms": 0.023,
+      "p50_ms": 0.023,
+      "seq_len": 1,
+      "stage": "decode_weighted_sum",
+      "sum_ms": 0.186
+    },
+    {
+      "count": 8,
+      "max_ms": 0.356,
+      "mean_ms": 0.068,
+      "p50_ms": 0.026,
+      "seq_len": 1,
+      "stage": "kv_read",
+      "sum_ms": 0.542
+    },
+    {
+      "count": 8,
+      "max_ms": 0.008,
+      "mean_ms": 0.005,
+      "p50_ms": 0.005,
+      "seq_len": 1,
+      "stage": "kv_write",
+      "sum_ms": 0.044
+    },
+    {
+      "count": 320,
+      "max_ms": 0.026,
+      "mean_ms": 0.01,
+      "p50_ms": 0.008,
+      "seq_len": 1,
+      "stage": "kv_write_batch",
+      "sum_ms": 3.192
+    },
+    {
+      "count": 8,
+      "max_ms": 0.313,
+      "mean_ms": 0.27,
+      "p50_ms": 0.26,
+      "seq_len": 1,
+      "stage": "o_proj",
+      "sum_ms": 2.156
+    },
+    {
+      "count": 320,
+      "max_ms": 0.905,
+      "mean_ms": 0.387,
+      "p50_ms": 0.378,
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "sum_ms": 123.984
+    },
+    {
+      "count": 8,
+      "max_ms": 0.003,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "seq_len": 1,
+      "stage": "q_transpose",
+      "sum_ms": 0.024
+    },
+    {
+      "count": 8,
+      "max_ms": 0.022,
+      "mean_ms": 0.016,
+      "p50_ms": 0.014,
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "sum_ms": 0.129
+    },
+    {
+      "count": 320,
+      "max_ms": 0.062,
+      "mean_ms": 0.035,
+      "p50_ms": 0.034,
+      "seq_len": 1,
+      "stage": "qk_norm_batch",
+      "sum_ms": 11.156
+    },
+    {
+      "count": 8,
+      "max_ms": 0.583,
+      "mean_ms": 0.432,
+      "p50_ms": 0.413,
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "sum_ms": 3.454
+    },
+    {
+      "count": 320,
+      "max_ms": 1.84,
+      "mean_ms": 1.106,
+      "p50_ms": 1.06,
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "sum_ms": 353.994
+    },
+    {
+      "count": 8,
+      "max_ms": 0.006,
+      "mean_ms": 0.003,
+      "p50_ms": 0.002,
+      "seq_len": 1,
+      "stage": "qkv_split",
+      "sum_ms": 0.023
+    },
+    {
+      "count": 320,
+      "max_ms": 0.015,
+      "mean_ms": 0.006,
+      "p50_ms": 0.006,
+      "seq_len": 1,
+      "stage": "qkv_split_batch",
+      "sum_ms": 2.032
+    },
+    {
+      "count": 8,
+      "max_ms": 0.036,
+      "mean_ms": 0.025,
+      "p50_ms": 0.022,
+      "seq_len": 1,
+      "stage": "rope",
+      "sum_ms": 0.201
+    },
+    {
+      "count": 320,
+      "max_ms": 0.113,
+      "mean_ms": 0.072,
+      "p50_ms": 0.072,
+      "seq_len": 1,
+      "stage": "rope_batch",
+      "sum_ms": 23.108
+    },
+    {
+      "count": 48,
+      "max_ms": 1.371,
+      "mean_ms": 0.609,
+      "p50_ms": 0.534,
+      "seq_len": 51,
+      "stage": "attn_gate",
+      "sum_ms": 29.231
+    },
+    {
+      "count": 48,
+      "max_ms": 0.551,
+      "mean_ms": 0.038,
+      "p50_ms": 0.019,
+      "seq_len": 51,
+      "stage": "kv_read",
+      "sum_ms": 1.816
+    },
+    {
+      "count": 48,
+      "max_ms": 0.396,
+      "mean_ms": 0.112,
+      "p50_ms": 0.088,
+      "seq_len": 51,
+      "stage": "kv_write",
+      "sum_ms": 5.353
+    },
+    {
+      "count": 48,
+      "max_ms": 38.545,
+      "mean_ms": 20.817,
+      "p50_ms": 19.697,
+      "seq_len": 51,
+      "stage": "o_proj",
+      "sum_ms": 999.223
+    },
+    {
+      "count": 48,
+      "max_ms": 2.119,
+      "mean_ms": 0.175,
+      "p50_ms": 0.085,
+      "seq_len": 51,
+      "stage": "prefill_gqa_expand",
+      "sum_ms": 8.423
+    },
+    {
+      "count": 48,
+      "max_ms": 0.33,
+      "mean_ms": 0.147,
+      "p50_ms": 0.129,
+      "seq_len": 51,
+      "stage": "prefill_mask",
+      "sum_ms": 7.08
+    },
+    {
+      "count": 48,
+      "max_ms": 0.668,
+      "mean_ms": 0.116,
+      "p50_ms": 0.083,
+      "seq_len": 51,
+      "stage": "prefill_output_layout",
+      "sum_ms": 5.581
+    },
+    {
+      "count": 48,
+      "max_ms": 1.555,
+      "mean_ms": 0.789,
+      "p50_ms": 0.732,
+      "seq_len": 51,
+      "stage": "prefill_scores",
+      "sum_ms": 37.856
+    },
+    {
+      "count": 48,
+      "max_ms": 0.379,
+      "mean_ms": 0.188,
+      "p50_ms": 0.164,
+      "seq_len": 51,
+      "stage": "prefill_softmax",
+      "sum_ms": 9.032
+    },
+    {
+      "count": 48,
+      "max_ms": 1.488,
+      "mean_ms": 0.477,
+      "p50_ms": 0.418,
+      "seq_len": 51,
+      "stage": "prefill_weighted_sum",
+      "sum_ms": 22.887
+    },
+    {
+      "count": 48,
+      "max_ms": 2.155,
+      "mean_ms": 0.25,
+      "p50_ms": 0.179,
+      "seq_len": 51,
+      "stage": "q_transpose",
+      "sum_ms": 12.002
+    },
+    {
+      "count": 48,
+      "max_ms": 1.244,
+      "mean_ms": 0.634,
+      "p50_ms": 0.568,
+      "seq_len": 51,
+      "stage": "qk_norm",
+      "sum_ms": 30.417
+    },
+    {
+      "count": 48,
+      "max_ms": 101.142,
+      "mean_ms": 66.316,
+      "p50_ms": 63.933,
+      "seq_len": 51,
+      "stage": "qkv_proj",
+      "sum_ms": 3183.15
+    },
+    {
+      "count": 48,
+      "max_ms": 0.544,
+      "mean_ms": 0.202,
+      "p50_ms": 0.172,
+      "seq_len": 51,
+      "stage": "qkv_split",
+      "sum_ms": 9.681
+    },
+    {
+      "count": 48,
+      "max_ms": 0.986,
+      "mean_ms": 0.738,
+      "p50_ms": 0.727,
+      "seq_len": 51,
+      "stage": "rope",
+      "sum_ms": 35.436
+    },
+    {
+      "count": 8,
+      "max_ms": 0.49,
+      "mean_ms": 0.434,
+      "p50_ms": 0.422,
+      "seq_len": 52,
+      "stage": "attn_gate",
+      "sum_ms": 3.472
+    },
+    {
+      "count": 8,
+      "max_ms": 0.026,
+      "mean_ms": 0.019,
+      "p50_ms": 0.018,
+      "seq_len": 52,
+      "stage": "kv_read",
+      "sum_ms": 0.151
+    },
+    {
+      "count": 8,
+      "max_ms": 0.156,
+      "mean_ms": 0.091,
+      "p50_ms": 0.082,
+      "seq_len": 52,
+      "stage": "kv_write",
+      "sum_ms": 0.73
+    },
+    {
+      "count": 8,
+      "max_ms": 38.012,
+      "mean_ms": 24.866,
+      "p50_ms": 23.096,
+      "seq_len": 52,
+      "stage": "o_proj",
+      "sum_ms": 198.931
+    },
+    {
+      "count": 8,
+      "max_ms": 0.59,
+      "mean_ms": 0.145,
+      "p50_ms": 0.069,
+      "seq_len": 52,
+      "stage": "prefill_gqa_expand",
+      "sum_ms": 1.163
+    },
+    {
+      "count": 8,
+      "max_ms": 0.291,
+      "mean_ms": 0.188,
+      "p50_ms": 0.172,
+      "seq_len": 52,
+      "stage": "prefill_mask",
+      "sum_ms": 1.502
+    },
+    {
+      "count": 8,
+      "max_ms": 0.666,
+      "mean_ms": 0.157,
+      "p50_ms": 0.083,
+      "seq_len": 52,
+      "stage": "prefill_output_layout",
+      "sum_ms": 1.252
+    },
+    {
+      "count": 8,
+      "max_ms": 1.479,
+      "mean_ms": 0.946,
+      "p50_ms": 0.822,
+      "seq_len": 52,
+      "stage": "prefill_scores",
+      "sum_ms": 7.565
+    },
+    {
+      "count": 8,
+      "max_ms": 0.763,
+      "mean_ms": 0.268,
+      "p50_ms": 0.203,
+      "seq_len": 52,
+      "stage": "prefill_softmax",
+      "sum_ms": 2.143
+    },
+    {
+      "count": 8,
+      "max_ms": 1.044,
+      "mean_ms": 0.505,
+      "p50_ms": 0.391,
+      "seq_len": 52,
+      "stage": "prefill_weighted_sum",
+      "sum_ms": 4.041
+    },
+    {
+      "count": 8,
+      "max_ms": 0.771,
+      "mean_ms": 0.269,
+      "p50_ms": 0.191,
+      "seq_len": 52,
+      "stage": "q_transpose",
+      "sum_ms": 2.152
+    },
+    {
+      "count": 8,
+      "max_ms": 0.818,
+      "mean_ms": 0.603,
+      "p50_ms": 0.545,
+      "seq_len": 52,
+      "stage": "qk_norm",
+      "sum_ms": 4.823
+    },
+    {
+      "count": 8,
+      "max_ms": 86.583,
+      "mean_ms": 70.075,
+      "p50_ms": 72.772,
+      "seq_len": 52,
+      "stage": "qkv_proj",
+      "sum_ms": 560.598
+    },
+    {
+      "count": 8,
+      "max_ms": 0.171,
+      "mean_ms": 0.157,
+      "p50_ms": 0.16,
+      "seq_len": 52,
+      "stage": "qkv_split",
+      "sum_ms": 1.259
+    },
+    {
+      "count": 8,
+      "max_ms": 0.957,
+      "mean_ms": 0.716,
+      "p50_ms": 0.668,
+      "seq_len": 52,
+      "stage": "rope",
+      "sum_ms": 5.724
+    },
+    {
+      "count": 8,
+      "max_ms": 0.798,
+      "mean_ms": 0.533,
+      "p50_ms": 0.436,
+      "seq_len": 53,
+      "stage": "attn_gate",
+      "sum_ms": 4.266
+    },
+    {
+      "count": 8,
+      "max_ms": 0.022,
+      "mean_ms": 0.017,
+      "p50_ms": 0.016,
+      "seq_len": 53,
+      "stage": "kv_read",
+      "sum_ms": 0.132
+    },
+    {
+      "count": 8,
+      "max_ms": 0.172,
+      "mean_ms": 0.108,
+      "p50_ms": 0.115,
+      "seq_len": 53,
+      "stage": "kv_write",
+      "sum_ms": 0.861
+    },
+    {
+      "count": 8,
+      "max_ms": 33.046,
+      "mean_ms": 18.262,
+      "p50_ms": 17.471,
+      "seq_len": 53,
+      "stage": "o_proj",
+      "sum_ms": 146.095
+    },
+    {
+      "count": 8,
+      "max_ms": 0.728,
+      "mean_ms": 0.155,
+      "p50_ms": 0.071,
+      "seq_len": 53,
+      "stage": "prefill_gqa_expand",
+      "sum_ms": 1.242
+    },
+    {
+      "count": 8,
+      "max_ms": 0.439,
+      "mean_ms": 0.209,
+      "p50_ms": 0.169,
+      "seq_len": 53,
+      "stage": "prefill_mask",
+      "sum_ms": 1.671
+    },
+    {
+      "count": 8,
+      "max_ms": 0.154,
+      "mean_ms": 0.095,
+      "p50_ms": 0.083,
+      "seq_len": 53,
+      "stage": "prefill_output_layout",
+      "sum_ms": 0.757
+    },
+    {
+      "count": 8,
+      "max_ms": 1.671,
+      "mean_ms": 0.995,
+      "p50_ms": 0.859,
+      "seq_len": 53,
+      "stage": "prefill_scores",
+      "sum_ms": 7.961
+    },
+    {
+      "count": 8,
+      "max_ms": 0.292,
+      "mean_ms": 0.211,
+      "p50_ms": 0.215,
+      "seq_len": 53,
+      "stage": "prefill_softmax",
+      "sum_ms": 1.686
+    },
+    {
+      "count": 8,
+      "max_ms": 1.787,
+      "mean_ms": 0.635,
+      "p50_ms": 0.467,
+      "seq_len": 53,
+      "stage": "prefill_weighted_sum",
+      "sum_ms": 5.079
+    },
+    {
+      "count": 8,
+      "max_ms": 0.289,
+      "mean_ms": 0.191,
+      "p50_ms": 0.179,
+      "seq_len": 53,
+      "stage": "q_transpose",
+      "sum_ms": 1.53
+    },
+    {
+      "count": 8,
+      "max_ms": 1.19,
+      "mean_ms": 0.705,
+      "p50_ms": 0.67,
+      "seq_len": 53,
+      "stage": "qk_norm",
+      "sum_ms": 5.641
+    },
+    {
+      "count": 8,
+      "max_ms": 106.341,
+      "mean_ms": 77.862,
+      "p50_ms": 76.406,
+      "seq_len": 53,
+      "stage": "qkv_proj",
+      "sum_ms": 622.893
+    },
+    {
+      "count": 8,
+      "max_ms": 0.371,
+      "mean_ms": 0.194,
+      "p50_ms": 0.17,
+      "seq_len": 53,
+      "stage": "qkv_split",
+      "sum_ms": 1.551
+    },
+    {
+      "count": 8,
+      "max_ms": 0.901,
+      "mean_ms": 0.725,
+      "p50_ms": 0.677,
+      "seq_len": 53,
+      "stage": "rope",
+      "sum_ms": 5.801
+    }
+  ],
+  "gdn_in_proj_kernel_by_batch_stage": [
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.081,
+      "mean_ms": 0.015,
+      "p50_ms": 0.011,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "create_out_buffers",
+      "sum_ms": 0.368
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.006,
+      "mean_ms": 0.002,
+      "p50_ms": 0.001,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "create_tensors",
+      "sum_ms": 0.041
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.068,
+      "mean_ms": 0.019,
+      "p50_ms": 0.015,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "create_x_stage_write",
+      "sum_ms": 0.459
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.002,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "extract_x",
+      "sum_ms": 0.008
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 18.937,
+      "mean_ms": 1.436,
+      "p50_ms": 0.002,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 34.472
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.017,
+      "mean_ms": 0.007,
+      "p50_ms": 0.006,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "read_host_visible",
+      "sum_ms": 0.173
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.505,
+      "mean_ms": 0.433,
+      "p50_ms": 0.426,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "record_submit_wait",
+      "sum_ms": 10.382
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.002,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "shader",
+      "sum_ms": 0.008
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 19.558,
+      "mean_ms": 1.956,
+      "p50_ms": 0.503,
+      "pair_qkv_z": "false",
+      "row_group_size": 1,
+      "stage": "total",
+      "sum_ms": 46.951
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.026,
+      "mean_ms": 0.015,
+      "p50_ms": 0.013,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "create_out_buffers",
+      "sum_ms": 0.357
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.008,
+      "mean_ms": 0.003,
+      "p50_ms": 0.002,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "create_tensors",
+      "sum_ms": 0.062
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.178,
+      "mean_ms": 0.023,
+      "p50_ms": 0.015,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "create_x_stage_write",
+      "sum_ms": 0.554
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.004,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "extract_x",
+      "sum_ms": 0.029
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 5.231,
+      "mean_ms": 0.22,
+      "p50_ms": 0.002,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 5.281
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.021,
+      "mean_ms": 0.011,
+      "p50_ms": 0.011,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "read_host_visible",
+      "sum_ms": 0.271
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 1.662,
+      "mean_ms": 0.811,
+      "p50_ms": 0.768,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "record_submit_wait",
+      "sum_ms": 19.474
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.004,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "shader",
+      "sum_ms": 0.028
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 7.203,
+      "mean_ms": 1.128,
+      "p50_ms": 0.856,
+      "pair_qkv_z": "true",
+      "row_group_size": 1,
+      "stage": "total",
+      "sum_ms": 27.08
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.608,
+      "mean_ms": 0.018,
+      "p50_ms": 0.016,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "create_out_buffers",
+      "sum_ms": 17.298
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.019,
+      "mean_ms": 0.005,
+      "p50_ms": 0.005,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "create_tensors",
+      "sum_ms": 5.084
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.542,
+      "mean_ms": 0.024,
+      "p50_ms": 0.016,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "create_x_stage_write",
+      "sum_ms": 22.771
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.016,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "extract_x",
+      "sum_ms": 1.262
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.009,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 3.072
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.078,
+      "mean_ms": 0.021,
+      "p50_ms": 0.016,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "read_host_visible",
+      "sum_ms": 19.216
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 2.056,
+      "mean_ms": 0.924,
+      "p50_ms": 0.887,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "record_submit_wait",
+      "sum_ms": 864.845
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.005,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "shader",
+      "sum_ms": 1.613
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 2.474,
+      "mean_ms": 1.046,
+      "p50_ms": 0.997,
+      "pair_qkv_z": "true",
+      "row_group_size": 2,
+      "stage": "total",
+      "sum_ms": 978.831
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 0.843,
+      "mean_ms": 0.152,
+      "p50_ms": 0.138,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_out_buffers",
+      "sum_ms": 21.853
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 0.612,
+      "mean_ms": 0.132,
+      "p50_ms": 0.099,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_tensors",
+      "sum_ms": 18.967
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 0.733,
+      "mean_ms": 0.115,
+      "p50_ms": 0.085,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_x_stage_write",
+      "sum_ms": 16.536
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 0.145,
+      "mean_ms": 0.029,
+      "p50_ms": 0.026,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "extract_x",
+      "sum_ms": 4.196
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 37.791,
+      "mean_ms": 14.658,
+      "p50_ms": 13.558,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 2110.796
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 1.782,
+      "mean_ms": 0.495,
+      "p50_ms": 0.309,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "read_host_visible",
+      "sum_ms": 71.253
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 5.296,
+      "mean_ms": 4.025,
+      "p50_ms": 3.979,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "record_submit_wait",
+      "sum_ms": 579.655
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 0.005,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "shader",
+      "sum_ms": 0.368
+    },
+    {
+      "batch": 51,
+      "count": 144,
+      "max_ms": 42.646,
+      "mean_ms": 19.852,
+      "p50_ms": 18.812,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "total",
+      "sum_ms": 2858.731
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 0.237,
+      "mean_ms": 0.145,
+      "p50_ms": 0.137,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_out_buffers",
+      "sum_ms": 3.472
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 0.362,
+      "mean_ms": 0.117,
+      "p50_ms": 0.095,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_tensors",
+      "sum_ms": 2.819
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 0.995,
+      "mean_ms": 0.143,
+      "p50_ms": 0.099,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_x_stage_write",
+      "sum_ms": 3.437
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 0.078,
+      "mean_ms": 0.032,
+      "p50_ms": 0.028,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "extract_x",
+      "sum_ms": 0.774
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 26.58,
+      "mean_ms": 14.649,
+      "p50_ms": 13.954,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 351.571
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 1.16,
+      "mean_ms": 0.428,
+      "p50_ms": 0.321,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "read_host_visible",
+      "sum_ms": 10.278
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 4.608,
+      "mean_ms": 4.119,
+      "p50_ms": 4.117,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "record_submit_wait",
+      "sum_ms": 98.848
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 0.007,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "shader",
+      "sum_ms": 0.066
+    },
+    {
+      "batch": 52,
+      "count": 24,
+      "max_ms": 32.164,
+      "mean_ms": 19.824,
+      "p50_ms": 19.005,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "total",
+      "sum_ms": 475.782
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.296,
+      "mean_ms": 0.143,
+      "p50_ms": 0.131,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_out_buffers",
+      "sum_ms": 3.433
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.524,
+      "mean_ms": 0.137,
+      "p50_ms": 0.102,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_tensors",
+      "sum_ms": 3.28
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.631,
+      "mean_ms": 0.127,
+      "p50_ms": 0.097,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "create_x_stage_write",
+      "sum_ms": 3.047
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.084,
+      "mean_ms": 0.027,
+      "p50_ms": 0.026,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "extract_x",
+      "sum_ms": 0.654
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 36.982,
+      "mean_ms": 16.573,
+      "p50_ms": 15.764,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "pipeline_descriptor_setup",
+      "sum_ms": 397.741
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.677,
+      "mean_ms": 0.327,
+      "p50_ms": 0.293,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "read_host_visible",
+      "sum_ms": 7.855
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 4.282,
+      "mean_ms": 4.066,
+      "p50_ms": 4.063,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "record_submit_wait",
+      "sum_ms": 97.584
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 0.005,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "shader",
+      "sum_ms": 0.062
+    },
+    {
+      "batch": 53,
+      "count": 24,
+      "max_ms": 42.983,
+      "mean_ms": 21.595,
+      "p50_ms": 20.899,
+      "pair_qkv_z": "true",
+      "row_group_size": 4,
+      "stage": "total",
+      "sum_ms": 518.275
+    }
+  ],
+  "gdn_recurrent_inner_by_batch_stage": [
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 0.006,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "cat_out",
+      "sum_ms": 0.012
+    },
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 4.017,
+      "mean_ms": 1.967,
+      "p50_ms": 1.855,
+      "stage": "chunk_prep",
+      "sum_ms": 377.616
+    },
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 4.394,
+      "mean_ms": 2.765,
+      "p50_ms": 2.673,
+      "stage": "chunk_scan",
+      "sum_ms": 530.879
+    },
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 14.745,
+      "mean_ms": 5.848,
+      "p50_ms": 5.187,
+      "stage": "matmul_prep",
+      "sum_ms": 1122.89
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 17.31,
+      "mean_ms": 1.945,
+      "p50_ms": 0.894,
+      "stage": "single_token_backend_step",
+      "sum_ms": 46.672
+    },
+    {
+      "batch": 1,
+      "count": 24,
+      "max_ms": 0.004,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "single_token_precopy",
+      "sum_ms": 0.029
+    },
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 0.613,
+      "mean_ms": 0.273,
+      "p50_ms": 0.268,
+      "stage": "slice_inputs",
+      "sum_ms": 52.426
+    },
+    {
+      "batch": 1,
+      "count": 192,
+      "max_ms": 8.077,
+      "mean_ms": 2.292,
+      "p50_ms": 1.896,
+      "stage": "state_update",
+      "sum_ms": 440.129
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 3.628,
+      "mean_ms": 3.199,
+      "p50_ms": 3.173,
+      "stage": "single_token_backend_step",
+      "sum_ms": 76.773
+    },
+    {
+      "batch": 2,
+      "count": 24,
+      "max_ms": 0.002,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "single_token_precopy",
+      "sum_ms": 0.024
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 8.788,
+      "mean_ms": 5.505,
+      "p50_ms": 5.916,
+      "stage": "single_token_backend_step",
+      "sum_ms": 5152.4
+    },
+    {
+      "batch": 3,
+      "count": 936,
+      "max_ms": 0.005,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "single_token_precopy",
+      "sum_ms": 1.344
+    }
+  ],
+  "gdn_stage_by_seq_stage": [
+    {
+      "count": 984,
+      "max_ms": 0.682,
+      "mean_ms": 0.287,
+      "p50_ms": 0.285,
+      "seq_len": 1,
+      "stage": "conv",
+      "sum_ms": 282.467
+    },
+    {
+      "count": 984,
+      "max_ms": 18.126,
+      "mean_ms": 0.795,
+      "p50_ms": 0.978,
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "sum_ms": 782.558
+    },
+    {
+      "count": 984,
+      "max_ms": 25.859,
+      "mean_ms": 0.283,
+      "p50_ms": 0.218,
+      "seq_len": 1,
+      "stage": "gates",
+      "sum_ms": 278.112
+    },
+    {
+      "count": 984,
+      "max_ms": 19.629,
+      "mean_ms": 1.101,
+      "p50_ms": 1.021,
+      "seq_len": 1,
+      "stage": "in_proj",
+      "sum_ms": 1083.287
+    },
+    {
+      "count": 984,
+      "max_ms": 19.927,
+      "mean_ms": 0.444,
+      "p50_ms": 0.336,
+      "seq_len": 1,
+      "stage": "out_proj",
+      "sum_ms": 437.385
+    },
+    {
+      "count": 984,
+      "max_ms": 0.002,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "seq_len": 1,
+      "stage": "post_transpose",
+      "sum_ms": 0.418
+    },
+    {
+      "count": 984,
+      "max_ms": 0.062,
+      "mean_ms": 0.032,
+      "p50_ms": 0.031,
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "sum_ms": 31.446
+    },
+    {
+      "count": 984,
+      "max_ms": 0.01,
+      "mean_ms": 0.003,
+      "p50_ms": 0.003,
+      "seq_len": 1,
+      "stage": "qkv_split",
+      "sum_ms": 3.263
+    },
+    {
+      "count": 984,
+      "max_ms": 17.332,
+      "mean_ms": 5.383,
+      "p50_ms": 5.921,
+      "seq_len": 1,
+      "stage": "recurrent",
+      "sum_ms": 5296.912
+    },
+    {
+      "count": 144,
+      "max_ms": 40.419,
+      "mean_ms": 18.912,
+      "p50_ms": 18.315,
+      "seq_len": 51,
+      "stage": "conv",
+      "sum_ms": 2723.269
+    },
+    {
+      "count": 144,
+      "max_ms": 41.937,
+      "mean_ms": 17.405,
+      "p50_ms": 17.319,
+      "seq_len": 51,
+      "stage": "gated_norm",
+      "sum_ms": 2506.316
+    },
+    {
+      "count": 144,
+      "max_ms": 48.115,
+      "mean_ms": 16.673,
+      "p50_ms": 16.168,
+      "seq_len": 51,
+      "stage": "gates",
+      "sum_ms": 2400.853
+    },
+    {
+      "count": 144,
+      "max_ms": 42.731,
+      "mean_ms": 19.938,
+      "p50_ms": 18.877,
+      "seq_len": 51,
+      "stage": "in_proj",
+      "sum_ms": 2871.044
+    },
+    {
+      "count": 144,
+      "max_ms": 67.795,
+      "mean_ms": 17.911,
+      "p50_ms": 16.831,
+      "seq_len": 51,
+      "stage": "out_proj",
+      "sum_ms": 2579.126
+    },
+    {
+      "count": 144,
+      "max_ms": 0.002,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "seq_len": 51,
+      "stage": "post_transpose",
+      "sum_ms": 0.067
+    },
+    {
+      "count": 144,
+      "max_ms": 1.155,
+      "mean_ms": 0.622,
+      "p50_ms": 0.588,
+      "seq_len": 51,
+      "stage": "qk_norm",
+      "sum_ms": 89.619
+    },
+    {
+      "count": 144,
+      "max_ms": 5.451,
+      "mean_ms": 0.668,
+      "p50_ms": 0.516,
+      "seq_len": 51,
+      "stage": "qkv_split",
+      "sum_ms": 96.233
+    },
+    {
+      "count": 144,
+      "max_ms": 22.902,
+      "mean_ms": 12.928,
+      "p50_ms": 11.998,
+      "seq_len": 51,
+      "stage": "recurrent",
+      "sum_ms": 1861.683
+    },
+    {
+      "count": 24,
+      "max_ms": 26.94,
+      "mean_ms": 17.108,
+      "p50_ms": 17.391,
+      "seq_len": 52,
+      "stage": "conv",
+      "sum_ms": 410.59
+    },
+    {
+      "count": 24,
+      "max_ms": 29.774,
+      "mean_ms": 16.196,
+      "p50_ms": 16.163,
+      "seq_len": 52,
+      "stage": "gated_norm",
+      "sum_ms": 388.697
+    },
+    {
+      "count": 24,
+      "max_ms": 31.931,
+      "mean_ms": 14.931,
+      "p50_ms": 15.54,
+      "seq_len": 52,
+      "stage": "gates",
+      "sum_ms": 358.333
+    },
+    {
+      "count": 24,
+      "max_ms": 32.228,
+      "mean_ms": 19.903,
+      "p50_ms": 19.084,
+      "seq_len": 52,
+      "stage": "in_proj",
+      "sum_ms": 477.672
+    },
+    {
+      "count": 24,
+      "max_ms": 28.034,
+      "mean_ms": 17.115,
+      "p50_ms": 15.757,
+      "seq_len": 52,
+      "stage": "out_proj",
+      "sum_ms": 410.761
+    },
+    {
+      "count": 24,
+      "max_ms": 0.001,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "seq_len": 52,
+      "stage": "post_transpose",
+      "sum_ms": 0.009
+    },
+    {
+      "count": 24,
+      "max_ms": 0.909,
+      "mean_ms": 0.667,
+      "p50_ms": 0.637,
+      "seq_len": 52,
+      "stage": "qk_norm",
+      "sum_ms": 15.997
+    },
+    {
+      "count": 24,
+      "max_ms": 1.318,
+      "mean_ms": 0.643,
+      "p50_ms": 0.502,
+      "seq_len": 52,
+      "stage": "qkv_split",
+      "sum_ms": 15.435
+    },
+    {
+      "count": 24,
+      "max_ms": 21.988,
+      "mean_ms": 14.092,
+      "p50_ms": 13.649,
+      "seq_len": 52,
+      "stage": "recurrent",
+      "sum_ms": 338.216
+    },
+    {
+      "count": 24,
+      "max_ms": 22.918,
+      "mean_ms": 16.033,
+      "p50_ms": 17.206,
+      "seq_len": 53,
+      "stage": "conv",
+      "sum_ms": 384.798
+    },
+    {
+      "count": 24,
+      "max_ms": 51.187,
+      "mean_ms": 18.671,
+      "p50_ms": 16.956,
+      "seq_len": 53,
+      "stage": "gated_norm",
+      "sum_ms": 448.101
+    },
+    {
+      "count": 24,
+      "max_ms": 29.375,
+      "mean_ms": 15.079,
+      "p50_ms": 14.193,
+      "seq_len": 53,
+      "stage": "gates",
+      "sum_ms": 361.906
+    },
+    {
+      "count": 24,
+      "max_ms": 43.038,
+      "mean_ms": 21.702,
+      "p50_ms": 21.008,
+      "seq_len": 53,
+      "stage": "in_proj",
+      "sum_ms": 520.855
+    },
+    {
+      "count": 24,
+      "max_ms": 30.666,
+      "mean_ms": 16.607,
+      "p50_ms": 16.728,
+      "seq_len": 53,
+      "stage": "out_proj",
+      "sum_ms": 398.572
+    },
+    {
+      "count": 24,
+      "max_ms": 0.001,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "seq_len": 53,
+      "stage": "post_transpose",
+      "sum_ms": 0.007
+    },
+    {
+      "count": 24,
+      "max_ms": 0.911,
+      "mean_ms": 0.69,
+      "p50_ms": 0.728,
+      "seq_len": 53,
+      "stage": "qk_norm",
+      "sum_ms": 16.554
+    },
+    {
+      "count": 24,
+      "max_ms": 1.614,
+      "mean_ms": 0.654,
+      "p50_ms": 0.599,
+      "seq_len": 53,
+      "stage": "qkv_split",
+      "sum_ms": 15.688
+    },
+    {
+      "count": 24,
+      "max_ms": 23.002,
+      "mean_ms": 14.086,
+      "p50_ms": 12.965,
+      "seq_len": 53,
+      "stage": "recurrent",
+      "sum_ms": 338.072
+    }
+  ],
+  "line_range": [
+    23204,
+    65235
+  ],
+  "mlp_kernel_by_batch_stage": [
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 19.772,
+      "mean_ms": 1.41,
+      "p50_ms": 0.758,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 45.107
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.005,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "create_tensor",
+      "sum_ms": 0.014
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.024,
+      "mean_ms": 0.011,
+      "p50_ms": 0.01,
+      "stage": "create_work_buffers",
+      "sum_ms": 0.364
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.016,
+      "mean_ms": 0.007,
+      "p50_ms": 0.006,
+      "stage": "create_x_buffer",
+      "sum_ms": 0.231
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.001,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "down_shader",
+      "sum_ms": 0.001
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.001,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "extract_x",
+      "sum_ms": 0.006
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.002,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "gate_up_shader",
+      "sum_ms": 0.01
+    },
+    {
+      "batch": 1,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 19.862,
+      "mean_ms": 1.467,
+      "p50_ms": 0.811,
+      "stage": "total",
+      "sum_ms": 46.946
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 1.792,
+      "mean_ms": 1.21,
+      "p50_ms": 1.075,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 38.725
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.001,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "create_tensor",
+      "sum_ms": 0.03
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.016,
+      "mean_ms": 0.01,
+      "p50_ms": 0.009,
+      "stage": "create_work_buffers",
+      "sum_ms": 0.325
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.498,
+      "mean_ms": 0.022,
+      "p50_ms": 0.006,
+      "stage": "create_x_buffer",
+      "sum_ms": 0.707
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "down_shader",
+      "sum_ms": 0.0
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.001,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "extract_x",
+      "sum_ms": 0.032
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.001,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "gate_up_shader",
+      "sum_ms": 0.017
+    },
+    {
+      "batch": 2,
+      "count": 32,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 2.026,
+      "mean_ms": 1.281,
+      "p50_ms": 1.13,
+      "stage": "total",
+      "sum_ms": 40.99
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 1.763,
+      "mean_ms": 1.092,
+      "p50_ms": 1.08,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 1363.379
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.008,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "create_tensor",
+      "sum_ms": 1.544
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.051,
+      "mean_ms": 0.013,
+      "p50_ms": 0.012,
+      "stage": "create_work_buffers",
+      "sum_ms": 15.867
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.138,
+      "mean_ms": 0.007,
+      "p50_ms": 0.006,
+      "stage": "create_x_buffer",
+      "sum_ms": 8.801
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.004,
+      "mean_ms": 0.0,
+      "p50_ms": 0.0,
+      "stage": "down_shader",
+      "sum_ms": 0.126
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.012,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "extract_x",
+      "sum_ms": 1.657
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 0.005,
+      "mean_ms": 0.001,
+      "p50_ms": 0.001,
+      "stage": "gate_up_shader",
+      "sum_ms": 1.369
+    },
+    {
+      "batch": 3,
+      "count": 1248,
+      "down_rows4": "false",
+      "gate_up_rows4": "false",
+      "max_ms": 1.818,
+      "mean_ms": 1.157,
+      "p50_ms": 1.144,
+      "stage": "total",
+      "sum_ms": 1443.743
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 61.286,
+      "mean_ms": 22.259,
+      "p50_ms": 21.717,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 4273.724
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.347,
+      "mean_ms": 0.024,
+      "p50_ms": 0.02,
+      "stage": "create_tensor",
+      "sum_ms": 4.633
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 2.056,
+      "mean_ms": 0.053,
+      "p50_ms": 0.032,
+      "stage": "create_work_buffers",
+      "sum_ms": 10.171
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.54,
+      "mean_ms": 0.024,
+      "p50_ms": 0.017,
+      "stage": "create_x_buffer",
+      "sum_ms": 4.583
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.018,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "stage": "down_shader",
+      "sum_ms": 0.352
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.13,
+      "mean_ms": 0.032,
+      "p50_ms": 0.029,
+      "stage": "extract_x",
+      "sum_ms": 6.066
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.02,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "stage": "gate_up_shader",
+      "sum_ms": 0.464
+    },
+    {
+      "batch": 51,
+      "count": 192,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 61.503,
+      "mean_ms": 22.456,
+      "p50_ms": 21.869,
+      "stage": "total",
+      "sum_ms": 4311.61
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 47.033,
+      "mean_ms": 23.59,
+      "p50_ms": 22.497,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 754.892
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.049,
+      "mean_ms": 0.024,
+      "p50_ms": 0.021,
+      "stage": "create_tensor",
+      "sum_ms": 0.78
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.057,
+      "mean_ms": 0.032,
+      "p50_ms": 0.029,
+      "stage": "create_work_buffers",
+      "sum_ms": 1.01
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.059,
+      "mean_ms": 0.027,
+      "p50_ms": 0.022,
+      "stage": "create_x_buffer",
+      "sum_ms": 0.867
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.005,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "stage": "down_shader",
+      "sum_ms": 0.058
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.076,
+      "mean_ms": 0.036,
+      "p50_ms": 0.03,
+      "stage": "extract_x",
+      "sum_ms": 1.15
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.007,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "stage": "gate_up_shader",
+      "sum_ms": 0.076
+    },
+    {
+      "batch": 52,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 47.206,
+      "mean_ms": 23.773,
+      "p50_ms": 22.621,
+      "stage": "total",
+      "sum_ms": 760.73
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 41.867,
+      "mean_ms": 23.337,
+      "p50_ms": 23.222,
+      "stage": "chained_transfer_dispatch_readback",
+      "sum_ms": 746.796
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.124,
+      "mean_ms": 0.029,
+      "p50_ms": 0.022,
+      "stage": "create_tensor",
+      "sum_ms": 0.935
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.086,
+      "mean_ms": 0.035,
+      "p50_ms": 0.03,
+      "stage": "create_work_buffers",
+      "sum_ms": 1.126
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.099,
+      "mean_ms": 0.029,
+      "p50_ms": 0.022,
+      "stage": "create_x_buffer",
+      "sum_ms": 0.937
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.003,
+      "mean_ms": 0.002,
+      "p50_ms": 0.002,
+      "stage": "down_shader",
+      "sum_ms": 0.061
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.16,
+      "mean_ms": 0.04,
+      "p50_ms": 0.032,
+      "stage": "extract_x",
+      "sum_ms": 1.283
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 0.006,
+      "mean_ms": 0.003,
+      "p50_ms": 0.002,
+      "stage": "gate_up_shader",
+      "sum_ms": 0.08
+    },
+    {
+      "batch": 53,
+      "count": 32,
+      "down_rows4": "true",
+      "gate_up_rows4": "true",
+      "max_ms": 42.246,
+      "mean_ms": 23.537,
+      "p50_ms": 23.38,
+      "stage": "total",
+      "sum_ms": 753.178
+    }
+  ],
+  "mlp_stage_by_seq_stage": [
+    {
+      "count": 1312,
+      "max_ms": 19.903,
+      "mean_ms": 1.193,
+      "p50_ms": 1.167,
+      "seq_len": 1,
+      "stage": "fused",
+      "sum_ms": 1564.591
+    },
+    {
+      "count": 192,
+      "max_ms": 61.595,
+      "mean_ms": 22.522,
+      "p50_ms": 21.922,
+      "seq_len": 51,
+      "stage": "fused",
+      "sum_ms": 4324.137
+    },
+    {
+      "count": 32,
+      "max_ms": 47.271,
+      "mean_ms": 23.836,
+      "p50_ms": 22.669,
+      "seq_len": 52,
+      "stage": "fused",
+      "sum_ms": 762.751
+    },
+    {
+      "count": 32,
+      "max_ms": 42.304,
+      "mean_ms": 23.626,
+      "p50_ms": 23.436,
+      "seq_len": 53,
+      "stage": "fused",
+      "sum_ms": 756.018
+    }
+  ],
+  "prefill_full_attn_stage_totals": [
+    {
+      "count": 64,
+      "mean_ms": 68.229,
+      "stage": "qkv_proj",
+      "sum_ms": 4366.641
+    },
+    {
+      "count": 64,
+      "mean_ms": 21.004,
+      "stage": "o_proj",
+      "sum_ms": 1344.249
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.834,
+      "stage": "prefill_scores",
+      "sum_ms": 53.382
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.734,
+      "stage": "rope",
+      "sum_ms": 46.961
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.639,
+      "stage": "qk_norm",
+      "sum_ms": 40.881
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.578,
+      "stage": "attn_gate",
+      "sum_ms": 36.969
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.5,
+      "stage": "prefill_weighted_sum",
+      "sum_ms": 32.007
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.245,
+      "stage": "q_transpose",
+      "sum_ms": 15.684
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.201,
+      "stage": "prefill_softmax",
+      "sum_ms": 12.861
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.195,
+      "stage": "qkv_split",
+      "sum_ms": 12.491
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.169,
+      "stage": "prefill_gqa_expand",
+      "sum_ms": 10.828
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.16,
+      "stage": "prefill_mask",
+      "sum_ms": 10.253
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.119,
+      "stage": "prefill_output_layout",
+      "sum_ms": 7.59
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.108,
+      "stage": "kv_write",
+      "sum_ms": 6.944
+    },
+    {
+      "count": 64,
+      "mean_ms": 0.033,
+      "stage": "kv_read",
+      "sum_ms": 2.099
+    }
+  ],
+  "prefill_gdn_stage_totals": [
+    {
+      "count": 192,
+      "mean_ms": 20.154,
+      "stage": "in_proj",
+      "sum_ms": 3869.571
+    },
+    {
+      "count": 192,
+      "mean_ms": 18.326,
+      "stage": "conv",
+      "sum_ms": 3518.657
+    },
+    {
+      "count": 192,
+      "mean_ms": 17.648,
+      "stage": "out_proj",
+      "sum_ms": 3388.459
+    },
+    {
+      "count": 192,
+      "mean_ms": 17.412,
+      "stage": "gated_norm",
+      "sum_ms": 3343.114
+    },
+    {
+      "count": 192,
+      "mean_ms": 16.256,
+      "stage": "gates",
+      "sum_ms": 3121.092
+    },
+    {
+      "count": 192,
+      "mean_ms": 13.219,
+      "stage": "recurrent",
+      "sum_ms": 2537.971
+    },
+    {
+      "count": 192,
+      "mean_ms": 0.663,
+      "stage": "qkv_split",
+      "sum_ms": 127.356
+    },
+    {
+      "count": 192,
+      "mean_ms": 0.636,
+      "stage": "qk_norm",
+      "sum_ms": 122.17
+    },
+    {
+      "count": 192,
+      "mean_ms": 0.0,
+      "stage": "post_transpose",
+      "sum_ms": 0.083
+    }
+  ],
+  "prefill_mlp_stage_totals": [
+    {
+      "count": 256,
+      "mean_ms": 22.824,
+      "stage": "fused",
+      "sum_ms": 5842.906
+    }
+  ]
+}

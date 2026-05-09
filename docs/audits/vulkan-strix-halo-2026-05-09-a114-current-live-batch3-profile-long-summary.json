@@ -1,0 +1,68 @@
+{
+  "case": "current-live-batch3-profile-long",
+  "wall_s": 2.84590383899922,
+  "metrics_before": {
+    "requests_ok": 4.0,
+    "requests_error": 0.0,
+    "tokens_generated": 8.0,
+    "jobs_submitted": 7.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 7.0,
+    "batcher_rows": 7.0,
+    "max_batch": 1.0
+  },
+  "metrics_after": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 24.0,
+    "jobs_submitted": 22.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 22.0,
+    "batcher_rows": 22.0,
+    "max_batch": 1.0
+  },
+  "metrics_delta": {
+    "requests_ok": 4.0,
+    "requests_error": 0.0,
+    "tokens_generated": 16.0,
+    "jobs_submitted": 15.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 15.0,
+    "batcher_rows": 15.0,
+    "max_batch_after": 1.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 2.3439983269927325,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "events": 3,
+      "error": null
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 2.3438036720035598,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "events": 3,
+      "error": null
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 2.344637911999598,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "events": 18,
+      "error": null
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 2.3439255080011208,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "events": 3,
+      "error": null
+    }
+  ]
+}
