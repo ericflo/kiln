@@ -11940,3 +11940,57 @@ Accepted as target-selection evidence. No source change. Continue Metal work on
 MLP/GDN projection kernels, with MLP `gate_up_fused` and `down_proj` as the
 largest current decode slices, rather than spending the next pass on paged
 attention.
+
+## 2026-05-09 E359 - Rejected four-column MLP gate/up serial kernel
+
+### Goal
+
+Try a narrower alternative to the rejected E349 simdgroup-cooperative MLP
+gate/up rewrite. The current accepted kernel computes two adjacent intermediate
+columns per thread, reusing each input `x` element across gate/up accumulation
+for those two columns. This experiment tested whether widening that simple
+serial shape to four adjacent columns per thread would reduce input rereads
+enough to beat the current two-column kernel without the overhead of the E349
+cooperative reduction.
+
+### Change
+
+- Temporarily changed `kiln_mlp_gate_up_bf16` from two columns per thread to
+  four columns per thread.
+- Updated the Rust dispatch width from `intermediate.div_ceil(2)` to
+  `intermediate.div_ceil(4)`.
+- Reverted the source after the candidate lost the synthetic bench.
+
+### Validation
+
+- Baseline:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Candidate parity:
+  `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- Candidate bench:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Qwen-shaped BF16 MLP gate/up decode batch synthetic bench, lower is better:
+
+- batch `1`: baseline `1805.161 us`, candidate `2324.990 us`
+- batch `2`: baseline `1953.260 us`, candidate `2580.365 us`
+- batch `4`: baseline `2132.995 us`, candidate `3731.068 us`
+- batch `8`: baseline `7228.188 us`, candidate `8243.922 us`
+
+The four-column serial kernel passed parity but regressed by `28.8%`, `32.1%`,
+`74.9%`, and `14.1%` at batch `1/2/4/8`. Reusing `x` across more columns did
+not pay for the added accumulators/register pressure.
+
+### Artifact
+
+- `e359_mlp_gate_up_cols2_baseline.log`
+- `e359_mlp_gate_up_cols4_parity.log`
+- `e359_mlp_gate_up_cols4_candidate.log`
+
+### Decision
+
+Rejected and reverted. Keep the current two-column serial fused gate/up kernel.
+Avoid wider serial column grouping for this MLP shape unless a later design
+substantially changes the register/memory tradeoff.

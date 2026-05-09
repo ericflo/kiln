@@ -1224,3 +1224,11 @@
   `115.709 ms`, then full-attention `qkv_proj_batch` `50.610 ms`. No source
   change; next Metal attempts should stay focused on MLP/GDN projection kernels
   rather than paged attention.
+- 2026-05-09 E359: Rejected and reverted a four-column serial variant of the
+  Metal MLP gate/up fused decode kernel. The idea was to reuse each input
+  element across four adjacent intermediate columns instead of two. Parity
+  passed, but the Qwen-shaped synthetic bench regressed at every batch size:
+  baseline fused `1805.161/1953.260/2132.995/7228.188 us` at batch `1/2/4/8`
+  versus candidate `2324.990/2580.365/3731.068/8243.922 us`. Keep the current
+  two-column serial kernel; do not try wider serial column grouping for this
+  shape without a materially different register/memory strategy.
