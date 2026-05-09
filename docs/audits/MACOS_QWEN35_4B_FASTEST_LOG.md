@@ -15433,3 +15433,91 @@ optimized for decode batches, not contiguous prefill-row throughput at these
 large projection widths. Do not route GDN prefill input projections through a
 `[T,1,H]` batch-GEMV reshape. Keep prefill `gdn:in_proj` on broadcast matmul
 until there is a genuinely prefill-shaped kernel or a different measured route.
+
+## 2026-05-09 - E404 accepted GDN prefill precomputed-decay recurrent path
+
+### Hypothesis
+
+E402 showed `gdn:recurrent` is a meaningful `seq_len=64` prefill bucket after
+GDN input projection and the MLP projection matmuls. The existing native
+head-last prefill recurrent kernel recomputes `exp(g)` inside every
+value-dimension threadgroup, even though the decay scalar is shared across all
+`dv` lanes for a `(batch, token, value_head)` row. Precomputing BF16
+`decay = exp(g)` once in the gates stage should reduce recurrent work without
+changing decode behavior.
+
+### Change
+
+Added a guarded Metal prefill path selected only when the existing native
+head-last recurrent prefill shape is supported:
+
+- new env rollback:
+  `KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT=1`
+- new `kiln_gdn_gates_decay_bf16` kernel returns `(beta, decay)` instead of
+  `(beta, g)`
+- new `kiln_gdn_recurrent_prefill_head_last_decay_bf16` kernel consumes the
+  precomputed BF16 decay directly
+- `forward.rs` uses the new path only for Metal prefill (`seq_len > 1`),
+  no debug tap capture, BF16 inputs, and the same recurrent support envelope
+  as the existing native head-last prefill path
+
+The original gates and recurrent kernels remain available and are used when
+the rollback env var or existing GDN gate/recurrent kill switches are set.
+
+### Results
+
+Qwen3.5-shaped recurrent-only synthetic, same source, lower is better:
+
+- `seq_len=16`: current `1008.538 us`, precomputed-decay `419.133 us`,
+  `2.406x` faster
+- `seq_len=64`: current `1813.350 us`, precomputed-decay `1127.225 us`,
+  `1.609x` faster
+- `seq_len=128`: current `2316.875 us`, precomputed-decay `2113.583 us`,
+  `1.096x` faster
+- output and state max/mean absolute diffs were `0`
+
+Paged Qwen3.5-4B serial latency A/B, `prompt_tokens=64`,
+`max_output_tokens=64`, one warmup run, same binary:
+
+- pair 1: default precomputed-decay prefill `433.810500 ms` vs rollback
+  `436.888125 ms` (`0.70%` faster)
+- counter-ordered pair 2: default `433.264958 ms` vs rollback `438.621833 ms`
+  (`1.22%` faster)
+- aggregate prefill: default `433.537729 ms` vs rollback `437.754979 ms`
+  (`0.96%` faster)
+
+Decode mean ITL moved in the opposite direction in aggregate
+(`159.939073 ms` default vs `159.247122 ms` rollback), which is treated as
+measurement noise because this path is selected only for prefill.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_gdn_gates_matches_fallback_prefill_shape -- --nocapture`
+- `cargo test -p kiln-model --features metal test_gdn_recurrent_prefill_head_last_matches_sequential -- --nocapture`
+- `cargo test -p kiln-model --features metal bench_gdn_recurrent_prefill_precomputed_decay_synthetic -- --ignored --nocapture`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+`cargo check -p kiln-model --features cuda` was attempted and recorded, but
+the local macOS machine cannot run it because `nvcc --version` is unavailable.
+The failure occurs in `cudarc` build-script discovery before compiling the
+touched Metal code.
+
+### Artifacts
+
+- `e404_gdn_prefill_decay_recurrent_synthetic.log`
+- `e404_prefill_decay_recurrent_latency_default_64out.log`
+- `e404_prefill_decay_recurrent_latency_disabled_64out.log`
+- `e404_prefill_decay_recurrent_latency_disabled_repeat_64out.log`
+- `e404_prefill_decay_recurrent_latency_default_repeat_64out.log`
+- `e404_cuda_check.log`
+
+### Decision
+
+Accepted. Keep the precomputed-decay path enabled by default for supported
+Metal GDN prefill shapes, with
+`KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT=1` as the specific rollback.

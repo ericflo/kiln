@@ -1616,3 +1616,12 @@
   badly versus broadcast: at `seq_len=64`, broadcast was `4070.275 us` and the
   batch-GEMV reshape was `32274.775 us` (`0.126x`). Source reverted; keep GDN
   prefill in-proj on broadcast until a prefill-shaped route is measured.
+- 2026-05-09 E404: Accepted a guarded Metal GDN prefill path that has the gates
+  kernel output BF16 `decay = exp(g)` and a recurrent prefill kernel consume
+  decay directly, avoiding repeated per-`dv` exponentials. Rollback:
+  `KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT=1`. Recurrent-only synthetic
+  at `seq_len=64` improved `1813.350 -> 1127.225 us` (`1.609x`) with zero
+  diff. Full paged 64-token prefill A/B favored default in both pairs; aggregate
+  prefill improved `437.754979 -> 433.537729 ms` (`0.96%`). Metal/Vulkan checks,
+  focused Metal tests, release Metal builds, fmt, and diff checks passed; CUDA
+  check remains blocked locally by missing `nvcc`.

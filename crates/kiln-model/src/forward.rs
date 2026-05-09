@@ -4774,11 +4774,89 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
+    let fused_prefill_decay_recurrent = {
+        #[cfg(feature = "metal")]
+        {
+            if fused_decode_gates_recurrent_rmsnorm.is_none()
+                && fused_decode_gates_recurrent.is_none()
+                && recurrent_unexpanded_qk
+                && seq_len > 1
+                && use_fused_gdn_gates
+                && crate::backend::metal::metal_gdn_gates_decay_supports(
+                    &a,
+                    &b,
+                    &weights.a_log,
+                    &weights.dt_bias,
+                )
+            {
+                let v_recur = v.to_dtype(input_dtype)?;
+                if crate::backend::metal::metal_gdn_recurrent_prefill_native_head_last_decay_supports(
+                    &q,
+                    &k,
+                    &v_recur,
+                    &a,
+                    &b,
+                    recurrent_state,
+                ) {
+                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                    let (beta, decay) = {
+                        kiln_nvtx::range!(c"kiln/gdn/gates");
+                        crate::backend::metal::metal_gdn_gates_decay_bf16(
+                            &a,
+                            &b,
+                            &weights.a_log,
+                            &weights.dt_bias,
+                        )
+                        .context("metal gdn prefill gates decay kernel failed")?
+                    };
+                    finish_gdn_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "gates",
+                        seq_len,
+                        stage_profile,
+                    )?;
+
+                    kiln_nvtx::range!(c"kiln/gdn/recurrent");
+                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                    let attn_out =
+                        crate::backend::metal::metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
+                            &q,
+                            &k,
+                            &v_recur,
+                            &beta,
+                            &decay,
+                            recurrent_state,
+                        )
+                        .context("metal gdn prefill recurrent decay kernel failed")?;
+                    finish_gdn_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "recurrent",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    Some(attn_out)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            None
+        }
+    };
+
     let (attn_out, attn_out_head_last, attn_out_already_gated_norm) = if let Some(attn_out) =
         fused_decode_gates_recurrent_rmsnorm
     {
         (attn_out, true, true) // [B, T, nv, dv], contiguous and gated-normalized
     } else if let Some(attn_out) = fused_decode_gates_recurrent {
+        (attn_out, true, false) // [B, T, nv, dv], contiguous
+    } else if let Some(attn_out) = fused_prefill_decay_recurrent {
         (attn_out, true, false) // [B, T, nv, dv], contiguous
     } else {
         // --- Step 6: Compute gates ---
