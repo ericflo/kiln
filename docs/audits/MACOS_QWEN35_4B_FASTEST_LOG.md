@@ -12039,3 +12039,94 @@ improved by only `0.5%`, while batch `1`, `2`, and `8` regressed.
 
 Rejected and reverted. Keep `exp` in the MLP gate/up kernel; this micro-change
 does not address the real cost of the projection-heavy stage.
+
+## 2026-05-09 E361 - Accepted batched GDN in-proj paired QKV/Z columns
+
+### Goal
+
+E358 ranked `gdn:in_proj` as the third-largest live `seq_len=1` decode stage
+behind MLP gate/up and down-projection. E351 already rejected a
+simdgroup-cooperative rewrite, but the current GDN in-proj kernel still runs
+one output column per thread and rereads the same input row for every QKV/Z
+column. This experiment tested a narrower scalar change: pair adjacent QKV and
+Z columns per thread for batched decode rows, while leaving the tiny A/B
+projections single-column.
+
+### Change
+
+- Added a `batch == 1` branch that keeps the existing one-column path.
+- For `batch > 1`, the Metal GDN in-proj kernel now dispatches pairs of
+  adjacent QKV columns and pairs of adjacent Z columns per thread.
+- A/B projections remain one output column per thread because they are only
+  `32` columns each in the Qwen3.5 shape.
+- Updated Rust dispatch width to use the old output-column count for `batch ==
+  1` and the paired QKV/Z count for batched rows.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=2 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Same varied-prompt four-request streaming endpoint probe as E357, greedy
+  `max_tokens=8`
+- Single-request streaming smoke, greedy `max_tokens=8`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The first paired QKV/Z candidate improved batched rows but regressed batch `1`
+(`1214.896 us` baseline to `1292.479 us`), so the final accepted source keeps
+the old one-column path for `batch == 1`.
+
+Qwen-shaped BF16 GDN in-proj decode batch synthetic bench, lower is better:
+
+- batch `1`: baseline `1214.896 us`, final `1207.161 us`
+- batch `2`: baseline `2456.740 us`, final `1672.229 us`
+- batch `4`: baseline `3423.047 us`, final `2728.719 us`
+- batch `8`: baseline `5547.948 us`, final `4085.151 us`
+
+The final kernel is flat at batch `1` and improves batch `2/4/8` by `31.9%`,
+`20.3%`, and `26.4%` in the synthetic bench.
+
+Same varied-prompt four-request streaming endpoint probe, greedy
+`max_tokens=8`, `32` generated tokens:
+
+- E357 zero-wait current-source control: wall `5.733101s`, `28` submitted jobs,
+  `14` worker batches, max batch `3`
+- E361 candidate: wall `5.502041s`, `28` submitted jobs, `14` worker batches,
+  max batch `3`
+
+The endpoint probe improved by `4.0%` with the same batching shape. A
+single-request smoke on the same server completed in `1.497457s`; subtracting
+the prior cumulative metrics shows the lone request added `7` submitted jobs,
+`7` worker batches, and `7` rows, so it stayed on one-row decode work.
+
+### Artifact
+
+- `e361_gdn_in_proj_current_baseline.log`
+- `e361_gdn_in_proj_pair_qkv_z_parity.log`
+- `e361_gdn_in_proj_pair_qkv_z_candidate.log`
+- `e361_gdn_in_proj_batch_pair_qkv_z_parity.log`
+- `e361_gdn_in_proj_batch_pair_qkv_z_candidate.log`
+- `e361_cargo_check_metal.log`
+- `e361_cargo_check_vulkan.log`
+- `e361_release_build_metal.log`
+- `e361_mixed_endpoint_server.log`
+- `e361_mixed_endpoint_health.json`
+- `e361_mixed_endpoint_metrics.prom`
+- `e361_mixed_endpoint_time.json`
+- `e361_mixed_endpoint_response_0.sse`
+- `e361_mixed_endpoint_response_1.sse`
+- `e361_mixed_endpoint_response_2.sse`
+- `e361_mixed_endpoint_response_3.sse`
+- `e361_single_endpoint_time.json`
+- `e361_single_endpoint_response.sse`
+- `e361_single_endpoint_metrics.prom`
+
+### Decision
+
+Accepted. This is a measured low-level and endpoint win on the current Metal
+mixed-seq path, while preserving the old single-row GDN in-proj dispatch shape.

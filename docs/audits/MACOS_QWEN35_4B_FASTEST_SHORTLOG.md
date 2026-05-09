@@ -1239,3 +1239,13 @@
   `1805.161/1953.260/2132.995/7228.188 us`. The only apparent win was a
   noise-level `0.5%` at batch `4`; batch `1/2/8` regressed. Keep precise
   `exp` in this kernel.
+- 2026-05-09 E361: Accepted batched-only paired QKV/Z columns in the Metal GDN
+  in-projection decode kernel. The first paired attempt improved batch
+  `2/4/8` but regressed batch `1`, so the final kernel keeps the old one-column
+  path for `batch == 1` and uses two-column QKV/Z work only for batched rows.
+  Parity, Metal/Vulkan `cargo check`, and release build passed. Synthetic GDN
+  in-proj fused times improved from `1214.896/2456.740/3423.047/5547.948 us`
+  to `1207.161/1672.229/2728.719/4085.151 us` at batch `1/2/4/8`. The
+  varied-prompt four-request endpoint probe improved from E357's zero-wait
+  `5.733101s` to `5.502041s` with the same `28` jobs, `14` worker batches, and
+  max batch `3`; a single-request smoke completed in `1.497457s`.

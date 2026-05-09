@@ -2824,7 +2824,46 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     constant uint& batch [[buffer(13)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    const uint total = qkv_dim + z_dim + (nv * 2);
+    // Keep bs=1 on the lean one-column path; paired columns only win once
+    // there are multiple rows to amortize the extra accumulators.
+    if (batch == 1) {
+        const uint total = qkv_dim + z_dim + (nv * 2);
+        if (gid >= total) {
+            return;
+        }
+
+        float acc = 0.0f;
+        if (gid < qkv_dim) {
+            const uint col = gid;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+            }
+            qkv_out[col] = static_cast<bfloat>(acc);
+        } else if (gid < qkv_dim + z_dim) {
+            const uint col = gid - qkv_dim;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
+            }
+            z_out[col] = static_cast<bfloat>(acc);
+        } else if (gid < qkv_dim + z_dim + nv) {
+            const uint col = gid - qkv_dim - z_dim;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+            }
+            a_out[col] = static_cast<bfloat>(acc);
+        } else {
+            const uint col = gid - qkv_dim - z_dim - nv;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+            }
+            b_out[col] = static_cast<bfloat>(acc);
+        }
+        return;
+    }
+
+    const uint qkv_pairs = (qkv_dim + 1) >> 1;
+    const uint z_pairs = (z_dim + 1) >> 1;
+    const uint total = qkv_pairs + z_pairs + (nv * 2);
     if (gid >= total * batch) {
         return;
     }
@@ -2832,27 +2871,53 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     const uint local_gid = gid - batch_idx * total;
     const uint x_base = batch_idx * hidden;
 
-    float acc = 0.0f;
-    if (local_gid < qkv_dim) {
-        const uint col = local_gid;
+    if (local_gid < qkv_pairs) {
+        const uint col0 = local_gid << 1;
+        const uint col1 = col0 + 1;
+        float acc0 = 0.0f;
+        float acc1 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+            const float xv = static_cast<float>(x[x_base + i]);
+            const uint w_idx = i * qkv_dim + col0;
+            acc0 += xv * static_cast<float>(qkv_t[w_idx]);
+            if (col1 < qkv_dim) {
+                acc1 += xv * static_cast<float>(qkv_t[w_idx + 1]);
+            }
         }
-        qkv_out[batch_idx * qkv_dim + col] = static_cast<bfloat>(acc);
-    } else if (local_gid < qkv_dim + z_dim) {
-        const uint col = local_gid - qkv_dim;
+        const uint out_base = batch_idx * qkv_dim;
+        qkv_out[out_base + col0] = static_cast<bfloat>(acc0);
+        if (col1 < qkv_dim) {
+            qkv_out[out_base + col1] = static_cast<bfloat>(acc1);
+        }
+    } else if (local_gid < qkv_pairs + z_pairs) {
+        const uint local_z = local_gid - qkv_pairs;
+        const uint col0 = local_z << 1;
+        const uint col1 = col0 + 1;
+        float acc0 = 0.0f;
+        float acc1 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(z_t[i * z_dim + col]);
+            const float xv = static_cast<float>(x[x_base + i]);
+            const uint w_idx = i * z_dim + col0;
+            acc0 += xv * static_cast<float>(z_t[w_idx]);
+            if (col1 < z_dim) {
+                acc1 += xv * static_cast<float>(z_t[w_idx + 1]);
+            }
         }
-        z_out[batch_idx * z_dim + col] = static_cast<bfloat>(acc);
-    } else if (local_gid < qkv_dim + z_dim + nv) {
-        const uint col = local_gid - qkv_dim - z_dim;
+        const uint out_base = batch_idx * z_dim;
+        z_out[out_base + col0] = static_cast<bfloat>(acc0);
+        if (col1 < z_dim) {
+            z_out[out_base + col1] = static_cast<bfloat>(acc1);
+        }
+    } else if (local_gid < qkv_pairs + z_pairs + nv) {
+        const uint col = local_gid - qkv_pairs - z_pairs;
+        float acc = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
             acc += static_cast<float>(x[x_base + i]) * static_cast<float>(a_t[i * nv + col]);
         }
         a_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
     } else {
-        const uint col = local_gid - qkv_dim - z_dim - nv;
+        const uint col = local_gid - qkv_pairs - z_pairs - nv;
+        float acc = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
             acc += static_cast<float>(x[x_base + i]) * static_cast<float>(b_t[i * nv + col]);
         }
@@ -5221,14 +5286,20 @@ fn metal_gdn_in_proj_decode_bf16(
     let (_, qkv_dim) = qkv_t.dims2()?;
     let (_, z_dim) = z_t.dims2()?;
     let (_, nv) = a_t.dims2()?;
-    let total = qkv_dim + z_dim + (nv * 2);
-    let dispatch_total = batch * total;
+    let output_total = qkv_dim + z_dim + (nv * 2);
+    let dispatch_cols = if batch == 1 {
+        output_total
+    } else {
+        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + (nv * 2)
+    };
+    let dispatch_total = batch * dispatch_cols;
 
     // The kernel writes every output element exactly once. Keep bs=1 on one
     // backing allocation, but use separate batch outputs so each `[B,1,N]`
     // tensor remains contiguous for the following fused decode kernels.
     let (qkv_out, z_out, a_out, b_out) = if batch == 1 {
-        let proj_out = unsafe { Tensor::empty((1usize, 1usize, total), DType::BF16, x.device())? };
+        let proj_out =
+            unsafe { Tensor::empty((1usize, 1usize, output_total), DType::BF16, x.device())? };
         (
             proj_out.narrow(2, 0, qkv_dim)?,
             proj_out.narrow(2, qkv_dim, z_dim)?,
