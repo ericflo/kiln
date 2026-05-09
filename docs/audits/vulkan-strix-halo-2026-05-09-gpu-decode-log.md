@@ -571,6 +571,53 @@ Verdict:
   should first address state/input residency and avoid extra upload/readback
   churn around the fused kernel.
 
+### 2026-05-09 A014: Reject Sampled Contiguous-Batch Logits Route
+
+Hypothesis:
+- The continuous sampled batch path falls through
+  `model_forward_paged_batched_decode_hidden`, while the accepted A011 work
+  added a faster dyn-seqlen contiguous-batch paged attention backend.
+- Routing sampled `row_count > 1` decode steps through
+  `model_forward_paged_decode_contiguous_batch` and then sampling per row from
+  full logits might reuse the A011 backend path for non-greedy continuous
+  batches.
+
+Experiment:
+- Added an uncommitted `decode_logits_paged_contiguous_batch` helper on
+  `ModelRunner`.
+- The helper assembled batched `LinearAttentionState`, called
+  `model_forward_paged_decode_contiguous_batch`, scattered state rows back, and
+  returned batch logits for per-row sampling.
+- Added an uncommitted rollback env,
+  `KILN_DISABLE_PAGED_CONTIG_BATCH_LOGITS=1`, to compare against the existing
+  generic sampled batch route in the same binary.
+- Removed the code after measurement.
+
+Evidence:
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Serial paged bench stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, prefill `424.5ms`, mean ITL
+  `133.6ms`.
+- Primary sampled actor batch with the logits route returned HTTP 200 for
+  `82` prompt tokens and `48` completion tokens, but measured
+  `time_total=8.430564s` before the rollback env and `time_total=8.311119s`
+  after rebuilding with the env gate.
+- The same binary with `KILN_DISABLE_PAGED_CONTIG_BATCH_LOGITS=1` returned HTTP
+  200 and measured `time_total=7.757198s`, matching the accepted A011/A013
+  performance envelope.
+
+Verdict:
+- Rejected and removed before commit. The route is correctness-safe on the
+  sampled smoke, but it is slower than the existing generic path for the primary
+  4-row continuous sampled batch.
+- Do not pursue a broad sampled logits reroute without first reducing the
+  state packing/scatter and logits materialization overhead. A narrower future
+  attempt should attach the A011 dyn-seqlen attention win inside the existing
+  generic sampled path or add decode-stage profiling there before changing the
+  route.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -580,6 +627,9 @@ Verdict:
 - For GDN batch fusion, do not reuse the generic
   `gdn_decode_gates_recurrent_rmsnorm` hook without first changing its
   residency/data-movement behavior; A013 measured it as a large regression.
+- For sampled continuous batch routing, do not broadly reroute through
+  `model_forward_paged_decode_contiguous_batch` logits; A014 measured it as a
+  regression against the current generic path.
 - Keep updating this log and
   `docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md` for every
   accepted or rejected optimization experiment.
