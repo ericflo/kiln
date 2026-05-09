@@ -3768,6 +3768,65 @@ Verdict:
   visible at `75.811ms`, but it is secondary until gate/up improves.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A075: Reject MLP Row-Pair Gate/Up 128x2 Tile
+
+Goal:
+- Test a narrow MLP gate/up compute-shape change after A074 showed
+  `gate_up_dispatch` dominates the 64-token MLP prefill bucket.
+- The existing row-pair gate/up shader used `64x2`, while the non-row-pair
+  batched gate/up shader uses `128x2`.
+
+Temporary change:
+- Changed `mlp_gate_up_decode_batched_rows2.comp` from `local_size_x = 64` to
+  `local_size_x = 128`.
+- Grew the row-pair shared partial arrays from `128` to `256`.
+- Changed the row-pair gate/up column grouping and both dispatcher workgroup
+  counts from `intermediate.div_ceil(64)` to
+  `intermediate.div_ceil(128)`.
+
+Evidence:
+- Candidate validation passed:
+  - `cargo fmt --check`
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`
+  - `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Candidate profile reported backend `vulkan` and the same non-empty token IDs
+  as A074:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Candidate measured profile looked promising for the MLP target:
+  - MLP inner `total`: `817.139ms`, `32` calls, `25.535594ms` avg.
+  - `gate_up_dispatch`: `606.125ms`, `32` calls, `18.941406ms` avg.
+  - Compared with A074, MLP inner `total` moved `861.116ms -> 817.139ms`
+    and `gate_up_dispatch` moved `643.090ms -> 606.125ms`.
+- Profiling noise also moved unrelated buckets; for example
+  `gdn_stage:in_proj seq_len=64` moved from A074 `417.114ms` to candidate
+  `306.510ms`, so no-profile evidence decided the experiment.
+- No-profile same-harness A/B with `--seed 75`:
+  - Candidate `128x2`: `2230.448221ms` prefill,
+    `95.87102725ms` mean ITL, token IDs
+    `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+  - Rollback/restored `64x2`: `2204.441379ms` prefill,
+    `98.759062625ms` mean ITL, same token IDs.
+  - Candidate lost the prefill comparison by `26.006842ms`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a075-mlp-rowpair-gateup-128-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a075-mlp-rowpair-gateup-128-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a075-mlp-rowpair-gateup-128-candidate-noprofile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a075-mlp-rowpair-gateup-128-rollback-noprofile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a075-mlp-rowpair-gateup-128-final-*.log`
+
+Final validation after revert:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+
+Verdict:
+- Reject and revert. Keep the existing row-pair MLP gate/up `64x2` tile.
+- Do not retry the direct `128x2` row-pair gate/up tile without a new
+  hypothesis. The profiled MLP inner bucket improved, but the no-profile
+  prefill comparison favored rollback on the same harness and seed.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3814,6 +3873,11 @@ Verdict:
   Next MLP work should target gate/up prefill shader shape, weight format, or
   broader layer-boundary residency; do not spend the next attempt on a small
   x-upload-only cleanup.
+- A075 rejects the direct row-pair MLP gate/up `128x2` tile: the profile moved
+  MLP inner `total` from A074 `861.116ms` to `817.139ms`, but no-profile
+  prefill lost to restored `64x2` (`2230.448221ms` candidate versus
+  `2204.441379ms` rollback on the same harness and seed). Keep `64x2` and do
+  not retry this exact tile change without a new hypothesis.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

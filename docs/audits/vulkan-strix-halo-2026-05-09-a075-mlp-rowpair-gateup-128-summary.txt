@@ -1,0 +1,125 @@
+A075: Reject MLP Row-Pair Gate/Up 128x2 Tile
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+
+Purpose
+-------
+
+A074 showed the measured 64-token Vulkan MLP prefill bucket is dominated by
+the row-pair gate/up dispatch:
+
+- `mlp_stage:fused`: 862.122 ms total / 32 calls.
+- MLP inner `total`: 861.116 ms total / 32 calls.
+- MLP inner `gate_up_dispatch`: 643.090 ms total / 32 calls.
+
+The existing larger-prefill row-pair gate/up shader used a `64x2` tile, while
+the non-row-pair batched gate/up shader already used `128x2`. A075 tested
+whether the row-pair shader also benefits from halving the number of output
+column workgroups.
+
+Temporary Change
+----------------
+
+Temporarily changed `mlp_gate_up_decode_batched_rows2.comp`:
+
+- `local_size_x`: `64 -> 128`
+- shared partial arrays: `128 -> 256`
+- `col_groups`: `ceil(intermediate / 64) -> ceil(intermediate / 128)`
+- `col`: `col_group * 64 + lane -> col_group * 128 + lane`
+
+Updated both row-pair dispatch counts in `kernels.rs` from
+`intermediate.div_ceil(64)` to `intermediate.div_ceil(128)`.
+
+Validation
+----------
+
+Candidate validation:
+
+- `cargo fmt --check`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Final reverted-source validation:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+
+Profile Command
+---------------
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1
+KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1 KILN_BENCH_LOG_TOKENS=1
+./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+--latency-only --latency-warmup-runs 1 --prompt-tokens 64
+--max-output-tokens 8 --seed 75 --quiet`
+
+Profile Evidence
+----------------
+
+The candidate measured profile looked directionally promising:
+
+- Backend JSON reported `backend: "vulkan"`.
+- Token IDs matched A074:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Candidate measured latency: `2107.459731ms` prefill,
+  `97.6623815ms` mean ITL, `97.356539ms` p50, `100.195880ms` p99.
+- Candidate measured-pass MLP `batch=64` inner buckets:
+  - `total`: 817.139 ms / 32 calls / 25.535594 ms avg.
+  - `gate_up_dispatch`: 606.125 ms / 32 calls / 18.941406 ms avg.
+  - `down_dispatch`: 132.260 ms / 32 calls / 4.133125 ms avg.
+  - `readback`: 67.183 ms / 32 calls / 2.099469 ms avg.
+  - `upload_x`: 6.075 ms / 32 calls / 0.189844 ms avg.
+
+Compared with A074's measured profile, the candidate moved:
+
+- MLP inner `total`: `861.116ms -> 817.139ms`
+- `gate_up_dispatch`: `643.090ms -> 606.125ms`
+
+However, other large buckets also moved under profiling; for example
+`gdn_stage:in_proj seq_len=64` moved from A074 `417.114ms` to candidate
+`306.510ms`, so a no-profile same-harness check was required before keeping
+the shader.
+
+No-Profile A/B
+--------------
+
+No-profile candidate command:
+
+`KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path
+Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+--max-output-tokens 8 --seed 75 --quiet`
+
+No-profile candidate, temporary `128x2`:
+
+- Token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Prefill: 2230.448221 ms.
+- Mean ITL: 95.87102725 ms.
+- P50 ITL: 96.224224 ms.
+- P99 ITL: 97.408871 ms.
+
+No-profile rollback after restoring `64x2`:
+
+- Token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Prefill: 2204.441379 ms.
+- Mean ITL: 98.759062625 ms.
+- P50 ITL: 98.757902 ms.
+- P99 ITL: 100.068384 ms.
+
+The candidate lost the measured no-profile prefill comparison by `26.006842ms`
+despite a better mean ITL. Since this shader only affects the flattened
+row-pair prefill gate/up path, not the `batch=1` decode path, prefill is the
+decision metric here.
+
+Verdict
+-------
+
+Reject and revert. Keep the existing row-pair MLP gate/up `64x2` tile.
+
+Do not retry the direct `128x2` row-pair gate/up tile without a new hypothesis.
+The profiled MLP inner bucket improved, but the no-profile prefill comparison
+favored rollback on the same harness and seed.
