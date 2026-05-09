@@ -2145,3 +2145,15 @@
   row-quad, matching E456, but no endpoint A/B was run because the target
   batch-3 hotspot was synthetically negative. Source reverted; keep the
   accepted E456 threshold at rows `>=5`.
+- 2026-05-09 E462: Accepted lowering Metal GDN in-proj row-pair selection from
+  batch `>=4` to batch `>=3`, leaving row-quad at batch `>=8`. Added explicit
+  batch-3 parity coverage while retaining batch-4 and batch-8 coverage, and
+  corrected the synthetic bench policy label. Qwen3.5 synthetic batch `3`
+  improved from `2537.508 us` rowwise rollback to `1621.971 us` row-pair;
+  batch `4` also favored row-pair (`1709.992 us` versus `2694.113 us`) and
+  batch `8` favored row-quad (`2031.033 us` versus `5086.029 us`). Wait0 live
+  probes missed the target path, but a three-stream wait5k shape-isolation run
+  reached max batch `3` in both arms and favored default: `1.759 s` versus
+  row-pair-disabled `1.891 s`, both `9` server tokens and `6` submitted jobs.
+  Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
+  missing `nvcc`.

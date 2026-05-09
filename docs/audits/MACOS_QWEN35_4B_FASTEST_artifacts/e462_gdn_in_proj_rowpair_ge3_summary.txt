@@ -1,0 +1,39 @@
+E462 accepted GDN in-proj row-pair at batch >=3 summary
+
+Source change: lower Metal GDN in-proj row grouping from batch >=4 to batch >=3; row-quad remains batch >=8. The synthetic bench policy label was tightened so row-quad is reported only when row-pair grouping is enabled too.
+
+Focused checks:
+- cargo fmt --check: passed
+- cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul -- --nocapture: passed with explicit batch-3 plus existing batch-4/batch-8 coverage
+
+Synthetic Qwen3.5 GDN in-proj decode batch BF16 A/B, warmup=3, iters=10:
+
+| batch | default policy | default fused | row-pair disabled policy | row-pair disabled fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| 1 | rowwise | 1105.742 us | rowwise | 1142.062 us | same path |
+| 2 | rowwise | 1497.621 us | rowwise | 1480.192 us | same path |
+| 3 | row_pair | 1621.971 us | rowwise | 2537.508 us | win |
+| 4 | row_pair | 1709.992 us | rowwise | 2694.113 us | win |
+| 8 | row_quad | 2031.033 us | rowwise | 5086.029 us | win |
+
+Live endpoint probes:
+
+| probe | elapsed | statuses | events | server tokens | jobs | worker batches | rows | max batch |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4-stream wait0 default (inconclusive) | 2.238090 s | 200,200,200,200 | 17 | 9 | 6 | 4 | 6 | 2 |
+| 4-stream wait0 row-pair disabled (inconclusive) | 2.334395 s | 200,200,200,200 | 17 | 9 | 6 | 4 | 6 | 2 |
+| 3-stream mt8 wait0 default (inconclusive) | 3.277608 s | 200,200,200 | 22 | 16 | 14 | 14 | 14 | 1 |
+| 3-stream wait5k default | 1.759121 s | 200,200,200 | 15 | 9 | 6 | 2 | 6 | 3 |
+| 3-stream wait5k row-pair disabled | 1.890963 s | 200,200,200 | 15 | 9 | 6 | 3 | 6 | 3 |
+
+The wait0 probes did not reliably exercise batch 3 (max batch 1-2), so they are kept as inconclusive artifacts. The wait5k shape-isolation A/B reached max batch 3 in both arms and favored row-pair: 1.759121 s default versus 1.890963 s disabled, both with 9 server tokens and 6 submitted jobs.
+
+Validation:
+- cargo build --release --features metal --bin kiln: passed with existing warnings
+- cargo check -p kiln-model --features metal: passed with existing warnings
+- cargo check -p kiln-model --features vulkan: passed with existing warnings
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check -p kiln-model --features cuda: blocked by local missing nvcc/CUDA toolkit
+
+Decision: accepted. Batch-3 GDN in-proj row-pair is correct, synthetically faster, and improves a live shape-isolation batch-3 endpoint run. Roll back with KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1 if needed.

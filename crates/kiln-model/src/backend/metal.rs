@@ -7605,7 +7605,7 @@ fn metal_gdn_in_proj_decode_bf16(
     let (_, z_dim) = z_t.dims2()?;
     let (_, nv) = a_t.dims2()?;
     let output_total = qkv_dim + z_dim + (nv * 2);
-    let row_grouping_enabled = batch >= 4 && !metal_gdn_in_proj_row_pair_disabled();
+    let row_grouping_enabled = batch >= 3 && !metal_gdn_in_proj_row_pair_disabled();
     let row_quad_enabled =
         row_grouping_enabled && batch >= 8 && !metal_gdn_in_proj_row_quad_disabled();
     let row_group_size = if row_quad_enabled {
@@ -15403,9 +15403,19 @@ mod tests {
             })?;
             let physical_tokens = batch;
 
+            let row_pair_enabled = batch >= 3 && !metal_gdn_in_proj_row_pair_disabled();
+            let policy = if row_pair_enabled && batch >= 8 && !metal_gdn_in_proj_row_quad_disabled()
+            {
+                "row_quad"
+            } else if row_pair_enabled {
+                "row_pair"
+            } else {
+                "rowwise"
+            };
+
             eprintln!(
                 "synthetic Metal Qwen3.5 GDN in-proj decode batch BF16: batch={batch} \
-                 physical_tokens={physical_tokens} x=[{batch},1,{hidden}] \
+                 physical_tokens={physical_tokens} policy={policy} x=[{batch},1,{hidden}] \
                  qkv_t=[{hidden},{qkv_dim}] z_t=[{hidden},{z_dim}] a/b_t=[{hidden},{nv}] \
                  warmup={warmup} iters={iters} broadcast={broadcast_us:.3} us \
                  fused={fused_us:.3} us speedup={:.3}x max_abs_diff={max_diff:.6e}",
@@ -16738,6 +16748,44 @@ mod tests {
             ("z", &z_fused, &z_ref),
             ("a", &a_fused, &a_ref),
             ("b", &b_fused, &b_ref),
+        ] {
+            assert_eq!(got.dtype(), DType::BF16);
+            assert!(
+                got.is_contiguous(),
+                "GDN in-proj {name} output must stay contiguous"
+            );
+            let max = max_abs_diff(got, want)?;
+            let mean = mean_abs_diff(got, want)?;
+            assert!(
+                max < 2e-2,
+                "GDN in-proj {name} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2e-3,
+                "GDN in-proj {name} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
+
+        let batch3 = 3usize;
+        let x3_data: Vec<f32> = (0..(batch3 * hidden))
+            .map(|i| ((i % 17) as f32 - 8.0) * 0.03125)
+            .collect();
+        let x3 = Tensor::from_slice(&x3_data, (batch3, 1usize, hidden), &device)?
+            .to_dtype(DType::BF16)?;
+        assert!(metal_gdn_in_proj_decode_supports(
+            &x3, &qkv_t, &z_t, &a_t, &b_t
+        ));
+        let (qkv3_fused, z3_fused, a3_fused, b3_fused) =
+            metal_gdn_in_proj_decode_bf16(&x3, &qkv_t, &z_t, &a_t, &b_t)?;
+        let qkv3_ref = x3.broadcast_matmul(&qkv_t)?;
+        let z3_ref = x3.broadcast_matmul(&z_t)?;
+        let a3_ref = x3.broadcast_matmul(&a_t)?;
+        let b3_ref = x3.broadcast_matmul(&b_t)?;
+        for (name, got, want) in [
+            ("qkv3", &qkv3_fused, &qkv3_ref),
+            ("z3", &z3_fused, &z3_ref),
+            ("a3", &a3_fused, &a3_ref),
+            ("b3", &b3_fused, &b3_ref),
         ] {
             assert_eq!(got.dtype(), DType::BF16);
             assert!(

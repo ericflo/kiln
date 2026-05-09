@@ -1,0 +1,21 @@
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1d21bb2c-7cb4-4802-a58e-6a3508cdccd2","object":"chat.completion.chunk","created":1778362492,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

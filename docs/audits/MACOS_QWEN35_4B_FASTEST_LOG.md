@@ -19621,3 +19621,88 @@ hotspot.
 
 Rejected. Keep the accepted E456 Metal MLP gate/up row-quad threshold at rows
 `>=5`; batches `3` and `4` should remain on row-pair.
+
+## E462 - Accepted GDN In-Projection Row-Pair at Batch 3
+
+### Hypothesis
+
+E460 showed `gdn:in_proj` is the second-largest hotspot for the four-stream
+batch-3 live profile. The GDN in-projection Metal kernel already uses row-pair
+grouping at batch `>=4`, but batch `3` stayed rowwise. Test whether lowering
+the row-pair threshold to batch `3` improves that live shape without changing
+the existing row-quad threshold at batch `8`.
+
+### Candidate
+
+Lowered `metal_gdn_in_proj_decode_bf16` row grouping from batch `>=4` to batch
+`>=3`. Row-quad remains gated at batch `>=8`. Added explicit batch-3 coverage
+to the GDN in-proj parity test while keeping the existing batch-4 and batch-8
+coverage. Also tightened the ignored synthetic bench policy label so row-quad
+is reported only when row-pair grouping is enabled too.
+
+### Results
+
+Focused parity and formatting passed:
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul -- --nocapture`
+
+Qwen3.5 GDN in-proj synthetic A/B with warmup `3`, iters `10`:
+
+| batch | default policy | default fused | row-pair disabled policy | row-pair disabled fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| `1` | rowwise | `1105.742 us` | rowwise | `1142.062 us` | same path |
+| `2` | rowwise | `1497.621 us` | rowwise | `1480.192 us` | same path/noise |
+| `3` | row-pair | `1621.971 us` | rowwise | `2537.508 us` | positive |
+| `4` | row-pair | `1709.992 us` | rowwise | `2694.113 us` | positive |
+| `8` | row-quad | `2031.033 us` | rowwise | `5086.029 us` | positive |
+
+No-profile live endpoint probes:
+
+| probe | elapsed | server tokens | jobs | worker batches | rows | max batch | result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| four-stream wait0 default | `2.238090 s` | `9` | `6` | `4` | `6` | `2` | inconclusive |
+| four-stream wait0 row-pair disabled | `2.334395 s` | `9` | `6` | `4` | `6` | `2` | inconclusive |
+| three-stream max_tokens=8 wait0 default | `3.277608 s` | `16` | `14` | `14` | `14` | `1` | inconclusive |
+| three-stream wait5k default | `1.759121 s` | `9` | `6` | `2` | `6` | `3` | positive |
+| three-stream wait5k row-pair disabled | `1.890963 s` | `9` | `6` | `3` | `6` | `3` | baseline |
+
+The wait0 probes did not reliably exercise batch `3`, so they are retained as
+inconclusive artifacts. The wait5k shape-isolation A/B reached
+`max_observed_batch=3` in both arms and favored row-pair by `6.97%` wall time,
+with the same server token count and submitted-job count.
+
+Validation:
+
+- `cargo build --release --features metal --bin kiln`: passed with existing warnings
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: blocked by local missing `nvcc`
+  / CUDA toolkit, matching the known local CUDA environment limitation
+
+### Artifacts
+
+- `e462_gdn_in_proj_rowpair_ge3_fmt.log`
+- `e462_gdn_in_proj_rowpair_ge3_parity.log`
+- `e462_gdn_in_proj_rowpair_ge3_shapes_default_w3_i10.log`
+- `e462_gdn_in_proj_rowpair_ge3_shapes_disabled_w3_i10.log`
+- `e462_gdn_in_proj_rowpair_ge3_build.log`
+- `e462_gdn_in_proj_rowpair_ge3_live_batch4_default_*`
+- `e462_gdn_in_proj_rowpair_ge3_live_batch4_disabled_*`
+- `e462_gdn_in_proj_rowpair_ge3_live_batch3_mt8_default_*`
+- `e462_gdn_in_proj_rowpair_ge3_live_batch3_wait5k_default_*`
+- `e462_gdn_in_proj_rowpair_ge3_live_batch3_wait5k_disabled_*`
+- `e462_gdn_in_proj_rowpair_ge3_check_metal.log`
+- `e462_gdn_in_proj_rowpair_ge3_check_vulkan.log`
+- `e462_gdn_in_proj_rowpair_ge3_check_server_metal.log`
+- `e462_gdn_in_proj_rowpair_ge3_check_server_vulkan.log`
+- `e462_gdn_in_proj_rowpair_ge3_check_cuda.log`
+- `e462_gdn_in_proj_rowpair_ge3_summary.txt`
+
+### Decision
+
+Accepted. Batch-3 GDN in-proj row-pair is correct, strongly improves the
+targeted synthetic shape, and improves a live batch-3 shape-isolation endpoint
+run. Roll back with `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` if needed.
