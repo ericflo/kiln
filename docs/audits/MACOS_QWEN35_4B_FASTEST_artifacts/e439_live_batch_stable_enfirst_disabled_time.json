@@ -1,0 +1,36 @@
+{
+  "elapsed_secs": 7.642932457965799,
+  "results": [
+    {
+      "status": 200,
+      "elapsed_secs": 7.5716282080393285,
+      "bytes": 2033,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 7.5318925000028685,
+      "bytes": 2021,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 7.631937292055227,
+      "bytes": 2027,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 7.436970790964551,
+      "bytes": 2031,
+      "error": null
+    }
+  ],
+  "max_tokens": 8,
+  "prompts": [
+    "Write one short sentence about E439 stable comparison topic alpha.",
+    "Write one short sentence about E439 stable comparison topic beta.",
+    "Write one short sentence about E439 stable comparison topic gamma.",
+    "Write one short sentence about E439 stable comparison topic delta."
+  ]
+}

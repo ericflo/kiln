@@ -17946,3 +17946,87 @@ Accepted the selected-path synthetic bench as permanent measurement tooling.
 Rejected changing the runtime down-projection selector; keep the current
 tile16 default for the Qwen3.5 down-projection shape until a selector-path A/B
 is stable across counter-order runs.
+
+## 2026-05-09 - E439 refreshed current live streaming batch profile
+
+### Purpose
+
+Refresh the live greedy streaming batcher measurement on current `main` after
+the newer Metal projection changes. The serial path had a fresh E434 profile,
+but the live request-path batch profile was still anchored to E348, before the
+later batch/serial projection experiments.
+
+### Change
+
+No source change. Built the current Metal release server and ran:
+
+- A profiled four-concurrent-stream probe with
+  `KILN_DECODE_BATCHER=1 KILN_DECODE_BATCH_WAIT_US=0`
+  `KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1`
+  `KILN_PROFILE_FULL_ATTN_STAGES=1`, `max_tokens=3`.
+- Same-build no-profile four-concurrent-stream enabled/disabled probes with
+  `max_tokens=8`, including counter-order and stable-prompt repeats.
+
+### Validation
+
+- `cargo build --release --features metal --bin kiln`
+- Four concurrent streaming chat completions returned HTTP `200` in every
+  profiled and no-profile run.
+- Metrics were captured after each run.
+
+### Results
+
+Profiled current live batcher probe:
+
+- Wall time: `5.318528s` for four streams, `12` generated tokens.
+- Decode batcher metrics: `8` submitted jobs, `4` worker batches, `8` rows,
+  max observed batch `3`.
+- Request decode stage totals for `seq_len=1`, `start_pos=18/19`:
+  - MLP: `780.341 ms`
+  - GDN: `499.991 ms`
+  - full attention: `211.034 ms`
+- Top stages:
+  - `mlp:gate_up_fused`: `457.088 ms`
+  - `mlp:down_proj`: `323.253 ms`
+  - `gdn:in_proj`: `279.405 ms`
+  - `gdn:out_proj`: `115.237 ms`
+  - `gdn:gates_recur_gated_norm`: `59.621 ms`
+  - `full_attn:qkv_proj`: `45.585 ms`
+  - `full_attn:qkv_proj_batch`: `34.499 ms`
+
+No-profile endpoint comparison:
+
+| run | batcher | elapsed | tokens | tok/s | submitted | batches | max batch |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| mixed enabled | on | `8.844783 s` | 32 | `3.618` | 28 | 14 | 3 |
+| mixed disabled | off | `8.274707 s` | 32 | `3.867` | 0 | 0 | 0 |
+| mixed disabled rerun | off | `8.431602 s` | 32 | `3.795` | 0 | 0 | 0 |
+| mixed enabled rerun | on | `7.340934 s` | 32 | `4.359` | 28 | 14 | 3 |
+| stable enabled first | on | `10.611484 s` | 32 | `3.016` | 28 | 14 | 3 |
+| stable disabled second | off | `7.642932 s` | 32 | `4.187` | 0 | 0 | 0 |
+| stable disabled first | off | `12.497172 s` | 32 | `2.561` | 0 | 0 | 0 |
+| stable enabled second | on | `7.518447 s` | 32 | `4.256` | 28 | 14 | 3 |
+
+The endpoint timings are noisy and order-sensitive. The useful stable fact is
+that the current zero-wait batcher still coalesces the compatible work:
+`28/32` generated tokens entered the worker as `14` batches, max batch `3`,
+with no runner-busy or failed jobs. That is not yet a clean latency win or loss
+on this four-stream macOS probe, so the next concrete batching work should stay
+on measured projection kernels rather than wait-window or admission tuning.
+
+### Artifacts
+
+- `e439_live_batch_profile_build.log`
+- `e439_live_batch_profile_server.log`
+- `e439_live_batch_profile_metrics.prom`
+- `e439_live_batch_profile_time.json`
+- `e439_live_batch_profile_summary.txt`
+- `e439_live_batch_noprofile_summary.txt`
+- `e439_live_batch_noprofile_*`
+- `e439_live_batch_stable_*`
+
+### Decision
+
+Accepted as a refreshed current-state batching measurement. No runtime change:
+keep the existing zero-wait Metal live batcher behavior and continue targeting
+MLP gate/up/down plus GDN projection kernels before revisiting scheduler waits.

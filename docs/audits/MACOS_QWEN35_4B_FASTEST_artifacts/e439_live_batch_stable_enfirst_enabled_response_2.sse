@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"طورة"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-bf4fa0c5-a41f-4730-ac4f-0258380c1a32","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

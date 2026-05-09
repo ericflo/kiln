@@ -1,0 +1,12 @@
+{
+  "model": "qwen3.5-4b-kiln",
+  "stream": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "E439 e439_live_batch_noprofile_enabled: write one short sentence about topic alpha."
+    }
+  ],
+  "max_tokens": 8,
+  "temperature": 0.0
+}

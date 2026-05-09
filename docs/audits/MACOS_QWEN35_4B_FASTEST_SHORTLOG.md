@@ -1918,3 +1918,16 @@
   favored forced tile8 (`911.451 -> 892.811 us`), but the counter-order repeat
   favored current tile16 (`947.226 -> 918.796 us`). Metal/Vulkan checks and fmt
   passed; CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E439: Refreshed current live streaming batcher measurements after
+  the recent Metal projection changes. No source change. The profiled
+  four-stream `max_tokens=3` run completed in `5.319 s`, generated `12`
+  tokens, and still coalesced `8` decode jobs into `4` worker batches with max
+  batch `3`. Request decode stage totals for `seq_len=1`, `start_pos=18/19`
+  were MLP `780.341 ms`, GDN `499.991 ms`, and full attention `211.034 ms`,
+  led by MLP `gate_up_fused` `457.088 ms`, MLP `down_proj` `323.253 ms`, and
+  GDN `in_proj` `279.405 ms`. No-profile enabled/disabled endpoint probes were
+  noisy and order-sensitive: enabled runs consistently batched `28/32`
+  generated tokens into `14` worker batches with max batch `3`, but elapsed
+  time was not a stable win over disabled control. Keep zero-wait batching as
+  is; do not tune waits from this sample, and keep focusing on MLP/GDN
+  projection kernels.

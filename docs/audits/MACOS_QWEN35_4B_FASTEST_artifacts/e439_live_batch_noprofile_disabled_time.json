@@ -1,0 +1,36 @@
+{
+  "elapsed_secs": 8.274706833995879,
+  "results": [
+    {
+      "status": 200,
+      "elapsed_secs": 8.129012791905552,
+      "bytes": 2027,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 8.269475750043057,
+      "bytes": 2033,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 8.232785333995707,
+      "bytes": 2021,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_secs": 8.091136500006542,
+      "bytes": 2032,
+      "error": null
+    }
+  ],
+  "max_tokens": 8,
+  "prompts": [
+    "E439 e439_live_batch_noprofile_disabled: write one short sentence about topic alpha.",
+    "E439 e439_live_batch_noprofile_disabled: write one short sentence about topic beta.",
+    "E439 e439_live_batch_noprofile_disabled: write one short sentence about topic gamma.",
+    "E439 e439_live_batch_noprofile_disabled: write one short sentence about topic delta."
+  ]
+}

@@ -1,0 +1,17 @@
+E439 current live streaming no-profile endpoint comparison
+
+- e439_live_batch_noprofile_enabled: elapsed=8.844783s tokens=32 tok_s=3.618 batcher_enabled=1 submitted=28 batches=14 rows=28 max_batch=3
+- e439_live_batch_noprofile_disabled: elapsed=8.274707s tokens=32 tok_s=3.867 batcher_enabled=0 submitted=0 batches=0 rows=0 max_batch=0
+- e439_live_batch_noprofile_disabled_rerun: elapsed=8.431602s tokens=32 tok_s=3.795 batcher_enabled=0 submitted=0 batches=0 rows=0 max_batch=0
+- e439_live_batch_noprofile_enabled_rerun: elapsed=7.340934s tokens=32 tok_s=4.359 batcher_enabled=1 submitted=28 batches=14 rows=28 max_batch=3
+- e439_live_batch_stable_enfirst_enabled: elapsed=10.611484s tokens=32 tok_s=3.016 batcher_enabled=1 submitted=28 batches=14 rows=28 max_batch=3
+- e439_live_batch_stable_enfirst_disabled: elapsed=7.642932s tokens=32 tok_s=4.187 batcher_enabled=0 submitted=0 batches=0 rows=0 max_batch=0
+- e439_live_batch_stable_disfirst_disabled: elapsed=12.497172s tokens=32 tok_s=2.561 batcher_enabled=0 submitted=0 batches=0 rows=0 max_batch=0
+- e439_live_batch_stable_disfirst_enabled: elapsed=7.518447s tokens=32 tok_s=4.256 batcher_enabled=1 submitted=28 batches=14 rows=28 max_batch=3
+
+- initial mixed prompts enabled: mean_elapsed=8.092858s min=7.340934s max=8.844783s
+- initial mixed prompts disabled: mean_elapsed=8.353154s min=8.274707s max=8.431602s
+- stable prompts enabled: mean_elapsed=9.064965s min=7.518447s max=10.611484s
+- stable prompts disabled: mean_elapsed=10.070052s min=7.642932s max=12.497172s
+
+Interpretation: same-build endpoint timings are noisy and order-sensitive; enabled runs consistently coalesced 28/32 generated tokens into 14 worker batches with max batch 3, but elapsed time was not a stable win over disabled control. Do not tune wait/admission based on one endpoint sample; use stage totals to target projection kernels.

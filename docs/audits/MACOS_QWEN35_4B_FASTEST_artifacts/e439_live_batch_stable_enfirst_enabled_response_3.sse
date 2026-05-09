@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":""}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-5cfe1b08-521b-4047-b183-8e2d4d405a16","object":"chat.completion.chunk","created":1778351131,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+
