@@ -1646,3 +1646,10 @@
   `9.936 ms`). Metal/Vulkan checks, focused Metal tests, release Metal builds,
   fmt, and diff checks passed; CUDA check remains blocked locally by missing
   `nvcc`.
+- 2026-05-09 E408: Refreshed the intrusive Metal `seq_len=64` prefill profile
+  after E407. Current prefill totals are led by `gdn:in_proj` `88.922 ms`,
+  `mlp:down_proj` `81.015 ms`, `mlp:gate_proj` `73.589 ms`,
+  `mlp:up_proj` `72.910 ms`, `gdn:recurrent` `42.259 ms`, and
+  `gdn:out_proj` `30.371 ms`. Accepted as target-selection evidence; no source
+  change. The remaining GDN in-proj work is mostly the large qkv/z projections,
+  while split MLP projection matmuls remain the other major prefill target.

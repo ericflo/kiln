@@ -15690,3 +15690,49 @@ Full paged Qwen3.5-4B latency, same release binary, one warmup run,
 
 Accepted. The narrow A/B-only combined prefill layout produces a repeatable
 full-model prefill win without touching decode or non-Metal runtime behavior.
+
+## 2026-05-09 - E408 refreshed post-E407 intrusive prefill profile
+
+### Purpose
+
+Refresh target-selection evidence after E407 using the same intrusive
+stage-profile method as E405. This run synchronizes around every profiled
+stage, so absolute endpoint timings are not comparable to normal latency runs;
+only relative stage ranking within the measured profile is used.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 408`
+
+### Results
+
+Filtering the measured second run to `seq_len=64` profile rows:
+
+- `gdn:in_proj`: `24` calls, `88.922 ms` total, `3.705 ms` average
+- `mlp:down_proj`: `32` calls, `81.015 ms` total, `2.532 ms` average
+- `mlp:gate_proj`: `32` calls, `73.589 ms` total, `2.300 ms` average
+- `mlp:up_proj`: `32` calls, `72.910 ms` total, `2.278 ms` average
+- `gdn:recurrent`: `24` calls, `42.259 ms` total, `1.761 ms` average
+- `gdn:out_proj`: `24` calls, `30.371 ms` total, `1.265 ms` average
+- `full_attn:qkv_proj`: `8` calls, `23.433 ms` total, `2.929 ms` average
+- `mlp:gate_silu`: `32` calls, `20.186 ms` total, `0.631 ms` average
+- `gdn:qkv_conv_split_norm`: `24` calls, `18.060 ms` total,
+  `0.752 ms` average
+- `full_attn:prefill_attn_fallback`: `8` calls, `16.554 ms` total,
+  `2.069 ms` average
+- `mlp:hidden_mul`: `32` calls, `14.635 ms` total, `0.457 ms` average
+- `full_attn:qkv_split`: `8` calls, `12.597 ms` total, `1.575 ms` average
+- `gdn:gated_norm`: `24` calls, `9.075 ms` total, `0.378 ms` average
+- `gdn:gates`: `24` calls, `7.305 ms` total, `0.304 ms` average
+
+### Artifacts
+
+- `e408_current_paged_latency_profile_after_e407.log`
+- `e408_prefill_profile_after_e407_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. Despite E407's
+endpoint prefill win, the intrusive profile still ranks GDN in-proj first,
+now dominated by the larger qkv/z projection matmuls rather than the optimized
+A/B subpart. MLP split projections remain the other large prefill target.
