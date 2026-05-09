@@ -18417,3 +18417,107 @@ while batch `2/4/8` rows are dominated by the generic fallback's batch cost.
 Accepted as measurement tooling. This fills the checked-in QKV-shaped LoRA
 coverage gap without reopening the rejected E384 fused-QKV LoRA path. Runtime
 source is unchanged for Metal/CUDA/Vulkan execution.
+
+## 2026-05-09 - E446 accepted GDN in-proj serial x2 hidden loads
+
+### Purpose
+
+GDN `in_proj` remains one of the dominant serial decode projection buckets
+after E434. E396 accepted serial `bfloat2` weight loads for adjacent qkv/z
+columns; E400 rejected a similar x2 hidden-load mode for MLP gate/up after the
+endpoint lost despite a synthetic win. This experiment retests the x2 hidden
+load mechanism only for GDN in-proj, where the projection mix and kernel shape
+are different.
+
+### Change
+
+Added guarded `row_pair_mode=7` to `kiln_gdn_in_proj_decode_bf16` for the
+serial `batch == 1` path:
+
+- qkv/z still compute adjacent output-column pairs with aligned `bfloat2`
+  weight loads.
+- the hidden input row is loaded as aligned `bfloat2` pairs when `hidden` is
+  even and the `x` buffer offset is 4-byte aligned.
+- A/B projections also consume the paired hidden values but keep scalar weight
+  reads.
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD=1` rolls back to the accepted
+  E396 `row_pair_mode=6` serial vector path.
+- If x2 is disabled or unsupported, the existing serial-vector eligibility is
+  preserved; batch row-pair and row-quad paths are unchanged.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same synthetic benchmark with `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD=1`
+- Longer synthetic counter-order pair with warmup `5`, iterations `30`
+- Release `kiln-bench` build with Metal
+- Paged Qwen3.5-4B serial endpoint A/B pairs, `prompt_tokens=64`,
+  `max_output_tokens=64`, one warmup run
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-model --features cuda`
+- `git diff --check`
+
+Metal and Vulkan checks passed. The CUDA check was attempted but remains
+blocked by the local macOS environment before compiling touched code:
+`nvcc --version` is not available, and `candle-kernels` reports
+`NvccNotFound`.
+
+### Results
+
+Focused parity passed, and all synthetic GDN in-proj rows reported
+`max_abs_diff=0`.
+
+Qwen3.5 GDN in-proj synthetic, affected batch-1 row:
+
+| run | x2 default | rollback mode6 | result |
+| --- | ---: | ---: | --- |
+| short pair | `1129.333 us` | `1424.475 us` | x2 `20.7%` faster |
+| longer counter pair | `1153.686 us` | `1208.297 us` | x2 `4.5%` faster |
+| final guard-preserving source | `1138.979 us` | `1165.233 us` | x2 `2.3%` faster |
+
+The batch `2/3/4/8` synthetic rows were recorded but are not decision drivers:
+they do not select `row_pair_mode=7`.
+
+Paged Qwen3.5-4B serial latency A/B:
+
+| pair | default x2 | rollback mode6 | result |
+| --- | ---: | ---: | --- |
+| seed 446 | `153.174 ms` | `153.960 ms` | x2 `0.51%` faster |
+| seed 447 counter-order | `152.995 ms` | `153.289 ms` | x2 `0.19%` faster |
+| aggregate | `153.085 ms` | `153.624 ms` | x2 `0.35%` faster |
+
+The endpoint delta is small, but it repeats in both orderings and aligns with
+the directly affected synthetic row. Prefill timing was not used as decision
+evidence.
+
+### Artifacts
+
+- `e446_gdn_in_proj_serial_x2_parity.log`
+- `e446_gdn_in_proj_serial_x2_parity_final.log`
+- `e446_gdn_in_proj_serial_x2_default.log`
+- `e446_gdn_in_proj_serial_x2_disabled.log`
+- `e446_gdn_in_proj_serial_x2_disabled_w5_i30.log`
+- `e446_gdn_in_proj_serial_x2_default_w5_i30.log`
+- `e446_gdn_in_proj_serial_x2_disabled_final.log`
+- `e446_gdn_in_proj_serial_x2_default_final.log`
+- `e446_gdn_in_proj_serial_x2_release_bench_build.log`
+- `e446_gdn_in_proj_serial_x2_release_bench_build_final.log`
+- `e446_gdn_in_proj_serial_x2_latency_default_64out.log`
+- `e446_gdn_in_proj_serial_x2_latency_disabled_64out.log`
+- `e446_gdn_in_proj_serial_x2_latency_disabled_repeat_64out.log`
+- `e446_gdn_in_proj_serial_x2_latency_default_repeat_64out.log`
+- `e446_gdn_in_proj_serial_x2_check_metal.log`
+- `e446_gdn_in_proj_serial_x2_check_vulkan.log`
+- `e446_gdn_in_proj_serial_x2_check_cuda.log`
+- `e446_gdn_in_proj_serial_x2_fmt_check.log`
+- `e446_gdn_in_proj_serial_x2_git_diff_check.log`
+
+### Decision
+
+Accepted. Enable the guarded serial x2 hidden-load mode for Metal GDN in-proj
+batch-1 decode. It preserves the existing E396 serial vector path as rollback,
+does not touch batch row-pair/row-quad paths, and leaves CUDA/Vulkan runtime
+code unchanged.

@@ -1982,3 +1982,14 @@
   `0.295/0.347/0.346/0.546 ms` for batch `1/2/4/8`, with speedups from
   `2.196x` to `112.629x` versus the generic LoRA fallback. Runtime Metal,
   CUDA, and Vulkan behavior is unchanged.
+- 2026-05-09 E446: Accepted guarded Metal GDN in-proj serial x2 hidden loads.
+  Added `row_pair_mode=7` for `batch == 1` when the existing serial qkv/z
+  vector path is active, `hidden` is even, and the hidden row is 4-byte
+  aligned; `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD=1` rolls back to
+  the accepted E396 mode6 path. Focused parity passed with exact synthetic
+  diffs. Batch-1 GDN in-proj synthetic favored x2 (`1138.979 us` versus
+  `1165.233 us` on the final short pair; `1153.686 us` versus `1208.297 us`
+  on the longer pair). Paged serial endpoint A/B repeated a small win:
+  aggregate mean ITL `153.085 ms` default versus `153.624 ms` rollback
+  (`0.35%`). Metal/Vulkan checks passed; CUDA remains locally blocked by
+  missing `nvcc`.
