@@ -2118,3 +2118,11 @@
   row-quad-disabled `4.872 s`, both `32` tokens and `28` submitted jobs.
   Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
   missing `nvcc`.
+- 2026-05-09 E459: Rejected lowering generic Metal batch transposed-GEMV
+  row-quad selection from batch `>=3` to batch `>=2`. Temporary batch-2 parity
+  passed, but Qwen3.5 shape synthetic rows regressed the important projections:
+  MLP down `1049.021 us` candidate versus `1045.098 us` row-pair rollback,
+  GDN out `515.562 us` versus `507.558 us`, and attention QKV-like
+  `455.356 us` versus `421.217 us`; only attention output improved
+  (`313.071 us` versus `336.300 us`). No endpoint A/B was run. Source
+  reverted; keep the accepted E458 batch `>=3` threshold.

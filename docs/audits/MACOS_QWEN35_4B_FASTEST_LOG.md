@@ -19445,3 +19445,50 @@ Accepted. Lower generic Metal batch transposed-GEMV row-quad selection to batch
 Qwen3.5 projection shapes synthetically, and improves the live four-stream
 continuous-batching shape that reaches max batch `3`. Roll back with
 `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` if needed.
+
+## E459 - Rejected Generic Batch Transposed-GEMV Row-Quad at Batch 2
+
+### Hypothesis
+
+E458 accepted generic batch transposed-GEMV row-quad grouping at batch `3`.
+The row-quad tile8 kernel masks rows independently, so it can safely process
+batch `2`; test whether using the same row-quad path for two-stream live
+batching improves throughput versus the current row-pair path.
+
+### Candidate
+
+Temporarily lowered `metal_transposed_coop_gemv_batch_bf16` row-quad selection
+from batch `>=3` to batch `>=2`. Updated the synthetic policy helper and
+temporarily expanded focused parity to include batch `2`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed with temporary batch-2 coverage.
+
+Qwen3.5 shape synthetic A/B with warmup `5`, iters `20`:
+
+| label | batch | candidate policy | candidate | row-quad disabled | result |
+| --- | ---: | --- | ---: | ---: | --- |
+| `mlp_down_proj` | 2 | row_quad_tile8 | `1049.021 us` | `1045.098 us` | rejected |
+| `gdn_out_proj` | 2 | row_quad_tile8 | `515.562 us` | `507.558 us` | rejected |
+| `attn_output` | 2 | row_quad_tile8 | `313.071 us` | `336.300 us` | positive |
+| `attn_qkv_like` | 2 | row_quad_tile8 | `455.356 us` | `421.217 us` | rejected |
+
+The candidate regressed the most important affected shapes for batch `2`.
+No endpoint A/B was run because the synthetic signal was already negative for
+MLP down, GDN out, and attention-QKV-like projections.
+
+### Artifacts
+
+- `e459_transposed_gemv_rowquad_ge2_fmt.log`
+- `e459_transposed_gemv_rowquad_ge2_parity.log`
+- `e459_transposed_gemv_rowquad_ge2_shapes_default_w5_i20.log`
+- `e459_transposed_gemv_rowquad_ge2_shapes_disabled_w5_i20.log`
+- `e459_transposed_gemv_rowquad_ge2_summary.txt`
+
+### Decision
+
+Rejected. Keep the accepted E458 generic Metal batch transposed-GEMV row-quad
+threshold at batch `>=3`. Batch `2` should remain on row-pair.

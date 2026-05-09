@@ -1,0 +1,26 @@
+E459 rejected Metal generic batch transposed-GEMV row-quad threshold >=2 summary
+
+Temporary change:
+- Lowered metal_transposed_coop_gemv_batch_bf16 row-quad selection from
+  batch >=3 to batch >=2.
+- Updated the synthetic policy label helper to match.
+- Temporarily expanded focused parity to include batch 2.
+- Existing rollback env: KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1.
+
+Focused parity:
+- test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul passed
+  with temporary batch-2 coverage and the existing batch 3/4/5/6/7/8 rows.
+
+Qwen3.5 shape synthetic A/B, warmup=5, iters=20:
+
+| label | batch | candidate policy | candidate | row-quad disabled |
+| --- | ---: | --- | ---: | ---: |
+| mlp_down_proj | 2 | row_quad_tile8 | 1049.021 us | 1045.098 us |
+| gdn_out_proj | 2 | row_quad_tile8 | 515.562 us | 507.558 us |
+| attn_output | 2 | row_quad_tile8 | 313.071 us | 336.300 us |
+| attn_qkv_like | 2 | row_quad_tile8 | 455.356 us | 421.217 us |
+
+Decision:
+- Rejected. Batch-2 row-quad improved only attention output and regressed the
+  more important MLP down, GDN out, and attention-QKV-like shapes. No endpoint
+  A/B was run. Source was reverted; keep the accepted E458 batch >=3 threshold.
