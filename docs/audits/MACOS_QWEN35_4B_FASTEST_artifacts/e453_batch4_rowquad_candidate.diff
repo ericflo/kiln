@@ -1,0 +1,55 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index 87e3aa0..5e315d8 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -7048,7 +7048,7 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
+     let (_, output_dim) = weight_t.dims2()?;
+     let row_grouping_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
+     let row_quad_enabled =
+-        row_grouping_enabled && batch >= 8 && !metal_transposed_coop_gemv_row_quad_disabled();
++        row_grouping_enabled && batch >= 4 && !metal_transposed_coop_gemv_row_quad_disabled();
+     let row_quad_tile8_enabled =
+         row_quad_enabled && !metal_transposed_coop_gemv_row_quad_tile8_disabled();
+     let row_group_size = if row_quad_enabled {
+@@ -14499,7 +14499,7 @@ mod tests {
+         let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 37, 0.0009765625)?;
+         device.synchronize()?;
+ 
+-        for batch in [2usize, 3, 4, 8] {
++        for batch in [2usize, 3, 4, 5, 6, 7, 8] {
+             let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+             device.synchronize()?;
+             assert!(metal_transposed_coop_gemv_decode_batch_supports(
+@@ -14600,7 +14600,7 @@ mod tests {
+             patterned_bf16_2d(input_dim, output_dim, device, 37, 0.0009765625)?.contiguous()?;
+         device.synchronize()?;
+ 
+-        for batch in [2usize, 3, 4, 8] {
++        for batch in [2usize, 3, 4, 5, 6, 7, 8] {
+             let x = patterned_bf16_decode_batch(batch, input_dim, device)?.contiguous()?;
+             device.synchronize()?;
+             assert!(metal_transposed_coop_gemv_decode_batch_supports(
+@@ -14640,7 +14640,7 @@ mod tests {
+ 
+     fn metal_transposed_coop_decode_batch_policy(batch: usize) -> &'static str {
+         if batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled() {
+-            if batch >= 8 && !metal_transposed_coop_gemv_row_quad_disabled() {
++            if batch >= 4 && !metal_transposed_coop_gemv_row_quad_disabled() {
+                 if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
+                     "row_quad_tile8"
+                 } else {
+@@ -16317,7 +16317,13 @@ mod tests {
+         };
+ 
+         let input_dim = 128usize;
+-        for (batch, output_dim) in [(4usize, 133usize), (8usize, 136usize)] {
++        for (batch, output_dim) in [
++            (4usize, 133usize),
++            (5usize, 134usize),
++            (6usize, 135usize),
++            (7usize, 137usize),
++            (8usize, 136usize),
++        ] {
+             let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+             let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 29, 0.0078125)?;
+ 

@@ -2050,3 +2050,15 @@
   rank-32 speedups `2.964-75.217x` and rank-64 speedups `2.721-70.866x`.
   `cargo fmt --check`, Metal check, and Vulkan check passed; CUDA remains
   locally blocked by missing `nvcc`. Runtime behavior is unchanged.
+- 2026-05-09 E453: Accepted generic Metal batch transposed-GEMV row-quad
+  grouping starting at batch `4` instead of batch `8`. Expanded parity to
+  batches `4/5/6/7/8` and expanded the MLP-down-only plus Qwen3.5 shape-matrix
+  benches to include batches `5/6/7`. Expanded shape A/B favored row-quad for
+  nearly every affected row, including batch-4 rows: MLP down `1567.212 us`
+  versus `1868.431 us`, GDN out `679.552 us` versus `892.481 us`, attention
+  output `418.394 us` versus `574.546 us`, and attention QKV-like
+  `651.071 us` versus `877.094 us`. One expanded-run MLP-down batch-6 row was
+  noisy/negative, but focused MLP-down counter-check favored row-quad for
+  batches `4/5/6/7` (`1481/2213/2426/2472 us` versus
+  `1967/2769/2772/3569 us`). Metal/Vulkan model and server checks passed;
+  CUDA remains locally blocked by missing `nvcc`.

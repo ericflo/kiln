@@ -18859,3 +18859,98 @@ Compile guards:
 Accepted as measurement and regression coverage. The runtime Metal, CUDA, and
 Vulkan paths are unchanged; this only makes future LoRA work exercise ranks
 `32` and `64` in the focused Metal tests and synthetic benches.
+
+## 2026-05-09 - E453 accepted Metal batch4+ row-quad GEMV policy
+
+### Purpose
+
+Improve continuous-batching projection latency for small but nontrivial batches.
+The generic Metal batch transposed-GEMV path used row-pair grouping for batches
+`2/3/4/5/6/7` and row-quad grouping only for batch `8+`. E440/E442 showed the
+same Qwen3.5 projection shapes are hot under live batching, and the accepted
+batch-8 row-quad tile8 kernel is already much faster than rowwise. This
+experiment tests whether row-quad should start at batch `4`.
+
+### Change
+
+- Changed generic Metal batch transposed-GEMV row-quad selection from
+  `batch >= 8` to `batch >= 4`.
+- Updated the policy-reporting helper used by the Qwen3.5 batch-shape bench.
+- Expanded batch transposed-GEMV parity coverage to batches `4/5/6/7/8` so
+  partial row-quad groups are exercised.
+- Expanded the MLP-down-only and Qwen3.5 shape-matrix batch GEMV benches to
+  include batches `5/6/7`.
+
+The existing `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` env remains
+the rollback to row-pair grouping.
+
+### Results
+
+Expanded parity passed for batches `4/5/6/7/8`.
+
+Short first A/B over the original shape matrix (`2/3/4/8`) was clearly positive
+for the newly affected batch-4 rows:
+
+| label | row-quad b4 | row-pair b4 |
+| --- | ---: | ---: |
+| mlp_down_proj | `1426.263 us` | `1936.608 us` |
+| gdn_out_proj | `736.208 us` | `895.021 us` |
+| attn_output | `416.938 us` | `578.050 us` |
+| attn_qkv_like | `638.171 us` | `883.696 us` |
+
+Longer expanded shape matrix (`warmup=5`, `iters=20`) for affected batches:
+
+| label | b4 row-quad / row-pair | b5 row-quad / row-pair | b6 row-quad / row-pair | b7 row-quad / row-pair |
+| --- | ---: | ---: | ---: | ---: |
+| mlp_down_proj | `1567.212 / 1868.431 us` | `2348.108 / 2744.340 us` | `2731.637 / 2537.790 us` | `2503.158 / 3463.650 us` |
+| gdn_out_proj | `679.552 / 892.481 us` | `1108.952 / 1293.194 us` | `1101.292 / 1299.846 us` | `1228.096 / 1604.890 us` |
+| attn_output | `418.394 / 574.546 us` | `735.025 / 821.612 us` | `768.054 / 881.342 us` | `894.100 / 1089.340 us` |
+| attn_qkv_like | `651.071 / 877.094 us` | `1165.481 / 1372.948 us` | `1097.263 / 1350.258 us` | `1087.196 / 1635.658 us` |
+
+The only negative row in the expanded shape run was `mlp_down_proj` at batch
+`6`. A focused MLP-down-only counter-check did not reproduce that regression:
+
+| batch | row-quad | row-pair |
+| ---: | ---: | ---: |
+| 4 | `1481.167 us` | `1966.975 us` |
+| 5 | `2213.075 us` | `2769.206 us` |
+| 6 | `2426.392 us` | `2771.677 us` |
+| 7 | `2472.104 us` | `3568.579 us` |
+
+All logged bench rows had exact BF16 diffs.
+
+Compile guards:
+
+- `cargo fmt --check`: passed
+- `git diff --check`: passed
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: locally blocked by missing
+  `nvcc`/CUDA toolkit
+
+### Artifacts
+
+- `e453_batch4_rowquad_candidate.diff`
+- `e453_batch4_rowquad_parity.log`
+- `e453_batch4_rowquad_parity_expanded.log`
+- `e453_batch4_rowquad_default_short.log`
+- `e453_batch4_rowquad_disabled_short.log`
+- `e453_batch4_rowquad_default_w5_i20.log`
+- `e453_batch4_rowquad_default_expanded_w5_i20.log`
+- `e453_batch4_rowquad_disabled_expanded_w5_i20.log`
+- `e453_batch4_rowquad_mlp_down_default_w5_i20.log`
+- `e453_batch4_rowquad_mlp_down_disabled_w5_i20.log`
+- `e453_batch4_rowquad_check_metal.log`
+- `e453_batch4_rowquad_check_vulkan.log`
+- `e453_batch4_rowquad_check_server_metal.log`
+- `e453_batch4_rowquad_check_server_vulkan.log`
+- `e453_batch4_rowquad_check_cuda.log`
+
+### Decision
+
+Accepted. Start generic Metal batch transposed-GEMV row-quad grouping at batch
+`4` instead of batch `8`. Batches `2/3` are unchanged, batch `8+` keeps the
+accepted row-quad path, and the existing row-quad disable env remains the
+rollback. CUDA/Vulkan runtime behavior is unchanged.
