@@ -15781,7 +15781,7 @@ mod tests {
         let input_dim = 1024usize;
         let output_dim = 1152usize;
         for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
-            for batch in [1usize, 2usize, 4usize] {
+            for batch in [1usize, 2usize, 4usize, 8usize] {
                 let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
                 let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
                 let a = patterned_bf16_2d(rank, input_dim, &device, 29, 0.002)?;
@@ -15820,7 +15820,7 @@ mod tests {
         let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
 
         for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
-            for batch in [1usize, 4usize] {
+            for batch in [1usize, 2usize, 4usize, 8usize] {
                 bench_lora_decode_add_case(
                     &device,
                     "mlp_gate_or_up",

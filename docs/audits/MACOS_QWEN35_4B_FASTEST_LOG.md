@@ -17081,3 +17081,114 @@ Qwen-class BF16 decode adapter shape. Rank-1 and rank-2 rows remain exact in the
 helper, full-projection timings are faster than the old fallback adapter path,
 and the existing dimension/device/layout gates continue to keep small or
 non-Metal shapes on the generic implementation.
+
+## 2026-05-09 - E427 rejected Metal LoRA add row grouping, added batch-8 coverage
+
+### Purpose
+
+After E426 broadened LoRA delta/add to every positive rank, this experiment
+tested whether the second LoRA kernel could reuse each `B` weight load across
+multiple decode rows. The idea mirrors the accepted MLP/GDN row-pair and
+row-quad decode kernels, but the LoRA add loop has much smaller rank-dependent
+work and could lose parallelism.
+
+### Temporary Change
+
+Temporarily changed `kiln_lora_add_decode_bf16` to accept a row-group size and
+write two or four adjacent batch rows per output column. The first broad
+candidate used row-pair for all `batch > 1` and row-quad for `batch >= 8`. A
+tighter follow-up selected row-pair only for `rank >= 16` and row-quad only for
+`batch >= 8 && rank >= 4`.
+
+The runtime source change was reverted after measurement. The committed source
+only broadens LoRA parity/bench coverage to include batch `8` in the backend
+delta/add test and batch `2`/`8` in the ignored synthetic LoRA benches.
+
+### Results
+
+The broad candidate was mixed in the isolated delta/add bench. It helped some
+full-batch rank-16 rows but regressed smaller shapes, for example:
+
+| candidate | rank | shape | batch | default | disabled | result |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| broad | 16 | MLP gate/up `2560 -> 9216` | 8 | `175.702 us` | `239.185 us` | `26.5%` faster |
+| broad | 16 | MLP down `9216 -> 2560` | 8 | `208.606 us` | `234.827 us` | `11.2%` faster |
+| broad | 2 | MLP down `9216 -> 2560` | 4 | `179.508 us` | `170.050 us` | `5.6%` slower |
+| broad | 4 | MLP gate/up `2560 -> 9216` | 4 | `141.925 us` | `134.367 us` | `5.6%` slower |
+
+The rank-gated candidate looked better in isolated selected rows but did not
+hold in the full LoRA projection bench:
+
+| candidate | rank | shape | batch | default | disabled | result |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| rank-gated isolated | 8 | MLP down `9216 -> 2560` | 8 | `173.515 us` | `180.102 us` | `3.7%` faster |
+| rank-gated isolated | 16 | MLP gate/up `2560 -> 9216` | 8 | `168.373 us` | `305.975 us` | `45.0%` faster |
+| rank-gated full linear | 16 | MLP gate/up `2560 -> 9216` | 8 | `3.432 ms` | `3.452 ms` | `0.6%` faster |
+| rank-gated full linear | 16 | MLP down `9216 -> 2560` | 8 | `3.646 ms` | `3.313 ms` | `10.1%` slower |
+| rank-gated full linear | 16 | MLP gate/up `2560 -> 9216` | 4 | `2.767 ms` | `2.485 ms` | `11.3%` slower |
+
+The final reverted source still records current batch-8 LoRA coverage. The
+current scalar add path remains exact and fast versus fallback for batch `8`:
+
+| rank | shape | batch | fused | fallback | speedup |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | MLP gate/up `2560 -> 9216` | 8 | `154.206 us` | `709.633 us` | `4.602x` |
+| 1 | MLP down `9216 -> 2560` | 8 | `163.294 us` | `916.852 us` | `5.615x` |
+| 2 | MLP gate/up `2560 -> 9216` | 8 | `152.285 us` | `692.198 us` | `4.545x` |
+| 2 | MLP down `9216 -> 2560` | 8 | `229.404 us` | `1081.483 us` | `4.714x` |
+| 4 | MLP gate/up `2560 -> 9216` | 8 | `149.915 us` | `801.263 us` | `5.345x` |
+| 4 | MLP down `9216 -> 2560` | 8 | `154.054 us` | `1262.079 us` | `8.192x` |
+| 8 | MLP gate/up `2560 -> 9216` | 8 | `166.835 us` | `1304.533 us` | `7.819x` |
+| 8 | MLP down `9216 -> 2560` | 8 | `179.396 us` | `1836.213 us` | `10.236x` |
+| 16 | MLP gate/up `2560 -> 9216` | 8 | `227.769 us` | `2167.819 us` | `9.518x` |
+| 16 | MLP down `9216 -> 2560` | 8 | `200.515 us` | `3039.096 us` | `15.156x` |
+
+All final-source batch-8 rows had exact delta/add parity against the reference
+LoRA path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+  - final source passed for rank `1`, `2`, `4`, `8`, and `16`, batch `1`,
+    `2`, `4`, and `8`
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+  - final source passed with batch `1`, `2`, `4`, and `8`
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda`
+  - blocked by local environment: `nvcc` is not installed, so `cudarc` and
+    `candle-kernels` build scripts fail before checking Kiln source
+- `git diff --check`
+
+### Artifacts
+
+- `e427_lora_add_row_group_parity.log`
+- `e427_lora_add_row_group_default_bench.log`
+- `e427_lora_add_row_group_disabled_bench.log`
+- `e427_lora_add_rank_gated_parity.log`
+- `e427_lora_add_rank_gated_default_bench.log`
+- `e427_lora_add_rank_gated_disabled_bench.log`
+- `e427_lora_add_rank_gated_linear_default_bench.log`
+- `e427_lora_add_rank_gated_linear_disabled_bench.log`
+- `e427_lora_batch8_final_parity.log`
+- `e427_lora_batch8_final_delta_bench.log`
+- `e427_lora_batch8_linear_parity.log`
+- `e427_lora_row_group_fmt_check.log`
+- `e427_lora_row_group_metal_check.log`
+- `e427_lora_row_group_vulkan_check.log`
+- `e427_lora_row_group_server_metal_check.log`
+- `e427_lora_row_group_cuda_check.log`
+- `e427_lora_row_group_diff_check.log`
+
+### Decision
+
+Rejected and reverted the runtime row-group kernel change. The isolated
+full-batch rows were tempting, but the full LoRA projection bench showed mixed
+results and a clear rank-16 batch-8 down-projection regression. Keep the
+existing scalar add kernel and the E426 all-rank support gate. Retain the new
+batch-8 parity/bench coverage as guardrail evidence for continuous-batching
+LoRA shapes.

@@ -10511,7 +10511,7 @@ mod tests {
             .unwrap_or(5);
 
         for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
-            for batch in [1usize, 4usize] {
+            for batch in [1usize, 2usize, 4usize, 8usize] {
                 bench_metal_lora_linear_case(
                     &device,
                     "mlp_gate_or_up",

@@ -1,0 +1,217 @@
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:797:13
+    |
+797 |         let mut cache = PagedKvCache::new(
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:867:13
+    |
+867 |         let mut cache = PagedKvCache::new(1, 4, 4, 2, 3, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:907:13
+    |
+907 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::F32, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/kiln-model/src/paged_kv_cache.rs:961:13
+    |
+961 |         let mut cache = PagedKvCache::new(1, 8, 4, heads, head_dim, DType::BF16, &device)?;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1016:13
+     |
+1016 |         let mut cache = PagedKvCache::new_uninit(1, 4, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1066:13
+     |
+1066 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1125:13
+     |
+1125 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1163:13
+     |
+1163 |         let mut cache = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1202:13
+     |
+1202 |         let mut cache = PagedKvCache::new(1, 2, 4, 2, 3, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1236:13
+     |
+1236 |         let mut paged = PagedKvCache::new(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1318:13
+     |
+1318 |         let mut cache = PagedKvCache::new(3, 2, 4, 1, 2, DType::F32, &device)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1359:13
+     |
+1359 |         let mut cache = PagedKvCache::new_with_fp8(
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `v_out`
+    --> crates/kiln-model/src/paged_kv_cache.rs:1407:21
+     |
+1407 |         let (k_out, v_out) = cache.read(0, &bt, 3)?;
+     |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_v_out`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> crates/kiln-model/src/paged_kv_cache.rs:1429:13
+     |
+1429 |         let mut cache = PagedKvCache::new_with_fp8(1, 2, 4, 2, 3, DType::F32, &device, true)?;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `in_features`
+   --> crates/kiln-model/src/quantized.rs:377:13
+    |
+377 |         let in_features = 8;
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_in_features`
+
+warning: unused variable: `out_features`
+   --> crates/kiln-model/src/quantized.rs:378:13
+    |
+378 |         let out_features = 1;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_out_features`
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3632:4
+     |
+3632 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8524:15
+     |
+8524 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `create_safetensors_with_data` is never used
+    --> crates/kiln-model/src/loader.rs:1893:8
+     |
+1893 |     fn create_safetensors_with_data(tensors: &[(&str, Vec<usize>, StDtype, Vec<u8>)]) -> Vec<u8> {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `pack_int4` is never used
+    --> crates/kiln-model/src/loader.rs:1913:8
+     |
+1913 |     fn pack_int4(values: &[u8]) -> Vec<u8> {
+     |        ^^^^^^^^^
+
+warning: function `gptq_linear_tensors` is never used
+    --> crates/kiln-model/src/loader.rs:1927:8
+     |
+1927 |     fn gptq_linear_tensors(
+     |        ^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib test) generated 22 warnings (run `cargo fix --lib -p kiln-model --tests` to apply 16 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/kiln_model-8ab5b66e9ef10c0c)
+
+running 1 test
+metal_lora_linear_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=1 iters=10 fast_ms=1.302 fallback_ms=1.761 speedup=1.353 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=1 iters=10 fast_ms=1.206 fallback_ms=1.951 speedup=1.618 max_abs_diff=1.5625e-2 mean_abs_diff=6.1035156e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=1 iters=10 fast_ms=1.792 fallback_ms=63.546 speedup=35.468 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=1 iters=10 fast_ms=1.874 fallback_ms=70.425 speedup=37.580 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=1 iters=10 fast_ms=2.582 fallback_ms=140.435 speedup=54.384 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=1 iters=10 fast_ms=2.655 fallback_ms=153.436 speedup=57.787 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=1 iters=10 fast_ms=3.468 fallback_ms=307.706 speedup=88.725 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=1 iters=10 fast_ms=3.496 fallback_ms=333.785 speedup=95.479 max_abs_diff=1.5625e-2 mean_abs_diff=1.5258789e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=2 iters=10 fast_ms=1.165 fallback_ms=1.986 speedup=1.705 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=2 iters=10 fast_ms=1.311 fallback_ms=1.947 speedup=1.486 max_abs_diff=1.5625e-2 mean_abs_diff=6.1035156e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=2 iters=10 fast_ms=1.564 fallback_ms=63.592 speedup=40.648 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=2 iters=10 fast_ms=1.858 fallback_ms=70.373 speedup=37.882 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=2 iters=10 fast_ms=2.806 fallback_ms=140.286 speedup=49.996 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=2 iters=10 fast_ms=2.392 fallback_ms=153.306 speedup=64.079 max_abs_diff=1.5625e-2 mean_abs_diff=3.8146973e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=2 iters=10 fast_ms=3.330 fallback_ms=307.607 speedup=92.381 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=2 iters=10 fast_ms=3.400 fallback_ms=333.360 speedup=98.043 max_abs_diff=1.5625e-2 mean_abs_diff=1.9073486e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=4 iters=10 fast_ms=1.400 fallback_ms=1.793 speedup=1.281 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=4 iters=10 fast_ms=1.152 fallback_ms=2.143 speedup=1.860 max_abs_diff=1.5625e-2 mean_abs_diff=6.1035156e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=4 iters=10 fast_ms=1.782 fallback_ms=63.467 speedup=35.607 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=4 iters=10 fast_ms=1.812 fallback_ms=70.280 speedup=38.787 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=4 iters=10 fast_ms=2.782 fallback_ms=140.447 speedup=50.476 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=4 iters=10 fast_ms=2.673 fallback_ms=153.508 speedup=57.425 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=4 iters=10 fast_ms=3.310 fallback_ms=307.788 speedup=93.001 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=4 iters=10 fast_ms=3.497 fallback_ms=333.760 speedup=95.450 max_abs_diff=1.5625e-2 mean_abs_diff=1.5258789e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=8 iters=10 fast_ms=1.185 fallback_ms=1.958 speedup=1.651 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=8 iters=10 fast_ms=1.319 fallback_ms=2.042 speedup=1.548 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=8 iters=10 fast_ms=1.730 fallback_ms=63.529 speedup=36.728 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=8 iters=10 fast_ms=1.645 fallback_ms=70.240 speedup=42.700 max_abs_diff=0e0 mean_abs_diff=0e0
+test forward::tests::bench_metal_linear_decode_lora_qwen35_synthetic has been running for over 60 seconds
+metal_lora_linear_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=8 iters=10 fast_ms=2.577 fallback_ms=140.603 speedup=54.570 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=8 iters=10 fast_ms=2.552 fallback_ms=153.764 speedup=60.259 max_abs_diff=3.125e-2 mean_abs_diff=4.5776367e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=8 iters=10 fast_ms=3.297 fallback_ms=308.770 speedup=93.640 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=8 iters=10 fast_ms=3.686 fallback_ms=334.311 speedup=90.700 max_abs_diff=3.125e-2 mean_abs_diff=2.2888184e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=1 input_dim=2560 output_dim=9216 rank=16 iters=10 fast_ms=1.160 fallback_ms=1.977 speedup=1.704 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=1 input_dim=9216 output_dim=2560 rank=16 iters=10 fast_ms=1.084 fallback_ms=2.340 speedup=2.158 max_abs_diff=1.5625e-2 mean_abs_diff=6.1035156e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=2 input_dim=2560 output_dim=9216 rank=16 iters=10 fast_ms=1.838 fallback_ms=64.003 speedup=34.831 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=2 input_dim=9216 output_dim=2560 rank=16 iters=10 fast_ms=1.881 fallback_ms=70.921 speedup=37.702 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=4 input_dim=2560 output_dim=9216 rank=16 iters=10 fast_ms=2.485 fallback_ms=141.005 speedup=56.736 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=4 input_dim=9216 output_dim=2560 rank=16 iters=10 fast_ms=2.806 fallback_ms=154.388 speedup=55.022 max_abs_diff=1.5625e-2 mean_abs_diff=3.0517578e-5
+metal_lora_linear_bench label=mlp_gate_or_up batch=8 input_dim=2560 output_dim=9216 rank=16 iters=10 fast_ms=3.452 fallback_ms=309.237 speedup=89.572 max_abs_diff=0e0 mean_abs_diff=0e0
+metal_lora_linear_bench label=down_proj batch=8 input_dim=9216 output_dim=2560 rank=16 iters=10 fast_ms=3.313 fallback_ms=335.656 speedup=101.329 max_abs_diff=1.5625e-2 mean_abs_diff=1.5258789e-5
+test forward::tests::bench_metal_linear_decode_lora_qwen35_synthetic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 367 filtered out; finished in 92.91s
+

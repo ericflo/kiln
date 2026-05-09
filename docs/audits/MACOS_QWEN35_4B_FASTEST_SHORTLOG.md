@@ -1816,3 +1816,14 @@
   `1.837 -> 1.110 ms` and rank2 serial down `1.878 -> 1.115 ms`. Rank
   `1/2/4/8/16` parity, benches, Metal/Vulkan/server Metal checks, fmt, and diff
   check passed; CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E427: Rejected Metal LoRA add row grouping. A broad temporary
+  row-pair/row-quad second-pass kernel helped some rank-16 full-batch isolated
+  rows, but regressed smaller rows; a rank-gated variant still failed the full
+  LoRA projection bench, including rank-16 batch-8 down-projection
+  `3.313 -> 3.646 ms`. Runtime source was reverted. Kept only expanded LoRA
+  coverage: final delta/add parity now covers batch `8`, and ignored synthetic
+  benches cover batch `1/2/4/8`. Final current batch-8 delta/add rows remain
+  exact and strongly faster than fallback, e.g. rank16 gate/up
+  `2167.819 -> 227.769 us` and rank16 down `3039.096 -> 200.515 us`.
+  Metal/Vulkan/server Metal checks, fmt, and diff check passed; CUDA remains
+  locally blocked by missing `nvcc`.
