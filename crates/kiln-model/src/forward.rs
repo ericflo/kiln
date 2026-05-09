@@ -11,10 +11,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
-#[cfg(feature = "cuda")]
-use crate::lora_loader::compute_lora_delta;
 use crate::lora_loader::{
-    LoraLayerWeights, LoraProjectionWeights, LoraWeights, linear_with_lora_t,
+    LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
 use crate::transposed_weight_cache::{
@@ -343,11 +341,18 @@ fn linear_with_lora_t_backend_decode_if(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
-    if lora.is_none() {
-        if let Some(backend) = backend {
-            if let Some(out) = backend.linear_decode(x, weight_t)? {
-                return Ok(out);
+    if let Some(backend) = backend {
+        if let Some(base) = backend.linear_decode(x, weight_t)? {
+            if let Some(proj) = lora {
+                let delta = compute_lora_delta(x, proj, lora_scale)?;
+                let delta = if delta.dtype() == base.dtype() {
+                    delta
+                } else {
+                    delta.to_dtype(base.dtype())?
+                };
+                return Ok((base + delta)?);
             }
+            return Ok(base);
         }
     }
     linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
@@ -9706,6 +9711,66 @@ mod tests {
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
         CpuBackend::new(device.clone())
+    }
+
+    #[derive(Debug)]
+    struct FixedLinearBackend {
+        device: Device,
+        values: Vec<f32>,
+        dims: (usize, usize, usize),
+    }
+
+    impl BackendRuntime for FixedLinearBackend {
+        fn name(&self) -> &'static str {
+            "fixed-linear-test"
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
+            Ok(Some(Tensor::from_vec(
+                self.values.clone(),
+                self.dims,
+                &self.device,
+            )?))
+        }
+    }
+
+    #[test]
+    fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
+        let lora = LoraProjectionWeights {
+            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2), &device)?,
+            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1), &device)?,
+        };
+        let backend = FixedLinearBackend {
+            device: device.clone(),
+            values: vec![10.0, 20.0, 30.0],
+            dims: (1, 1, 3),
+        };
+
+        let out = linear_with_lora_t_backend_decode_if(
+            Some(&backend),
+            false,
+            &x,
+            &weight_t,
+            Some(&lora),
+            0.5,
+        )?;
+
+        let values = out.flatten_all()?.to_vec1::<f32>()?;
+        let expected = [37.5, 53.0, 68.5];
+        for (got, expected) in values.iter().zip(expected) {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "got {got}, expected {expected}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
