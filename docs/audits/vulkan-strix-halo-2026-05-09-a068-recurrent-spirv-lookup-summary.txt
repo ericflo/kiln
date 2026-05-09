@@ -1,0 +1,21 @@
+A068: Fix parallel recurrent embedded SPIR-V lookup
+Date: 2026-05-09
+
+Change:
+- Added `gdn_recurrent_step_parallel` to
+  `crates/kiln-vulkan-kernel/src/pipeline.rs` `SHADER_SPIRVS`.
+
+Reason:
+- The shader was already in `build.rs` and the prewarm list, but the embedded
+  lookup table omitted it. Without this entry, accepted A059/A067 recurrent
+  dispatches could fall back to runtime shader compilation.
+
+Validation:
+- `PATH="$HOME/.cargo/bin:$PATH" cargo fmt --check`
+- `PATH="$HOME/.cargo/bin:$PATH" cargo check -p kiln-vulkan-kernel`
+- `PATH="$HOME/.cargo/bin:$PATH" cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent -- --nocapture`
+- `git diff --check`
+
+Verdict:
+- Keep as a Vulkan-only deployment/prewarm fix. No shader math, CUDA path, or
+  Metal path changed.

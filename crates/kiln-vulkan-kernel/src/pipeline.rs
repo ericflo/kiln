@@ -81,6 +81,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("solve_tri", SPIR_V_SOLVE_TRI),
     ("gdn_recurrent_prefill", SPIR_V_GDN_RECURRENT_PREFILL),
+    (
+        "gdn_recurrent_step_parallel",
+        SPIR_V_GDN_RECURRENT_STEP_PARALLEL,
+    ),
     ("gdn_chunk_prep", SPIR_V_GDN_CHUNK_PREP),
     ("gdn_full_chunk_forward", SPIR_V_GDN_FULL_CHUNK_FORWARD),
     ("gdn_chunk_scan", SPIR_V_GDN_CHUNK_SCAN),

@@ -3366,6 +3366,39 @@ Verdict:
   `2.237ms` mean-ITL improvement with stable token output.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A068: Fix Parallel Recurrent Embedded SPIR-V Lookup
+
+Problem:
+- While inspecting the A067 follow-up state, `gdn_recurrent_step_parallel` was
+  present in `crates/kiln-vulkan-kernel/build.rs` and the built-in pipeline
+  prewarm list, but was missing from `crates/kiln-vulkan-kernel/src/pipeline.rs`
+  `SHADER_SPIRVS`.
+- That is the same deployability class as A061: production builds with embedded
+  SPIR-V available could still fall back to runtime `glslc`/`glslangValidator`
+  for an accepted hot-path shader. It is not a math-path change, but it can add
+  first-use latency or fail on hosts without a runtime shader compiler.
+
+Change:
+- Added the missing `("gdn_recurrent_step_parallel",
+  SPIR_V_GDN_RECURRENT_STEP_PARALLEL)` entry to `pipeline.rs`.
+- No shader source, dispatch selection, CUDA path, or Metal path changed.
+
+Evidence:
+- The diff is limited to the embedded lookup table entry.
+- This should not change steady-state token output or benchmark timings because
+  the shader bytes and dispatch logic are unchanged; it removes runtime shader
+  compiler dependence for the A059/A067 recurrent path.
+
+Validation:
+- `PATH="$HOME/.cargo/bin:$PATH" cargo fmt --check`
+- `PATH="$HOME/.cargo/bin:$PATH" cargo check -p kiln-vulkan-kernel`
+- `PATH="$HOME/.cargo/bin:$PATH" cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent -- --nocapture`
+- `git diff --check`
+
+Verdict:
+- Keep. This is a Vulkan-only deployment/prewarm correctness fix for the
+  accepted parallel recurrent shader, with no CUDA/Metal source changes.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
