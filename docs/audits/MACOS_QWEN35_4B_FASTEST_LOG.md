@@ -16276,3 +16276,68 @@ is not a decision signal because the temporary route only changes prefill.
 Rejected and reverted before commit. Candle Metal SDPA accepts strided K/V views
 and removes the explicit K/V head-layout copy, but the full prefill path does
 not get faster. Keep the current contiguous K/V layout before SDPA.
+
+## 2026-05-09 - E417 rejected full-attention combined K/V prefill projection
+
+### Purpose
+
+E413 still shows `full_attn:qkv_proj` at `22.792 ms` total for the 64-token
+prefill profile. This experiment tested whether the full-attention K and V
+prefill projections can be packed into one `[hidden, 2 * kv_dim]` BF16 matmul
+instead of two separate `[hidden, kv_dim]` matmuls.
+
+### Temporary Change
+
+Temporarily added an ignored Metal synthetic benchmark in
+`crates/kiln-model/src/backend/metal.rs`. The benchmark compared:
+
+- current separate K/V matmuls,
+- one combined matmul with K/V returned as non-contiguous narrow views,
+- one combined matmul followed by `.contiguous()` on each K/V half.
+
+The temporary source was reverted before commit. No production route was added.
+
+### Synthetic Results
+
+Command:
+
+`KILN_METAL_FULL_ATTN_KV_COMBINED_BENCH_WARMUP=3 KILN_METAL_FULL_ATTN_KV_COMBINED_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_full_attn_kv_prefill_combined_synthetic --lib -- --ignored --nocapture`
+
+| seq_len | separate | combined view | combined contiguous | view speedup | contiguous speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | `1727.900 us` | `608.183 us` | `835.587 us` | `2.841x` | `2.068x` |
+| 64 | `905.408 us` | `599.508 us` | `1019.142 us` | `1.510x` | `0.888x` |
+| 128 | `1369.546 us` | `1036.525 us` | `1626.550 us` | `1.321x` | `0.842x` |
+
+Confirmation command:
+
+`KILN_METAL_FULL_ATTN_KV_COMBINED_BENCH_WARMUP=5 KILN_METAL_FULL_ATTN_KV_COMBINED_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_full_attn_kv_prefill_combined_synthetic --lib -- --ignored --nocapture`
+
+| seq_len | separate | combined view | combined contiguous | view speedup | contiguous speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 16 | `1349.498 us` | `611.633 us` | `810.127 us` | `2.206x` | `1.666x` |
+| 64 | `923.604 us` | `596.250 us` | `862.419 us` | `1.549x` | `1.071x` |
+| 128 | `1134.662 us` | `1081.185 us` | `1462.650 us` | `1.049x` | `0.776x` |
+
+All cases had exact parity against separate K/V matmuls
+(`max_abs_diff=0.000000e0`).
+
+### Validation
+
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+
+### Artifacts
+
+- `e417_full_attn_kv_prefill_combined_synthetic.log`
+- `e417_full_attn_kv_prefill_combined_synthetic_w5_i20.log`
+- `e417_full_attn_kv_prefill_combined_fmt_check.log`
+- `e417_full_attn_kv_prefill_combined_source_reverted.diffcheck.log`
+
+### Decision
+
+Rejected and reverted before commit. The view-only path is faster, but it
+returns non-contiguous K/V slices that do not match the existing production
+attention path. The production-relevant contiguous path is noisy at `seq_len=64`
+and clearly slower at `seq_len=128`, so it does not justify a loader-time
+packed weight, LoRA guardrails, or endpoint A/B work.

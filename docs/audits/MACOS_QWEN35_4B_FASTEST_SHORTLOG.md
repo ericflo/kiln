@@ -1717,3 +1717,13 @@
   improve (`424.299375 ms` rollback vs `426.555750 ms` default). Non-intrusive
   paged 64-token endpoint A/B also favored rollback: contiguous K/V
   `376.645250 ms` vs strided K/V `377.843334 ms`. Temporary source was reverted.
+- 2026-05-09 E417: Rejected a full-attention K/V prefill projection pack that
+  would replace separate K and V `[1,T,2560] @ [2560,1024]` matmuls with one
+  `[1,T,2560] @ [2560,2048]` matmul. Synthetic parity was exact. Returning
+  non-contiguous K/V views was faster, but the production-relevant contiguous
+  path was not robust: warmup/iters `3/10` showed seq64 `905.408 -> 1019.142 us`
+  (`0.888x`) and seq128 `1369.546 -> 1626.550 us` (`0.842x`); confirmation
+  `5/20` showed seq64 only marginally faster `923.604 -> 862.419 us` (`1.071x`)
+  while seq128 stayed slower `1134.662 -> 1462.650 us` (`0.776x`). Temporary
+  source was reverted; keep separate K/V matmuls unless a future kernel can
+  consume the packed non-contiguous halves directly.
