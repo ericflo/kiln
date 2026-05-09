@@ -1687,3 +1687,10 @@
   A default endpoint sanity run also completed at measured prompt length `259`.
   Metal/Vulkan checks, focused Metal tests, release Metal builds, fmt, and diff
   checks passed; CUDA check remains blocked locally by missing `nvcc`.
+- 2026-05-09 E413: Refreshed the intrusive Metal `seq_len=64` prefill profile
+  after E412. Current prefill totals are led by `gdn:in_proj` `82.402 ms`,
+  `mlp:down_proj` `74.673 ms`, `mlp:up_proj` `68.924 ms`,
+  `mlp:gate_proj` `66.161 ms`, `gdn:recurrent` `33.522 ms`, and
+  `gdn:out_proj` `28.755 ms`. The old `full_attn:prefill_attn_fallback`
+  bucket is gone; `full_attn:prefill_attn_head_major` now totals `7.017 ms`.
+  Accepted as target-selection evidence; no source change.

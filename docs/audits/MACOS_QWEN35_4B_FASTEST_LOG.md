@@ -16008,3 +16008,51 @@ close at every retested Qwen3.5 historical failure length, and the endpoint
 prefill win is large and repeated. Keep the default scoped to the Qwen3.5
 `head_dim=256` full-attention shape; use `KILN_DISABLE_METAL_SDPA_FULL=1` to
 fall back to the naive prefill attention without disabling decode SDPA.
+
+## 2026-05-09 - E413 refreshed post-E412 intrusive prefill profile
+
+### Purpose
+
+Refresh the `seq_len=64` Metal prefill target list after E412 replaced the
+full-attention prefill fallback with the head-major SDPA path. As with E405,
+E408, and E411, this is an intrusive profile that synchronizes around every
+stage; use it for ranking, not endpoint latency.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 413`
+
+### Results
+
+Filtering the measured second run to `seq_len=64` profile rows:
+
+- `gdn:in_proj`: `24` calls, `82.402 ms` total, `3.433 ms` average
+- `mlp:down_proj`: `32` calls, `74.673 ms` total, `2.334 ms` average
+- `mlp:up_proj`: `32` calls, `68.924 ms` total, `2.154 ms` average
+- `mlp:gate_proj`: `32` calls, `66.161 ms` total, `2.068 ms` average
+- `gdn:recurrent`: `24` calls, `33.522 ms` total, `1.397 ms` average
+- `gdn:out_proj`: `24` calls, `28.755 ms` total, `1.198 ms` average
+- `full_attn:qkv_proj`: `8` calls, `22.792 ms` total, `2.849 ms` average
+- `gdn:qkv_conv_split_norm`: `24` calls, `17.131 ms` total,
+  `0.714 ms` average
+- `mlp:gate_silu_hidden_mul`: `32` calls, `13.792 ms` total,
+  `0.431 ms` average
+- `full_attn:o_proj`: `8` calls, `10.519 ms` total, `1.315 ms` average
+- `full_attn:qkv_split`: `8` calls, `8.949 ms` total, `1.119 ms` average
+- `gdn:gated_norm`: `24` calls, `7.509 ms` total, `0.313 ms` average
+- `full_attn:prefill_attn_head_major`: `8` calls, `7.017 ms` total,
+  `0.877 ms` average
+- `gdn:gates`: `24` calls, `5.973 ms` total, `0.249 ms` average
+
+### Artifacts
+
+- `e413_current_paged_latency_profile_after_e412.log`
+- `e413_prefill_profile_after_e412_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. E412 removed the old
+`full_attn:prefill_attn_fallback` bucket and the new SDPA stage now ranks below
+the projection and GDN recurrent/out-projection work. The next prefill work
+should stay focused on GDN qkv/z input projection, split MLP projection matmuls,
+or the remaining GDN recurrent/out-projection buckets.
