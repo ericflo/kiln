@@ -1,0 +1,210 @@
+[
+  {
+    "arm": "default-host-visible",
+    "case": "vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-default-host-visible",
+    "metrics_after": {
+      "batcher_rows": 120.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 120.0,
+      "max_batch": 3.0,
+      "requests_error": 0.0,
+      "requests_ok": 8.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 128.0,
+      "worker_batches": 41.0
+    },
+    "metrics_before": {
+      "batcher_rows": 0.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 0.0,
+      "max_batch": 0.0,
+      "requests_error": 0.0,
+      "requests_ok": 0.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 0.0,
+      "worker_batches": 0.0
+    },
+    "metrics_delta": {
+      "batcher_rows": 120.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 120.0,
+      "max_batch_after": 3.0,
+      "requests_error": 0.0,
+      "requests_ok": 8.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 128.0,
+      "worker_batches": 41.0
+    },
+    "results": [
+      {
+        "elapsed_s": 16.771584328002064,
+        "error": null,
+        "events": 18,
+        "index": 0,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 16.976731955001014,
+        "error": null,
+        "events": 18,
+        "index": 1,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 16.770878307012026,
+        "error": null,
+        "events": 18,
+        "index": 2,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 16.976005925011123,
+        "error": null,
+        "events": 18,
+        "index": 3,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 16.769955873009167,
+        "error": null,
+        "events": 18,
+        "index": 4,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.502828974000295,
+        "error": null,
+        "events": 18,
+        "index": 5,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.175233644011314,
+        "error": null,
+        "events": 18,
+        "index": 6,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.82395174598787,
+        "error": null,
+        "events": 18,
+        "index": 7,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      }
+    ],
+    "wall_s": 17.012898264001706
+  },
+  {
+    "arm": "device-local-state",
+    "case": "vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-device-local-state",
+    "metrics_after": {
+      "batcher_rows": 120.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 120.0,
+      "max_batch": 3.0,
+      "requests_error": 0.0,
+      "requests_ok": 8.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 128.0,
+      "worker_batches": 41.0
+    },
+    "metrics_before": {
+      "batcher_rows": 0.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 0.0,
+      "max_batch": 0.0,
+      "requests_error": 0.0,
+      "requests_ok": 0.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 0.0,
+      "worker_batches": 0.0
+    },
+    "metrics_delta": {
+      "batcher_rows": 120.0,
+      "jobs_failed": 0.0,
+      "jobs_submitted": 120.0,
+      "max_batch_after": 3.0,
+      "requests_error": 0.0,
+      "requests_ok": 8.0,
+      "runner_busy_jobs": 0.0,
+      "tokens_generated": 128.0,
+      "worker_batches": 41.0
+    },
+    "results": [
+      {
+        "elapsed_s": 15.966392122005345,
+        "error": null,
+        "events": 18,
+        "index": 0,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.484794296004111,
+        "error": null,
+        "events": 18,
+        "index": 1,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.484156143997097,
+        "error": null,
+        "events": 18,
+        "index": 2,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.780429025006015,
+        "error": null,
+        "events": 18,
+        "index": 3,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.965321401992696,
+        "error": null,
+        "events": 18,
+        "index": 4,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 15.779996856988873,
+        "error": null,
+        "events": 18,
+        "index": 5,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 13.433061005998752,
+        "error": null,
+        "events": 18,
+        "index": 6,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      },
+      {
+        "elapsed_s": 14.594940063005197,
+        "error": null,
+        "events": 18,
+        "index": 7,
+        "status": 200,
+        "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+      }
+    ],
+    "wall_s": 15.973004646992194
+  }
+]

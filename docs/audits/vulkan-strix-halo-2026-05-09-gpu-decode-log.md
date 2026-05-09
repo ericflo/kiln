@@ -6909,3 +6909,98 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-long-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-distinct8-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a114-current-live-batch3-profile-distinct8-profile-summary.json`
+
+### 2026-05-09 A115: Device-Local Vulkan GDN Recurrent State For Batches
+
+Scope:
+
+- Vulkan-only runtime change in `crates/kiln-vulkan-kernel/src/kernels.rs`.
+- Batch `1` GDN recurrent keeps the existing host-visible state path.
+- Batch `>1` GDN recurrent now defaults to device-local state with explicit
+  staging copies.
+- CUDA and Metal source paths are untouched.
+
+Inspiration reviewed before the candidate:
+
+- Recent Metal E469 accepted an exact batch-3 GDN in-proj row-triple policy,
+  but A111/A112 already rejected direct Vulkan row-triple ports for this backend
+  shape. E471 also rejected a Metal fast-exp MLP variant.
+- Recent CUDA graph-runner changes in this repo and vLLM's
+  GPU/CPU-sync-removal work point at CPU-side synchronization and host/device
+  boundary churn as decode throughput risks.
+- llama.cpp's recent GDN Vulkan/CUDA changes emphasize coalesced recurrent
+  state access and subgroup sharding. A115 keeps the current Vulkan math/layout
+  and only changes the multi-row recurrent state memory class.
+
+Implementation:
+
+- Added `gdn_recurrent_use_host_visible_state(batch)`.
+- `batch == 1` remains host-visible by default.
+- `batch > 1` uses device-local state by default.
+- New rollback env:
+  `KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_BATCH_STATE=1`.
+- Existing `KILN_DISABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_STATE=1` still forces
+  device-local state for every batch size.
+
+Validation:
+
+- `cargo fmt --check` passed.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step -- --nocapture`
+  passed (`3` tests).
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  passed (`34` tests).
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- `cargo check -p kiln-server --features vulkan --bin kiln` passed with
+  existing warnings.
+- `cargo build --release -p kiln-server --bin kiln --features vulkan` passed
+  with existing warnings.
+- CUDA feature check remains environment-blocked by missing `nvcc`.
+- Metal feature check remains environment-blocked on this Linux host because
+  `objc2` requires an Apple target.
+
+Live endpoint A/B:
+
+- Shape: eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, `chat_template_kwargs: {"enable_thinking": false}`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, and `KILN_DECODE_BATCH_MAX=3`.
+- Every arm returned 8/8 HTTP 200 responses with visible text
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm had identical decode counters:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `runner_busy_jobs=0`, `jobs_failed=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+
+Wall-time evidence:
+
+- Pre-change env-only pair:
+  - Host-visible old default: `17.012898s`.
+  - Device-local env arm: `15.973005s`.
+- Post-change pair:
+  - Candidate device-local default: `16.746977s`.
+  - Rollback host-visible batch env: `16.655265s`.
+- Post-change reversed pair:
+  - Rollback host-visible batch env: `16.938897s`.
+  - Candidate device-local default: `15.970087s`.
+- Aggregate across the three same-shape pairs:
+  - Device-local multi-row state average: `16.230023s`.
+  - Host-visible multi-row state average: `16.869020s`.
+  - Device-local is `3.94%` faster by wall time.
+
+Decision:
+
+- Accepted. The middle pair is noisy, but the env-only pair and reversed
+  post-change pair both favor device-local multi-row state, and the aggregate
+  same-shape result is a measurable live batch-3 win.
+- Batch-1 Vulkan recurrent behavior remains unchanged.
+- CUDA and Metal source paths remain untouched.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-comparison-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-final-comparison-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a115-gdn-recurrent-state-b3-final2-comparison-summary.json`

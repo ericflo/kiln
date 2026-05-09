@@ -1,0 +1,45 @@
+    Blocking waiting for file lock on package cache
+   Compiling cudarc v0.19.4
+warning: kiln-gdn-kernel@0.2.13: CUDA not found, kiln-gdn-kernel will not compile CUDA kernels
+warning: kiln-gdn-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-marlin-gemm@0.2.13: CUDA not found, kiln-marlin-gemm will not compile CUDA kernels
+warning: kiln-marlin-gemm@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-rmsnorm-kernel@0.2.13: CUDA not found, kiln-rmsnorm-kernel will not compile CUDA kernels
+warning: kiln-rmsnorm-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-flash-attn@0.2.13: CUDA not found, kiln-flash-attn will not compile CUDA kernels
+warning: kiln-flash-attn@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-conv1d-kernel@0.2.13: CUDA not found, kiln-conv1d-kernel will not compile CUDA kernels
+warning: kiln-conv1d-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+   Compiling candle-kernels v0.10.2
+error: failed to run custom build command for `cudarc v0.19.4`
+
+Caused by:
+  process didn't exit successfully: `/home/ericflo/Development/kiln/target/debug/build/cudarc-2e3bdac2e8ae11ed/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION
+  cargo:rerun-if-env-changed=CUDA_HOME
+  cargo:rerun-if-env-changed=CUDA_PATH
+  cargo:rerun-if-env-changed=CUDA_ROOT
+  cargo:rerun-if-env-changed=CUDA_TOOLKIT_ROOT_DIR
+  cargo:rerun-if-env-changed=CUDNN_LIB
+
+  --- stderr
+
+  thread 'main' (349620) panicked at /home/ericflo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cudarc-0.19.4/build.rs:125:13:
+  `nvcc --version` failed.
+  Err(Os { code: 2, kind: NotFound, message: "No such file or directory" })
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
+error: failed to run custom build command for `candle-kernels v0.10.2`
+
+Caused by:
+  process didn't exit successfully: `/home/ericflo/Development/kiln/target/debug/build/candle-kernels-c5b1bbb37615828d/build-script-build` (exit status: 1)
+  --- stdout
+  cargo::rerun-if-changed=build.rs
+  cargo::rerun-if-changed=src/compatibility.cuh
+  cargo::rerun-if-changed=src/cuda_utils.cuh
+  cargo::rerun-if-changed=src/binary_op_macros.cuh
+
+  --- stderr
+  Error: NvccNotFound("No nvcc found in PATH or standard locations")

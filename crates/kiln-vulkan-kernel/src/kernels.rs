@@ -113,6 +113,18 @@ fn gdn_recurrent_host_visible_state_enabled() -> bool {
     })
 }
 
+fn gdn_recurrent_host_visible_batch_state_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_HOST_VISIBLE_BATCH_STATE").is_ok()
+    })
+}
+
+fn gdn_recurrent_use_host_visible_state(batch: usize) -> bool {
+    gdn_recurrent_host_visible_state_enabled()
+        && (batch == 1 || gdn_recurrent_host_visible_batch_state_enabled())
+}
+
 fn gdn_recurrent_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
@@ -6109,9 +6121,9 @@ pub fn dispatch_gdn_recurrent_step(
     let beta_buf = make_input_buf(&beta_data)?;
     let g_buf = make_input_buf(&g_data)?;
     // State is mutable — upload, dispatch, read back. On Strix Halo, direct
-    // host-visible state is faster than explicit state upload/readback copies
-    // for this split recurrent kernel; keep a disable flag for other drivers.
-    let host_visible_state = gdn_recurrent_host_visible_state_enabled();
+    // host-visible state is faster for batch 1, while batch >1 benefits from
+    // device-local state plus explicit staging copies.
+    let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
         VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?
     } else {
@@ -6500,7 +6512,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
     let (beta_buf, beta_stage) = make_device_and_staging(beta_data)?;
     let (g_buf, g_stage) = make_device_and_staging(g_data)?;
 
-    let host_visible_state = gdn_recurrent_host_visible_state_enabled();
+    let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
         let buf =
             VulkanBuffer::create_host_visible(device, host_visible_mt, state_data.len() as u64)?;
