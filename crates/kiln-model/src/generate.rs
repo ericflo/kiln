@@ -2037,7 +2037,9 @@ impl ModelRunner {
             state
                 .cuda_graph_lease
                 .as_ref()
-                .map(|lease| lease.replay_ready(&block_tables[idx], paged_cache, sequence_lengths[idx]))
+                .map(|lease| {
+                    lease.replay_ready(&block_tables[idx], paged_cache, sequence_lengths[idx])
+                })
                 .unwrap_or(false)
         })
     }
