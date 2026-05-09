@@ -1903,3 +1903,11 @@
   recent batch2/4/8 baselines. Runtime source was reverted. A future
   single-row-only simdgroup8/tile8 selector experiment may still be worth
   testing, but batch/fused-QKV paths should stay on simdgroup4.
+- 2026-05-09 E437: Rejected single-row-only Metal transposed-GEMV simdgroup8.
+  The scoped candidate passed focused parity and left batch/fused-QKV on
+  simdgroup4, but same-source timings were mixed: the first pair had only a
+  small down-selector win (`976.317 -> 963.515 us`) while regressing attention
+  output (`297.871 -> 322.598 us`), and the counter-order repeat lost down
+  outright (`945.340 -> 1011.763 us`) while again regressing attention output.
+  Runtime source was reverted; keep current single-row simdgroup4 plus the
+  down-proj tile16 selector.

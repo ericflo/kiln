@@ -17817,3 +17817,68 @@ Rejected as a global change. The runtime source was reverted. A future
 single-row-only simdgroup8 experiment may still be worthwhile, but batch and
 fused-QKV paths should stay on the current four-simdgroup mapping unless they
 win their own rollback-controlled comparisons.
+
+## 2026-05-09 - E437 rejected single-row Metal transposed-GEMV simdgroup8
+
+### Purpose
+
+Follow up on E436 with a scoped candidate: use simdgroup8 only for the
+single-row transposed cooperative GEMV kernels while leaving decode-batch and
+fused-QKV kernels on the current simdgroup4 mapping. The candidate also routed
+the Qwen3.5 MLP down-projection selector back to tile8 when simdgroup8 was
+enabled.
+
+### Candidate
+
+- Added temporary `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMD8=1`.
+- Added a per-dispatch `simdgroups` constant to the single-row tile4/8/16
+  kernels.
+- Defaulted single-row GEMV dispatch to eight simdgroups per threadgroup.
+- Used the rollback env to restore simdgroup4 and the old down-proj tile16
+  selector.
+- Preserved the candidate diff as an artifact, then reverted runtime source
+  before documenting the rejected result.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal transposed_coop_gemv --lib -- --nocapture`
+- Default serial projection synthetic bench:
+  `KILN_METAL_TRANSPOSED_COOP_BENCH_WARMUP=5 KILN_METAL_TRANSPOSED_COOP_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMD8=1`
+- Counter-order disabled/default benchmark repeat
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The candidate passed focused parity. The same-source synthetic timings were not
+stable enough to promote and showed clear regressions on smaller single-row
+projections:
+
+| config | down tile/default selector | attn output tile8 | attn qkv-like tile8 |
+| --- | ---: | ---: | ---: |
+| default simd8 | `963.515 us` | `322.598 us` | `454.702 us` |
+| rollback simd4 | `976.317 us` | `297.871 us` | `486.079 us` |
+| rollback simd4 rerun | `945.340 us` | `288.642 us` | `444.360 us` |
+| default simd8 rerun | `1011.763 us` | `366.221 us` | `443.367 us` |
+
+The first pair gave only a small down-projection win against the old selector
+(`976.317 -> 963.515 us`, `1.3%`) while regressing attention output. The
+counter-order repeat lost down-projection outright (`945.340 -> 1011.763 us`)
+and again regressed attention output (`288.642 -> 366.221 us`).
+
+### Artifacts
+
+- `e437_transposed_single_simd8_candidate.diff`
+- `e437_transposed_single_simd8_parity.log`
+- `e437_transposed_single_simd8_default.log`
+- `e437_transposed_single_simd8_disabled.log`
+- `e437_transposed_single_simd8_disabled_rerun.log`
+- `e437_transposed_single_simd8_default_rerun.log`
+- `e437_transposed_single_simd8_source_reverted.log`
+- `e437_transposed_single_simd8_git_diff_check.log`
+
+### Decision
+
+Rejected. Keep the current single-row simdgroup4 mapping and the existing
+down-projection tile16 selector. The runtime source was reverted.

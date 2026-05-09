@@ -1,0 +1,122 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index 33f6591..0eda641 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -67,6 +67,8 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16";
++const DISABLE_METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMD8: &str =
++    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMD8";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD: &str =
+@@ -77,6 +79,7 @@ const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS: usize = 16;
+ const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
++const METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMDGROUPS: usize = 8;
+ const METAL_TRANSPOSED_COOP_GEMV_THREADS: usize = 32 * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+@@ -1001,6 +1004,18 @@ fn metal_transposed_coop_gemv_tile16_disabled() -> bool {
+         || env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16)
+ }
+ 
++fn metal_transposed_coop_gemv_single_simd8_disabled() -> bool {
++    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMD8)
++}
++
++fn metal_transposed_coop_gemv_single_simdgroups() -> usize {
++    if metal_transposed_coop_gemv_single_simd8_disabled() {
++        METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS
++    } else {
++        METAL_TRANSPOSED_COOP_GEMV_SINGLE_SIMDGROUPS
++    }
++}
++
+ fn metal_transposed_coop_gemv_row_pair_disabled() -> bool {
+     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR)
+ }
+@@ -1028,6 +1043,7 @@ fn metal_transposed_coop_gemv_select_tile(
+     let default_tile = metal_transposed_coop_gemv_default_tile();
+     if default_tile == MetalTransposedCoopGemvTile::Tile8
+         && !metal_transposed_coop_gemv_tile16_disabled()
++        && metal_transposed_coop_gemv_single_simd8_disabled()
+         // Qwen3.5-4B MLP down projection. The wider tile regressed smaller
+         // attention-output GEMVs, so keep the selector shape-specific.
+         && input_dim == 9216
+@@ -2895,11 +2911,12 @@ kernel void kiln_transposed_coop_gemv4_bf16(
+     device bfloat* out [[buffer(2)]],
+     constant uint& input_dim [[buffer(3)]],
+     constant uint& output_dim [[buffer(4)]],
++    constant uint& simdgroups [[buffer(5)]],
+     uint tgroup [[threadgroup_position_in_grid]],
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 4;
++    const uint col_base = (tgroup * simdgroups + simd_group) * 4;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -2960,11 +2977,12 @@ kernel void kiln_transposed_coop_gemv8_bf16(
+     device bfloat* out [[buffer(2)]],
+     constant uint& input_dim [[buffer(3)]],
+     constant uint& output_dim [[buffer(4)]],
++    constant uint& simdgroups [[buffer(5)]],
+     uint tgroup [[threadgroup_position_in_grid]],
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 8;
++    const uint col_base = (tgroup * simdgroups + simd_group) * 8;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -3062,11 +3080,12 @@ kernel void kiln_transposed_coop_gemv16_bf16(
+     device bfloat* out [[buffer(2)]],
+     constant uint& input_dim [[buffer(3)]],
+     constant uint& output_dim [[buffer(4)]],
++    constant uint& simdgroups [[buffer(5)]],
+     uint tgroup [[threadgroup_position_in_grid]],
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+ ) {
+-    const uint col_base = (tgroup * 4 + simd_group) * 16;
++    const uint col_base = (tgroup * simdgroups + simd_group) * 16;
+     if (col_base >= output_dim) {
+         return;
+     }
+@@ -6968,17 +6987,20 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
+ 
+         let input_dim_u32 = input_dim as u32;
+         let output_dim_u32 = output_dim as u32;
++        let simdgroups = metal_transposed_coop_gemv_single_simdgroups();
++        let simdgroups_u32 = simdgroups as u32;
+         encoder.set_bytes(3, &input_dim_u32);
+         encoder.set_bytes(4, &output_dim_u32);
++        encoder.set_bytes(5, &simdgroups_u32);
+ 
+-        let cols_per_threadgroup = tile.tile_cols() * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
++        let cols_per_threadgroup = tile.tile_cols() * simdgroups;
+         let threadgroups_per_grid = objc2_metal::MTLSize {
+             width: output_dim.div_ceil(cols_per_threadgroup),
+             height: 1,
+             depth: 1,
+         };
+         let threads_per_threadgroup = objc2_metal::MTLSize {
+-            width: METAL_TRANSPOSED_COOP_GEMV_THREADS,
++            width: 32 * simdgroups,
+             height: 1,
+             depth: 1,
+         };
+@@ -13938,7 +13960,7 @@ mod tests {
+              tile4_max_abs_diff={tile4_max:.6e} tile4_mean_abs_diff={tile4_mean:.6e} \
+              tile8_max_abs_diff={tile8_max:.6e} tile8_mean_abs_diff={tile8_mean:.6e} \
+              tile16_max_abs_diff={tile16_max:.6e} tile16_mean_abs_diff={tile16_mean:.6e}",
+-            METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS,
++            metal_transposed_coop_gemv_single_simdgroups(),
+             tile4_us / tile8_us,
+             tile8_us / tile16_us,
+             broadcast_us / tile4_us,
