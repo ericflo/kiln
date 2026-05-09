@@ -1,0 +1,48 @@
+{
+  "elapsed_s": 4.53154104098212,
+  "statuses": [
+    200,
+    200,
+    200,
+    200
+  ],
+  "generated_token_events_total": 20,
+  "results": [
+    {
+      "index": 0,
+      "topic": "alpha",
+      "status": 200,
+      "elapsed_s": 4.5294588330434635,
+      "bytes": 961,
+      "generated_token_events": 5,
+      "error": null
+    },
+    {
+      "index": 1,
+      "topic": "beta",
+      "status": 200,
+      "elapsed_s": 4.187902500038035,
+      "bytes": 971,
+      "generated_token_events": 5,
+      "error": null
+    },
+    {
+      "index": 2,
+      "topic": "gamma",
+      "status": 200,
+      "elapsed_s": 4.52923008298967,
+      "bytes": 961,
+      "generated_token_events": 5,
+      "error": null
+    },
+    {
+      "index": 3,
+      "topic": "delta",
+      "status": 200,
+      "elapsed_s": 4.528871541959234,
+      "bytes": 961,
+      "generated_token_events": 5,
+      "error": null
+    }
+  ]
+}

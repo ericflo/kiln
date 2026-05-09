@@ -19706,3 +19706,80 @@ Validation:
 Accepted. Batch-3 GDN in-proj row-pair is correct, strongly improves the
 targeted synthetic shape, and improves a live batch-3 shape-isolation endpoint
 run. Roll back with `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` if needed.
+
+## E463 - Post-E462 Four-Stream All-Stage Live Profile
+
+### Hypothesis
+
+After E462 accepted batch-3 row-pair grouping for Metal GDN in-proj, capture a
+fresh four-stream all-stage profile for the same max-batch-3 live shape used in
+E460. This should show whether the GDN in-proj hotspot moved and what remains
+at the top of the live profile.
+
+### Procedure
+
+Rebuilt the release Metal server and ran four concurrent streaming chat
+requests with `max_tokens=3`, `temperature=0`, the decode batcher enabled, and
+MLP/GDN/full-attention stage profiling enabled. The server reached the target
+shape: `8` submitted decode jobs, `4` worker batches, `8` decode rows, and
+`max_observed_batch=3`.
+
+### Results
+
+The clean profile run completed with four HTTP `200` responses:
+
+| metric | value |
+| --- | ---: |
+| elapsed | `4.531541 s` |
+| stream token events | `20` |
+| server generated tokens | `12` |
+| submitted decode jobs | `8` |
+| worker batches | `4` |
+| decode rows | `8` |
+| max observed batch | `3` |
+
+Filtered decode rows (`seq_len=1`, excluding prewarm `start_pos=64`) totaled:
+
+| subsystem | E460 post-E458 | E463 post-E462 | delta |
+| --- | ---: | ---: | ---: |
+| MLP | `573.102 ms` | `569.124 ms` | `-3.978 ms` |
+| GDN | `441.251 ms` | `405.952 ms` | `-35.299 ms` |
+| full attention | `158.302 ms` | `147.435 ms` | `-10.867 ms` |
+
+Top filtered stages after E462:
+
+| stage | total | count | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `344.922 ms` | `128` | `2.695 ms` |
+| `mlp:down_proj` | `224.202 ms` | `128` | `1.752 ms` |
+| `gdn:in_proj` | `217.244 ms` | `96` | `2.263 ms` |
+| `gdn:out_proj` | `91.655 ms` | `96` | `0.955 ms` |
+| `gdn:qkv_conv_norm` | `58.466 ms` | `96` | `0.609 ms` |
+| `gdn:gates_recur_gated_norm` | `38.393 ms` | `96` | `0.400 ms` |
+
+Compared with E460, the profiled GDN total dropped by `35.299 ms` and
+`gdn:in_proj` dropped from `245.389 ms` to `217.244 ms`. Wall time also
+improved from `5.990943 s` to `4.531541 s`, but this is retained as a profile
+checkpoint rather than a wall-time A/B because profiler-enabled live runs are
+machine-noise sensitive.
+
+The remaining top candidates are `mlp:gate_up_fused`, `mlp:down_proj`, and
+`gdn:in_proj`. E461 already rejected lowering MLP gate/up row-quad below rows
+`>=5`, and E455 already rejected lowering GDN in-proj row-quad below batch
+`8`, so the next useful work should avoid repeating those threshold probes.
+
+### Artifacts
+
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_profile_build.log`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_health.json`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_request_*.json`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_response_*.sse`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_time.json`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_metrics.prom`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_server.log`
+- `e463_post_gdn_in_proj_rowpair_ge3_live_batch4_all_profile_summary.txt`
+
+### Decision
+
+Accepted as a no-source-change profile checkpoint. Use this as the post-E462
+max-batch-3 live hotspot map.

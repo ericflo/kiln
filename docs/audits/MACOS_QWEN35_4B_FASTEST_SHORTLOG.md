@@ -2157,3 +2157,15 @@
   row-pair-disabled `1.891 s`, both `9` server tokens and `6` submitted jobs.
   Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
   missing `nvcc`.
+- 2026-05-09 E463: Captured the post-E462 four-stream all-stage live batch
+  profile for the max-batch-3 shape. No source change. The run completed in
+  `4.532 s`, returned four HTTP `200` responses, generated `12` server tokens,
+  submitted `8` decode-batcher jobs, ran `4` worker batches, processed `8`
+  decode rows, and reached `max_observed_batch=3`. Filtered decode rows
+  (`seq_len=1`, excluding prewarm `start_pos=64`) totaled MLP `569.124 ms`,
+  GDN `405.952 ms`, and full attention `147.435 ms`. Compared with E460,
+  profiled GDN fell from `441.251 ms` to `405.952 ms`, and `gdn:in_proj` fell
+  from `245.389 ms` to `217.244 ms`. Hottest remaining stages are
+  `mlp:gate_up_fused` `344.922 ms`, `mlp:down_proj` `224.202 ms`,
+  `gdn:in_proj` `217.244 ms`, and `gdn:out_proj` `91.655 ms`; use this as the
+  post-E462 batch-3 live hotspot map.
