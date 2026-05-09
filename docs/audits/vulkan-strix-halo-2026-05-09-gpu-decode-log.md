@@ -838,6 +838,46 @@ Verdict:
   projection dispatches. A standalone two-stage delta backend is not the right
   next step.
 
+### 2026-05-09 A020: Reject Vulkan Batched GDN In-Projection 32x8 Tile
+
+Hypothesis:
+- The current batched GDN input-projection shader uses an unusual
+  `local_size_x = 80, local_size_y = 3` tile. Recent profiles show GDN
+  `in_proj` remains a top decode hotspot, and CUDA/Metal work elsewhere points
+  toward regular tiles and better occupancy. A `32x8` tile might improve memory
+  access and reduction balance for batched decode.
+
+Experiment:
+- Temporarily changed
+  `crates/kiln-vulkan-kernel/csrc/shaders/gdn_in_proj_decode_batched.comp`
+  from `80x3` to `32x8`.
+- Updated the two matching Vulkan dispatch group counts in
+  `crates/kiln-vulkan-kernel/src/kernels.rs` from `div_ceil(80)` to
+  `div_ceil(32)`.
+- Restored both files after measurement.
+
+Evidence:
+- Focused parity passed:
+  `cargo test -p kiln-vulkan-kernel gdn_in_proj_decode_batched_matches_cpu_reference --test gdn_parity -- --nocapture`.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- The 32x8 candidate server path used Vulkan on
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)` and returned HTTP 200 for the
+  sampled four-prompt batch, but measured `time_total=9.170221s` and
+  `time_total=9.119555s` for `106` prompt tokens and `48` completion tokens.
+- Same-branch rollback to the original 80x3 tile returned HTTP 200 at
+  `time_total=8.824926s` for the same `106` prompt-token /
+  `48` completion-token shape. Additional rollback samples were
+  `time_total=8.742473s` and `time_total=8.506257s` for `102` prompt tokens and
+  `48` completion tokens.
+
+Verdict:
+- Rejected and removed before commit. The `32x8` tile is correct but slower in
+  the sampled continuous-batch serving path.
+- Keep the existing `80x3` batched GDN input-projection geometry until a
+  broader GDN residency/fusion change can reduce launch and data-movement cost.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
