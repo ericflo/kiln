@@ -1735,3 +1735,11 @@
   regressed batch3/4/8 (`2777.275/3467.267/6209.917 us`), disabling row-quad
   regressed batch8 (`3782.842 us`), and disabling vector-load paths did not
   produce a robust win. Keep the current Metal MLP gate/up row policy.
+- 2026-05-09 E419: Measured the existing Metal transposed-coop GEMV
+  decode-batch row policy on the Qwen3.5 MLP down-projection shape
+  `[B,1,9216] @ [9216,2560]`; no source change. Default fused timing with
+  warmup/iters `5/20` was exact against fallback and far faster, e.g. batch8
+  fallback `331894.365 us` vs fused `2861.169 us`. Short row-policy runs showed
+  row-pair is required (`no row pair` batch2/3/4/8
+  `2101.067/2912.983/3714.633/7427.292 us`), and disabling row-quad regressed
+  batch8 (`3886.700 us`). Keep the current batch GEMV row policy.

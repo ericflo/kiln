@@ -16404,3 +16404,60 @@ Accepted as decode-batch target evidence; no source change. Row-pair mode is
 important for batch 3 and up, row-quad mode is important for batch 8, and
 disabling vector-load variants does not produce a robust win. Keep the current
 Metal MLP gate/up row policy.
+
+## 2026-05-09 - E419 measured Metal transposed-coop GEMV decode-batch row policy
+
+### Purpose
+
+Continue the batch/continuous-batching sweep on another hot decode-batch
+primitive: the Metal transposed-coop GEMV path used for BF16
+`[B,1,input_dim] @ [input_dim,output_dim]` projections. The benchmark uses the
+Qwen3.5 MLP down-projection shape `[B,1,9216] @ [9216,2560]`.
+
+### Baseline
+
+Command:
+
+`KILN_METAL_BATCH_GEMV_BENCH_WARMUP=5 KILN_METAL_BATCH_GEMV_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+| batch | fallback | fused default | speedup |
+| --- | ---: | ---: | ---: |
+| 2 | `69130.348 us` | `1289.763 us` | `53.599x` |
+| 3 | `113356.438 us` | `2006.713 us` | `56.489x` |
+| 4 | `151965.431 us` | `2062.827 us` | `73.669x` |
+| 8 | `331894.365 us` | `2861.169 us` | `116.000x` |
+
+The fused path matched the fallback exactly in this synthetic run
+(`max_abs_diff=0`).
+
+### Row-Policy Matrix
+
+Shorter confirmation runs used warmup `2`, iterations `5`, and compare only the
+`fused_tile8=` timing.
+
+| config | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: |
+| default | `1476.300 us` | `2388.083 us` | `2132.725 us` | `3051.942 us` |
+| no row quad | `1588.567 us` | `2091.275 us` | `1940.667 us` | `3886.700 us` |
+| no row pair | `2101.067 us` | `2912.983 us` | `3714.633 us` | `7427.292 us` |
+
+### Validation
+
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/forward.rs`
+
+### Artifacts
+
+- `e419_transposed_coop_batch_default.log`
+- `e419_transposed_coop_batch_default_w2_i5.log`
+- `e419_transposed_coop_batch_no_row_quad_w2_i5.log`
+- `e419_transposed_coop_batch_no_row_pair_w2_i5.log`
+- `e419_transposed_coop_batch_fmt_check.log`
+- `e419_transposed_coop_batch_source_diff_check.log`
+
+### Decision
+
+Accepted as decode-batch target evidence; no source change. Row-pair mode is
+clearly required for all tested batch sizes. Row-quad mode regresses batch 8
+when disabled, while the batch 3/4 differences in the short run are noisy and
+not worth a shape-specific policy change.
