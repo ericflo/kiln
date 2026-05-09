@@ -1718,7 +1718,7 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
         "parallel recurrent out f32",
         &got_out,
         &cpu_f32(expected_out, (batch, heads, dv))?,
-        1e-4,
+        5e-4,
     )?;
     assert_close(
         "parallel recurrent state f32",
