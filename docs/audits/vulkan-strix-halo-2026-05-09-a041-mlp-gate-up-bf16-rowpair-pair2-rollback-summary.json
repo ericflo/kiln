@@ -1,0 +1,61 @@
+{
+  "name": "pair2-rollback",
+  "ready_after_s": 13.021197366004344,
+  "wall_s": 15.632471191995137,
+  "env": {
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_DISABLE_VULKAN_BF16_PACKED_MLP_GATE_UP_BATCH_ROW_PAIR": "1"
+  },
+  "metrics_before": {
+    "jobs": 0.0,
+    "batches": 0.0,
+    "rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "jobs": 17.0,
+    "batches": 8.0,
+    "rows": 17.0,
+    "max_batch": 4.0
+  },
+  "metrics_delta": {
+    "jobs": 17.0,
+    "batches": 8.0,
+    "rows": 17.0,
+    "max_batch": 4.0
+  },
+  "results": [
+    {
+      "status": 200,
+      "elapsed_s": 14.515690294996602,
+      "finish": "stop",
+      "text": "6",
+      "reasoning_len": 0,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_s": 15.63082883899915,
+      "finish": "length",
+      "text": "11 12 13",
+      "reasoning_len": 0,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_s": 15.63099401400541,
+      "finish": "length",
+      "text": "16 17 18",
+      "reasoning_len": 0,
+      "error": null
+    },
+    {
+      "status": 200,
+      "elapsed_s": 14.515607777000696,
+      "finish": "stop",
+      "text": "13",
+      "reasoning_len": 0,
+      "error": null
+    }
+  ]
+}

@@ -1144,7 +1144,7 @@ fn mlp_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
         return Ok(());
     };
 
-    for batch in [1usize, 3usize] {
+    for batch in [1usize, 3usize, 5usize] {
         let (hidden, intermediate, out_dim) = (9usize, 7usize, 5usize);
         let x = cpu_f32(
             (0..batch * hidden)

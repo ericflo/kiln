@@ -1948,6 +1948,118 @@ Verdict:
 - GDN still matters, but A038 moved the larger-batch GDN in-proj work far
   enough that MLP is now the dominant measured live decode bucket.
 
+### 2026-05-09 A040: Reject Packed-BF16 MLP Gate/Up and Down Row-Pair for Batch >= 4
+
+Hypothesis:
+- A039 showed `mlp:fused` was the dominant live Vulkan bucket.
+- The successful A038 GDN row-pair shader suggested that adjacent live rows can
+  profitably share packed-BF16 weight loads when the decode batch reaches `4`.
+- A paired gate/up and paired down-projection MLP path gated to live batches
+  `4..7` might reduce MLP weight traffic while leaving serial, batch `2/3`,
+  and the existing F32 prefill row-pair path unchanged.
+
+Experiment:
+- Added temporary packed-BF16 row-pair shaders for MLP gate/up and MLP
+  down-projection.
+- Routed only packed-BF16 MLP live batches `4..7` through the temporary path.
+- Added a rollback env
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_BATCH_ROW_PAIR=1`.
+- Extended focused BF16 MLP parity to batch `5`, so the temporary row-pair path
+  was covered.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_BATCH_ROW_PAIR=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Same-binary endpoint A/B, four concurrent streaming prompts,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Pair 1, rollback first:
+    - Rollback disabled: `17.957298s`, `17` jobs, `8` batches, `17` rows,
+      max batch `4`.
+    - Candidate: `17.081064s`, identical counters.
+  - Pair 2, candidate first:
+    - Candidate: `20.895731s`, `17` jobs, `8` batches, `17` rows, max batch
+      `4`.
+    - Rollback disabled: `19.352085s`, identical counters.
+  - All runs returned HTTP 200, coherent visible text
+    `"6"`, `"11 12 13"`, `"16 17 18"`, and `"13"`, with reasoning length
+    `0`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a040-mlp-bf16-rowpair-*`
+
+Verdict:
+- Rejected and removed. The paired gate/up + down path was order-sensitive and
+  averaged slower than rollback across the two endpoint pairs.
+- The down-projection half was the likely risk because A036 already showed
+  packed-BF16 generic linear row-pair was not a safe direct transfer from
+  Metal.
+
+### 2026-05-09 A041: Reject Packed-BF16 MLP Gate/Up-Only Row-Pair for Batch >= 4
+
+Hypothesis:
+- If A040 was dragged down by the down-projection row-pair, keeping the existing
+  down-projection shader and only pairing MLP gate/up rows might preserve the
+  weight-load reuse benefit without the generic linear regression.
+
+Experiment:
+- Removed the temporary packed-BF16 down-projection row-pair route.
+- Kept a temporary packed-BF16 gate/up row-pair shader for live batches `4..7`.
+- Used rollback env
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_GATE_UP_BATCH_ROW_PAIR=1`.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_GATE_UP_BATCH_ROW_PAIR=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Same-binary endpoint A/B, four concurrent streaming prompts,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Pair 1, rollback first:
+    - Rollback disabled: `16.243556s`, `17` jobs, `8` batches, `17` rows,
+      max batch `4`.
+    - Candidate: `21.055432s`, identical counters.
+  - Pair 2, candidate first:
+    - Candidate: `18.424314s`, `17` jobs, `8` batches, `17` rows, max batch
+      `4`.
+    - Rollback disabled: `15.632471s`, identical counters.
+  - All runs returned HTTP 200, coherent visible text
+    `"6"`, `"11 12 13"`, `"16 17 18"`, and `"13"`, with reasoning length
+    `0`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a041-mlp-gate-up-bf16-rowpair-*`
+
+Verdict:
+- Rejected and removed. Gate/up row-pair alone was consistently slower than
+  rollback on this live-batch shape.
+- Keep the added batch-5 packed-BF16 MLP parity coverage, but do not reintroduce
+  MLP row-pair variants for live batches `4..7` without a materially different
+  tile or residency strategy.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -1956,6 +2068,9 @@ Verdict:
   dominates live `seq_len=1` work (`2635.685ms`) and total profiled time
   (`12790.460ms`), so split or optimize packed-BF16 MLP decode before spending
   more time on smaller GDN residuals.
+- Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
+  direct shader mirroring; A040 and A041 measured both full MLP row-pair and
+  gate/up-only row-pair as slower or unstable against rollback.
 - Do not set a static Vulkan live decode-batcher wait based only on env sweeps;
   A037's same-binary no-env candidate was slower even though it formed larger
   batches.
