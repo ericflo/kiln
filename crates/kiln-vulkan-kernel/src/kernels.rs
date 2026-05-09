@@ -33,15 +33,17 @@ fn finish_vulkan_mlp_kernel_stage_profile(
     hidden: usize,
     intermediate: usize,
     out_dim: usize,
-    bf16_weights: bool,
-    use_rows2: bool,
+    gate_up_bf16_weights: bool,
+    down_bf16_weights: bool,
+    gate_up_rows2: bool,
+    down_rows2: bool,
     start: Option<Instant>,
 ) {
     let Some(start) = start else {
         return;
     };
     eprintln!(
-        "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={bf16_weights} rows2={use_rows2} elapsed_ms={:.3}",
+        "kiln_profile_vulkan_mlp_kernel_stage stage={stage} batch={batch} hidden={hidden} intermediate={intermediate} out_dim={out_dim} bf16_weights={gate_up_bf16_weights} down_bf16_weights={down_bf16_weights} rows2={gate_up_rows2} down_rows2={down_rows2} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
 }
@@ -3235,6 +3237,7 @@ pub fn dispatch_mlp_decode_cached(
         intermediate,
         out_dim,
         false,
+        false,
     )
 }
 
@@ -3260,6 +3263,34 @@ pub fn dispatch_mlp_decode_cached_bf16_weights(
         intermediate,
         out_dim,
         true,
+        true,
+    )
+}
+
+/// Dispatch single-token SwiGLU MLP with packed BF16 gate/up weights and an
+/// F32 down-projection weight.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+) -> Result<Tensor> {
+    dispatch_mlp_decode_cached_impl(
+        vk_device,
+        x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        true,
+        false,
     )
 }
 
@@ -3273,7 +3304,8 @@ fn dispatch_mlp_decode_cached_impl(
     hidden: usize,
     intermediate: usize,
     out_dim: usize,
-    bf16_weights: bool,
+    gate_up_bf16_weights: bool,
+    down_bf16_weights: bool,
 ) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -3288,7 +3320,8 @@ fn dispatch_mlp_decode_cached_impl(
     );
     let batch = x_dims[0];
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
-    let use_rows2 = !bf16_weights && use_prefill_row_pair_matmul(batch);
+    let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
+    let down_rows2 = !down_bf16_weights && use_prefill_row_pair_matmul(batch);
     let total_start = profile_stages.then(Instant::now);
     let stage_start = profile_stages.then(Instant::now);
     let x_data = extract_tensor_bytes(x)?.0;
@@ -3298,8 +3331,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
     anyhow::ensure!(
@@ -3307,10 +3342,6 @@ fn dispatch_mlp_decode_cached_impl(
         "mlp_decode: x buffer has {} bytes, expected {}",
         x_data.len(),
         batch * hidden * 4
-    );
-    anyhow::ensure!(
-        !bf16_weights || !use_rows2,
-        "mlp_decode packed BF16 weights currently support batch below row-pair threshold, got {batch}"
     );
     let stage_start = profile_stages.then(Instant::now);
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
@@ -3321,8 +3352,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
     {
@@ -3343,8 +3376,10 @@ fn dispatch_mlp_decode_cached_impl(
             hidden,
             intermediate,
             out_dim,
-            bf16_weights,
-            use_rows2,
+            gate_up_bf16_weights,
+            down_bf16_weights,
+            gate_up_rows2,
+            down_rows2,
             stage_start,
         );
     }
@@ -3365,12 +3400,14 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
 
-    let gate_up_glsl = if bf16_weights {
+    let gate_up_glsl = if gate_up_bf16_weights {
         if batch == 1 {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -3387,7 +3424,7 @@ fn dispatch_mlp_decode_cached_impl(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/mlp_gate_up_decode.comp"
         )
-    } else if use_rows2 {
+    } else if gate_up_rows2 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/mlp_gate_up_decode_batched_rows2.comp"
@@ -3406,8 +3443,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
     let mut gate_up_push = vec![hidden as u32, intermediate as u32];
@@ -3429,7 +3468,7 @@ fn dispatch_mlp_decode_cached_impl(
         &gate_up_push,
         if batch == 1 {
             intermediate.div_ceil(64) as u32
-        } else if use_rows2 {
+        } else if gate_up_rows2 {
             (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
         } else {
             (batch * intermediate.div_ceil(128)) as u32
@@ -3442,12 +3481,14 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
 
-    let linear_glsl = if bf16_weights {
+    let linear_glsl = if down_bf16_weights {
         if batch == 1 {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -3464,7 +3505,7 @@ fn dispatch_mlp_decode_cached_impl(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode.comp"
         )
-    } else if use_rows2 {
+    } else if down_rows2 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode_batched_rows2.comp"
@@ -3483,8 +3524,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
     let mut linear_push = vec![intermediate as u32, out_dim as u32];
@@ -3505,7 +3548,7 @@ fn dispatch_mlp_decode_cached_impl(
         &linear_push,
         if batch == 1 {
             out_dim.div_ceil(16) as u32
-        } else if use_rows2 {
+        } else if down_rows2 {
             (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
         } else {
             (batch * out_dim.div_ceil(32)) as u32
@@ -3518,8 +3561,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
 
@@ -3540,8 +3585,10 @@ fn dispatch_mlp_decode_cached_impl(
             hidden,
             intermediate,
             out_dim,
-            bf16_weights,
-            use_rows2,
+            gate_up_bf16_weights,
+            down_bf16_weights,
+            gate_up_rows2,
+            down_rows2,
             stage_start,
         );
         out_data
@@ -3554,8 +3601,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         stage_start,
     );
     finish_vulkan_mlp_kernel_stage_profile(
@@ -3564,8 +3613,10 @@ fn dispatch_mlp_decode_cached_impl(
         hidden,
         intermediate,
         out_dim,
-        bf16_weights,
-        use_rows2,
+        gate_up_bf16_weights,
+        down_bf16_weights,
+        gate_up_rows2,
+        down_rows2,
         total_start,
     );
     out

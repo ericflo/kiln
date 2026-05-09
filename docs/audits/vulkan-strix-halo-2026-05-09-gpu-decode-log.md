@@ -4224,6 +4224,115 @@ Verdict:
   rejected; A079 uses the existing batched BF16 shaders for large batches.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A080: Hybrid Large-Batch MLP BF16 Gate/Up With F32 Row-Pair Down
+
+Goal:
+- A079 improved large-batch MLP prefill by moving gate/up/down weights to the
+  existing packed-BF16 batched shaders, but the down projection regressed from
+  A078's F32 row-pair down path.
+- Keep the A079 packed-BF16 gate/up bandwidth win while routing only the down
+  projection back through the cached F32 row-pair shader for large batches.
+
+Change:
+- Added `dispatch_mlp_decode_cached_bf16_gate_up_f32_down`, which passes
+  packed-BF16 gate/up buffers and the cached F32 down buffer to the shared MLP
+  dispatcher.
+- Split MLP profile flags into gate/up and down booleans:
+  `bf16_weights`, `down_bf16_weights`, `rows2`, and `down_rows2`.
+- Vulkan backend now selects the hybrid path for `row_count >= 8` when packed
+  BF16 MLP weights are available.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN=1`
+- CUDA and Metal source paths are untouched.
+
+Same-binary rollback-env A/B:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 81 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN=1`
+  - prefill `1470.046758ms`
+  - mean ITL `87.12934975ms`
+  - p99 ITL `87.890651ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-candidate.log`
+  - prefill `1384.762731ms`
+  - mean ITL `86.617229125ms`
+  - p99 ITL `87.867494ms`
+  - same token IDs
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-candidate-profile.log`
+- Candidate profile latency:
+  - prefill `1439.585065ms`
+  - mean ITL `89.3816515ms`
+  - p99 ITL `91.001386ms`
+  - same token IDs
+- Profile flags for `batch=64`:
+  `bf16_weights=true down_bf16_weights=false rows2=false down_rows2=true`
+- A079 measured-pass MLP `batch=64`:
+  - total `678.129ms`
+  - `gate_up_dispatch` `426.340ms`
+  - `down_dispatch` `234.627ms`
+  - `readback` `6.541ms`
+  - `bf16_weights=true rows2=false`
+- A080 measured-pass MLP `batch=64`:
+  - total `558.304ms`
+  - `gate_up_dispatch` `413.934ms`
+  - `down_dispatch` `127.721ms`
+  - `readback` `6.615ms`
+  - `bf16_weights=true down_bf16_weights=false rows2=false down_rows2=true`
+- The net MLP `batch=64` inner total improved by `119.825ms`, mostly by
+  restoring the down projection to the faster F32 row-pair path.
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18425 ./target/release/kiln serve`
+- Server log showed Vulkan backend selection on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a080-mlp-bf16-gateup-f32-down-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. Same-binary rollback-env evidence preserved token IDs and improved
+  prefill, and the profile shows the expected recovery of the down projection.
+- This preserves A079's packed-BF16 gate/up win while avoiding A079's packed
+  BF16 down-projection regression for large prefill batches.
+- The single-token decode path remains on the all-BF16 MLP route; the hybrid is
+  only selected for `row_count >= 8`.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4293,6 +4402,10 @@ Verdict:
   non-row-pair BF16 shaders. It improves the measured `batch=64` MLP inner
   total from A078 `812.985ms` to `678.129ms`; do not revive the rejected A029
   BF16 row-pair shader without a new hypothesis.
+- A080 hybridizes large-batch MLP by keeping A079's BF16 gate/up path while
+  restoring down projection to cached F32 row-pair. Measured `batch=64` MLP
+  inner total is now `558.304ms`; the remaining MLP prefill target is mostly
+  gate/up dispatch (`413.934ms` across 32 layers), not down dispatch.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

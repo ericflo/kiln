@@ -42,6 +42,7 @@ pub struct VulkanBackend {
     paged_attn_decode_batch_enabled: bool,
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
+    mlp_bf16_gate_up_f32_down_enabled: bool,
     bf16_packed_linear_weights_enabled: bool,
     bf16_packed_gdn_in_proj_weights_enabled: bool,
     bf16_packed_full_attn_qkv_weights_enabled: bool,
@@ -148,6 +149,8 @@ impl VulkanBackend {
         let mlp_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_MLP_DECODE").is_err();
         let bf16_packed_mlp_decode_weights_enabled = mlp_decode_enabled
             && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS").is_err();
+        let mlp_bf16_gate_up_f32_down_enabled = bf16_packed_mlp_decode_weights_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN").is_err();
         // The fused Vulkan MLP gate/up shader is validated, but on Strix Halo
         // it was slower than the generic cached GEMV path in short decode
         // benchmarks. Keep it opt-in until it is tiled/tuned.
@@ -198,6 +201,7 @@ impl VulkanBackend {
             paged_attn_decode_batch_enabled,
             mlp_decode_enabled,
             mlp_gate_up_enabled,
+            mlp_bf16_gate_up_f32_down_enabled,
             bf16_packed_linear_weights_enabled,
             bf16_packed_gdn_in_proj_weights_enabled,
             bf16_packed_full_attn_qkv_weights_enabled,
@@ -1470,40 +1474,53 @@ impl BackendRuntime for VulkanBackend {
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let out = if self.use_bf16_packed_mlp_decode_weights(&[
-            gate_weight_t,
-            up_weight_t,
-            down_weight_t,
-        ]) {
-            let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
-            let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
-            let down_buf = self.cached_bf16_packed_weight_buffer(down_weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
-                vk_device,
-                &dispatch_x,
-                &gate_buf,
-                &up_buf,
-                &down_buf,
-                hidden,
-                intermediate,
-                out_dim,
-            )
-        } else {
-            let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
-            let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
-            let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
-                vk_device,
-                &dispatch_x,
-                &gate_buf,
-                &up_buf,
-                &down_buf,
-                hidden,
-                intermediate,
-                out_dim,
-            )
-        }
-        .context("mlp_decode kernel failed")?;
+        let use_bf16_mlp_weights =
+            self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t]);
+        let out =
+            if row_count >= 8 && self.mlp_bf16_gate_up_f32_down_enabled && use_bf16_mlp_weights {
+                let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
+                let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
+                let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
+                    vk_device,
+                    &dispatch_x,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
+                )
+            } else if use_bf16_mlp_weights {
+                let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
+                let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
+                let down_buf = self.cached_bf16_packed_weight_buffer(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+                    vk_device,
+                    &dispatch_x,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
+                )
+            } else {
+                let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
+                let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
+                let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
+                    vk_device,
+                    &dispatch_x,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    hidden,
+                    intermediate,
+                    out_dim,
+                )
+            }
+            .context("mlp_decode kernel failed")?;
         let out = if seq_len == 1 {
             out
         } else {
