@@ -1,0 +1,95 @@
+A033 current Vulkan post-GDN profile
+profile_filter: excluded prewarm seq_len=64 and seq_len=1 start_pos=64 profile rows
+profile_lines_live_after_filter: 2544
+profile_lines_skipped_as_prewarm: 656
+wall_s: 5.470081
+response 0: status=200 elapsed_s=5.231871 visible='6 7' reasoning_len=0
+response 1: status=200 elapsed_s=5.467009 visible='11 ' reasoning_len=0
+response 2: status=200 elapsed_s=5.466344 visible='16 ' reasoning_len=0
+response 3: status=200 elapsed_s=5.465577 visible='thirteen' reasoning_len=0
+
+decode batcher metrics:
+kiln_decode_batcher_jobs_total{result="submitted"}: before=0.0 after=8.0 delta=8.0
+kiln_decode_batcher_batches_total: before=0.0 after=4.0 delta=4.0
+kiln_decode_batcher_rows_total: before=0.0 after=8.0 delta=8.0
+kiln_decode_batcher_max_observed_batch: before=0.0 after=3.0 delta=3.0
+
+kind totals ms:
+full_attn: 1931.328
+gdn: 11274.449
+mlp: 5203.672
+
+seq/kind totals ms:
+full_attn:seq1: 67.054
+full_attn:seq32: 468.581
+full_attn:seq34: 574.421
+full_attn:seq43: 426.353
+full_attn:seq58: 394.919
+gdn:seq1: 560.806
+gdn:seq32: 2666.262
+gdn:seq34: 2675.252
+gdn:seq43: 2639.561
+gdn:seq58: 2732.568
+mlp:seq1: 198.206
+mlp:seq32: 1100.643
+mlp:seq34: 1189.872
+mlp:seq43: 1296.692
+mlp:seq58: 1418.259
+
+top live stages:
+mlp:fused seq=58 total=1418.259 count=32 mean=44.321
+mlp:fused seq=43 total=1296.692 count=32 mean=40.522
+mlp:fused seq=34 total=1189.872 count=32 mean=37.184
+mlp:fused seq=32 total=1100.643 count=32 mean=34.395
+gdn:in_proj seq=34 total=889.258 count=24 mean=37.052
+gdn:gated_norm seq=32 total=824.746 count=24 mean=34.364
+gdn:in_proj seq=58 total=743.968 count=24 mean=30.999
+gdn:in_proj seq=43 total=695.298 count=24 mean=28.971
+gdn:gated_norm seq=43 total=650.45 count=24 mean=27.102
+gdn:in_proj seq=32 total=600.259 count=24 mean=25.011
+gdn:gated_norm seq=34 total=593.899 count=24 mean=24.746
+gdn:gated_norm seq=58 total=591.771 count=24 mean=24.657
+full_attn:qkv_proj seq=34 total=563.567 count=8 mean=70.446
+gdn:gates seq=32 total=544.982 count=24 mean=22.708
+gdn:gates seq=34 total=514.091 count=24 mean=21.42
+gdn:out_proj seq=58 total=503.969 count=24 mean=20.999
+gdn:gates seq=43 total=500.934 count=24 mean=20.872
+gdn:out_proj seq=32 total=494.645 count=24 mean=20.61
+gdn:gates seq=58 total=491.975 count=24 mean=20.499
+full_attn:qkv_proj seq=32 total=458.875 count=8 mean=57.359
+gdn:out_proj seq=34 total=444.37 count=24 mean=18.515
+gdn:out_proj seq=43 total=441.084 count=24 mean=18.378
+full_attn:qkv_proj seq=43 total=414.082 count=8 mean=51.76
+full_attn:qkv_proj seq=58 total=379.018 count=8 mean=47.377
+gdn:recurrent seq=43 total=230.442 count=24 mean=9.602
+gdn:recurrent seq=58 total=227.178 count=24 mean=9.466
+mlp:fused seq=1 total=198.206 count=128 mean=1.548
+gdn:gates seq=1 total=178.687 count=96 mean=1.861
+gdn:conv seq=58 total=150.084 count=24 mean=6.253
+gdn:recurrent seq=34 total=130.352 count=24 mean=5.431
+
+top seq_len=1 stages:
+mlp:fused total=198.206 count=128 mean=1.548
+gdn:gates total=178.687 count=96 mean=1.861
+gdn:recurrent total=120.919 count=96 mean=1.26
+gdn:in_proj total=117.978 count=96 mean=1.229
+gdn:gated_norm total=72.004 count=96 mean=0.75
+gdn:out_proj total=50.574 count=96 mean=0.527
+full_attn:qkv_proj_batch total=24.097 count=16 mean=1.506
+gdn:conv total=18.344 count=96 mean=0.191
+full_attn:decode_attn_contiguous_batch total=14.86 count=16 mean=0.929
+full_attn:qkv_proj total=9.759 count=16 mean=0.61
+full_attn:o_proj_batch total=8.478 count=16 mean=0.53
+full_attn:o_proj total=4.749 count=16 mean=0.297
+gdn:qk_norm total=2.094 count=96 mean=0.022
+full_attn:decode_scores total=1.132 count=16 mean=0.071
+full_attn:rope_batch total=1.104 count=16 mean=0.069
+full_attn:qk_norm_batch total=0.558 count=16 mean=0.035
+full_attn:rope total=0.374 count=16 mean=0.023
+full_attn:attn_gate_batch total=0.367 count=16 mean=0.023
+full_attn:kv_read total=0.301 count=16 mean=0.019
+full_attn:kv_write_batch total=0.258 count=16 mean=0.016
+full_attn:qk_norm total=0.243 count=16 mean=0.015
+full_attn:decode_weighted_sum total=0.22 count=16 mean=0.014
+gdn:qkv_split total=0.187 count=96 mean=0.002
+full_attn:kv_write total=0.123 count=16 mean=0.008

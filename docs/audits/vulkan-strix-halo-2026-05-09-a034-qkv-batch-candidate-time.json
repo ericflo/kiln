@@ -1,0 +1,37 @@
+{
+  "results": [
+    {
+      "bytes": 956,
+      "elapsed_s": 9.610363539999526,
+      "index": 0,
+      "reasoning_text": "",
+      "status": 200,
+      "visible_text": "6 7"
+    },
+    {
+      "bytes": 956,
+      "elapsed_s": 9.845044199002587,
+      "index": 1,
+      "reasoning_text": "",
+      "status": 200,
+      "visible_text": "11 "
+    },
+    {
+      "bytes": 956,
+      "elapsed_s": 9.852955558999383,
+      "index": 2,
+      "reasoning_text": "",
+      "status": 200,
+      "visible_text": "16 "
+    },
+    {
+      "bytes": 775,
+      "elapsed_s": 9.844786276000377,
+      "index": 3,
+      "reasoning_text": "",
+      "status": 200,
+      "visible_text": "thirteen"
+    }
+  ],
+  "wall_s": 9.856213012000808
+}

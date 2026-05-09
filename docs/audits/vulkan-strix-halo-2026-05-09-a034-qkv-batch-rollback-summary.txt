@@ -1,0 +1,11 @@
+vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback
+wall_s: 5.490338
+response 0: status=200 elapsed_s=5.243188 visible='6 7' reasoning_len=0
+response 1: status=200 elapsed_s=5.486942 visible='11 ' reasoning_len=0
+response 2: status=200 elapsed_s=5.482627 visible='16 ' reasoning_len=0
+response 3: status=200 elapsed_s=5.482422 visible='thirteen' reasoning_len=0
+decode batcher metrics:
+kiln_decode_batcher_jobs_total{result="submitted"}: before=0.0 after=8.0 delta=8.0
+kiln_decode_batcher_batches_total: before=0.0 after=4.0 delta=4.0
+kiln_decode_batcher_rows_total: before=0.0 after=8.0 delta=8.0
+kiln_decode_batcher_max_observed_batch: before=0.0 after=3.0 delta=3.0

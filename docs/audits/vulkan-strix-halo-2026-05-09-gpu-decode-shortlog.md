@@ -43,6 +43,32 @@ before or with each accepted change and each measured rejection.
 | A030 | Enable mixed-sequence live decode batching by default for Vulkan. | Pre-change streaming A/B showed mixed-seq grouping reduces default-wait live-batcher fragmentation (`12.921s`, `38` batches, max batch `3`) versus disabled (`13.470s`, `69` one-row batches), with a larger wait-50ms win (`12.444s` vs `17.034s`). Post-change no-env Vulkan server logged `mixed_seq_lens=true` and returned four correct visible streams in `13.365s`, `68` rows, `38` batches, max batch `3`. Focused policy test, `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, and release Vulkan build passed. | Keep; backend-aware default only, CPU/CUDA remain off by default, Metal default preserved. Rollback via `KILN_DECODE_BATCH_MIXED_SEQ=0`. |
 | A031 | Trial Vulkan actor mixed-sequence greedy rows through the contiguous-batch argmax path. | Temporary Vulkan-only gate relaxation passed `cargo check -p kiln-model --features vulkan` and release Vulkan build. Current-main actor baseline was `14.299s` for four varied-length greedy non-streaming requests. Candidate returned correct visible text but regressed to `19.584s`; same-binary rollback with `KILN_DISABLE_VULKAN_ACTOR_MIXED_SEQ_GREEDY_BATCH=1` and the exact candidate prompts returned `13.871s`. | Rejected and removed; admission-gate-only routing to dyn-seqlen actor argmax is slower than the existing hidden/logits fallback. |
 | A032 | Pair adjacent QKV and Z columns in batched Vulkan GDN input projection. | Added F32 and packed-BF16 paired batched shaders inspired by recent Metal column-pairing work. Focused GDN in-proj parity, full Vulkan GDN parity (`28 passed`), `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, release Vulkan build, and `git diff --check` passed. Four varied-length live streams returned HTTP 200 with non-empty visible text and empty reasoning text. Endpoint A/B improved candidate `13.076s` vs rollback `15.680s` with identical `68` rows / `38` batches / max batch `3`; second pair was candidate `13.735s` vs rollback `14.000s`. | Keep; Vulkan-only batched GDN in-proj win, batch `1` unchanged, CUDA/Metal sources untouched. Rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`. |
+| A033 | Profile current Vulkan live path after A032. | Profiled four varied prompt-length streams with `max_tokens=3` and thinking disabled. All streams returned HTTP 200 with visible text and empty reasoning text. Filtered live totals, excluding prewarm rows: MLP `5203.672 ms`, GDN `11274.449 ms`, full-attention `1931.328 ms`. Top decode-only `seq_len=1` stages were `mlp:fused` `198.206 ms`, `gdn:gates` `178.687 ms`, `gdn:recurrent` `120.919 ms`, and `gdn:in_proj` `117.978 ms`. | Keep as target-selection evidence; no source change. |
+| A034 | Trial flattened batched Vulkan full-attention QKV fusion for prefill rows. | Temporary F32 and packed-BF16 batched QKV shaders passed focused parity and full Vulkan parity (`30 passed`), plus `cargo check -p kiln-model --features vulkan`, `cargo check -p kiln-server --features vulkan`, release Vulkan build, and `git diff --check`. Candidate returned correct visible text but regressed to `9.856s`; same-binary rollback was `5.490s` with the same `8` jobs / `4` batches / `8` rows / max batch `3`. | Rejected and removed; do not retry by only flattening rows into a fused Q/K/V dispatch. |
+
+Additional validation after rejected A034:
+
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate passed
+  `cargo test -p kiln-vulkan-kernel full_attn_qkv_decode --test gdn_parity -- --nocapture`
+  with `4` tests.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  with `30` tests.
+- Temporary candidate passed `cargo check -p kiln-server --features vulkan`.
+- Temporary candidate passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate and rollback server runs returned HTTP 200 with non-empty visible
+  content and empty reasoning text.
+- Source change was removed after rollback beat candidate.
+
+Additional validation after A033:
+
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- Profiled no-env Vulkan server run with four concurrent different-length
+  prompts, `stream=true`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
 
 Additional validation after A032:
 

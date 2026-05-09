@@ -1,0 +1,526 @@
+{
+  "decode_batcher_metrics": [
+    {
+      "after": 8.0,
+      "before": 0.0,
+      "delta": 8.0,
+      "metric": "kiln_decode_batcher_jobs_total{result=\"submitted\"}"
+    },
+    {
+      "after": 4.0,
+      "before": 0.0,
+      "delta": 4.0,
+      "metric": "kiln_decode_batcher_batches_total"
+    },
+    {
+      "after": 8.0,
+      "before": 0.0,
+      "delta": 8.0,
+      "metric": "kiln_decode_batcher_rows_total"
+    },
+    {
+      "after": 3.0,
+      "before": 0.0,
+      "delta": 3.0,
+      "metric": "kiln_decode_batcher_max_observed_batch"
+    }
+  ],
+  "kind_totals_ms": {
+    "full_attn": 1931.328,
+    "gdn": 11274.449,
+    "mlp": 5203.672
+  },
+  "profile_filter": "excluded prewarm seq_len=64 and seq_len=1 start_pos=64 profile rows",
+  "profile_lines_live_after_filter": 2544,
+  "profile_lines_skipped_as_prewarm": 656,
+  "seq_kind_totals_ms": {
+    "full_attn:seq1": 67.054,
+    "full_attn:seq32": 468.581,
+    "full_attn:seq34": 574.421,
+    "full_attn:seq43": 426.353,
+    "full_attn:seq58": 394.919,
+    "gdn:seq1": 560.806,
+    "gdn:seq32": 2666.262,
+    "gdn:seq34": 2675.252,
+    "gdn:seq43": 2639.561,
+    "gdn:seq58": 2732.568,
+    "mlp:seq1": 198.206,
+    "mlp:seq32": 1100.643,
+    "mlp:seq34": 1189.872,
+    "mlp:seq43": 1296.692,
+    "mlp:seq58": 1418.259
+  },
+  "time": {
+    "results": [
+      {
+        "bytes": 956,
+        "elapsed_s": 5.231871320000209,
+        "index": 0,
+        "reasoning_text": "",
+        "status": 200,
+        "visible_text": "6 7"
+      },
+      {
+        "bytes": 956,
+        "elapsed_s": 5.467008681000152,
+        "index": 1,
+        "reasoning_text": "",
+        "status": 200,
+        "visible_text": "11 "
+      },
+      {
+        "bytes": 956,
+        "elapsed_s": 5.466343545002019,
+        "index": 2,
+        "reasoning_text": "",
+        "status": 200,
+        "visible_text": "16 "
+      },
+      {
+        "bytes": 775,
+        "elapsed_s": 5.465577471997676,
+        "index": 3,
+        "reasoning_text": "",
+        "status": 200,
+        "visible_text": "thirteen"
+      }
+    ],
+    "wall_s": 5.470081164003204
+  },
+  "top_live_stages": [
+    {
+      "count": 32,
+      "kind": "mlp",
+      "mean_ms": 44.321,
+      "seq_len": 58,
+      "stage": "fused",
+      "total_ms": 1418.259
+    },
+    {
+      "count": 32,
+      "kind": "mlp",
+      "mean_ms": 40.522,
+      "seq_len": 43,
+      "stage": "fused",
+      "total_ms": 1296.692
+    },
+    {
+      "count": 32,
+      "kind": "mlp",
+      "mean_ms": 37.184,
+      "seq_len": 34,
+      "stage": "fused",
+      "total_ms": 1189.872
+    },
+    {
+      "count": 32,
+      "kind": "mlp",
+      "mean_ms": 34.395,
+      "seq_len": 32,
+      "stage": "fused",
+      "total_ms": 1100.643
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 37.052,
+      "seq_len": 34,
+      "stage": "in_proj",
+      "total_ms": 889.258
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 34.364,
+      "seq_len": 32,
+      "stage": "gated_norm",
+      "total_ms": 824.746
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 30.999,
+      "seq_len": 58,
+      "stage": "in_proj",
+      "total_ms": 743.968
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 28.971,
+      "seq_len": 43,
+      "stage": "in_proj",
+      "total_ms": 695.298
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 27.102,
+      "seq_len": 43,
+      "stage": "gated_norm",
+      "total_ms": 650.45
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 25.011,
+      "seq_len": 32,
+      "stage": "in_proj",
+      "total_ms": 600.259
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 24.746,
+      "seq_len": 34,
+      "stage": "gated_norm",
+      "total_ms": 593.899
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 24.657,
+      "seq_len": 58,
+      "stage": "gated_norm",
+      "total_ms": 591.771
+    },
+    {
+      "count": 8,
+      "kind": "full_attn",
+      "mean_ms": 70.446,
+      "seq_len": 34,
+      "stage": "qkv_proj",
+      "total_ms": 563.567
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 22.708,
+      "seq_len": 32,
+      "stage": "gates",
+      "total_ms": 544.982
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 21.42,
+      "seq_len": 34,
+      "stage": "gates",
+      "total_ms": 514.091
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 20.999,
+      "seq_len": 58,
+      "stage": "out_proj",
+      "total_ms": 503.969
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 20.872,
+      "seq_len": 43,
+      "stage": "gates",
+      "total_ms": 500.934
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 20.61,
+      "seq_len": 32,
+      "stage": "out_proj",
+      "total_ms": 494.645
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 20.499,
+      "seq_len": 58,
+      "stage": "gates",
+      "total_ms": 491.975
+    },
+    {
+      "count": 8,
+      "kind": "full_attn",
+      "mean_ms": 57.359,
+      "seq_len": 32,
+      "stage": "qkv_proj",
+      "total_ms": 458.875
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 18.515,
+      "seq_len": 34,
+      "stage": "out_proj",
+      "total_ms": 444.37
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 18.378,
+      "seq_len": 43,
+      "stage": "out_proj",
+      "total_ms": 441.084
+    },
+    {
+      "count": 8,
+      "kind": "full_attn",
+      "mean_ms": 51.76,
+      "seq_len": 43,
+      "stage": "qkv_proj",
+      "total_ms": 414.082
+    },
+    {
+      "count": 8,
+      "kind": "full_attn",
+      "mean_ms": 47.377,
+      "seq_len": 58,
+      "stage": "qkv_proj",
+      "total_ms": 379.018
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 9.602,
+      "seq_len": 43,
+      "stage": "recurrent",
+      "total_ms": 230.442
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 9.466,
+      "seq_len": 58,
+      "stage": "recurrent",
+      "total_ms": 227.178
+    },
+    {
+      "count": 128,
+      "kind": "mlp",
+      "mean_ms": 1.548,
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 198.206
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 1.861,
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 178.687
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 6.253,
+      "seq_len": 58,
+      "stage": "conv",
+      "total_ms": 150.084
+    },
+    {
+      "count": 24,
+      "kind": "gdn",
+      "mean_ms": 5.431,
+      "seq_len": 34,
+      "stage": "recurrent",
+      "total_ms": 130.352
+    }
+  ],
+  "top_seq1_stages": [
+    {
+      "count": 128,
+      "kind": "mlp",
+      "mean_ms": 1.548,
+      "seq_len": 1,
+      "stage": "fused",
+      "total_ms": 198.206
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 1.861,
+      "seq_len": 1,
+      "stage": "gates",
+      "total_ms": 178.687
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 1.26,
+      "seq_len": 1,
+      "stage": "recurrent",
+      "total_ms": 120.919
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 1.229,
+      "seq_len": 1,
+      "stage": "in_proj",
+      "total_ms": 117.978
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 0.75,
+      "seq_len": 1,
+      "stage": "gated_norm",
+      "total_ms": 72.004
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 0.527,
+      "seq_len": 1,
+      "stage": "out_proj",
+      "total_ms": 50.574
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 1.506,
+      "seq_len": 1,
+      "stage": "qkv_proj_batch",
+      "total_ms": 24.097
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 0.191,
+      "seq_len": 1,
+      "stage": "conv",
+      "total_ms": 18.344
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.929,
+      "seq_len": 1,
+      "stage": "decode_attn_contiguous_batch",
+      "total_ms": 14.86
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.61,
+      "seq_len": 1,
+      "stage": "qkv_proj",
+      "total_ms": 9.759
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.53,
+      "seq_len": 1,
+      "stage": "o_proj_batch",
+      "total_ms": 8.478
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.297,
+      "seq_len": 1,
+      "stage": "o_proj",
+      "total_ms": 4.749
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 0.022,
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 2.094
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.071,
+      "seq_len": 1,
+      "stage": "decode_scores",
+      "total_ms": 1.132
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.069,
+      "seq_len": 1,
+      "stage": "rope_batch",
+      "total_ms": 1.104
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.035,
+      "seq_len": 1,
+      "stage": "qk_norm_batch",
+      "total_ms": 0.558
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.023,
+      "seq_len": 1,
+      "stage": "rope",
+      "total_ms": 0.374
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.023,
+      "seq_len": 1,
+      "stage": "attn_gate_batch",
+      "total_ms": 0.367
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.019,
+      "seq_len": 1,
+      "stage": "kv_read",
+      "total_ms": 0.301
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.016,
+      "seq_len": 1,
+      "stage": "kv_write_batch",
+      "total_ms": 0.258
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.015,
+      "seq_len": 1,
+      "stage": "qk_norm",
+      "total_ms": 0.243
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.014,
+      "seq_len": 1,
+      "stage": "decode_weighted_sum",
+      "total_ms": 0.22
+    },
+    {
+      "count": 96,
+      "kind": "gdn",
+      "mean_ms": 0.002,
+      "seq_len": 1,
+      "stage": "qkv_split",
+      "total_ms": 0.187
+    },
+    {
+      "count": 16,
+      "kind": "full_attn",
+      "mean_ms": 0.008,
+      "seq_len": 1,
+      "stage": "kv_write",
+      "total_ms": 0.123
+    }
+  ]
+}

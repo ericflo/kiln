@@ -1512,10 +1512,146 @@ Verdict:
 - Rollback/override: set
   `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z=1`.
 
+### 2026-05-09 A033: Profile Current Vulkan Live Path After A032
+
+Goal:
+- Re-profile the current Vulkan live streaming path after A032 so the next
+  target is based on current bottlenecks rather than pre-A032 assumptions.
+
+Run:
+- Release Vulkan server with `KILN_PROFILE_FULL_ATTN_STAGES=1`,
+  `KILN_PROFILE_GDN_STAGES=1`, and `KILN_PROFILE_MLP_STAGES=1`.
+- Four varied prompt-length streaming chat requests, `max_tokens=3`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- The profile env also captured server prewarm. The durable summary filters
+  out the prewarm `seq_len=64` rows and the prewarm `seq_len=1 start_pos=64`
+  continuation rows.
+
+Evidence:
+- Server reported `backend="vulkan"` and `mixed_seq_lens=true`.
+- All four streams returned HTTP 200, non-empty visible text, and empty
+  reasoning text: `"6 7"`, `"11 "`, `"16 "`, and `"thirteen"`.
+- Profiled wall time: `5.470081s`.
+- Decode batcher metrics from the run: `8` submitted jobs, `4` worker batches,
+  `8` rows, max observed batch `3`.
+- Filtered live stage totals:
+  - MLP total: `5203.672 ms`
+  - GDN total: `11274.449 ms`
+  - full-attention total: `1931.328 ms`
+- Top filtered live stages were prefill-heavy:
+  - `mlp:fused seq_len=58`: `1418.259 ms`
+  - `mlp:fused seq_len=43`: `1296.692 ms`
+  - `mlp:fused seq_len=34`: `1189.872 ms`
+  - `mlp:fused seq_len=32`: `1100.643 ms`
+  - `gdn:in_proj seq_len=34`: `889.258 ms`
+- Top filtered decode-only `seq_len=1` stages:
+  - `mlp:fused`: `198.206 ms`, `128` calls, `1.548 ms` mean
+  - `gdn:gates`: `178.687 ms`, `96` calls, `1.861 ms` mean
+  - `gdn:recurrent`: `120.919 ms`, `96` calls, `1.260 ms` mean
+  - `gdn:in_proj`: `117.978 ms`, `96` calls, `1.229 ms` mean
+  - `gdn:gated_norm`: `72.004 ms`, `96` calls, `0.750 ms` mean
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-server.log`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-health.json`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-metrics-before.prom`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-metrics-after.prom`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-response-0.sse`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-response-1.sse`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-response-2.sse`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-response-3.sse`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-time.json`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-summary.json`
+- `vulkan-strix-halo-2026-05-09-a033-current-profile-summary.txt`
+
+Decision:
+- Accepted as target-selection evidence. No source change.
+- Continue optimizing MLP/GDN-heavy paths. Full-attention decode is not the
+  current largest live decode target.
+
+### 2026-05-09 A034: Reject Batched Vulkan Full-Attention QKV Fusion
+
+Issue:
+- A033 showed prefill full-attention `qkv_proj` still has measurable cost.
+- The existing Vulkan fused full-attention Q/K/V shader only handles a single
+  row. A plausible extension was to flatten prefill rows and compute Q/K/V in
+  one batched dispatch instead of three separate backend linear projections.
+
+Implementation Tried:
+- Added temporary F32 and packed-BF16 batched full-attention QKV shaders.
+- Registered them in the Vulkan shader build/pipeline tables.
+- Routed `full_attn_qkv_decode` through the batched path for `row_count > 1`
+  behind a temporary rollback env:
+  `KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BATCH=1`.
+- Added focused F32 and packed-BF16 batched QKV parity tests.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs
+  crates/kiln-model/src/backend/vulkan.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel full_attn_qkv_decode --test
+  gdn_parity -- --nocapture`: `4` passed
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`:
+  `30` passed
+- `cargo check -p kiln-server --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- `git diff --check`
+
+Evidence:
+- Candidate same four-stream shape as A033, no profiling, returned HTTP 200
+  for all streams with non-empty visible text and empty reasoning text.
+- Candidate wall time: `9.856213s`, with `8` submitted jobs, `4` worker
+  batches, `8` rows, max observed batch `3`.
+- Same-binary rollback with
+  `KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BATCH=1` returned the same visible text
+  shape in `5.490338s`, with the same decode-batcher counters.
+- The pre-trial A033 current-source profiled run on the same request shape was
+  also `5.470081s`, so the candidate regression is not a small noise effect.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-server.log`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-health.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-metrics-before.prom`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-metrics-after.prom`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-response-0.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-response-1.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-response-2.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-response-3.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-time.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-summary.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-candidate-summary.txt`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-server.log`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-health.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-metrics-before.prom`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-metrics-after.prom`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-response-0.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-response-1.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-response-2.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-response-3.sse`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-time.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-summary.json`
+- `vulkan-strix-halo-2026-05-09-a034-qkv-batch-rollback-summary.txt`
+
+Verdict:
+- Rejected and removed. The naive batched QKV fusion preserves correctness but
+  is much slower on the real server shape than the existing split backend
+  linear route.
+- Do not retry full-attention QKV batching by simply flattening rows into the
+  single-dispatch Q/K/V shape. A future attempt needs a different tiling or
+  residency strategy and should be justified by shader-level timing first.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Do not retry full-attention QKV prefill batching by only fusing the three
+  projections into one flattened batched dispatch; A034 measured it as a large
+  server regression.
 - Do not route Vulkan actor mixed-sequence greedy rows through
   `decode_next_tokens_paged_contiguous_batch_greedy` by admission-gate change
   alone; A031 measured it as slower than the existing hidden/logits fallback.
