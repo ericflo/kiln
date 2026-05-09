@@ -618,6 +618,53 @@ Verdict:
   generic sampled path or add decode-stage profiling there before changing the
   route.
 
+### 2026-05-09 A015: Online Softmax for Vulkan Dyn-Seqlen Paged Decode Batch
+
+Hypothesis:
+- The A011 Vulkan dyn-seqlen paged decode attention shader recomputed each QK
+  dot product three times: max pass, denominator pass, and value pass.
+- Replacing those passes with the standard online softmax recurrence should
+  preserve numerical stability while computing each QK dot product once.
+- This mirrors the row-max/row-sum correction pattern used by modern CUDA
+  attention implementations, including the vLLM/CUTLASS MLA decode path
+  inspected during this experiment.
+
+Change:
+- Updated `paged_attn_decode_batch.comp` to maintain `row_max`, `row_sum`, and
+  a rescaled per-lane value accumulator in one token loop.
+- The change is Vulkan-only and does not touch CUDA, Metal, routing, cache
+  ownership, or host/device transfer behavior.
+
+Evidence:
+- Focused Vulkan parity passed:
+  `cargo test -p kiln-vulkan-kernel paged_attn_decode_batch_matches_cpu_reference --test gdn_parity -- --nocapture`.
+- Full Vulkan kernel parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`20` tests passed).
+- Vulkan model check passed:
+  `cargo check -p kiln-model --features vulkan`.
+- Final release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Final serial paged bench stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, prefill `454.0ms`, mean ITL
+  `131.8ms`.
+- Final primary sampled actor batch returned HTTP 200 for `82` prompt tokens
+  and `48` completion tokens at `time_total=7.743591s`, matching the accepted
+  A011/A013/A014 envelope.
+- Proper old-vs-online rebuild comparison on a longer sampled batch:
+  - Old three-pass shader rebuild: HTTP 200, `411` prompt tokens, `64`
+    completion tokens, `time_total=27.612193s`.
+  - Online-softmax shader rebuild: HTTP 200, same request shape,
+    `time_total=27.327221s`.
+
+Verdict:
+- Keep. This is a small but measurable win for longer-context sampled
+  continuous batches, and it removes redundant per-token QK dot work without
+  expanding backend-specific surface area.
+- The remaining larger bottleneck is still data movement around the dyn-seqlen
+  path: CPU gather/compaction of K/V, upload of compact K/V, and readback of
+  attention output.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU

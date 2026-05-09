@@ -6,8 +6,9 @@
 // Output layout:  [batch, 1, num_heads, head_dim]
 //
 // This is intentionally a decode-only kernel for q_len=1. One workgroup owns
-// one (batch row, query head) pair. The kernel uses a three-pass online-safe
-// softmax implementation over the compacted per-row K/V window.
+// one (batch row, query head) pair. The kernel uses an online softmax
+// recurrence over the compacted per-row K/V window, so each QK dot product is
+// computed once.
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
@@ -72,30 +73,24 @@ void main() {
     uint q_base = ((batch_idx * num_heads + q_head) * head_dim);
     float q_lane = lane < head_dim ? data_q[q_base + lane] : 0.0;
 
-    float max_logit = -3.4028234663852886e38;
-    for (uint t = 0; t < seq_len; t++) {
-        float logit = dot_for_token(batch_idx, q_head, kv_head, t, lane, q_lane);
-        max_logit = max(max_logit, logit);
-    }
-
-    float denom = 0.0;
-    for (uint t = 0; t < seq_len; t++) {
-        float logit = dot_for_token(batch_idx, q_head, kv_head, t, lane, q_lane);
-        denom += exp(logit - max_logit);
-    }
-
+    float row_max = -3.4028234663852886e38;
+    float row_sum = 0.0;
     float acc = 0.0;
     for (uint t = 0; t < seq_len; t++) {
         float logit = dot_for_token(batch_idx, q_head, kv_head, t, lane, q_lane);
-        float weight = exp(logit - max_logit) / denom;
+        float new_max = max(row_max, logit);
+        float old_scale = exp(row_max - new_max);
+        float new_scale = exp(logit - new_max);
+        row_sum = row_sum * old_scale + new_scale;
         if (lane < head_dim) {
             uint v_idx = (((batch_idx * max_seqlen + t) * num_kv_heads + kv_head) * head_dim) + lane;
-            acc += weight * data_v[v_idx];
+            acc = acc * old_scale + new_scale * data_v[v_idx];
         }
+        row_max = new_max;
     }
 
     if (lane < head_dim) {
         uint out_idx = ((batch_idx * num_heads + q_head) * head_dim) + lane;
-        data_out[out_idx] = acc;
+        data_out[out_idx] = acc / row_sum;
     }
 }
