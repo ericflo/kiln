@@ -544,9 +544,29 @@ async function expectDisabled(page, selector, expected, message) {
 }
 
 async function clickAndWait(page, selector, message) {
-  const handle = await page.waitForSelector(selector, { visible: true, timeout: 5000 });
+  const handle = await page.waitForSelector(selector, { visible: true, timeout: 5000 })
+    .catch((error) => fail(`${message}: clickAndWait timed out for ${selector}: ${error.message}`));
   if (!handle) fail(`${message}: missing selector ${selector}`);
   await page.evaluate((element) => element.click(), handle);
+}
+
+async function goToPrimaryTab(page, name) {
+  const pageId = `#page-${name}`;
+  await page.evaluate((targetName) => {
+    const tab = document.querySelector(`#primary-tab-${targetName}`);
+    if (tab) tab.click();
+  }, name);
+  await page.waitForFunction(
+    (selector) => {
+      const section = document.querySelector(selector);
+      return section
+        && section.classList.contains('active')
+        && !section.hidden
+        && !section.hasAttribute('inert');
+    },
+    { timeout: 5000 },
+    pageId,
+  ).catch(() => fail(`Primary tab ${name} did not activate (${pageId})`));
 }
 
 async function waitForVisiblePanel(page, selector, message) {
@@ -722,42 +742,49 @@ async function expectNoMobileOverflow(page) {
 }
 
 async function expectMobilePanelFlow(page) {
-  const panelSelectors = [
-    '#server-status',
-    '#decode-perf-panel',
-    '#recent-requests-panel',
-    '#adapters-panel',
-    '[data-training-tabs]',
-    '#chat-output',
+  const tabPanels = [
+    { tab: 'overview', selectors: ['#server-status', '#decode-perf-panel', '#recent-requests-panel'] },
+    { tab: 'adapters', selectors: ['#adapters-panel'] },
+    { tab: 'training', selectors: ['[data-training-tabs]'] },
+    { tab: 'playground', selectors: ['#chat-output'] },
   ];
-  const panelFlow = await page.evaluate((selectors) => selectors.map((selector) => {
-    const element = document.querySelector(selector);
-    const panel = element?.closest('.panel');
-    const rect = panel?.getBoundingClientRect();
-    return rect && {
-      selector,
-      left: Math.round(rect.left),
-      top: Math.round(rect.top + window.scrollY),
-      width: Math.round(rect.width),
-    };
-  }), panelSelectors);
 
-  if (panelFlow.some((panel) => !panel)) fail(`Mobile dashboard is missing a main panel: ${JSON.stringify(panelFlow)}`);
-  for (let index = 1; index < panelFlow.length; index += 1) {
-    const previous = panelFlow[index - 1];
-    const current = panelFlow[index];
-    if (current.top <= previous.top) fail(`Mobile panels should stack in source order: ${JSON.stringify(panelFlow)}`);
-    if (Math.abs(current.left - panelFlow[0].left) > 2) fail(`Mobile panels should align in one column: ${JSON.stringify(panelFlow)}`);
-    if (current.width > 390) fail(`Mobile panel exceeds viewport width: ${JSON.stringify(current)}`);
-  }
-
-  for (const selector of panelSelectors) {
-    await page.evaluate((targetSelector) => document.querySelector(targetSelector)?.closest('.panel')?.scrollIntoView({ block: 'center' }), selector);
-    await page.waitForFunction((targetSelector) => {
-      const panel = document.querySelector(targetSelector)?.closest('.panel');
+  for (const { tab, selectors } of tabPanels) {
+    await goToPrimaryTab(page, tab);
+    const panelFlow = await page.evaluate((panelSelectors) => panelSelectors.map((selector) => {
+      const element = document.querySelector(selector);
+      const panel = element?.closest('.panel') || element;
       const rect = panel?.getBoundingClientRect();
-      return Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0 && rect.height > 0);
-    }, { timeout: 5000 }, selector).catch(() => fail(`Mobile panel ${selector} should be reachable by scrolling`));
+      return rect && {
+        selector,
+        left: Math.round(rect.left),
+        top: Math.round(rect.top + window.scrollY),
+        width: Math.round(rect.width),
+      };
+    }), selectors);
+
+    if (panelFlow.some((panel) => !panel)) fail(`Mobile ${tab} tab is missing a main panel: ${JSON.stringify(panelFlow)}`);
+    for (let index = 1; index < panelFlow.length; index += 1) {
+      const previous = panelFlow[index - 1];
+      const current = panelFlow[index];
+      if (current.top <= previous.top) fail(`Mobile ${tab} panels should stack in source order: ${JSON.stringify(panelFlow)}`);
+      if (Math.abs(current.left - panelFlow[0].left) > 2) fail(`Mobile ${tab} panels should align in one column: ${JSON.stringify(panelFlow)}`);
+      if (current.width > 390) fail(`Mobile ${tab} panel exceeds viewport width: ${JSON.stringify(current)}`);
+    }
+
+    for (const selector of selectors) {
+      await page.evaluate((targetSelector) => {
+        const element = document.querySelector(targetSelector);
+        const panel = element?.closest('.panel') || element;
+        panel?.scrollIntoView({ block: 'center' });
+      }, selector);
+      await page.waitForFunction((targetSelector) => {
+        const element = document.querySelector(targetSelector);
+        const panel = element?.closest('.panel') || element;
+        const rect = panel?.getBoundingClientRect();
+        return Boolean(rect && rect.bottom > 0 && rect.top < window.innerHeight && rect.width > 0 && rect.height > 0);
+      }, { timeout: 5000 }, selector).catch(() => fail(`Mobile ${tab} panel ${selector} should be reachable by scrolling`));
+    }
   }
 }
 
@@ -858,6 +885,7 @@ async function runMobileOnboardingSmoke(baseUrl) {
     await expectHeaderHelpLinks(page, { visible: true });
     await expectNoForbiddenPublicityCopy(page, 'Mobile server dashboard');
     await expectMobilePanelFlow(page);
+    await goToPrimaryTab(page, 'training');
     await expectTrainingTabKeyboardNavigation(page);
     await clickAndWait(page, '#training-tab-queue', 'Could not activate mobile Queue tab');
     await waitForVisiblePanel(page, '#tab-queue', 'Mobile Queue tab did not activate');
@@ -903,16 +931,20 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectNoForbiddenPublicityCopy(page, 'Server dashboard');
 
     if (expectFailureStates) {
+      await goToPrimaryTab(page, 'overview');
       await expectApiFailurePanel(page, '#server-status', 'Server status', 'Server status smoke failure from /health');
       await expectApiFailurePanel(page, '#decode-perf-panel', 'Decode performance', 'Decode performance smoke failure from /v1/stats/decode');
       await expectApiFailurePanel(page, '#recent-requests-panel', 'Recent requests', 'Recent requests smoke failure from /v1/stats/recent-requests');
+      await goToPrimaryTab(page, 'adapters');
       await expectApiFailurePanel(page, '#adapters-panel', 'Adapters', 'Adapters smoke failure from /v1/adapters');
+      await goToPrimaryTab(page, 'training');
       await expectApiFailurePanel(page, '#tab-queue', 'Training queue', 'Training queue smoke failure from /v1/train/queue');
       if (pageErrors.length > 0) fail(`Failure state UI emitted browser errors: ${pageErrors.join('; ')}`);
       return;
     }
 
     if (expectEmptyAdapters) {
+      await goToPrimaryTab(page, 'adapters');
       await waitForPanelText(page, '#adapters-panel', /No adapters found yet\./, 'Empty adapter state missing');
       await expectPanelLink(page, '#adapters-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
       await expectPanelLink(page, '#adapters-panel .empty', 'Troubleshooting', 'https://ericflo.github.io/kiln/troubleshooting.html');
@@ -921,6 +953,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
       return;
     }
 
+    await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should show the first smoke adapter');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should show the second smoke adapter');
 
@@ -942,6 +975,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     if (!/^application\/gzip\b/i.test(downloadHeaders['content-type'] || '')) fail('Adapter download should return an archive content-type header');
     if (Number(downloadHeaders['content-length'] || 0) <= 0) fail('Adapter download should return non-empty archive bytes');
     await page.goto(`${baseUrl}/ui`, { waitUntil: 'domcontentloaded' });
+    await goToPrimaryTab(page, 'adapters');
     await waitForPanelText(page, '#adapters-panel', /adapter-alpha/, 'Adapter list should reload after adapter download');
     await waitForPanelText(page, '#adapters-panel', /adapter-beta/, 'Adapter list should still include adapter-beta after download');
 
@@ -999,20 +1033,24 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await expectDisabled(page, '#merge-btn', true, 'Adapter merge should disable while submitting');
     await expectTrainingToast(page, 'Merged 2 sources → merged-smoke-adapter (32 tensors, mode=weighted_average)');
 
+    await goToPrimaryTab(page, 'training');
     await waitForPanelText(page, '#tab-queue', /No training jobs yet\./, 'Empty training queue state missing');
     await expectPanelLink(page, '#tab-queue .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
     await expectPanelLink(page, '#tab-queue .empty', 'GRPO Guide', 'https://ericflo.github.io/kiln/grpo.html');
 
+    await goToPrimaryTab(page, 'overview');
     await waitForPanelText(page, '#recent-requests-panel', /No recent requests yet\./, 'Empty recent requests state missing');
     await expectPanelLink(page, '#recent-requests-panel .empty', 'Quickstart', 'https://ericflo.github.io/kiln/quickstart.html');
 
     await waitForPanelText(page, '#decode-perf-panel', /No streaming completions/i, 'Empty decode performance state missing');
     await expectPanelLink(page, '#decode-perf-panel', '/health', '/health');
 
+    await goToPrimaryTab(page, 'playground');
     await waitForPanelText(page, '#chat-output', /Send a message to test inference\./, 'Quick Inference empty state missing');
     await expectPanelLink(page, '#chat-output .empty', '/health', '/health');
     await expectPanelLink(page, '#chat-output .empty', 'Troubleshooting guide', 'https://ericflo.github.io/kiln/troubleshooting.html');
 
+    await goToPrimaryTab(page, 'training');
     await expectTrainingTabKeyboardNavigation(page);
 
     await clickAndWait(page, '#training-tab-sft', 'Could not open SFT tab');
@@ -1039,6 +1077,7 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
     await waitForPanelText(page, '#tab-queue', /smoke-gr/, 'Training queue should refresh after GRPO submit');
     await waitForPanelText(page, '#tab-queue', /Adapter:\s*grpo-adapter/, 'Training queue should show the submitted GRPO adapter name');
 
+    await goToPrimaryTab(page, 'playground');
     await expectDisabled(page, '#chat-send', true, 'Quick Inference send should start disabled until text is entered');
     await page.type('#chat-input', 'Explain Kiln in one sentence.');
     await expectDisabled(page, '#chat-send', false, 'Quick Inference send should enable after text is entered');
@@ -1065,22 +1104,29 @@ async function runSmoke(baseUrl, { expectFailureStates = false, expectEmptyAdapt
 
 const emptyAdapterScenario = await startServer({ availableAdapters: [] });
 try {
+  console.log('[smoke] empty adapter scenario start');
   await runSmoke(emptyAdapterScenario.baseUrl, { expectEmptyAdapters: true });
+  console.log('[smoke] empty adapter scenario passed');
 } finally {
   await new Promise((accept) => emptyAdapterScenario.server.close(accept));
 }
 
 const { server, baseUrl } = await startServer();
 try {
+  console.log('[smoke] default scenario desktop start');
   await runSmoke(baseUrl);
+  console.log('[smoke] default scenario desktop passed; mobile start');
   await runMobileOnboardingSmoke(baseUrl);
+  console.log('[smoke] default scenario mobile passed');
 } finally {
   await new Promise((accept) => server.close(accept));
 }
 
 const failureScenario = await startServer({ failDashboardApis: true });
 try {
+  console.log('[smoke] failure scenario start');
   await runSmoke(failureScenario.baseUrl, { expectFailureStates: true });
+  console.log('[smoke] failure scenario passed');
 } finally {
   await new Promise((accept) => failureScenario.server.close(accept));
 }
