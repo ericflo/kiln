@@ -1405,10 +1405,55 @@ Verdict:
   preserves CPU/CUDA defaults plus Metal's existing default.
 - Rollback/override: set `KILN_DECODE_BATCH_MIXED_SEQ=0`.
 
+### 2026-05-09 A031: Reject Vulkan Mixed-Sequence Actor Greedy Argmax Fast Path
+
+Issue:
+- `KILN_BATCHING_ENGINE=1` routes streaming and non-streaming requests through
+  `ModelRunner::paged_batched_decode_step`, not the live greedy decode batcher.
+- That actor path already has a greedy contiguous-batch fast path for rows with
+  a common `seq_len`. For rows with varied prompt lengths, it falls through to
+  the generic hidden-state batch path and then materializes full logits.
+- Since Vulkan dyn-seqlen paged attention can handle varied `seq_len`, a
+  possible optimization was to let mixed-sequence greedy actor rows call
+  `decode_next_tokens_paged_contiguous_batch_greedy`, which uses the fused
+  rowwise argmax LM-head path instead of full logits.
+
+Implementation Tried:
+- Temporarily relaxed the actor greedy fast-path gate so Vulkan could use the
+  contiguous-batch greedy path when rows had different sequence lengths.
+- Added a temporary rollback env for the trial:
+  `KILN_DISABLE_VULKAN_ACTOR_MIXED_SEQ_GREEDY_BATCH=1`.
+- The change was Vulkan-only for mixed-sequence rows; the existing uniform
+  cross-backend fast path was left unchanged.
+
+Evidence:
+- Current-main actor baseline before the trial, with `KILN_BATCHING_ENGINE=1`,
+  four concurrent varied-length non-streaming greedy requests, `max_tokens=20`,
+  and `chat_template_kwargs: {"enable_thinking": false}`, returned correct
+  visible text in `14.299s`.
+- Candidate source passed `cargo check -p kiln-model --features vulkan` and
+  release Vulkan build.
+- Candidate same-shape actor run returned correct visible text but regressed to
+  `19.584s`.
+- Same-binary rollback with
+  `KILN_DISABLE_VULKAN_ACTOR_MIXED_SEQ_GREEDY_BATCH=1`, using the exact
+  candidate prompt strings, returned correct visible text in `13.871s`.
+
+Verdict:
+- Rejected and removed. The fused argmax savings do not pay for forcing the
+  actor's mixed-sequence greedy rows through the dyn-seqlen contiguous-batch
+  path on this Vulkan workload.
+- Do not retry this by only changing the actor admission gate. A future attempt
+  would need to reduce the dyn-seqlen K/V movement or otherwise improve the
+  mixed-sequence attention path itself.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Do not route Vulkan actor mixed-sequence greedy rows through
+  `decode_next_tokens_paged_contiguous_batch_greedy` by admission-gate change
+  alone; A031 measured it as slower than the existing hidden/logits fallback.
 - Do not extend packed-BF16 MLP to row-pair (`row_count >= 8`) by direct shader
   mirroring; A029 measured that as slower than the current F32 row-pair path.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
