@@ -1562,3 +1562,11 @@
   `gate_up_fused` `521.045 ms`, `down_proj` `333.456 ms`, `gdn:in_proj`
   `321.182 ms`, `gdn:out_proj` `149.836 ms`, and `full_attn:qkv_proj`
   `98.725 ms`. Accepted as target-selection evidence; no source change.
+- 2026-05-09 E396: Accepted guarded serial GDN in-proj `bfloat2` vector loads
+  for `batch == 1` qkv/z projections, with A/B left on the old one-column
+  path and `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD=1` as rollback.
+  Focused parity passed. Same-binary synthetic batch-1 improved
+  `1382.202 -> 1296.058 us` (`6.23%`). Two 65-token paged serial latency
+  pairs both favored default; aggregate mean ITL improved `162.330 -> 159.857 ms`
+  (`1.52%`). Metal/Vulkan checks, release Metal builds, fmt, and diff checks
+  passed; CUDA check was blocked locally by missing `nvcc`.

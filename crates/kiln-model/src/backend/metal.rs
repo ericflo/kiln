@@ -43,6 +43,8 @@ const DISABLE_METAL_LORA_DELTA_DECODE: &str = "KILN_DISABLE_METAL_LORA_DELTA_DEC
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR";
 const DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD";
+const DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD: &str =
+    "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD";
 const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
@@ -872,6 +874,10 @@ fn metal_gdn_in_proj_row_pair_disabled() -> bool {
 
 fn metal_gdn_in_proj_row_quad_disabled() -> bool {
     env_truthy(DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD)
+}
+
+fn metal_gdn_in_proj_serial_vector_load_disabled() -> bool {
+    env_truthy(DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD)
 }
 
 fn metal_gdn_gates_disabled() -> bool {
@@ -3503,39 +3509,88 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     constant uint& row_pair_mode [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
-    // Keep bs=1 on the lean one-column path; paired columns only win once
-    // there are multiple rows to amortize the extra accumulators.
     if (batch == 1) {
-        const uint total = qkv_dim + z_dim + (nv * 2);
-        if (gid >= total) {
-            return;
-        }
+        if (row_pair_mode == 6) {
+            const uint qkv_pairs = qkv_dim >> 1;
+            const uint z_pairs = z_dim >> 1;
+            const uint total = qkv_pairs + z_pairs + (nv * 2);
+            if (gid >= total) {
+                return;
+            }
 
-        float acc = 0.0f;
-        if (gid < qkv_dim) {
-            const uint col = gid;
-            for (uint i = 0; i < hidden; ++i) {
-                acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+            if (gid < qkv_pairs) {
+                const uint col0 = gid << 1;
+                float acc0 = 0.0f;
+                float acc1 = 0.0f;
+                for (uint i = 0; i < hidden; ++i) {
+                    const float xv = static_cast<float>(x[i]);
+                    const uint w_idx = i * qkv_dim + col0;
+                    const bfloat2 w = *(device const bfloat2*)(qkv_t + w_idx);
+                    acc0 += xv * static_cast<float>(w[0]);
+                    acc1 += xv * static_cast<float>(w[1]);
+                }
+                qkv_out[col0] = static_cast<bfloat>(acc0);
+                qkv_out[col0 + 1] = static_cast<bfloat>(acc1);
+            } else if (gid < qkv_pairs + z_pairs) {
+                const uint col0 = (gid - qkv_pairs) << 1;
+                float acc0 = 0.0f;
+                float acc1 = 0.0f;
+                for (uint i = 0; i < hidden; ++i) {
+                    const float xv = static_cast<float>(x[i]);
+                    const uint w_idx = i * z_dim + col0;
+                    const bfloat2 w = *(device const bfloat2*)(z_t + w_idx);
+                    acc0 += xv * static_cast<float>(w[0]);
+                    acc1 += xv * static_cast<float>(w[1]);
+                }
+                z_out[col0] = static_cast<bfloat>(acc0);
+                z_out[col0 + 1] = static_cast<bfloat>(acc1);
+            } else if (gid < qkv_pairs + z_pairs + nv) {
+                const uint col = gid - qkv_pairs - z_pairs;
+                float acc = 0.0f;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+                }
+                a_out[col] = static_cast<bfloat>(acc);
+            } else {
+                const uint col = gid - qkv_pairs - z_pairs - nv;
+                float acc = 0.0f;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+                }
+                b_out[col] = static_cast<bfloat>(acc);
             }
-            qkv_out[col] = static_cast<bfloat>(acc);
-        } else if (gid < qkv_dim + z_dim) {
-            const uint col = gid - qkv_dim;
-            for (uint i = 0; i < hidden; ++i) {
-                acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
-            }
-            z_out[col] = static_cast<bfloat>(acc);
-        } else if (gid < qkv_dim + z_dim + nv) {
-            const uint col = gid - qkv_dim - z_dim;
-            for (uint i = 0; i < hidden; ++i) {
-                acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
-            }
-            a_out[col] = static_cast<bfloat>(acc);
         } else {
-            const uint col = gid - qkv_dim - z_dim - nv;
-            for (uint i = 0; i < hidden; ++i) {
-                acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+            const uint total = qkv_dim + z_dim + (nv * 2);
+            if (gid >= total) {
+                return;
             }
-            b_out[col] = static_cast<bfloat>(acc);
+
+            float acc = 0.0f;
+            if (gid < qkv_dim) {
+                const uint col = gid;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(qkv_t[i * qkv_dim + col]);
+                }
+                qkv_out[col] = static_cast<bfloat>(acc);
+            } else if (gid < qkv_dim + z_dim) {
+                const uint col = gid - qkv_dim;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(z_t[i * z_dim + col]);
+                }
+                z_out[col] = static_cast<bfloat>(acc);
+            } else if (gid < qkv_dim + z_dim + nv) {
+                const uint col = gid - qkv_dim - z_dim;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(a_t[i * nv + col]);
+                }
+                a_out[col] = static_cast<bfloat>(acc);
+            } else {
+                const uint col = gid - qkv_dim - z_dim - nv;
+                for (uint i = 0; i < hidden; ++i) {
+                    acc += static_cast<float>(x[i]) * static_cast<float>(b_t[i * nv + col]);
+                }
+                b_out[col] = static_cast<bfloat>(acc);
+            }
         }
         return;
     }
@@ -6623,14 +6678,6 @@ fn metal_gdn_in_proj_decode_bf16(
     } else {
         1usize
     };
-    let dispatch_cols = if batch == 1 {
-        output_total
-    } else {
-        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + (nv * 2)
-    };
-    let dispatch_rows = batch.div_ceil(row_group_size);
-    let dispatch_total = dispatch_rows * dispatch_cols;
-
     // The kernel writes every output element exactly once. Keep bs=1 on one
     // backing allocation, but use separate batch outputs so each `[B,1,N]`
     // tensor remains contiguous for the following fused decode kernels.
@@ -6736,12 +6783,30 @@ fn metal_gdn_in_proj_decode_bf16(
         encoder.set_buffer(7, Some(a_o_buf.buffer), a_o_buf.offset_in_bytes);
         encoder.set_buffer(8, Some(b_o_buf.buffer), b_o_buf.offset_in_bytes);
 
+        let serial_vector_mode = batch == 1
+            && !metal_gdn_in_proj_serial_vector_load_disabled()
+            && qkv_dim % 2 == 0
+            && z_dim % 2 == 0
+            && qkv_buf.offset_in_bytes % 4 == 0
+            && z_buf.offset_in_bytes % 4 == 0;
+        let dispatch_cols = if serial_vector_mode {
+            (qkv_dim / 2) + (z_dim / 2) + (nv * 2)
+        } else if batch == 1 {
+            output_total
+        } else {
+            qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + (nv * 2)
+        };
+        let dispatch_rows = batch.div_ceil(row_group_size);
+        let dispatch_total = dispatch_rows * dispatch_cols;
+
         let hidden_u32 = hidden as u32;
         let qkv_dim_u32 = qkv_dim as u32;
         let z_dim_u32 = z_dim as u32;
         let nv_u32 = nv as u32;
         let batch_u32 = batch as u32;
-        let row_pair_mode_u32 = if row_group_size == 1 {
+        let row_pair_mode_u32 = if serial_vector_mode {
+            6
+        } else if row_group_size == 1 {
             0
         } else {
             row_group_size as u32

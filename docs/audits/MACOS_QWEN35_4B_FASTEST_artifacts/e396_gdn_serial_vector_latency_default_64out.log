@@ -1,0 +1,61 @@
+
+  kiln-bench v0.2.13
+  GPU                    unknown (10240 MB)
+  Model path             /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  Model loaded           13.25s (backend: metal, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 10613.7ms (6 tok/s)
+    Decode (paged): 65 tokens, mean ITL 161.2ms (6.2 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 430.2ms (149 tok/s)
+    Decode (paged): 65 tokens, mean ITL 160.1ms (6.2 tok/s)
+
+  ▌ Benchmark results
+  GPU                    unknown (10240 MB VRAM, source: apple-silicon-unified)
+  Model load             13.25s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                430.2 ms (149 tok/s)
+  Time to first token    430.2 ms
+  Mean inter-token       160.1 ms (6.2 tok/s)
+  P50 inter-token        159.5 ms
+  P99 inter-token        172.5 ms
+  Tokens generated       65
+  Spec method            off
+
+{
+  "backend": "metal",
+  "gpu_info": {
+    "name": "unknown",
+    "total_vram_mb": 10240,
+    "vram_source": "apple-silicon-unified"
+  },
+  "model_load": {
+    "load_time_secs": 13.248927958,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 430.192209,
+    "prefill_tokens_per_sec": 148.7707091413178,
+    "time_to_first_token_ms": 430.192209,
+    "mean_inter_token_ms": 160.06617776562496,
+    "p50_inter_token_ms": 159.484709,
+    "p99_inter_token_ms": 172.51370799999998,
+    "num_tokens_generated": 65,
+    "decode_tokens_per_sec": 6.247415999801272,
+    "spec_method": "off"
+  },
+  "training": null
+}

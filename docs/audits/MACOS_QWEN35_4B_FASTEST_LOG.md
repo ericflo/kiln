@@ -14952,3 +14952,90 @@ the largest profiled serial decode stage, with MLP down-projection and GDN
 in-projection close behind. Continue prioritizing changes that affect those
 projection-heavy paths and require same-binary rollback evidence for small
 kernel wins.
+
+## 2026-05-09 - E396 accepted GDN in-proj serial vector loads
+
+### Hypothesis
+
+E395 still ranks GDN `in_proj` as a top serial decode projection stage. E361
+kept `batch == 1` on the old one-column path because an earlier paired-column
+serial candidate regressed, but E393 showed that adjacent-column `bfloat2`
+loads can make a narrow serial paired-column path worthwhile. Test the same
+idea for the GDN qkv/z serial projections only, leaving the tiny A/B
+projections one-column.
+
+### Change
+
+Added a guarded serial mode for `kiln_gdn_in_proj_decode_bf16` when
+`batch == 1`. The mode:
+
+- pairs adjacent qkv columns and adjacent z columns
+- uses aligned `bfloat2` loads for qkv/z weights
+- leaves A/B projections on the existing one-column loop
+- requires even qkv/z dimensions and 4-byte-aligned qkv/z buffer offsets
+- can be rolled back with
+  `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD=1`
+- leaves the existing batch row-pair and row-quad paths unchanged
+
+### Results
+
+Focused GDN in-proj parity passed:
+
+- `test_gdn_in_proj_decode_matches_broadcast_matmul`
+
+Same-binary Qwen3.5 GDN in-proj synthetic, default versus rollback:
+
+- batch `1`: rollback `1382.202 us`, default `1296.058 us`
+- batch-1 improvement: `6.23%`
+- max absolute diff remained `0`
+
+The change is only selected for `batch == 1`; batch `2/3/4/8` synthetic values
+are recorded but are not decision drivers for the serial-vector mode.
+
+Paged Qwen3.5-4B serial latency A/B, `prompt_tokens=64`,
+`max_output_tokens=64`, one warmup run:
+
+- pair 1: default `160.066178 ms` mean ITL vs rollback `162.523069 ms`
+  (`1.51%` faster)
+- counter-ordered pair 2: default `159.648184 ms` mean ITL vs rollback
+  `162.137169 ms` (`1.53%` faster)
+- aggregate: default `159.857181 ms` vs rollback `162.330119 ms` mean ITL
+  (`1.52%` faster)
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+`cargo check -p kiln-model --features cuda` was attempted and recorded, but
+the local macOS machine cannot run it because `nvcc --version` is unavailable.
+The failure occurs in `cudarc` build-script discovery before compiling the
+touched Metal code.
+
+### Artifact
+
+- `e396_gdn_serial_vector_test.log`
+- `e396_gdn_serial_vector_default_synthetic.log`
+- `e396_gdn_serial_vector_disabled_synthetic.log`
+- `e396_gdn_serial_vector_release_build.log`
+- `e396_gdn_serial_vector_latency_default_64out.log`
+- `e396_gdn_serial_vector_latency_disabled_64out.log`
+- `e396_gdn_serial_vector_latency_disabled_repeat_64out.log`
+- `e396_gdn_serial_vector_latency_default_repeat_64out.log`
+- `e396_gdn_serial_vector_fmt_check.log`
+- `e396_gdn_serial_vector_check_metal.log`
+- `e396_gdn_serial_vector_check_vulkan.log`
+- `e396_gdn_serial_vector_check_cuda.log`
+- `e396_gdn_serial_vector_release_kiln_build.log`
+- `e396_gdn_serial_vector_git_diff_check.log`
+
+### Decision
+
+Accepted. Keep the guarded serial `bfloat2` GDN in-proj path because it
+improves the directly affected synthetic batch-1 kernel and repeats as a real
+same-build paged serial latency win, with a targeted rollback knob.

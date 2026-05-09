@@ -1,0 +1,28 @@
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling rustix v1.1.4
+   Compiling cudarc v0.19.4
+    Checking gemm-f16 v0.19.0
+    Checking gemm-c32 v0.19.0
+    Checking gemm-c64 v0.19.0
+   Compiling kiln-conv1d-kernel v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-conv1d-kernel)
+error: failed to run custom build command for `cudarc v0.19.4`
+
+Caused by:
+  process didn't exit successfully: `/Users/ericflo/Development/kiln/target/debug/build/cudarc-7130438b1cca869b/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION
+  cargo:rerun-if-env-changed=CUDA_HOME
+  cargo:rerun-if-env-changed=CUDA_PATH
+  cargo:rerun-if-env-changed=CUDA_ROOT
+  cargo:rerun-if-env-changed=CUDA_TOOLKIT_ROOT_DIR
+  cargo:rerun-if-env-changed=CUDNN_LIB
+
+  --- stderr
+
+  thread 'main' (17469616) panicked at /Users/ericflo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cudarc-0.19.4/build.rs:125:13:
+  `nvcc --version` failed.
+  Err(Os { code: 2, kind: NotFound, message: "No such file or directory" })
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
