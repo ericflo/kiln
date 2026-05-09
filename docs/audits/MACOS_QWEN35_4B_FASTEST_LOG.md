@@ -13405,3 +13405,110 @@ batch QKV projection remains smaller.
 Accepted as target-selection evidence. No source change. Continue with MLP
 decode kernels first, especially down-projection and any further safe full-batch
 gate/up improvements, while preserving the bs=1 and batch `2/3/4` paths.
+
+## 2026-05-09 E377 - Add row-quad batched GEMV for full Metal down-projection batches
+
+### Goal
+
+Target the largest remaining MLP live decode stage after E376:
+`mlp:down_proj`. E366's row-pair mode reuses each transposed GEMV weight tile
+across two decode rows. With the E374 default admission wait and E375 full-batch
+gate/up path, the Metal serving shape now often reaches batch `8`, so this
+experiment tests reusing each down-projection weight load across four rows.
+
+### Change
+
+- Added a row-quad branch to `kiln_transposed_coop_gemv8_batch_bf16`.
+- The branch is selected only for batch `>=8`.
+- Row-quad uses `4` output columns per SIMD group, so it reuses weight loads
+  across four rows without increasing accumulator count beyond the row-pair
+  tile8 branch.
+- Batch `2/3/4` stay on the E366 row-pair tile8 path.
+- Added `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` as the targeted
+  rollback knob. `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1` still
+  disables all row grouping, including row-quad.
+- Extended the focused decode-batch parity test to cover the batch `8`
+  row-quad branch.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1 KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- Same-binary eight-request streaming endpoint A/B with row-quad disabled and
+  default enabled, greedy `max_tokens=8`, no `KILN_DECODE_BATCH_WAIT_US` env.
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Qwen-shaped BF16 transposed GEMV synthetic bench,
+`[B,1,9216] x [9216,2560]`, same source with row-quad disabled versus default:
+
+- batch `2`: disabled `1248.671 us`, default `1366.192 us`
+- batch `3`: disabled `2046.092 us`, default `2132.054 us`
+- batch `4`: disabled `2153.292 us`, default `2104.787 us`
+- batch `8`: disabled `3479.879 us`, default `3122.283 us`
+
+Only batch `8` selects the new row-quad branch. The intended batch-8 synthetic
+shape improved by `10.3%`.
+
+Same-binary endpoint A/B on the eight-request short-prompt streaming shape:
+
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1`: wall `8.328718s`,
+  `64` generated tokens, `56` jobs, `9` worker batches, `56` rows, max batch
+  `8`
+- default row-quad: wall `8.034134s`, `64` generated tokens, `56` jobs, `9`
+  worker batches, `56` rows, max batch `8`
+
+The default row-quad path is `3.5%` faster on this serving shape with identical
+decode-batcher counters.
+
+### Artifact
+
+- `e377_down_proj_row_quad_parity.log`
+- `e377_down_proj_row_quad_disabled_baseline.log`
+- `e377_down_proj_row_quad_candidate.log`
+- `e377_release_build_metal.log`
+- `e377_down_proj_row_quad_endpoint_summary.json`
+- `e377_down_proj_row_quad_endpoint_disabled_server.log`
+- `e377_down_proj_row_quad_endpoint_disabled_health.json`
+- `e377_down_proj_row_quad_endpoint_disabled_metrics.prom`
+- `e377_down_proj_row_quad_endpoint_disabled_time.json`
+- `e377_down_proj_row_quad_endpoint_disabled_response_0.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_1.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_2.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_3.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_4.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_5.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_6.sse`
+- `e377_down_proj_row_quad_endpoint_disabled_response_7.sse`
+- `e377_down_proj_row_quad_endpoint_default_server.log`
+- `e377_down_proj_row_quad_endpoint_default_health.json`
+- `e377_down_proj_row_quad_endpoint_default_metrics.prom`
+- `e377_down_proj_row_quad_endpoint_default_time.json`
+- `e377_down_proj_row_quad_endpoint_default_response_0.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_1.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_2.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_3.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_4.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_5.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_6.sse`
+- `e377_down_proj_row_quad_endpoint_default_response_7.sse`
+- `e377_down_proj_row_quad_transposed_tests.log`
+- `e377_cargo_check_metal.log`
+- `e377_cargo_check_vulkan.log`
+- `e377_cargo_fmt_check.log`
+- `e377_git_diff_check.log`
+- `e377_down_proj_row_quad_summary.txt`
+
+### Decision
+
+Accepted. Enable Metal batched transposed GEMV row-quad mode by default only
+for batch `>=8`, with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` as
+the targeted rollback. This improves the full-batch MLP down-projection path
+without changing the batch `2/3/4` row-pair selection or non-Metal backends.

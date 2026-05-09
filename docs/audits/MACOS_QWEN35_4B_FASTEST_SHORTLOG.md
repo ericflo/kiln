@@ -1399,3 +1399,14 @@
   `mlp:down_proj` `340.353 ms`, `gdn:in_proj` `280.860 ms`, and
   `gdn:out_proj` `139.661 ms`. Accepted as target-selection evidence; no
   source change.
+- 2026-05-09 E377: Accepted Metal batched transposed GEMV row-quad mode for
+  full batches, targeting MLP down-projection. The new branch is selected only
+  for batch `>=8`, uses `4` output columns per SIMD group to keep accumulator
+  count in line with row-pair tile8, and has
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1` as a targeted rollback;
+  batch `2/3/4` remain on E366 row-pair. Focused transposed-GEMV tests,
+  Metal/Vulkan checks, fmt check, and release build passed. Synthetic Qwen
+  down-proj batch `8` improved `3479.879 -> 3122.283 us` (`10.3%`).
+  Same-binary n8 endpoint with default wait100 improved row-quad disabled to
+  default from `8.328718s` to `8.034134s` (`3.5%`) with identical `64`
+  generated tokens, `56` jobs, `9` worker batches, and max batch `8`.

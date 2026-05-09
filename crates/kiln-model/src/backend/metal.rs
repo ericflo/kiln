@@ -51,6 +51,8 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR";
+const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD: &str =
+    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD";
 const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
 const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
 const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
@@ -935,6 +937,10 @@ fn metal_transposed_coop_gemv_tile8_disabled() -> bool {
 
 fn metal_transposed_coop_gemv_row_pair_disabled() -> bool {
     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR)
+}
+
+fn metal_transposed_coop_gemv_row_quad_disabled() -> bool {
+    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD)
 }
 
 fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
@@ -2777,11 +2783,16 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     constant uint& input_dim [[buffer(3)]],
     constant uint& output_dim [[buffer(4)]],
     constant uint& row_pair_mode [[buffer(5)]],
+    constant uint& row_group_size_arg [[buffer(6)]],
     uint2 tgroup [[threadgroup_position_in_grid]],
     uint simd_group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    const uint col_base = (tgroup.x * 4 + simd_group) * 8;
+    const bool grouped_mode = row_pair_mode != 0;
+    const uint row_group_size = grouped_mode ? row_group_size_arg : 1;
+    const bool row_quad_mode = grouped_mode && row_group_size == 4;
+    const uint tile_cols = row_quad_mode ? 4 : 8;
+    const uint col_base = (tgroup.x * 4 + simd_group) * tile_cols;
     if (col_base >= output_dim) {
         return;
     }
@@ -2794,12 +2805,12 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     float acc5 = 0.0f;
     float acc6 = 0.0f;
     float acc7 = 0.0f;
-    const bool full_tile = col_base + 7 < output_dim;
+    const bool full_tile = col_base + tile_cols - 1 < output_dim;
     const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
-    const uint batch_idx = row_pair_mode == 0 ? tgroup.y : tgroup.y * 2;
+    const uint batch_idx = grouped_mode ? tgroup.y * row_group_size : tgroup.y;
     const uint x_base = batch_idx * input_dim;
 
-    if (row_pair_mode == 0) {
+    if (!grouped_mode) {
         for (uint row = lane; row < input_dim; row += 32) {
             const float xv = static_cast<float>(x[x_base + row]);
             const uint weight_base = row * output_dim + col_base;
@@ -2873,6 +2884,160 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
             }
             if (col_base + 7 < output_dim) {
                 out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
+            }
+        }
+        return;
+    }
+
+    if (row_quad_mode) {
+        const uint batch1 = batch_idx + 1;
+        const uint batch2 = batch_idx + 2;
+        const uint batch3 = batch_idx + 3;
+        const bool has_batch1 = batch1 < row_pair_mode;
+        const bool has_batch2 = batch2 < row_pair_mode;
+        const bool has_batch3 = batch3 < row_pair_mode;
+        const uint x_base1 = batch1 * input_dim;
+        const uint x_base2 = batch2 * input_dim;
+        const uint x_base3 = batch3 * input_dim;
+        float acc10 = 0.0f;
+        float acc11 = 0.0f;
+        float acc12 = 0.0f;
+        float acc13 = 0.0f;
+        float acc20 = 0.0f;
+        float acc21 = 0.0f;
+        float acc22 = 0.0f;
+        float acc23 = 0.0f;
+        float acc30 = 0.0f;
+        float acc31 = 0.0f;
+        float acc32 = 0.0f;
+        float acc33 = 0.0f;
+
+        for (uint row = lane; row < input_dim; row += 32) {
+            const float xv0 = static_cast<float>(x[x_base + row]);
+            const float xv1 = has_batch1 ? static_cast<float>(x[x_base1 + row]) : 0.0f;
+            const float xv2 = has_batch2 ? static_cast<float>(x[x_base2 + row]) : 0.0f;
+            const float xv3 = has_batch3 ? static_cast<float>(x[x_base3 + row]) : 0.0f;
+            const uint weight_base = row * output_dim + col_base;
+            if (vector_load_safe) {
+                device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+                const bfloat4 w = *w4_ptr;
+                const float w0 = static_cast<float>(w[0]);
+                const float w1 = static_cast<float>(w[1]);
+                const float w2 = static_cast<float>(w[2]);
+                const float w3 = static_cast<float>(w[3]);
+                acc0 += xv0 * w0;
+                acc1 += xv0 * w1;
+                acc2 += xv0 * w2;
+                acc3 += xv0 * w3;
+                acc10 += xv1 * w0;
+                acc11 += xv1 * w1;
+                acc12 += xv1 * w2;
+                acc13 += xv1 * w3;
+                acc20 += xv2 * w0;
+                acc21 += xv2 * w1;
+                acc22 += xv2 * w2;
+                acc23 += xv2 * w3;
+                acc30 += xv3 * w0;
+                acc31 += xv3 * w1;
+                acc32 += xv3 * w2;
+                acc33 += xv3 * w3;
+            } else {
+                const float w0 = static_cast<float>(weight_t[weight_base + 0]);
+                acc0 += xv0 * w0;
+                acc10 += xv1 * w0;
+                acc20 += xv2 * w0;
+                acc30 += xv3 * w0;
+                if (col_base + 1 < output_dim) {
+                    const float w1 = static_cast<float>(weight_t[weight_base + 1]);
+                    acc1 += xv0 * w1;
+                    acc11 += xv1 * w1;
+                    acc21 += xv2 * w1;
+                    acc31 += xv3 * w1;
+                }
+                if (col_base + 2 < output_dim) {
+                    const float w2 = static_cast<float>(weight_t[weight_base + 2]);
+                    acc2 += xv0 * w2;
+                    acc12 += xv1 * w2;
+                    acc22 += xv2 * w2;
+                    acc32 += xv3 * w2;
+                }
+                if (col_base + 3 < output_dim) {
+                    const float w3 = static_cast<float>(weight_t[weight_base + 3]);
+                    acc3 += xv0 * w3;
+                    acc13 += xv1 * w3;
+                    acc23 += xv2 * w3;
+                    acc33 += xv3 * w3;
+                }
+            }
+        }
+
+        acc0 = simd_sum(acc0);
+        acc1 = simd_sum(acc1);
+        acc2 = simd_sum(acc2);
+        acc3 = simd_sum(acc3);
+        acc10 = simd_sum(acc10);
+        acc11 = simd_sum(acc11);
+        acc12 = simd_sum(acc12);
+        acc13 = simd_sum(acc13);
+        acc20 = simd_sum(acc20);
+        acc21 = simd_sum(acc21);
+        acc22 = simd_sum(acc22);
+        acc23 = simd_sum(acc23);
+        acc30 = simd_sum(acc30);
+        acc31 = simd_sum(acc31);
+        acc32 = simd_sum(acc32);
+        acc33 = simd_sum(acc33);
+
+        if (lane == 0) {
+            const uint out_base = batch_idx * output_dim;
+            out[out_base + col_base + 0] = static_cast<bfloat>(acc0);
+            if (col_base + 1 < output_dim) {
+                out[out_base + col_base + 1] = static_cast<bfloat>(acc1);
+            }
+            if (col_base + 2 < output_dim) {
+                out[out_base + col_base + 2] = static_cast<bfloat>(acc2);
+            }
+            if (col_base + 3 < output_dim) {
+                out[out_base + col_base + 3] = static_cast<bfloat>(acc3);
+            }
+            if (has_batch1) {
+                const uint out_base1 = batch1 * output_dim;
+                out[out_base1 + col_base + 0] = static_cast<bfloat>(acc10);
+                if (col_base + 1 < output_dim) {
+                    out[out_base1 + col_base + 1] = static_cast<bfloat>(acc11);
+                }
+                if (col_base + 2 < output_dim) {
+                    out[out_base1 + col_base + 2] = static_cast<bfloat>(acc12);
+                }
+                if (col_base + 3 < output_dim) {
+                    out[out_base1 + col_base + 3] = static_cast<bfloat>(acc13);
+                }
+            }
+            if (has_batch2) {
+                const uint out_base2 = batch2 * output_dim;
+                out[out_base2 + col_base + 0] = static_cast<bfloat>(acc20);
+                if (col_base + 1 < output_dim) {
+                    out[out_base2 + col_base + 1] = static_cast<bfloat>(acc21);
+                }
+                if (col_base + 2 < output_dim) {
+                    out[out_base2 + col_base + 2] = static_cast<bfloat>(acc22);
+                }
+                if (col_base + 3 < output_dim) {
+                    out[out_base2 + col_base + 3] = static_cast<bfloat>(acc23);
+                }
+            }
+            if (has_batch3) {
+                const uint out_base3 = batch3 * output_dim;
+                out[out_base3 + col_base + 0] = static_cast<bfloat>(acc30);
+                if (col_base + 1 < output_dim) {
+                    out[out_base3 + col_base + 1] = static_cast<bfloat>(acc31);
+                }
+                if (col_base + 2 < output_dim) {
+                    out[out_base3 + col_base + 2] = static_cast<bfloat>(acc32);
+                }
+                if (col_base + 3 < output_dim) {
+                    out[out_base3 + col_base + 3] = static_cast<bfloat>(acc33);
+                }
             }
         }
         return;
@@ -5495,12 +5660,17 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     );
     let (batch, _, input_dim) = x.dims3()?;
     let (_, output_dim) = weight_t.dims2()?;
-    let row_pair_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
-    let row_groups = if row_pair_enabled {
-        batch.div_ceil(2)
+    let row_grouping_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
+    let row_quad_enabled =
+        row_grouping_enabled && batch >= 8 && !metal_transposed_coop_gemv_row_quad_disabled();
+    let row_group_size = if row_quad_enabled {
+        4usize
+    } else if row_grouping_enabled {
+        2usize
     } else {
-        batch
+        1usize
     };
+    let row_groups = batch.div_ceil(row_group_size);
 
     // The kernel writes every batch/output channel exactly once.
     let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, x.device())? };
@@ -5543,13 +5713,19 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
 
         let input_dim_u32 = input_dim as u32;
         let output_dim_u32 = output_dim as u32;
-        let row_pair_mode_u32 = if row_pair_enabled { batch as u32 } else { 0 };
+        let row_pair_mode_u32 = if row_group_size > 1 { batch as u32 } else { 0 };
+        let row_group_size_u32 = row_group_size as u32;
         encoder.set_bytes(3, &input_dim_u32);
         encoder.set_bytes(4, &output_dim_u32);
         encoder.set_bytes(5, &row_pair_mode_u32);
+        encoder.set_bytes(6, &row_group_size_u32);
 
-        let cols_per_threadgroup =
-            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+        let tile_cols = if row_quad_enabled {
+            METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS
+        } else {
+            METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS
+        };
+        let cols_per_threadgroup = tile_cols * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: output_dim.div_ceil(cols_per_threadgroup),
             height: row_groups,
@@ -13088,31 +13264,31 @@ mod tests {
             return Ok(());
         };
 
-        let batch = 4usize;
         let input_dim = 128usize;
-        let output_dim = 133usize;
-        let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
-        let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 29, 0.0078125)?;
+        for (batch, output_dim) in [(4usize, 133usize), (8usize, 136usize)] {
+            let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+            let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 29, 0.0078125)?;
 
-        assert!(metal_transposed_coop_gemv_decode_batch_supports(
-            &x, &weight_t
-        ));
-        let reference = x.broadcast_matmul(&weight_t)?;
-        let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+            let reference = x.broadcast_matmul(&weight_t)?;
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
 
-        assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
-        assert_eq!(fused.dtype(), DType::BF16);
+            assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
+            assert_eq!(fused.dtype(), DType::BF16);
 
-        let max = max_abs_diff(&reference, &fused)?;
-        let mean = mean_abs_diff(&reference, &fused)?;
-        assert!(
-            max < 2e-2,
-            "Metal batch transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
-        );
-        assert!(
-            mean < 3e-3,
-            "Metal batch transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
-        );
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Metal batch transposed coop GEMV batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 3e-3,
+                "Metal batch transposed coop GEMV batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
 
         Ok(())
     }

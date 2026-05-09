@@ -1,0 +1,38 @@
+E377 Metal batched transposed GEMV row-quad summary
+
+Change:
+- Added a row-quad mode to the Metal batched transposed cooperative GEMV path.
+- The mode is enabled only for batch >= 8 and only when row grouping is enabled.
+- The old KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1 rollback disables row grouping entirely.
+- Added KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1 to disable only the new batch-8 row-quad path.
+- Row-quad uses 4 output columns per SIMD group, reusing each weight load across up to four rows without increasing accumulator count beyond the row-pair tile8 path.
+
+Validation:
+- cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul --lib -- --nocapture
+- cargo test -p kiln-model --features metal test_transposed_coop_gemv --lib -- --nocapture
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench
+- cargo fmt --check
+- git diff --check
+- cargo build --release --features metal --bin kiln
+
+Synthetic Qwen3.5 down-proj-shaped batch GEMV:
+- row-quad disabled batch 2: 1248.671 us
+- row-quad default batch 2: 1366.192 us
+- row-quad disabled batch 3: 2046.092 us
+- row-quad default batch 3: 2132.054 us
+- row-quad disabled batch 4: 2153.292 us
+- row-quad default batch 4: 2104.787 us
+- row-quad disabled batch 8: 3479.879 us
+- row-quad default batch 8: 3122.283 us
+
+Only batch 8 uses the new row-quad branch. The batch-8 synthetic improvement is 10.2761%.
+
+Same-binary n8 endpoint A/B, no KILN_DECODE_BATCH_WAIT_US env:
+- KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD=1: wall 8.328718s, 64 generated tokens, 56 jobs, 9 worker batches, 56 rows, max batch 8
+- default row-quad: wall 8.034134s, 64 generated tokens, 56 jobs, 9 worker batches, 56 rows, max batch 8
+
+The default row-quad path improved the endpoint shape by 3.5370% with the same decode-batcher counters.
+
+Decision:
+Accepted. Keep the row-quad branch enabled by default only for batch >= 8.
