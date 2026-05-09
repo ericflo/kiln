@@ -13812,3 +13812,136 @@ MLP down-projection, then GDN in/out projection.
 Accepted as target-selection evidence. No source change. Continue with MLP
 gate/up and MLP down-projection first; GDN in-projection is improved but still
 the next GDN target family alongside out-projection.
+
+## 2026-05-09 E381 - Add vector-load mode for full-batch Metal MLP gate/up row-quad
+
+### Goal
+
+Target the top remaining profiled decode stage from E380,
+`mlp:gate_up_fused`. E375 already made full decode batches reuse each MLP
+gate/up weight load across four rows. This experiment tests whether each
+row-quad thread can load the two adjacent intermediate columns as a `bfloat2`
+pair instead of two scalar BF16 loads.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1` as a targeted
+  same-binary rollback.
+- Preserved the existing scalar row-quad path as `row_pair_mode=4`.
+- Added `row_pair_mode=5` for vector row-quad, selected only when:
+  - rows `>=8`
+  - row-quad is otherwise enabled
+  - the vector-load rollback env is not set
+  - `intermediate` is even
+  - `gate_t` and `up_t` Metal buffer offsets are 4-byte aligned
+- Mode `5` uses `bfloat2` loads for gate/up column pairs inside the row-quad
+  MLP gate/up branch. Batch `1` remains on the single-row path, and batch
+  `2/3/4` remain on the E364 row-pair path.
+
+### Method
+
+- Captured a pre-edit synthetic MLP gate/up baseline.
+- Tried an initial vector-load candidate controlled by a per-inner-loop kernel
+  argument. The first parallel benchmark pair was discarded because both cargo
+  tests overlapped; the sequential rerun showed the dynamic branch was not the
+  right shape.
+- Reworked the candidate into a dedicated row-pair mode so the hot loop chooses
+  vector or scalar once outside the inner dot-product loop.
+- Ran focused parity, synthetic A/B, release build, endpoint A/B, Metal/Vulkan
+  checks, fmt, and diff checks.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- Same-binary endpoint A/B with eight cache-warmed streaming requests, greedy
+  `max_tokens=16`.
+- Same-binary endpoint A/B with eight cache-warmed streaming requests, greedy
+  `max_tokens=24`.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Pre-edit Qwen-shaped BF16 MLP gate/up synthetic baseline:
+
+- batch `1`: `1718.254 us`
+- batch `2`: `2128.858 us`
+- batch `3`: `2172.867 us`
+- batch `4`: `1988.875 us`
+- batch `8`: `2393.442 us`
+
+The first dynamic-toggle implementation was rejected. Its clean sequential
+rerun improved vector over its scalar toggle at batch `8` (`2595.142 us` versus
+`2856.829 us`), but it was slower than the pre-edit scalar baseline. The final
+candidate uses a dedicated mode to remove that inner-loop control branch.
+
+Final dedicated-mode synthetic A/B:
+
+- batch `1`: disabled `1657.946 us`, default `1749.396 us`
+- batch `2`: disabled `1984.796 us`, default `1948.150 us`
+- batch `3`: disabled `2011.254 us`, default `2132.271 us`
+- batch `4`: disabled `2112.800 us`, default `2131.992 us`
+- batch `8`: disabled `2603.238 us`, default `2341.192 us`
+
+Only batch `8` selects the new vector row-quad branch. The intended batch-8
+synthetic shape improved by `10.1%` versus same-binary scalar row-quad, and by
+`2.2%` versus the pre-edit baseline.
+
+Endpoint A/B, eight varied prompts, greedy `max_tokens=16`:
+
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1`: wall
+  `13.069378s`, `128` generated tokens, `120` jobs, `16` worker batches,
+  `120` rows, max batch `8`
+- default vector row-quad: wall `12.988253s`, `128` generated tokens, `120`
+  jobs, `17` worker batches, `120` rows, max batch `8`
+
+The short endpoint run improved by `0.6%`, though worker-batch counts differed.
+
+Longer endpoint A/B, eight varied prompts, greedy `max_tokens=24`:
+
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1`: wall
+  `18.452436s`, `192` generated tokens, `184` jobs, `25` worker batches,
+  `184` rows, max batch `8`
+- default vector row-quad: wall `18.176732s`, `192` generated tokens, `184`
+  jobs, `26` worker batches, `184` rows, max batch `8`
+
+The longer endpoint run improved by `1.5%`; default was faster despite forming
+one extra worker batch. An identical-prompt repeat collapsed to max batch `1`
+and is not row-quad decision evidence.
+
+### Artifact
+
+- `e381_mlp_gate_up_row_quad_vector_load_baseline.log`
+- `e381_mlp_gate_up_row_quad_vector_load_candidate.log`
+- `e381_mlp_gate_up_row_quad_vector_load_candidate_rerun.log`
+- `e381_mlp_gate_up_row_quad_vector_load_disabled.log`
+- `e381_mlp_gate_up_row_quad_vector_load_disabled_rerun.log`
+- `e381_mlp_gate_up_row_quad_vector_load_parity.log`
+- `e381_mlp_gate_up_row_quad_vector_mode_parity.log`
+- `e381_mlp_gate_up_row_quad_vector_mode_disabled.log`
+- `e381_mlp_gate_up_row_quad_vector_mode_candidate.log`
+- `e381_release_build_metal.log`
+- `e381_mlp_gate_up_vector_mode_endpoint_disabled_*`
+- `e381_mlp_gate_up_vector_mode_endpoint_default_*`
+- `e381_mlp_gate_up_vector_mode_endpoint_repeat_*`
+- `e381_mlp_gate_up_vector_mode_endpoint_longer_*`
+- `e381_mlp_gate_up_vector_mode_endpoint_longer_summary.json`
+- `e381_cargo_check_metal.log`
+- `e381_cargo_check_vulkan.log`
+- `e381_cargo_fmt_check.log`
+- `e381_git_diff_check.log`
+- `e381_mlp_gate_up_vector_mode_summary.txt`
+
+### Decision
+
+Accepted. Enable vector-load row-quad MLP gate/up by default only for full
+batches when the weight column pair and buffer alignment make `bfloat2` loads
+safe. The scalar row-quad branch remains available with
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1`, and the broader
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` rollback still disables full-batch
+row-quad entirely.

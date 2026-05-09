@@ -1,0 +1,46 @@
+E381 Metal MLP gate/up row-quad vector-load mode
+
+Decision: accepted.
+
+Change:
+- Added KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1.
+- Kept the existing scalar row-quad path as row_pair_mode=4.
+- Added row_pair_mode=5 for batch >=8 row-quad when vector loads are enabled,
+  intermediate is even, and gate/up buffer offsets are 4-byte aligned.
+- Mode 5 loads gate/up column pairs with bfloat2 inside the row-quad MLP
+  gate/up branch. Batch 1 remains single-row; batch 2/3/4 remain row-pair.
+
+Rejected intermediate:
+- The first implementation used a per-inner-loop runtime branch controlled by
+  a separate kernel argument. Sequential synthetic rerun improved vector over
+  that scalar toggle at batch 8 (2595.142 us vs 2856.829 us), but it was slower
+  than the pre-edit scalar baseline (2393.442 us). Reworked to a dedicated mode
+  so the hot loop has no dynamic vector/scalar branch.
+
+Key synthetic results:
+- Pre-edit baseline batch 8: 2393.442 us.
+- Dedicated vector mode disabled batch 8: 2603.238 us.
+- Dedicated vector mode default batch 8: 2341.192 us.
+- Same-binary vector vs scalar row-quad: 10.1% faster at batch 8.
+- Default vector mode vs pre-edit baseline: 2.2% faster at batch 8.
+
+Endpoint results:
+- max_tokens=16 varied prompts: disabled 13.069378s, default 12.988253s
+  (0.6% faster), 128 tokens, 120 jobs, max batch 8. Worker batches differed
+  16 vs 17.
+- max_tokens=24 varied prompts: disabled 18.452436s, default 18.176732s
+  (1.5% faster), 192 tokens, 184 jobs, max batch 8. Worker batches differed
+  25 vs 26, with default faster despite one extra worker batch.
+- Identical-prompt repeat collapsed to max_batch=1 and is not decision
+  evidence for row-quad.
+
+Validation:
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture
+- KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture
+- KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture
+- cargo build --release --features metal --bin kiln
+- Same-binary endpoint A/B at max_tokens=16 and max_tokens=24.
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench
+- cargo fmt --check
+- git diff --check

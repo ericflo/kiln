@@ -33,6 +33,8 @@ const DISABLE_METAL_RMSNORM: &str = "KILN_DISABLE_METAL_RMSNORM";
 const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION";
 const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR";
 const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD";
+const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
+    "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
@@ -899,6 +901,10 @@ fn metal_mlp_gate_up_row_pair_disabled() -> bool {
 
 fn metal_mlp_gate_up_row_quad_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD)
+}
+
+fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
+    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD)
 }
 
 fn metal_attn_gate_fusion_disabled() -> bool {
@@ -2394,7 +2400,7 @@ kernel void kiln_mlp_gate_up_bf16(
         return;
     }
 
-    if (row_pair_mode == 4) {
+    if (row_pair_mode == 4 || row_pair_mode == 5) {
         const uint row_quads = (rows + 3) >> 2;
         const uint total = row_quads * cols2;
         if (gid >= total) {
@@ -2432,51 +2438,91 @@ kernel void kiln_mlp_gate_up_bf16(
         float up_acc30 = 0.0f;
         float gate_acc31 = 0.0f;
         float up_acc31 = 0.0f;
-        for (uint i = 0; i < hidden; ++i) {
-            const uint w_idx0 = i * intermediate + col0;
-            const float gate_w0 = static_cast<float>(gate_t[w_idx0]);
-            const float up_w0 = static_cast<float>(up_t[w_idx0]);
-            float gate_w1 = 0.0f;
-            float up_w1 = 0.0f;
-            if (has_col1) {
-                const uint w_idx1 = w_idx0 + 1;
-                gate_w1 = static_cast<float>(gate_t[w_idx1]);
-                up_w1 = static_cast<float>(up_t[w_idx1]);
-            }
+        if (row_pair_mode == 5) {
+            for (uint i = 0; i < hidden; ++i) {
+                const uint w_idx0 = i * intermediate + col0;
+                const bfloat2 gate_w = *(device const bfloat2*)(gate_t + w_idx0);
+                const bfloat2 up_w = *(device const bfloat2*)(up_t + w_idx0);
+                const float gate_w0 = static_cast<float>(gate_w[0]);
+                const float gate_w1 = static_cast<float>(gate_w[1]);
+                const float up_w0 = static_cast<float>(up_w[0]);
+                const float up_w1 = static_cast<float>(up_w[1]);
 
-            const float xv0 = static_cast<float>(x[x_base0 + i]);
-            gate_acc00 += xv0 * gate_w0;
-            up_acc00 += xv0 * up_w0;
-            if (has_col1) {
+                const float xv0 = static_cast<float>(x[x_base0 + i]);
+                gate_acc00 += xv0 * gate_w0;
+                up_acc00 += xv0 * up_w0;
                 gate_acc01 += xv0 * gate_w1;
                 up_acc01 += xv0 * up_w1;
-            }
 
-            if (has_row1) {
-                const float xv1 = static_cast<float>(x[x_base1 + i]);
-                gate_acc10 += xv1 * gate_w0;
-                up_acc10 += xv1 * up_w0;
-                if (has_col1) {
+                if (has_row1) {
+                    const float xv1 = static_cast<float>(x[x_base1 + i]);
+                    gate_acc10 += xv1 * gate_w0;
+                    up_acc10 += xv1 * up_w0;
                     gate_acc11 += xv1 * gate_w1;
                     up_acc11 += xv1 * up_w1;
                 }
-            }
-            if (has_row2) {
-                const float xv2 = static_cast<float>(x[x_base2 + i]);
-                gate_acc20 += xv2 * gate_w0;
-                up_acc20 += xv2 * up_w0;
-                if (has_col1) {
+                if (has_row2) {
+                    const float xv2 = static_cast<float>(x[x_base2 + i]);
+                    gate_acc20 += xv2 * gate_w0;
+                    up_acc20 += xv2 * up_w0;
                     gate_acc21 += xv2 * gate_w1;
                     up_acc21 += xv2 * up_w1;
                 }
-            }
-            if (has_row3) {
-                const float xv3 = static_cast<float>(x[x_base3 + i]);
-                gate_acc30 += xv3 * gate_w0;
-                up_acc30 += xv3 * up_w0;
-                if (has_col1) {
+                if (has_row3) {
+                    const float xv3 = static_cast<float>(x[x_base3 + i]);
+                    gate_acc30 += xv3 * gate_w0;
+                    up_acc30 += xv3 * up_w0;
                     gate_acc31 += xv3 * gate_w1;
                     up_acc31 += xv3 * up_w1;
+                }
+            }
+        } else {
+            for (uint i = 0; i < hidden; ++i) {
+                const uint w_idx0 = i * intermediate + col0;
+                const float gate_w0 = static_cast<float>(gate_t[w_idx0]);
+                const float up_w0 = static_cast<float>(up_t[w_idx0]);
+                float gate_w1 = 0.0f;
+                float up_w1 = 0.0f;
+                if (has_col1) {
+                    const uint w_idx1 = w_idx0 + 1;
+                    gate_w1 = static_cast<float>(gate_t[w_idx1]);
+                    up_w1 = static_cast<float>(up_t[w_idx1]);
+                }
+
+                const float xv0 = static_cast<float>(x[x_base0 + i]);
+                gate_acc00 += xv0 * gate_w0;
+                up_acc00 += xv0 * up_w0;
+                if (has_col1) {
+                    gate_acc01 += xv0 * gate_w1;
+                    up_acc01 += xv0 * up_w1;
+                }
+
+                if (has_row1) {
+                    const float xv1 = static_cast<float>(x[x_base1 + i]);
+                    gate_acc10 += xv1 * gate_w0;
+                    up_acc10 += xv1 * up_w0;
+                    if (has_col1) {
+                        gate_acc11 += xv1 * gate_w1;
+                        up_acc11 += xv1 * up_w1;
+                    }
+                }
+                if (has_row2) {
+                    const float xv2 = static_cast<float>(x[x_base2 + i]);
+                    gate_acc20 += xv2 * gate_w0;
+                    up_acc20 += xv2 * up_w0;
+                    if (has_col1) {
+                        gate_acc21 += xv2 * gate_w1;
+                        up_acc21 += xv2 * up_w1;
+                    }
+                }
+                if (has_row3) {
+                    const float xv3 = static_cast<float>(x[x_base3 + i]);
+                    gate_acc30 += xv3 * gate_w0;
+                    up_acc30 += xv3 * up_w0;
+                    if (has_col1) {
+                        gate_acc31 += xv3 * gate_w1;
+                        up_acc31 += xv3 * up_w1;
+                    }
                 }
             }
         }
@@ -5587,6 +5633,13 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
         let intermediate_u32 = intermediate as u32;
         let row_pair_mode_u32 = if row_group_size == 1 {
             0
+        } else if row_group_size == 4
+            && !metal_mlp_gate_up_row_quad_vector_load_disabled()
+            && intermediate % 2 == 0
+            && gate_buf.offset_in_bytes % 4 == 0
+            && up_buf.offset_in_bytes % 4 == 0
+        {
+            5
         } else {
             row_group_size as u32
         };

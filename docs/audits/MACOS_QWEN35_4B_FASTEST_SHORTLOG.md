@@ -1435,3 +1435,16 @@
   totals were led by `mlp:gate_up_fused` `443.570 ms`, `mlp:down_proj`
   `338.788 ms`, `gdn:in_proj` `248.828 ms`, and `gdn:out_proj` `145.015 ms`.
   Accepted as target-selection evidence; no source change.
+- 2026-05-09 E381: Accepted Metal MLP gate/up row-quad vector-load mode for
+  full batches. The new default mode uses `bfloat2` loads for gate/up column
+  pairs only when rows are `>=8`, intermediate width is even, and gate/up
+  buffer offsets are 4-byte aligned; `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1`
+  falls back to scalar row-quad, while the older row-quad rollback still
+  disables full-batch row-quad entirely. Focused parity, release build,
+  Metal/Vulkan checks, fmt check, and diff check passed. Synthetic batch `8`
+  improved same-binary scalar row-quad to vector mode from `2603.238 ->
+  2341.192 us` (`10.1%`), and improved versus the pre-edit baseline
+  `2393.442 -> 2341.192 us` (`2.2%`). Endpoint A/B improved `max_tokens=16`
+  from `13.069378s` to `12.988253s` (`0.6%`) and `max_tokens=24` from
+  `18.452436s` to `18.176732s` (`1.5%`) with identical token/job/row counts
+  and max batch `8`, though worker-batch counts differed by one in both runs.
