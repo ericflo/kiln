@@ -303,20 +303,39 @@ fn linear_with_lora_t_decode(
 ) -> Result<Tensor> {
     #[cfg(feature = "metal")]
     {
-        if lora.is_none()
-            && !crate::mtp_debug::is_mtp_fp32_head_armed()
+        if !crate::mtp_debug::is_mtp_fp32_head_armed()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && (crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
                 || crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
                     x, weight_t,
                 ))
         {
-            return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
+            let base = crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
                 .context("metal transposed coop GEMV failed");
+            return add_lora_delta_to_base(base?, x, lora, lora_scale)
+                .context("metal transposed coop GEMV LoRA delta failed");
         }
     }
 
     linear_with_lora_t(x, weight_t, lora, lora_scale)
+}
+
+fn add_lora_delta_to_base(
+    base: Tensor,
+    x: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    let Some(proj) = lora else {
+        return Ok(base);
+    };
+    let delta = compute_lora_delta(x, proj, lora_scale)?;
+    let delta = if delta.dtype() == base.dtype() {
+        delta
+    } else {
+        delta.to_dtype(base.dtype())?
+    };
+    Ok((base + delta)?)
 }
 
 fn linear_with_lora_t_decode_if(
@@ -343,16 +362,7 @@ fn linear_with_lora_t_backend_decode_if(
 ) -> Result<Tensor> {
     if let Some(backend) = backend {
         if let Some(base) = backend.linear_decode(x, weight_t)? {
-            if let Some(proj) = lora {
-                let delta = compute_lora_delta(x, proj, lora_scale)?;
-                let delta = if delta.dtype() == base.dtype() {
-                    delta
-                } else {
-                    delta.to_dtype(base.dtype())?
-                };
-                return Ok((base + delta)?);
-            }
-            return Ok(base);
+            return add_lora_delta_to_base(base, x, lora, lora_scale);
         }
     }
     linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
@@ -9926,6 +9936,145 @@ mod tests {
                 "got {got}, expected {expected}"
             );
         }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_linear_decode_lora_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_linear_decode_lora_matches_broadcast_matmul"
+            );
+            return Ok(());
+        };
+
+        let input_dim = 128usize;
+        let output_dim = 133usize;
+        let rank = 4usize;
+        let mut exercised_fast_path = false;
+        for batch in [1usize, 4usize] {
+            let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, &device)?;
+            let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0078125, &device)?;
+            let lora = LoraProjectionWeights {
+                a: patterned_bf16(&[rank, input_dim], 0.001, &device)?,
+                b: patterned_bf16(&[output_dim, rank], 0.0015, &device)?,
+            };
+            let supported = if batch == 1 {
+                crate::backend::metal::metal_transposed_coop_gemv_supports(&x, &weight_t)
+            } else {
+                crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+                    &x, &weight_t,
+                )
+            };
+            if !supported {
+                eprintln!(
+                    "Metal transposed coop GEMV disabled for batch={batch}, skipping LoRA parity row"
+                );
+                continue;
+            }
+            exercised_fast_path = true;
+
+            let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 0.75)?;
+            let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 0.75)?;
+
+            assert_eq!(fast.dims(), &[batch, 1usize, output_dim]);
+            assert_eq!(fast.dtype(), DType::BF16);
+
+            let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
+            assert!(
+                max < 2e-2,
+                "Metal LoRA linear decode batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 3e-3,
+                "Metal LoRA linear decode batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
+
+        if !exercised_fast_path {
+            eprintln!("Metal transposed coop GEMV unavailable, no LoRA fast path rows exercised");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "synthetic Metal LoRA projection microbench; run explicitly with --ignored --nocapture"]
+    fn bench_metal_linear_decode_lora_qwen35_synthetic() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = std::env::var("KILN_METAL_LORA_LINEAR_BENCH_WARMUP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2);
+        let iters = std::env::var("KILN_METAL_LORA_LINEAR_BENCH_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5);
+
+        bench_metal_lora_linear_case(&device, "mlp_gate_or_up", 4, 2560, 9216, 16, warmup, iters)?;
+        bench_metal_lora_linear_case(&device, "down_proj", 4, 9216, 2560, 16, warmup, iters)?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[allow(clippy::too_many_arguments)]
+    fn bench_metal_lora_linear_case(
+        device: &Device,
+        label: &str,
+        batch: usize,
+        input_dim: usize,
+        output_dim: usize,
+        rank: usize,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<()> {
+        let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, device)?;
+        let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0001, device)?;
+        let lora = LoraProjectionWeights {
+            a: patterned_bf16(&[rank, input_dim], 0.0002, device)?,
+            b: patterned_bf16(&[output_dim, rank], 0.0002, device)?,
+        };
+        if !crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t) {
+            eprintln!("metal_lora_linear_bench label={label} skipped unsupported shape");
+            return Ok(());
+        }
+
+        let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+        let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+        let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
+
+        for _ in 0..warmup {
+            let out = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+            let out = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let out = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+        let fast_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let out = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+        let fallback_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        eprintln!(
+            "metal_lora_linear_bench label={label} batch={batch} input_dim={input_dim} output_dim={output_dim} rank={rank} iters={iters} fast_ms={fast_ms:.3} fallback_ms={fallback_ms:.3} speedup={:.3} max_abs_diff={max:e} mean_abs_diff={mean:e}",
+            fallback_ms / fast_ms
+        );
         Ok(())
     }
 

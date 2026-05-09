@@ -12207,3 +12207,74 @@ projection-heavy MLP/GDN slices.
 Accepted as target-selection evidence. No source change. Continue Metal work
 on MLP decode projection stages, with `mlp:gate_up_fused` and `mlp:down_proj`
 as the current top targets.
+
+## 2026-05-09 E363 - Accepted Metal LoRA decode base-projection fast path
+
+### Goal
+
+Cover the active LoRA configuration after E362. The no-LoRA Metal decode path
+already uses fused MLP gate/up and transposed cooperative GEMV projections, but
+LoRA adapters bypass the MLP gate/up fusion and the direct Metal GEMV helper
+previously refused to run when `lora.is_some()`. The goal was to preserve LoRA
+math while letting Metal still accelerate the base projection.
+
+### Change
+
+- Removed the `lora.is_none()` gate from `linear_with_lora_t_decode`'s direct
+  Metal transposed cooperative GEMV dispatch.
+- Added `add_lora_delta_to_base`, shared by direct Metal decode and the generic
+  backend `linear_decode` helper, to compute the existing
+  `x @ A^T @ B^T * scale` delta and cast it to the accelerated base dtype
+  before addition.
+- Added a Metal parity test covering LoRA decode at batch `1` and `4`.
+- Added an ignored Qwen3.5-sized synthetic LoRA projection microbench.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --lib -- --nocapture`
+- `KILN_METAL_LORA_LINEAR_BENCH_WARMUP=2 KILN_METAL_LORA_LINEAR_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Correctness:
+
+- Metal LoRA linear decode parity passed for batch `1` and `4`.
+- Existing backend accelerated-base plus LoRA-delta parity test passed.
+- Metal and Vulkan builds still check successfully.
+
+Qwen-shaped BF16 rank-16 LoRA projection synthetic bench at batch `4`, lower
+is better:
+
+- MLP gate-or-up shape `[4,1,2560] x [2560,9216]`: fast `6.770 ms`,
+  fallback `135.994 ms`, `20.088x` speedup, `max_abs_diff=0`
+- MLP down-projection shape `[4,1,9216] x [9216,2560]`: fast `6.326 ms`,
+  fallback `150.156 ms`, `23.735x` speedup, `max_abs_diff=1.5625e-2`,
+  `mean_abs_diff=3.0517578e-5`
+
+No real-adapter endpoint run was available in this checkout, so this remains a
+synthetic LoRA projection result rather than an end-to-end adapter serving
+measurement. The source change is still useful for the "all configurations"
+goal: it restores the already-accepted Metal base projection fast path in LoRA
+decode while leaving the no-LoRA fused MLP path unchanged.
+
+### Artifact
+
+- `e363_metal_lora_linear_parity.log`
+- `e363_backend_lora_delta_parity.log`
+- `e363_metal_lora_linear_bench.log`
+- `e363_cargo_check_metal.log`
+- `e363_cargo_check_vulkan.log`
+- `e363_release_build_metal.log`
+- `e363_cargo_fmt_check.log`
+- `e363_git_diff_check.log`
+
+### Decision
+
+Accepted. This is a scoped Metal LoRA decode improvement with parity coverage
+and no CUDA/Vulkan dispatch changes beyond reusing the same delta-add helper.

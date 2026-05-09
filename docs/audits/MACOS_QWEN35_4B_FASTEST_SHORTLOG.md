@@ -1258,3 +1258,14 @@
   full-attention `qkv_proj_batch` `49.102 ms`. No source change; E361 moved GDN
   in-proj down from E358's `255.876 ms`, and the next Metal attempts should
   prioritize MLP gate/up or down-projection instead.
+- 2026-05-09 E363: Accepted Metal LoRA decode base-projection fast path.
+  `linear_with_lora_t_decode` now uses the Metal transposed cooperative GEMV
+  for the base projection even when a LoRA projection is active, then adds the
+  existing `x @ A^T @ B^T * scale` delta. Metal LoRA parity passed for batch
+  `1` and `4`, the existing backend LoRA delta test passed, Metal/Vulkan
+  checks and release Metal build passed. Qwen-shaped BF16 rank-16 synthetic
+  LoRA projections at batch `4` improved from fallback `135.994/150.156 ms` to
+  fast `6.770/6.326 ms` for MLP gate-or-up/down, a `20.1x/23.7x` speedup with
+  max diffs `0` and `1.5625e-2`. No real-adapter endpoint run was available;
+  this is a LoRA-config targeted win and leaves the no-LoRA fused MLP path
+  unchanged.
