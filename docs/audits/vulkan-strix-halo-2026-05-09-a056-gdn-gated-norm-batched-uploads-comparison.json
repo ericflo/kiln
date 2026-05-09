@@ -1,0 +1,17 @@
+{
+  "candidate_wall_s": 2.975427970995952,
+  "gdn_stage:gated_norm:candidate_ms": 49.860999999999976,
+  "gdn_stage:gated_norm:delta_ms": -40.55000000000004,
+  "gdn_stage:gated_norm:rollback_ms": 90.41100000000002,
+  "gdn_stage:gates:candidate_ms": 77.80799999999998,
+  "gdn_stage:gates:delta_ms": 26.06099999999998,
+  "gdn_stage:gates:rollback_ms": 51.747,
+  "gdn_stage:recurrent:candidate_ms": 121.30100000000003,
+  "gdn_stage:recurrent:delta_ms": -3.308999999999969,
+  "gdn_stage:recurrent:rollback_ms": 124.61,
+  "mlp_stage:fused:candidate_ms": 164.39099999999993,
+  "mlp_stage:fused:delta_ms": 15.345999999999918,
+  "mlp_stage:fused:rollback_ms": 149.04500000000002,
+  "rollback_wall_s": 3.126834269001847,
+  "wall_delta_candidate_minus_rollback_s": -0.15140629800589522
+}

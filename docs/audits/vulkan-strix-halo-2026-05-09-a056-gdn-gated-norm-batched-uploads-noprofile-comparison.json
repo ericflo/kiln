@@ -1,0 +1,21 @@
+{
+  "candidate_all_correct": true,
+  "candidate_metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 3.0,
+    "worker_batches": 3.0
+  },
+  "candidate_minus_rollback_s": -0.11648211100691697,
+  "candidate_second_wall_s": 2.9681582159973914,
+  "rollback_all_correct": true,
+  "rollback_first_wall_s": 3.0846403270043083,
+  "rollback_metrics_delta": {
+    "batcher_rows": 7.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 7.0,
+    "max_batch_after": 4.0,
+    "worker_batches": 3.0
+  }
+}

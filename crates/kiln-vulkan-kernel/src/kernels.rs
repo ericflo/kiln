@@ -71,6 +71,13 @@ fn gdn_gates_batched_transfers_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_GATES_BATCHED_TRANSFERS").is_err())
 }
 
+fn gdn_gated_norm_batched_uploads_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_BATCHED_UPLOADS").is_err()
+    })
+}
+
 fn prefill_row_pair_matmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
@@ -3911,21 +3918,36 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
     // Create input buffers + upload
-    let make_input_buf = |data: &[u8]| -> Result<VulkanBuffer> {
-        let buf = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)?;
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
+    let z_buf = VulkanBuffer::create_device_local(device, device_local_mt, z_data.len() as u64)?;
+    if gdn_gated_norm_batched_uploads_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        upload_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[(&x_buf, &x_data), (&z_buf, &z_data)],
+        )?;
+    } else {
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
             device,
             host_visible_mt,
             queue,
             *command_pool,
-            &buf,
-            data,
+            &x_buf,
+            &x_data,
         )?;
-        Ok(buf)
-    };
-    let x_buf = make_input_buf(&x_data)?;
-    let z_buf = make_input_buf(&z_data)?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &z_buf,
+            &z_data,
+        )?;
+    }
 
     // Create output buffer
     let elem_count: usize = out_shape.iter().product();

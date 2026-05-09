@@ -2581,6 +2581,61 @@ Verdict:
   improved by `12.337ms` in the profiled same-shape run; no-profile wall time
   was mixed within short-run noise and all endpoint checks stayed correct.
 
+### 2026-05-09 A056: Batch Vulkan GDN Gated-RMSNorm Input Uploads
+
+Hypothesis:
+- Recent CUDA graph work reduced per-request ownership/runner overhead, while
+  recent Metal wins kept emphasizing fewer hot-path dispatches and less
+  boundary overhead. For Vulkan, `dispatch_gdn_gated_rms_norm_cached` still
+  uploaded `x` and `z` through two separate transfer submissions before one
+  small shader dispatch.
+- Combining the two input uploads into one transfer command should reduce
+  gated-norm movement overhead without changing shader math, tensor shapes, or
+  CUDA/Metal code.
+
+Change:
+- Added Vulkan-only upload batching for
+  `dispatch_gdn_gated_rms_norm_cached`, using the existing A055 batched
+  transfer helper for the `x`/`z` input buffers.
+- Added rollback env
+  `KILN_DISABLE_VULKAN_GDN_GATED_NORM_BATCHED_UPLOADS=1`, which preserves the
+  old two-upload path.
+
+Validation:
+- `cargo fmt --check`.
+- `cargo check -p kiln-vulkan-kernel`.
+- `cargo check -p kiln-model --features vulkan`.
+- `cargo check -p kiln-server --features vulkan`.
+- `cargo test -p kiln-vulkan-kernel gdn_gates_and_gated_rms_norm_match_f32_cpu_reference --test gdn_parity -- --nocapture`.
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture` (`29`
+  tests passed).
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check`.
+
+Evidence:
+- Profiled same-binary endpoint A/B, both arms waited for
+  `inference_prewarm_complete=true`, both returned correct texts `"6"`,
+  `"11"`, `"16"`, `"13"` with empty reasoning, and both used the same `7` jobs
+  / `3` batches / `7` rows shape.
+- Profiled candidate: wall `2.975428s`; live `gdn:gated_norm seq_len=1`
+  `49.861ms` / `96` samples.
+- Profiled rollback with
+  `KILN_DISABLE_VULKAN_GDN_GATED_NORM_BATCHED_UPLOADS=1`: wall `3.126834s`;
+  live `gdn:gated_norm seq_len=1` `90.411ms` / `96` samples.
+- No-profile reverse-order A/B preserved correctness on both arms. Rollback was
+  `3.084640s`; candidate was `2.968158s`. The batcher shape was very close:
+  both had `7` jobs / `3` batches / `7` rows; rollback max batch was `4` and
+  candidate max batch was `3`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a056-gdn-gated-norm-batched-uploads-*`
+
+Verdict:
+- Accepted as a small Vulkan GDN movement win. The targeted profiled stage
+  improved by `40.550ms`, and the no-profile reverse-order endpoint pair also
+  favored the candidate by `116.482ms`.
+- No CUDA or Metal source files changed.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2591,12 +2646,11 @@ Verdict:
 - Use A054/A055, not A039, for warmed-serving target selection. After A048, do
   not use measurements taken before `inference_prewarm_complete=true` as serving
   evidence.
-- A054's post-PR1004 post-prewarm profile still has MLP as the largest explicit
-  live `seq_len=1` stage (`127.327ms`), while GDN recurrent/in-proj/gates and
-  GDN transfer overhead remain comparable in aggregate. Next work should target
-  either packed-BF16 MLP boundary/data movement, sparse/active K/V movement, or
-  a GDN path that materially reduces movement, not just a direct fused-hook
-  route.
+- A054/A055/A056 post-prewarm profiles still leave MLP, GDN recurrent,
+  GDN in-proj, and paged-layer linear work as the largest live decode buckets.
+  Next work should target either packed-BF16 MLP boundary/data movement,
+  sparse/active K/V movement, or a GDN path that materially reduces movement,
+  not just a direct fused-hook route.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).
