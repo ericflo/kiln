@@ -18694,3 +18694,45 @@ The synthetic loss is large enough that no endpoint A/B was run.
 Rejected. The row-unroll2 kernel increased latency for the exact down-proj
 shape it targeted. Source was reverted; keep the current shape-specific tile16
 serial transposed GEMV path.
+
+## 2026-05-09 - E450 rejected GDN in-proj serial x2 unroll2
+
+### Purpose
+
+Test whether the accepted E446 GDN in-proj serial x2 hidden-load path benefits
+from unrolling the x2 loop by another factor of two. E447 still shows GDN
+in-proj as the largest non-MLP serial projection stage after E446.
+
+### Candidate
+
+Temporarily added `row_pair_mode=8` to `kiln_gdn_in_proj_decode_bf16`.
+Mode 8 was selected only when the accepted E446 serial x2 path was already
+eligible, `hidden % 4 == 0`, and
+`KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_UNROLL2` was not set. The rollback
+env forced the current E446 `row_pair_mode=7` path.
+
+### Results
+
+Focused GDN in-proj parity passed.
+
+Short synthetic A/B, affected batch-1 row:
+
+| candidate mode8 | rollback mode7 | result |
+| ---: | ---: | --- |
+| `1222.517 us` | `1188.833 us` | rollback `2.8%` faster |
+
+Batch `2/3/4/8` rows were recorded but are not decision drivers because they
+do not select the serial mode.
+
+### Artifacts
+
+- `e450_gdn_in_proj_x2_unroll2_candidate.diff`
+- `e450_gdn_in_proj_x2_unroll2_parity.log`
+- `e450_gdn_in_proj_x2_unroll2_default_short.log`
+- `e450_gdn_in_proj_x2_unroll2_disabled_short.log`
+
+### Decision
+
+Rejected. The unroll2 variant regressed the directly affected synthetic row, so
+no endpoint A/B was run. Source was reverted; keep E446's serial x2 hidden-load
+mode.

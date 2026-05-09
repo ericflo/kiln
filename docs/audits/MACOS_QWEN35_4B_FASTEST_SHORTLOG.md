@@ -2021,3 +2021,11 @@
   exact BF16 diffs, but the short selected-shape synthetic A/B was a clear
   loss: `1030.992 us` candidate versus `894.529 us` rollback. No endpoint A/B
   was run. Source reverted; keep current tile16.
+- 2026-05-09 E450: Rejected Metal GDN in-proj serial x2 unroll2. The temporary
+  `row_pair_mode=8` unrolled E446's accepted serial x2 hidden-load loop by
+  another factor of two, selected only when mode 7 was otherwise eligible and
+  `hidden % 4 == 0`, with
+  `KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_UNROLL2=1` rolling back to mode 7.
+  Focused parity passed, but the affected batch-1 synthetic row regressed:
+  `1222.517 us` candidate versus `1188.833 us` rollback. No endpoint A/B was
+  run. Source reverted; keep E446 mode 7.
