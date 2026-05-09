@@ -1390,3 +1390,12 @@
   `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` from `8.729105s` to
   `8.204494s` (`6.0%`) with `64` generated tokens, `56` jobs, `8` worker
   batches, and max batch `8`.
+- 2026-05-09 E376: Refreshed synchronized stage profiling on the current
+  default Metal n8 path after E375, with no `KILN_DECODE_BATCH_WAIT_US` env
+  and full-attn/GDN/MLP profiling enabled. The run generated `24` tokens from
+  eight short streaming requests, submitted `16` decode-batcher jobs through
+  `3` worker batches, and observed max batch `8`. Post-marker `seq_len=1`
+  decode totals were led by `mlp:gate_up_fused` `419.259 ms`,
+  `mlp:down_proj` `340.353 ms`, `gdn:in_proj` `280.860 ms`, and
+  `gdn:out_proj` `139.661 ms`. Accepted as target-selection evidence; no
+  source change.

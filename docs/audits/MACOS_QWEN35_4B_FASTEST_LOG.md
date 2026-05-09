@@ -13323,3 +13323,85 @@ Accepted. Enable Metal MLP gate/up row-quad by default only for rows `>=8`,
 with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` as the rollback. This improves
 the full-batch default Metal serving path without changing bs=1 or batch
 `2/3/4` kernel selection.
+
+## 2026-05-09 E376 - Profile current default n8 path after MLP row-quad
+
+### Goal
+
+Refresh synchronized Metal stage profiling after E375. E370 used four
+concurrent varied prompts and max batch `4`, so it did not exercise the new
+row-quad MLP gate/up branch that only applies to rows `>=8`.
+
+### Method
+
+- Rebuilt release `kiln` with `--features metal`.
+- Started `target/release/kiln serve` with:
+  - no `KILN_DECODE_BATCH_WAIT_US` env, so Metal uses the new `100us` default
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Wrote `E376_MEASURE_START` to the server log after prewarm.
+- Issued eight concurrent short streaming chat requests, greedy
+  `max_tokens=3`.
+- Parsed only stage lines after `E376_MEASURE_START`.
+
+### Results
+
+The server logged backend `metal`, `max_batch=8`, `wait_us=100`, and
+`mixed_seq_lens=true`.
+
+The profiled endpoint run:
+
+- wall `11.406341s`
+- `24` generated tokens
+- `16` submitted decode-batcher jobs
+- `3` worker batches
+- `16` batcher rows
+- max observed batch `8`
+- all eight requests returned `200`
+
+Kind totals after the marker:
+
+- GDN: `22474.530 ms`
+- MLP: `14695.394 ms`
+- full attention: `5814.058 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `419.259 ms`
+- `mlp:down_proj`: `340.353 ms`
+- `gdn:in_proj`: `280.860 ms`
+- `gdn:out_proj`: `139.661 ms`
+- `full_attn:qkv_proj_batch`: `66.481 ms`
+- `gdn:gates_recur_gated_norm`: `57.662 ms`
+- `full_attn:attn_gate`: `32.794 ms`
+- `gdn:qkv_conv_norm`: `32.527 ms`
+
+The profile confirms that the current full-batch default path still spends the
+most live decode time in MLP gate/up and down-projection. GDN in-projection is
+the next Metal decode target after the two MLP projections, and full-attention
+batch QKV projection remains smaller.
+
+### Artifact
+
+- `e376_release_build_metal.log`
+- `e376_post_row_quad_n8_stage_profile_server.log`
+- `e376_post_row_quad_n8_stage_profile_health.json`
+- `e376_post_row_quad_n8_stage_profile_metrics.prom`
+- `e376_post_row_quad_n8_stage_profile_time.json`
+- `e376_post_row_quad_n8_stage_profile_response_0.sse`
+- `e376_post_row_quad_n8_stage_profile_response_1.sse`
+- `e376_post_row_quad_n8_stage_profile_response_2.sse`
+- `e376_post_row_quad_n8_stage_profile_response_3.sse`
+- `e376_post_row_quad_n8_stage_profile_response_4.sse`
+- `e376_post_row_quad_n8_stage_profile_response_5.sse`
+- `e376_post_row_quad_n8_stage_profile_response_6.sse`
+- `e376_post_row_quad_n8_stage_profile_response_7.sse`
+- `e376_post_row_quad_n8_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue with MLP
+decode kernels first, especially down-projection and any further safe full-batch
+gate/up improvements, while preserving the bs=1 and batch `2/3/4` paths.
