@@ -3620,6 +3620,71 @@ Verdict:
   template config.
 - No CUDA, Metal, or Vulkan source path changed.
 
+### 2026-05-09 A073: Label Full-Attention Prefill Fallback Stages
+
+Goal:
+- Check whether the recent Metal E412/E413 full-SDPA prefill win identifies a
+  similar Vulkan target.
+- A071 did not label the standard full-attention prefill fallback internals, so
+  it could not separate QKV/O projection cost from SDPA-like attention math.
+
+Change:
+- Added profile-only labels around the standard full-attention prefill fallback
+  path:
+  `prefill_gqa_expand`, `prefill_kv_contiguous`, `prefill_scores`,
+  `prefill_mask`, `prefill_softmax`, `prefill_weighted_sum`,
+  `prefill_output_layout`, `attn_gate`, and `o_proj`.
+- When `KILN_PROFILE_FULL_ATTN_STAGES` is unset, the wrappers return without
+  synchronization and do not change runtime behavior.
+
+Evidence:
+- The profiled run reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- The measured run emitted the same non-empty token IDs as A071:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Profiling-heavy latency was `2258.406691ms` prefill,
+  `96.489395250ms` mean ITL, `96.727262ms` p50, and `97.648872ms` p99 for
+  `9` generated tokens.
+- Top prefill `seq_len=64` buckets:
+  - `paged_layer:linear`: `1769.806ms`, `24` calls, `73.741917ms` avg.
+  - `mlp_stage:fused`: `879.833ms`, `32` calls, `27.494781ms` avg.
+  - `paged_layer:full`: `482.378ms`, `8` calls, `60.297250ms` avg.
+  - `gdn_stage:in_proj`: `417.301ms`, `24` calls, `17.387542ms` avg.
+  - `gdn_stage:recurrent`: `239.185ms`, `24` calls, `9.966042ms` avg.
+  - `full_attn_stage:qkv_proj`: `183.112ms`, `8` calls, `22.889000ms`
+    avg.
+  - `gdn_stage:conv`: `161.466ms`, `24` calls, `6.727750ms` avg.
+  - `gdn_stage:out_proj`: `124.600ms`, `24` calls, `5.191667ms` avg.
+  - `full_attn_stage:o_proj`: `46.860ms`, `8` calls, `5.857500ms` avg.
+- The newly labelled SDPA-like prefill internals are small at this prompt
+  shape: `prefill_scores` `6.368ms`, `prefill_mask` `1.446ms`,
+  `prefill_softmax` `2.281ms`, `prefill_weighted_sum` `3.178ms`,
+  `prefill_gqa_expand` `0.640ms`, and `prefill_output_layout` `0.516ms`;
+  about `14.429ms` total across all 8 full-attention layers, excluding gate
+  and O projection.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a073-full-attn-prefill-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a073-full-attn-prefill-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a073-full-attn-prefill-profile-*.log`
+
+Validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- CUDA check attempted but blocked by missing `nvcc`.
+- Metal check attempted but blocked because `objc2` requires an Apple target.
+
+Verdict:
+- Keep the profile labels.
+- Do not prioritize a Vulkan full-SDPA prefill port for the current 64-token
+  Strix Halo shape. The standard attention math exposed by A073 is much smaller
+  than MLP fused, GDN in-proj/recurrent/conv, and full-attention QKV projection.
+- The next Vulkan work should stay focused on MLP boundary/data movement and
+  GDN in-proj/recurrent/conv residency or transfer shape.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3654,6 +3719,11 @@ Verdict:
   pass `chat_template_kwargs: {"enable_thinking": false}`. Do not reintroduce
   prompt-text control hacks for Qwen thinking; caller-provided template config
   is the correct interface.
+- A073 rules out Metal E412-style full-SDPA prefill as the next 64-token
+  Vulkan target: the newly labelled standard prefill attention internals total
+  only about `14.429ms` across all full-attention layers, while QKV projection,
+  MLP, and GDN buckets are much larger. Revisit only for longer prompts or
+  after projection/GDN work moves the bottleneck.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

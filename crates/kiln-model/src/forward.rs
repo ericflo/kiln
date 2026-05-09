@@ -7221,6 +7221,7 @@ fn gqa_attention_paged_with_rope_tables(
 
     // Standard path (prefill without flash-attn, or gqa_ratio == 1)
     let (k, v) = if gqa_ratio > 1 {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let k = k
             .unsqueeze(2)?
             .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
@@ -7231,34 +7232,116 @@ fn gqa_attention_paged_with_rope_tables(
             .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, kv_len, head_dim))?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_gqa_expand",
+            seq_len,
+            stage_profile,
+        )?;
         (k, v)
     } else {
-        (k.contiguous()?, v.contiguous()?)
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = (k.contiguous()?, v.contiguous()?);
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_kv_contiguous",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
 
     // Scaled dot-product attention
     let scale = (head_dim as f64).sqrt();
-    let attn_scores = q.broadcast_matmul(&k.t()?)?;
-    let attn_scores = (attn_scores / scale)?;
+    let attn_scores = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let attn_scores = q.broadcast_matmul(&k.t()?)?;
+        let attn_scores = (attn_scores / scale)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_scores",
+            seq_len,
+            stage_profile,
+        )?;
+        attn_scores
+    };
 
     let past_len = kv_len - seq_len;
-    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+    let attn_scores = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_mask",
+            seq_len,
+            stage_profile,
+        )?;
+        attn_scores
+    };
 
-    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
+    let attn_weights_softmax = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = cuda_softmax_last_dim(&attn_scores)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_softmax",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = attn_weights_softmax.broadcast_matmul(&v)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_weighted_sum",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Transpose back and output projection
-    let attn_output =
-        attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out = attn_output.transpose(1, 2)?.contiguous()?.reshape((
+            (),
+            seq_len,
+            num_heads * head_dim,
+        ))?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_output_layout",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
     }
 
-    let attn_output =
-        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    let attn_output = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+        let out =
+            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_gate",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
     }
@@ -7268,15 +7351,24 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     let out = {
+        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_backend_decode_if(
+        let out = linear_with_lora_t_backend_decode_if(
             Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "o_proj",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);

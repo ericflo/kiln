@@ -1,0 +1,139 @@
+A073: label Vulkan standard full-attention prefill fallback stages
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+
+Purpose
+-------
+
+Recent Metal E412/E413 re-enabled full-SDPA prefill and showed a large Metal
+prefill win. A071 did not expose the equivalent standard full-attention prefill
+fallback internals on Vulkan: full-attention prefill printed QKV, layout, K/V,
+and decode stages, but the standard fallback attention math and output
+projection were unlabelled.
+
+This change adds profile-only labels around the standard full-attention
+fallback path:
+
+- `prefill_gqa_expand`
+- `prefill_kv_contiguous`
+- `prefill_scores`
+- `prefill_mask`
+- `prefill_softmax`
+- `prefill_weighted_sum`
+- `prefill_output_layout`
+- `attn_gate`
+- `o_proj`
+
+When `KILN_PROFILE_FULL_ATTN_STAGES` is not set, these wrappers return
+immediately and do not synchronize.
+
+Validation
+----------
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Cross-feature checks attempted:
+
+- `cargo check -p kiln-model --features cuda` is blocked on this host because
+  `nvcc` is unavailable.
+- `cargo check -p kiln-model --features metal` is blocked on this host because
+  `objc2` only compiles for Apple targets.
+
+Profile Command
+---------------
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1
+KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path
+Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1
+--prompt-tokens 64 --max-output-tokens 8 --seed 73 --quiet`
+
+Correctness / Routing Evidence
+------------------------------
+
+- Backend JSON reported `backend: "vulkan"`.
+- GPU JSON reported
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- The measured run emitted the same non-empty token IDs as A071:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+
+Latency
+-------
+
+- Prefill: 2258.406691 ms.
+- Mean ITL: 96.489395250 ms.
+- P50 ITL: 96.727262 ms.
+- P99 ITL: 97.648872 ms.
+- Generated tokens: 9.
+
+Prefill Stage Ranking, seq_len=64
+---------------------------------
+
+Outer paged-layer buckets:
+
+- `paged_layer:linear`: 1769.806 ms total / 24 calls / 73.741917 ms avg.
+- `paged_layer:full`: 482.378 ms total / 8 calls / 60.297250 ms avg.
+
+Concrete MLP bucket:
+
+- `mlp_stage:fused`: 879.833 ms total / 32 calls / 27.494781 ms avg.
+
+Concrete GDN buckets:
+
+- `gdn_stage:in_proj`: 417.301 ms total / 24 calls / 17.387542 ms avg.
+- `gdn_stage:recurrent`: 239.185 ms total / 24 calls / 9.966042 ms avg.
+- `gdn_stage:conv`: 161.466 ms total / 24 calls / 6.727750 ms avg.
+- `gdn_stage:out_proj`: 124.600 ms total / 24 calls / 5.191667 ms avg.
+- `gdn_stage:gated_norm`: 95.065 ms total / 24 calls / 3.961042 ms avg.
+
+Concrete full-attention buckets:
+
+- `full_attn_stage:qkv_proj`: 183.112 ms total / 8 calls / 22.889000 ms avg.
+- `full_attn_stage:o_proj`: 46.860 ms total / 8 calls / 5.857500 ms avg.
+- `full_attn_stage:rope`: 6.461 ms total / 8 calls / 0.807625 ms avg.
+- `full_attn_stage:prefill_scores`: 6.368 ms total / 8 calls / 0.796000 ms avg.
+- `full_attn_stage:qk_norm`: 5.073 ms total / 8 calls / 0.634125 ms avg.
+- `full_attn_stage:q_transpose`: 4.470 ms total / 8 calls / 0.558750 ms avg.
+- `full_attn_stage:attn_gate`: 3.476 ms total / 8 calls / 0.434500 ms avg.
+- `full_attn_stage:prefill_weighted_sum`: 3.178 ms total / 8 calls / 0.397250 ms avg.
+- `full_attn_stage:prefill_softmax`: 2.281 ms total / 8 calls / 0.285125 ms avg.
+- `full_attn_stage:prefill_mask`: 1.446 ms total / 8 calls / 0.180750 ms avg.
+- `full_attn_stage:prefill_gqa_expand`: 0.640 ms total / 8 calls / 0.080000 ms avg.
+- `full_attn_stage:prefill_output_layout`: 0.516 ms total / 8 calls / 0.064500 ms avg.
+
+Interpretation
+--------------
+
+The new labels show the Vulkan standard prefill attention math is not the
+dominant hidden bucket for the 64-token prompt shape. The main full-attention
+prefill cost is QKV projection (`183.112 ms`) and then O projection
+(`46.860 ms`). The SDPA-like fallback internals, excluding gate and O
+projection, total about `14.429 ms` across all 8 full-attention layers:
+
+- scores: `6.368 ms`
+- mask: `1.446 ms`
+- softmax: `2.281 ms`
+- weighted sum: `3.178 ms`
+- GQA expansion: `0.640 ms`
+- output layout: `0.516 ms`
+
+That is below MLP fused (`879.833 ms`) and the major GDN prefill buckets. The
+Metal E412 full-SDPA lesson is useful as a profiling question, but it does not
+point to the next Vulkan implementation target unless longer prompts show a
+larger standard-attention bucket.
+
+Verdict
+-------
+
+Keep the profile labels. They close a full-attention prefill blind spot with no
+runtime behavior change when profiling is disabled.
+
+Do not prioritize a Vulkan full-SDPA prefill port for the current 64-token
+Strix Halo shape. The next Vulkan work should stay focused on MLP
+boundary/data movement and GDN in-proj/recurrent/conv residency or transfer
+shape.

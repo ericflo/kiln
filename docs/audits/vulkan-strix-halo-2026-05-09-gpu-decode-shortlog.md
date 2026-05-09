@@ -80,6 +80,7 @@ before or with each accepted change and each measured rejection.
 | A070 | Fix Vulkan `gdn_full_chunk_forward` parity and reject default enable. | Rewrote the stale full-chunk shader so it matches the split `gdn_chunk_prep` + `gdn_chunk_scan` + state-update contract, added `gdn_full_chunk_forward_matches_split_vulkan_path`, and kept the path opt-in via `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`. Candidate, rollback, and final default all emitted identical first 32 token IDs. Default enable regressed prefill: candidate `2216.728ms` versus rollback split path `2138.199ms`; final no-env default stayed on the split path at `2248.036ms` prefill / `94.611ms` mean ITL after rebasing onto the latest Metal MLP commits. | Keep the shader correctness/parity fix as opt-in tuning groundwork. Reject default enable; the current one-workgroup fused chunk serializes too much work. CUDA/Metal source paths untouched. |
 | A071 | Refresh current Vulkan profile after A070 and recent Metal work. | Profiled current `main` with full-attn, GDN, MLP, paged-layer timers, and token logging. Backend JSON reported `vulkan` on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, and the measured run emitted non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. Profiling-heavy latency was `2325.135ms` prefill / `120.371ms` mean ITL. Top prefill concrete buckets were `mlp:fused` `916.453ms`, `gdn:recurrent` `315.745ms`, `gdn:in_proj` `254.924ms`, `gdn:conv` `222.692ms`, and full-attn `qkv_proj` `181.910ms`. Short decode profile kept `mlp:fused` first, then GDN recurrent/in-proj. | Keep as target-selection evidence only; no source change. Next Vulkan work should target MLP boundary/data movement or residency-level GDN recurrent/in-proj/conv changes. Recent Metal MLP pointwise and GDN combined-projection wins do not directly map to the current Vulkan bottleneck shape. |
 | A072 | Reconfirm current Vulkan server visible-text correctness. | Started `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18420 ./target/release/kiln serve`; server log showed Vulkan GPU selection, `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, decode weight prewarm, and background inference prewarm complete. With `chat_template_kwargs: {"enable_thinking": false}`, direct chat returned `content == "blue green"`, streaming chat deltas reconstructed to `red yellow`, and `/v1/completions/batch` returned `blue green`, `red yellow`, `north south`, and `silver gold`; all requests were HTTP 200 and batch finish reasons were `stop`. | Keep as endpoint correctness evidence. Current `main` is GPU-routed and visible text is not empty when callers use the real template config. No CUDA/Metal/Vulkan source paths changed. |
+| A073 | Label and profile standard full-attention prefill fallback stages. | Added profile-only labels around the standard full-attention prefill fallback path. The measured Vulkan run kept the same non-empty token IDs and reported `2258.407ms` prefill / `96.489ms` mean ITL. Newly exposed `seq_len=64` full-attn fallback internals were small: `prefill_scores` `6.368ms`, `prefill_mask` `1.446ms`, `prefill_softmax` `2.281ms`, `prefill_weighted_sum` `3.178ms`, `prefill_gqa_expand` `0.640ms`, and `prefill_output_layout` `0.516ms`, about `14.429ms` total across all 8 full-attn layers. Full-attn `qkv_proj` was `183.112ms` and `o_proj` `46.860ms`; MLP/GDN buckets remained much larger. | Keep the profile labels. Do not prioritize a Metal E412-style Vulkan full-SDPA prefill port for the current 64-token Strix Halo shape; focus next on MLP boundary/data movement or GDN in-proj/recurrent/conv residency/transfer shape. CUDA/Metal source behavior unchanged; local feature checks remain environment-blocked. |
 
 Additional validation after rejected A069:
 
@@ -120,6 +121,18 @@ Additional validation after A072:
   `chat_template_kwargs: {"enable_thinking": false}`.
 - Server log confirmed Vulkan device selection and background inference
   prewarm completion before the endpoint requests.
+
+Additional validation after A073:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo check -p kiln-model --features cuda` attempted and blocked by missing
+  `nvcc`.
+- `cargo check -p kiln-model --features metal` attempted and blocked because
+  `objc2` requires an Apple target.
 
 Additional validation after A044:
 
