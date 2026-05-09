@@ -6017,3 +6017,71 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-server-response.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a100-mlp-chained-dispatch-server-metrics.txt`
+
+### 2026-05-09 A101: Current Profile After MLP Chained Dispatch
+
+Scope:
+- Profile-only refresh on `main` after A100 and after rebasing over Metal E453.
+- No source changes.
+
+Command:
+- `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1
+  KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+  KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1
+  KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1
+  ./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+  --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+  --max-output-tokens 8 --seed 112 --quiet`
+
+Final measured pass:
+- Backend: `vulkan`
+- First token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `948.26886ms`
+- Mean ITL: `83.326105125ms`
+- P99 ITL: `94.805265ms`
+
+Prefill stage totals:
+- MLP fused: `231.337ms` across `32` calls, `7.229ms` avg.
+- GDN recurrent: `230.385ms` across `24` calls, `9.599ms` avg.
+- GDN in-proj: `123.588ms` across `24` calls, `5.150ms` avg.
+- Full-attn QKV projection: `99.372ms` across `8` calls, `12.421ms` avg.
+- GDN out-proj: `57.412ms` across `24` calls, `2.392ms` avg.
+- GDN conv: `52.679ms` across `24` calls, `2.195ms` avg.
+- GDN gated-norm: `33.032ms` across `24` calls, `1.376ms` avg.
+
+Decode stage totals:
+- MLP fused: `233.406ms` across `256` calls, `0.912ms` avg.
+- GDN in-proj: `101.511ms` across `192` calls, `0.529ms` avg.
+- GDN recurrent: `73.549ms` across `192` calls, `0.383ms` avg.
+- GDN out-proj: `44.486ms` across `192` calls, `0.232ms` avg.
+- GDN gated-norm: `43.106ms` across `192` calls, `0.225ms` avg.
+- GDN gates: `35.103ms` across `192` calls, `0.183ms` avg.
+- Full-attn QKV projection: `27.221ms` across `64` calls, `0.425ms` avg.
+- Full-attn output projection: `17.182ms` across `64` calls, `0.268ms` avg.
+- GDN conv: `16.281ms` across `192` calls, `0.085ms` avg.
+
+Inner-stage observations:
+- MLP batch `64` total was `230.408ms`; chained dispatch was `216.500ms`.
+- MLP batch `1` total was `228.527ms`; chained dispatch was `188.970ms`.
+- GDN in-proj batch `64` total was `122.669ms`; record/submit/wait was
+  `100.608ms`.
+- GDN in-proj batch `1` total was `97.079ms`; record/submit/wait was
+  `85.179ms`.
+- GDN recurrent prefill split was `79.037ms` chunk scan, `56.883ms`
+  matmul prep, `55.457ms` chunk prep, and `35.943ms` state update.
+- GDN recurrent decode uses `single_token_backend_step`, totaling `72.211ms`.
+
+Interpretation:
+- A100's chained MLP dispatch remains visible: batch-1 MLP total is
+  `228.527ms`, and the decode MLP bucket is `233.406ms`.
+- Prefill is now led by MLP fused and GDN recurrent at near parity.
+- Decode remains led by MLP fused, then GDN in-proj, then GDN recurrent.
+- Next Vulkan work should target GDN recurrent prefill internals or a
+  materially different live-batch policy inspired by Metal E453. Avoid direct
+  repeats of rejected native head-last recurrent, shared-prefix chunk-prep,
+  `32x8` single-row, and tile16 QKV-style ports.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a101-current-after-mlp-chain-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a101-current-after-mlp-chain-profile.log`
