@@ -1428,3 +1428,10 @@
   (`8` vs `9`), but the longer n8 `max_tokens=16` endpoint improved row-quad
   disabled to default from `13.541063s` to `12.862253s` (`5.0%`) with identical
   `128` generated tokens, `120` jobs, `17` worker batches, and max batch `8`.
+- 2026-05-09 E380: Refreshed synchronized stage profiling on the current
+  default Metal n8 path after E379. The run generated `24` tokens from eight
+  short streaming requests, submitted `16` decode-batcher jobs through `3`
+  worker batches, and observed max batch `8`. Post-marker `seq_len=1` decode
+  totals were led by `mlp:gate_up_fused` `443.570 ms`, `mlp:down_proj`
+  `338.788 ms`, `gdn:in_proj` `248.828 ms`, and `gdn:out_proj` `145.015 ms`.
+  Accepted as target-selection evidence; no source change.

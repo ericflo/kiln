@@ -13731,3 +13731,84 @@ Accepted. Enable Metal GDN in-projection row-quad by default only for batch
 rollback. This improves the longer full-batch decode serving shape without
 changing the batch `1/2/3` or batch `4` kernel selection, and without changing
 CUDA/Vulkan.
+
+## 2026-05-09 E380 - Profile current default n8 path after GDN in-projection row-quad
+
+### Goal
+
+Refresh synchronized Metal stage profiling after E379. E378 still measured the
+old GDN in-projection batch path, so this profile identifies the next decode
+target after the full-batch GDN row-quad change.
+
+### Method
+
+- Rebuilt release `kiln` with `--features metal`.
+- Started `target/release/kiln serve` with:
+  - no `KILN_DECODE_BATCH_WAIT_US` env, so Metal uses the `100us` default
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Wrote `E380_MEASURE_START` to the server log after prewarm.
+- Issued eight concurrent short streaming chat requests, greedy
+  `max_tokens=3`.
+- Parsed only stage lines after `E380_MEASURE_START`.
+
+### Results
+
+The server logged backend `metal`, `max_batch=8`, `wait_us=100`, and
+`mixed_seq_lens=true`.
+
+The profiled endpoint run:
+
+- wall `11.478781s`
+- `24` generated tokens
+- `16` submitted decode-batcher jobs
+- `3` worker batches
+- `16` batcher rows
+- max observed batch `8`
+- all eight requests returned `200`
+
+Kind totals after the marker:
+
+- GDN: `22632.650 ms`
+- MLP: `14159.725 ms`
+- full attention: `5958.330 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `443.570 ms`
+- `mlp:down_proj`: `338.788 ms`
+- `gdn:in_proj`: `248.828 ms`
+- `gdn:out_proj`: `145.015 ms`
+- `gdn:qkv_conv_norm`: `75.118 ms`
+- `gdn:gates_recur_gated_norm`: `63.581 ms`
+- `full_attn:qkv_proj_batch`: `58.555 ms`
+- `full_attn:qkv_proj`: `29.502 ms`
+
+Compared with E378 on the same profiled shape, `gdn:in_proj` moved from
+`331.652 ms` to `248.828 ms`. The remaining decode ranking is MLP gate/up,
+MLP down-projection, then GDN in/out projection.
+
+### Artifact
+
+- `e380_release_build_metal.log`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_server.log`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_health.json`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_metrics.prom`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_time.json`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_0.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_1.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_2.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_3.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_4.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_5.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_6.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_response_7.sse`
+- `e380_post_gdn_in_proj_row_quad_n8_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue with MLP
+gate/up and MLP down-projection first; GDN in-projection is improved but still
+the next GDN target family alongside out-projection.
