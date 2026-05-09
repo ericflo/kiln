@@ -1894,10 +1894,68 @@ Verdict:
 - This follows the Metal E369 lesson: row-pair reuse is useful for larger live
   batches, while batch `1/2/3` should stay on the previous path.
 
+### 2026-05-09 A039: Profile Vulkan After GDN In-Proj Row-Pair
+
+Goal:
+- Refresh target selection after A038 and after the matching Metal wait sweep
+  landed on `main`.
+
+Setup:
+- Built `target/release/kiln` with Vulkan enabled from `main` at `0bb5f3c`.
+- Ran `KILN_MODEL_PATH=Qwen3.5-4B`, `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`, and
+  `KILN_PROFILE_MLP_STAGES=1`.
+- Sent four concurrent streaming chat requests with `max_tokens=3`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Evidence:
+- Wall time was `17.513681s`.
+- Decode-batcher counters moved by `8` jobs, `3` batches, `8` rows, max batch
+  `4`.
+- All responses returned HTTP 200 with non-empty visible text and empty
+  reasoning text:
+  - `response_0`: finish `length`, text `"6 7"`.
+  - `response_1`: finish `length`, text `"11 "`.
+  - `response_2`: finish `length`, text `"16 "`.
+  - `response_3`: finish `stop`, text `"13"`.
+- Profile rows: `2848`.
+- Stage totals:
+  - `mlp`: `12790.460ms`.
+  - `gdn`: `10374.416ms`.
+  - `full_attn`: `1828.641ms`.
+- Top live decode `seq_len=1` stages:
+  - `mlp:fused`: `2635.685ms`.
+  - `gdn:recurrent`: `142.574ms`.
+  - `gdn:in_proj`: `139.856ms`.
+  - `gdn:out_proj`: `87.072ms`.
+  - `gdn:gated_norm`: `75.592ms`.
+  - `gdn:gates`: `55.988ms`.
+  - `full_attn:qkv_proj_batch`: `28.411ms`.
+  - `gdn:conv`: `21.818ms`.
+  - `full_attn:decode_attn_contiguous_batch`: `12.364ms`.
+  - `full_attn:qkv_proj`: `9.519ms`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a039-post-gdn-rowpair-profile-*`
+
+Verdict:
+- Keep as target-selection evidence; no source change.
+- The next Vulkan target should be MLP decode. The current profile bucket is
+  `mlp:fused`, so follow-up work should either split the Vulkan MLP stage
+  profile into gate/up and down-projection costs or directly test a
+  small-live-batch packed-BF16 MLP improvement with a rollback gate.
+- GDN still matters, but A038 moved the larger-batch GDN in-proj work far
+  enough that MLP is now the dominant measured live decode bucket.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Use A039's post-A038 profile to drive the next Vulkan experiment: `mlp:fused`
+  dominates live `seq_len=1` work (`2635.685ms`) and total profiled time
+  (`12790.460ms`), so split or optimize packed-BF16 MLP decode before spending
+  more time on smaller GDN residuals.
 - Do not set a static Vulkan live decode-batcher wait based only on env sweeps;
   A037's same-binary no-env candidate was slower even though it formed larger
   batches.

@@ -1,0 +1,8 @@
+wall_s=17.513681
+metrics_delta={"batches": 3.0, "jobs": 8.0, "max_batch": 4.0, "rows": 8.0}
+kind_totals_ms={"full_attn": 1828.6409999999998, "gdn": 10374.41600000004, "mlp": 12790.459999999997}
+top_live_seq1_stages_ms=[{"stage": "mlp:fused", "elapsed_ms": 2635.6849999999977}, {"stage": "gdn:recurrent", "elapsed_ms": 142.57399999999996}, {"stage": "gdn:in_proj", "elapsed_ms": 139.85599999999997}, {"stage": "gdn:out_proj", "elapsed_ms": 87.07199999999995}, {"stage": "gdn:gated_norm", "elapsed_ms": 75.59200000000004}, {"stage": "gdn:gates", "elapsed_ms": 55.987999999999985}, {"stage": "full_attn:qkv_proj_batch", "elapsed_ms": 28.411000000000005}, {"stage": "gdn:conv", "elapsed_ms": 21.817999999999998}, {"stage": "full_attn:decode_attn_contiguous_batch", "elapsed_ms": 12.364}, {"stage": "full_attn:qkv_proj", "elapsed_ms": 9.519}]
+response_0 status=200 finish=length elapsed_s=17.506938 text='6 7' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=17.506779 text='11 ' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=17.506433 text='16 ' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=17.257556 text='13' reasoning_len=0

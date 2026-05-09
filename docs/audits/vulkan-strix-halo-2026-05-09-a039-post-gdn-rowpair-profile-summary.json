@@ -1,0 +1,227 @@
+{
+  "ready_after_s": 12,
+  "wall_s": 17.513680723001016,
+  "wait_us": 5000,
+  "metrics_before": {
+    "jobs": 0.0,
+    "batches": 0.0,
+    "rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "jobs": 8.0,
+    "batches": 3.0,
+    "rows": 8.0,
+    "max_batch": 4.0
+  },
+  "metrics_delta": {
+    "jobs": 8.0,
+    "batches": 3.0,
+    "rows": 8.0,
+    "max_batch": 4.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 17.506937911999557,
+      "finish_reason": "length",
+      "text": "6 7",
+      "reasoning_len": 0
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 17.50677915599954,
+      "finish_reason": "length",
+      "text": "11 ",
+      "reasoning_len": 0
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 17.506433263999497,
+      "finish_reason": "length",
+      "text": "16 ",
+      "reasoning_len": 0
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 17.25755625199963,
+      "finish_reason": "stop",
+      "text": "13",
+      "reasoning_len": 0
+    }
+  ],
+  "profile_rows": 2848,
+  "kind_totals_ms": {
+    "full_attn": 1828.6409999999998,
+    "gdn": 10374.41600000004,
+    "mlp": 12790.459999999997
+  },
+  "top_live_seq1_stages_ms": [
+    {
+      "stage": "mlp:fused",
+      "elapsed_ms": 2635.6849999999977
+    },
+    {
+      "stage": "gdn:recurrent",
+      "elapsed_ms": 142.57399999999996
+    },
+    {
+      "stage": "gdn:in_proj",
+      "elapsed_ms": 139.85599999999997
+    },
+    {
+      "stage": "gdn:out_proj",
+      "elapsed_ms": 87.07199999999995
+    },
+    {
+      "stage": "gdn:gated_norm",
+      "elapsed_ms": 75.59200000000004
+    },
+    {
+      "stage": "gdn:gates",
+      "elapsed_ms": 55.987999999999985
+    },
+    {
+      "stage": "full_attn:qkv_proj_batch",
+      "elapsed_ms": 28.411000000000005
+    },
+    {
+      "stage": "gdn:conv",
+      "elapsed_ms": 21.817999999999998
+    },
+    {
+      "stage": "full_attn:decode_attn_contiguous_batch",
+      "elapsed_ms": 12.364
+    },
+    {
+      "stage": "full_attn:qkv_proj",
+      "elapsed_ms": 9.519
+    },
+    {
+      "stage": "full_attn:o_proj_batch",
+      "elapsed_ms": 7.8690000000000015
+    },
+    {
+      "stage": "full_attn:o_proj",
+      "elapsed_ms": 4.949999999999999
+    },
+    {
+      "stage": "gdn:qk_norm",
+      "elapsed_ms": 2.7110000000000003
+    },
+    {
+      "stage": "full_attn:decode_scores",
+      "elapsed_ms": 1.905
+    },
+    {
+      "stage": "full_attn:rope_batch",
+      "elapsed_ms": 1.3319999999999999
+    },
+    {
+      "stage": "full_attn:qk_norm_batch",
+      "elapsed_ms": 0.654
+    },
+    {
+      "stage": "full_attn:kv_read",
+      "elapsed_ms": 0.5800000000000001
+    },
+    {
+      "stage": "full_attn:rope",
+      "elapsed_ms": 0.5780000000000001
+    },
+    {
+      "stage": "full_attn:attn_gate_batch",
+      "elapsed_ms": 0.4640000000000001
+    },
+    {
+      "stage": "full_attn:decode_weighted_sum",
+      "elapsed_ms": 0.3720000000000001
+    }
+  ],
+  "top_all_stages_ms": [
+    {
+      "stage": "mlp:fused",
+      "elapsed_ms": 12790.459999999997
+    },
+    {
+      "stage": "gdn:in_proj",
+      "elapsed_ms": 3481.1069999999995
+    },
+    {
+      "stage": "gdn:gated_norm",
+      "elapsed_ms": 2042.5119999999995
+    },
+    {
+      "stage": "full_attn:qkv_proj",
+      "elapsed_ms": 1713.1980000000003
+    },
+    {
+      "stage": "gdn:out_proj",
+      "elapsed_ms": 1668.8299999999997
+    },
+    {
+      "stage": "gdn:gates",
+      "elapsed_ms": 1650.822
+    },
+    {
+      "stage": "gdn:recurrent",
+      "elapsed_ms": 931.6580000000004
+    },
+    {
+      "stage": "gdn:conv",
+      "elapsed_ms": 527.7240000000002
+    },
+    {
+      "stage": "gdn:qk_norm",
+      "elapsed_ms": 43.97599999999995
+    },
+    {
+      "stage": "full_attn:qkv_proj_batch",
+      "elapsed_ms": 28.411000000000005
+    },
+    {
+      "stage": "gdn:qkv_split",
+      "elapsed_ms": 27.73400000000004
+    },
+    {
+      "stage": "full_attn:rope",
+      "elapsed_ms": 20.826999999999998
+    },
+    {
+      "stage": "full_attn:qk_norm",
+      "elapsed_ms": 16.619
+    },
+    {
+      "stage": "full_attn:decode_attn_contiguous_batch",
+      "elapsed_ms": 12.364
+    },
+    {
+      "stage": "full_attn:q_transpose",
+      "elapsed_ms": 8.703000000000003
+    },
+    {
+      "stage": "full_attn:o_proj_batch",
+      "elapsed_ms": 7.8690000000000015
+    },
+    {
+      "stage": "full_attn:o_proj",
+      "elapsed_ms": 4.949999999999999
+    },
+    {
+      "stage": "full_attn:qkv_split",
+      "elapsed_ms": 4.885999999999998
+    },
+    {
+      "stage": "full_attn:kv_write",
+      "elapsed_ms": 4.152
+    },
+    {
+      "stage": "full_attn:decode_scores",
+      "elapsed_ms": 1.905
+    }
+  ]
+}
