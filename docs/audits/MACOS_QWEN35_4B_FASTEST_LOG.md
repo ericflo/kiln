@@ -12803,3 +12803,76 @@ The endpoint probe improved by `1.75%` with the same batching shape.
 Accepted. Keep GDN in-proj row-pair mode enabled by default only for
 `batch >= 4`, with `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` as the rollback
 knob. Batch `1/2/3` stay on the previous E361 path.
+
+## 2026-05-09 E370 - Profile after GDN in-proj row-pair at wait100
+
+### Goal
+
+Refresh synchronized Metal stage profiling after E369 under a decode-batch
+admission shape that can form batch `4`. E367 used zero wait and max batch `3`,
+so it could not show the new larger-batch-only GDN in-projection path.
+
+### Method
+
+- Built release `kiln`/`kiln-bench` with `--features metal`.
+- Started `target/release/kiln serve` with:
+  - `KILN_DECODE_BATCH_WAIT_US=100`
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Wrote `E370_MEASURE_START` to the server log after prewarm.
+- Issued the same four concurrent varied streaming chat requests, greedy
+  `max_tokens=3`.
+- Parsed only stage lines after `E370_MEASURE_START`.
+
+### Results
+
+The run generated `12` tokens. Decode batching shape:
+
+- `8` submitted decode-batcher jobs
+- `3` worker batches
+- `8` batcher rows
+- max observed batch `4`
+
+Synchronized profiled wall time was `7.037300s`.
+
+Kind totals after the marker:
+
+- GDN: `6469.663 ms`
+- MLP: `5089.984 ms`
+- full attention: `1908.191 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `386.636 ms`
+- `mlp:down_proj`: `302.606 ms`
+- `gdn:in_proj`: `199.478 ms`
+- `gdn:out_proj`: `105.149 ms`
+- `gdn:gates_recur_gated_norm`: `45.665 ms`
+- `gdn:qkv_conv_norm`: `41.733 ms`
+- `full_attn:qkv_proj_batch`: `35.937 ms`
+- `full_attn:qkv_proj`: `34.216 ms`
+
+The profile confirms that E369 moved the wait-100 max-batch-4 GDN in-projection
+bucket well below the two dominant MLP decode stages. MLP `gate_up_fused` and
+`down_proj` remain the leading Metal decode targets.
+
+### Artifact
+
+- `e370_release_build_metal.log`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_server.log`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_health.json`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_metrics.prom`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_time.json`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_response_0.sse`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_response_1.sse`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_response_2.sse`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_response_3.sse`
+- `e370_post_gdn_rows2_ge4_wait100_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue focusing
+Metal work on MLP gate/up and down-projection first, with GDN out-projection
+and full-attention QKV projection as smaller secondary targets.

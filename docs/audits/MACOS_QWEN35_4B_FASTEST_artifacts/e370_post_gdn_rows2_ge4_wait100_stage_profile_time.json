@@ -1,0 +1,93 @@
+{
+  "decode_batch_wait_us": 100,
+  "elapsed_s": 30.97624495893251,
+  "prompts": [
+    {
+      "chars": 175,
+      "index": 0,
+      "words": 29
+    },
+    {
+      "chars": 351,
+      "index": 1,
+      "words": 69
+    },
+    {
+      "chars": 703,
+      "index": 2,
+      "words": 117
+    },
+    {
+      "chars": 1087,
+      "index": 3,
+      "words": 181
+    }
+  ],
+  "request_elapsed_s": 7.037300333031453,
+  "responses": [
+    {
+      "bytes": 1016,
+      "elapsed_s": 7.035401459084824,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:07:25 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 0,
+      "status": 200
+    },
+    {
+      "bytes": 1016,
+      "elapsed_s": 7.034567624912597,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:07:25 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 1,
+      "status": 200
+    },
+    {
+      "bytes": 1021,
+      "elapsed_s": 6.5741279169451445,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:07:25 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 2,
+      "status": 200
+    },
+    {
+      "bytes": 1016,
+      "elapsed_s": 7.0337259999942034,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:07:25 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 3,
+      "status": 200
+    }
+  ]
+}

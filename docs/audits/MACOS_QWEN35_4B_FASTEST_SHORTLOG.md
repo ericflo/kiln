@@ -1338,3 +1338,13 @@
   formed max batch `4` in both cases and improved disabled/enabled
   `6.038664/5.932975s` with `32` generated tokens, `28` jobs, `8` worker
   batches, and `28` rows.
+- 2026-05-09 E370: Refreshed synchronized stage profiling after E369 using the
+  same four varied prompts with `KILN_DECODE_BATCH_WAIT_US=100`, greedy
+  `max_tokens=3`. The run generated `12` tokens, submitted `8` jobs through
+  `3` worker batches, and observed max batch `4`; wall time was `7.037300s`
+  with profiling synchronization enabled. Stage totals after the marker were
+  GDN `6469.663 ms`, MLP `5089.984 ms`, and full attention `1908.191 ms`.
+  Top live `seq_len=1` decode stages were MLP `gate_up_fused` `386.636 ms`,
+  MLP `down_proj` `302.606 ms`, GDN `in_proj` `199.478 ms`, and GDN
+  `out_proj` `105.149 ms`. No source change; continue treating MLP gate/up
+  and down-projection as the primary Metal decode targets.
