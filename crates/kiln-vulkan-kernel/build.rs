@@ -21,8 +21,16 @@ const SHADERS: &[(&str, &str)] = &[
     ),
     ("gdn_in_proj_decode", "SPIR_V_GDN_IN_PROJ_DECODE"),
     (
+        "gdn_in_proj_decode_bf16w",
+        "SPIR_V_GDN_IN_PROJ_DECODE_BF16W",
+    ),
+    (
         "gdn_in_proj_decode_batched",
         "SPIR_V_GDN_IN_PROJ_DECODE_BATCHED",
+    ),
+    (
+        "gdn_in_proj_decode_batched_bf16w",
+        "SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_BF16W",
     ),
     ("gdn_gated_rms_norm", "SPIR_V_GDN_GATED_RMS_NORM"),
     ("causal_conv1d", "SPIR_V_CAUSAL_CONV1D"),

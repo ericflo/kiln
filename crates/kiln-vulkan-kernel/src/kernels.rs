@@ -73,7 +73,9 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
         ("gdn_in_proj_decode", 6, 24),
+        ("gdn_in_proj_decode_bf16w", 6, 24),
         ("gdn_in_proj_decode_batched", 6, 28),
+        ("gdn_in_proj_decode_batched_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
@@ -655,6 +657,67 @@ pub fn dispatch_gdn_in_proj_decode_cached(
     a_dim: usize,
     b_dim: usize,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+    dispatch_gdn_in_proj_decode_cached_impl(
+        vk_device,
+        x,
+        qkv_weight_t,
+        z_weight_t,
+        a_weight_t,
+        b_weight_t,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_decode_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    qkv_weight_t: &VulkanBuffer,
+    z_weight_t: &VulkanBuffer,
+    a_weight_t: &VulkanBuffer,
+    b_weight_t: &VulkanBuffer,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+    dispatch_gdn_in_proj_decode_cached_impl(
+        vk_device,
+        x,
+        qkv_weight_t,
+        z_weight_t,
+        a_weight_t,
+        b_weight_t,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_gdn_in_proj_decode_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    qkv_weight_t: &VulkanBuffer,
+    z_weight_t: &VulkanBuffer,
+    a_weight_t: &VulkanBuffer,
+    b_weight_t: &VulkanBuffer,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -677,15 +740,29 @@ pub fn dispatch_gdn_in_proj_decode_cached(
 
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
     let glsl_path = if batch == 1 {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/gdn_in_proj_decode.comp"
-        )
+        if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode.comp"
+            )
+        }
     } else {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/gdn_in_proj_decode_batched.comp"
-        )
+        if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched.comp"
+            )
+        }
     };
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
     let mut push_constants = vec![

@@ -42,6 +42,7 @@ pub struct VulkanBackend {
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
     bf16_packed_linear_weights_enabled: bool,
+    bf16_packed_gdn_in_proj_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
@@ -124,6 +125,8 @@ impl VulkanBackend {
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
         let bf16_packed_linear_weights_enabled = linear_decode_enabled
             && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS").is_err();
+        let bf16_packed_gdn_in_proj_weights_enabled = gdn_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS").is_err();
         let linear_argmax_batch_enabled =
             std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH").is_err();
         let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
@@ -183,6 +186,7 @@ impl VulkanBackend {
             mlp_decode_enabled,
             mlp_gate_up_enabled,
             bf16_packed_linear_weights_enabled,
+            bf16_packed_gdn_in_proj_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
@@ -228,6 +232,11 @@ impl VulkanBackend {
 
     fn use_bf16_packed_linear_weight(&self, weight: &Tensor) -> bool {
         self.bf16_packed_linear_weights_enabled && weight.dtype() == DType::BF16
+    }
+
+    fn use_bf16_packed_gdn_in_proj_weights(&self, weights: &[&Tensor]) -> bool {
+        self.bf16_packed_gdn_in_proj_weights_enabled
+            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
     }
 
     fn cached_bf16_packed_weight_buffer(
@@ -300,6 +309,22 @@ impl VulkanBackend {
         bf16_bytes: &mut usize,
     ) -> Result<()> {
         if self.use_bf16_packed_linear_weight(weight) {
+            self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
+        } else {
+            self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
+        }
+    }
+
+    fn prewarm_gdn_in_proj_weight(
+        &self,
+        name: &str,
+        weight: &Tensor,
+        f32_count: &mut usize,
+        f32_bytes: &mut usize,
+        bf16_count: &mut usize,
+        bf16_bytes: &mut usize,
+    ) -> Result<()> {
+        if self.bf16_packed_gdn_in_proj_weights_enabled && weight.dtype() == DType::BF16 {
             self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
         } else {
             self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
@@ -694,11 +719,6 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let qkv_buf = self.cached_f32_weight_buffer(in_proj_qkv_t)?;
-        let z_buf = self.cached_f32_weight_buffer(in_proj_z_t)?;
-        let a_buf = self.cached_f32_weight_buffer(in_proj_a_t)?;
-        let b_buf = self.cached_f32_weight_buffer(in_proj_b_t)?;
-
         let row_count = batch * seq_len;
         let dispatch_x = if seq_len == 1 {
             x.clone()
@@ -706,19 +726,48 @@ impl BackendRuntime for VulkanBackend {
             x.reshape((row_count, 1usize, hidden))?
         };
 
-        let (qkv, z, a, b) = kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached(
-            vk_device,
-            &dispatch_x,
-            &qkv_buf,
-            &z_buf,
-            &a_buf,
-            &b_buf,
-            hidden,
-            qkv_dim,
-            z_dim,
-            a_dim,
-            b_dim,
-        )
+        let (qkv, z, a, b) = if self.use_bf16_packed_gdn_in_proj_weights(&[
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+        ]) {
+            let qkv_buf = self.cached_bf16_packed_weight_buffer(in_proj_qkv_t)?;
+            let z_buf = self.cached_bf16_packed_weight_buffer(in_proj_z_t)?;
+            let a_buf = self.cached_bf16_packed_weight_buffer(in_proj_a_t)?;
+            let b_buf = self.cached_bf16_packed_weight_buffer(in_proj_b_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
+                vk_device,
+                &dispatch_x,
+                &qkv_buf,
+                &z_buf,
+                &a_buf,
+                &b_buf,
+                hidden,
+                qkv_dim,
+                z_dim,
+                a_dim,
+                b_dim,
+            )
+        } else {
+            let qkv_buf = self.cached_f32_weight_buffer(in_proj_qkv_t)?;
+            let z_buf = self.cached_f32_weight_buffer(in_proj_z_t)?;
+            let a_buf = self.cached_f32_weight_buffer(in_proj_a_t)?;
+            let b_buf = self.cached_f32_weight_buffer(in_proj_b_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached(
+                vk_device,
+                &dispatch_x,
+                &qkv_buf,
+                &z_buf,
+                &a_buf,
+                &b_buf,
+                hidden,
+                qkv_dim,
+                z_dim,
+                a_dim,
+                b_dim,
+            )
+        }
         .context("gdn_in_proj_decode kernel failed")?;
         let result = if seq_len == 1 {
             (qkv, z, a, b)
@@ -1090,29 +1139,37 @@ impl BackendRuntime for VulkanBackend {
                     )?;
                 }
                 GpuAttentionWeights::Linear(attn) => {
-                    self.prewarm_f32_weight(
+                    self.prewarm_gdn_in_proj_weight(
                         &format!("layers.{layer_idx}.attention.in_proj_qkv_t"),
                         &attn.in_proj_qkv_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
-                    self.prewarm_f32_weight(
+                    self.prewarm_gdn_in_proj_weight(
                         &format!("layers.{layer_idx}.attention.in_proj_z_t"),
                         &attn.in_proj_z_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
-                    self.prewarm_f32_weight(
+                    self.prewarm_gdn_in_proj_weight(
                         &format!("layers.{layer_idx}.attention.in_proj_a_t"),
                         &attn.in_proj_a_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
-                    self.prewarm_f32_weight(
+                    self.prewarm_gdn_in_proj_weight(
                         &format!("layers.{layer_idx}.attention.in_proj_b_t"),
                         &attn.in_proj_b_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
                     self.prewarm_linear_weight(
                         &format!("layers.{layer_idx}.attention.out_proj_t"),

@@ -1025,14 +1025,60 @@ Verdict:
   validation remains Linux-limited: CUDA checks are blocked here by missing
   `nvcc`, and Metal checks require an Apple target.
 
+### 2026-05-09 A024: Accept Packed BF16 Weights for Vulkan GDN In-Projection
+
+Hypothesis:
+- GDN `in_proj` is one of the largest remaining serial decode buckets and uses
+  four transposed BF16 source matrices expanded to F32 Vulkan buffers. Applying
+  the packed-weight strategy from A023 to the fused single-token and batched
+  GDN `in_proj` shaders should cut weight bandwidth on both serial and
+  continuous-batch paths.
+
+Implementation:
+- Added packed-BF16 shader variants for `gdn_in_proj_decode` and
+  `gdn_in_proj_decode_batched`.
+- Added `dispatch_gdn_in_proj_decode_cached_bf16_weights` in the Vulkan kernel
+  crate.
+- Routed Vulkan GDN `in_proj` through the packed-BF16 path when all four
+  weights are BF16. Rollback:
+  `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS=1`.
+- Prewarmed packed-BF16 buffers for GDN `in_proj_qkv_t`, `in_proj_z_t`,
+  `in_proj_a_t`, and `in_proj_b_t`.
+
+Evidence:
+- Focused GDN in-proj parity passed for F32 single, F32 batched, packed-BF16
+  single, and packed-BF16 batched variants.
+- Full Vulkan kernel parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  reported `26 passed`.
+- `cargo check -p kiln-model --features vulkan` and `cargo check -p kiln-model`
+  passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check` passed.
+- Serial paged decode stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`.
+- Serial candidate runs measured `115.5ms` and `118.2ms` mean ITL. Same-binary
+  rollback with `KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS=1`
+  measured `121.4ms` mean ITL with the same token IDs.
+- Sampled four-request continuous batch with `KILN_BATCHING_ENGINE=1`,
+  `temperature=0.7`, `top_p=0.95`, `top_k=40`, `seed=1234`, and `max_tokens=12`
+  returned HTTP 200 for all four requests. Candidate wall time was `7.663571s`
+  for `111` prompt tokens and `48` completion tokens; rollback on the same
+  prompt/request shape was `8.525863s`.
+
+Verdict:
+- Keep. This is another Vulkan-only measurable win and improves the current
+  sampled continuous-batch shape below the A023-only result.
+- CUDA and Metal source paths remain unchanged.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
 - Extend the packed-BF16 weight strategy to the remaining high-traffic Vulkan
   projection kernels if profiling confirms the shader conversion cost stays
-  below the bandwidth savings: GDN `in_proj`, fused MLP gate/up/down, and
-  full-attention QKV.
+  below the bandwidth savings: fused MLP gate/up/down and full-attention QKV.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: fused MLP decode,
