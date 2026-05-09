@@ -83,6 +83,7 @@ before or with each accepted change and each measured rejection.
 | A073 | Label and profile standard full-attention prefill fallback stages. | Added profile-only labels around the standard full-attention prefill fallback path. The measured Vulkan run kept the same non-empty token IDs and reported `2258.407ms` prefill / `96.489ms` mean ITL. Newly exposed `seq_len=64` full-attn fallback internals were small: `prefill_scores` `6.368ms`, `prefill_mask` `1.446ms`, `prefill_softmax` `2.281ms`, `prefill_weighted_sum` `3.178ms`, `prefill_gqa_expand` `0.640ms`, and `prefill_output_layout` `0.516ms`, about `14.429ms` total across all 8 full-attn layers. Full-attn `qkv_proj` was `183.112ms` and `o_proj` `46.860ms`; MLP/GDN buckets remained much larger. | Keep the profile labels. Do not prioritize a Metal E412-style Vulkan full-SDPA prefill port for the current 64-token Strix Halo shape; focus next on MLP boundary/data movement or GDN in-proj/recurrent/conv residency/transfer shape. CUDA/Metal source behavior unchanged; local feature checks remain environment-blocked. |
 | A074 | Split Vulkan MLP fused bucket into inner dispatcher stages. | Added profile-only `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` timing in the Vulkan MLP dispatcher. The measured Vulkan run kept non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]` and reported `2303.108ms` prefill / `95.160ms` mean ITL. Measured-pass `batch=64` MLP inner total was `861.116ms` / `32` calls: `gate_up_dispatch` `643.090ms`, `down_dispatch` `130.483ms`, `readback` `75.811ms`, and `upload_x` only `7.228ms`. A no-profile rebuilt server smoke selected Vulkan, enabled the decode batcher, and returned direct chat `content == "blue green"` with `chat_template_kwargs: {"enable_thinking": false}`. | Keep the profile-only instrumentation. MLP prefill is gate/up compute dominated, not x-upload dominated; next MLP work should target gate/up prefill shader shape, weight format, or broader layer-boundary residency. CUDA/Metal source paths are untouched; local feature checks remain environment-blocked. |
 | A075 | Reject row-pair MLP gate/up `128x2` tile. | Temporarily changed `mlp_gate_up_decode_batched_rows2.comp` and row-pair dispatch counts from `64x2` to `128x2`. Candidate parity and release bench build passed, and the profile looked promising: MLP inner `total` moved from A074 `861.116ms` to `817.139ms`, with `gate_up_dispatch` `643.090ms -> 606.125ms`. No-profile same-harness A/B decided against it: candidate prefill `2230.448ms` versus restored `64x2` rollback `2204.441ms`, both with identical token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. | Reject and revert. Keep row-pair MLP gate/up `64x2`; do not retry direct `128x2` without a new hypothesis. Final source has no CUDA/Metal changes. |
+| A076 | Reject row-pair MLP gate/up `64x4` tile. | Temporarily kept the row-pair output tile at `64` but changed the gate/up shader from two reduction lanes to four. Candidate parity and release bench build passed, but no-profile same-harness A/B was clearly worse: candidate prefill `2486.718ms` versus restored `64x2` rollback `2280.475ms`, both with identical token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. | Reject and revert. Keep row-pair MLP gate/up `64x2`; more reduction lanes alone are not the MLP prefill fix. Final source has no CUDA/Metal changes. |
 
 Additional validation after rejected A069:
 
@@ -156,6 +157,18 @@ Additional validation after A074:
 Additional validation after rejected A075:
 
 - Temporary candidate passed `cargo fmt --check`.
+- Temporary candidate passed
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`.
+- Temporary candidate passed
+  `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`.
+- Candidate and rollback no-profile benches both reported backend `vulkan` and
+  identical non-empty token IDs.
+- Source change was removed after rollback beat candidate prefill.
+- Final reverted source passed `cargo fmt --check`, `git diff --check`, and
+  `cargo check -p kiln-vulkan-kernel`.
+
+Additional validation after rejected A076:
+
 - Temporary candidate passed
   `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`.
 - Temporary candidate passed

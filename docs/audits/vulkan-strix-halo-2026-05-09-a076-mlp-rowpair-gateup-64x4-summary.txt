@@ -1,0 +1,79 @@
+A076: Reject MLP Row-Pair Gate/Up 64x4 Tile
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+
+Purpose
+-------
+
+A074 showed the 64-token MLP prefill bucket is dominated by
+`gate_up_dispatch`. A075 showed direct widening from row-pair `64x2` to
+`128x2` did not confirm under no-profile A/B. A076 tested the other obvious
+axis: keep the row-pair output tile width at `64`, but split the hidden
+dimension across `4` reduction lanes instead of `2`, inspired by llama.cpp's
+Vulkan matvec emphasis on parallel reductions.
+
+Temporary Change
+----------------
+
+Temporarily changed `mlp_gate_up_decode_batched_rows2.comp`:
+
+- `local_size_y`: `2 -> 4`
+- shared partial arrays: `128 -> 256`
+- partial index: `col_lane * 2 + red_lane -> col_lane * 4 + red_lane`
+- hidden loop stride: `h += 2 -> h += 4`
+- final reduction: sum four lanes instead of two lanes
+
+The workgroup count and output-column grouping stayed unchanged.
+
+Validation
+----------
+
+Candidate validation:
+
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Final reverted-source validation:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+
+No-Profile A/B
+--------------
+
+No-profile candidate and rollback command:
+
+`KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path
+Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+--max-output-tokens 8 --seed 76 --quiet`
+
+No-profile candidate, temporary `64x4`:
+
+- Token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Prefill: 2486.717907 ms.
+- Mean ITL: 98.524340375 ms.
+- P50 ITL: 98.287638 ms.
+- P99 ITL: 104.499858 ms.
+
+No-profile rollback after restoring `64x2`:
+
+- Token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Prefill: 2280.474615 ms.
+- Mean ITL: 98.743757875 ms.
+- P50 ITL: 98.422814 ms.
+- P99 ITL: 100.756925 ms.
+
+The candidate lost the measured prefill comparison by `206.243292ms`.
+
+Verdict
+-------
+
+Reject and revert. Keep the existing row-pair MLP gate/up `64x2` tile.
+
+Do not retry the direct `64x4` row-pair gate/up tile without a new hypothesis.
+More reduction lanes increased overhead enough to lose the same-harness
+no-profile comparison.

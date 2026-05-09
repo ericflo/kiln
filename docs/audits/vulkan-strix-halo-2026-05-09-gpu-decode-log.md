@@ -3827,6 +3827,55 @@ Verdict:
   prefill comparison favored rollback on the same harness and seed.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A076: Reject MLP Row-Pair Gate/Up 64x4 Tile
+
+Goal:
+- Test the reduction-lane axis after A075 rejected widening row-pair MLP
+  gate/up output columns.
+- This was inspired by llama.cpp's Vulkan matvec reduction variants, but kept
+  the shader portable and avoided requiring subgroup extensions.
+
+Temporary change:
+- Changed `mlp_gate_up_decode_batched_rows2.comp` from `local_size_y = 2` to
+  `local_size_y = 4`.
+- Grew the row-pair shared partial arrays from `128` to `256`.
+- Changed partial indexing from `col_lane * 2 + red_lane` to
+  `col_lane * 4 + red_lane`.
+- Changed the hidden loop stride from `h += 2` to `h += 4`.
+- Reduced four lanes in the final `red_lane == 0` writer instead of two lanes.
+- Workgroup count and output-column grouping stayed unchanged.
+
+Evidence:
+- Candidate validation passed:
+  - `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_batched_matches_cpu_reference -- --nocapture`
+  - `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- No-profile same-harness A/B with `--seed 76`:
+  - Candidate `64x4`: `2486.717907ms` prefill,
+    `98.524340375ms` mean ITL, token IDs
+    `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+  - Rollback/restored `64x2`: `2280.474615ms` prefill,
+    `98.743757875ms` mean ITL, same token IDs.
+  - Candidate lost the prefill comparison by `206.243292ms`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a076-mlp-rowpair-gateup-64x4-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a076-mlp-rowpair-gateup-64x4-candidate-noprofile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a076-mlp-rowpair-gateup-64x4-rollback-noprofile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a076-mlp-rowpair-gateup-64x4-*-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a076-mlp-rowpair-gateup-64x4-final-*.log`
+
+Final validation after revert:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+
+Verdict:
+- Reject and revert. Keep the existing row-pair MLP gate/up `64x2` tile.
+- Do not retry the direct `64x4` row-pair gate/up tile without a new
+  hypothesis. More reduction lanes increased overhead enough to lose the
+  same-harness no-profile comparison.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3878,6 +3927,10 @@ Verdict:
   prefill lost to restored `64x2` (`2230.448221ms` candidate versus
   `2204.441379ms` rollback on the same harness and seed). Keep `64x2` and do
   not retry this exact tile change without a new hypothesis.
+- A076 rejects the direct row-pair MLP gate/up `64x4` tile: it preserved token
+  IDs, but no-profile prefill lost badly to restored `64x2` (`2486.717907ms`
+  candidate versus `2280.474615ms` rollback on the same harness and seed).
+  Keep `64x2`; more reduction lanes alone are not the MLP prefill fix.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
