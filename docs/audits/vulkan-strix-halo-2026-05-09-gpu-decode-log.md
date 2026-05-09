@@ -1253,13 +1253,67 @@ Verdict:
   direct/batch/concurrent visible-output smokes.
 - CUDA and Metal code paths are untouched.
 
+### 2026-05-09 A028: Extend Packed-BF16 MLP Decode to Small Multi-Row Batches
+
+Issue:
+- A027 kept packed-BF16 MLP decode to flattened row count `1` to avoid
+  disturbing prefill and continuous-batch paths. Four-request live batching
+  still ran MLP through cached F32 weights even though the row count stays below
+  the existing row-pair threshold.
+
+Implementation:
+- Added `mlp_gate_up_decode_batched_bf16w.comp`, mirroring the current
+  batched gate/up shader while reading packed BF16 gate/up weights.
+- Extended `dispatch_mlp_decode_cached_bf16_weights` to use:
+  - `mlp_gate_up_decode_bf16w.comp` + `linear_decode_bf16w.comp` for row count
+    `1`;
+  - `mlp_gate_up_decode_batched_bf16w.comp` +
+    `linear_decode_batched_bf16w.comp` for row counts `2..7`.
+- Left row-pair MLP batches (`row_count >= 8`) on the current F32 row-pair
+  shaders. This intentionally avoids changing larger prefill behavior before a
+  dedicated packed-BF16 row-pair shader has evidence.
+- Reused A027's rollback env:
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`.
+- Expanded packed-BF16 MLP parity coverage to batch `1` and batch `3`.
+
+Evidence:
+- `rustfmt --edition 2024` on the touched Vulkan files passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed; warnings were existing
+  unused-code warnings.
+- Focused packed MLP parity passed for batch `1` and batch `3`.
+- Release Vulkan build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Full Vulkan parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  returned `28 passed`.
+- `git diff --check` passed.
+- Serial paged latency remained coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`; the extended candidate measured
+  `419.3ms` prefill / `98.3ms` mean ITL.
+- Four-prompt explicit batch and four-concurrent-chat A/B with
+  `chat_template_kwargs: {"enable_thinking": false}` returned non-empty visible
+  text on both candidate and rollback:
+  - First pair: candidate explicit batch `4.390s` vs rollback `4.330s`
+    (slightly worse); candidate concurrent chat `9.493s` vs rollback `9.818s`
+    (better).
+  - Second pair with fresh prompts: candidate explicit batch `4.320s` vs
+    rollback `4.544s`; candidate concurrent chat `10.092s` vs rollback
+    `10.378s`.
+
+Verdict:
+- Keep. The first explicit-batch sample was mixed, but the repeated pair and
+  both concurrent-chat samples favored the packed small-batch path, correctness
+  stayed clean, and row-pair prefill/batch behavior is still left untouched.
+- CUDA and Metal code paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
-- Extend packed-BF16 MLP work to multi-row/batched decode only if a dedicated
-  batched shader beats the current F32 row-pair path; do not trade a serial win
-  for a prefill or continuous-batch regression.
+- Extend packed-BF16 MLP work to row-pair (`row_count >= 8`) only if a
+  dedicated shader beats the current F32 row-pair path; do not trade serial and
+  small-batch wins for a prefill regression.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: GDN recurrent/gated

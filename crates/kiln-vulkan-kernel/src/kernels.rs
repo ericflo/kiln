@@ -97,6 +97,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("mlp_gate_up_decode", 4, 8),
         ("mlp_gate_up_decode_bf16w", 4, 8),
         ("mlp_gate_up_decode_batched", 4, 12),
+        ("mlp_gate_up_decode_batched_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
         ("paged_attn_decode_batch", 5, 20),
     ];
@@ -2739,9 +2740,10 @@ fn dispatch_mlp_decode_cached_impl(
         x_data.len(),
         batch * hidden * 4
     );
+    let use_rows2 = use_prefill_row_pair_matmul(batch);
     anyhow::ensure!(
-        !bf16_weights || batch == 1,
-        "mlp_decode packed BF16 weights currently support batch=1, got {batch}"
+        !bf16_weights || !use_rows2,
+        "mlp_decode packed BF16 weights currently support batch below row-pair threshold, got {batch}"
     );
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create mlp_decode x buffer")?;
@@ -2768,12 +2770,18 @@ fn dispatch_mlp_decode_cached_impl(
         VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
             .context("failed to create mlp_decode output buffer")?;
 
-    let use_rows2 = use_prefill_row_pair_matmul(batch);
     let gate_up_glsl = if bf16_weights {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/mlp_gate_up_decode_bf16w.comp"
-        )
+        if batch == 1 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/mlp_gate_up_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
+            )
+        }
     } else if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -2818,10 +2826,17 @@ fn dispatch_mlp_decode_cached_impl(
     .context("mlp_decode gate/up kernel failed")?;
 
     let linear_glsl = if bf16_weights {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode_bf16w.comp"
-        )
+        if batch == 1 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched_bf16w.comp"
+            )
+        }
     } else if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),

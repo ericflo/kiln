@@ -1466,7 +1466,7 @@ impl BackendRuntime for VulkanBackend {
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let out = if row_count == 1
+        let out = if row_count < 8
             && self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t])
         {
             let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
