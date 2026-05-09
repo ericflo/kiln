@@ -42,6 +42,8 @@ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
 const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD";
+const DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED: &str =
+    "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED";
 const DISABLE_METAL_MLP_SILU_MUL: &str = "KILN_DISABLE_METAL_MLP_SILU_MUL";
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
@@ -199,6 +201,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     }
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
+        if !metal_mlp_gate_up_serial_dedicated_disabled() {
+            metal_mlp_gate_up_serial_pipeline(metal_device)?;
+        }
     }
     metal_mlp_silu_mul_pipeline(metal_device)?;
     if !metal_attn_gate_fusion_disabled() {
@@ -938,6 +943,10 @@ fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
 
 fn metal_mlp_gate_up_serial_vector_load_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD)
+}
+
+fn metal_mlp_gate_up_serial_dedicated_disabled() -> bool {
+    env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED)
 }
 
 fn metal_mlp_silu_mul_disabled() -> bool {
@@ -2798,6 +2807,42 @@ kernel void kiln_mlp_gate_up_bf16(
             out[out_base1 + col1] = static_cast<bfloat>((gate_acc11 * gate_sigmoid11) * up_acc11);
         }
     }
+}
+
+kernel void kiln_mlp_gate_up_serial_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* gate_t [[buffer(1)]],
+    device const bfloat* up_t [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant uint& intermediate [[buffer(5)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint cols2 = intermediate >> 1;
+    if (gid >= cols2) {
+        return;
+    }
+
+    const uint col0 = gid << 1;
+    float gate_acc0 = 0.0f;
+    float up_acc0 = 0.0f;
+    float gate_acc1 = 0.0f;
+    float up_acc1 = 0.0f;
+    for (uint i = 0; i < hidden; ++i) {
+        const float xv = static_cast<float>(x[i]);
+        const uint w_idx0 = i * intermediate + col0;
+        const bfloat2 gate_w = *(device const bfloat2*)(gate_t + w_idx0);
+        const bfloat2 up_w = *(device const bfloat2*)(up_t + w_idx0);
+        gate_acc0 += xv * static_cast<float>(gate_w[0]);
+        up_acc0 += xv * static_cast<float>(up_w[0]);
+        gate_acc1 += xv * static_cast<float>(gate_w[1]);
+        up_acc1 += xv * static_cast<float>(up_w[1]);
+    }
+
+    const float gate_sigmoid0 = 1.0f / (1.0f + exp(-gate_acc0));
+    const float gate_sigmoid1 = 1.0f / (1.0f + exp(-gate_acc1));
+    out[col0] = static_cast<bfloat>((gate_acc0 * gate_sigmoid0) * up_acc0);
+    out[col0 + 1] = static_cast<bfloat>((gate_acc1 * gate_sigmoid1) * up_acc1);
 }
 
 kernel void kiln_mlp_silu_mul_bf16(
@@ -5482,6 +5527,35 @@ fn metal_mlp_gate_up_pipeline(
     Ok(pipeline)
 }
 
+fn metal_mlp_gate_up_serial_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal mlp gate/up serial pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_mlp_gate_up_serial_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal mlp gate/up serial function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal mlp gate/up serial pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_silu_mul_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -6487,10 +6561,7 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal mlp gate/up requires Metal tensors");
     };
-    let pipeline = metal_mlp_gate_up_pipeline(device)?;
     let encoder = device.command_encoder()?;
-    encoder.set_label("kiln_mlp_gate_up_bf16");
-    encoder.set_compute_pipeline_state(&pipeline);
 
     {
         let (x_storage, x_layout) = x.storage_and_layout();
@@ -6528,33 +6599,43 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
         encoder.set_buffer(2, Some(up_buf.buffer), up_buf.offset_in_bytes);
         encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
 
-        let rows_u32 = rows as u32;
         let hidden_u32 = hidden as u32;
         let intermediate_u32 = intermediate as u32;
-        let row_pair_mode_u32 = if row_group_size == 1 {
-            if !metal_mlp_gate_up_serial_vector_load_disabled()
+
+        let serial_vector_safe = rows == 1
+            && !metal_mlp_gate_up_serial_vector_load_disabled()
+            && intermediate % 2 == 0
+            && gate_buf.offset_in_bytes % 4 == 0
+            && up_buf.offset_in_bytes % 4 == 0;
+        let serial_dedicated = serial_vector_safe && !metal_mlp_gate_up_serial_dedicated_disabled();
+        if serial_dedicated {
+            let pipeline = metal_mlp_gate_up_serial_pipeline(device)?;
+            encoder.set_label("kiln_mlp_gate_up_serial_bf16");
+            encoder.set_compute_pipeline_state(&pipeline);
+            encoder.set_bytes(4, &hidden_u32);
+            encoder.set_bytes(5, &intermediate_u32);
+        } else {
+            let pipeline = metal_mlp_gate_up_pipeline(device)?;
+            encoder.set_label("kiln_mlp_gate_up_bf16");
+            encoder.set_compute_pipeline_state(&pipeline);
+            let rows_u32 = rows as u32;
+            let row_pair_mode_u32 = if row_group_size == 1 {
+                if serial_vector_safe { 6 } else { 0 }
+            } else if row_group_size == 4
+                && !metal_mlp_gate_up_row_quad_vector_load_disabled()
                 && intermediate % 2 == 0
                 && gate_buf.offset_in_bytes % 4 == 0
                 && up_buf.offset_in_bytes % 4 == 0
             {
-                6
+                5
             } else {
-                0
-            }
-        } else if row_group_size == 4
-            && !metal_mlp_gate_up_row_quad_vector_load_disabled()
-            && intermediate % 2 == 0
-            && gate_buf.offset_in_bytes % 4 == 0
-            && up_buf.offset_in_bytes % 4 == 0
-        {
-            5
-        } else {
-            row_group_size as u32
-        };
-        encoder.set_bytes(4, &rows_u32);
-        encoder.set_bytes(5, &hidden_u32);
-        encoder.set_bytes(6, &intermediate_u32);
-        encoder.set_bytes(7, &row_pair_mode_u32);
+                row_group_size as u32
+            };
+            encoder.set_bytes(4, &rows_u32);
+            encoder.set_bytes(5, &hidden_u32);
+            encoder.set_bytes(6, &intermediate_u32);
+            encoder.set_bytes(7, &row_pair_mode_u32);
+        }
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: total,

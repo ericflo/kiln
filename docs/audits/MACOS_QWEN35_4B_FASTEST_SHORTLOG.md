@@ -1870,3 +1870,11 @@
   longer show E431's consistent partial-batch regressions. Metal/Vulkan checks,
   server Metal/Vulkan checks, parity, fmt, and diff check passed; CUDA remains
   locally blocked by missing `nvcc`.
+- 2026-05-09 E433: Accepted a dedicated Metal MLP gate/up serial vector kernel
+  for aligned bs=1 decode, with
+  `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED=1` falling back to the
+  existing shared mode6 path. Same-binary synthetic b1 improved from shared
+  `1741.292/1783.371 us` to dedicated `1652.471/1657.850 us` (`5.1-7.0%`).
+  Batch2/3/4/8 keep using the existing shared batch kernel. Metal/Vulkan
+  checks, server Metal/Vulkan checks, parity, fmt, and diff check passed; CUDA
+  remains locally blocked by missing `nvcc`.

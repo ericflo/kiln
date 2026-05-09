@@ -17525,3 +17525,75 @@ transposed-GEMV down-projection, with
 rollback to the existing row-quad tile4 path. CUDA/Vulkan source behavior is
 unchanged; Vulkan checks pass locally, and CUDA cannot be checked on this host
 because `nvcc` is not installed.
+
+## 2026-05-09 - E433 accepted dedicated Metal MLP gate/up serial kernel
+
+### Purpose
+
+Target the current largest serial decode stage, `mlp:gate_up_fused`. E393
+accepted serial `bfloat2` column-pair loads inside the shared MLP gate/up
+kernel. This experiment isolates that serial vector path in a dedicated Metal
+kernel so bs=1 does not share a shader with row-pair/row-quad batch branches.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED=1` as a targeted
+  rollback to the existing shared mode6 path.
+- Added dedicated Metal kernel `kiln_mlp_gate_up_serial_bf16`.
+- Added a separate pipeline cache/precompile path for the serial kernel.
+- Selected the dedicated kernel only when `rows == 1`, serial vector loads are
+  enabled, `intermediate` is even, and gate/up buffer offsets are 4-byte
+  aligned. Batch `2/3/4/8` stay on the existing shared batch kernel.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED=1`
+- Counter-order disabled/default benchmark repeat
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda` remains locally blocked by missing `nvcc`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Qwen-shaped BF16 MLP gate/up decode-batch synthetic bench,
+same source default dedicated serial versus rollback shared mode6:
+
+| config | b1 | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| default dedicated | `1652.471 us` | `2084.775 us` | `1987.096 us` | `1963.325 us` | `2505.908 us` |
+| rollback shared | `1741.292 us` | `2170.496 us` | `2184.717 us` | `1935.912 us` | `2238.113 us` |
+| rollback shared rerun | `1783.371 us` | `2164.092 us` | `2012.454 us` | `2090.762 us` | `2371.162 us` |
+| default dedicated rerun | `1657.850 us` | `2067.000 us` | `1989.904 us` | `1970.438 us` | `2506.346 us` |
+
+Only batch `1` selects the new kernel. The serial target improved by `5.1%` in
+the first pair and `7.0%` in the counter-order pair. Batch `2/3/4/8` timings
+remain noisy and continue selecting the existing shared batch kernel.
+
+### Artifacts
+
+- `e433_mlp_gate_up_serial_dedicated_parity.log`
+- `e433_mlp_gate_up_serial_dedicated_default.log`
+- `e433_mlp_gate_up_serial_dedicated_disabled.log`
+- `e433_mlp_gate_up_serial_dedicated_disabled_rerun.log`
+- `e433_mlp_gate_up_serial_dedicated_default_rerun.log`
+- `e433_mlp_gate_up_serial_dedicated_check_metal.log`
+- `e433_mlp_gate_up_serial_dedicated_check_vulkan.log`
+- `e433_mlp_gate_up_serial_dedicated_check_server_metal.log`
+- `e433_mlp_gate_up_serial_dedicated_check_server_vulkan.log`
+- `e433_mlp_gate_up_serial_dedicated_check_cuda.log`
+- `e433_mlp_gate_up_serial_dedicated_fmt_check.log`
+- `e433_mlp_gate_up_serial_dedicated_git_diff_check.log`
+
+### Decision
+
+Accepted. Use the dedicated Metal MLP gate/up serial vector kernel for aligned
+bs=1 decode, with `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED=1` as a
+rollback to the existing shared mode6 path. CUDA/Vulkan source behavior is
+unchanged; Vulkan checks pass locally, and CUDA cannot be checked on this host
+because `nvcc` is not installed.
