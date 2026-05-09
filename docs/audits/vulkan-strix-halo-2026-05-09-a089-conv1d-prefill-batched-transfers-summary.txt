@@ -1,0 +1,52 @@
+A089: Reject Vulkan conv1d prefill-only batched transfers
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Goal:
+- Follow up A088 by batching transfer submissions only in the multi-token
+  conv1d prefill path, leaving the single-token update path untouched.
+
+Temporary change:
+- Added temporary env:
+  KILN_DISABLE_VULKAN_CONV1D_PREFILL_BATCHED_TRANSFERS=1
+- `dispatch_causal_conv1d_prefill` used `upload_buffers_with_command_pool` for
+  x/weight/state uploads and `read_back_buffers_with_command_pool` for
+  out/state readback.
+- `dispatch_causal_conv1d_update` stayed on the existing transfer path.
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Same-binary rollback-env A/B, seed 91:
+- Harness:
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 91 --quiet
+- Rollback:
+  - env: KILN_DISABLE_VULKAN_CONV1D_PREFILL_BATCHED_TRANSFERS=1
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a089-conv1d-prefill-batched-transfers-rollback.log
+  - backend: vulkan
+  - prefill: 1089.38999ms
+  - mean ITL: 85.81659099999999ms
+  - p99 ITL: 87.05913ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+- Candidate:
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a089-conv1d-prefill-batched-transfers-candidate.log
+  - backend: vulkan
+  - prefill: 1112.3609880000001ms
+  - mean ITL: 88.81177224999999ms
+  - p99 ITL: 90.720701ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+
+Verdict:
+- Reject and remove the temporary source.
+- The prefill-only candidate preserved backend selection and token IDs, but
+  regressed prefill and decode latency against rollback.
+- Do not retry conv1d transfer batching by only grouping copy submissions.
+- Final source has no A089 code, and CUDA/Metal source paths are untouched.
