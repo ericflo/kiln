@@ -1600,3 +1600,8 @@
   regressed in both 65-token pairs. Aggregate mean ITL was `160.634 ms` for
   temporary x2 versus `159.915 ms` for rollback mode6 (`0.45%` slower).
   Source reverted.
+- 2026-05-09 E401: Rejected extending the E398 tile16 serial GEMV selector to
+  the Qwen-shaped GDN out projection `[1,1,4096] x [4096,2560]`. A temporary
+  benchmark-only source change showed tile8 `430.050 us`, tile16 `433.006 us`
+  (`0.7%` slower), and tile4 `551.529 us`, all with zero diff versus the
+  broadcast reference. Source reverted; keep GDN out-proj on tile8.

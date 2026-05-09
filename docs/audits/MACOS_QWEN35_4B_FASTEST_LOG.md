@@ -15304,3 +15304,45 @@ Paged Qwen3.5-4B serial latency A/B, `prompt_tokens=64`,
 Rejected and reverted. The isolated batch-1 synthetic improvement did not
 translate to the full paged serial decode path; the same-binary endpoint
 aggregate favored the accepted E393 mode6 rollback.
+
+## 2026-05-09 - E401 rejected GDN out-proj tile16 selector
+
+### Hypothesis
+
+E399 still ranks GDN `out_proj` as a nontrivial serial decode bucket. E398
+added a tile16 serial GEMV kernel for the larger MLP down-projection shape, so
+test whether the same wider tile is useful for the Qwen-shaped GDN out
+projection before adding any production selector.
+
+### Change Tested
+
+Temporarily added the Qwen3.5 GDN out-projection shape to the existing
+transposed-GEMV synthetic bench:
+
+- `x=[1,1,4096]`
+- `weight_t=[4096,2560]`
+
+No production selector was changed. The temporary benchmark-only source change
+was reverted after the measurement.
+
+### Results
+
+Qwen3.5 transposed-GEMV synthetic, same binary:
+
+- `gdn_out_proj`: tile8 `430.050 us`, tile16 `433.006 us`
+- tile16 was `0.7%` slower than tile8 on this shape
+- tile4 was much slower at `551.529 us`
+- max and mean absolute diffs were `0`
+
+The same synthetic refresh also showed normal noise on neighboring shapes; it
+is not decision evidence for E398 because E398 already used same-binary
+rollback latency A/B for its accepted MLP down-projection selector.
+
+### Artifact
+
+- `e401_gdn_out_tile16_shape_synthetic.log`
+
+### Decision
+
+Rejected before endpoint measurement. Do not extend the E398 tile16 selector
+to GDN out-projection; keep this shape on the existing tile8 path.
