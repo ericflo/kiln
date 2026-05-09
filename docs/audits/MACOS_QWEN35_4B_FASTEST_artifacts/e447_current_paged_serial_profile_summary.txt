@@ -1,0 +1,28 @@
+latency.prefill_ms	500.706459
+latency.mean_itl_ms	234.4304065
+latency.p50_itl_ms	235.101417
+latency.p99_itl_ms	240.555542
+latency.tokens_generated	9
+latency.decode_tokens_per_sec	4.265658260503848
+kind	total_ms
+mlp	1609.295
+gdn	1042.942
+full_attn	442.318
+stage	calls	total_ms	avg_ms
+gdn:gates_recur_gated_norm	384	126.078	0.328
+full_attn:qkv_split	128	34.633	0.271
+mlp:down_proj	512	605.373	1.182
+gdn:gated_norm	384	0.757	0.002
+mlp:gate_up_fused	512	1003.922	1.961
+gdn:qkv_conv_norm	384	106.780	0.278
+full_attn:decode_attn_contiguous	128	32.001	0.250
+gdn:out_proj	384	272.804	0.710
+gdn:post_transpose	384	0.019	0.000
+full_attn:o_proj	128	88.832	0.694
+full_attn:kv_write	128	27.326	0.213
+full_attn:rope	128	27.782	0.217
+gdn:in_proj	384	536.504	1.397
+full_attn:qkv_proj	128	174.688	1.365
+full_attn:attn_gate	128	26.686	0.208
+full_attn:qk_norm	128	30.176	0.236
+full_attn:q_transpose	128	0.194	0.002

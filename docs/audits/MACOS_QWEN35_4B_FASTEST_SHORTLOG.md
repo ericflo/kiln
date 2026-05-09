@@ -1993,3 +1993,11 @@
   aggregate mean ITL `153.085 ms` default versus `153.624 ms` rollback
   (`0.35%`). Metal/Vulkan checks passed; CUDA remains locally blocked by
   missing `nvcc`.
+- 2026-05-09 E447: Refreshed current Metal paged serial profile after E446.
+  No source change. The measured run reported prefill `500.706 ms`, mean ITL
+  `234.430 ms`, and `4.266 tok/s` with profiling enabled. Filtered
+  `seq_len=1` totals remain led by `mlp:gate_up_fused` `1003.922 ms`,
+  `mlp:down_proj` `605.373 ms`, `gdn:in_proj` `536.504 ms`, `gdn:out_proj`
+  `272.804 ms`, and `full_attn:qkv_proj` `174.688 ms`. Kind totals were MLP
+  `1609.295 ms`, GDN `1042.942 ms`, and full attention `442.318 ms`. Continue
+  prioritizing MLP gate/up, MLP down, and GDN in-proj.

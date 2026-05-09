@@ -18521,3 +18521,67 @@ Accepted. Enable the guarded serial x2 hidden-load mode for Metal GDN in-proj
 batch-1 decode. It preserves the existing E396 serial vector path as rollback,
 does not touch batch row-pair/row-quad paths, and leaves CUDA/Vulkan runtime
 code unchanged.
+
+## 2026-05-09 - E447 current paged serial profile after E446
+
+### Purpose
+
+Refresh the synchronized Metal paged serial target list after accepting E446's
+GDN in-proj serial x2 hidden-load mode and after the intervening Vulkan-only
+documentation commits. This is profiling evidence, not a source change.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 447`
+
+### Results
+
+The measured latency run reported:
+
+- Prefill: `500.706 ms`
+- Mean inter-token latency: `234.430 ms`
+- P50 / P99 inter-token latency: `235.101 ms` / `240.556 ms`
+- Decode throughput: `4.266 tok/s`
+- Tokens generated: `9`
+
+Filtering measured `seq_len=1` profile rows:
+
+| stage | calls | total | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | 512 | `1003.922 ms` | `1.961 ms` |
+| `mlp:down_proj` | 512 | `605.373 ms` | `1.182 ms` |
+| `gdn:in_proj` | 384 | `536.504 ms` | `1.397 ms` |
+| `gdn:out_proj` | 384 | `272.804 ms` | `0.710 ms` |
+| `full_attn:qkv_proj` | 128 | `174.688 ms` | `1.365 ms` |
+| `gdn:gates_recur_gated_norm` | 384 | `126.078 ms` | `0.328 ms` |
+| `gdn:qkv_conv_norm` | 384 | `106.780 ms` | `0.278 ms` |
+| `full_attn:o_proj` | 128 | `88.832 ms` | `0.694 ms` |
+| `full_attn:qkv_split` | 128 | `34.633 ms` | `0.271 ms` |
+| `full_attn:decode_attn_contiguous` | 128 | `32.001 ms` | `0.250 ms` |
+| `full_attn:qk_norm` | 128 | `30.176 ms` | `0.236 ms` |
+| `full_attn:rope` | 128 | `27.782 ms` | `0.217 ms` |
+| `full_attn:kv_write` | 128 | `27.326 ms` | `0.213 ms` |
+| `full_attn:attn_gate` | 128 | `26.686 ms` | `0.208 ms` |
+
+Kind totals:
+
+- MLP: `1609.295 ms`
+- GDN: `1042.942 ms`
+- full attention: `442.318 ms`
+
+Compared with E434's pre-E446 profile, the ranking is unchanged. GDN
+`in_proj` moved from `587.298 ms` to `536.504 ms`, consistent with E446's
+small same-binary latency win, but this synchronized profile is not a
+rollback-controlled A/B and should be used for target selection only.
+
+### Artifacts
+
+- `e447_current_paged_serial_release_bench_build.log`
+- `e447_current_paged_serial_profile.log`
+- `e447_current_paged_serial_profile_summary.txt`
+
+### Decision
+
+Accepted as refreshed target-selection evidence. Continue prioritizing MLP
+gate/up, MLP down-projection, and GDN input projection before smaller
+full-attention point kernels.
