@@ -1605,3 +1605,8 @@
   benchmark-only source change showed tile8 `430.050 us`, tile16 `433.006 us`
   (`0.7%` slower), and tile4 `551.529 us`, all with zero diff versus the
   broadcast reference. Source reverted; keep GDN out-proj on tile8.
+- 2026-05-09 E402: Parsed E399's measured `seq_len=64` prefill profile.
+  Prefill totals are led by `gdn:in_proj` `97.042 ms`, `mlp:down_proj`
+  `83.523 ms`, `mlp:gate_proj` `78.770 ms`, `mlp:up_proj` `72.665 ms`,
+  `gdn:recurrent` `40.002 ms`, and `gdn:out_proj` `32.415 ms`. Accepted as
+  target-selection evidence; no source change.

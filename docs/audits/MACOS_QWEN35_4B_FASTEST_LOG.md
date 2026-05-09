@@ -15346,3 +15346,44 @@ rollback latency A/B for its accepted MLP down-projection selector.
 
 Rejected before endpoint measurement. Do not extend the E398 tile16 selector
 to GDN out-projection; keep this shape on the existing tile8 path.
+
+## 2026-05-09 - E402 prefill profile parse after E398
+
+### Purpose
+
+Use the already-pushed E399 synchronized profile to extract `seq_len=64`
+prefill stage totals from the measured second run. The recent E392-E401 work
+has mostly targeted decode; this parse identifies prefill targets without
+running another benchmark.
+
+### Results
+
+Filtering E399's measured second run to `seq_len=64` profile rows:
+
+- `gdn:in_proj`: `24` calls, `97.042 ms` total, `4.043 ms` average
+- `mlp:down_proj`: `32` calls, `83.523 ms` total, `2.610 ms` average
+- `mlp:gate_proj`: `32` calls, `78.770 ms` total, `2.462 ms` average
+- `mlp:up_proj`: `32` calls, `72.665 ms` total, `2.271 ms` average
+- `gdn:recurrent`: `24` calls, `40.002 ms` total, `1.667 ms` average
+- `gdn:out_proj`: `24` calls, `32.415 ms` total, `1.351 ms` average
+- `full_attn:qkv_proj`: `8` calls, `22.944 ms` total, `2.868 ms` average
+- `mlp:gate_silu`: `32` calls, `19.270 ms` total, `0.602 ms` average
+- `full_attn:prefill_attn_fallback`: `8` calls, `18.636 ms` total,
+  `2.330 ms` average
+- `gdn:qkv_conv_split_norm`: `24` calls, `17.094 ms` total,
+  `0.712 ms` average
+- `gdn:gates`: `24` calls, `15.486 ms` total, `0.645 ms` average
+- `mlp:hidden_mul`: `32` calls, `13.328 ms` total, `0.416 ms` average
+
+### Artifact
+
+- `e402_prefill_profile_after_e398_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. Prefill is led by GDN
+in-projection and the split MLP projection matmuls, not by the decode-only
+fused MLP gate/up kernel. Avoid retrying E332's rejected route of pushing
+prefill rows through the decode gate/up kernel; a useful prefill candidate
+should target the actual split projection path, GDN in-projection, or recurrent
+prefill work.

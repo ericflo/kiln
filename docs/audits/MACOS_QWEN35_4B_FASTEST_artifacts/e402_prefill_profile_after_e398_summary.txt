@@ -1,0 +1,25 @@
+E402 prefill seq_len=64 stage totals from E399 measured second run
+Source: e399_current_paged_latency_profile_after_e398.log
+
+gdn:in_proj count=24 total_ms=97.042 avg_ms=4.043
+mlp:down_proj count=32 total_ms=83.523 avg_ms=2.610
+mlp:gate_proj count=32 total_ms=78.770 avg_ms=2.462
+mlp:up_proj count=32 total_ms=72.665 avg_ms=2.271
+gdn:recurrent count=24 total_ms=40.002 avg_ms=1.667
+gdn:out_proj count=24 total_ms=32.415 avg_ms=1.351
+full_attn:qkv_proj count=8 total_ms=22.944 avg_ms=2.868
+mlp:gate_silu count=32 total_ms=19.270 avg_ms=0.602
+full_attn:prefill_attn_fallback count=8 total_ms=18.636 avg_ms=2.330
+gdn:qkv_conv_split_norm count=24 total_ms=17.094 avg_ms=0.712
+gdn:gates count=24 total_ms=15.486 avg_ms=0.645
+mlp:hidden_mul count=32 total_ms=13.328 avg_ms=0.416
+full_attn:qkv_split count=8 total_ms=11.928 avg_ms=1.491
+gdn:gated_norm count=24 total_ms=8.613 avg_ms=0.359
+full_attn:q_transpose count=8 total_ms=5.662 avg_ms=0.708
+full_attn:prefill_kv_head_layout count=8 total_ms=4.022 avg_ms=0.503
+full_attn:kv_read count=8 total_ms=3.918 avg_ms=0.490
+full_attn:qk_norm count=8 total_ms=3.322 avg_ms=0.415
+full_attn:rope count=8 total_ms=3.151 avg_ms=0.394
+full_attn:kv_write count=8 total_ms=2.841 avg_ms=0.355
+full_attn:prefill_attn_head_major count=8 total_ms=0.048 avg_ms=0.006
+gdn:post_transpose count=24 total_ms=0.009 avg_ms=0.000
