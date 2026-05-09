@@ -4899,6 +4899,64 @@ Verdict:
   direct `32x8` lane trade without a new occupancy or cache hypothesis.
 - Final source has no A087 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A088: Reject Broad Conv1d Batched Transfers
+
+Goal:
+- Reduce Vulkan causal conv1d transfer submissions by batching the three input
+  uploads and two output/state readbacks.
+- Test both single-token update and multi-token prefill conv paths together.
+
+Temporary change:
+- Added temporary env:
+  `KILN_DISABLE_VULKAN_CONV1D_BATCHED_TRANSFERS=1`
+- When enabled, both `dispatch_causal_conv1d_update` and
+  `dispatch_causal_conv1d_prefill` used `upload_buffers_with_command_pool` for
+  x/weight/state uploads and `read_back_buffers_with_command_pool` for
+  out/state readback.
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary rollback-env A/B, seed 90:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 90 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_CONV1D_BATCHED_TRANSFERS=1`
+  - prefill `1077.433238ms`
+  - mean ITL `85.47904125000001ms`
+  - p99 ITL `86.885112ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-candidate.log`
+  - prefill `1063.865113ms`
+  - mean ITL `88.239430375ms`
+  - p99 ITL `93.993956ms`
+  - same token IDs
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-source-reverted-diffcheck.log`
+
+Verdict:
+- Reject and remove the temporary source. The candidate slightly improved
+  prefill, but worsened decode ITL and p99.
+- Do not batch the single-token conv update transfer path by default; a
+  prefill-only transfer batching follow-up remains worth testing.
+- Final source has no A088 code, and CUDA/Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -5003,6 +5061,10 @@ Verdict:
   same-token no-profile A/B regressed prefill `1065.126ms` rollback to
   `1086.950ms` candidate and mean ITL `87.013ms` to `94.090ms`. Keep the
   current `16x16` serial BF16 linear shader.
+- A088 rejects broad conv1d batched transfers across update and prefill:
+  candidate improved prefill `1077.433ms` rollback to `1063.865ms`, but
+  regressed mean ITL `85.479ms` to `88.239ms`. Do not batch the single-token
+  conv update transfer path by default; test prefill-only batching separately.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

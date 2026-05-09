@@ -1,0 +1,54 @@
+A088: Reject broad Vulkan conv1d batched transfers
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Goal:
+- Reduce transfer submissions in Vulkan causal conv1d by batching the three
+  input uploads and two output/state readbacks.
+- Test both single-token update and multi-token prefill conv paths together.
+
+Temporary change:
+- Added temporary env:
+  KILN_DISABLE_VULKAN_CONV1D_BATCHED_TRANSFERS=1
+- When enabled, both `dispatch_causal_conv1d_update` and
+  `dispatch_causal_conv1d_prefill` used `upload_buffers_with_command_pool` for
+  x/weight/state uploads and `read_back_buffers_with_command_pool` for
+  out/state readback.
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Same-binary rollback-env A/B, seed 90:
+- Harness:
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 90 --quiet
+- Rollback:
+  - env: KILN_DISABLE_VULKAN_CONV1D_BATCHED_TRANSFERS=1
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-rollback.log
+  - backend: vulkan
+  - prefill: 1077.433238ms
+  - mean ITL: 85.47904125000001ms
+  - p99 ITL: 86.885112ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+- Candidate:
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a088-conv1d-batched-transfers-candidate.log
+  - backend: vulkan
+  - prefill: 1063.865113ms
+  - mean ITL: 88.239430375ms
+  - p99 ITL: 93.993956ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+
+Verdict:
+- Reject and remove the temporary source.
+- The candidate slightly improved prefill but worsened decode ITL and p99, so
+  broad conv update+prefill transfer batching is not safe as a default.
+- Follow up with a prefill-only transfer batching experiment; do not batch the
+  single-token conv update path without separate decode evidence.
+- Final source has no A088 code, and CUDA/Metal source paths are untouched.
