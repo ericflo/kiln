@@ -969,10 +969,70 @@ Verdict:
 - A production resident-state win likely needs recurrent state to become an
   owned request/batcher resource instead of a thread-local temporary scope.
 
+### 2026-05-09 A023: Accept Packed BF16 Weights for Vulkan Linear Decode
+
+Hypothesis:
+- The model's projection weights are BF16 on disk, but the Vulkan decode weight
+  cache expands them to F32 device buffers. The transposed GEMV and LM-head
+  argmax kernels are bandwidth-heavy, so storing immutable linear weights as
+  two packed BF16 values per `u32` and expanding in shader with
+  `uintBitsToFloat(bits << 16)` should reduce memory traffic without requiring
+  native shader BF16 arithmetic.
+
+Implementation:
+- Added packed-BF16 Vulkan shader variants for linear decode, batched linear
+  decode, single-row argmax blocks, and batched argmax blocks.
+- Added `upload_tensor_bf16_packed_buffer` and BF16-weight dispatch entry points
+  in `crates/kiln-vulkan-kernel/src/kernels.rs`.
+- Added a separate packed-BF16 weight cache in
+  `crates/kiln-model/src/backend/vulkan.rs`; it is Vulkan-only and gated by
+  `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS=1`.
+- Prewarmed packed BF16 weights for no-LoRA linear decode surfaces that use the
+  new path during ordinary serving: `embed_tokens_t`, full-attention `o_proj_t`,
+  and GDN `out_proj_t`.
+
+Evidence:
+- New focused parity tests passed for packed BF16 single linear decode, batched
+  linear decode, single argmax, and batched argmax.
+- Full Vulkan kernel parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  reported `24 passed`.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check` passed.
+- Serial paged decode stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`.
+- Serial candidate runs measured `121.4ms` and `114.0ms` mean ITL. Same-binary
+  rollback with `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS=1` measured
+  `132.5ms` mean ITL with the same token IDs.
+- Sampled four-request continuous batch with `KILN_BATCHING_ENGINE=1`,
+  `temperature=0.7`, `top_p=0.95`, `top_k=40`, `seed=1234`, and `max_tokens=12`
+  returned HTTP 200 for all four requests. Candidate wall time was `8.394559s`
+  for `111` prompt tokens and `48` completion tokens; rollback wall time on the
+  same prompt/request shape was `9.049283s`.
+- Greedy four-request continuous batch with `temperature=0`, `top_p=1`,
+  `seed=1234`, and `max_tokens=12` returned HTTP 200 for all four requests.
+  Candidate wall time was `8.284110s`; rollback wall time was `8.940242s`.
+- Synthetic rank-8 LoRA adapter smoke using
+  `target/kiln-audit-adapters/synthetic-rank8` returned HTTP 200 for a sampled
+  direct request, `28` prompt tokens and `8` completion tokens.
+
+Verdict:
+- Keep. This is a measurable Vulkan-only serial and continuous-batch win, with
+  coherent output and a same-binary rollback switch.
+- CUDA and Metal source paths are not changed by this experiment. Environment
+  validation remains Linux-limited: CUDA checks are blocked here by missing
+  `nvcc`, and Metal checks require an Apple target.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Extend the packed-BF16 weight strategy to the remaining high-traffic Vulkan
+  projection kernels if profiling confirms the shader conversion cost stays
+  below the bandwidth savings: GDN `in_proj`, fused MLP gate/up/down, and
+  full-attention QKV.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: fused MLP decode,

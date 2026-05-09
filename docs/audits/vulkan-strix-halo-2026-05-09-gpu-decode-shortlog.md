@@ -33,18 +33,17 @@ before or with each accepted change and each measured rejection.
 | A020 | Trial Vulkan batched GDN input-projection `32x8` tile in place of the current `80x3` tile. | Focused batched GDN in-proj parity passed; `cargo check -p kiln-model --features vulkan` and release build passed. Candidate sampled batches returned HTTP 200 at `9.170221s` / `9.119555s` for `106` prompt and `48` completion tokens. Same-branch rollback to `80x3` returned `8.824926s` for the same token shape, plus `8.742473s` / `8.506257s` on adjacent `102` prompt-token runs. | Rejected and removed; keep the existing `80x3` geometry until a broader GDN residency/fusion change. |
 | A021 | Trial Metal-inspired Vulkan MLP gate/up two-column single-token shader. | Focused MLP parity passed (`3` tests); `cargo check -p kiln-model --features vulkan` and release build passed. Candidate stayed coherent but regressed serial paged bench to `141.6ms` mean ITL. Candidate profile showed `mlp:fused total=218.030ms / mean=2.271ms`, worse than pre-trial `~202.545ms / 2.110ms`. Same-branch rollback rebuilt and returned to coherent tokens with `129.1ms` mean ITL. | Rejected and removed; Metal's two-column gate/up shape does not transfer to Vulkan F32 on Strix Halo. |
 | A022 | Trial direct generation-loop Vulkan GDN recurrent resident-state scope. | Temporary RAII scope in `generate.rs` passed rustfmt, `cargo check -p kiln-model --features vulkan`, and release build. Candidate direct `/v1/chat/completions` stayed HTTP 200 but measured `4.975489s` / `4.920384s` for `30` prompt and `24` completion tokens. Same-binary rollback with `KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` measured `4.796903s` for the same shape. Longer 48-token rollback measured `8.307010s`, candidate `8.477510s`. | Rejected and removed; real API resident-state wins need request/batcher-owned residency, not a thread-local direct-loop scope. |
+| A023 | Store Vulkan linear-decode weights as packed BF16 buffers and expand in shader. | New packed-BF16 parity tests passed; full Vulkan parity passed `24` tests; `cargo check -p kiln-model --features vulkan`, release build, and `git diff --check` passed. Serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate mean ITL was `121.4ms` / `114.0ms` versus same-binary rollback `132.5ms`. Sampled continuous batch improved `9.049283s` rollback to `8.394559s`; greedy continuous batch improved `8.940242s` rollback to `8.284110s`. Synthetic rank-8 LoRA smoke returned HTTP 200. | Keep; measurable Vulkan-only serial and continuous-batch win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS=1`. |
 
-Validation snapshot after A011:
+Validation snapshot after A023:
 
-- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs crates/kiln-vulkan-kernel/tests/gdn_parity.rs crates/kiln-model/src/backend/vulkan.rs`
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/src/kernels.rs crates/kiln-vulkan-kernel/tests/gdn_parity.rs crates/kiln-model/src/backend/vulkan.rs crates/kiln-vulkan-kernel/build.rs crates/kiln-vulkan-kernel/src/pipeline.rs`
 - `git diff --check`
-- `cargo check -p kiln-model`
 - `cargo check -p kiln-model --features vulkan`
-- `cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --lib -- --nocapture`
-- `cargo test -p kiln-model test_gdn_chunkwise_masks_decay_before_exp --lib -- --nocapture`
 - `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
 - `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
-- `KILN_BATCHING_ENGINE=1 KILN_MODEL_PATH=Qwen3.5-4B ./target/release/kiln serve` sampled batch smoke, plus rollback env smoke.
+- `KILN_BATCHING_ENGINE=1 KILN_MODEL_PATH=Qwen3.5-4B ./target/release/kiln serve` sampled and greedy continuous-batch smokes, plus rollback env smoke.
+- Synthetic rank-8 LoRA direct sampled smoke against `target/kiln-audit-adapters/synthetic-rank8`.
 - `KILN_BENCH_LOG_ITL=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 8 --max-output-tokens 6 --skip-training`
 
 CUDA and Metal checks were attempted but are environment-blocked on this Linux

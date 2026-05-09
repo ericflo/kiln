@@ -36,7 +36,12 @@ const SHADERS: &[(&str, &str)] = &[
     ("gdn_full_chunk_forward", "SPIR_V_GDN_FULL_CHUNK_FORWARD"),
     ("gdn_chunk_scan", "SPIR_V_GDN_CHUNK_SCAN"),
     ("linear_decode", "SPIR_V_LINEAR_DECODE"),
+    ("linear_decode_bf16w", "SPIR_V_LINEAR_DECODE_BF16W"),
     ("linear_decode_batched", "SPIR_V_LINEAR_DECODE_BATCHED"),
+    (
+        "linear_decode_batched_bf16w",
+        "SPIR_V_LINEAR_DECODE_BATCHED_BF16W",
+    ),
     (
         "linear_decode_batched_rows2",
         "SPIR_V_LINEAR_DECODE_BATCHED_ROWS2",
@@ -46,12 +51,20 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS",
     ),
     (
+        "linear_decode_argmax_blocks_bf16w",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BLOCKS_BF16W",
+    ),
+    (
         "linear_decode_argmax_reduce",
         "SPIR_V_LINEAR_DECODE_ARGMAX_REDUCE",
     ),
     (
         "linear_decode_argmax_batched_blocks",
         "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS",
+    ),
+    (
+        "linear_decode_argmax_batched_blocks_bf16w",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W",
     ),
     (
         "linear_decode_argmax_batched_reduce",
@@ -66,10 +79,7 @@ const SHADERS: &[(&str, &str)] = &[
         "mlp_gate_up_decode_batched_rows2",
         "SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2",
     ),
-    (
-        "paged_attn_decode_batch",
-        "SPIR_V_PAGED_ATTN_DECODE_BATCH",
-    ),
+    ("paged_attn_decode_batch", "SPIR_V_PAGED_ATTN_DECODE_BATCH"),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
 ];
 

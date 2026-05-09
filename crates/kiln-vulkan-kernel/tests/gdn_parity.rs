@@ -297,6 +297,86 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn linear_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, out_dim) = (9usize, 7usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 5.0) - 2.0) * 0.17)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.023)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        1,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_cached_bf16_weights")?;
+    assert_close(
+        "linear decode bf16 weights",
+        &got,
+        &x.broadcast_matmul(&weight_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn linear_decode_batched_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, out_dim) = (4usize, 11usize, 9usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.071)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * -0.013)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        batch,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_cached_bf16_weights batched")?;
+    assert_close(
+        "linear decode batched bf16 weights",
+        &got,
+        &x.broadcast_matmul(&weight_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn linear_decode_argmax_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
@@ -337,6 +417,52 @@ fn linear_decode_argmax_matches_cpu_reference() -> Result<()> {
     anyhow::ensure!(
         got == expected as u32,
         "linear argmax mismatch got {got} expected {expected}"
+    );
+    Ok(())
+}
+
+#[test]
+fn linear_decode_argmax_bf16_packed_weights_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, out_dim) = (10usize, 35usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.13)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.019)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_argmax_cached_bf16_weights")?;
+
+    let logits = tensor_data_f32(&x.broadcast_matmul(&weight_f32)?)?;
+    let (expected, _) =
+        logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (idx, &score)| {
+                if score > best.1 { (idx, score) } else { best }
+            });
+    anyhow::ensure!(
+        got == expected as u32,
+        "linear bf16 argmax mismatch got {got} expected {expected}"
     );
     Ok(())
 }
@@ -389,6 +515,62 @@ fn linear_decode_argmax_batched_matches_cpu_reference() -> Result<()> {
     anyhow::ensure!(
         got == expected,
         "batched linear argmax mismatch got {:?} expected {:?}",
+        got,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn linear_decode_argmax_batched_bf16_packed_weights_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, out_dim) = (4usize, 13usize, 71usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * 0.047)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * -0.017)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got =
+        kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights(
+            &vk,
+            &x,
+            &weight_buf,
+            batch,
+            hidden,
+            out_dim,
+        )
+        .context("dispatch_linear_decode_argmax_batched_cached_bf16_weights")?;
+
+    let logits = tensor_data_f32(&x.broadcast_matmul(&weight_f32)?)?;
+    let expected: Vec<u32> = (0..batch)
+        .map(|row| {
+            let start = row * out_dim;
+            let row_logits = &logits[start..start + out_dim];
+            let (token, _) = row_logits.iter().enumerate().fold(
+                (0usize, f32::NEG_INFINITY),
+                |best, (idx, &score)| {
+                    if score > best.1 { (idx, score) } else { best }
+                },
+            );
+            token as u32
+        })
+        .collect();
+    anyhow::ensure!(
+        got == expected,
+        "batched linear bf16 argmax mismatch got {:?} expected {:?}",
         got,
         expected
     );

@@ -41,6 +41,7 @@ pub struct VulkanBackend {
     paged_attn_decode_batch_enabled: bool,
     mlp_decode_enabled: bool,
     mlp_gate_up_enabled: bool,
+    bf16_packed_linear_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
@@ -48,6 +49,9 @@ pub struct VulkanBackend {
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
     weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// Cached packed-bf16 device-local buffers for immutable CPU weights used
+    /// by Vulkan transposed linear decode paths.
+    bf16_packed_weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core)
     vulkan_device: Option<Box<kiln_vulkan_kernel::VulkanDevice>>,
 }
@@ -118,6 +122,8 @@ impl VulkanBackend {
         let gdn_decode_fused_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED").is_ok();
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
+        let bf16_packed_linear_weights_enabled = linear_decode_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS").is_err();
         let linear_argmax_batch_enabled =
             std::env::var("KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH").is_err();
         let full_attn_qkv_enabled = std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV").is_err();
@@ -176,9 +182,11 @@ impl VulkanBackend {
             paged_attn_decode_batch_enabled,
             mlp_decode_enabled,
             mlp_gate_up_enabled,
+            bf16_packed_linear_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
+            bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
         }
     }
@@ -218,6 +226,42 @@ impl VulkanBackend {
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
     }
 
+    fn use_bf16_packed_linear_weight(&self, weight: &Tensor) -> bool {
+        self.bf16_packed_linear_weights_enabled && weight.dtype() == DType::BF16
+    }
+
+    fn cached_bf16_packed_weight_buffer(
+        &self,
+        weight: &Tensor,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let key = weight.id();
+
+        {
+            let cache = self
+                .bf16_packed_weight_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Vulkan packed bf16 weight cache mutex poisoned"))?;
+            if let Some(buffer) = cache.get(&key) {
+                return Ok(Arc::clone(buffer));
+            }
+        }
+
+        let buffer =
+            kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(vk_device, weight)
+                .context("upload packed BF16 projection weight to Vulkan")?;
+        let buffer = Arc::new(buffer);
+
+        let mut cache = self
+            .bf16_packed_weight_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Vulkan packed bf16 weight cache mutex poisoned"))?;
+        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+    }
+
     fn prewarm_f32_weight(
         &self,
         name: &str,
@@ -230,6 +274,36 @@ impl VulkanBackend {
         *count += 1;
         *bytes += weight.elem_count() * std::mem::size_of::<f32>();
         Ok(())
+    }
+
+    fn prewarm_bf16_packed_weight(
+        &self,
+        name: &str,
+        weight: &Tensor,
+        count: &mut usize,
+        bytes: &mut usize,
+    ) -> Result<()> {
+        self.cached_bf16_packed_weight_buffer(weight)
+            .with_context(|| format!("prewarm Vulkan packed BF16 decode weight {name}"))?;
+        *count += 1;
+        *bytes += weight.elem_count().div_ceil(2) * std::mem::size_of::<u32>();
+        Ok(())
+    }
+
+    fn prewarm_linear_weight(
+        &self,
+        name: &str,
+        weight: &Tensor,
+        f32_count: &mut usize,
+        f32_bytes: &mut usize,
+        bf16_count: &mut usize,
+        bf16_bytes: &mut usize,
+    ) -> Result<()> {
+        if self.use_bf16_packed_linear_weight(weight) {
+            self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
+        } else {
+            self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
+        }
     }
 
     /// Dispatch FlashAttention-2 prefill kernel via Vulkan.
@@ -815,21 +889,33 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
         let row_count = batch * seq_len;
         let dispatch_x = if seq_len == 1 {
             x.clone()
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let out = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
-            vk_device,
-            &dispatch_x,
-            &weight_buf,
-            row_count,
-            hidden,
-            out_dim,
-        )
+        let out = if self.use_bf16_packed_linear_weight(weight_t) {
+            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+                vk_device,
+                &dispatch_x,
+                &weight_buf,
+                row_count,
+                hidden,
+                out_dim,
+            )
+        } else {
+            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached(
+                vk_device,
+                &dispatch_x,
+                &weight_buf,
+                row_count,
+                hidden,
+                out_dim,
+            )
+        }
         .context("linear_decode kernel failed")?;
         let out = if seq_len == 1 {
             out
@@ -868,14 +954,25 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
-        let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached(
-            vk_device,
-            x,
-            &weight_buf,
-            hidden,
-            out_dim,
-        )
+        let token = if self.use_bf16_packed_linear_weight(weight_t) {
+            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bf16_weights(
+                vk_device,
+                x,
+                &weight_buf,
+                hidden,
+                out_dim,
+            )
+        } else {
+            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached(
+                vk_device,
+                x,
+                &weight_buf,
+                hidden,
+                out_dim,
+            )
+        }
         .context("linear_decode_argmax kernel failed")?;
         Ok(Some(token))
     }
@@ -917,15 +1014,27 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
-        let tokens = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached(
-            vk_device,
-            x,
-            &weight_buf,
-            batch,
-            hidden,
-            out_dim,
-        )
+        let tokens = if self.use_bf16_packed_linear_weight(weight_t) {
+            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights(
+                vk_device,
+                x,
+                &weight_buf,
+                batch,
+                hidden,
+                out_dim,
+            )
+        } else {
+            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached(
+                vk_device,
+                x,
+                &weight_buf,
+                batch,
+                hidden,
+                out_dim,
+            )
+        }
         .context("linear_decode_argmax_batch kernel failed")?;
         Ok(Some(tokens))
     }
@@ -938,12 +1047,16 @@ impl BackendRuntime for VulkanBackend {
         let start = std::time::Instant::now();
         let mut count = 0usize;
         let mut bytes = 0usize;
+        let mut bf16_packed_count = 0usize;
+        let mut bf16_packed_bytes = 0usize;
 
-        self.prewarm_f32_weight(
+        self.prewarm_linear_weight(
             "embed_tokens_t",
             &weights.embed_tokens_t,
             &mut count,
             &mut bytes,
+            &mut bf16_packed_count,
+            &mut bf16_packed_bytes,
         )?;
 
         for (layer_idx, layer) in weights.layers.iter().enumerate() {
@@ -967,11 +1080,13 @@ impl BackendRuntime for VulkanBackend {
                         &mut count,
                         &mut bytes,
                     )?;
-                    self.prewarm_f32_weight(
+                    self.prewarm_linear_weight(
                         &format!("layers.{layer_idx}.attention.o_proj_t"),
                         &attn.o_proj_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
                 }
                 GpuAttentionWeights::Linear(attn) => {
@@ -999,11 +1114,13 @@ impl BackendRuntime for VulkanBackend {
                         &mut count,
                         &mut bytes,
                     )?;
-                    self.prewarm_f32_weight(
+                    self.prewarm_linear_weight(
                         &format!("layers.{layer_idx}.attention.out_proj_t"),
                         &attn.out_proj_t,
                         &mut count,
                         &mut bytes,
+                        &mut bf16_packed_count,
+                        &mut bf16_packed_bytes,
                     )?;
                 }
             }
@@ -1031,6 +1148,8 @@ impl BackendRuntime for VulkanBackend {
         tracing::info!(
             weights = count,
             f32_cache_mb = bytes / (1024 * 1024),
+            bf16_packed_weights = bf16_packed_count,
+            bf16_packed_cache_mb = bf16_packed_bytes / (1024 * 1024),
             elapsed_ms = start.elapsed().as_millis() as u64,
             "Vulkan decode weight cache prewarmed"
         );

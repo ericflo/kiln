@@ -3,6 +3,7 @@ use crate::device::VulkanDevice;
 use anyhow::{Context, Result};
 use ash::vk;
 use candle_core::{DType, Device, Tensor};
+use half::bf16;
 use std::sync::{Arc, OnceLock};
 
 fn gdn_decode_host_visible_state_enabled() -> bool {
@@ -80,11 +81,15 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
+        ("linear_decode_bf16w", 3, 8),
         ("linear_decode_batched", 3, 12),
+        ("linear_decode_batched_bf16w", 3, 12),
         ("linear_decode_batched_rows2", 3, 12),
         ("linear_decode_argmax_blocks", 4, 12),
+        ("linear_decode_argmax_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_reduce", 3, 4),
         ("linear_decode_argmax_batched_blocks", 4, 12),
+        ("linear_decode_argmax_batched_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_batched_reduce", 3, 4),
         ("mlp_gate_up_decode", 4, 8),
         ("mlp_gate_up_decode_batched", 4, 12),
@@ -534,6 +539,30 @@ pub fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
 }
 
+/// Extract raw bf16 weights packed two values per u32 in row-major order.
+///
+/// Shaders expand each 16-bit lane with `uintBitsToFloat(bits << 16)`, which
+/// preserves the exact bf16 value without requiring native shader bf16 support.
+fn extract_tensor_packed_bf16_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+    anyhow::ensure!(
+        tensor.dtype() == DType::BF16,
+        "packed bf16 upload requires BF16 tensor, got {:?}",
+        tensor.dtype()
+    );
+    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let flat = tensor.flatten_all().context("failed to flatten tensor")?;
+    let bf16_data = flat
+        .to_vec1::<bf16>()
+        .context("failed to extract bf16 data")?;
+    let mut packed = Vec::with_capacity(bf16_data.len().div_ceil(2));
+    for pair in bf16_data.chunks(2) {
+        let lo = pair[0].to_bits() as u32;
+        let hi = pair.get(1).map(|v| v.to_bits() as u32).unwrap_or(0);
+        packed.push(lo | (hi << 16));
+    }
+    Ok((bytemuck::cast_slice(&packed).to_vec(), shape))
+}
+
 /// Create a candle-core Tensor from raw bytes.
 pub fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
     let f32_data: &[f32] = bytemuck::cast_slice(data);
@@ -571,6 +600,37 @@ pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Re
             &data,
         )
         .context("failed to upload cached tensor buffer")?;
+    }
+    Ok(buffer)
+}
+
+/// Upload a BF16 Candle tensor as packed immutable weights into a Vulkan buffer.
+///
+/// The resulting buffer stores two BF16 values per u32, matching the
+/// `*_bf16w.comp` shader variants.
+pub fn upload_tensor_bf16_packed_buffer(
+    vk_device: &VulkanDevice,
+    tensor: &Tensor,
+) -> Result<VulkanBuffer> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+    let data = extract_tensor_packed_bf16_bytes(tensor)?.0;
+
+    let buffer = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
+        .context("failed to create cached packed bf16 tensor buffer")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &buffer,
+            &data,
+        )
+        .context("failed to upload cached packed bf16 tensor buffer")?;
     }
     Ok(buffer)
 }
@@ -926,6 +986,29 @@ pub fn dispatch_linear_decode_cached(
     hidden: usize,
     out_dim: usize,
 ) -> Result<Tensor> {
+    dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, false)
+}
+
+pub fn dispatch_linear_decode_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<Tensor> {
+    dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, true)
+}
+
+fn dispatch_linear_decode_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -940,7 +1023,13 @@ pub fn dispatch_linear_decode_cached(
     );
     if linear_decode_single_submit_enabled() {
         return dispatch_linear_decode_cached_single_submit(
-            vk_device, weight_t, batch, hidden, out_dim, &x_data,
+            vk_device,
+            weight_t,
+            batch,
+            hidden,
+            out_dim,
+            &x_data,
+            packed_bf16_weights,
         );
     }
 
@@ -965,10 +1054,17 @@ pub fn dispatch_linear_decode_cached(
 
     let all_handles = vec![x_buf.handle(), weight_t.handle(), out_buf.handle()];
     if batch == 1 {
-        let glsl_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode.comp"
-        );
+        let glsl_path = if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode.comp"
+            )
+        };
         let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
         let push_constants: [u32; 2] = [hidden as u32, out_dim as u32];
         run_compute_pipeline(
@@ -981,10 +1077,17 @@ pub fn dispatch_linear_decode_cached(
         )
         .context("linear_decode kernel failed")?;
     } else {
-        let glsl_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode_batched.comp"
-        );
+        let glsl_path = if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched.comp"
+            )
+        };
         let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
         let push_constants: [u32; 3] = [hidden as u32, out_dim as u32, batch as u32];
         run_compute_pipeline(
@@ -1019,6 +1122,7 @@ fn dispatch_linear_decode_cached_single_submit(
     hidden: usize,
     out_dim: usize,
     x_data: &[u8],
+    packed_bf16_weights: bool,
 ) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -1038,20 +1142,34 @@ fn dispatch_linear_decode_cached_single_submit(
         .context("failed to create linear_decode output staging buffer")?;
 
     let (spirv, push_constants, workgroup_count): (Vec<u8>, Vec<u32>, u32) = if batch == 1 {
-        let glsl_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode.comp"
-        );
+        let glsl_path = if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode.comp"
+            )
+        };
         (
             crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?,
             vec![hidden as u32, out_dim as u32],
             out_dim.div_ceil(16) as u32,
         )
     } else {
-        let glsl_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode_batched.comp"
-        );
+        let glsl_path = if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched.comp"
+            )
+        };
         (
             crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?,
             vec![hidden as u32, out_dim as u32, batch as u32],
@@ -1192,6 +1310,27 @@ pub fn dispatch_linear_decode_argmax_cached(
     hidden: usize,
     out_dim: usize,
 ) -> Result<u32> {
+    dispatch_linear_decode_argmax_cached_impl(vk_device, x, weight_t, hidden, out_dim, false)
+}
+
+pub fn dispatch_linear_decode_argmax_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<u32> {
+    dispatch_linear_decode_argmax_cached_impl(vk_device, x, weight_t, hidden, out_dim, true)
+}
+
+fn dispatch_linear_decode_argmax_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    hidden: usize,
+    out_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<u32> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -1207,7 +1346,12 @@ pub fn dispatch_linear_decode_argmax_cached(
     );
     if linear_decode_argmax_single_submit_enabled() {
         return dispatch_linear_decode_argmax_cached_single_submit(
-            vk_device, weight_t, hidden, out_dim, &x_data,
+            vk_device,
+            weight_t,
+            hidden,
+            out_dim,
+            &x_data,
+            packed_bf16_weights,
         );
     }
 
@@ -1236,10 +1380,17 @@ pub fn dispatch_linear_decode_argmax_cached(
     let out_index_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
         .context("failed to create linear argmax output index buffer")?;
 
-    let blocks_glsl = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_argmax_blocks.comp"
-    );
+    let blocks_glsl = if packed_bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_blocks_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_blocks.comp"
+        )
+    };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
     let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
     let block_handles = vec![
@@ -1303,6 +1454,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     hidden: usize,
     out_dim: usize,
     x_data: &[u8],
+    packed_bf16_weights: bool,
 ) -> Result<u32> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -1327,10 +1479,17 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, 4)
         .context("failed to create linear argmax output staging buffer")?;
 
-    let blocks_glsl = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_argmax_blocks.comp"
-    );
+    let blocks_glsl = if packed_bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_blocks_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_blocks.comp"
+        )
+    };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
     let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
     let block_handles = vec![
@@ -1557,6 +1716,33 @@ pub fn dispatch_linear_decode_argmax_batched_cached(
     hidden: usize,
     out_dim: usize,
 ) -> Result<Vec<u32>> {
+    dispatch_linear_decode_argmax_batched_cached_impl(
+        vk_device, x, weight_t, batch, hidden, out_dim, false,
+    )
+}
+
+pub fn dispatch_linear_decode_argmax_batched_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<Vec<u32>> {
+    dispatch_linear_decode_argmax_batched_cached_impl(
+        vk_device, x, weight_t, batch, hidden, out_dim, true,
+    )
+}
+
+fn dispatch_linear_decode_argmax_batched_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<Vec<u32>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -1595,10 +1781,17 @@ pub fn dispatch_linear_decode_argmax_batched_cached(
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
         .context("failed to create batched linear argmax output staging buffer")?;
 
-    let blocks_glsl = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_argmax_batched_blocks.comp"
-    );
+    let blocks_glsl = if packed_bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_batched_blocks_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_batched_blocks.comp"
+        )
+    };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
     let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
     let block_handles = vec![
