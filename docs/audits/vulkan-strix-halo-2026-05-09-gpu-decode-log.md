@@ -744,6 +744,45 @@ Verdict:
   beat the current `exp` online softmax shader on the measured sampled batch
   shapes.
 
+### 2026-05-09 A018: Reject Batch-4 MLP Row-Pair Threshold
+
+Hypothesis:
+- The Vulkan MLP gate/up and down-projection kernels already include row-pair
+  variants that share weight loads across two rows.
+- Those row-pair kernels are gated to `batch >= 8`, so the primary 4-row
+  continuous sampled decode batch still uses the ordinary batched kernels.
+- Lowering the row-pair gate to `batch >= 4` might improve the continuous batch
+  decode step without touching single-request serial decode.
+
+Experiment:
+- Changed the uncommitted `use_prefill_row_pair_matmul` threshold from
+  `batch >= 8` to `batch >= 4`.
+- Left the existing `KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL=1` env in
+  place for debugging.
+- Removed the change after measurement.
+
+Evidence:
+- Focused parity passed:
+  `cargo test -p kiln-vulkan-kernel mlp_decode_batched_matches_cpu_reference --test gdn_parity -- --nocapture`.
+- Focused gate/up parity passed:
+  `cargo test -p kiln-vulkan-kernel mlp_gate_up_decode_matches_cpu_reference --test gdn_parity -- --nocapture`.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Two fresh default runs of the primary sampled batch with the `batch >= 4`
+  threshold returned HTTP 200 but measured `time_total=7.884895s` and
+  `time_total=7.811283s`.
+- That is slower than the current accepted standard sampled-batch envelope from
+  A015/A016/A017 (`~7.67s` to `7.74s`).
+- A same-binary env-disabled run measured `8.035747s`, but that is not a clean
+  old-threshold rollback because it also disables the existing prefill row-pair
+  path for larger row counts.
+
+Verdict:
+- Rejected and removed before commit. Batch-4 row-pair MLP kernels are correct
+  but did not beat the accepted sampled-batch envelope.
+- Keep the row-pair path gated at `batch >= 8`.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
