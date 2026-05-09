@@ -1323,6 +1323,44 @@ fn gdn_gates_and_gated_rms_norm_match_f32_cpu_reference() -> Result<()> {
     assert_close("gates cached beta f32", &beta_cached, &beta, 1e-5)?;
     assert_close("gates cached g f32", &g_cached, &g, 1e-5)?;
 
+    let a_log_bf16 = a_log.to_dtype(DType::BF16)?;
+    let dt_bias_bf16 = dt_bias.to_dtype(DType::BF16)?;
+    let a_log_bf16_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &a_log_bf16)?;
+    let dt_bias_bf16_buf =
+        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &dt_bias_bf16)?;
+    let (beta_cached_bf16_aux, g_cached_bf16_aux) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached(
+            &vk,
+            &a,
+            &b,
+            &a_log_bf16_buf,
+            &dt_bias_bf16_buf,
+            2,
+            &[1, 2, 2],
+        )
+        .context("dispatch_gdn_gates_cached bf16 aux")?;
+    let ald_bf16 = tensor_data_f32(&a_log_bf16)?;
+    let dbd_bf16 = tensor_data_f32(&dt_bias_bf16)?;
+    let mut exp_g_bf16_aux = vec![0.0; ad.len()];
+    for i in 0..ad.len() {
+        let head = i % 2;
+        let biased = ad[i] + dbd_bf16[head];
+        let softplus = biased.max(0.0) + (-biased.abs()).exp().ln_1p();
+        exp_g_bf16_aux[i] = -ald_bf16[head].exp() * softplus;
+    }
+    assert_close(
+        "gates cached beta bf16 aux",
+        &beta_cached_bf16_aux,
+        &beta,
+        1e-5,
+    )?;
+    assert_close(
+        "gates cached g bf16 aux",
+        &g_cached_bf16_aux,
+        &cpu_f32(exp_g_bf16_aux, (1, 2, 2))?,
+        1e-5,
+    )?;
+
     let x = cpu_f32(vec![0.2, -0.4, 0.8, -1.2, 1.1, -0.9, 0.5, -0.3], (1, 2, 4))?;
     let z = cpu_f32(vec![-0.5, 0.7, 1.4, -1.6, 0.3, -0.8, 1.2, -0.2], (1, 2, 4))?;
     let weight = cpu_f32(vec![0.9, -0.7, 1.3, 0.5], (4,))?;

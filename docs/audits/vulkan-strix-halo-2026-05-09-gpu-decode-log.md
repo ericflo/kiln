@@ -2377,6 +2377,45 @@ Verdict:
   applies after A048: the kernel is correct, but the current end-to-end route is
   slower than the split path.
 
+### 2026-05-09 A051: Fix Vulkan F32 Upload Helper for Non-F32 Inputs
+
+Problem:
+- `upload_tensor_f32_buffer` is used by Vulkan cached f32-weight paths and its
+  contract says it uploads contiguous f32 values, but it was uploading the
+  tensor's raw bytes. That is only correct when the source tensor is already
+  `DType::F32`.
+- This matters for small GDN aux tensors as well as any fallback path that asks
+  a f32 shader to consume a BF16 tensor. For example, the forward path passes
+  `a_log_gates` into `backend.gdn_gates`; on Vulkan, that could cache BF16
+  bytes behind a shader binding read as `float`.
+
+Implementation:
+- Changed `kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer` to convert
+  non-F32 tensors to `DType::F32` before extracting bytes for upload.
+- Extended the Vulkan GDN parity test so `dispatch_gdn_gates_cached` covers
+  cached BF16 `a_log` / `dt_bias` aux tensors after conversion.
+
+Validation:
+- `cargo fmt --check`.
+- `cargo check -p kiln-vulkan-kernel`.
+- `cargo check -p kiln-model --features vulkan`.
+- `cargo check -p kiln-server --features vulkan`.
+- `cargo test -p kiln-vulkan-kernel
+  gdn_gates_and_gated_rms_norm_match_f32_cpu_reference -- --nocapture`.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- No-profile Vulkan endpoint run after prewarm returned HTTP 200 with correct
+  visible texts `"6"`, `"11"`, `"16"`, `"13"`, empty reasoning, `7` jobs,
+  `3` worker batches, `7` rows, max batch `3`, and `3.990150s` wall time.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a051-vulkan-f32-upload-conversion-candidate-*`
+
+Verdict:
+- Accepted. This is a Vulkan correctness fix for the cached f32 upload path,
+  not a shader-shape optimization. It preserves the warmed endpoint behavior
+  and removes a class of dtype/byte-size mismatches before further GDN or MLP
+  tuning.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2392,6 +2431,9 @@ Verdict:
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).
+- After A051, cached f32 uploads are safe for non-F32 tensors. Future Vulkan
+  work can rely on `upload_tensor_f32_buffer` matching its contract, but should
+  still prefer packed-BF16 paths for large BF16 model weights when available.
 - Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
   direct shader mirroring; A040 and A041 measured both full MLP row-pair and
   gate/up-only row-pair as slower or unstable against rollback.

@@ -603,6 +603,15 @@ pub fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Re
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
+    let tensor_f32;
+    let tensor = if tensor.dtype() == DType::F32 {
+        tensor
+    } else {
+        tensor_f32 = tensor
+            .to_dtype(DType::F32)
+            .context("failed to convert cached tensor to f32 for Vulkan upload")?;
+        &tensor_f32
+    };
     let data = extract_tensor_bytes(tensor)?.0;
 
     let buffer = VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
