@@ -16,3 +16,8 @@ profiling-artifacts/
 
 # Vulkan SPIR-V build artifacts
 *.spv
+
+# Node tooling for screenshot capture (see scripts/capture-screenshots.mjs)
+node_modules/
+package.json
+package-lock.json
