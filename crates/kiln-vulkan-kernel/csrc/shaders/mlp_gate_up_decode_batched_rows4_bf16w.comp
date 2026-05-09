@@ -1,0 +1,134 @@
+// Batched SwiGLU gate/up projection with packed bf16 weights for larger
+// flattened prefill batches.
+//
+// Computes four input rows per workgroup for the same output-column tile,
+// reusing each packed bf16 gate/up weight load across adjacent rows. The input
+// and output buffers are f32; weight buffers pack two bf16 values per uint.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 2, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint intermediate;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer GateWeightBuf { uint data_gate_w[]; };
+layout(binding = 2) readonly buffer UpWeightBuf { uint data_up_w[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+shared float gate_partial0[128];
+shared float up_partial0[128];
+shared float gate_partial1[128];
+shared float up_partial1[128];
+shared float gate_partial2[128];
+shared float up_partial2[128];
+shared float gate_partial3[128];
+shared float up_partial3[128];
+
+float load_bf16(uint packed_word, uint idx) {
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed_word & 0xffffu) : (packed_word >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (intermediate + 63) / 64;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint row0 = row_group * 4;
+    uint row1 = row0 + 1;
+    uint row2 = row0 + 2;
+    uint row3 = row0 + 3;
+    uint col = col_group * 64 + col_lane;
+    uint partial_idx = col_lane * 2 + red_lane;
+
+    float gate_sum0 = 0.0;
+    float up_sum0 = 0.0;
+    float gate_sum1 = 0.0;
+    float up_sum1 = 0.0;
+    float gate_sum2 = 0.0;
+    float up_sum2 = 0.0;
+    float gate_sum3 = 0.0;
+    float up_sum3 = 0.0;
+    if (col < intermediate) {
+        bool valid0 = row0 < batch;
+        bool valid1 = row1 < batch;
+        bool valid2 = row2 < batch;
+        bool valid3 = row3 < batch;
+        uint x_base0 = row0 * hidden;
+        uint x_base1 = row1 * hidden;
+        uint x_base2 = row2 * hidden;
+        uint x_base3 = row3 * hidden;
+        for (uint h = red_lane; h < hidden; h += 2) {
+            uint off = h * intermediate + col;
+            float gate_w = load_bf16(data_gate_w[off >> 1], off);
+            float up_w = load_bf16(data_up_w[off >> 1], off);
+            if (valid0) {
+                float xv0 = data_x[x_base0 + h];
+                gate_sum0 += xv0 * gate_w;
+                up_sum0 += xv0 * up_w;
+            }
+            if (valid1) {
+                float xv1 = data_x[x_base1 + h];
+                gate_sum1 += xv1 * gate_w;
+                up_sum1 += xv1 * up_w;
+            }
+            if (valid2) {
+                float xv2 = data_x[x_base2 + h];
+                gate_sum2 += xv2 * gate_w;
+                up_sum2 += xv2 * up_w;
+            }
+            if (valid3) {
+                float xv3 = data_x[x_base3 + h];
+                gate_sum3 += xv3 * gate_w;
+                up_sum3 += xv3 * up_w;
+            }
+        }
+    }
+
+    gate_partial0[partial_idx] = gate_sum0;
+    up_partial0[partial_idx] = up_sum0;
+    gate_partial1[partial_idx] = gate_sum1;
+    up_partial1[partial_idx] = up_sum1;
+    gate_partial2[partial_idx] = gate_sum2;
+    up_partial2[partial_idx] = up_sum2;
+    gate_partial3[partial_idx] = gate_sum3;
+    up_partial3[partial_idx] = up_sum3;
+    barrier();
+
+    if (red_lane == 0 && col < intermediate) {
+        float gate0 = gate_partial0[col_lane * 2] + gate_partial0[col_lane * 2 + 1];
+        float up0 = up_partial0[col_lane * 2] + up_partial0[col_lane * 2 + 1];
+        float gate1 = gate_partial1[col_lane * 2] + gate_partial1[col_lane * 2 + 1];
+        float up1 = up_partial1[col_lane * 2] + up_partial1[col_lane * 2 + 1];
+        float gate2 = gate_partial2[col_lane * 2] + gate_partial2[col_lane * 2 + 1];
+        float up2 = up_partial2[col_lane * 2] + up_partial2[col_lane * 2 + 1];
+        float gate3 = gate_partial3[col_lane * 2] + gate_partial3[col_lane * 2 + 1];
+        float up3 = up_partial3[col_lane * 2] + up_partial3[col_lane * 2 + 1];
+        if (row0 < batch) {
+            data_out[row0 * intermediate + col] = gate0 * stable_sigmoid(gate0) * up0;
+        }
+        if (row1 < batch) {
+            data_out[row1 * intermediate + col] = gate1 * stable_sigmoid(gate1) * up1;
+        }
+        if (row2 < batch) {
+            data_out[row2 * intermediate + col] = gate2 * stable_sigmoid(gate2) * up2;
+        }
+        if (row3 < batch) {
+            data_out[row3 * intermediate + col] = gate3 * stable_sigmoid(gate3) * up3;
+        }
+    }
+}

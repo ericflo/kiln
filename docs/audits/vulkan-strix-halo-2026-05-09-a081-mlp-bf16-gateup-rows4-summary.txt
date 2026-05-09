@@ -1,0 +1,67 @@
+Vulkan Strix Halo A081 summary, 2026-05-09
+
+Change:
+- Added `mlp_gate_up_decode_batched_rows4_bf16w.comp`.
+- The shader computes four adjacent rows per workgroup for the A080 hybrid
+  large-batch MLP path, reusing packed-BF16 gate/up weight loads across rows.
+- Rollback:
+  `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4=1`
+
+No-profile same-binary A/B:
+- Seed 82 rollback:
+  - prefill `1379.32513ms`
+  - mean ITL `86.44455ms`
+  - p99 ITL `89.204832ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Seed 82 candidate:
+  - prefill `1118.677665ms`
+  - mean ITL `87.8805955ms`
+  - p99 ITL `96.779249ms`
+  - same token IDs
+- Seed 83 rollback:
+  - prefill `1372.707445ms`
+  - mean ITL `87.918574625ms`
+  - p99 ITL `89.897612ms`
+  - same token IDs
+- Seed 83 candidate:
+  - prefill `1128.403628ms`
+  - mean ITL `85.485014625ms`
+  - p99 ITL `88.47319ms`
+  - same token IDs
+
+Profile:
+- Candidate flags for prefill MLP:
+  `bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows2=true`
+- A080 `batch=64` MLP inner total:
+  - total `558.304ms`
+  - gate/up `413.934ms`
+  - down `127.721ms`
+  - readback `6.615ms`
+- A081 `batch=64` MLP inner total:
+  - total `279.313ms`
+  - gate/up `132.253ms`
+  - down `128.874ms`
+  - readback `7.009ms`
+
+Correctness:
+- Candidate and rollback benches reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Server smoke with
+  `chat_template_kwargs: {"enable_thinking": false}` returned visible
+  `content == "blue green"` and `finish_reason == "stop"`.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA check attempted and host-blocked by missing `nvcc`.
+- Metal check attempted and host-blocked because `objc2` requires an Apple
+  target.
+
+Verdict:
+- Accept as a Vulkan-only prefill win.
+- CUDA and Metal source paths are untouched.

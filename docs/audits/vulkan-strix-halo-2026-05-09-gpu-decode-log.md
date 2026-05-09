@@ -4333,6 +4333,136 @@ Verdict:
   only selected for `row_count >= 8`.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A081: Packed-BF16 MLP Gate/Up Rows4 for the Hybrid Prefill Path
+
+Goal:
+- A080 made large-batch MLP down projection fast again, leaving packed-BF16
+  gate/up as the largest MLP inner stage.
+- Recent Metal MLP work showed row-quad reuse can pay off for full batches.
+  Test the same idea in a Vulkan-specific shape without reviving A029's BF16
+  row-pair down path.
+
+Change:
+- Added `mlp_gate_up_decode_batched_rows4_bf16w.comp`.
+- The shader computes four adjacent rows per workgroup for a 64-column tile,
+  reusing each packed-BF16 gate/up weight load across those rows.
+- The dispatcher selects rows4 only for the A080 hybrid large-batch route:
+  `bf16_weights=true down_bf16_weights=false row_count >= 8`.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4=1`
+- Added focused parity:
+  `mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference`.
+- CUDA and Metal source paths are untouched.
+
+Same-binary rollback-env A/B, seed 82:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 82 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4=1`
+  - prefill `1379.32513ms`
+  - mean ITL `86.44455ms`
+  - p99 ITL `89.204832ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate.log`
+  - prefill `1118.677665ms`
+  - mean ITL `87.8805955ms`
+  - p99 ITL `96.779249ms`
+  - same token IDs
+
+Same-binary rollback-env A/B, seed 83:
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-rollback-seed83.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4=1`
+  - prefill `1372.707445ms`
+  - mean ITL `87.918574625ms`
+  - p99 ITL `89.897612ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate-seed83.log`
+  - prefill `1128.403628ms`
+  - mean ITL `85.485014625ms`
+  - p99 ITL `88.47319ms`
+  - same token IDs
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate-profile.log`
+- Candidate profile latency:
+  - prefill `1122.189078ms`
+  - mean ITL `92.55591225ms`
+  - p99 ITL `122.501709ms`
+  - same token IDs
+- Profile flags for `batch=64`:
+  `bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows2=true`
+- A080 measured-pass MLP `batch=64`:
+  - total `558.304ms`
+  - `gate_up_dispatch` `413.934ms`
+  - `down_dispatch` `127.721ms`
+  - `readback` `6.615ms`
+- A081 measured-pass MLP `batch=64`:
+  - total `279.313ms`
+  - `gate_up_dispatch` `132.253ms`
+  - `down_dispatch` `128.874ms`
+  - `readback` `7.009ms`
+- The net MLP `batch=64` inner total improved by `278.991ms`, almost entirely
+  from the new rows4 gate/up shader.
+- Current measured-pass prefill concrete buckets after A081:
+  - `mlp:fused` `281.917ms`
+  - `gdn:recurrent` `230.024ms`
+  - `gdn:conv` `156.212ms`
+  - `gdn:in_proj` `130.074ms`
+  - full-attention `qkv_proj` `100.973ms`
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18426 ./target/release/kiln serve`
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate-seed83.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-rollback-seed83.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a081-mlp-bf16-gateup-rows4-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. Two same-binary rollback-env A/B pairs preserved token IDs and showed
+  a large prefill win; the profile shows the intended gate/up rows4 path and
+  the expected MLP inner-stage movement.
+- The rows4 shader is scoped to the large-batch hybrid path, so single-token
+  decode remains on the all-BF16 MLP route.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4406,6 +4536,11 @@ Verdict:
   restoring down projection to cached F32 row-pair. Measured `batch=64` MLP
   inner total is now `558.304ms`; the remaining MLP prefill target is mostly
   gate/up dispatch (`413.934ms` across 32 layers), not down dispatch.
+- A081 applies a Vulkan-specific BF16 rows4 gate/up shader to that hybrid path.
+  Measured `batch=64` MLP inner total is now `279.313ms`, with gate/up
+  `132.253ms` and down `128.874ms`. The next prefill targets are no longer a
+  single obvious MLP gate/up bucket; current measured buckets are MLP fused,
+  GDN recurrent, GDN conv, GDN in-proj, and full-attention QKV in that order.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

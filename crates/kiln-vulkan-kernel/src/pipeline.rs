@@ -134,6 +134,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_MLP_GATE_UP_DECODE_BATCHED_BF16W,
     ),
     (
+        "mlp_gate_up_decode_batched_rows4_bf16w",
+        SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W,
+    ),
+    (
         "mlp_gate_up_decode_batched_rows2",
         SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2,
     ),
