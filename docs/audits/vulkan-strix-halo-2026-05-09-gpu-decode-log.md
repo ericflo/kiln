@@ -783,10 +783,67 @@ Verdict:
   but did not beat the accepted sampled-batch envelope.
 - Keep the row-pair path gated at `batch >= 8`.
 
+### 2026-05-09 A019: Reject Vulkan Two-Stage LoRA Delta Decode
+
+Hypothesis:
+- A002 already routes the base projection through `backend.linear_decode` when
+  LoRA is active, then computes the low-rank delta with the generic Candle path.
+- For a rank-8 adapter, replacing `compute_lora_delta(x, A, B)` with a
+  Vulkan two-stage path (`x @ A^T` followed by `hidden @ B^T`) might avoid CPU
+  matmul overhead in LoRA serial and continuously batched decode.
+
+Experiment:
+- Built a temporary generator for a full-shape synthetic rank-8 PEFT adapter
+  under `target/kiln-audit-adapters/synthetic-rank8`; it was not committed.
+- The adapter used tiny deterministic non-zero F32 values for all trained
+  modules: full-attention `q_proj`, `k_proj`, `v_proj`, `o_proj` on the eight
+  full-attention layers, plus MLP `gate_proj`, `up_proj`, and `down_proj` on
+  all 32 layers.
+- Added uncommitted Vulkan shaders:
+  - `lora_a_decode.comp`: compute `[row, rank] = x @ A^T`.
+  - `lora_b_decode.comp`: compute `[row, out_dim] = hidden @ B^T * scale`.
+- Added an uncommitted backend hook,
+  `BackendRuntime::lora_delta_decode`, and a Vulkan impl with rollback env
+  `KILN_DISABLE_VULKAN_LORA_DELTA_DECODE=1`.
+- Removed all code after measurement.
+
+Evidence:
+- The temporary full-shape synthetic adapter loaded through the normal server
+  adapter path with `KILN_ADAPTER_DIR=target/kiln-audit-adapters`.
+- Baseline active-adapter sampled batch before the shader experiment returned
+  HTTP 200 at `time_total=13.581623s` for `98` prompt tokens and `48`
+  completion tokens. The first load-including request was `11.836511s` for
+  `82` prompt and `48` completion tokens, so subsequent measurements avoided
+  cache hits and varied prompt suffixes.
+- Focused parity passed:
+  `cargo test -p kiln-vulkan-kernel lora_delta_decode_matches_cpu_reference --test gdn_parity -- --nocapture`.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- With the Vulkan LoRA delta path enabled, active-adapter sampled batches
+  returned HTTP 200 but measured `time_total=14.988255s` and
+  `time_total=15.065539s` for `94` prompt tokens and `48` completion tokens.
+- Same-binary rollback with
+  `KILN_DISABLE_VULKAN_LORA_DELTA_DECODE=1` returned HTTP 200 at
+  `time_total=12.825559s` and `time_total=12.724448s` for `98` prompt tokens
+  and `48` completion tokens.
+
+Verdict:
+- Rejected and removed before commit. The shader math is correct, but the
+  implementation adds two Vulkan dispatches per LoRA projection. With full
+  rank-8 LoRA coverage, that launch/readback shape loses to the current CPU
+  low-rank delta path.
+- Future LoRA work should target fused projection+delta kernels, adapter
+  residency, or a way to fuse LoRA into the existing MLP/full-attention
+  projection dispatches. A standalone two-stage delta backend is not the right
+  next step.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Improve LoRA throughput without adding per-projection dispatch fanout. A019
+  shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: fused MLP decode,
   GDN `in_proj`, GDN recurrent/gated norm, and full-attention QKV projection.
 - For GDN batch fusion, do not reuse the generic
