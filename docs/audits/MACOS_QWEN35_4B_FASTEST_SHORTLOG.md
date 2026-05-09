@@ -1570,3 +1570,11 @@
   pairs both favored default; aggregate mean ITL improved `162.330 -> 159.857 ms`
   (`1.52%`). Metal/Vulkan checks, release Metal builds, fmt, and diff checks
   passed; CUDA check was blocked locally by missing `nvcc`.
+- 2026-05-09 E397: Refreshed the current paged serial profile after E396.
+  The measured run reported `305.831 ms` mean ITL and `3.270 tok/s`.
+  Filtered decode stage totals showed E396's affected GDN `in_proj` bucket at
+  `303.950 ms` versus E395's `321.182 ms`, while projection work remains the
+  top target set: `gate_up_fused` `528.049 ms`, `down_proj` `333.357 ms`,
+  `gdn:in_proj` `303.950 ms`, `gdn:out_proj` `151.550 ms`, and
+  `full_attn:qkv_proj` `89.475 ms`. Accepted as target-selection evidence; no
+  source change.

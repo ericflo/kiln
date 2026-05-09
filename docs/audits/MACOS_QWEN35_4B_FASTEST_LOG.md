@@ -15039,3 +15039,57 @@ touched Metal code.
 Accepted. Keep the guarded serial `bfloat2` GDN in-proj path because it
 improves the directly affected synthetic batch-1 kernel and repeats as a real
 same-build paged serial latency win, with a targeted rollback knob.
+
+## 2026-05-09 - E397 current paged serial profile after E396
+
+### Purpose
+
+Refresh the synchronized paged serial stage profile after accepting E396's
+serial GDN in-proj `bfloat2` loads. This is a profiling run, not a source
+change.
+
+### Results
+
+The measured second latency run reported:
+
+- Prefill: `817.801041 ms`
+- Mean inter-token latency: `305.831406 ms`
+- P50 / P99 inter-token latency: `305.630333 ms` / `329.509833 ms`
+- Decode throughput: `3.269775 tok/s`
+- Tokens generated: `9`
+
+Filtering the second run to `seq_len=1` decode profile rows:
+
+- `gate_up_fused`: `256` calls, `528.049 ms` total, `2.063 ms` average
+- `down_proj`: `256` calls, `333.357 ms` total, `1.302 ms` average
+- `in_proj`: `192` calls, `303.950 ms` total, `1.583 ms` average
+- `out_proj`: `192` calls, `151.550 ms` total, `0.789 ms` average
+- `qkv_proj`: `64` calls, `89.475 ms` total, `1.398 ms` average
+- `gates_recur_gated_norm`: `192` calls, `81.094 ms` total,
+  `0.422 ms` average
+- `qkv_conv_norm`: `192` calls, `68.256 ms` total, `0.355 ms` average
+- `o_proj`: `64` calls, `51.369 ms` total, `0.803 ms` average
+- `qkv_split`: `64` calls, `22.876 ms` total, `0.357 ms` average
+- `decode_attn_contiguous`: `64` calls, `21.204 ms` total,
+  `0.331 ms` average
+- `qk_norm`: `64` calls, `19.581 ms` total, `0.306 ms` average
+- `attn_gate`: `64` calls, `19.102 ms` total, `0.298 ms` average
+- `rope`: `64` calls, `18.374 ms` total, `0.287 ms` average
+- `kv_write`: `64` calls, `18.337 ms` total, `0.287 ms` average
+
+Compared with E395's same profiled shape, GDN `in_proj` moved from
+`321.182 ms` to `303.950 ms`. Because this is a profiling run with intrusive
+stage timing, treat that as directional support for E396 rather than a
+standalone latency claim.
+
+### Artifact
+
+- `e397_current_paged_latency_profile_after_e396.log`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. MLP gate/up remains
+the largest profiled serial decode stage, followed by MLP down-projection and
+GDN in-projection. Continue prioritizing projection-heavy paths, but avoid
+retreading previously rejected gate/up four-column, fast-exp, threadgroup
+width, and fused-QKV tile4 variants without a materially different mechanism.
