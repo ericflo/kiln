@@ -15241,3 +15241,66 @@ in-projection. The next source experiment should either materially change
 gate/up execution without repeating rejected wider-serial/fast-exp/shared-X
 ideas, or target the remaining projection buckets with same-binary rollback
 evidence.
+
+## 2026-05-09 - E400 rejected MLP gate/up serial x2 hidden loads
+
+### Hypothesis
+
+The accepted E393 serial MLP gate/up path pairs adjacent gate/up columns with
+`bfloat2` weight loads, but still loads the hidden row one scalar BF16 at a
+time. For the Qwen-shaped serial path, pairing adjacent hidden values as
+`bfloat2` could reduce loop overhead and input-load instructions without
+changing the accumulator shape.
+
+### Change Tested
+
+Added a temporary serial mode for `kiln_mlp_gate_up_bf16` selected only when
+`row_group_size == 1`, hidden/intermediate dimensions were even, and x/gate/up
+buffer offsets were 4-byte aligned. The temporary
+`KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_X2_LOAD=1` knob rolled back to the
+accepted E393 mode6 serial vector path.
+
+The source was reverted after endpoint validation failed.
+
+### Results
+
+Focused MLP gate/up parity passed.
+
+Same-binary Qwen3.5 MLP gate/up synthetic:
+
+- batch `1`: rollback mode6 `1778.983 us`, temporary x2 mode7 `1679.208 us`
+  (`5.6%` faster)
+- batch `2/3/4/8`: recorded in the artifact but not decision drivers because
+  those rows do not select the serial x2 mode
+
+Paged Qwen3.5-4B serial latency A/B, `prompt_tokens=64`,
+`max_output_tokens=64`, one warmup run:
+
+- pair 1: temporary x2 `160.244615 ms` mean ITL vs rollback mode6
+  `160.008634 ms` (`0.15%` slower)
+- counter-ordered pair 2: temporary x2 `161.024367 ms` mean ITL vs rollback
+  mode6 `159.822285 ms` (`0.75%` slower)
+- aggregate: temporary x2 `160.634491 ms` vs rollback mode6 `159.915459 ms`
+  mean ITL (`0.45%` slower)
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+
+### Artifact
+
+- `e400_mlp_serial_x2_parity.log`
+- `e400_mlp_serial_x2_default_synthetic.log`
+- `e400_mlp_serial_x2_disabled_synthetic.log`
+- `e400_mlp_serial_x2_latency_default_64out.log`
+- `e400_mlp_serial_x2_latency_disabled_64out.log`
+- `e400_mlp_serial_x2_latency_disabled_repeat_64out.log`
+- `e400_mlp_serial_x2_latency_default_repeat_64out.log`
+- `e400_mlp_serial_x2_fmt_check.log`
+
+### Decision
+
+Rejected and reverted. The isolated batch-1 synthetic improvement did not
+translate to the full paged serial decode path; the same-binary endpoint
+aggregate favored the accepted E393 mode6 rollback.

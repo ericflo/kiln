@@ -1593,3 +1593,10 @@
   `gate_up_fused` `516.120 ms`, `down_proj` `333.458 ms`, `gdn:in_proj`
   `303.376 ms`, `gdn:out_proj` `151.359 ms`, and `full_attn:qkv_proj`
   `91.150 ms`. Accepted as target-selection evidence; no source change.
+- 2026-05-09 E400: Rejected a temporary MLP gate/up serial mode that paired
+  adjacent hidden-row values as `bfloat2` on top of E393's adjacent-column
+  weight loads. Focused parity passed, and same-binary synthetic batch-1
+  improved `1778.983 -> 1679.208 us` (`5.6%`), but full paged serial latency
+  regressed in both 65-token pairs. Aggregate mean ITL was `160.634 ms` for
+  temporary x2 versus `159.915 ms` for rollback mode6 (`0.45%` slower).
+  Source reverted.
