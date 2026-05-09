@@ -5121,6 +5121,74 @@ Verdict:
   further, reduce boundaries, or build a head-last/resident route that changes
   data movement rather than only enabling the existing full-chunk shader.
 
+### 2026-05-09 A092: Add GDN Recurrent Inner-Stage Profiling
+
+Problem:
+- A090 shows GDN recurrent as the largest prefill bucket and a top decode
+  bucket, but the outer `recurrent` stage hides several very different costs:
+  Candle matmul preparation, Vulkan chunk prep, Vulkan chunk scan, state
+  update, and fallback single-token decode.
+
+Change:
+- Added profile-only logging behind
+  `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`.
+- New log prefix:
+  `kiln_profile_gdn_recurrent_inner_stage stage=... batch=... heads=... seq_len=... chunk_index=... chunk_len=... elapsed_ms=...`
+- No routing or math changes.
+
+Command:
+- `cargo fmt --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Profile:
+  `KILN_BENCH_LOG_TOKENS=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 93 --quiet`
+- No-profile sanity:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 93 --quiet`
+
+Evidence:
+- `cargo fmt --check`, `cargo check -p kiln-model`,
+  `cargo check -p kiln-model --features vulkan`, and the release Vulkan bench
+  build passed; warnings only.
+- `cargo check -p kiln-model --features cuda` was attempted and remains
+  host-blocked before project typecheck because `nvcc` is unavailable.
+- `cargo check -p kiln-model --features metal` was attempted and remains
+  host-blocked before project typecheck because `objc2` requires an Apple
+  target.
+- Profile run reported backend `vulkan`, token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`, prefill
+  `1175.193672ms`, mean ITL `88.498017ms`, p99 ITL `90.314499ms`.
+- No-profile sanity run reported backend `vulkan`, the same token IDs,
+  prefill `1110.633370ms`, mean ITL `86.876867ms`, p99 ITL `88.173338ms`.
+- Measured-pass GDN recurrent prefill split, excluding warmup:
+  outer recurrent `293.854ms`; `matmul_prep` `101.787ms`; `chunk_scan`
+  `86.077ms`; `chunk_prep` `56.893ms`; `state_update` `44.123ms`;
+  `slice_inputs` `3.983ms`; `cat_out` `0.001ms`.
+- Measured-pass GDN recurrent decode split:
+  outer recurrent `118.076ms`; `single_token_fallback` `117.203ms`.
+  No `single_token_backend_step` rows appeared.
+- Raw logs:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-check-model.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-check-vulkan.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-release-bench-build.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-profile.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-noprofile.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-check-cuda.log`,
+  and
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-check-metal.log`.
+- Durable aggregate summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a092-recurrent-inner-summary.txt`.
+
+Verdict:
+- Keep profile instrumentation. It is env-gated and the no-profile run stayed
+  coherent on Vulkan with expected token IDs.
+- Prefill recurrent work should target `matmul_prep` and/or `chunk_scan`;
+  slicing and final concatenation are not meaningful targets.
+- Decode recurrent work should test a Vulkan-only F32 recurrent-step route
+  with an explicit rollback gate. The existing backend-step gate only permits
+  BF16, while this run shows the current decode path falls through to the
+  single-token fallback.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -5245,6 +5313,12 @@ Verdict:
   regressed from `1108.174ms` default to `1160.651ms` enabled. Keep the shader
   opt-in; do not enable it by default without a materially different fused
   chunk shape.
+- A092 splits the GDN recurrent bucket: current prefill recurrent is led by
+  `matmul_prep` `101.787ms` and `chunk_scan` `86.077ms`, not slicing or
+  concatenation. Decode recurrent is entirely `single_token_fallback`
+  (`117.203ms` of `118.076ms`) because the active decode tensors are F32 and
+  the backend recurrent-step gate only allows BF16. Test a Vulkan-only F32
+  recurrent-step route with rollback before more decode recurrent work.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

@@ -1,0 +1,77 @@
+# A092 GDN Recurrent Inner Profile Summary
+
+Date: 2026-05-09
+Host: AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+Model: Qwen3.5-4B
+Backend: vulkan
+Source: current `main` after A091
+
+Change:
+- Added profile-only GDN recurrent inner-stage logging behind
+  `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`.
+- New log prefix:
+  `kiln_profile_gdn_recurrent_inner_stage`.
+- No routing or math changes.
+
+Validation:
+- `cargo fmt --check`: pass.
+- `cargo check -p kiln-model`: pass, warnings only.
+- `cargo check -p kiln-model --features vulkan`: pass, warnings only.
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`:
+  pass, warnings only.
+- `cargo check -p kiln-model --features cuda`: attempted, host-blocked before
+  project typecheck because `nvcc` is unavailable.
+- `cargo check -p kiln-model --features metal`: attempted, host-blocked before
+  project typecheck because `objc2` requires an Apple target.
+
+Profile harness:
+
+```text
+KILN_BENCH_LOG_TOKENS=1 \
+KILN_PROFILE_GDN_STAGES=1 \
+KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1 \
+./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only \
+  --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 93 --quiet
+```
+
+Final profiled latency:
+- Backend: `vulkan`
+- Token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1175.193672ms`
+- Mean ITL: `88.498017ms`
+- P99 ITL: `90.314499ms`
+
+No-profile sanity, same source and seed:
+- Backend: `vulkan`
+- Token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1110.633370ms`
+- Mean ITL: `86.876867ms`
+- P99 ITL: `88.173338ms`
+
+Measured-pass GDN recurrent inner totals, warmup excluded:
+
+| Bucket | Total ms | Count | Mean ms |
+| --- | ---: | ---: | ---: |
+| prefill recurrent outer | 293.854 | 24 | 12.244 |
+| prefill matmul_prep | 101.787 | 24 | 4.241 |
+| prefill chunk_scan | 86.077 | 24 | 3.587 |
+| prefill chunk_prep | 56.893 | 24 | 2.371 |
+| prefill state_update | 44.123 | 24 | 1.838 |
+| prefill slice_inputs | 3.983 | 24 | 0.166 |
+| prefill cat_out | 0.001 | 24 | 0.000 |
+| decode recurrent outer | 118.076 | 192 | 0.615 |
+| decode single_token_fallback | 117.203 | 192 | 0.610 |
+
+Interpretation:
+- A090's GDN recurrent prefill bucket is split mainly between Candle matmul
+  prep (`k_t`, `ks_entry`, `kkt`, `qkt`, `q_s`) and Vulkan chunk scan. Chunk
+  prep and state update are meaningful but smaller.
+- The current 64-token path does not spend meaningful time in chunk slicing or
+  final concatenation.
+- Decode does not enter `single_token_backend_step`; it uses
+  `single_token_fallback`, matching the full outer recurrent time. The active
+  decode tensors are F32, while the existing backend-step gate only allows
+  BF16.
+- Next Vulkan decode experiment should test a Vulkan-only F32 recurrent-step
+  route with an explicit rollback gate. That is separate from the A070/A091
+  full-chunk prefill shape, which remains rejected.

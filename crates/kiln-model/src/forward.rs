@@ -131,6 +131,11 @@ fn profile_gdn_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_STAGES"))
 }
 
+fn profile_gdn_recurrent_inner_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_RECURRENT_INNER_STAGES"))
+}
+
 fn profile_full_attn_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
@@ -194,6 +199,39 @@ fn finish_gdn_stage_profile(
     synchronize_for_profile(device)?;
     eprintln!(
         "kiln_profile_gdn_stage layer={layer} stage={stage} seq_len={seq_len} start_pos={start_pos} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
+
+fn start_gdn_recurrent_inner_profile(
+    device: &Device,
+    enabled: bool,
+) -> Result<Option<std::time::Instant>> {
+    if enabled {
+        synchronize_for_profile(device)?;
+        Ok(Some(std::time::Instant::now()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn finish_gdn_recurrent_inner_profile(
+    device: &Device,
+    stage: &str,
+    batch: usize,
+    heads: usize,
+    seq_len: usize,
+    chunk_index: usize,
+    chunk_len: usize,
+    start: Option<std::time::Instant>,
+) -> Result<()> {
+    let Some(start) = start else {
+        return Ok(());
+    };
+    synchronize_for_profile(device)?;
+    eprintln!(
+        "kiln_profile_gdn_recurrent_inner_stage stage={stage} batch={batch} heads={heads} seq_len={seq_len} chunk_index={chunk_index} chunk_len={chunk_len} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
@@ -3738,6 +3776,7 @@ fn gdn_chunkwise_recurrence(
     let (batch, heads, seq_len, _) = q.dims4()?;
     let dtype = q.dtype();
     let device = q.device();
+    let profile_inner = profile_gdn_recurrent_inner_stages_enabled();
 
     // Single-token decode fast path. The chunkwise machinery (preshape,
     // decay matrix, KKT, forward sub, B_mask) costs more than the per-token
@@ -3755,6 +3794,7 @@ fn gdn_chunkwise_recurrence(
             // marks this block as the suspected source of the 24-GDN-layer
             // ucopy_bf16 slice; the dedicated NVTX range lets nsys attribute
             // it separately from the kernel itself.
+            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let (q1, k1, v1, beta1, g1) = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/precopy");
                 (
@@ -3765,16 +3805,49 @@ fn gdn_chunkwise_recurrence(
                     g.squeeze(2)?.contiguous()?,
                 )
             };
+            finish_gdn_recurrent_inner_profile(
+                device,
+                "single_token_precopy",
+                batch,
+                heads,
+                seq_len,
+                0,
+                1,
+                stage_profile,
+            )?;
+            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let out_opt = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
                 backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
             };
+            finish_gdn_recurrent_inner_profile(
+                device,
+                "single_token_backend_step",
+                batch,
+                heads,
+                seq_len,
+                0,
+                1,
+                stage_profile,
+            )?;
             if let Some(out) = out_opt {
                 return Ok(out.unsqueeze(2)?);
             }
         }
 
-        return gdn_single_token_recurrence(q, k, v, beta, g, state);
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
+        let out = gdn_single_token_recurrence(q, k, v, beta, g, state)?;
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "single_token_fallback",
+            batch,
+            heads,
+            seq_len,
+            0,
+            1,
+            stage_profile,
+        )?;
+        return Ok(out);
     }
 
     let full_chunks = seq_len / chunk_size;
@@ -3789,6 +3862,7 @@ fn gdn_chunkwise_recurrence(
         let is_tail = ci >= full_chunks;
         let c = if is_tail { tail } else { chunk_size };
 
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (q_c, k_c, v_c, beta_c, g_c) = if is_tail {
             let t_start = full_chunks * chunk_size;
             (
@@ -3808,21 +3882,54 @@ fn gdn_chunkwise_recurrence(
                 g.narrow(2, t_start, chunk_size)?.contiguous()?,
             )
         };
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "slice_inputs",
+            batch,
+            heads,
+            seq_len,
+            ci,
+            c,
+            stage_profile,
+        )?;
 
         // Matmuls first — these are well-tuned cuBLAS GEMMs and stay on
         // candle. K^T is reused for KKT (intra-chunk similarities) and the
         // final outer product into the state update.
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "matmul_prep",
+            batch,
+            heads,
+            seq_len,
+            ci,
+            c,
+            stage_profile,
+        )?;
 
         if !is_tail && c == 64 && backend.supports_gdn_full_chunk_forward() && dtype == DType::BF16
         {
-            if let Some(out_chunk) = backend.gdn_full_chunk_forward(
+            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
+            let out_chunk = backend.gdn_full_chunk_forward(
                 &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-            )? {
+            )?;
+            finish_gdn_recurrent_inner_profile(
+                device,
+                "full_chunk_forward",
+                batch,
+                heads,
+                seq_len,
+                ci,
+                c,
+                stage_profile,
+            )?;
+            if let Some(out_chunk) = out_chunk {
                 out_chunks.push(out_chunk);
                 continue;
             }
@@ -3840,6 +3947,7 @@ fn gdn_chunkwise_recurrence(
         //   q_s_scaled:       [B, nv, C, dv] bf16 — q_s * p
         //   decay_last_col_u: [B, nv, C, 1]  bf16 — exp(big_g[C-1] - big_g[i])
         //   p_last_u:         [B, nv, 1, 1]  bf16 — exp(big_g[C-1])
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
             let prep_out = if backend.supports_gdn_chunk_prep() && dtype == DType::BF16 {
@@ -3927,8 +4035,19 @@ fn gdn_chunkwise_recurrence(
                 }
             }
         };
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "chunk_prep",
+            batch,
+            heads,
+            seq_len,
+            ci,
+            c,
+            stage_profile,
+        )?;
 
         let decay_last_col = decay_last_col_u.squeeze(3)?;
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (out_chunk, w_weighted) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
             if backend.supports_gdn_chunk_scan() && dtype == DType::BF16 {
@@ -3957,18 +4076,51 @@ fn gdn_chunkwise_recurrence(
                 (out_chunk, w_weighted)
             }
         };
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "chunk_scan",
+            batch,
+            heads,
+            seq_len,
+            ci,
+            c,
+            stage_profile,
+        )?;
 
         out_chunks.push(out_chunk); // [B, nv, C, dv]
 
         // State update:
         //   S_new = exp(G[C-1]) * S_entry
         //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
+        let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let state_scaled = state.broadcast_mul(&p_last_u)?; // [B, nv, dk, dv]
         let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
+        finish_gdn_recurrent_inner_profile(
+            device,
+            "state_update",
+            batch,
+            heads,
+            seq_len,
+            ci,
+            c,
+            stage_profile,
+        )?;
     }
 
-    Ok(Tensor::cat(&out_chunks, 2)?)
+    let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
+    let out = Tensor::cat(&out_chunks, 2)?;
+    finish_gdn_recurrent_inner_profile(
+        device,
+        "cat_out",
+        batch,
+        heads,
+        seq_len,
+        full_chunks + if tail > 0 { 1 } else { 0 },
+        seq_len,
+        stage_profile,
+    )?;
+    Ok(out)
 }
 
 fn gdn_recurrent_prefill_head_last(
