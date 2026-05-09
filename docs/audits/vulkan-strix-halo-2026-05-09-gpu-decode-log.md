@@ -6237,3 +6237,56 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-profile.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-release-bench-build.log`
+
+### 2026-05-09 A104: Reject GDN Gates Single-Submit
+
+Scope:
+- Temporary Vulkan-only command-boundary experiment in `dispatch_gdn_gates_cached`.
+- Candidate folded `a`/`b` copies, `gdn_gates.comp` dispatch, and beta/g
+  readbacks into one command buffer.
+- Rollback env during the test:
+  `KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT=1`.
+- Final source has no A104 runtime changes. CUDA and Metal source paths are
+  untouched.
+
+Correctness and build evidence:
+- Candidate focused parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_gates_and_gated_rms_norm_match_f32_cpu_reference -- --nocapture`.
+- Rollback focused parity passed with
+  `KILN_DISABLE_VULKAN_GDN_GATES_SINGLE_SUBMIT=1`.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+  passed with existing warnings.
+
+Same-binary A/B:
+- All runs stayed on backend `vulkan`.
+- All runs kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Seed `118`: candidate `987.854ms` prefill / `80.250ms` mean ITL /
+  `91.278ms` p99; rollback `969.855ms` / `81.302ms` / `97.782ms`.
+- Seed `119` counter-order: rollback `953.249ms` / `80.683ms` / `88.275ms`;
+  candidate `985.274ms` / `80.177ms` / `90.695ms`.
+- Seed `120`: candidate `1008.367ms` / `79.375ms` / `87.314ms`; rollback
+  `1020.023ms` / `80.238ms` / `87.983ms`.
+- Three-pair average: candidate `993.832ms` prefill / `79.934ms` mean ITL /
+  `89.762ms` p99; rollback `981.042ms` / `80.741ms` / `91.346ms`.
+- Approximate 64 prompt + 8 ITL total: candidate `1633.307ms`; rollback
+  `1626.970ms`.
+
+Verdict:
+- Rejected and removed.
+- Mean ITL and p99 moved slightly in the candidate's favor, but average prefill
+  regressed enough to lose aggregate short-run latency.
+- Do not retry GDN gates single-submit as a standalone command-buffer fold.
+  This matches A057's gated-RMSNorm result: isolated GDN submission folding is
+  too small/noisy unless combined with broader GDN boundary or residency work.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-focused-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-focused-parity-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-cargo-check-model-vulkan.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-candidate-seed*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-rollback-seed*.log`
