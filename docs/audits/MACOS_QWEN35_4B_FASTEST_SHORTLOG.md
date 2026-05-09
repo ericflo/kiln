@@ -1530,3 +1530,7 @@
   (`2263.555 -> 2328.708 us`) and MLP batch-2/3. A temporary MLP-only `512`
   group regressed every measured batch, including batch-8
   (`2460.151 -> 3756.891 us`). Source reverted; keep `256`.
+- 2026-05-09 E391: Rejected a scoped Metal MLP gate/up `fast::exp` SiLU
+  variant. Synthetic parity stayed within tolerance, but the important batch-8
+  shape regressed (`2460.151 -> 2543.807 us`) and smaller batches were mixed.
+  Source reverted; keep standard `exp`.

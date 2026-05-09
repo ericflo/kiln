@@ -1,0 +1,45 @@
+{
+  "experiment": "E391 rejected Metal MLP gate/up fast::exp SiLU",
+  "date": "2026-05-09",
+  "status": "rejected",
+  "source_reverted": true,
+  "hypothesis": "Replacing exp with fast::exp only inside the Metal MLP gate/up fused SiLU path might reduce per-output activation overhead without exceeding the existing synthetic parity tolerance.",
+  "baseline": {
+    "threadgroup_width": 256,
+    "exp": "exp",
+    "mlp_gate_up_fused_us": {
+      "batch_1": 1661.620,
+      "batch_2": 1945.797,
+      "batch_3": 1837.042,
+      "batch_4": 2178.219,
+      "batch_8": 2460.151
+    }
+  },
+  "variant": {
+    "exp": "fast::exp",
+    "scope": "Only kiln_mlp_gate_up_bf16 sigmoid calculations; no GDN, conv, attn-gate, or Rust reference changes.",
+    "mlp_gate_up_fused_us": {
+      "batch_1": 1851.339,
+      "batch_2": 1882.656,
+      "batch_3": 2237.385,
+      "batch_4": 2061.026,
+      "batch_8": 2543.807
+    },
+    "max_abs_diff": {
+      "batch_1": 2.980232e-8,
+      "batch_2": 5.960464e-8,
+      "batch_3": 5.960464e-8,
+      "batch_4": 5.960464e-8,
+      "batch_8": 5.960464e-8
+    },
+    "mean_abs_diff": {
+      "batch_1": 2.045201e-9,
+      "batch_2": 2.136733e-9,
+      "batch_3": 2.138449e-9,
+      "batch_4": 2.139142e-9,
+      "batch_8": 2.129718e-9
+    }
+  },
+  "command": "KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture",
+  "decision": "Rejected before endpoint measurement. The fast-exp variant preserved synthetic parity but regressed the important batch-8 shape and batch-1, with only mixed wins at batch-2 and batch-4."
+}

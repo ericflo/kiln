@@ -14667,3 +14667,43 @@ Rejected before endpoint measurement. The only positive full-batch MLP signal
 was too small to justify accepting smaller threadgroups, and it came with
 regressions in GDN full batch and smaller MLP batches. Keep the source at the
 current `256`-thread threadgroup width.
+
+## 2026-05-09 - E391 rejected Metal MLP gate/up fast-exp SiLU
+
+### Hypothesis
+
+The MLP gate/up fused kernel still evaluates a SiLU sigmoid for every output
+element. Replacing `exp` with `fast::exp` only inside
+`kiln_mlp_gate_up_bf16` might reduce activation overhead while staying inside
+the existing synthetic parity tolerance.
+
+### Temporary change
+
+Only the MLP gate/up kernel sigmoid expressions were changed from `exp` to
+`fast::exp`. GDN, conv, attention gate, and Rust reference helpers were left
+unchanged. The source change was reverted after synthetic measurement.
+
+### Results
+
+The temporary variant passed the existing synthetic parity tolerances:
+
+- max absolute diff remained `5.960464e-8` or lower across measured batches
+- mean absolute diff remained about `2.14e-9` or lower
+
+Timing did not hold against the current baseline:
+
+- batch `1`: `1661.620 -> 1851.339 us` regression
+- batch `2`: `1945.797 -> 1882.656 us` improvement
+- batch `3`: `1837.042 -> 2237.385 us` regression
+- batch `4`: `2178.219 -> 2061.026 us` improvement
+- batch `8`: `2460.151 -> 2543.807 us` regression
+
+### Artifact
+
+- `e391_mlp_gate_up_fast_exp_synthetic_comparison.json`
+
+### Decision
+
+Rejected before endpoint measurement. The batch-8 decode shape regressed, and
+the smaller-batch results were mixed. Keep the standard `exp` path in the MLP
+gate/up fused kernel.
