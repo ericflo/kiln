@@ -1,0 +1,32 @@
+E467 post-E466 four-stream all-stage live batch profile summary
+
+Run:
+- Rebuilt release Metal server after E466 and the latest rebase.
+- Ran four concurrent streaming chat requests with max_tokens=3, temperature=0, decode batcher enabled, and MLP/GDN/full-attention stage profiling enabled.
+- Used the sequence-continuation prompt shape from E466's matched live A/B to keep all streams at max_tokens.
+
+Endpoint shape:
+- elapsed 5.820632 s
+- statuses 200,200,200,200
+- stream token events 20
+- server generated tokens 12
+- submitted decode jobs 8
+- worker batches 4
+- decode rows 8
+- max observed batch 3
+
+Filtered seq_len=1 profile totals:
+- MLP 640.854 ms over 256 stage records
+- GDN 435.789 ms over 576 stage records
+- full attention 193.145 ms over 288 stage records
+
+Top filtered stages:
+- mlp:gate_up_fused 395.715 ms over 128 records, avg 3.092 ms
+- mlp:down_proj 245.139 ms over 128 records, avg 1.915 ms
+- gdn:in_proj 232.506 ms over 96 records, avg 2.422 ms
+- gdn:out_proj 100.359 ms over 96 records, avg 1.045 ms
+- gdn:qkv_conv_norm 52.404 ms over 96 records, avg 0.546 ms
+- gdn:gates_recur_gated_norm 50.009 ms over 96 records, avg 0.521 ms
+
+Decision:
+- Accepted as a no-source-change profile checkpoint only. The absolute totals remain noisy and inflated versus E465, but the shape is matched and the rank order still points to MLP gate/up first, then MLP down-projection and GDN input projection.

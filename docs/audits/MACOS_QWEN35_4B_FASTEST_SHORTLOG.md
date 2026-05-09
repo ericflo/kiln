@@ -2210,3 +2210,14 @@
   server tokens, `28` submitted jobs, `14` worker batches, and `28` rows.
   Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
   missing `nvcc`.
+- 2026-05-09 E467: Captured the post-E466 four-stream all-stage live batch
+  profile for the max-batch-3 shape. No source change. The run used the
+  sequence-continuation prompt shape from E466's matched live A/B, completed in
+  `5.821 s`, returned four HTTP `200` responses, generated `12` server tokens,
+  submitted `8` decode-batcher jobs, ran `4` worker batches, processed `8`
+  decode rows, and reached `max_observed_batch=3`. Filtered decode rows
+  (`seq_len=1`) totaled MLP `640.854 ms`, GDN `435.789 ms`, and full attention
+  `193.145 ms`; these absolute totals are still noisy/inflated, so use this
+  only as rank-order evidence. Hottest stages are `mlp:gate_up_fused`
+  `395.715 ms`, `mlp:down_proj` `245.139 ms`, `gdn:in_proj` `232.506 ms`, and
+  `gdn:out_proj` `100.359 ms`.

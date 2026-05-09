@@ -20036,3 +20036,76 @@ Accepted. The dedicated batch-3 MLP gate/up row-triple mode is correct,
 repeatedly improves the targeted Qwen3.5 synthetic shape, and improves matched
 max-batch-3 live endpoint latency. Roll back with
 `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE=1` if needed.
+
+## E467 - Post-E466 Four-Stream All-Stage Live Profile
+
+### Hypothesis
+
+After E466 accepted the batch-3 MLP gate/up row-triple specialization, capture a
+fresh all-stage profile for the same max-batch-3 live shape. This should update
+the next-target ranking with the current source while keeping E466's
+source-decision evidence anchored to the matched no-profile A/B.
+
+### Procedure
+
+Rebuilt the release Metal server after rebasing over the latest `origin/main`
+and ran four concurrent streaming chat requests with `max_tokens=3`,
+`temperature=0`, the decode batcher enabled, and MLP/GDN/full-attention stage
+profiling enabled. The request prompt used the sequence-continuation shape from
+E466's matched live A/B so all streams reached `max_tokens`. The run reached
+the target continuous-batching shape: `8` submitted decode jobs, `4` worker
+batches, `8` decode rows, and `max_observed_batch=3`.
+
+### Results
+
+The profile completed with four HTTP `200` responses:
+
+| metric | value |
+| --- | ---: |
+| elapsed | `5.820632 s` |
+| stream token events | `20` |
+| server generated tokens | `12` |
+| submitted decode jobs | `8` |
+| worker batches | `4` |
+| decode rows | `8` |
+| max observed batch | `3` |
+
+Filtered decode rows (`seq_len=1`) totaled:
+
+| subsystem | E465 post-E464 | E467 post-E466 | delta |
+| --- | ---: | ---: | ---: |
+| MLP | `632.411 ms` | `640.854 ms` | `+8.443 ms` |
+| GDN | `432.238 ms` | `435.789 ms` | `+3.551 ms` |
+| full attention | `170.929 ms` | `193.145 ms` | `+22.216 ms` |
+
+Top filtered stages after E466:
+
+| stage | total | count | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `395.715 ms` | `128` | `3.092 ms` |
+| `mlp:down_proj` | `245.139 ms` | `128` | `1.915 ms` |
+| `gdn:in_proj` | `232.506 ms` | `96` | `2.422 ms` |
+| `gdn:out_proj` | `100.359 ms` | `96` | `1.045 ms` |
+| `gdn:qkv_conv_norm` | `52.404 ms` | `96` | `0.546 ms` |
+| `gdn:gates_recur_gated_norm` | `50.009 ms` | `96` | `0.521 ms` |
+
+Like E465, the absolute profile totals are noisy and inflated, so this run is
+not used to revise E466's source acceptance. Treat it as a shape-matched
+rank-order checkpoint: `mlp:gate_up_fused` remains first, while
+`mlp:down_proj` and `gdn:in_proj` remain the next closest targets.
+
+### Artifacts
+
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_profile_build.log`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_health.json`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_request_*.json`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_response_*.sse`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_time.json`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_metrics.prom`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_server.log`
+- `e467_post_mlp_gate_up_rowtriple_b3_live_batch4_all_profile_summary.txt`
+
+### Decision
+
+Accepted as a no-source-change profile checkpoint. Use it only for post-E466
+target ordering, not for wall-time or source-decision evidence.
