@@ -6465,3 +6465,40 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-rollback-seed*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-cuda-check.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a107-conv1d-prefill-single-submit-metal-check.log`
+
+### 2026-05-09 A108: Current Profile After A107
+
+Scope:
+- No source change.
+- Refresh the profiled hotspot map on `main` after A107.
+
+Profile result:
+- Backend stayed `vulkan`.
+- Token IDs stayed `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Final measured latency: `928.769ms` prefill / `80.681ms` mean ITL /
+  `91.724ms` p99.
+- Prefill buckets: MLP fused `227.884ms`, GDN recurrent `216.954ms`, GDN
+  in-proj `121.848ms`, full-attention QKV `98.250ms`, GDN out-proj
+  `56.897ms`, GDN conv `53.639ms`.
+- Decode buckets: MLP fused `215.036ms`, GDN in-proj `100.779ms`, GDN
+  recurrent `73.352ms`, GDN out-proj `44.289ms`, gated norm `41.052ms`,
+  gates `35.537ms`.
+- MLP kernel `chained_transfer_dispatch_readback`: batch64 `223.315ms` /
+  `32`; batch1 `198.896ms` / `256`.
+- GDN in-proj kernel `record_submit_wait`: batch64 `100.681ms` / `24`;
+  batch1 `83.485ms` / `192`.
+- GDN recurrent prefill inner buckets: `chunk_scan` `71.385ms`,
+  `matmul_prep` `57.660ms`, `chunk_prep` `49.539ms`, `state_update`
+  `35.365ms`.
+
+Interpretation:
+- A107 moved the prefill conv bucket from A106's `67.696ms` to `53.639ms`.
+- The remaining serial target set is led by MLP fused and GDN recurrent, with
+  GDN in-proj and full-attention QKV still important. The latest Metal
+  E460/E461 evidence argues against blind small-batch row-quad threshold
+  lowering; next Vulkan work should change a real boundary/residency shape or
+  target a proven high-batch path.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile.log`

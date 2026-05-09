@@ -1,0 +1,63 @@
+A108 Current Vulkan Profile After A107
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Profiled source:
+- `main` at `4963b750` after A107 `fold vulkan conv1d prefill submit`.
+- No source changes in A108.
+
+Final measured latency JSON:
+- backend: `vulkan`
+- token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- prefill: `928.769365ms`
+- mean ITL: `80.680713875ms`
+- p50 ITL: `79.262462ms`
+- p99 ITL: `91.723596ms`
+- output tokens: `9`
+
+Measured-pass prefill buckets:
+- MLP fused: `227.884ms` / `32` calls.
+- GDN recurrent: `216.954ms` / `24` calls.
+- GDN in-proj: `121.848ms` / `24` calls.
+- Full-attention QKV: `98.250ms` / `8` calls.
+- GDN out-proj: `56.897ms` / `24` calls.
+- GDN conv: `53.639ms` / `24` calls.
+- GDN gated norm: `31.841ms` / `24` calls.
+
+Measured-pass decode buckets:
+- MLP fused: `215.036ms` / `256` calls.
+- GDN in-proj: `100.779ms` / `192` calls.
+- GDN recurrent: `73.352ms` / `192` calls.
+- GDN out-proj: `44.289ms` / `192` calls.
+- GDN gated norm: `41.052ms` / `192` calls.
+- GDN gates: `35.537ms` / `192` calls.
+- Full-attention QKV: `26.947ms` / `64` calls.
+
+Kernel-stage notes:
+- Vulkan MLP batch64 `chained_transfer_dispatch_readback` was
+  `223.315ms` / `32`, total `226.874ms` / `32`.
+- Vulkan MLP batch1 `chained_transfer_dispatch_readback` was `198.896ms` /
+  `256`, total `209.781ms` / `256`.
+- Vulkan GDN in-proj batch64 `record_submit_wait` stayed dominant at
+  `100.681ms` / `24`, total `120.899ms` / `24`.
+- Vulkan GDN in-proj batch1 `record_submit_wait` was `83.485ms` / `192`,
+  total `96.329ms` / `192`.
+- GDN recurrent prefill inner buckets: `chunk_scan` `71.385ms`,
+  `matmul_prep` `57.660ms`, `chunk_prep` `49.539ms`, `state_update`
+  `35.365ms`.
+- GDN recurrent decode inner bucket: `single_token_backend_step` `71.947ms`
+  / `192`.
+
+Interpretation:
+- A107 moved prefill conv from A106's `67.696ms` profile bucket to `53.639ms`.
+- The remaining serial target set is led by MLP fused and GDN recurrent, with
+  GDN in-proj and full-attention QKV still substantial prefill/decode targets.
+- The latest Metal E460/E461 evidence argues against blindly lowering row-quad
+  thresholds for small batches. For Vulkan, the next candidate should change a
+  real boundary/residency shape or a proven high-batch kernel path, not repeat
+  direct small-batch tile-threshold attempts.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a108-current-after-conv1d-single-submit-profile.log`
