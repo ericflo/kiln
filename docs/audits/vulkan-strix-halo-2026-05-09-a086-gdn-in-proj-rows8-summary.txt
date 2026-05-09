@@ -1,0 +1,55 @@
+A086: Reject Vulkan GDN in-proj rows8 shader
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Goal:
+- Test whether a larger row group improves the packed-BF16 batched GDN
+  input-projection path after the accepted rows4 shader.
+- Keep the existing paired QKV/Z column layout and change only the large-batch
+  row grouping from 4 rows to 8 rows.
+
+Temporary change:
+- Added temporary shader:
+  crates/kiln-vulkan-kernel/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w.comp
+- Wired it only for packed-BF16 paired-QKV/Z GDN input projection when
+  batch >= 8.
+- Temporary rollback env:
+  KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCT=1
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj_decode_batched_bf16_packed_weights_row_quad_matches_cpu_reference -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Same-binary rollback-env A/B, seed 88:
+- Harness:
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 88 --quiet
+- Rollback:
+  - env: KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCT=1
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-rollback.log
+  - backend: vulkan
+  - prefill: 1066.3897769999999ms
+  - mean ITL: 84.92567937500002ms
+  - p99 ITL: 86.301103ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+- Candidate:
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-candidate.log
+  - backend: vulkan
+  - prefill: 1142.299467ms
+  - mean ITL: 87.498449375ms
+  - p99 ITL: 93.23147399999999ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+
+Verdict:
+- Reject and remove the temporary source.
+- The candidate preserved backend selection and token IDs, but regressed
+  prefill and decode latency against the accepted rows4 GDN in-proj path.
+- Do not retry GDN in-proj rows8 by only increasing the row group size without
+  a new occupancy/register-pressure hypothesis.
+- Final source has no A086 code, and CUDA/Metal source paths are untouched.

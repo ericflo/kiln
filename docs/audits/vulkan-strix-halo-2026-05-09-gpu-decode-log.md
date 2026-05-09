@@ -4778,6 +4778,66 @@ Verdict:
   MLP down without a new hypothesis.
 - Final source has no A085 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A086: Reject GDN In-Projection Rows8
+
+Goal:
+- Test whether a larger row group improves Vulkan's packed-BF16 batched GDN
+  input-projection path after the accepted rows4 shader.
+- Keep the paired QKV/Z column layout and change only the large-batch row
+  grouping from 4 rows to 8 rows.
+
+Temporary change:
+- Added temporary shader
+  `gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w.comp`.
+- Selected it only for packed-BF16 paired-QKV/Z GDN input projection at
+  `batch >= 8`.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCT=1`
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_in_proj_decode_batched_bf16_packed_weights_row_quad_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary rollback-env A/B, seed 88:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 88 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCT=1`
+  - prefill `1066.3897769999999ms`
+  - mean ITL `84.92567937500002ms`
+  - p99 ITL `86.301103ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-candidate.log`
+  - prefill `1142.299467ms`
+  - mean ITL `87.498449375ms`
+  - p99 ITL `93.23147399999999ms`
+  - same token IDs
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a086-gdn-in-proj-rows8-source-reverted-diffcheck.log`
+
+Verdict:
+- Reject and remove the temporary source. The candidate preserved Vulkan
+  backend selection and token IDs, but prefill and decode latency both
+  regressed against the accepted rows4 path.
+- Do not retry GDN in-proj rows8 by only increasing row group size without a
+  new occupancy/register-pressure hypothesis.
+- Final source has no A086 code, and CUDA/Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4874,6 +4934,10 @@ Verdict:
   MLP down: same-token no-profile A/B regressed prefill `1057.323ms` rollback
   to `1393.836ms` candidate. Keep A082's rows4 down shader unless a new
   hypothesis changes the memory/dispatch shape.
+- A086 rejects packed-BF16 GDN in-proj rows8: same-token no-profile A/B
+  regressed prefill `1066.390ms` rollback to `1142.299ms` candidate and also
+  worsened mean/p99 ITL. Keep rows4 for large-batch GDN in-proj; direct larger
+  row grouping is likely pressure-limited on Strix Halo.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
