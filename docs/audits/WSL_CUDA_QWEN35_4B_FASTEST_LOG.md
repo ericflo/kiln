@@ -152,3 +152,43 @@ Focused test result:
 ```text
 3 passed; 0 failed; 293 filtered out
 ```
+
+## Follow-Up: CUDA Graph Cache-Full Warning Spam
+
+The default graph cache remains intentionally small on 16 GiB GPUs after the
+128-entry cache experiment was rejected. With that default cache, decode falls
+back to eager for uncached metadata shapes after the cache fills. Before this
+follow-up, every fallback step emitted:
+
+```text
+CUDA graph capture skipped: paged metadata shape cache is full
+```
+
+That produced 369 warning lines during the same six-request, 64-token endpoint
+probe. A quiet-log A/B showed this was a small but measurable default-path
+throughput tax:
+
+| path | cache-full warning lines | warmed seconds | completion tok/s |
+| --- | ---: | ---: | ---: |
+| default logging, repeated warn | 369 | 2.7687 | 23.12 |
+| `KILN_LOG_LEVEL=error` | 0 | 2.7251 | 23.49 |
+| patched default, warn once | 1 | 2.7435 | 23.33 |
+
+The accepted follow-up keeps the first cache-full message at WARN so operators
+still see the graph-cache state, then emits subsequent repeats at DEBUG. LoRA
+adapter invalidation resets the one-shot warning flag because the graph cache is
+cleared at the same time.
+
+Validation:
+
+```bash
+cargo fmt --all --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" cargo build --release --features cuda --bin kiln
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" cargo test --release -p kiln-model --features cuda cuda_graph --lib
+```
+
+Focused test result:
+
+```text
+4 passed; 0 failed; 291 filtered out
+```

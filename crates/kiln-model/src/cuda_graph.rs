@@ -145,6 +145,9 @@ pub struct CudaGraphRunner {
     adapter_generation: u64,
     /// Whether warmup is complete.
     warmup_done: bool,
+    /// Whether we already warned that the paged metadata graph cache is full.
+    #[cfg(feature = "cuda")]
+    cache_full_warned: bool,
 }
 
 impl CudaGraphRunner {
@@ -162,6 +165,8 @@ impl CudaGraphRunner {
             captured: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
+            #[cfg(feature = "cuda")]
+            cache_full_warned: false,
         }
     }
 
@@ -178,6 +183,7 @@ impl CudaGraphRunner {
                 );
             }
             self.captured.clear();
+            self.cache_full_warned = false;
         }
     }
 
@@ -397,12 +403,22 @@ impl CudaGraphRunner {
             }
 
             if self.captured.len() >= Self::max_cached_graphs() {
-                tracing::warn!(
-                    cached_graphs = self.captured.len(),
-                    requested_max_seqlen_k = requested_key.max_seqlen_k,
-                    requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
-                    "CUDA graph capture skipped: paged metadata shape cache is full"
-                );
+                if self.cache_full_warned {
+                    tracing::debug!(
+                        cached_graphs = self.captured.len(),
+                        requested_max_seqlen_k = requested_key.max_seqlen_k,
+                        requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
+                        "CUDA graph capture skipped: paged metadata shape cache is full"
+                    );
+                } else {
+                    self.cache_full_warned = true;
+                    tracing::warn!(
+                        cached_graphs = self.captured.len(),
+                        requested_max_seqlen_k = requested_key.max_seqlen_k,
+                        requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
+                        "CUDA graph capture skipped: paged metadata shape cache is full"
+                    );
+                }
                 return Self::eager_forward(
                     backend,
                     token_id,
@@ -985,9 +1001,15 @@ mod tests {
     fn test_invalidate_resets_state() {
         let mut runner = CudaGraphRunner::new(&Device::Cpu, false);
         runner.warmup_done = true;
+        #[cfg(feature = "cuda")]
+        {
+            runner.cache_full_warned = true;
+        }
         runner.invalidate();
         assert!(!runner.warmup_done);
         assert_eq!(runner.adapter_generation, 1);
+        #[cfg(feature = "cuda")]
+        assert!(!runner.cache_full_warned);
     }
 
     #[test]

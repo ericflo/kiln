@@ -24,3 +24,12 @@ Date: 2026-05-09
   `cargo fmt --all --check`;
   `cargo build --release --features cuda --bin kiln`;
   `cargo test --release -p kiln-model --features cuda rms_norm --lib`.
+- Follow-up accepted: rate-limit CUDA graph cache-full warnings to one WARN per
+  graph runner, DEBUG afterward, with adapter invalidation resetting the flag.
+- Six-request default-log probe warning count dropped from 369 to 1.
+- Warmed default-log latency moved from 2.7687s to 2.7435s for 64 tokens
+  (+0.9% completion throughput); quiet-log control was 2.7251s.
+- Follow-up validation:
+  `cargo fmt --all --check`;
+  `cargo build --release --features cuda --bin kiln`;
+  `cargo test --release -p kiln-model --features cuda cuda_graph --lib`.
