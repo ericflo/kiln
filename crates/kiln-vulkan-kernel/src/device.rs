@@ -197,11 +197,25 @@ impl VulkanDevice {
         let device_local_mem_type =
             Self::find_memory_type(&mem_props, vk::MemoryPropertyFlags::DEVICE_LOCAL)
                 .ok_or_else(|| anyhow!("no device-local memory type found"))?;
-        let host_visible_mem_type = Self::find_memory_type(
+        let host_visible_cached_mem_type = Self::find_memory_type(
             &mem_props,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .ok_or_else(|| anyhow!("no host-visible memory type found"))?;
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_CACHED,
+        );
+        let host_visible_mem_type = host_visible_cached_mem_type
+            .or_else(|| {
+                Self::find_memory_type(
+                    &mem_props,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+            })
+            .ok_or_else(|| anyhow!("no host-visible memory type found"))?;
+        tracing::info!(
+            memory_type = host_visible_mem_type,
+            cached = host_visible_cached_mem_type.is_some(),
+            "selected Vulkan host-visible staging memory type"
+        );
 
         // Create logical device
         let queue_info = vk::DeviceQueueCreateInfo::builder()

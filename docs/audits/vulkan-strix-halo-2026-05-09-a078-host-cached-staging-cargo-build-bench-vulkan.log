@@ -1,0 +1,68 @@
+warning: variable `slots_fit_u32` is assigned to, but never used
+   --> crates/kiln-model/src/paged_kv_cache.rs:346:13
+    |
+346 |         let mut slots_fit_u32 = true;
+    |             ^^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_slots_fit_u32` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `slots_fit_u32` is never read
+   --> crates/kiln-model/src/paged_kv_cache.rs:350:27
+    |
+350 |                 Err(_) => slots_fit_u32 = false,
+    |                           ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3632:4
+     |
+3632 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `apply_causal_mask` is never used
+    --> crates/kiln-model/src/forward.rs:7384:4
+     |
+7384 | fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8524:15
+     |
+8524 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib) generated 6 warnings
+warning: function `analytic_sft_tail_grad_pre_final_norm` is never used
+    --> crates/kiln-train/src/trainer.rs:1062:4
+     |
+1062 | fn analytic_sft_tail_grad_pre_final_norm(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kiln-train` (lib) generated 1 warning
+warning: value assigned to `timed_out` is never read
+    --> crates/kiln-server/src/api/completions.rs:3162:33
+     |
+3162 |             let mut timed_out = false;
+     |                                 ^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: `kiln-server` (lib) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.19s

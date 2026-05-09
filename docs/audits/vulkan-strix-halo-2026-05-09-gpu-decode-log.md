@@ -3983,6 +3983,120 @@ Verdict:
   the real template configuration instead of prompt-text hacks.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A078: Prefer Cached Host-Visible Vulkan Staging Memory
+
+Goal:
+- Use the A077 evidence directly: `batch=64` GDN in-projection was dominated
+  by CPU-visible output readback. Before attempting a larger GDN fusion, check
+  whether the Vulkan staging memory type itself is making CPU reads expensive.
+
+Host memory evidence:
+- `vulkaninfo` on the Strix Halo host reports the first
+  `HOST_VISIBLE | HOST_COHERENT` memory type as type `2`, with no
+  `HOST_CACHED` flag.
+- Cached host-visible/coherent memory is available as type `5`.
+- The previous selection picked the first matching
+  `HOST_VISIBLE | HOST_COHERENT` type, so readback staging used uncached CPU
+  memory.
+
+Change:
+- Vulkan device init now prefers
+  `HOST_VISIBLE | HOST_COHERENT | HOST_CACHED` for host-visible staging memory,
+  falling back to the previous `HOST_VISIBLE | HOST_COHERENT` selection when a
+  cached type is unavailable.
+- Device init logs the selected staging memory type and whether it is cached.
+- CUDA and Metal source paths are untouched.
+
+No-profile same-seed A/B:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 78 --quiet`
+- Baseline:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-baseline.log`
+  - prefill `2060.804924ms`
+  - mean ITL `97.13375625ms`
+  - p50 ITL `96.787484ms`
+  - p99 ITL `99.783964ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate.log`
+  - prefill `1667.560801ms`
+  - mean ITL `86.450999ms`
+  - p50 ITL `86.391391ms`
+  - p99 ITL `89.954974ms`
+  - same token IDs
+- Delta:
+  - prefill `-393.244123ms`
+  - mean ITL `-10.68275725ms`
+  - p99 ITL `-9.828990ms`
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate-profile.log`
+- Candidate profile latency:
+  - prefill `1654.708868ms`
+  - mean ITL `87.92500625ms`
+  - p99 ITL `89.732545ms`
+  - same token IDs
+- A077 measured-pass GDN in-proj `batch=64`:
+  - total `363.733ms`
+  - `read_host_visible` `246.909ms`
+  - `record_submit_wait` `108.461ms`
+  - outer `gdn_stage:in_proj seq_len=64` `364.616ms`
+- A078 measured-pass GDN in-proj `batch=64`:
+  - total `119.743ms`
+  - `read_host_visible` `9.733ms`
+  - `record_submit_wait` `98.963ms`
+  - outer `gdn_stage:in_proj seq_len=64` `121.046ms`
+- The targeted `read_host_visible` bucket dropped by `237.176ms` across the
+  measured prefill pass.
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18423 ./target/release/kiln serve`
+- Server log showed:
+  - Vulkan GPU selected:
+    `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`
+  - selected Vulkan host-visible staging memory type `5`, `cached=true`
+  - live greedy decode batcher enabled with backend `vulkan`
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-baseline.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-direct-chat-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-server-smoke.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-server-metrics.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-git-diff-check.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. This is a Vulkan-only staging-memory selection fix with a clear
+  same-seed no-profile latency win and a directly explained profile movement.
+- The remaining `batch=64` GDN in-proj inner bucket is now dominated by
+  `record_submit_wait` (`98.963ms`), not CPU readback. Further GDN in-proj
+  work should target compute/submit or adjacent-stage residency/fusion.
+- Endpoint visible-text correctness remains good on Vulkan GPU with explicit
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4043,6 +4157,11 @@ Verdict:
   `246.909ms` in `read_host_visible` and `108.461ms` in
   `record_submit_wait`. Next GDN in-proj work should reduce or fuse the output
   boundary, not just retile arithmetic.
+- A078 fixes the immediate readback memory-type issue by selecting cached
+  host-visible staging memory when available. GDN in-proj `batch=64`
+  `read_host_visible` is now `9.733ms`, down from A077 `246.909ms`; the
+  remaining target in that inner bucket is `record_submit_wait` / compute and
+  broader adjacent-stage residency.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

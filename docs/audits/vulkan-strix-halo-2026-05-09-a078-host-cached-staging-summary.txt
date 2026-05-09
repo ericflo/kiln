@@ -1,0 +1,76 @@
+2026-05-09 A078: Prefer cached Vulkan host-visible staging memory
+
+Change:
+- Prefer a `HOST_VISIBLE | HOST_COHERENT | HOST_CACHED` Vulkan memory type for
+  host-visible staging buffers, falling back to the previous
+  `HOST_VISIBLE | HOST_COHERENT` selection when cached memory is unavailable.
+- Log the selected host-visible staging memory type during Vulkan device init.
+- On this Strix Halo host, `vulkaninfo` shows the previous first matching
+  type was memory type `2` (`HOST_VISIBLE | HOST_COHERENT`, uncached), while
+  the new selection uses memory type `5` with `HOST_CACHED`.
+- CUDA and Metal source paths are untouched.
+
+No-profile same-seed A/B:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 78 --quiet`
+- Baseline artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-baseline.log`
+- Candidate artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate.log`
+- Both runs reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)` and generated the same token
+  IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Baseline: `2060.804924ms` prefill, `97.13375625ms` mean ITL,
+  `96.787484ms` p50 ITL, `99.783964ms` p99 ITL.
+- Candidate: `1667.560801ms` prefill, `86.450999ms` mean ITL,
+  `86.391391ms` p50 ITL, `89.954974ms` p99 ITL.
+- Delta: `-393.244123ms` prefill and `-10.68275725ms` mean ITL.
+
+Profile evidence:
+- Candidate profile artifact:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a078-host-cached-staging-candidate-profile.log`
+- Candidate profiled latency: `1654.708868ms` prefill,
+  `87.92500625ms` mean ITL, same token IDs.
+- A077 measured-pass `batch=64` GDN in-proj inner stages:
+  - total `363.733ms`
+  - `read_host_visible` `246.909ms`
+  - `record_submit_wait` `108.461ms`
+  - outer `gdn_stage:in_proj seq_len=64` `364.616ms`
+- A078 candidate measured-pass `batch=64` GDN in-proj inner stages:
+  - total `119.743ms`
+  - `read_host_visible` `9.733ms`
+  - `record_submit_wait` `98.963ms`
+  - outer `gdn_stage:in_proj seq_len=64` `121.046ms`
+- The targeted readback bucket dropped by `237.176ms` across the measured
+  prefill pass.
+
+No-profile server correctness smoke:
+- Command:
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_PORT=18423 ./target/release/kiln serve`
+- Server log selected Vulkan GPU
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, selected host-visible staging
+  memory type `5` with `cached=true`, and enabled the live greedy decode
+  batcher with backend `vulkan`.
+- Direct chat with
+  `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200,
+  `finish_reason == "stop"`, and visible `content == "blue green"`.
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+- CUDA and Metal checks were attempted and remain environment-blocked on this
+  Linux host before project typecheck:
+  - CUDA: `nvcc --version` failed / `No nvcc found in PATH or standard locations`.
+  - Metal: `objc2` requires an Apple target.
+
+Verdict:
+- Accept. This is a Vulkan-only staging-memory selection fix with a clear
+  same-seed latency win and a directly explained profile movement.
+- The remaining GDN in-proj `batch=64` inner bucket is now mostly
+  `record_submit_wait` (`98.963ms`), so further GDN in-proj work should target
+  compute/submit or adjacent-stage residency/fusion rather than CPU readback
+  memory type.
