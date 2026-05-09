@@ -1827,3 +1827,12 @@
   `2167.819 -> 227.769 us` and rank16 down `3039.096 -> 200.515 us`.
   Metal/Vulkan/server Metal checks, fmt, and diff check passed; CUDA remains
   locally blocked by missing `nvcc`.
+- 2026-05-09 E428: Rejected Metal GDN decode fast-exp gate math. An all-fast
+  temporary GDN decode gates+recurrent+RMSNorm kernel passed focused parity and
+  improved batch4/8 synthetic rows (`255.372 -> 230.314 us`, `570.913 ->
+  526.158 us`) but regressed serial (`180.917 -> 193.206 us`). A batch-gated
+  single-kernel variant removed that exposure but did not keep a useful batch8
+  win, and the production-shaped split fast-exp kernel lost the same-source
+  rollback comparison at batch4/8 (`246.749 -> 273.558 us`, `546.089 ->
+  582.941 us`). Runtime source was reverted; keep the existing stable GDN
+  decode gate math.

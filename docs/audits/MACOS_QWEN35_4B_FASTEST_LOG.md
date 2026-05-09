@@ -17192,3 +17192,74 @@ results and a clear rank-16 batch-8 down-projection regression. Keep the
 existing scalar add kernel and the E426 all-rank support gate. Retain the new
 batch-8 parity/bench coverage as guardrail evidence for continuous-batching
 LoRA shapes.
+
+## 2026-05-09 - E428 rejected Metal GDN decode fast-exp gate math
+
+### Hypothesis
+
+The fused Metal GDN decode gates+recurrent+RMSNorm kernel still evaluates
+sigmoid, softplus, and decay exponentials for each value head. Since E391 only
+tested `fast::exp` in the MLP gate/up SiLU path, this experiment tested whether
+GDN decode gate math could use Metal fast exponentials profitably without
+changing the prefill gates kernels.
+
+### Candidates
+
+The temporary source was tried in three forms and then fully reverted:
+
+- all-fast GDN decode gate math in the existing decode gates kernels;
+- a single-kernel batch gate that used fast math only for batch `>=4`;
+- a separate fast-exp RMSNorm decode kernel selected only for batch `>=4`, with
+  `KILN_DISABLE_METAL_GDN_DECODE_FAST_EXP=1` as rollback.
+
+The all-fast version passed focused parity but was mixed against the original
+baseline. It improved the larger synthetic rows but regressed the serial row:
+
+| batch | original fused | all-fast fused | result |
+| ---: | ---: | ---: | --- |
+| 1 | `180.917 us` | `193.206 us` | `6.8%` slower |
+| 2 | `178.387 us` | `180.894 us` | `1.4%` slower |
+| 4 | `255.372 us` | `230.314 us` | `9.8%` faster |
+| 8 | `570.913 us` | `526.158 us` | `7.8%` faster |
+
+The branch-gated single-kernel variant removed the serial fast-math exposure
+but did not keep a useful batch-8 win. The final split-kernel candidate gave a
+clean same-source default versus rollback comparison and lost on the targeted
+rows:
+
+| batch | rollback stable kernel | fast-exp split kernel | result |
+| ---: | ---: | ---: | --- |
+| 4 | `246.749 us` | `273.558 us` | `10.9%` slower |
+| 8 | `546.089 us` | `582.941 us` | `6.7%` slower |
+
+All measured rows stayed within the existing parity tolerance
+(`out_max_abs_diff <= 9.765625e-4`, `state_max_abs_diff = 2.441406e-4`).
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_decode_gates_recurrent_matches_split_reference --lib -- --nocapture`
+  - passed for the all-fast, batch-gated, and split-kernel candidates
+- `KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_WARMUP=10 KILN_METAL_GDN_GATES_RECURRENT_RMSNORM_BATCH_BENCH_ITERS=50 cargo test -p kiln-model --features metal bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic --lib -- --ignored --nocapture`
+  - run for the original baseline and each candidate
+- `KILN_DISABLE_METAL_GDN_DECODE_FAST_EXP=1 ... bench_gdn_decode_gates_recurrent_rmsnorm_decode_batch_synthetic`
+  - same-source rollback for the split-kernel candidate
+- `git diff --check`
+- runtime source reverted after rejection
+
+### Artifacts
+
+- `e428_gdn_decode_fast_exp_baseline.log`
+- `e428_gdn_decode_fast_exp_parity.log`
+- `e428_gdn_decode_fast_exp_candidate.log`
+- `e428_gdn_decode_fast_exp_batch4_parity.log`
+- `e428_gdn_decode_fast_exp_batch4_candidate.log`
+- `e428_gdn_decode_fast_exp_split_kernel_parity.log`
+- `e428_gdn_decode_fast_exp_split_kernel_disabled_bench.log`
+- `e428_gdn_decode_fast_exp_split_kernel_default_bench.log`
+- `e428_gdn_decode_fast_exp_diff_check.log`
+
+### Decision
+
+Rejected. The simple all-fast candidate was not acceptable for serial bs=1, and
+the production-shaped split fast-exp kernel was slower than its rollback for
+batch `4` and `8`. Keep the existing stable GDN decode gate math.
