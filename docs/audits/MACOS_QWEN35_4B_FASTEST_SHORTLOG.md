@@ -2001,3 +2001,15 @@
   `272.804 ms`, and `full_attn:qkv_proj` `174.688 ms`. Kind totals were MLP
   `1609.295 ms`, GDN `1042.942 ms`, and full attention `442.318 ms`. Continue
   prioritizing MLP gate/up, MLP down, and GDN in-proj.
+- 2026-05-09 E448: Rejected Metal MLP gate/up dedicated serial x2 hidden
+  loads. The temporary candidate added a separate batch-1 serial x2 kernel
+  guarded by `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_X2_LOAD=1`, selected only
+  when the accepted E433 dedicated serial path was otherwise eligible and the
+  input row was 4-byte aligned. Parity passed, and synthetic batch-1 timings
+  were slightly positive (`1598.558 us` x2 versus `1630.208 us` rollback;
+  longer pair `1600.222 us` versus `1605.800 us`). Clean paged serial endpoint
+  A/B favored rollback: seed 448 `156.239 ms` x2 versus `154.964 ms`
+  rollback, seed 450 quiet rerun `153.765 ms` x2 versus `153.178 ms`
+  rollback, aggregate `155.002 ms` x2 versus `154.071 ms` rollback. A noisy
+  seed-449 pair was discarded due concurrent local work. Source reverted; keep
+  the accepted E433 dedicated serial MLP gate/up kernel.

@@ -18585,3 +18585,68 @@ rollback-controlled A/B and should be used for target selection only.
 Accepted as refreshed target-selection evidence. Continue prioritizing MLP
 gate/up, MLP down-projection, and GDN input projection before smaller
 full-attention point kernels.
+
+## 2026-05-09 - E448 rejected MLP gate/up serial x2 hidden loads
+
+### Purpose
+
+Retest MLP gate/up batch-1 serial x2 hidden loads after E433's dedicated
+serial kernel. E400 rejected x2 hidden loads in the older shared serial path,
+but E433 changed the relevant baseline enough to justify a focused retest.
+
+### Candidate
+
+Temporarily added a separate Metal `kiln_mlp_gate_up_serial_x2_bf16` kernel
+selected only when the existing dedicated batch-1 serial path was eligible,
+`hidden` was even, and the input row was 4-byte aligned. The candidate also
+added a rollback env,
+`KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_X2_LOAD=1`, to force the accepted E433
+dedicated serial kernel. Batch MLP gate/up paths were unchanged.
+
+### Results
+
+Focused parity passed with the same BF16 tolerance as the existing synthetic
+MLP gate/up benchmark.
+
+Direct synthetic MLP gate/up batch-1 timings:
+
+| run | x2 candidate | rollback E433 | result |
+| --- | ---: | ---: | --- |
+| short pair | `1598.558 us` | `1630.208 us` | x2 `1.9%` faster |
+| longer rollback-first pair | `1600.222 us` | `1605.800 us` | x2 `0.3%` faster |
+
+The synthetic signal was small but positive, so the candidate was tested on
+the paged Qwen3.5-4B serial endpoint. Clean endpoint pairs favored rollback:
+
+| pair | x2 candidate | rollback E433 | result |
+| --- | ---: | ---: | --- |
+| seed 448 | `156.239 ms` | `154.964 ms` | rollback `0.8%` faster |
+| seed 450 quiet rerun | `153.765 ms` | `153.178 ms` | rollback `0.4%` faster |
+| clean aggregate | `155.002 ms` | `154.071 ms` | rollback `0.6%` faster |
+
+The initial seed-449 rollback-first pair was discarded as noisy because local
+interactive work occurred during the run; it produced an outlier rollback
+measurement of `173.984 ms` followed by an x2 run of `154.457 ms`. The logs are
+kept as artifacts but were not used for the decision.
+
+### Artifacts
+
+- `e448_mlp_gate_up_serial_x2_dedicated_candidate.diff`
+- `e448_mlp_gate_up_serial_x2_dedicated_parity.log`
+- `e448_mlp_gate_up_serial_x2_dedicated_default.log`
+- `e448_mlp_gate_up_serial_x2_dedicated_disabled.log`
+- `e448_mlp_gate_up_serial_x2_dedicated_long_disabled_first.log`
+- `e448_mlp_gate_up_serial_x2_dedicated_long_default_second.log`
+- `e448_build_release_metal.log`
+- `e448_endpoint_default_seed448.log`
+- `e448_endpoint_disabled_seed448.log`
+- `e448_endpoint_disabled_seed449.log`
+- `e448_endpoint_default_seed449.log`
+- `e448_endpoint_disabled_seed450_quiet.log`
+- `e448_endpoint_default_seed450_quiet.log`
+
+### Decision
+
+Rejected. The dedicated serial x2 hidden-load candidate improves the isolated
+synthetic kernel slightly, but clean endpoint A/B repeats a regression. Source
+was reverted; keep the accepted E433 dedicated serial MLP gate/up kernel.
