@@ -4,798 +4,1625 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kiln Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='0' y1='0' y2='1'%3E%3Cstop offset='0' stop-color='%23fbbf24'/%3E%3Cstop offset='1' stop-color='%23c2410c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='7' fill='%2308090c'/%3E%3Cpath d='M9 22 L16 8 L23 22 Z' fill='url(%23g)'/%3E%3C/svg%3E">
 <style>
+/* =====================================================================
+   Kiln design system
+   ---------------------------------------------------------------------
+   Tokens, primitives, and layout for the embedded server dashboard.
+   Brand accent draws from the kiln logo's warm fire palette
+   (deep maroon → orange-red → orange → golden-yellow).
+   ===================================================================== */
+
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface2: #1c2129;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text2: #8b949e;
-  --accent: #58a6ff;
-  --accent2: #388bfd;
-  --green: #3fb950;
-  --red: #f85149;
-  --orange: #d29922;
-  --purple: #bc8cff;
-  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
-  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --radius: 8px;
+  /* Brand — kiln amber, derived from the logo's fire-cube ramp */
+  --kiln-50:  #fff7ed;
+  --kiln-100: #ffedd5;
+  --kiln-200: #fed7aa;
+  --kiln-300: #fdba74;
+  --kiln-400: #fb923c;
+  --kiln-500: #f97316; /* primary brand */
+  --kiln-600: #ea580c;
+  --kiln-700: #c2410c;
+  --kiln-800: #9a3412;
+  --kiln-900: #7c2d12;
+
+  /* Surface — warm-tinted charcoal */
+  --ink-950: #08090c;
+  --ink-900: #0d0e12;
+  --ink-850: #11131a;
+  --ink-800: #14161e;
+  --ink-750: #181b24;
+  --ink-700: #1c1f29;
+  --ink-650: #232732;
+  --ink-600: #2a2f3b;
+  --ink-500: #353a48;
+  --ink-400: #4b5163;
+  --ink-300: #6b7280;
+  --ink-200: #9ca3af;
+  --ink-100: #d1d5db;
+  --ink-50:  #f4f5f7;
+
+  /* Semantic */
+  --success-fg:  #4ade80;
+  --success-bg:  #0f2c1c;
+  --success-bd:  #1a4d2e;
+  --warning-fg:  #fbbf24;
+  --warning-bg:  #2c220a;
+  --warning-bd:  #4a3a14;
+  --danger-fg:   #f87171;
+  --danger-bg:   #2a1414;
+  --danger-bd:   #4a1f1f;
+  --info-fg:     #60a5fa;
+  --info-bg:     #0f1c2c;
+  --info-bd:     #1a3050;
+
+  /* Aliases used throughout components */
+  --bg:         var(--ink-950);
+  --canvas:     var(--ink-900);
+  --surface:    var(--ink-800);
+  --surface-2:  var(--ink-750);
+  --surface-3:  var(--ink-700);
+  --border:     var(--ink-650);
+  --border-strong: var(--ink-500);
+  --text:       var(--ink-50);
+  --text-2:     var(--ink-100);
+  --text-3:     var(--ink-200);
+  --text-muted: var(--ink-300);
+  --text-quiet: var(--ink-400);
+  --accent:     var(--kiln-500);
+  --accent-hover: var(--kiln-400);
+  --accent-press: var(--kiln-600);
+  --accent-soft: rgba(249, 115, 22, 0.12);
+  --accent-ring: rgba(249, 115, 22, 0.42);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', 'Berkeley Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+
+  --text-2xs: 11px;
+  --text-xs:  12px;
+  --text-sm:  13px;
+  --text-md:  14px;
+  --text-lg:  16px;
+  --text-xl:  18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --text-4xl: 36px;
+
+  /* Spacing — 4px grid */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-7:  32px;
+  --space-8:  40px;
+  --space-10: 48px;
+  --space-12: 64px;
+
+  /* Radii */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 16px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.4);
+  --glow-brand: 0 0 0 1px rgba(249, 115, 22, 0.18), 0 12px 28px rgba(249, 115, 22, 0.18);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --t-instant: 80ms;
+  --t-fast: 140ms;
+  --t-base: 220ms;
+  --t-slow: 380ms;
+
+  color-scheme: dark;
 }
+
+/* Base reset */
 * { margin: 0; padding: 0; box-sizing: border-box; }
+*:focus { outline: none; }
+*:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+html, body { height: 100%; }
 body {
-  font-family: var(--sans);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: 1.5;
   background: var(--bg);
   color: var(--text);
-  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   min-height: 100vh;
+  background-image:
+    radial-gradient(1200px 600px at 50% -120px, rgba(249, 115, 22, 0.08), transparent 60%),
+    radial-gradient(800px 400px at 100% 0%, rgba(96, 165, 250, 0.04), transparent 60%);
+  background-attachment: fixed;
 }
-a { color: var(--accent); text-decoration: none; }
+a {
+  color: var(--accent-hover);
+  text-decoration: none;
+  transition: color var(--t-fast) var(--ease-out);
+}
+a:hover { color: var(--kiln-300); }
+code, pre, kbd, .mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+code {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  font-size: 0.85em;
+}
+button { font: inherit; color: inherit; }
+button, input, select, textarea { font-family: inherit; }
+.tabular-nums { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+
+/* Skip link */
 .skip-link {
   position: absolute;
-  left: 1rem;
+  left: var(--space-4);
   top: 0;
   transform: translateY(-120%);
-  z-index: 50;
+  z-index: 100;
   background: var(--accent);
-  color: var(--bg);
-  border-radius: 0 0 8px 8px;
-  padding: 10px 14px;
-  font-weight: 700;
-  transition: transform 0.15s ease;
-}
-.skip-link:focus {
-  transform: translateY(0);
-  outline: 2px solid var(--text);
-  outline-offset: 2px;
-}
-
-/* Layout */
-.header {
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
-  padding: 12px 20px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-.header h1 {
-  font-family: var(--mono);
-  font-size: 18px;
+  color: var(--ink-950);
   font-weight: 600;
-  color: var(--accent);
-  white-space: nowrap;
+  padding: var(--space-2) var(--space-4);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  transition: transform var(--t-fast) var(--ease-out);
 }
-.header-help {
+.skip-link:focus { transform: translateY(0); }
+
+/* =====================================================================
+   Topbar
+   ===================================================================== */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
   align-items: center;
-  font-size: 12px;
-}
-.header-help a {
-  color: var(--text2);
-  white-space: nowrap;
-}
-.header-help a:hover { color: var(--accent); }
-.header-stats {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  align-items: center;
-  margin-left: auto;
-  font-size: 13px;
-}
-.stat { display: flex; align-items: center; gap: 4px; }
-.stat-label { color: var(--text2); }
-.stat-val {
-  font-family: var(--mono);
-  font-weight: 500;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.status-dot {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.status-dot.ok { background: var(--green); }
-.status-dot.degraded { background: var(--orange); }
-.status-dot.offline { background: var(--red); }
-
-@media (max-width: 480px) {
-  .header { padding: 10px 14px; gap: 8px 12px; }
-  .header-help {
-    order: 3;
-    width: 100%;
-    gap: 8px;
-  }
-  .header-stats { gap: 10px; }
-}
-
-.main {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  padding: 16px 20px;
-  max-width: 1600px;
-  margin: 0 auto;
-}
-@media (max-width: 900px) {
-  .main { grid-template-columns: 1fr; }
-}
-
-.panel {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-.panel-head {
-  padding: 10px 14px;
+  gap: var(--space-5);
+  padding: var(--space-3) var(--space-6);
+  background: rgba(13, 14, 18, 0.85);
+  backdrop-filter: saturate(150%) blur(14px);
+  -webkit-backdrop-filter: saturate(150%) blur(14px);
   border-bottom: 1px solid var(--border);
+  min-height: 56px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  text-decoration: none;
+  color: var(--text);
+  flex-shrink: 0;
+}
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  background:
+    radial-gradient(120% 120% at 30% 20%, rgba(255, 255, 255, 0.06), transparent 60%),
+    linear-gradient(160deg, var(--kiln-700) 0%, var(--kiln-500) 55%, var(--kiln-300) 100%);
+  position: relative;
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  flex-shrink: 0;
+}
+.brand-mark::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  background: var(--ink-950);
+  clip-path: polygon(50% 12%, 88% 88%, 12% 88%);
+  opacity: 0.78;
+}
+.brand-text { display: flex; align-items: baseline; gap: var(--space-2); }
+.brand-name {
+  font-family: var(--font-display);
+  font-size: var(--text-xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.brand-version {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+}
+
+/* Stats inside topbar */
+.topbar-stats {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  min-width: 0;
+}
+.stat-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--text-2xs);
+  font-weight: 500;
+}
+.stat-val {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  position: relative;
+  flex-shrink: 0;
+}
+.status-dot.ok      { background: var(--success-fg); box-shadow: 0 0 0 4px rgba(74, 222, 128, 0.16); }
+.status-dot.degraded { background: var(--warning-fg); box-shadow: 0 0 0 4px rgba(251, 191, 36, 0.16); }
+.status-dot.offline  { background: var(--danger-fg);  box-shadow: 0 0 0 4px rgba(248, 113, 113, 0.16); }
+.status-dot.ok::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1px solid var(--success-fg);
+  opacity: 0;
+  animation: pulse 2.4s var(--ease-out) infinite;
+}
+@keyframes pulse {
+  0%   { transform: scale(0.9); opacity: 0.55; }
+  60%  { transform: scale(1.6); opacity: 0;    }
+  100% { transform: scale(1.6); opacity: 0;    }
+}
+
+.topbar-help {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+.topbar-help a {
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 4px 0;
+}
+.topbar-help a:hover { color: var(--text); }
+.topbar-help .gh {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--space-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+.topbar-help .gh:hover { border-color: var(--border-strong); color: var(--text); }
+
+/* =====================================================================
+   Primary navigation (page tabs)
+   ===================================================================== */
+.primary-nav {
+  position: sticky;
+  top: 56px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-6);
+  background: rgba(13, 14, 18, 0.85);
+  backdrop-filter: saturate(150%) blur(14px);
+  -webkit-backdrop-filter: saturate(150%) blur(14px);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.primary-nav::-webkit-scrollbar { display: none; }
+.primary-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 8px var(--space-3);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+  white-space: nowrap;
+}
+.primary-tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+.primary-tab.active {
+  color: var(--text);
+  background: var(--accent-soft);
+}
+.primary-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -13px;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px 1px 0 0;
+}
+.primary-tab .count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.primary-tab.active .count { background: var(--accent-soft); border-color: var(--accent); color: var(--kiln-200); }
+
+/* =====================================================================
+   Main + pages
+   ===================================================================== */
+.main {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+.page { display: none; flex-direction: column; gap: var(--space-6); }
+.page.active { display: flex; }
+.page-playground.active { flex: 1; }
+
+/* =====================================================================
+   Card primitives
+   ===================================================================== */
+.card {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  position: relative;
+  transition: border-color var(--t-base) var(--ease-out);
+}
+.card:hover { border-color: var(--ink-600); }
+.card-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: var(--surface2);
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
 }
-.panel-head h2 {
-  font-size: 13px;
+.card-head h2 {
+  font-size: var(--text-md);
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text2);
+  letter-spacing: -0.005em;
+  color: var(--text);
 }
-.panel-body { padding: 14px; }
+.card-head .eyebrow {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.card-body { padding: var(--space-5); }
+.card-body + .card-body { border-top: 1px solid var(--border); }
+.card-body-tight { padding: var(--space-4) var(--space-5); }
+.section-label {
+  display: block;
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+.divider { border: 0; border-top: 1px solid var(--border); margin: var(--space-4) 0; }
 
-/* VRAM Bar */
-.vram-bar-wrap { margin: 8px 0; }
-.vram-bar {
-  height: 20px;
-  border-radius: 4px;
+/* Layout helpers */
+.row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-6); }
+.row-3 { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: var(--space-6); }
+@media (max-width: 1100px) {
+  .row-2, .row-3 { grid-template-columns: 1fr; }
+}
+
+/* =====================================================================
+   Hero stats (used at top of overview page)
+   ===================================================================== */
+.hero {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   overflow: hidden;
+  position: relative;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(800px 200px at 8% 0%, rgba(249, 115, 22, 0.08), transparent 60%);
+  pointer-events: none;
+}
+.hero-cell {
+  position: relative;
+  padding: var(--space-5);
   display: flex;
-  background: #21262d;
+  flex-direction: column;
+  gap: 6px;
+  border-right: 1px solid var(--border);
+}
+.hero-cell:last-child { border-right: 0; }
+.hero-eyebrow {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.hero-num {
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.hero-num .unit {
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-left: 4px;
+}
+.hero-sub {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 900px) {
+  .hero { grid-template-columns: repeat(2, 1fr); }
+  .hero-cell:nth-child(2) { border-right: 0; }
+  .hero-cell:nth-child(1), .hero-cell:nth-child(2) { border-bottom: 1px solid var(--border); }
+}
+
+/* =====================================================================
+   VRAM bar
+   ===================================================================== */
+.vram-wrap { display: flex; flex-direction: column; gap: var(--space-2); }
+.vram-bar-wrap { display: flex; flex-direction: column; gap: var(--space-2); }
+.vram-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: var(--text-xs);
+}
+.vram-meta-total { color: var(--text-muted); }
+.vram-meta-total strong { color: var(--text-2); font-family: var(--font-mono); font-weight: 600; }
+.vram-bar {
+  display: flex;
+  height: 12px;
+  background: var(--ink-700);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  position: relative;
 }
 .vram-seg {
   height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-family: var(--mono);
-  color: var(--bg);
-  font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: rgba(255, 255, 255, 0.92);
   white-space: nowrap;
+  overflow: hidden;
+  font-weight: 600;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: width var(--t-base) var(--ease-out);
 }
+.vram-seg:nth-child(1) { background: linear-gradient(90deg, var(--kiln-600), var(--kiln-400)); }
+.vram-seg:nth-child(2) { background: linear-gradient(90deg, #2563eb, var(--info-fg)); }
+.vram-seg:nth-child(3) { background: linear-gradient(90deg, #15803d, var(--success-fg)); }
+.vram-seg:nth-child(4) { background: var(--ink-700); color: var(--text-muted); text-shadow: none; }
 .vram-legend {
   display: flex;
-  gap: 12px;
   flex-wrap: wrap;
-  margin-top: 6px;
-  font-size: 11px;
-  color: var(--text2);
+  gap: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
-.vram-legend span::before {
+.vram-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.vram-legend > span::before {
   content: '';
-  display: inline-block;
-  width: 8px; height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 2px;
-  margin-right: 4px;
-  vertical-align: middle;
+  flex-shrink: 0;
 }
-.vram-legend .model::before { background: var(--accent); }
-.vram-legend .kv::before { background: var(--purple); }
-.vram-legend .train::before { background: var(--orange); }
-.vram-legend .free::before { background: #21262d; }
+.vram-legend .model::before { background: var(--kiln-500); }
+.vram-legend .kv::before    { background: var(--info-fg); }
+.vram-legend .train::before { background: var(--success-fg); }
+.vram-legend .free::before  { background: var(--ink-600); }
 
-/* Scheduler stats */
+/* =====================================================================
+   Scheduler / decode stat blocks
+   ===================================================================== */
 .sched-stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
 }
 .sched-stat {
-  background: var(--surface2);
-  border-radius: 6px;
-  padding: 8px 10px;
-  text-align: center;
+  background: var(--ink-850);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
 }
+.sched-stat:hover { border-color: var(--ink-500); }
 .sched-stat .num {
-  font-family: var(--mono);
-  font-size: 20px;
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-size: var(--text-2xl);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  line-height: 1.1;
 }
 .sched-stat .lbl {
-  font-size: 11px;
-  color: var(--text2);
-  margin-top: 2px;
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+@media (max-width: 700px) {
+  .sched-stats { grid-template-columns: repeat(2, 1fr); }
 }
 
-/* Adapter list */
-.adapter-list { list-style: none; }
-.adapter-item {
+/* Health checks chips */
+.checks-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px dashed var(--border);
+}
+.check-chip {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 13px;
+  gap: 6px;
+  font-size: var(--text-xs);
+  padding: 4px var(--space-2);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--ink-850);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
 }
-.adapter-item:last-child { border-bottom: none; }
-.adapter-name {
-  font-family: var(--mono);
-  font-weight: 500;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.check-chip.pass { border-color: var(--success-bd); color: var(--success-fg); }
+.check-chip.fail { border-color: var(--danger-bd);  color: var(--danger-fg); }
+.check-chip::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }
-.adapter-active {
-  background: rgba(63, 185, 80, 0.15);
-  border-radius: 4px;
+
+/* =====================================================================
+   Forms — inputs, selects, textareas, buttons
+   ===================================================================== */
+.form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: var(--space-4); }
+.form-group:last-child { margin-bottom: 0; }
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
 }
-.badge {
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  font-weight: 600;
+.form-group label {
+  font-size: var(--text-2xs);
   text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
 }
-.badge-active { background: rgba(63, 185, 80, 0.2); color: var(--green); }
-.adapter-size {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text2);
+.form-help {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.45;
 }
-.adapter-actions { display: flex; gap: 4px; }
+.form-help code { padding: 0 4px; font-size: 0.9em; }
+
+input[type="text"],
+input[type="number"],
+input[type="email"],
+input[type="password"],
+input[type="search"],
+select, textarea {
+  width: 100%;
+  background: var(--ink-850);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 9px var(--space-3);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--t-fast) var(--ease-out), box-shadow var(--t-fast) var(--ease-out);
+  font-variant-numeric: tabular-nums;
+}
+input[type="number"] { font-family: var(--font-mono); }
+input[type="file"] {
+  width: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-2);
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+input[type="file"]:hover { border-color: var(--accent); background: var(--accent-soft); }
+input[type="file"]::file-selector-button {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 4px var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  margin-right: var(--space-3);
+  cursor: pointer;
+}
+input[type="file"]::file-selector-button:hover { background: var(--surface-3); }
+textarea {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  resize: vertical;
+  min-height: 120px;
+  line-height: 1.55;
+}
+input:hover:not(:focus):not(:disabled),
+select:hover:not(:focus):not(:disabled),
+textarea:hover:not(:focus):not(:disabled) { border-color: var(--border-strong); }
+input:focus, select:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+input:disabled, select:disabled, textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+input::placeholder, textarea::placeholder { color: var(--text-quiet); }
+
+input[type="checkbox"] {
+  width: 16px; height: 16px;
+  appearance: none;
+  background: var(--ink-850);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: border-color var(--t-fast) var(--ease-out), background var(--t-fast) var(--ease-out);
+}
+input[type="checkbox"]:hover { border-color: var(--border-strong); }
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px; top: 0px;
+  width: 5px; height: 9px;
+  border: solid var(--ink-950);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%239ca3af' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 30px;
+}
 
 /* Buttons */
 .btn {
-  font-family: var(--sans);
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--surface-2);
   color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px var(--space-4);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   white-space: nowrap;
+  transition: background var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out), color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
+  user-select: none;
 }
-.btn:hover { background: var(--border); }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn:disabled:hover { background: var(--surface2); }
-.btn-sm { font-size: 11px; padding: 2px 8px; }
-.btn-primary { background: var(--accent2); border-color: var(--accent2); color: #fff; }
-.btn-primary:hover { background: var(--accent); }
-.btn-danger { color: var(--red); }
-.btn-danger:hover { background: rgba(248, 81, 73, 0.15); }
+.btn:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/* Training queue */
-.job-card {
-  background: var(--surface2);
-  border-radius: 6px;
-  padding: 10px 12px;
-  margin-bottom: 8px;
+.btn-primary {
+  background: linear-gradient(180deg, var(--kiln-500), var(--kiln-600));
+  border-color: var(--kiln-700);
+  color: white;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 4px 12px rgba(249, 115, 22, 0.25);
 }
-.job-card:last-child { margin-bottom: 0; }
-.job-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.job-id {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--accent);
-}
-.job-state {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 10px;
-  font-weight: 600;
-}
-.job-state.Running { background: rgba(56, 139, 253, 0.2); color: var(--accent); }
-.job-state.Queued { background: rgba(210, 153, 34, 0.2); color: var(--orange); }
-.job-state.Completed { background: rgba(63, 185, 80, 0.2); color: var(--green); }
-.job-state.Failed { background: rgba(248, 81, 73, 0.2); color: var(--red); }
-.progress-bar {
-  height: 4px;
-  background: #21262d;
-  border-radius: 2px;
-  overflow: hidden;
-  margin: 6px 0;
-}
-.progress-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 2px;
-  transition: width 0.3s;
-}
-.job-meta {
-  font-size: 11px;
-  color: var(--text2);
-  display: flex;
-  gap: 12px;
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, var(--kiln-400), var(--kiln-500));
+  border-color: var(--kiln-600);
+  color: white;
 }
 
-/* Forms */
-.form-group { margin-bottom: 10px; }
-.form-group label {
-  display: block;
-  font-size: 12px;
-  color: var(--text2);
-  margin-bottom: 4px;
-  font-weight: 500;
+.btn-danger {
+  background: var(--ink-850);
+  border-color: var(--danger-bd);
+  color: var(--danger-fg);
 }
-.form-help {
-  margin-top: 6px;
-  color: var(--text2);
-  font-size: 12px;
-  line-height: 1.4;
+.btn-danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  border-color: var(--danger-fg);
+  color: var(--danger-fg);
 }
-input[type="text"], input[type="number"], textarea, select {
-  width: 100%;
-  font-family: var(--mono);
-  font-size: 13px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
+
+.btn-sm {
+  padding: 5px var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
-  outline: none;
-}
-input:focus, textarea:focus, select:focus {
-  border-color: var(--accent);
-}
-textarea { resize: vertical; min-height: 80px; }
-.form-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  border-color: transparent;
 }
 
-/* Chat */
-.chat-messages {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 10px;
-  min-height: 120px;
-  max-height: 300px;
-  overflow-y: auto;
-  margin-bottom: 10px;
-  font-size: 13px;
-  line-height: 1.6;
-}
-.chat-msg { margin-bottom: 8px; }
-.chat-msg .role {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  margin-bottom: 2px;
-}
-.chat-msg.user .role { color: var(--green); }
-.chat-msg.assistant .role { color: var(--accent); }
-.chat-msg.pending pre {
-  color: var(--text2);
-  font-style: italic;
-}
-.chat-msg pre {
-  font-family: var(--mono);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.chat-input-row {
+.btn-row {
   display: flex;
-  gap: 8px;
-}
-.chat-input-row input {
-  flex: 1;
-}
-.chat-output-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin: -2px 0 8px;
-}
-.chat-starter-prompts {
-  display: flex;
+  gap: var(--space-2);
+  align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  margin-bottom: 8px;
-  color: var(--text2);
-  font-size: 12px;
-}
-.chat-starter-prompts span {
-  flex: 0 0 auto;
-}
-.chat-starter-prompts .btn {
-  white-space: normal;
-  text-align: left;
-}
-.chat-controls {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-.chat-controls select { width: auto; }
-#chat-adapter { width: 180px; }
-#chat-temp { width: 70px; }
-.upload-adapter-controls {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  gap: 6px;
-  align-items: end;
 }
 
-/* Tabs */
-.tabs {
-  display: flex;
-  gap: 0;
-  border-bottom: 1px solid var(--border);
-}
-.tab {
-  padding: 8px 14px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  color: var(--text2);
-  background: none;
-  border-top: none; border-left: none; border-right: none;
-  font-family: var(--sans);
-}
-.tab:hover { color: var(--text); }
-.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.tab-content { display: none; }
-.tab-content.active { display: block; }
-
-@media (max-width: 640px) {
-  .header {
-    padding: 10px 12px;
-    gap: 10px;
-  }
-  .header-stats {
-    width: 100%;
-    margin-left: 0;
-    gap: 8px 12px;
-  }
-  .main {
-    padding: 12px;
-    gap: 12px;
-  }
-  .main > *, .panel, .form-row > *, .chat-input-row input {
-    min-width: 0;
-  }
-  .panel-head {
-    align-items: flex-start;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .tabs {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-  }
-  .tab {
-    flex: 1 0 auto;
-    text-align: center;
-  }
-  .form-row {
-    grid-template-columns: 1fr;
-  }
-  .chat-controls, .chat-input-row, .adapter-actions {
-    flex-wrap: wrap;
-  }
-  .chat-starter-prompts {
-    align-items: stretch;
-  }
-  .chat-starter-prompts span,
-  .chat-starter-prompts .btn {
-    flex: 1 1 100%;
-  }
-  .chat-controls select, .chat-input-row input {
-    width: 100%;
-  }
-  .chat-input-row .btn, .form-group .btn {
-    max-width: 100%;
-    white-space: normal;
-  }
-  .upload-adapter-controls {
-    grid-template-columns: 1fr;
-    align-items: stretch;
-  }
-  .upload-adapter-controls .btn {
-    width: 100%;
-  }
-}
-
-/* Empty state */
-.empty {
-  text-align: center;
-  padding: 20px;
-  color: var(--text2);
-  font-size: 13px;
-}
-.empty code {
-  overflow-wrap: anywhere;
-}
-.api-failure {
-  line-height: 1.45;
-}
-.api-failure .btn {
-  min-height: 34px;
-}
-
-@media (max-width: 640px) {
-  .header h1 {
-    font-size: 17px;
-  }
-  .header-help a,
-  .stat {
-    line-height: 1.8;
-  }
-  .header-stats .stat {
-    flex: 1 1 calc(50% - 12px);
-    min-width: 120px;
-  }
-  .header-stats .stat:first-child {
-    flex-basis: 100%;
-  }
-  .empty {
-    padding: 16px 14px;
-    text-align: left;
-  }
-  .api-failure .btn {
-    width: 100%;
-    min-height: 40px;
-  }
-  .chat-controls {
-    align-items: stretch;
-  }
-  .chat-controls label {
-    display: flex;
-    align-items: center;
-    min-height: 36px;
-  }
-  .chat-controls select {
-    flex: 1 1 calc(100% - 72px);
-    min-width: 0;
-  }
-  #chat-adapter {
-    width: auto;
-  }
-  .chat-controls input[type="number"] {
-    flex: 1 1 92px;
-    min-width: 92px;
-  }
-  #chat-temp {
-    width: auto;
-  }
-  .chat-input-row input {
-    flex: 1 0 100%;
-    min-height: 40px;
-  }
-  .chat-input-row .btn {
-    flex: 1 1 0;
-    min-height: 40px;
-  }
-}
-
-/* Recent Requests */
+/* =====================================================================
+   Recent requests list
+   ===================================================================== */
 .recent-list {
-  max-height: 320px;
-  overflow-y: auto;
   list-style: none;
-  margin: 0;
-  padding: 0;
+  display: flex;
+  flex-direction: column;
 }
 .recent-row {
   display: grid;
-  grid-template-columns: 80px 1fr 140px;
-  gap: 12px;
-  padding: 8px 4px;
+  grid-template-columns: 90px 1fr 200px;
+  gap: var(--space-4);
+  padding: var(--space-3) 0;
   border-bottom: 1px solid var(--border);
-  font-size: 12px;
   align-items: start;
+  transition: background var(--t-fast) var(--ease-out);
 }
-.recent-row:last-child { border-bottom: none; }
+.recent-row:last-child { border-bottom: 0; }
+.recent-row:hover { background: rgba(255, 255, 255, 0.02); }
 .recent-time {
-  font-family: var(--mono);
-  color: var(--text2);
-  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
 }
-.recent-previews { min-width: 0; }
+.recent-previews { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .recent-prompt {
-  color: var(--text2);
+  font-size: var(--text-sm);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-family: var(--mono);
 }
 .recent-completion {
-  color: var(--text);
-  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-family: var(--font-mono);
 }
 .recent-meta {
   display: flex;
   flex-direction: column;
+  gap: 4px;
   align-items: flex-end;
-  gap: 2px;
-  color: var(--text2);
-  font-family: var(--mono);
-  white-space: nowrap;
+  justify-content: flex-start;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
-.recent-meta .recent-tokens { color: var(--text); }
+.recent-meta > span { display: inline-flex; align-items: center; gap: 6px; }
+.recent-tokens {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-2);
+}
 .recent-pill {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
   font-size: 10px;
-  background: var(--surface2);
-  color: var(--text2);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border);
-  margin-right: 6px;
-  vertical-align: middle;
+  background: var(--ink-850);
+  color: var(--text-2);
 }
-.recent-pill.streamed { color: var(--accent); border-color: var(--accent); }
-.recent-pill.timeout,
-.recent-pill.error,
-.recent-pill.client_disconnect { color: var(--orange); border-color: var(--orange); }
+.recent-pill.streamed { color: var(--info-fg); border-color: var(--info-bd); background: var(--info-bg); }
+.recent-pill.stop     { color: var(--success-fg); border-color: var(--success-bd); background: var(--success-bg); }
+.recent-pill.length   { color: var(--warning-fg); border-color: var(--warning-bd); background: var(--warning-bg); }
+.recent-pill.error    { color: var(--danger-fg);  border-color: var(--danger-bd);  background: var(--danger-bg); }
 
-/* Toast */
-.toast-container {
-  position: fixed;
-  bottom: 20px;
-  right: 20px;
-  z-index: 1000;
+@media (max-width: 700px) {
+  .recent-row { grid-template-columns: 1fr; gap: 4px; }
+  .recent-meta { align-items: flex-start; }
+}
+
+/* =====================================================================
+   Adapter list
+   ===================================================================== */
+.adapter-list {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+.adapter-item {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background: var(--ink-850);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: border-color var(--t-fast) var(--ease-out), transform var(--t-fast) var(--ease-out);
+  position: relative;
+  min-height: 110px;
+}
+.adapter-item:hover { border-color: var(--ink-500); }
+.adapter-item.adapter-active {
+  border-color: var(--accent);
+  background:
+    linear-gradient(135deg, rgba(249, 115, 22, 0.06), transparent 70%),
+    var(--ink-850);
+  box-shadow: var(--glow-brand);
+}
+.adapter-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+  line-height: 1.35;
+}
+.adapter-size {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.adapter-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: var(--space-2);
+  flex-wrap: wrap;
+}
+.adapter-actions .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--ink-850);
+  color: var(--text-2);
+  width: max-content;
+}
+.badge-active {
+  background: linear-gradient(180deg, var(--kiln-500), var(--kiln-600));
+  color: white;
+  border-color: var(--kiln-700);
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.18);
+}
+.badge-active::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.6);
+  animation: pulse-active 1.6s var(--ease-out) infinite;
+}
+@keyframes pulse-active {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* Upload + merge controls */
+.upload-adapter-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: var(--space-3);
+  align-items: end;
+}
+@media (max-width: 700px) {
+  .upload-adapter-controls { grid-template-columns: 1fr; }
+}
+
+/* =====================================================================
+   Inner tabs (training queue/sft/grpo)
+   ===================================================================== */
+.tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color var(--t-fast) var(--ease-out), border-color var(--t-fast) var(--ease-out);
+  margin-bottom: -1px;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.tab-content { display: none; padding: var(--space-5); }
+.tab-content.active { display: block; }
+
+/* =====================================================================
+   Job cards (training queue)
+   ===================================================================== */
+.job-card {
+  background: var(--ink-850);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  margin-bottom: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.job-card:last-child { margin-bottom: 0; }
+.job-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+.job-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+.job-state {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.job-state.Queued    { color: var(--text-muted); }
+.job-state.Running   { color: var(--info-fg); border-color: var(--info-bd); background: var(--info-bg); }
+.job-state.Completed { color: var(--success-fg); border-color: var(--success-bd); background: var(--success-bg); }
+.job-state.Failed,
+.job-state.Cancelled { color: var(--danger-fg); border-color: var(--danger-bd); background: var(--danger-bg); }
+.progress-bar {
+  height: 6px;
+  background: var(--ink-700);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  position: relative;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--kiln-500), var(--kiln-300));
+  border-radius: var(--radius-pill);
+  transition: width var(--t-base) var(--ease-out);
+  position: relative;
+}
+.progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.18) 50%, transparent 100%);
+  animation: progress-shimmer 1.6s linear infinite;
+}
+@keyframes progress-shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.job-meta span { display: inline-flex; gap: 4px; align-items: center; }
+.queue-section-label {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin: var(--space-4) 0 var(--space-2);
+}
+
+/* =====================================================================
+   Chat / playground
+   ===================================================================== */
+.playground-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 600px;
+}
+.chat-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--ink-850);
+  flex-wrap: wrap;
+}
+.chat-controls > label {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin: 0;
+}
+.chat-controls #chat-adapter { width: auto; min-width: 180px; }
+.chat-controls #chat-temp    { width: 76px; }
+.chat-messages {
+  flex: 1;
+  min-height: 320px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(0,0,0,0.04) 100%),
+    var(--ink-900);
+}
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 92%;
+  animation: chat-msg-in var(--t-base) var(--ease-out);
+}
+@keyframes chat-msg-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.chat-msg .role {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.chat-msg pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+.chat-msg.user      { align-self: flex-end; }
+.chat-msg.user pre  {
+  background: linear-gradient(180deg, var(--kiln-700), var(--kiln-800));
+  border-color: var(--kiln-700);
+  color: white;
+}
+.chat-msg.user .role { text-align: right; color: var(--kiln-300); }
+.chat-msg.assistant pre {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.chat-msg.pending pre {
+  position: relative;
+  color: var(--text-muted);
+}
+.chat-msg.pending pre::after {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 6px;
+  vertical-align: middle;
+  animation: chat-blink 1.2s var(--ease-out) infinite;
+}
+@keyframes chat-blink {
+  0%, 80%, 100% { opacity: 0.2; }
+  40% { opacity: 1; }
+}
+.chat-output-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-2) var(--space-5);
+  background: var(--ink-850);
+  border-top: 1px solid var(--border);
+}
+.chat-starter-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  background: var(--ink-850);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.chat-starter-prompts > span {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  font-size: var(--text-2xs);
+  margin-right: var(--space-2);
+}
+.chat-input-row {
+  position: relative;
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  background: var(--ink-900);
+  border-top: 1px solid var(--border);
+}
+.chat-input-row #chat-input {
+  flex: 1;
+  font-size: var(--text-md);
+  padding: 10px var(--space-4);
+}
+
+/* =====================================================================
+   Toast
+   ===================================================================== */
+.toast-container {
+  position: fixed;
+  bottom: var(--space-5);
+  right: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  z-index: 1000;
+  pointer-events: none;
 }
 .toast {
-  padding: 10px 16px;
-  border-radius: 6px;
-  font-size: 13px;
-  animation: fadeIn 0.2s;
+  background: var(--surface);
+  color: var(--text);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  font-size: var(--text-sm);
+  box-shadow: var(--shadow-3);
   max-width: 360px;
+  pointer-events: auto;
+  animation: toast-in var(--t-base) var(--ease-out);
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
-.toast.ok { background: rgba(63, 185, 80, 0.9); color: #fff; }
-.toast.err { background: rgba(248, 81, 73, 0.9); color: #fff; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.toast::before {
+  content: '';
+  width: 6px;
+  align-self: stretch;
+  border-radius: 3px;
+  background: var(--ink-500);
+  flex-shrink: 0;
+}
+.toast.ok::before  { background: var(--success-fg); }
+.toast.err::before { background: var(--danger-fg); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* =====================================================================
+   Empty state + API failure
+   ===================================================================== */
+.empty {
+  padding: var(--space-6);
+  text-align: left;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--ink-850);
+}
+.empty a { font-weight: 500; }
+.empty .api-failure { background: var(--danger-bg); border-color: var(--danger-bd); }
+.empty.api-failure { border-color: var(--danger-bd); background: var(--danger-bg); }
+
+/* =====================================================================
+   Skeleton (optional, for hover/loading polish)
+   ===================================================================== */
+.skeleton {
+  background: linear-gradient(90deg, var(--ink-800) 0%, var(--ink-700) 50%, var(--ink-800) 100%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s linear infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes skeleton-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* =====================================================================
+   Reduced motion
+   ===================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* =====================================================================
+   Responsive
+   ===================================================================== */
+@media (max-width: 720px) {
+  .topbar { padding: var(--space-3) var(--space-4); flex-wrap: wrap; gap: var(--space-3); }
+  .topbar-help { gap: var(--space-2); }
+  .topbar-help a:not(.gh) { display: none; }
+  .primary-nav { padding: var(--space-2) var(--space-4); top: auto; }
+  .main { padding: var(--space-4); gap: var(--space-4); }
+  .card-head, .card-body { padding: var(--space-4); }
+  .hero-cell { padding: var(--space-4); }
+  .hero-num { font-size: var(--text-2xl); }
+}
 </style>
 </head>
 <body>
 <a class="skip-link" href="#content">Skip to content</a>
 
-<div class="header">
-  <h1>kiln</h1>
-  <nav class="header-help" aria-label="Help links">
-    <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
-    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>
-    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API Reference</a>
-    <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI Reference</a>
-    <a href="https://ericflo.github.io/kiln/demo/" target="_blank" rel="noopener noreferrer">Demo</a>
-    <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>
-    <a href="https://ericflo.github.io/kiln/architecture.html" target="_blank" rel="noopener noreferrer">Architecture</a>
-  </nav>
-  <div class="header-stats" id="header-stats">
-    <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting...</span></span>
+<header class="topbar" role="banner">
+  <a class="brand" href="/" aria-label="Kiln dashboard home">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-text">
+      <span class="brand-name">kiln</span>
+      <span class="brand-version" id="brand-version">dashboard</span>
+    </span>
+  </a>
+
+  <div class="topbar-stats" id="header-stats" aria-live="polite">
+    <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting…</span></span>
   </div>
-</div>
+
+  <nav class="topbar-help" aria-label="Documentation">
+    <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
+    <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO</a>
+    <a href="https://ericflo.github.io/kiln/api.html" target="_blank" rel="noopener noreferrer">API</a>
+    <a href="https://ericflo.github.io/kiln/cli.html" target="_blank" rel="noopener noreferrer">CLI</a>
+    <a href="https://ericflo.github.io/kiln/architecture.html" target="_blank" rel="noopener noreferrer">Architecture</a>
+    <a class="gh" href="https://github.com/ericflo/kiln" target="_blank" rel="noopener noreferrer" aria-label="View Kiln on GitHub">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+  </nav>
+</header>
+
+<nav class="primary-nav" role="tablist" aria-label="Dashboard sections">
+  <button type="button" class="primary-tab active" data-page="overview" role="tab" aria-selected="true" aria-controls="page-overview" id="primary-tab-overview">
+    Overview
+  </button>
+  <button type="button" class="primary-tab" data-page="adapters" role="tab" aria-selected="false" aria-controls="page-adapters" id="primary-tab-adapters">
+    Adapters
+    <span class="count" data-count="adapters" id="adapters-count">0</span>
+  </button>
+  <button type="button" class="primary-tab" data-page="training" role="tab" aria-selected="false" aria-controls="page-training" id="primary-tab-training">
+    Training
+    <span class="count" data-count="training" id="training-count">0</span>
+  </button>
+  <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground">
+    Playground
+  </button>
+</nav>
 
 <main id="content" tabindex="-1" class="main">
-  <!-- Server Status -->
-  <div class="panel">
-    <div class="panel-head"><h2>Server Status</h2></div>
-    <div class="panel-body" id="server-status" data-panel-id="server-status-panel" role="status" aria-live="polite" aria-atomic="false" aria-busy="true">
-      <div class="empty">Loading server diagnostics...</div>
-    </div>
-  </div>
 
-  <!-- Decode Performance -->
-  <div class="panel">
-    <div class="panel-head"><h2>Decode Performance</h2></div>
-    <div class="panel-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
-      <div class="empty">Loading live metrics...</div>
-    </div>
-  </div>
+  <!-- =================================================================
+       Overview page
+       ================================================================= -->
+  <section class="page active" id="page-overview" role="tabpanel" aria-labelledby="primary-tab-overview">
 
-  <!-- Recent Requests -->
-  <div class="panel" style="grid-column: 1 / -1;">
-    <div class="panel-head"><h2>Recent Requests</h2></div>
-    <div class="panel-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
-      <div class="empty">Loading recent requests...</div>
+    <!-- Hero stats -->
+    <div class="hero" id="hero-stats" aria-live="polite">
+      <div class="hero-cell">
+        <span class="hero-eyebrow">Decode tok/s</span>
+        <span class="hero-num tabular-nums" id="hero-tps">—</span>
+        <span class="hero-sub" id="hero-tps-sub">Awaiting completions</span>
+      </div>
+      <div class="hero-cell">
+        <span class="hero-eyebrow">P50 / P99 ITL</span>
+        <span class="hero-num tabular-nums" id="hero-itl">—</span>
+        <span class="hero-sub" id="hero-itl-sub">Inter-token latency</span>
+      </div>
+      <div class="hero-cell">
+        <span class="hero-eyebrow">Active LoRA</span>
+        <span class="hero-num tabular-nums" id="hero-adapter">base</span>
+        <span class="hero-sub" id="hero-adapter-sub">No adapter loaded</span>
+      </div>
+      <div class="hero-cell">
+        <span class="hero-eyebrow">Training</span>
+        <span class="hero-num tabular-nums" id="hero-training">idle</span>
+        <span class="hero-sub" id="hero-training-sub">Submit SFT or GRPO to begin</span>
+      </div>
     </div>
-  </div>
 
-  <!-- Adapters -->
-  <div class="panel">
-    <div class="panel-head">
-      <h2>Adapters</h2>
-    </div>
-    <div class="panel-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
-      <div class="empty">Loading adapter list...</div>
-    </div>
-    <div class="panel-body" style="border-top:1px solid var(--border);">
-      <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Upload Adapter</div>
-      <div id="upload-adapter-help" style="font-size:12px;color:var(--text2);margin-bottom:8px;line-height:1.4;">
-        Import a PEFT-compatible <code>.tar.gz</code>/<code>.tgz</code> adapter archive, typically one created by Kiln's adapter download/export endpoint. The adapter name becomes the saved adapter directory name.
-      </div>
-      <div class="upload-adapter-controls">
-        <div class="form-group" style="margin-bottom:0;">
-          <label for="upload-name">Adapter Name</label>
-          <input type="text" id="upload-name" placeholder="adapter name" aria-describedby="upload-adapter-help upload-adapter-state">
+    <div class="row-2">
+      <!-- Server Status card -->
+      <div class="card">
+        <div class="card-head">
+          <h2>Server status</h2>
+          <span class="eyebrow" id="server-status-eyebrow">VRAM &amp; scheduler</span>
         </div>
-        <div class="form-group" style="margin-bottom:0;">
-          <label for="upload-archive">Adapter Archive</label>
-          <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state" style="font-family:var(--sans);font-size:12px;">
-        </div>
-        <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
-      </div>
-      <div id="upload-adapter-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Enter a name and choose an archive to enable upload.</div>
-    </div>
-    <div class="panel-body" style="border-top:1px solid var(--border);">
-      <div style="font-size:11px;color:var(--text2);margin-bottom:6px;text-transform:uppercase;font-weight:600;letter-spacing:0.5px;">Merge Adapters</div>
-      <div id="merge-helper" style="font-size:12px;color:var(--text2);margin-bottom:8px;"></div>
-      <div id="merge-sources" style="margin-bottom:6px;"></div>
-      <div style="display:flex;gap:6px;margin-bottom:8px;">
-        <button type="button" class="btn btn-sm" id="add-merge-source" onclick="addMergeSource()">+ Add source</button>
-      </div>
-      <div class="form-row" style="margin-bottom:8px;">
-        <div class="form-group" style="margin-bottom:0;">
-          <label for="merge-output-name">Output Name</label>
-          <input type="text" id="merge-output-name" value="merged-adapter" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
-          <div class="form-help" id="merge-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
-        </div>
-        <div class="form-group" style="margin-bottom:0;">
-          <label for="merge-mode">Mode</label>
-          <select id="merge-mode" onchange="onMergeModeChange()">
-            <option value="weighted_average">weighted_average</option>
-            <option value="ties">ties</option>
-            <option value="concat">concat</option>
-          </select>
+        <div class="card-body" id="server-status" data-panel-id="server-status-panel" role="status" aria-live="polite" aria-atomic="false" aria-busy="true">
+          <div class="empty">Loading server diagnostics…</div>
         </div>
       </div>
-      <div class="form-group" id="merge-density-wrap" style="display:none;margin-bottom:8px;">
-        <label for="merge-density">Density (TIES, in (0, 1])</label>
-        <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
-      </div>
-      <div style="display:flex;justify-content:flex-end;">
-        <button class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge</button>
-      </div>
-    </div>
-  </div>
 
-  <!-- Training -->
-  <div class="panel" style="grid-column: 1 / -1;">
-    <div class="panel-head"><h2>Training</h2></div>
-    <div class="tabs" role="tablist" aria-label="Training views" data-training-tabs>
-      <button class="tab active" id="training-tab-queue" data-tab="queue" type="button" role="tab" aria-selected="true" aria-controls="tab-queue" tabindex="0">Queue</button>
-      <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Submit SFT</button>
-      <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Submit GRPO</button>
+      <!-- Decode Performance card -->
+      <div class="card">
+        <div class="card-head">
+          <h2>Decode performance</h2>
+          <span class="eyebrow">60s rolling window</span>
+        </div>
+        <div class="card-body" id="decode-perf-panel" data-panel-id="decode-stats-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+          <div class="empty">Loading live metrics…</div>
+        </div>
+      </div>
     </div>
-    <div class="panel-body">
+
+    <!-- Recent requests -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Recent requests</h2>
+        <span class="eyebrow">Latest chat completions</span>
+      </div>
+      <div class="card-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+        <div class="empty">Loading recent requests…</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       Adapters page
+       ================================================================= -->
+  <section class="page" id="page-adapters" role="tabpanel" aria-labelledby="primary-tab-adapters" hidden inert>
+    <div class="card">
+      <div class="card-head">
+        <h2>Saved adapters</h2>
+        <span class="eyebrow">LoRA adapters on disk</span>
+      </div>
+      <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+        <div class="empty">Loading adapter list…</div>
+      </div>
+    </div>
+
+    <div class="row-2">
+      <!-- Upload adapter -->
+      <div class="card">
+        <div class="card-head">
+          <h2>Upload adapter</h2>
+          <span class="eyebrow">PEFT .tar.gz / .tgz</span>
+        </div>
+        <div class="card-body">
+          <div id="upload-adapter-help" style="font-size: var(--text-xs); color: var(--text-muted); line-height: 1.5; margin-bottom: var(--space-4);">
+            Import a PEFT-compatible <code>.tar.gz</code> or <code>.tgz</code> adapter archive — typically one
+            created by Kiln's adapter download/export endpoint. The adapter name becomes the saved adapter directory.
+          </div>
+          <div class="upload-adapter-controls">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="upload-name">Adapter name</label>
+              <input type="text" id="upload-name" placeholder="my-adapter" aria-describedby="upload-adapter-help upload-adapter-state">
+            </div>
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="upload-archive">Archive</label>
+              <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state">
+            </div>
+            <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
+          </div>
+          <div id="upload-adapter-state" style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);" aria-live="polite">Enter a name and choose an archive to enable upload.</div>
+        </div>
+      </div>
+
+      <!-- Merge adapters -->
+      <div class="card">
+        <div class="card-head">
+          <h2>Merge adapters</h2>
+          <span class="eyebrow">weighted_average · ties · concat</span>
+        </div>
+        <div class="card-body">
+          <div id="merge-helper" style="font-size: var(--text-xs); color: var(--text-muted); margin-bottom: var(--space-3); line-height: 1.5;"></div>
+          <div id="merge-sources" style="margin-bottom: var(--space-2);"></div>
+          <div class="btn-row" style="margin-bottom: var(--space-4);">
+            <button type="button" class="btn btn-sm" id="add-merge-source" onclick="addMergeSource()">+ Add source</button>
+          </div>
+          <div class="form-row">
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="merge-output-name">Output name</label>
+              <input type="text" id="merge-output-name" value="merged-adapter" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
+              <div class="form-help" id="merge-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
+            </div>
+            <div class="form-group" style="margin-bottom: 0;">
+              <label for="merge-mode">Mode</label>
+              <select id="merge-mode" onchange="onMergeModeChange()">
+                <option value="weighted_average">weighted_average</option>
+                <option value="ties">ties</option>
+                <option value="concat">concat</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group" id="merge-density-wrap" style="display: none;">
+            <label for="merge-density">Density (TIES, in (0, 1])</label>
+            <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
+          </div>
+          <div style="display: flex; justify-content: flex-end; margin-top: var(--space-3);">
+            <button class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge adapters</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       Training page
+       ================================================================= -->
+  <section class="page" id="page-training" role="tabpanel" aria-labelledby="primary-tab-training" hidden inert>
+    <div class="card">
+      <div class="card-head">
+        <h2>Training jobs</h2>
+        <span class="eyebrow">SFT &amp; GRPO over HTTP</span>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Training views" data-training-tabs>
+        <button class="tab active" id="training-tab-queue" data-tab="queue" type="button" role="tab" aria-selected="true" aria-controls="tab-queue" tabindex="0">Queue</button>
+        <button class="tab" id="training-tab-sft" data-tab="sft" type="button" role="tab" aria-selected="false" aria-controls="tab-sft" tabindex="-1">Submit SFT</button>
+        <button class="tab" id="training-tab-grpo" data-tab="grpo" type="button" role="tab" aria-selected="false" aria-controls="tab-grpo" tabindex="-1">Submit GRPO</button>
+      </div>
+
       <div class="tab-content active" id="tab-queue" role="tabpanel" aria-labelledby="training-tab-queue" aria-live="polite" aria-atomic="false" aria-busy="true" data-panel-id="training-queue-panel">
-        <div class="empty">Loading queued training jobs...</div>
+        <div class="empty">Loading queued training jobs…</div>
       </div>
+
       <div class="tab-content" id="tab-sft" role="tabpanel" aria-labelledby="training-tab-sft" hidden inert>
         <form id="sft-form">
           <div class="form-row">
             <div class="form-group">
-              <label for="sft-output-name">Adapter Name</label>
+              <label for="sft-output-name">Adapter name</label>
               <input type="text" id="sft-output-name" name="output_name" value="sft-adapter" aria-describedby="sft-output-name-help sft-output-name-state" required>
               <div class="form-help" id="sft-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
-              <div id="sft-output-name-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+              <div id="sft-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
             </div>
             <div class="form-group">
               <label for="sft-epochs">Epochs</label>
@@ -804,114 +1631,247 @@ textarea { resize: vertical; min-height: 80px; }
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label for="sft-learning-rate">Learning Rate</label>
+              <label for="sft-learning-rate">Learning rate</label>
               <input type="text" id="sft-learning-rate" name="learning_rate" value="0.0002">
             </div>
             <div class="form-group">
-              <label for="sft-rank">LoRA Rank</label>
+              <label for="sft-rank">LoRA rank</label>
               <input type="number" id="sft-rank" name="rank" value="8" min="1" max="128">
             </div>
           </div>
           <div class="form-group">
-            <label for="sft-examples">Training Examples (JSON array)</label>
+            <label for="sft-examples">Training examples (JSON array)</label>
             <textarea id="sft-examples" name="examples" rows="6" aria-describedby="sft-examples-help sft-examples-state" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
             <div class="form-help" id="sft-examples-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
-            <div id="sft-examples-state" data-sft-examples-state style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Paste examples JSON or use the sample payload to enable submit.</div>
-            <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+            <div id="sft-examples-state" data-sft-examples-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste examples JSON or use the sample payload to enable submit.</div>
+            <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
               <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
             </div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <label for="sft-auto-load" style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
-              <input type="checkbox" id="sft-auto-load" name="auto_load" checked> Auto-load after training
+          <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <label for="sft-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
+              <input type="checkbox" id="sft-auto-load" name="auto_load" checked> Auto-load adapter after training
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left:auto">Submit SFT Job</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit SFT job</button>
           </div>
         </form>
       </div>
+
       <div class="tab-content" id="tab-grpo" role="tabpanel" aria-labelledby="training-tab-grpo" hidden inert>
         <form id="grpo-form">
           <div class="form-row">
             <div class="form-group">
-              <label for="grpo-output-name">Adapter Name</label>
+              <label for="grpo-output-name">Adapter name</label>
               <input type="text" id="grpo-output-name" name="output_name" value="grpo-adapter" aria-describedby="grpo-output-name-help grpo-output-name-state" required>
               <div class="form-help" id="grpo-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
-              <div id="grpo-output-name-state" style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
+              <div id="grpo-output-name-state" style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Ready to submit with this path-safe adapter name.</div>
             </div>
             <div class="form-group">
-              <label for="grpo-kl-coeff">KL Coefficient</label>
+              <label for="grpo-kl-coeff">KL coefficient</label>
               <input type="text" id="grpo-kl-coeff" name="kl_coeff" value="0.1">
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label for="grpo-learning-rate">Learning Rate</label>
+              <label for="grpo-learning-rate">Learning rate</label>
               <input type="text" id="grpo-learning-rate" name="learning_rate" value="0.00005">
             </div>
             <div class="form-group">
-              <label for="grpo-rank">LoRA Rank</label>
+              <label for="grpo-rank">LoRA rank</label>
               <input type="number" id="grpo-rank" name="rank" value="8" min="1" max="128">
             </div>
           </div>
           <div class="form-group">
-            <label for="grpo-groups">GRPO Groups (JSON array)</label>
+            <label for="grpo-groups">GRPO groups (JSON array)</label>
             <textarea id="grpo-groups" name="groups" rows="6" aria-describedby="grpo-groups-help grpo-groups-state" placeholder='[{"messages":[{"role":"user","content":"Write a haiku about the moon"}],"completions":[{"text":"Silent moonlit night / Silver clouds drift softly by / Dreams bloom in starlight","reward":0.9},{"text":"The moon is bright tonight.","reward":0.2}]}]'></textarea>
             <div class="form-help" id="grpo-groups-help">Expected: a JSON array of groups. Each group needs <code>messages</code> plus <code>completions</code> containing <code>text</code> and a numeric <code>reward</code>.</div>
-            <div id="grpo-groups-state" data-grpo-groups-state style="font-size:12px;color:var(--text2);margin-top:6px;" aria-live="polite">Paste groups JSON or use the sample payload to enable submit.</div>
-            <div style="display:flex;justify-content:flex-end;margin-top:6px;">
+            <div id="grpo-groups-state" data-grpo-groups-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste groups JSON or use the sample payload to enable submit.</div>
+            <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
               <button type="button" class="btn btn-sm" id="use-grpo-sample">Use sample GRPO payload</button>
             </div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center;">
-            <label for="grpo-auto-load" style="font-size:12px;display:flex;align-items:center;gap:4px;color:var(--text2)">
-              <input type="checkbox" id="grpo-auto-load" name="auto_load" checked> Auto-load after training
+          <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <label for="grpo-auto-load" style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
+              <input type="checkbox" id="grpo-auto-load" name="auto_load" checked> Auto-load adapter after training
             </label>
-            <button type="submit" class="btn btn-primary" style="margin-left:auto">Submit GRPO Job</button>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit GRPO job</button>
           </div>
         </form>
       </div>
     </div>
-  </div>
+  </section>
 
-  <!-- Quick Inference -->
-  <div class="panel" style="grid-column: 1 / -1;">
-    <div class="panel-head"><h2>Quick Inference</h2></div>
-    <div class="panel-body">
+  <!-- =================================================================
+       Playground page
+       ================================================================= -->
+  <section class="page page-playground" id="page-playground" role="tabpanel" aria-labelledby="primary-tab-playground" hidden inert>
+    <div class="card playground-card">
+      <div class="card-head">
+        <h2>Quick inference</h2>
+        <span class="eyebrow">/v1/chat/completions · streaming</span>
+      </div>
       <div class="chat-controls">
-        <label for="chat-adapter" style="font-size:12px;color:var(--text2)">Adapter:</label>
+        <label for="chat-adapter">Adapter</label>
         <select id="chat-adapter">
-          <option value="">Base Model</option>
+          <option value="">Base model</option>
         </select>
-        <label for="chat-temp" style="font-size:12px;color:var(--text2);margin-left:8px;">Temp:</label>
+        <label for="chat-temp">Temperature</label>
         <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
       </div>
       <div class="chat-messages" id="chat-output"></div>
       <div class="chat-output-actions">
         <button type="button" class="btn btn-sm" id="copy-chat-response" data-copy-chat-response disabled>Copy response</button>
       </div>
-      <div class="chat-starter-prompts" aria-label="Starter prompts for Quick Inference">
-        <span>Try a starter:</span>
+      <div class="chat-starter-prompts" aria-label="Starter prompts">
+        <span>Try a starter</span>
         <button type="button" class="btn btn-sm" data-chat-starter-prompt="Summarize Kiln in two sentences for a new developer.">Summarize Kiln</button>
         <button type="button" class="btn btn-sm" data-chat-starter-prompt="Write a Rust function that computes a moving average.">Code example</button>
         <button type="button" class="btn btn-sm" data-chat-starter-prompt="Suggest a reward function for grading concise JSON answers.">Reward loop</button>
       </div>
       <div class="chat-input-row">
-        <label for="chat-input" style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Message</label>
-        <input type="text" id="chat-input" placeholder="Type a message..." aria-describedby="chat-input-help">
+        <label class="sr-only" for="chat-input">Message</label>
+        <input type="text" id="chat-input" placeholder="Type a message and press Enter…" aria-describedby="chat-input-help">
         <button type="button" class="btn btn-primary" id="chat-send">Send</button>
         <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
-        <button type="button" class="btn" id="chat-clear">Clear</button>
+        <button type="button" class="btn btn-ghost" id="chat-clear">Clear</button>
       </div>
-      <div class="form-help" id="chat-input-help">Type a quick prompt to test the selected adapter or base model.</div>
+      <div class="form-help" id="chat-input-help" style="padding: 0 var(--space-5) var(--space-4);">Send a quick prompt to test the selected adapter or base model.</div>
     </div>
-  </div>
+  </section>
+
 </main>
 
 <div class="toast-container" id="toasts" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script>
+/* =====================================================================
+   Demo fixture mode (?demo=1)
+   ---------------------------------------------------------------------
+   Used to capture realistic README screenshots without a live GPU pod.
+   Returns canned Qwen3.5-4B data shaped like the production endpoints.
+   No effect when the query string is absent.
+   ===================================================================== */
+(function () {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('demo') !== '1') return;
+
+  const start = Date.now() - 4527 * 1000;
+  const demoState = {
+    adapters: ['support-bot', 'format-fixer', 'docstring-cleaner', 'typefix-alpha', 'code-helper-v3'],
+    active: 'support-bot',
+  };
+
+  function uptimeSeconds() { return Math.floor((Date.now() - start) / 1000); }
+
+  const responses = {
+    '/health': () => ({
+      status: 'ok',
+      model: 'Qwen/Qwen3.5-4B',
+      backend: 'cuda',
+      uptime_seconds: uptimeSeconds(),
+      active_adapter: demoState.active,
+      gpu_memory: {
+        total_vram_gb: 47.5,
+        model_gb: 8.2,
+        kv_cache_gb: 12.0,
+        training_budget_gb: 4.1,
+      },
+      scheduler: { waiting: 0, running: 1, blocks_used: 142, blocks_free: 386 },
+      checks: [
+        { pass: true, name: 'cuda_runtime' },
+        { pass: true, name: 'model_loaded' },
+        { pass: true, name: 'kv_cache' },
+        { pass: true, name: 'lora_engine' },
+      ],
+    }),
+    '/v1/stats/decode': () => ({
+      window_secs: 60,
+      sample_count: 8,
+      tok_per_sec: 142.8,
+      p50_itl_ms: 7.0,
+      p99_itl_ms: 11.4,
+      mean_itl_ms: 7.6,
+    }),
+    '/v1/stats/recent-requests': () => {
+      const now = Date.now();
+      return [
+        { timestamp_unix_ms: now - 4_000,   prompt_preview: 'Refund the customer on order #4821 and reply', completion_preview: 'I\u2019ve issued a full refund of $148.20 to the original card. You should see it within 3-5 business days.', prompt_tokens: 28, completion_tokens: 36, finish_reason: 'stop',   streamed: true,  duration_ms: 254 },
+        { timestamp_unix_ms: now - 18_000,  prompt_preview: 'Format this JSON response as a single line', completion_preview: '{"id":"msg_92","status":"complete","payload":{"score":0.91,"label":"approved"}}', prompt_tokens: 41, completion_tokens: 22, finish_reason: 'stop', streamed: true, duration_ms: 158 },
+        { timestamp_unix_ms: now - 41_000,  prompt_preview: 'Why is my package still showing in transit?', completion_preview: 'I see your package shipped on May 6 and is currently with the local carrier. The latest tracking…', prompt_tokens: 19, completion_tokens: 64, finish_reason: 'stop', streamed: true, duration_ms: 462 },
+        { timestamp_unix_ms: now - 92_000,  prompt_preview: 'Apologize and offer a 10% credit on the next order', completion_preview: 'I\u2019m really sorry for the trouble with this order. As a thank-you for your patience, I\u2019ve added a 10% credit to your account.', prompt_tokens: 25, completion_tokens: 38, finish_reason: 'stop', streamed: true, duration_ms: 271 },
+        { timestamp_unix_ms: now - 145_000, prompt_preview: 'Generate a one-line product summary for SKU-2271', completion_preview: 'Compact wireless earbuds with active noise cancellation, 8h battery, and a USB-C charging case.', prompt_tokens: 22, completion_tokens: 24, finish_reason: 'stop', streamed: true, duration_ms: 167 },
+        { timestamp_unix_ms: now - 198_000, prompt_preview: 'Extract the order number from this email', completion_preview: 'Order number: #4821', prompt_tokens: 87, completion_tokens: 6, finish_reason: 'stop', streamed: true, duration_ms: 84 },
+      ];
+    },
+    '/v1/adapters': () => ({
+      active: demoState.active,
+      available: [
+        { name: 'support-bot',       size_bytes: 17 * 1024 * 1024 },
+        { name: 'format-fixer',      size_bytes: 14 * 1024 * 1024 },
+        { name: 'code-helper-v3',    size_bytes: 22 * 1024 * 1024 },
+        { name: 'docstring-cleaner', size_bytes: 12 * 1024 * 1024 + 600 * 1024 },
+        { name: 'typefix-alpha',     size_bytes: 9 * 1024 * 1024 + 400 * 1024 },
+      ],
+    }),
+    '/v1/train/queue': () => ({
+      running: { job_id: 'job_7_support_grpo', state: 'Running', progress: 0.42, current_loss: 1.18, adapter_name: 'support-bot-v2', elapsed_secs: 87, job_type: 'GRPO' },
+      queued:  [
+        { job_id: 'job_8_format_sft', state: 'Queued', adapter_name: 'format-fixer-v3', position: 1, job_type: 'SFT' },
+      ],
+      completed: [
+        { job_id: 'job_6_format_sft',   state: 'Completed', progress: 1.0, current_loss: 0.41, adapter_name: 'format-fixer',      elapsed_secs: 124, job_type: 'SFT' },
+        { job_id: 'job_5_typefix_sft',  state: 'Completed', progress: 1.0, current_loss: 0.37, adapter_name: 'typefix-alpha',     elapsed_secs: 98,  job_type: 'SFT' },
+        { job_id: 'job_4_docstring_sft', state: 'Completed', progress: 1.0, current_loss: 0.52, adapter_name: 'docstring-cleaner', elapsed_secs: 142, job_type: 'SFT' },
+      ],
+    }),
+    '/v1/models': () => ({ data: [{ id: 'Qwen/Qwen3.5-4B', object: 'model' }] }),
+  };
+
+  const realFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = typeof input === 'string' ? input : (input && input.url) || '';
+    const path = url.startsWith('http') ? new URL(url).pathname : url.split('?')[0];
+    if (responses[path]) {
+      const body = JSON.stringify(responses[path]());
+      return Promise.resolve(new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    }
+    return realFetch(input, init);
+  };
+})();
+</script>
+
+<script>
 (function() {
 'use strict';
+
+/* =====================================================================
+   Page switcher (Overview / Adapters / Training / Playground)
+   ===================================================================== */
+function selectPage(name) {
+  document.querySelectorAll('.primary-tab').forEach(t => {
+    const active = t.dataset.page === name;
+    t.classList.toggle('active', active);
+    t.setAttribute('aria-selected', String(active));
+  });
+  document.querySelectorAll('.page').forEach(p => {
+    const active = p.id === 'page-' + name;
+    p.classList.toggle('active', active);
+    p.hidden = !active;
+    if (active) p.removeAttribute('inert'); else p.setAttribute('inert', '');
+  });
+  if (history.replaceState) {
+    const u = new URL(window.location.href);
+    u.hash = name;
+    history.replaceState(null, '', u);
+  }
+}
+document.querySelectorAll('.primary-tab').forEach(tab => {
+  tab.addEventListener('click', () => selectPage(tab.dataset.page));
+});
+const initialHash = (location.hash || '#overview').slice(1);
+if (['overview', 'adapters', 'training', 'playground'].includes(initialHash)) {
+  selectPage(initialHash);
+}
 
 // --- Toast Notifications ---
 function toast(msg, type) {
@@ -946,7 +1906,7 @@ function setPanelBusy(id, busy) {
 
 // --- Training Tabs ---
 function selectTrainingTab(tab, focus = false) {
-  const panel = tab.closest('.panel');
+  const panel = tab.closest('.card');
   panel.querySelectorAll('[role="tab"]').forEach(item => {
     const selected = item === tab;
     item.classList.toggle('active', selected);
@@ -1001,6 +1961,12 @@ function fmtDuration(secs) {
   return h + 'h ' + m + 'm';
 }
 
+// --- Hero stats helpers ---
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
 // --- Health Polling ---
 let lastHealth = null;
 
@@ -1011,6 +1977,7 @@ async function pollHealth() {
     lastHealth = h;
     renderHeader(h);
     renderServerStatus(h);
+    renderHeroFromHealth(h);
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
@@ -1024,15 +1991,15 @@ function renderHeader(h) {
   const dot = document.getElementById('status-dot');
   const txt = document.getElementById('status-text');
   dot.className = 'status-dot ' + (h.status === 'ok' ? 'ok' : 'degraded');
-  txt.textContent = h.status;
+  txt.textContent = h.status === 'ok' ? 'Running' : (h.status || 'unknown');
 
   const stats = document.getElementById('header-stats');
   stats.innerHTML = `
-    <span class="stat"><span class="status-dot ${h.status === 'ok' ? 'ok' : 'degraded'}"></span><span class="stat-val">${h.status}</span></span>
-    <span class="stat"><span class="stat-label">Model</span><span class="stat-val">${h.model || '-'}</span></span>
-    <span class="stat"><span class="stat-label">Backend</span><span class="stat-val">${h.backend || '-'}</span></span>
+    <span class="stat"><span class="status-dot ${h.status === 'ok' ? 'ok' : 'degraded'}" id="status-dot"></span><span class="stat-val" id="status-text">${h.status === 'ok' ? 'Running' : h.status}</span></span>
+    <span class="stat"><span class="stat-label">Model</span><span class="stat-val" title="${escapeHtml(h.model || '')}">${escapeHtml(h.model || '—')}</span></span>
+    <span class="stat"><span class="stat-label">Backend</span><span class="stat-val">${escapeHtml(h.backend || '—')}</span></span>
     <span class="stat"><span class="stat-label">Uptime</span><span class="stat-val">${fmtDuration(h.uptime_seconds)}</span></span>
-    <span class="stat"><span class="stat-label">Adapter</span><span class="stat-val">${h.active_adapter || 'base'}</span></span>
+    <span class="stat"><span class="stat-label">Adapter</span><span class="stat-val">${escapeHtml(h.active_adapter || 'base')}</span></span>
   `;
 }
 
@@ -1051,18 +2018,21 @@ function renderServerStatus(h) {
     const pct = v => ((v / total) * 100).toFixed(1);
     vramHtml = `
       <div class="vram-bar-wrap">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:4px;">GPU VRAM: ${fmtGb(total)}</div>
+        <div class="vram-meta">
+          <span style="font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); font-weight: 600;">GPU VRAM</span>
+          <span class="vram-meta-total"><strong>${fmtGb(total)}</strong> total</span>
+        </div>
         <div class="vram-bar">
-          <div class="vram-seg" style="width:${pct(model)}%;background:var(--accent)">${model > 0.5 ? fmtGb(model) : ''}</div>
-          <div class="vram-seg" style="width:${pct(kv)}%;background:var(--purple)">${kv > 0.5 ? fmtGb(kv) : ''}</div>
-          <div class="vram-seg" style="width:${pct(train)}%;background:var(--orange)">${train > 0.5 ? fmtGb(train) : ''}</div>
-          <div class="vram-seg" style="width:${pct(free)}%;background:#21262d"></div>
+          <div class="vram-seg" style="width:${pct(model)}%">${model > 1.5 ? fmtGb(model) : ''}</div>
+          <div class="vram-seg" style="width:${pct(kv)}%">${kv > 1.5 ? fmtGb(kv) : ''}</div>
+          <div class="vram-seg" style="width:${pct(train)}%">${train > 1.5 ? fmtGb(train) : ''}</div>
+          <div class="vram-seg" style="width:${pct(free)}%"></div>
         </div>
         <div class="vram-legend">
           <span class="model" title="GPU memory used by the model weights (Qwen3.5-4B + Marlin packed quantized projections).">Model ${fmtGb(model)}</span>
-          <span class="kv" title="GPU memory reserved for the paged attention KV cache (live inference state for in-flight requests).">KV Cache ${fmtGb(kv)}</span>
+          <span class="kv" title="GPU memory reserved for the paged attention KV cache.">KV cache ${fmtGb(kv)}</span>
           <span class="train" title="GPU memory budget reserved for online LoRA training (SFT and GRPO).">Training ${fmtGb(train)}</span>
-          <span class="free" title="Unallocated GPU memory available to grow KV cache or training as needed.">Free ${fmtGb(free)}</span>
+          <span class="free" title="Unallocated GPU memory.">Free ${fmtGb(free)}</span>
         </div>
       </div>
     `;
@@ -1071,23 +2041,28 @@ function renderServerStatus(h) {
   let schedHtml = '';
   if (sched) {
     schedHtml = `
-      <div class="sched-stats">
-        <div class="sched-stat" title="Requests admitted to the scheduler but not yet running: queued for KV cache blocks to free up."><div class="num">${sched.waiting}</div><div class="lbl">Waiting</div></div>
-        <div class="sched-stat" title="Requests currently decoding tokens this step (chunked-prefill scheduler runs prefill and decode in the same batch)."><div class="num">${sched.running}</div><div class="lbl">Running</div></div>
-        <div class="sched-stat" title="KV cache blocks allocated to active requests. Each block holds a fixed span of tokens (paged attention)."><div class="num">${sched.blocks_used}</div><div class="lbl">Blocks Used</div></div>
-        <div class="sched-stat" title="KV cache blocks available for new requests. When this hits 0, new requests must wait."><div class="num">${sched.blocks_free}</div><div class="lbl">Blocks Free</div></div>
+      <div class="sched-stats" style="margin-top: var(--space-4);">
+        <div class="sched-stat" title="Requests admitted but not yet running."><div class="num">${sched.waiting}</div><div class="lbl">Waiting</div></div>
+        <div class="sched-stat" title="Requests currently decoding tokens this step."><div class="num">${sched.running}</div><div class="lbl">Running</div></div>
+        <div class="sched-stat" title="KV cache blocks allocated to active requests."><div class="num">${sched.blocks_used}</div><div class="lbl">Blocks used</div></div>
+        <div class="sched-stat" title="KV cache blocks available for new requests."><div class="num">${sched.blocks_free}</div><div class="lbl">Blocks free</div></div>
       </div>
     `;
   }
 
   let checksHtml = '';
   if (h.checks && h.checks.length > 0) {
-    checksHtml = `<div style="margin-top:10px;font-size:12px;color:var(--text2)">
-      ${h.checks.map(c => `<span style="margin-right:10px">${c.pass ? '\u2705' : '\u274c'} ${c.name}</span>`).join('')}
+    checksHtml = `<div class="checks-row">
+      ${h.checks.map(c => `<span class="check-chip ${c.pass ? 'pass' : 'fail'}">${escapeHtml(c.name)}</span>`).join('')}
     </div>`;
   }
 
   el.innerHTML = vramHtml + schedHtml + checksHtml || '<div class="empty">No data</div>';
+}
+
+function renderHeroFromHealth(h) {
+  setText('hero-adapter', h.active_adapter || 'base');
+  setText('hero-adapter-sub', h.active_adapter ? 'Hot-swapped LoRA' : 'No adapter loaded');
 }
 
 // --- Decode Performance ---
@@ -1099,25 +2074,35 @@ async function pollDecodePerf() {
     const window = data.window_secs ? Math.round(data.window_secs) : 60;
     if (!data.sample_count || data.sample_count < 1) {
       el.innerHTML = `<div class="sched-stats">
-        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions in this rolling window."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
-        <div class="sched-stat" title="Median inter-token latency: time between consecutive output tokens during streaming."><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
-        <div class="sched-stat" title="99th-percentile inter-token latency: tail latency between output tokens (worst-case 1-in-100 step)."><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples (last ${window}s)</div></div>
+        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">&mdash;</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Median inter-token latency."><div class="num">&mdash;</div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">&mdash;</div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">0</div><div class="lbl">samples</div></div>
       </div>
-      <div style="margin-top:8px;font-size:12px;color:var(--text2)">No streaming completions in the last ${window}s. Send a message in Quick Inference below, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
+      <div class="empty" style="margin-top: var(--space-4);">No streaming completions in the last ${window}s. Send a message in <strong>Playground</strong> to populate metrics, or check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> if the server is still warming up.</div>`;
+      setText('hero-tps', '—');
+      setText('hero-tps-sub', 'Awaiting completions');
+      setText('hero-itl', '—');
+      setText('hero-itl-sub', 'Inter-token latency');
       return;
     }
     const tps = data.tok_per_sec.toFixed(1);
-    const p50 = data.p50_itl_ms.toFixed(1) + ' ms';
-    const p99 = data.p99_itl_ms.toFixed(1) + ' ms';
+    const p50 = data.p50_itl_ms.toFixed(1);
+    const p99 = data.p99_itl_ms.toFixed(1);
     const mean = data.mean_itl_ms.toFixed(1);
     el.innerHTML = `<div class="sched-stats">
-        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions in this rolling window."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
-        <div class="sched-stat" title="Median inter-token latency: time between consecutive output tokens during streaming."><div class="num">${p50}</div><div class="lbl">p50 ITL</div></div>
-        <div class="sched-stat" title="99th-percentile inter-token latency: tail latency between output tokens (worst-case 1-in-100 step)."><div class="num">${p99}</div><div class="lbl">p99 ITL</div></div>
-        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples (last ${window}s)</div></div>
+        <div class="sched-stat" title="Decoded tokens per second across recent streaming completions."><div class="num">${tps}</div><div class="lbl">tok/s</div></div>
+        <div class="sched-stat" title="Median inter-token latency."><div class="num">${p50}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p50 ITL</div></div>
+        <div class="sched-stat" title="99th-percentile inter-token latency."><div class="num">${p99}<span style="font-size:0.55em;color:var(--text-muted);font-weight:500;"> ms</span></div><div class="lbl">p99 ITL</div></div>
+        <div class="sched-stat" title="Streaming completions counted in this rolling window."><div class="num">${data.sample_count}</div><div class="lbl">samples · ${window}s</div></div>
       </div>
-      <div style="margin-top:8px;font-size:12px;color:var(--text2)">Mean inter-token latency: ${mean} ms</div>`;
+      <div style="margin-top: var(--space-3); font-size: var(--text-xs); color: var(--text-muted);">Mean inter-token latency: <span class="tabular-nums" style="color: var(--text-2);">${mean} ms</span></div>`;
+    // Hero
+    setText('hero-tps', tps);
+    document.getElementById('hero-tps').innerHTML = `${tps}<span class="unit">tok/s</span>`;
+    setText('hero-tps-sub', `${data.sample_count} samples · ${window}s window`);
+    document.getElementById('hero-itl').innerHTML = `${p50}<span class="unit">/ ${p99} ms</span>`;
+    setText('hero-itl-sub', `mean ${mean} ms`);
   } catch (e) {
     el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
   } finally {
@@ -1152,14 +2137,13 @@ function shortId(s) {
 }
 
 function apiFailureHtml(action, e, retryFn) {
-  const retryButton = retryFn ? `<div style="margin-top:12px;"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
+  const retryButton = retryFn ? `<div style="margin-top:var(--space-3);"><button type="button" class="btn btn-primary" onclick="${retryFn}()" aria-label="Retry ${escapeHtml(action)}">Retry ${escapeHtml(action)}</button></div>` : '';
   return `<div class="empty api-failure">
     <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Dashboard is waiting for Kiln server APIs.</div>
-    <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then retry this panel.</div>
+    <div>${escapeHtml(action)} could not load yet. If this is a cold start, wait for <code>kiln serve</code> to finish model startup, then retry.</div>
     ${retryButton}
-    <div style="margin-top:8px;">If it keeps failing, check the server logs for startup, model-path, or GPU initialization errors.</div>
-    <div style="margin-top:8px;">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
-    <div style="margin-top:8px;font-family:var(--mono);font-size:12px;">Details: ${escapeHtml(e.message)}</div>
+    <div style="margin-top:var(--space-2);">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
+    <div style="margin-top:var(--space-2);font-family:var(--font-mono);font-size:var(--text-xs);">Details: ${escapeHtml(e.message)}</div>
   </div>`;
 }
 
@@ -1170,8 +2154,7 @@ function renderRecentRequests(rows) {
     el.innerHTML = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No recent requests yet.</div>
       <div>Recent chat completions will appear here with prompt and completion previews, token counts, finish status, and streaming/error badges.</div>
-      <div style="margin-top:8px;">Use <strong>Quick Inference</strong> below to create the first entry.</div>
-      <div style="margin-top:8px;">This is normal on a fresh server or after restart. If you are setting up Kiln for the first time, follow the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>.</div>
+      <div style="margin-top:var(--space-2);">Use <strong>Playground</strong> above to create the first entry.</div>
     </div>`;
     return;
   }
@@ -1193,7 +2176,7 @@ function renderRecentRequests(rows) {
         </div>
         <div class="recent-meta">
           <span class="recent-tokens">${tokens}</span>
-          <span>${finishPill}${escapeHtml(dur)}</span>
+          <span>${finishPill}${dur ? `<span class="tabular-nums">${escapeHtml(dur)}</span>` : ''}</span>
         </div>
       </li>
     `;
@@ -1242,6 +2225,8 @@ async function pollAdapters() {
     renderAdapters(data);
     updateAdapterSelect(data);
     renderMergeSources();
+    const count = (data.available || []).length;
+    setText('adapters-count', String(count));
   } catch (e) {
     adaptersPanel.innerHTML = apiFailureHtml('Adapters', e, 'pollAdapters');
   } finally {
@@ -1254,9 +2239,8 @@ function renderAdapters(data) {
   if (!data.available || data.available.length === 0) {
     el.innerHTML = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No adapters found yet.</div>
-      <div>Use the base model now, submit an SFT job to create your first adapter, or upload/import a PEFT-compatible adapter below.</div>
-      <div style="margin-top:8px;">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
-      <div style="margin-top:8px;">Need setup help? See the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>; if an imported adapter is missing, check <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
+      <div>Use the base model now, submit an SFT job to create your first adapter, or upload a PEFT-compatible adapter below.</div>
+      <div style="margin-top:var(--space-2);">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
     </div>`;
     return;
   }
@@ -1265,13 +2249,15 @@ function renderAdapters(data) {
     const adapterName = escapeHtml(a.name);
     return `
       <li class="adapter-item ${isActive ? 'adapter-active' : ''}">
-        <span class="adapter-name">${adapterName}</span>
-        ${isActive ? '<span class="badge badge-active">active</span>' : ''}
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+          <span class="adapter-name">${adapterName}</span>
+          ${isActive ? '<span class="badge badge-active">active</span>' : ''}
+        </div>
         <span class="adapter-size">${fmtBytes(a.size_bytes)}</span>
         <div class="adapter-actions">
           ${isActive
             ? `<button class="btn btn-sm" onclick="unloadAdapter()">Unload</button>`
-            : `<button class="btn btn-sm" data-adapter-action="load" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Load</button>`}
+            : `<button class="btn btn-sm btn-primary" data-adapter-action="load" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Load</button>`}
           <button class="btn btn-sm" data-adapter-action="download" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Download</button>
           <button class="btn btn-sm btn-danger" data-adapter-action="delete" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Delete</button>
         </div>
@@ -1304,7 +2290,7 @@ window.adapterListAction = function(button) {
 function updateAdapterSelect(data) {
   const sel = document.getElementById('chat-adapter');
   const current = sel.value;
-  sel.innerHTML = '<option value="">Base Model</option>';
+  sel.innerHTML = '<option value="">Base model</option>';
   if (data.available) {
     data.available.forEach(a => {
       const opt = document.createElement('option');
@@ -1503,7 +2489,7 @@ function mergeReadinessState() {
   if (available.length < 2) {
     return {
       ready: false,
-      message: 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload/import an adapter first.',
+      message: 'Merging requires at least two saved adapters. Create one with SFT/GRPO, or upload an adapter first.',
     };
   }
   if (mergeAdaptersBusy) {
@@ -1591,7 +2577,7 @@ function renderMergeSources() {
     const rowNumber = i + 1;
     const nameId = `merge-src-name-${rowNumber}`;
     const weightId = `merge-src-weight-${rowNumber}`;
-    html += `<div class="merge-source" style="display:grid;grid-template-columns:1fr 90px auto;gap:6px;margin-bottom:6px;align-items:center;">
+    html += `<div class="merge-source" style="display:grid;grid-template-columns:1fr 90px auto;gap:var(--space-2);margin-bottom:var(--space-2);align-items:center;">
       <select id="${nameId}" class="merge-src-name" aria-label="Merge source ${rowNumber} adapter"><option value="">(select adapter)</option>${adapterOptions}</select>
       <input id="${weightId}" type="number" class="merge-src-weight" step="0.05" value="${w}" aria-label="Merge source ${rowNumber} weight">
       <button type="button" class="btn btn-sm btn-danger" onclick="removeMergeSource(${i})" aria-label="Remove merge source ${rowNumber}" ${mergeSourceCount <= 2 ? 'disabled' : ''}>−</button>
@@ -1707,6 +2693,26 @@ async function pollTraining() {
   try {
     const data = await api('/v1/train/queue');
     renderTrainingQueue(data);
+    const liveCount = (data.running ? 1 : 0) + (data.queued ? data.queued.length : 0);
+    setText('training-count', String(liveCount));
+    if (data.running) {
+      const j = data.running;
+      const pct = ((j.progress || 0) * 100).toFixed(0);
+      const lossLabel = j.current_loss != null ? ` · loss ${j.current_loss.toFixed(3)}` : '';
+      const adapterLabel = j.adapter_name ? ` ${j.adapter_name}` : '';
+      setText('hero-training', `${pct}%`);
+      document.getElementById('hero-training').innerHTML = `${pct}<span class="unit">%</span>`;
+      setText('hero-training-sub', `${j.job_type || 'job'}${adapterLabel}${lossLabel}`);
+    } else if ((data.queued || []).length > 0) {
+      const q = data.queued[0];
+      setText('hero-training', String(data.queued.length));
+      document.getElementById('hero-training').innerHTML = `${data.queued.length}<span class="unit">queued</span>`;
+      setText('hero-training-sub', `Next: ${q.adapter_name || q.job_id}`);
+    } else {
+      setText('hero-training', 'idle');
+      document.getElementById('hero-training').textContent = 'idle';
+      setText('hero-training-sub', 'Submit SFT or GRPO to begin');
+    }
   } catch (e) {
     queuePanel.innerHTML = apiFailureHtml('Training queue', e, 'pollTraining');
   } finally {
@@ -1719,12 +2725,12 @@ function renderTrainingQueue(data) {
   let html = '';
 
   if (data.running) {
-    const j = data.running;
-    html += renderJobCard(j, true);
+    html += `<div class="queue-section-label">Running</div>`;
+    html += renderJobCard(data.running, true);
   }
 
   if (data.queued && data.queued.length > 0) {
-    html += `<div style="font-size:11px;color:var(--text2);margin:10px 0 6px;text-transform:uppercase;font-weight:600;">Queued</div>`;
+    html += `<div class="queue-section-label">Queued</div>`;
     data.queued.forEach(q => {
       html += `<div class="job-card">
         <div class="job-header">
@@ -1732,17 +2738,17 @@ function renderTrainingQueue(data) {
           <span class="job-state Queued">Queued</span>
         </div>
         <div class="job-meta">
-          <span>Type: ${escapeHtml(q.job_type)}</span>
-          <span>Adapter: ${escapeHtml(q.adapter_name)}</span>
-          <span>Position: #${q.position}</span>
+          <span>Type ${escapeHtml(q.job_type)}</span>
+          <span>Adapter ${escapeHtml(q.adapter_name)}</span>
+          <span>Position #${q.position}</span>
         </div>
-        <div style="margin-top:6px">${renderCancelJobButton(q.job_id)}</div>
+        <div>${renderCancelJobButton(q.job_id)}</div>
       </div>`;
     });
   }
 
   if (data.completed && data.completed.length > 0) {
-    html += `<div style="font-size:11px;color:var(--text2);margin:10px 0 6px;text-transform:uppercase;font-weight:600;">Recent</div>`;
+    html += `<div class="queue-section-label">Recent</div>`;
     data.completed.slice(0, 5).forEach(j => {
       html += renderJobCard(j, false);
     });
@@ -1752,8 +2758,7 @@ function renderTrainingQueue(data) {
     html = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No training jobs yet.</div>
       <div>Submit SFT examples to teach the model a correction, or use Submit GRPO for scored completions and reward-driven updates.</div>
-      <div style="margin-top:8px;">New here? Start with the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>, then read the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a> for reward-driven training.</div>
-      <div style="margin-top:8px;">Until then, Quick Inference uses the Base Model or whichever adapter you load.</div>
+      <div style="margin-top:var(--space-2);">New here? Start with the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>, then read the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>.</div>
     </div>`;
   }
 
@@ -1770,12 +2775,12 @@ function renderJobCard(j, isRunning) {
     </div>
     <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
     <div class="job-meta">
-      <span>Progress: ${pct}%</span>
-      ${j.current_loss != null ? `<span>Loss: ${j.current_loss.toFixed(4)}</span>` : ''}
-      ${j.adapter_name ? `<span>Adapter: ${escapeHtml(j.adapter_name)}</span>` : ''}
-      <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
+      <span>Progress ${pct}%</span>
+      ${j.current_loss != null ? `<span>Loss <span class="tabular-nums" style="color:var(--text-2);">${j.current_loss.toFixed(4)}</span></span>` : ''}
+      ${j.adapter_name ? `<span>Adapter <code>${escapeHtml(j.adapter_name)}</code></span>` : ''}
+      <span>Elapsed ${fmtDuration(j.elapsed_secs)}</span>
     </div>
-    ${isRunning ? `<div style="margin-top:6px">${renderCancelJobButton(j.job_id)}</div>` : ''}
+    ${isRunning ? `<div>${renderCancelJobButton(j.job_id)}</div>` : ''}
   </div>`;
 }
 
@@ -2129,11 +3134,11 @@ loadServedModelId();
 function renderChat() {
   const el = document.getElementById('chat-output');
   if (chatMessages.length === 0) {
-    el.innerHTML = `<div class="empty" style="padding:24px;text-align:left;">
+    el.innerHTML = `<div class="empty">
       <div style="font-weight:600;color:var(--text);margin-bottom:6px;">Send a message to test inference.</div>
-      <div>Quick Inference sends a chat completion to the currently selected adapter, or the <strong>Base Model</strong>, using the temperature above.</div>
-      <div style="margin-top:8px;">Try: <code>Explain Kiln in one sentence.</code></div>
-      <div style="margin-top:8px;">If the server is still starting or model loading fails, check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting guide</a>.</div>
+      <div>Quick Inference sends a chat completion to the currently selected adapter, or the <strong>Base model</strong>, using the temperature above.</div>
+      <div style="margin-top:var(--space-2);">Try: <code>Explain Kiln in one sentence.</code></div>
+      <div style="margin-top:var(--space-2);">If the server is still starting, check <a href="/health" target="_blank" rel="noopener noreferrer">/health</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting guide</a>.</div>
     </div>`;
     updateCopyChatResponseState();
     return;
