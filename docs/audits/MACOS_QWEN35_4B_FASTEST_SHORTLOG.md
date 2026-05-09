@@ -1911,3 +1911,10 @@
   outright (`945.340 -> 1011.763 us`) while again regressing attention output.
   Runtime source was reverted; keep current single-row simdgroup4 plus the
   down-proj tile16 selector.
+- 2026-05-09 E438: Accepted a selected-path Metal transposed-GEMV synthetic
+  bench that times `metal_transposed_coop_gemv_bf16` and prints the actual
+  selected tile for Qwen3.5 serial projection shapes. Rejected changing the
+  current down-proj selector from tile16 to tile8: the first selected-path pair
+  favored forced tile8 (`911.451 -> 892.811 us`), but the counter-order repeat
+  favored current tile16 (`947.226 -> 918.796 us`). Metal/Vulkan checks and fmt
+  passed; CUDA remains locally blocked by missing `nvcc`.

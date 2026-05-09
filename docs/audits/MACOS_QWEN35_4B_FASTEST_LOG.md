@@ -17882,3 +17882,67 @@ and again regressed attention output (`288.642 -> 366.221 us`).
 
 Rejected. Keep the current single-row simdgroup4 mapping and the existing
 down-projection tile16 selector. The runtime source was reverted.
+
+## 2026-05-09 - E438 accepted selected-path GEMV bench, rejected down selector change
+
+### Purpose
+
+E436/E437 showed that direct tile-only microbenches can disagree with the
+production selector path. Add a focused selected-path synthetic bench that
+times `metal_transposed_coop_gemv_bf16` directly, then use it to retest whether
+the current Qwen3.5 MLP down-projection tile16 selector should fall back to
+tile8.
+
+### Change
+
+- Added ignored Metal test
+  `bench_transposed_coop_gemv_qwen35_selected_synthetic`.
+- The bench covers Qwen3.5 serial projection shapes and prints the actual
+  selected tile plus selected-path timing.
+- No runtime selector or kernel behavior changed.
+
+### Validation
+
+- `KILN_METAL_TRANSPOSED_COOP_SELECTED_BENCH_WARMUP=5 KILN_METAL_TRANSPOSED_COOP_SELECTED_BENCH_ITERS=30 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_qwen35_selected_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16=1`
+- Counter-order disabled/default benchmark repeat
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-model --features cuda` remains locally blocked by missing `nvcc`
+- `git diff --check`
+
+### Results
+
+Selected-path synthetic timings:
+
+| config | gate/up selected | down selected | attn output selected | attn qkv-like selected |
+| --- | ---: | ---: | ---: | ---: |
+| default selector | `1131.362 us` | `911.451 us` (`Tile16`) | `280.476 us` | `521.461 us` |
+| tile16 disabled | `1159.631 us` | `892.811 us` (`Tile8`) | `278.747 us` | `517.901 us` |
+| tile16 disabled rerun | `1160.286 us` | `947.226 us` (`Tile8`) | `281.335 us` | `473.679 us` |
+| default selector rerun | `1107.753 us` | `918.796 us` (`Tile16`) | `277.517 us` | `479.317 us` |
+
+The first pair favored forcing down-projection to tile8
+(`911.451 -> 892.811 us`, `2.0%`). The counter-order pair favored the current
+tile16 selector (`947.226 -> 918.796 us`, `3.0%`). Because the direction
+flipped, there is no stable evidence to change the production selector.
+
+### Artifacts
+
+- `e438_transposed_selected_default.log`
+- `e438_transposed_selected_tile16_disabled.log`
+- `e438_transposed_selected_tile16_disabled_rerun.log`
+- `e438_transposed_selected_default_rerun.log`
+- `e438_transposed_selected_fmt_check.log`
+- `e438_transposed_selected_check_metal.log`
+- `e438_transposed_selected_check_vulkan.log`
+- `e438_transposed_selected_check_cuda.log`
+- `e438_transposed_selected_git_diff_check.log`
+
+### Decision
+
+Accepted the selected-path synthetic bench as permanent measurement tooling.
+Rejected changing the runtime down-projection selector; keep the current
+tile16 default for the Qwen3.5 down-projection shape until a selector-path A/B
+is stable across counter-order runs.

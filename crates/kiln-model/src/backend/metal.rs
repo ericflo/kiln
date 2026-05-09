@@ -13949,6 +13949,59 @@ mod tests {
         Ok(())
     }
 
+    fn bench_transposed_coop_selected_projection_case(
+        device: &Device,
+        name: &str,
+        input_dim: usize,
+        output_dim: usize,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<()> {
+        let x = patterned_bf16_x(input_dim, device)?;
+        let weight_t = patterned_bf16_2d(input_dim, output_dim, device, 37, 0.0009765625)?;
+        device.synchronize()?;
+
+        assert!(metal_transposed_coop_gemv_supports(&x, &weight_t));
+        let selected_tile = metal_transposed_coop_gemv_select_tile(input_dim, output_dim);
+        let reference = x.broadcast_matmul(&weight_t)?;
+        let selected = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+        device.synchronize()?;
+
+        assert_eq!(reference.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(selected.dims(), &[1usize, 1usize, output_dim]);
+        assert_eq!(selected.dtype(), DType::BF16);
+        let max = max_abs_diff(&reference, &selected)?;
+        let mean = mean_abs_diff(&reference, &selected)?;
+        assert!(
+            max < 1.5e-1,
+            "{name} selected transposed coop GEMV max_abs_diff={max:e} exceeds tolerance"
+        );
+        assert!(
+            mean < 2.5e-2,
+            "{name} selected transposed coop GEMV mean_abs_diff={mean:e} exceeds tolerance"
+        );
+
+        let broadcast_us = bench_metal_tensor_op(device, warmup, iters, || {
+            x.broadcast_matmul(&weight_t)
+                .context("bench broadcast_matmul selected transposed projection")
+        })?;
+        let selected_us = bench_metal_tensor_op(device, warmup, iters, || {
+            metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                .context("bench selected transposed coop GEMV projection")
+        })?;
+
+        eprintln!(
+            "synthetic Metal Qwen3.5 {name} selected BF16 transposed GEMV: \
+             x=[1,1,{input_dim}] weight_t=[{input_dim},{output_dim}] \
+             selected_tile={selected_tile:?} warmup={warmup} iters={iters} \
+             broadcast_matmul={broadcast_us:.3} us selected={selected_us:.3} us \
+             speedup={:.3}x max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+            broadcast_us / selected_us,
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn test_metal_rotary_embedding_batched_position_tables_match_rowwise() -> Result<()> {
         let Some(device) = try_new_metal() else {
@@ -16389,6 +16442,52 @@ mod tests {
             iters,
         )?;
         bench_transposed_coop_projection_case(
+            &device,
+            "attn_qkv_like",
+            QWEN35_HIDDEN,
+            QWEN35_ATTN_QKV_OUT,
+            warmup,
+            iters,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "synthetic Metal microbench; run explicitly with --ignored --nocapture"]
+    fn bench_transposed_coop_gemv_qwen35_selected_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let warmup = env_usize("KILN_METAL_TRANSPOSED_COOP_SELECTED_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_TRANSPOSED_COOP_SELECTED_BENCH_ITERS", 20);
+
+        bench_transposed_coop_selected_projection_case(
+            &device,
+            "mlp_gate_or_up",
+            QWEN35_HIDDEN,
+            QWEN35_INTERMEDIATE,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_selected_projection_case(
+            &device,
+            "down_proj",
+            QWEN35_INTERMEDIATE,
+            QWEN35_HIDDEN,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_selected_projection_case(
+            &device,
+            "attn_output",
+            QWEN35_HIDDEN,
+            QWEN35_HIDDEN,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_selected_projection_case(
             &device,
             "attn_qkv_like",
             QWEN35_HIDDEN,
