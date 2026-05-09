@@ -1829,6 +1829,71 @@ Verdict:
   Any future scheduler wait work needs an adaptive policy or a stronger
   repeated A/B that covers both throughput and single-request latency.
 
+### 2026-05-09 A038: Accept Packed-BF16 GDN In-Proj Row-Pair for Batch >= 4
+
+Hypothesis:
+- Metal E369 showed that reusing each GDN in-projection weight load across two
+  adjacent decode rows helped larger batches, but hurt batch `2/3`.
+- Vulkan A032 already pairs adjacent QKV/Z columns for batched GDN in-proj. A
+  row-pair variant gated to `batch >= 4` could improve explicit larger live
+  batches while leaving the common batch `1/2/3` path unchanged.
+
+Implementation:
+- Added `gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w.comp`.
+- The shader keeps the A032 QKV/Z column-pairing layout and computes two
+  adjacent batch rows per workgroup for the same projection-column unit.
+- Routed only the packed-BF16 GDN in-proj path to this shader when
+  `batch >= 4`.
+- Added rollback env `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`.
+- CPU, CUDA, Metal, F32 Vulkan GDN in-proj, and Vulkan batch `1/2/3` routing
+  are unchanged.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_in_proj_decode_batched_bf16_packed_weights -- --nocapture`
+- `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  gdn_in_proj_decode_batched_bf16_packed_weights_row_pair_matches_cpu_reference
+  -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Focused packed-BF16 GDN in-proj parity passed for both the existing batch-3
+  path and the new batch-5 row-pair path.
+- Rollback parity passed for the new batch-5 test with
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`.
+- Same-binary endpoint A/B, four concurrent streaming prompts,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Pair 1, rollback first:
+    - Rollback disabled: `21.972988s`, `23` jobs, `8` batches, `23` rows,
+      max batch `4`.
+    - Candidate: `20.143145s`, identical counters.
+  - Pair 2, candidate first:
+    - Candidate: `20.294414s`, `23` jobs, `8` batches, `23` rows, max batch
+      `4`.
+    - Rollback disabled: `21.480328s`, identical counters.
+  - All runs returned HTTP 200, coherent visible text
+    `"6 7 8 9 "`, `"11 12 13"`, `"16 17 18"`, and `"13"`, with reasoning
+    length `0`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a038-gdn-in-proj-rowpair-*`
+- `vulkan-strix-halo-2026-05-09-a038-gdn-in-proj-rowpair-repeat-*`
+
+Verdict:
+- Accepted. Keep the Vulkan packed-BF16 GDN in-proj row-pair path enabled only
+  for `batch >= 4`.
+- This follows the Metal E369 lesson: row-pair reuse is useful for larger live
+  batches, while batch `1/2/3` should stay on the previous path.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU

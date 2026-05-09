@@ -1,0 +1,59 @@
+{
+  "case": "candidate",
+  "disabled": false,
+  "wait_us": 5000,
+  "ready_after_s": 13,
+  "wall_s": 20.143144742000004,
+  "metrics_before": {
+    "jobs": 0.0,
+    "batches": 0.0,
+    "rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "jobs": 23.0,
+    "batches": 8.0,
+    "rows": 23.0,
+    "max_batch": 4.0
+  },
+  "metrics_delta": {
+    "jobs": 23.0,
+    "batches": 8.0,
+    "rows": 23.0,
+    "max_batch": 4.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 20.142006008998578,
+      "finish_reason": "length",
+      "text": "6 7 8 9 ",
+      "reasoning_len": 0
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 20.14183400299953,
+      "finish_reason": "length",
+      "text": "11 12 13",
+      "reasoning_len": 0
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 20.14163367799847,
+      "finish_reason": "length",
+      "text": "16 17 18",
+      "reasoning_len": 0
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 18.61679669300065,
+      "finish_reason": "stop",
+      "text": "13",
+      "reasoning_len": 0
+    }
+  ]
+}

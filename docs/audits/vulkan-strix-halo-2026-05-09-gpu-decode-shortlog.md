@@ -48,6 +48,26 @@ before or with each accepted change and each measured rejection.
 | A035 | Trial push-constant `seq_lens` for Vulkan dyn-seqlen paged attention. | Temporary shader/dispatcher path passed focused paged-attn parity for candidate and rollback, `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Greedy streaming actor smoke was inconclusive (`20.086s` candidate vs `20.857s` rollback) with correct visible text, but the more relevant sampled actor batch regressed: rollback `16.944s`, candidate `17.467s`, same usage and outputs. | Rejected and removed; row-length push constants are not enough. Next dyn-seqlen work needs K/V residency or compact-window upload/materialization changes. |
 | A036 | Trial Metal-inspired packed-BF16 Vulkan generic linear row-pair for small live batches. | Temporary row-pair shader/dispatcher path passed focused BF16 generic linear parity for candidate and rollback, focused packed-BF16 MLP parity, `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. No-env live greedy decode-batcher smoke with thinking disabled returned coherent visible text, but regressed: rollback `18.438s`, candidate `19.136s`, both `23` jobs / `14` batches / `23` rows / max batch `3`. | Rejected and removed; Metal's row-pair shape does not directly transfer to Vulkan packed-BF16 generic linear decode. Future work needs RADV/Strix-Halo-specific tiling evidence first. |
 | A037 | Trial Vulkan-only default `5ms` live decode-batcher rendezvous wait. | Env-only sweep suggested `5ms` could help (`16.916s`, `8` batches) versus `0us` (`19.276s`, `14` batches), and a single-stream env probe showed no penalty. Temporary code passed `cargo test -p kiln-model decode_batcher_default --lib`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. The decisive same-binary no-env candidate regressed badly: rollback `15.159s`, candidate `21.191s`, with coherent visible text and empty reasoning in both. | Rejected and removed; do not set a static Vulkan default wait from env sweeps alone. Future wait work needs adaptive policy and stronger repeated A/B. |
+| A038 | Add packed-BF16 Vulkan GDN in-proj row-pair shader for `batch >= 4`. | Inspired by Metal E369 but gated away from batch `2/3`. Focused GDN in-proj parity passed for existing batch-3 and new batch-5 row-pair paths, rollback parity passed with `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`, `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build passed. Two same-binary endpoint pairs with wait `5000us` and max batch `4` improved candidate `20.143s` vs rollback `21.973s`, then candidate `20.294s` vs rollback `21.480s`, with identical counters and coherent visible text. | Keep; Vulkan-only larger-batch GDN in-proj win. Batch `1/2/3`, CPU, CUDA, Metal, and F32 Vulkan path stay unchanged. Rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`. |
+
+Additional validation after A038:
+
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_in_proj_decode_batched_bf16_packed_weights -- --nocapture`
+- `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  gdn_in_proj_decode_batched_bf16_packed_weights_row_pair_matches_cpu_reference
+  -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+- Two same-binary endpoint A/B pairs returned HTTP 200 with non-empty visible
+  content and empty reasoning text.
 
 Additional validation after rejected A037:
 

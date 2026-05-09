@@ -59,6 +59,12 @@ fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z").is_err())
 }
 
+fn gdn_in_proj_batch_row_pair_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
+}
+
 fn prefill_row_pair_matmul_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
@@ -83,6 +89,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_in_proj_decode_bf16w", 6, 24),
         ("gdn_in_proj_decode_batched", 6, 28),
         ("gdn_in_proj_decode_batched_bf16w", 6, 28),
+        ("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
@@ -749,6 +756,8 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
 
     let total_out = qkv_dim + z_dim + a_dim + b_dim;
     let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
+    let row_pair =
+        packed_bf16_weights && pair_qkv_z && batch >= 4 && gdn_in_proj_batch_row_pair_enabled();
     let dispatch_cols = if pair_qkv_z {
         qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
     } else {
@@ -768,7 +777,12 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         }
     } else {
         if packed_bf16_weights {
-            if pair_qkv_z {
+            if row_pair {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w.comp"
+                )
+            } else if pair_qkv_z {
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_bf16w.comp"
@@ -817,6 +831,7 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
             b_dim,
             total_out,
             dispatch_cols,
+            row_pair,
             &spirv,
             &push_constants,
             &x_data,
@@ -858,6 +873,8 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         &push_constants,
         if batch == 1 {
             total_out.div_ceil(16) as u32
+        } else if row_pair {
+            (batch.div_ceil(2) * dispatch_cols.div_ceil(80)) as u32
         } else {
             (batch * dispatch_cols.div_ceil(80)) as u32
         },
@@ -893,6 +910,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     b_dim: usize,
     total_out: usize,
     dispatch_cols: usize,
+    row_pair: bool,
     spirv: &[u8],
     push_constants: &[u32],
     x_data: &[u8],
@@ -1008,6 +1026,8 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             cmd,
             if batch == 1 {
                 total_out.div_ceil(16) as u32
+            } else if row_pair {
+                (batch.div_ceil(2) * dispatch_cols.div_ceil(80)) as u32
             } else {
                 (batch * dispatch_cols.div_ceil(80)) as u32
             },

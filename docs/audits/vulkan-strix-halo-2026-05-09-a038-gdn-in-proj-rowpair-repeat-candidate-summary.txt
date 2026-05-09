@@ -1,0 +1,9 @@
+case=candidate
+disabled=False
+wait_us=5000
+wall_s=20.294414
+metrics_delta={"batches": 8.0, "jobs": 23.0, "max_batch": 4.0, "rows": 23.0}
+response_0 status=200 finish=length elapsed_s=20.291523 text='6 7 8 9 ' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=20.110806 text='11 12 13' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=20.289830 text='16 17 18' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=19.110006 text='13' reasoning_len=0

@@ -65,6 +65,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "gdn_in_proj_decode_batched_pair_qkv_z_bf16w",
         SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_BF16W,
     ),
+    (
+        "gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w",
+        SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS2_BF16W,
+    ),
     ("gdn_gated_rms_norm", SPIR_V_GDN_GATED_RMS_NORM),
     ("causal_conv1d", SPIR_V_CAUSAL_CONV1D),
     (
