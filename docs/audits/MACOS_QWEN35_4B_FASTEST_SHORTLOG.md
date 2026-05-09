@@ -1192,3 +1192,16 @@
   `454.0 ms` prefill and `169.3 ms` mean ITL (`5.91 tok/s`) after a cold
   warmup run. No source change; this establishes the control before targeting
   Metal's missing divergent-length batch attention path.
+- 2026-05-09 E356: Accepted Metal dyn-seqlen paged batch decode attention and
+  enabled mixed-length live decode admission by default on Metal. The new BF16
+  Qwen-shaped Metal kernel handles per-row `seqused_k`/block tables for
+  `[B,1,16,256]` decode, while uniform batches still prefer the faster strict
+  path. Parity passed against rowwise paged decode
+  (`max_abs_diff=6.1035156e-5`, `mean_abs_diff=2.1966246e-6`), mixed-seq live
+  batcher parity passed, and Metal/Vulkan `cargo check` passed. Synthetic
+  dyn-seqlen attention beat rowwise by `1.572x/1.302x/1.656x` at batch
+  `2/4/8`. On the varied-prompt four-request streaming probe, disabling
+  mixed-seq admission took `8.104361s` with `28` one-row worker batches; default
+  Metal mixed-seq took `5.728904s` with `14` worker batches and max batch `3`,
+  a `1.414x` wall-time speedup. `KILN_DECODE_BATCH_MIXED_SEQ=0` remains the
+  kill switch and non-Metal devices only opt in via env.

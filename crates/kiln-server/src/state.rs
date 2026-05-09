@@ -1609,10 +1609,11 @@ impl AppState {
             ))
         });
         let decode_batcher = if DecodeBatcherConfig::enabled_for_device(&device) {
-            let config = DecodeBatcherConfig::from_env();
+            let config = DecodeBatcherConfig::from_env_for_device(&device);
             tracing::info!(
                 max_batch = config.max_batch,
                 wait_us = config.wait.as_micros() as u64,
+                mixed_seq_lens = config.allow_mixed_seq_lens,
                 "live greedy decode batcher enabled"
             );
             match DecodeBatcher::spawn(runner.clone(), paged_cache.clone(), config) {

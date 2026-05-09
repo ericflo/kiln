@@ -5663,20 +5663,22 @@ fn try_flash_attn_paged_decode(
     Ok(Some(out))
 }
 
-/// Batched full-attention decode for rows whose live paged-KV windows are
-/// contiguous and share a common sequence length.
+/// Batched full-attention decode for rows whose live paged-KV windows can be
+/// addressed through a block table. Uniform contiguous rows use the strict
+/// faster path when available; divergent row lengths use the backend's
+/// dyn-seqlen path.
 ///
 /// This is the scheduler-facing low-level primitive for true decode batching:
 /// it projects Q/K/V for `[batch, 1, hidden]`, writes one K/V row per request
 /// into the shared paged cache, runs the batched contiguous paged-attention
 /// backend kernel, then applies the attention output gate and `o_proj`.
 ///
-/// Current backend constraints are intentionally strict:
+/// Current backend constraints are intentionally narrow:
 /// - one decode token per row,
-/// - all rows at the same `start_pos`,
 /// - non-FP8 paged cache,
-/// - each row's live `0..start_pos+1` KV window is one contiguous pool run,
-/// - backend accepts `flash_attn_paged_decode_contiguous_batch`.
+/// - either each row's live `0..start_pos+1` KV window is one contiguous pool
+///   run with a uniform length, or the backend accepts
+///   `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_attention_paged_decode_contiguous_batch(
     backend: &dyn BackendRuntime,
@@ -7621,7 +7623,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
 ///
 /// This is the model-loop counterpart to
 /// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
-/// per batch row, a block table per row, a common decode position, and an
+/// per batch row, a block table per row, per-row decode positions, and an
 /// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
 /// shape `[batch, 1, vocab_size]`.
 #[allow(clippy::too_many_arguments)]

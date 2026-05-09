@@ -187,6 +187,7 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
     if !metal_paged_attn_decode_contiguous_disabled() {
         metal_paged_attn_decode_contiguous_pipeline(metal_device)?;
         metal_paged_attn_decode_contiguous_batch_pipeline(metal_device)?;
+        metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(metal_device)?;
     }
     if !metal_paged_kv_write_token_major_disabled() {
         metal_paged_kv_write_token_major_pipeline(metal_device)?;
@@ -278,6 +279,45 @@ impl BackendRuntime for MetalBackend {
             softmax_scale,
         )
         .context("metal contiguous paged batch decode attention failed")?;
+        Ok(Some(out))
+    }
+
+    fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+        &self,
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        block_table: &Tensor,
+        seqused_k: &Tensor,
+        max_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<Tensor>> {
+        if !causal
+            || !metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+                q,
+                k_pool,
+                v_pool,
+                block_table,
+                seqused_k,
+                max_seqlen_k,
+                page_block_size,
+            )
+        {
+            return Ok(None);
+        }
+        let out = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+        )
+        .context("metal dyn-seqlen paged batch decode attention failed")?;
         Ok(Some(out))
     }
 
@@ -3118,6 +3158,136 @@ kernel void kiln_paged_attn_decode_contiguous_batch_bf16_d256(
         }
     }
 }
+
+kernel void kiln_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+    device const bfloat* q [[buffer(0)]],
+    device const bfloat* k_pool [[buffer(1)]],
+    device const bfloat* v_pool [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    device const uint* block_table [[buffer(4)]],
+    device const int* seqused_k [[buffer(5)]],
+    constant uint& batch [[buffer(6)]],
+    constant uint& max_blocks_per_seq [[buffer(7)]],
+    constant uint& max_seqlen_k [[buffer(8)]],
+    constant uint& page_block_size [[buffer(9)]],
+    constant uint& q_heads [[buffer(10)]],
+    constant uint& kv_heads [[buffer(11)]],
+    constant float& scale [[buffer(12)]],
+    constant uint& total_slots [[buffer(13)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]
+) {
+    constexpr uint D = 256;
+    constexpr uint BN = 32;
+    constexpr uint BD = 32;
+    constexpr uint EPT = D / BD;
+    constexpr uint QWEN_HEADS_PER_KV = 4;
+
+    const uint batch_idx = tid.x;
+    const uint head_idx = tid.y;
+    if (batch_idx >= batch || head_idx >= q_heads) {
+        return;
+    }
+
+    const uint kv_head_idx = head_idx / QWEN_HEADS_PER_KV;
+    if (kv_head_idx >= kv_heads) {
+        return;
+    }
+
+    device bfloat* out_ptr =
+        out + (batch_idx * q_heads + head_idx) * D + simd_gid * EPT;
+    const int row_len_i = seqused_k[batch_idx];
+    if (row_len_i <= 0 || page_block_size == 0 || max_blocks_per_seq == 0) {
+        if (simd_lid == 0) {
+            for (uint i = 0; i < EPT; ++i) {
+                out_ptr[i] = static_cast<bfloat>(0.0f);
+            }
+        }
+        return;
+    }
+    const uint row_len = min(static_cast<uint>(row_len_i), max_seqlen_k);
+
+    thread float q_frag[EPT];
+    thread float k_frag[EPT];
+    thread float o_frag[EPT];
+    threadgroup float outputs[BN * BD];
+    threadgroup float max_scores[BN];
+    threadgroup float sum_exp_scores[BN];
+
+    device const bfloat* q_ptr =
+        q + (batch_idx * q_heads + head_idx) * D + simd_lid * EPT;
+
+    for (uint i = 0; i < EPT; ++i) {
+        q_frag[i] = scale * static_cast<float>(q_ptr[i]);
+        o_frag[i] = 0.0f;
+    }
+
+    float max_score = -INFINITY;
+    float sum_exp_score = 0.0f;
+
+    for (uint t = simd_gid; t < row_len; t += BN) {
+        const uint block_idx = t / page_block_size;
+        const uint block_offset = t - block_idx * page_block_size;
+        if (block_idx >= max_blocks_per_seq) {
+            continue;
+        }
+        const uint physical_block = block_table[batch_idx * max_blocks_per_seq + block_idx];
+        const uint pool_slot = physical_block * page_block_size + block_offset;
+        if (pool_slot >= total_slots) {
+            continue;
+        }
+        device const bfloat* k_ptr =
+            k_pool + (pool_slot * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+        device const bfloat* v_ptr =
+            v_pool + (pool_slot * kv_heads + kv_head_idx) * D + simd_lid * EPT;
+
+        for (uint i = 0; i < EPT; ++i) {
+            k_frag[i] = static_cast<float>(k_ptr[i]);
+        }
+
+        float score = 0.0f;
+        for (uint i = 0; i < EPT; ++i) {
+            score += q_frag[i] * k_frag[i];
+        }
+        score = simd_sum(score);
+
+        const float new_max = max(max_score, score);
+        const float factor = fast::exp(max_score - new_max);
+        const float exp_score = fast::exp(score - new_max);
+
+        max_score = new_max;
+        sum_exp_score = sum_exp_score * factor + exp_score;
+
+        for (uint i = 0; i < EPT; ++i) {
+            o_frag[i] = o_frag[i] * factor + exp_score * static_cast<float>(v_ptr[i]);
+        }
+    }
+
+    if (simd_lid == 0) {
+        max_scores[simd_gid] = max_score;
+        sum_exp_scores[simd_gid] = sum_exp_score;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float partial_max = max_scores[simd_lid];
+    const float global_max = simd_max(partial_max);
+    const float partial_factor = fast::exp(partial_max - global_max);
+    const float denom = simd_sum(sum_exp_scores[simd_lid] * partial_factor);
+
+    for (uint i = 0; i < EPT; ++i) {
+        outputs[simd_lid * BD + simd_gid] = o_frag[i];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        o_frag[i] = simd_sum(outputs[simd_gid * BD + simd_lid] * partial_factor) / denom;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (simd_lid == 0) {
+        for (uint i = 0; i < EPT; ++i) {
+            out_ptr[i] = static_cast<bfloat>(o_frag[i]);
+        }
+    }
+}
 "#;
 
 const METAL_PAGED_KV_WRITE_TOKEN_MAJOR_KERNEL: &str = r#"
@@ -3811,6 +3981,42 @@ fn metal_paged_attn_decode_contiguous_batch_pipeline(
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!("build metal contiguous paged batch decode attention: {e:?}")
+        })?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal dyn-seqlen paged batch decode pipeline poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function(
+            "kiln_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256",
+            None,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("load metal dyn-seqlen paged batch decode attention: {e:?}")
+        })?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| {
+            anyhow::anyhow!("build metal dyn-seqlen paged batch decode attention: {e:?}")
         })?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
@@ -5681,6 +5887,206 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
         encoder.set_bytes(8, &kv_heads_u32);
         encoder.set_bytes(9, &softmax_scale);
         encoder.set_bytes(10, &total_slots_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: batch,
+            height: q_heads,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 1024,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+#[allow(dead_code)]
+fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table: &Tensor,
+    seqused_k: &Tensor,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+) -> bool {
+    if metal_paged_attn_decode_contiguous_disabled() {
+        return false;
+    }
+    if q.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+        || block_table.dtype() != DType::U32
+        || seqused_k.dtype() != DType::I32
+    {
+        return false;
+    }
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k_pool.device(), Device::Metal(_))
+        || !matches!(v_pool.device(), Device::Metal(_))
+        || !matches!(block_table.device(), Device::Metal(_))
+        || !matches!(seqused_k.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !q.is_contiguous()
+        || !k_pool.is_contiguous()
+        || !v_pool.is_contiguous()
+        || !block_table.is_contiguous()
+        || !seqused_k.is_contiguous()
+    {
+        return false;
+    }
+    let Ok((batch, q_len, q_heads, head_dim)) = q.dims4() else {
+        return false;
+    };
+    let Ok((total_slots, kv_heads, k_head_dim)) = k_pool.dims3() else {
+        return false;
+    };
+    let Ok(v_dims) = v_pool.dims3() else {
+        return false;
+    };
+    let Ok((table_batch, max_blocks_per_seq)) = block_table.dims2() else {
+        return false;
+    };
+    let Ok(seq_rows) = seqused_k.dims1() else {
+        return false;
+    };
+    batch > 0
+        && q_len == 1
+        && q_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && k_head_dim == head_dim
+        && v_dims == (total_slots, kv_heads, head_dim)
+        && table_batch == batch
+        && seq_rows == batch
+        && max_blocks_per_seq > 0
+        && max_seqlen_k > 0
+        && page_block_size > 0
+        && max_blocks_per_seq <= u32::MAX as usize
+        && max_seqlen_k <= u32::MAX as usize
+        && page_block_size <= u32::MAX as usize
+        && batch <= u32::MAX as usize
+        && q_heads <= u32::MAX as usize
+        && kv_heads <= u32::MAX as usize
+        && total_slots <= u32::MAX as usize
+}
+
+#[allow(dead_code)]
+fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table: &Tensor,
+    seqused_k: &Tensor,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+        ),
+        "metal dyn-seqlen paged batch decode attention unsupported shape"
+    );
+    let (batch, _, q_heads, head_dim) = q.dims4()?;
+    let (total_slots, _, _) = k_pool.dims3()?;
+    let (_, max_blocks_per_seq) = block_table.dims2()?;
+    let out =
+        unsafe { Tensor::empty((batch, 1usize, q_heads, head_dim), DType::BF16, q.device())? };
+
+    let Device::Metal(device) = q.device() else {
+        anyhow::bail!("metal dyn-seqlen paged batch decode attention requires Metal tensors");
+    };
+    let pipeline = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k_pool.storage_and_layout();
+        let (v_storage, v_layout) = v_pool.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+        let (table_storage, table_layout) = block_table.storage_and_layout();
+        let (seq_storage, seq_layout) = seqused_k.storage_and_layout();
+
+        let q_metal = match &*q_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention q must be on Metal"),
+        };
+        let k_metal = match &*k_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention k_pool must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention v_pool must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention out must be on Metal"),
+        };
+        let table_metal = match &*table_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention block_table must be on Metal"),
+        };
+        let seq_metal = match &*seq_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal dyn-seqlen batch attention seqused_k must be on Metal"),
+        };
+
+        let q_buf = candle_core::metal_backend::buffer_o(q_metal.buffer(), &q_layout, q.dtype());
+        let k_buf =
+            candle_core::metal_backend::buffer_o(k_metal.buffer(), &k_layout, k_pool.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_pool.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let table_buf = candle_core::metal_backend::buffer_o(
+            table_metal.buffer(),
+            &table_layout,
+            block_table.dtype(),
+        );
+        let seq_buf = candle_core::metal_backend::buffer_o(
+            seq_metal.buffer(),
+            &seq_layout,
+            seqused_k.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+        encoder.set_buffer(4, Some(table_buf.buffer), table_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(seq_buf.buffer), seq_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let max_blocks_u32 = max_blocks_per_seq as u32;
+        let max_seqlen_u32 = max_seqlen_k as u32;
+        let page_block_size_u32 = page_block_size as u32;
+        let q_heads_u32 = q_heads as u32;
+        let kv_heads_u32 = 4u32;
+        let total_slots_u32 = total_slots as u32;
+        encoder.set_bytes(6, &batch_u32);
+        encoder.set_bytes(7, &max_blocks_u32);
+        encoder.set_bytes(8, &max_seqlen_u32);
+        encoder.set_bytes(9, &page_block_size_u32);
+        encoder.set_bytes(10, &q_heads_u32);
+        encoder.set_bytes(11, &kv_heads_u32);
+        encoder.set_bytes(12, &softmax_scale);
+        encoder.set_bytes(13, &total_slots_u32);
 
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: batch,
@@ -9957,6 +10363,75 @@ mod tests {
         Tensor::cat(&row_refs, 0).context("stack rowwise contiguous decode outputs")
     }
 
+    fn paged_attn_decode_contiguous_varlen_rowwise(
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        start_slots: &[usize],
+        seq_lens: &[usize],
+        scale: f32,
+    ) -> Result<Tensor> {
+        let (batch, _, q_heads, head_dim) = q.dims4()?;
+        anyhow::ensure!(
+            start_slots.len() == batch && seq_lens.len() == batch,
+            "rowwise varlen contiguous decode metadata mismatch"
+        );
+        let mut rows = Vec::with_capacity(batch);
+        for idx in 0..batch {
+            let q_row = q.narrow(0, idx, 1)?.transpose(1, 2)?.contiguous()?;
+            rows.push(
+                metal_paged_attn_decode_contiguous_bf16_d256(
+                    &q_row,
+                    k_pool,
+                    v_pool,
+                    start_slots[idx],
+                    seq_lens[idx],
+                    scale,
+                )?
+                .reshape((1usize, 1usize, q_heads, head_dim))?,
+            );
+        }
+        let row_refs: Vec<&Tensor> = rows.iter().collect();
+        Tensor::cat(&row_refs, 0).context("stack rowwise varlen contiguous decode outputs")
+    }
+
+    fn paged_attn_decode_dyn_seqlen_sdpa_rowwise(
+        q: &Tensor,
+        k_pool: &Tensor,
+        v_pool: &Tensor,
+        block_table: &Tensor,
+        seq_lens: &[usize],
+        page_block_size: usize,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let (batch, _, _, _) = q.dims4()?;
+        anyhow::ensure!(
+            seq_lens.len() == batch,
+            "rowwise dyn-seqlen decode seq_lens mismatch"
+        );
+        let backend = MetalBackend::new(q.device().clone());
+        let mut rows = Vec::with_capacity(batch);
+        for (idx, &seq_len) in seq_lens.iter().enumerate() {
+            let q_row = q.narrow(0, idx, 1)?.contiguous()?;
+            let table_row = block_table.narrow(0, idx, 1)?.contiguous()?;
+            let out = backend
+                .flash_attn_paged_decode(
+                    &q_row,
+                    k_pool,
+                    v_pool,
+                    &table_row,
+                    seq_len,
+                    page_block_size,
+                    scale,
+                    true,
+                )?
+                .with_context(|| format!("row {idx} SDPA paged decode declined"))?;
+            rows.push(out);
+        }
+        let row_refs: Vec<&Tensor> = rows.iter().collect();
+        Tensor::cat(&row_refs, 0).context("stack rowwise dyn-seqlen decode outputs")
+    }
+
     fn rotary_qk_rowwise(
         q: &Tensor,
         k: &Tensor,
@@ -10825,14 +11300,10 @@ mod tests {
                 .map(|idx| v.narrow(0, idx, 1).and_then(|row| row.contiguous()))
                 .collect::<candle_core::Result<Vec<_>>>()?;
             let rowwise_slots: Vec<usize> = slots_data.iter().map(|&slot| slot as usize).collect();
-            let k_pool_row =
-                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let v_pool_row =
-                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let k_pool_batch =
-                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let v_pool_batch =
-                Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let k_pool_row = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let v_pool_row = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let k_pool_batch = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+            let v_pool_batch = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
             device.synchronize()?;
 
             assert!(metal_paged_kv_write_token_major_batch_supports(
@@ -11023,6 +11494,148 @@ mod tests {
                  q=[{batch},{q_heads},1,{head_dim}] pools=[{total_slots},{kv_heads},{head_dim}] \
                  seq_len={seq_len} warmup={warmup} iters={iters} \
                  rowwise={rowwise_us:.3} us batched={batched_us:.3} us speedup={:.3}x \
+                 max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+                rowwise_us / batched_us,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_paged_attn_decode_contiguous_batch_dyn_seqlen_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_PAGED_ATTN_DYN_BATCH_BENCH_WARMUP", 3);
+        let iters = env_usize("KILN_METAL_PAGED_ATTN_DYN_BATCH_BENCH_ITERS", 10);
+        let requested_slots = env_usize("KILN_METAL_PAGED_ATTN_DYN_BATCH_BENCH_SLOTS", 4096);
+        let max_seqlen_k = env_usize("KILN_METAL_PAGED_ATTN_DYN_BATCH_BENCH_MAX_SEQ_LEN", 512);
+        let page_block_size = env_usize("KILN_METAL_PAGED_ATTN_DYN_BATCH_BENCH_BLOCK", 16);
+        let q_heads = 16usize;
+        let kv_heads = 4usize;
+        let head_dim = 256usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let max_blocks_per_seq = max_seqlen_k.div_ceil(page_block_size).max(1);
+
+        for batch in [2usize, 4, 8] {
+            let total_slots =
+                requested_slots.max((batch * max_blocks_per_seq + 1) * page_block_size);
+            let kv_elems = total_slots * kv_heads * head_dim;
+            let k_data: Vec<f32> = (0..kv_elems)
+                .map(|i| ((i % 131) as f32 - 65.0) * 0.0004)
+                .collect();
+            let v_data: Vec<f32> = (0..kv_elems)
+                .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
+                .collect();
+            let q_elems = batch * q_heads * head_dim;
+            let q_data: Vec<f32> = (0..q_elems)
+                .map(|i| ((i % 97) as f32 - 48.0) * 0.0005)
+                .collect();
+            let mut block_table_data = Vec::with_capacity(batch * max_blocks_per_seq);
+            let mut start_slots = Vec::with_capacity(batch);
+            let mut seq_lens = Vec::with_capacity(batch);
+            for row in 0..batch {
+                let start_block = row * max_blocks_per_seq;
+                start_slots.push(start_block * page_block_size);
+                let row_seq = max_seqlen_k.saturating_sub((row * 7) % 31).max(1);
+                seq_lens.push(row_seq);
+                for block in 0..max_blocks_per_seq {
+                    block_table_data.push((start_block + block) as u32);
+                }
+            }
+            let seqused_k: Vec<i32> = seq_lens
+                .iter()
+                .map(|&len| i32::try_from(len).expect("seq_len fits i32"))
+                .collect();
+
+            let q = Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let block_table =
+                Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
+                    .contiguous()?;
+            let seqused_k = Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
+            device.synchronize()?;
+
+            assert!(
+                metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+                    &q,
+                    &k_pool,
+                    &v_pool,
+                    &block_table,
+                    &seqused_k,
+                    max_seqlen_k,
+                    page_block_size,
+                )
+            );
+            let rowwise = paged_attn_decode_contiguous_varlen_rowwise(
+                &q,
+                &k_pool,
+                &v_pool,
+                &start_slots,
+                &seq_lens,
+                scale,
+            )?;
+            let batched = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                &seqused_k,
+                max_seqlen_k,
+                page_block_size,
+                scale,
+            )?;
+            device.synchronize()?;
+
+            let max = max_abs_diff(&rowwise, &batched)?;
+            let mean = mean_abs_diff(&rowwise, &batched)?;
+            assert!(
+                max < 1e-6,
+                "Qwen3.5 dyn-seqlen paged decode batch={batch} max_abs_diff={max:e}"
+            );
+
+            let rowwise_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                paged_attn_decode_contiguous_varlen_rowwise(
+                    &q,
+                    &k_pool,
+                    &v_pool,
+                    &start_slots,
+                    &seq_lens,
+                    scale,
+                )
+                .context("bench rowwise varlen contiguous paged decode attention")
+            })?;
+            let batched_us = bench_metal_tensor_op(&device, warmup, iters, || {
+                metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+                    &q,
+                    &k_pool,
+                    &v_pool,
+                    &block_table,
+                    &seqused_k,
+                    max_seqlen_k,
+                    page_block_size,
+                    scale,
+                )
+                .context("bench dyn-seqlen batched contiguous paged decode attention")
+            })?;
+            let physical_tokens = batch;
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 dyn-seqlen paged decode attention batch BF16: \
+                 batch={batch} physical_tokens={physical_tokens} \
+                 q=[{batch},1,{q_heads},{head_dim}] pools=[{total_slots},{kv_heads},{head_dim}] \
+                 max_seqlen_k={max_seqlen_k} page_block_size={page_block_size} \
+                 warmup={warmup} iters={iters} rowwise={rowwise_us:.3} us \
+                 batched={batched_us:.3} us speedup={:.3}x \
                  max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
                 rowwise_us / batched_us,
             );
@@ -12648,6 +13261,126 @@ mod tests {
         assert!(
             backend_max < 1e-6,
             "BackendRuntime contiguous paged decode batch max_abs_diff={backend_max:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_paged_attn_decode_contiguous_batch_dyn_seqlen_matches_rowwise() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let batch = 3usize;
+        let q_heads = 16usize;
+        let kv_heads = 4usize;
+        let head_dim = 256usize;
+        let page_block_size = 4usize;
+        let max_blocks_per_seq = 4usize;
+        let total_slots = 48usize;
+        let max_seqlen_k = 13usize;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+        let block_table_data: Vec<u32> = vec![
+            2, 0, 0, 0, //
+            7, 1, 9, 0, //
+            5, 3, 8, 10,
+        ];
+        let seq_lens = vec![5usize, 9usize, 13usize];
+        let seqused_k: Vec<i32> = seq_lens
+            .iter()
+            .map(|&len| i32::try_from(len).expect("seq_len fits i32"))
+            .collect();
+        let q_elems = batch * q_heads * head_dim;
+        let q_data: Vec<f32> = (0..q_elems)
+            .map(|i| ((i % 97) as f32 - 48.0) * 0.0005)
+            .collect();
+        let kv_elems = total_slots * kv_heads * head_dim;
+        let k_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 131) as f32 - 65.0) * 0.0004)
+            .collect();
+        let v_data: Vec<f32> = (0..kv_elems)
+            .map(|i| ((i % 127) as f32 - 63.0) * 0.0006)
+            .collect();
+
+        let q = Tensor::from_slice(&q_data, (batch, 1usize, q_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let k_pool = Tensor::from_slice(&k_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let v_pool = Tensor::from_slice(&v_data, (total_slots, kv_heads, head_dim), &device)?
+            .to_dtype(DType::BF16)?
+            .contiguous()?;
+        let block_table =
+            Tensor::from_slice(&block_table_data, (batch, max_blocks_per_seq), &device)?
+                .contiguous()?;
+        let seqused_k = Tensor::from_slice(&seqused_k, batch, &device)?.contiguous()?;
+
+        assert!(
+            metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                &seqused_k,
+                max_seqlen_k,
+                page_block_size,
+            )
+        );
+        let reference = paged_attn_decode_dyn_seqlen_sdpa_rowwise(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            &seq_lens,
+            page_block_size,
+            scale,
+        )?;
+        let fused = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            &seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            scale,
+        )?;
+        let backend = MetalBackend::new(device.clone());
+        let via_backend = backend
+            .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                &seqused_k,
+                max_seqlen_k,
+                page_block_size,
+                scale,
+                true,
+            )?
+            .context("BackendRuntime declined dyn-seqlen paged decode batch")?;
+        device.synchronize()?;
+
+        assert_eq!(fused.dims(), &[batch, 1usize, q_heads, head_dim]);
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+        let backend_max = max_abs_diff(&fused, &via_backend)?;
+        eprintln!(
+            "dyn-seqlen contiguous paged decode batch: max_abs_diff={max:e} mean_abs_diff={mean:e}"
+        );
+        assert!(
+            max < 2e-2,
+            "dyn-seqlen contiguous paged decode batch max_abs_diff={max:e}"
+        );
+        assert!(
+            mean < 2e-4,
+            "dyn-seqlen contiguous paged decode batch mean_abs_diff={mean:e}"
+        );
+        assert!(
+            backend_max < 1e-6,
+            "BackendRuntime dyn-seqlen paged decode batch max_abs_diff={backend_max:e}"
         );
 
         Ok(())

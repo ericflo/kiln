@@ -11648,3 +11648,116 @@ missing divergent-length batch attention path: generic forward now carries the
 CUDA/Vulkan-style dyn-seqlen plumbing, but Metal still only implements the
 strict uniform-length contiguous batch kernel, so mixed-prompt continuous
 batching cannot use true Metal batch attention yet.
+
+## 2026-05-09 E356 - Enabled Metal mixed-length decode batching
+
+### Goal
+
+Remove the main Metal serving blocker left after the CUDA/Vulkan dyn-seqlen
+merge: live greedy requests with different prompt lengths could enter the
+decode batcher, but Metal could only execute the strict uniform-length
+contiguous paged-attention batch kernel. Varied-prompt concurrency therefore
+fell back to one-row decode work instead of true batched attention.
+
+### Change
+
+- Added a BF16 Metal dyn-seqlen paged decode attention kernel for Qwen-shaped
+  `[B,1,16,256]` queries, `[slots,4,256]` K/V pools, per-row block tables, and
+  per-row `seqused_k`.
+- Added the Metal backend hook for
+  `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`; uniform batches still
+  prefer the existing strict path unless the dyn-seqlen force env is set.
+- Added Metal parity coverage and an ignored synthetic attention benchmark.
+- Added `DecodeBatcherConfig::allow_mixed_seq_lens` and
+  `KILN_DECODE_BATCH_MIXED_SEQ`.
+- Switched server config construction to `DecodeBatcherConfig::from_env_for_device`.
+  Metal defaults mixed-seq admission on; non-Metal devices only opt in through
+  the env knob. `KILN_DECODE_BATCH_MIXED_SEQ=0` disables the new admission mode.
+- Logged `mixed_seq_lens` when the live decode batcher is created.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_dyn_seqlen_matches_rowwise --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_mixed_seq_lens_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal bench_paged_attn_decode_contiguous_batch_dyn_seqlen_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/generate.rs crates/kiln-model/src/forward.rs crates/kiln-server/src/state.rs`
+- `git diff --check`
+
+### Results
+
+The dyn-seqlen Metal parity test matched rowwise paged decode with
+`max_abs_diff=6.1035156e-5` and `mean_abs_diff=2.1966246e-6`. The live mixed
+sequence length decode batcher test passed, as did the existing uniform
+sequence length batcher test.
+
+Synthetic Metal Qwen3.5 dyn-seqlen paged decode attention, `max_seqlen_k=512`,
+`page_block_size=16`, warmup `3`, iters `10`:
+
+- batch `2`: rowwise `613.671 us`, batched `390.312 us`, speedup `1.572x`
+- batch `4`: rowwise `896.212 us`, batched `688.371 us`, speedup `1.302x`
+- batch `8`: rowwise `1392.321 us`, batched `840.796 us`, speedup `1.656x`
+
+Same-source release endpoint A/B, four concurrent varied-prompt streaming chat
+requests, greedy `max_tokens=8`, `32` generated tokens each run:
+
+- `KILN_DECODE_BATCH_MIXED_SEQ=0`:
+  - wall time `8.104361s`
+  - all `4` requests returned `200`
+  - `28` submitted batcher jobs
+  - `28` worker batches
+  - `28` rows
+  - max batch `1`
+- default Metal mixed-seq admission:
+  - wall time `5.728904s`
+  - all `4` requests returned `200`
+  - `28` submitted batcher jobs
+  - `14` worker batches
+  - `28` rows
+  - max batch `3`
+
+The default Metal mixed-seq path reduced wall time by `29.3%` and improved
+wall-time throughput by `1.414x` on this varied-prompt concurrency probe. A
+single-request smoke on the enabled server took `1.627647s`; subtracting the
+previous cumulative metrics shows the lone request added `7` submitted jobs,
+`7` worker batches, and `7` rows, so bs=1 still runs as one-row decode work.
+
+### Artifact
+
+- `e356_cargo_check_metal.log`
+- `e356_cargo_check_vulkan.log`
+- `e356_dyn_seqlen_parity.log`
+- `e356_decode_batcher_mixed_seq_parity.log`
+- `e356_decode_batcher_uniform_seq_parity.log`
+- `e356_dyn_seqlen_synthetic.log`
+- `e356_release_build_metal.log`
+- `e356_mixed_seq_disabled_server.log`
+- `e356_mixed_seq_disabled_health.json`
+- `e356_mixed_seq_disabled_metrics.prom`
+- `e356_mixed_seq_disabled_time.json`
+- `e356_mixed_seq_disabled_response_0.sse`
+- `e356_mixed_seq_disabled_response_1.sse`
+- `e356_mixed_seq_disabled_response_2.sse`
+- `e356_mixed_seq_disabled_response_3.sse`
+- `e356_mixed_seq_enabled_server.log`
+- `e356_mixed_seq_enabled_health.json`
+- `e356_mixed_seq_enabled_metrics.prom`
+- `e356_mixed_seq_enabled_time.json`
+- `e356_mixed_seq_enabled_response_0.sse`
+- `e356_mixed_seq_enabled_response_1.sse`
+- `e356_mixed_seq_enabled_response_2.sse`
+- `e356_mixed_seq_enabled_response_3.sse`
+- `e356_single_mixed_enabled_time.json`
+- `e356_single_mixed_enabled_response.sse`
+- `e356_single_mixed_enabled_metrics.prom`
+
+### Decision
+
+Accepted. Default Metal live decode batching now admits mixed sequence lengths
+and uses the dyn-seqlen Metal paged-attention batch path when rows diverge.
+Uniform batches keep the faster strict kernel, Vulkan still compiles after the
+shared config change, and CUDA/Vulkan do not change default admission behavior
+unless `KILN_DECODE_BATCH_MIXED_SEQ` is explicitly set.

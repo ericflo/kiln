@@ -247,16 +247,18 @@ enum StreamTokenDisposition {
 
 /// Configuration for the live greedy decode rendezvous worker.
 ///
-/// The worker is enabled by default on Metal and drains immediately available
-/// same-position decode rows without delaying single-step progress. Set
-/// `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise path, or
-/// `KILN_DECODE_BATCH_WAIT_US` to experiment with an admission delay.
+/// The worker is enabled by default and drains immediately available decode
+/// rows without delaying single-step progress. Set `KILN_DECODE_BATCHER=0` to
+/// force the legacy direct rowwise path, or `KILN_DECODE_BATCH_WAIT_US` to
+/// experiment with an admission delay.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
     pub max_batch: usize,
     /// Optional admission delay for collecting peers.
     pub wait: std::time::Duration,
+    /// Whether one batch may contain rows at different decode positions.
+    pub allow_mixed_seq_lens: bool,
 }
 
 impl Default for DecodeBatcherConfig {
@@ -264,6 +266,7 @@ impl Default for DecodeBatcherConfig {
         Self {
             max_batch: 8,
             wait: std::time::Duration::ZERO,
+            allow_mixed_seq_lens: false,
         }
     }
 }
@@ -281,6 +284,17 @@ impl DecodeBatcherConfig {
         {
             config.wait = std::time::Duration::from_micros(parsed);
         }
+        if let Some(enabled) = env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ") {
+            config.allow_mixed_seq_lens = enabled;
+        }
+        config
+    }
+
+    pub fn from_env_for_device(device: &Device) -> Self {
+        let mut config = Self::from_env();
+        if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
+            config.allow_mixed_seq_lens = matches!(device, Device::Metal(_));
+        }
         config
     }
 
@@ -290,15 +304,17 @@ impl DecodeBatcherConfig {
     }
 }
 
-fn env_flag_enabled(name: &str, default: bool) -> bool {
-    let Ok(value) = std::env::var(name) else {
-        return default;
-    };
+fn env_flag_value(name: &str) -> Option<bool> {
+    let value = std::env::var(name).ok()?;
     match value.trim().to_ascii_lowercase().as_str() {
-        "0" | "false" | "off" | "no" => false,
-        "1" | "true" | "on" | "yes" => true,
-        _ => default,
+        "0" | "false" | "off" | "no" => Some(false),
+        "1" | "true" | "on" | "yes" => Some(true),
+        _ => None,
     }
+}
+
+fn env_flag_enabled(name: &str, default: bool) -> bool {
+    env_flag_value(name).unwrap_or(default)
 }
 
 /// Shared live decode rendezvous for greedy streaming requests.
@@ -471,6 +487,7 @@ fn run_decode_batcher_worker(
     counters: Arc<DecodeBatcherCounters>,
 ) {
     let max_batch = config.max_batch.max(1);
+    let allow_mixed_seq_lens = config.allow_mixed_seq_lens;
     let mut deferred = VecDeque::new();
     let mut disconnected = false;
 
@@ -483,7 +500,7 @@ fn run_decode_batcher_worker(
 
         while jobs.len() < max_batch {
             match receiver.try_recv() {
-                Ok(job) if job.seq_len == seq_len => jobs.push(job),
+                Ok(job) if allow_mixed_seq_lens || job.seq_len == seq_len => jobs.push(job),
                 Ok(job) => deferred.push_back(job),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -501,7 +518,7 @@ fn run_decode_batcher_worker(
                     break;
                 }
                 match receiver.recv_timeout(deadline.saturating_duration_since(now)) {
-                    Ok(job) if job.seq_len == seq_len => jobs.push(job),
+                    Ok(job) if allow_mixed_seq_lens || job.seq_len == seq_len => jobs.push(job),
                     Ok(job) => deferred.push_back(job),
                     Err(mpsc::RecvTimeoutError::Timeout) => break,
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -2255,9 +2272,9 @@ impl ModelRunner {
     /// `model_forward_paged_decode_contiguous_batch_greedy`.
     ///
     /// Current constraints intentionally mirror the lower-level helper:
-    /// non-empty rows, one token per row, one `BlockTable` per row, common
-    /// decode position, non-FP8 cache, contiguous live KV windows, and shared
-    /// base model/LoRA state for every row. Qwen-style GDN models must pass one
+    /// non-empty rows, one token per row, one `BlockTable` per row, non-FP8
+    /// cache, backend-compatible paged attention windows, and shared base
+    /// model/LoRA state for every row. Qwen-style GDN models must pass one
     /// mutable one-row `LinearAttentionState` per row; the method assembles
     /// those into batch state before the forward pass and scatters the updated
     /// rows back afterward.
@@ -2792,9 +2809,10 @@ impl ModelRunner {
                 // paged cache for one step, then drop both before sampling so
                 // concurrent requests can interleave on the next step.
                 let logits = {
-                    let mut graph_runner = self.cuda_graph.lock().map_err(|e| {
-                        anyhow::anyhow!("failed to lock CUDA graph runner: {e}")
-                    })?;
+                    let mut graph_runner = self
+                        .cuda_graph
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
                     let pc_guard = lock_paged_cache(paged_cache)?;
                     graph_runner.decode_step_paged(
                         &*self.backend,
@@ -5892,6 +5910,7 @@ mod tests {
             DecodeBatcherConfig {
                 max_batch: 2,
                 wait: std::time::Duration::from_millis(50),
+                allow_mixed_seq_lens: false,
             },
         )?;
         let barrier = Arc::new(std::sync::Barrier::new(3));
@@ -5967,6 +5986,181 @@ mod tests {
             assert_eq!(
                 batched[row], rowwise,
                 "row {row} decode batcher token should match rowwise"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_decode_batcher_batches_mixed_seq_lens_metal() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping mixed-seq decode batcher test");
+            return Ok(());
+        }
+
+        let config = ModelConfig {
+            hidden_size: 256,
+            num_layers: 1,
+            num_attention_heads: 16,
+            num_kv_heads: 4,
+            head_dim: 256,
+            intermediate_size: 512,
+            vocab_size: 32,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 0,
+            linear_key_head_dim: 0,
+            linear_num_value_heads: 0,
+            linear_value_head_dim: 0,
+            linear_conv_kernel_dim: 0,
+            partial_rotary_factor: 1.0,
+        };
+        let weights = qwen_shape_bf16_full_attention_weights(&config, &device)?;
+        let runner = Arc::new(std::sync::RwLock::new(ModelRunner::new(
+            weights,
+            test_tokenizer(),
+            config.clone(),
+        )));
+        let batch = 2usize;
+        let block_size = 16usize;
+        let seq_lens = [3usize, 5usize];
+        let max_prefix = *seq_lens.iter().max().unwrap();
+        let token_ids = [7u32, 11u32];
+        let prefix_k = patterned_bf16(
+            &[batch, max_prefix, config.num_kv_heads, config.head_dim],
+            0.002,
+            &device,
+        )?;
+        let prefix_v = patterned_bf16(
+            &[batch, max_prefix, config.num_kv_heads, config.head_dim],
+            0.003,
+            &device,
+        )?;
+        let bt0 = BlockTable { blocks: vec![0] };
+        let bt1 = BlockTable { blocks: vec![1] };
+        let block_tables = [&bt0, &bt1];
+        let batch_cache = Arc::new(PagedKvCache::new(
+            config.num_full_attention_layers,
+            2,
+            block_size,
+            config.num_kv_heads,
+            config.head_dim,
+            DType::BF16,
+            &device,
+        )?);
+        {
+            for (row, block_table) in block_tables.iter().enumerate() {
+                let row_k = prefix_k.narrow(0, row, 1)?.narrow(1, 0, seq_lens[row])?;
+                let row_v = prefix_v.narrow(0, row, 1)?.narrow(1, 0, seq_lens[row])?;
+                assert!(batch_cache.write_token_major_native(
+                    0,
+                    block_table,
+                    0,
+                    &row_k.contiguous()?,
+                    &row_v.contiguous()?,
+                )?);
+            }
+        }
+
+        let batcher = DecodeBatcher::spawn(
+            runner.clone(),
+            batch_cache.clone(),
+            DecodeBatcherConfig {
+                max_batch: 2,
+                wait: std::time::Duration::from_millis(50),
+                allow_mixed_seq_lens: true,
+            },
+        )?;
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles: Vec<_> = [
+            (token_ids[0], bt0.clone(), seq_lens[0]),
+            (token_ids[1], bt1.clone(), seq_lens[1]),
+        ]
+        .into_iter()
+        .map(|(token, block_table, seq_len)| {
+            let batcher = batcher.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || -> Result<TokenId> {
+                let mut linear_state = LinearAttentionState {
+                    recurrent_states: Vec::new(),
+                    conv_states: Vec::new(),
+                };
+                barrier.wait();
+                match batcher.decode_next_token_greedy(
+                    token,
+                    &block_table,
+                    seq_len,
+                    &mut linear_state,
+                )? {
+                    DecodeBatcherDecode::Decoded(next) => Ok(next),
+                    DecodeBatcherDecode::RunnerBusy => {
+                        anyhow::bail!("decode batcher unexpectedly reported runner busy")
+                    }
+                }
+            })
+        })
+        .collect();
+        barrier.wait();
+
+        let mut batched = Vec::new();
+        for handle in handles {
+            batched.push(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("decode batcher test thread panicked"))??,
+            );
+        }
+        assert_eq!(batcher.max_observed_batch(), 2);
+
+        let runner_guard = runner.read().unwrap();
+        for row in 0..batch {
+            let row_cache = PagedKvCache::new(
+                config.num_full_attention_layers,
+                1,
+                block_size,
+                config.num_kv_heads,
+                config.head_dim,
+                DType::BF16,
+                &device,
+            )?;
+            let row_table = BlockTable { blocks: vec![0] };
+            {
+                let row_k = prefix_k.narrow(0, row, 1)?.narrow(1, 0, seq_lens[row])?;
+                let row_v = prefix_v.narrow(0, row, 1)?.narrow(1, 0, seq_lens[row])?;
+                assert!(row_cache.write_token_major_native(
+                    0,
+                    &row_table,
+                    0,
+                    &row_k.contiguous()?,
+                    &row_v.contiguous()?,
+                )?);
+            }
+            let rowwise_logits = model_forward_paged(
+                &*runner_guard.backend,
+                &token_ids[row..row + 1],
+                &runner_guard.weights,
+                &runner_guard.config,
+                &row_cache,
+                &row_table,
+                seq_lens[row],
+                None,
+                None,
+                None,
+            )?;
+            let rowwise = greedy_sample(&rowwise_logits)?;
+            assert_eq!(
+                batched[row], rowwise,
+                "row {row} mixed-seq decode batcher token should match rowwise"
             );
         }
 
