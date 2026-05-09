@@ -1319,3 +1319,12 @@
   some unrelated stage buckets moved the other way, so treat this as
   target-selection evidence rather than an endpoint regression. MLP gate/up
   remains the largest live Metal decode target.
+- 2026-05-09 E368: Rejected splitting the Metal MLP gate/up row-pair path into
+  a separate kernel. A first pure split improved batch `2/3/4` synthetic times
+  but regressed batch `1` from `1747.156 us` to `1848.464 us`. A hybrid that
+  kept the old one-row kernel then added a same-binary rollback for old
+  combined row-pair mode, but the decisive same-binary bench still regressed
+  batch `2/3` from `1835.177/1859.589 us` to `2150.083/1959.552 us`, while
+  only improving batch `4/8` from `2131.391/3547.505 us` to
+  `2071.964/3384.490 us`. Source was reverted; keep the existing combined
+  row-pair MLP gate/up kernel.

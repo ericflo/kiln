@@ -12620,3 +12620,85 @@ decode stage, followed by MLP `down_proj` and GDN `in_proj`.
 Accepted as target-selection evidence. No source change. Continue focusing
 Metal work on the MLP gate/up decode path first, with down-projection and GDN
 in-projection still secondary targets.
+
+## 2026-05-09 E368 - Rejected split MLP gate/up row-pair kernel
+
+### Goal
+
+E367 still ranked Metal MLP `gate_up_fused` as the largest live decode stage.
+E364's row-pair mode is implemented inside the same `kiln_mlp_gate_up_bf16`
+Metal kernel as the original per-row path, selected by a runtime
+`row_pair_mode` buffer. This experiment tested whether splitting the batched
+row-pair path into its own Metal function would reduce branching or register
+pressure enough to improve live batch sizes.
+
+### Change Tested
+
+- First temporary candidate split `kiln_mlp_gate_up_bf16` into a pure per-row
+  kernel plus a separate `kiln_mlp_gate_up_row_pair_bf16` kernel.
+- Because that regressed batch `1`, a second hybrid restored the old combined
+  kernel for one-row decode and used the split row-pair kernel only for batched
+  decode.
+- Added a temporary same-binary rollback knob,
+  `KILN_DISABLE_METAL_MLP_GATE_UP_SPLIT_ROW_PAIR=1`, so the final candidate
+  could compare old combined row-pair mode versus split row-pair mode in the
+  same executable.
+- Reverted all source changes after the same-binary bench rejected the idea.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up --lib -- --nocapture`
+  for the pure split, hybrid, and same-binary split-row-pair candidates.
+- Baseline and candidates:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same-binary old-combined row-pair control:
+  `KILN_DISABLE_METAL_MLP_GATE_UP_SPLIT_ROW_PAIR=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Current combined-kernel baseline before editing:
+
+- batch `1`: `1747.156 us`
+- batch `2`: `2052.984 us`
+- batch `3`: `2059.672 us`
+- batch `4`: `2177.625 us`
+- batch `8`: `3495.156 us`
+
+The pure split candidate was mixed:
+
+- batch `1`: `1848.464 us` (`5.8%` slower)
+- batch `2`: `1985.302 us` (`3.3%` faster)
+- batch `3`: `1844.854 us` (`10.4%` faster)
+- batch `4`: `2000.729 us` (`8.1%` faster)
+- batch `8`: `3464.568 us` (`0.9%` faster)
+
+The batch `1` regression made the pure split unacceptable for the serial path,
+so it was narrowed to a hybrid that kept the old one-row function. The decisive
+same-binary comparison of old combined row-pair mode versus split row-pair mode
+was still unfavorable for the live batch sizes:
+
+- batch `2`: old combined `1835.177 us`, split row-pair `2150.083 us`
+- batch `3`: old combined `1859.589 us`, split row-pair `1959.552 us`
+- batch `4`: old combined `2131.391 us`, split row-pair `2071.964 us`
+- batch `8`: old combined `3547.505 us`, split row-pair `3384.490 us`
+
+The split row-pair path improved only batch `4/8` by `2.8%/4.6%`, while
+regressing batch `2/3` by `17.2%/5.4%`. Recent live probes most often reach
+max batch `3`, so this is the wrong tradeoff.
+
+### Artifact
+
+- `e368_mlp_gate_up_split_kernel_current.log`
+- `e368_mlp_gate_up_split_kernel_parity.log`
+- `e368_mlp_gate_up_split_kernel_candidate.log`
+- `e368_mlp_gate_up_split_kernel_hybrid_parity.log`
+- `e368_mlp_gate_up_split_kernel_hybrid_candidate.log`
+- `e368_mlp_gate_up_split_row_pair_parity.log`
+- `e368_mlp_gate_up_split_row_pair_disabled_baseline.log`
+- `e368_mlp_gate_up_split_row_pair_candidate.log`
+
+### Decision
+
+Rejected and reverted. Keep the existing combined row-pair MLP gate/up kernel.
+Do not split the row-pair path into a separate Metal function unless a different
+decomposition can win batch `2/3` without hurting batch `1`.
