@@ -2072,3 +2072,13 @@
   `16` decode-batcher jobs over `4` worker batches. Quiet-rerun hot decode
   stages remained MLP gate/up `457.279 ms`, GDN in-proj `301.899 ms`, MLP down
   `295.199 ms`, and GDN out `148.650 ms`.
+- 2026-05-09 E455: Rejected lowering Metal GDN in-proj row-quad below batch
+  `8`. The initial batch-4 threshold regressed synthetic batch `4`
+  (`1925.329 us` row-quad versus `1568.237 us` row-pair). A narrowed batch-5
+  threshold was synthetically positive for batches `5/6/7/8`
+  (`2143/1800/1927/1961 us` versus rollback `2668/2801/2826/2689 us`) and
+  improved live profiled `gdn:in_proj` (`207.377 ms` versus `278.133 ms`), but
+  no-profile live endpoint A/Bs favored rollback: `4.529 s` rollback versus
+  `4.637 s` default at `max_tokens=3`, and `8.769 s` rollback versus `9.249 s`
+  default at `max_tokens=8`. Source reverted; keep the accepted batch-8
+  threshold.

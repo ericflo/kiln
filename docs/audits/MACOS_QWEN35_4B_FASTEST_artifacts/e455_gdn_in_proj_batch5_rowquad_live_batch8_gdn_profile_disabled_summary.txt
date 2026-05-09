@@ -1,0 +1,26 @@
+E455 live_batch8_gdn_profile_disabled
+
+elapsed_s=6.392431
+statuses=200,200,200,200,200,200,200,200
+stream_token_events_total=24
+kiln_requests_total{status="ok"} 8
+kiln_tokens_generated_total 24
+kiln_decode_batcher_batches_total 4
+kiln_decode_batcher_rows_total 16
+kiln_decode_batcher_max_observed_batch 7
+
+profile_rows_total=2232
+request_decode_rows_seq1_pos18_20=576
+
+By decode start_pos:
+- start_pos=18: 286.132 ms
+- start_pos=19: 191.889 ms
+- start_pos=20: 129.136 ms
+
+By GDN stage (seq_len=1 start_pos=18/19/20):
+- in_proj: 278.133 ms count=96 avg=2.897 ms
+- gates_recur_gated_norm: 153.636 ms count=96 avg=1.600 ms
+- out_proj: 130.153 ms count=96 avg=1.356 ms
+- qkv_conv_norm: 44.043 ms count=96 avg=0.459 ms
+- gated_norm: 1.171 ms count=96 avg=0.012 ms
+- post_transpose: 0.021 ms count=96 avg=0.000 ms

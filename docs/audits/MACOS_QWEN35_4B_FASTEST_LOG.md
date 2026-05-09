@@ -19096,3 +19096,92 @@ to exercise E453, but the eight-stream profile and quiet rerun both reached
 `max_observed_batch=7`, confirming that the live Metal server path now hits the
 new batch4+ row-quad policy under concurrent decoding. The hottest remaining
 live batch stages are still MLP gate/up, GDN in-proj, MLP down, and GDN out.
+
+## 2026-05-09 - E455 rejected Metal GDN in-proj row-quad threshold lowering
+
+### Purpose
+
+Test whether Metal GDN in-proj row-quad grouping should start below batch `8`.
+E454 showed live eight-stream continuous batching reaches `max_observed_batch=7`,
+so the existing batch-8 threshold can miss the live batch sizes now being
+created by the decode batcher.
+
+### Candidate
+
+Temporarily lowered `metal_gdn_in_proj_decode_bf16` row-quad selection from
+batch `8+` to batch `4+`, then narrowed it to batch `5+` after synthetic data
+showed batch `4` is better left on row-pair. The existing rollback env was
+`KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD=1`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed for the temporary threshold-5 candidate, including
+partial row-quad batches `5/6/7` and batch `8`.
+
+The initial batch-4 candidate was rejected before endpoint testing because
+same-binary synthetic timings showed batch `4` regressed:
+
+| batch | row-quad candidate | row-pair rollback |
+| ---: | ---: | ---: |
+| 4 | `1925.329 us` | `1568.237 us` |
+
+The narrowed threshold-5 synthetic bench looked strong for batches `5/6/7/8`
+while preserving row-pair behavior for batch `4`:
+
+| batch | threshold-5 default | row-quad disabled |
+| ---: | ---: | ---: |
+| 4 | `1566.413 us` | `1568.237 us` |
+| 5 | `2143.350 us` | `2668.125 us` |
+| 6 | `1800.385 us` | `2800.606 us` |
+| 7 | `1927.331 us` | `2826.088 us` |
+| 8 | `1960.965 us` | `2689.252 us` |
+
+Release build passed with existing warnings.
+
+No-profile live eight-stream probe with `max_tokens=3`:
+
+- default: `4.636801 s`, HTTP `200` for all requests, server tokens `24`
+- rollback: `4.529393 s`, HTTP `200` for all requests, server tokens `24`
+- both runs: `16` submitted jobs, `4` worker batches, `16` rows,
+  `max_observed_batch=7`
+
+GDN-only profiled live eight-stream probe with `max_tokens=3`:
+
+- default: `6.327401 s`, server tokens `24`, `max_observed_batch=7`
+- rollback: `6.392431 s`, server tokens `24`, `max_observed_batch=7`
+- targeted `gdn:in_proj` improved from `278.133 ms` rollback to
+  `207.377 ms` default
+- total parsed GDN decode stage time improved from `607.157 ms` rollback to
+  `578.806 ms` default
+
+Longer no-profile live eight-stream probe with `max_tokens=8`:
+
+- default: `9.248698 s`, server tokens `64`
+- rollback: `8.768579 s`, server tokens `64`
+- both runs: `56` submitted jobs, `14` worker batches, `56` rows,
+  `max_observed_batch=7`
+
+### Artifacts
+
+- `e455_gdn_in_proj_batch4_rowquad_parity.log`
+- `e455_gdn_in_proj_batch4_rowquad_default_w5_i20.log`
+- `e455_gdn_in_proj_batch4_rowquad_disabled_w5_i20.log`
+- `e455_gdn_in_proj_batch5_rowquad_parity.log`
+- `e455_gdn_in_proj_batch5_rowquad_default_w5_i20.log`
+- `e455_gdn_in_proj_batch5_rowquad_build.log`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_default_*`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_disabled_*`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_gdn_profile_default_*`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_gdn_profile_disabled_*`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_mt8_default_*`
+- `e455_gdn_in_proj_batch5_rowquad_live_batch8_mt8_disabled_*`
+
+### Decision
+
+Rejected. The isolated synthetic and GDN-stage evidence showed the row-quad
+kernel can reduce `gdn:in_proj` time for batches `5/6/7/8`, but both
+no-profile endpoint A/Bs favored the rollback, including the longer
+`max_tokens=8` run that submitted `56` decode-batcher jobs. Keep the current
+Metal GDN in-proj row-quad threshold at batch `8`; no source changes remain.
