@@ -89,8 +89,8 @@ impl CudaGraphKey {
 
     fn stable_paged_metadata_enabled() -> bool {
         std::env::var("KILN_CUDA_GRAPH_STABLE_PAGED_METADATA")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false)
+            .map(|v| env_flag_enabled(&v))
+            .unwrap_or(true)
     }
 }
 
