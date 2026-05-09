@@ -1556,3 +1556,9 @@
   real fused-QKV tile4 kernel passed parity, then lost same-binary Qwen3.5
   fused Q/K/V synthetic to tile8 (`481.798 us` vs `462.967 us`, `4.1%`
   slower). Source reverted; keep fused QKV on tile8.
+- 2026-05-09 E395: Refreshed the current paged serial profile after E393.
+  The measured run reported `302.688 ms` mean ITL and `3.304 tok/s`.
+  Filtered decode stage totals were still led by projection work:
+  `gate_up_fused` `521.045 ms`, `down_proj` `333.456 ms`, `gdn:in_proj`
+  `321.182 ms`, `gdn:out_proj` `149.836 ms`, and `full_attn:qkv_proj`
+  `98.725 ms`. Accepted as target-selection evidence; no source change.

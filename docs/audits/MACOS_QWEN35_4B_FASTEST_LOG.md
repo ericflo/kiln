@@ -14898,3 +14898,57 @@ Q/K/V candidate did not hold:
 Rejected before endpoint measurement. The generic QKV-like tile4 signal was a
 false proxy for the real fused-QKV path; keep the production fused-QKV kernel
 on tile8 and leave the source reverted.
+
+## 2026-05-09 - E395 current paged serial profile after E393
+
+### Purpose
+
+Refresh the synchronized paged serial stage profile after accepting E393's
+serial MLP gate/up `bfloat2` loads and rejecting E394's fused-QKV tile4
+candidate. This is a profiling run, not a source change.
+
+### Results
+
+The measured second latency run reported:
+
+- Prefill: `910.308000 ms`
+- Mean inter-token latency: `302.687734 ms`
+- P50 / P99 inter-token latency: `310.144541 ms` / `324.136542 ms`
+- Decode throughput: `3.303735 tok/s`
+- Tokens generated: `9`
+
+Filtering the second run to `seq_len=1` decode profile rows:
+
+- `gate_up_fused`: `256` calls, `521.045 ms` total, `2.035 ms` average
+- `down_proj`: `256` calls, `333.456 ms` total, `1.303 ms` average
+- `in_proj`: `192` calls, `321.182 ms` total, `1.673 ms` average
+- `out_proj`: `192` calls, `149.836 ms` total, `0.780 ms` average
+- `qkv_proj`: `64` calls, `98.725 ms` total, `1.543 ms` average
+- `gates_recur_gated_norm`: `192` calls, `84.024 ms` total,
+  `0.438 ms` average
+- `qkv_conv_norm`: `192` calls, `71.765 ms` total, `0.374 ms` average
+- `o_proj`: `64` calls, `52.241 ms` total, `0.816 ms` average
+- `qkv_split`: `64` calls, `24.189 ms` total, `0.378 ms` average
+- `decode_attn_contiguous`: `64` calls, `19.453 ms` total,
+  `0.304 ms` average
+- `qk_norm`: `64` calls, `18.810 ms` total, `0.294 ms` average
+- `rope`: `64` calls, `17.531 ms` total, `0.274 ms` average
+- `kv_write`: `64` calls, `16.811 ms` total, `0.263 ms` average
+- `attn_gate`: `64` calls, `16.773 ms` total, `0.262 ms` average
+
+Compared with E392's same profiled shape, `gate_up_fused` moved from
+`564.942 ms` to `521.045 ms`. Because this is a profiling run with intrusive
+stage timing, treat that as directional support for E393 rather than a
+standalone latency claim.
+
+### Artifact
+
+- `e395_current_paged_latency_profile_after_e393.log`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. MLP gate/up remains
+the largest profiled serial decode stage, with MLP down-projection and GDN
+in-projection close behind. Continue prioritizing changes that affect those
+projection-heavy paths and require same-binary rollback evidence for small
+kernel wins.
