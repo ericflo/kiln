@@ -3508,6 +3508,68 @@ Verdict:
   prep/scan route despite reducing boundary crossings.
 - CUDA and Metal source paths are untouched.
 
+### 2026-05-09 A071: Current Vulkan Profile After A070 and Recent Metal Work
+
+Goal:
+- Refresh the current Strix Halo Vulkan target profile after A070 and after
+  rebasing onto the latest Metal CI/performance work, without changing source.
+- Use the recent CUDA/Metal work as inspiration, but verify whether those
+  lessons map to the current Vulkan bottlenecks before implementing anything.
+
+Setup:
+- Command:
+  `KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1
+  KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path
+  Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1
+  --prompt-tokens 64 --max-output-tokens 8 --seed 71 --quiet`.
+- This is a profiling run, not an endpoint visible-text smoke.
+
+Evidence:
+- Backend JSON reported `vulkan`.
+- GPU JSON reported `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- The measured run emitted non-empty decode token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Latency under profiling was `2325.134809ms` prefill,
+  `120.370599750ms` mean ITL, `119.112639ms` p50, and `132.543078ms` p99
+  for `9` generated tokens. Do not compare this ITL directly to A070's
+  no-profile `94.610663ms`; use this run for stage ranking.
+- Top prefill `seq_len=64` buckets:
+  - `paged_layer:linear`: `1802.496ms`, `24` calls, `75.104000ms` avg.
+  - `mlp_stage:fused`: `916.453ms`, `32` calls, `28.639156ms` avg.
+  - `paged_layer:full`: `515.537ms`, `8` calls, `64.442125ms` avg.
+  - `gdn_stage:recurrent`: `315.745ms`, `24` calls, `13.156042ms` avg.
+  - `gdn_stage:in_proj`: `254.924ms`, `24` calls, `10.621833ms` avg.
+  - `gdn_stage:conv`: `222.692ms`, `24` calls, `9.278833ms` avg.
+  - `full_attn_stage:qkv_proj`: `181.910ms`, `8` calls, `22.738750ms`
+    avg.
+- Top decode `seq_len=1` buckets from the short profiled run:
+  - `paged_layer:linear`: `752.619ms`, `192` calls, `3.919891ms` avg.
+  - `mlp_stage:fused`: `273.825ms`, `256` calls, `1.069629ms` avg.
+  - `paged_layer:full`: `160.441ms`, `64` calls, `2.506891ms` avg.
+  - `gdn_stage:recurrent`: `162.719ms`, `192` calls, `0.847495ms` avg.
+  - `gdn_stage:in_proj`: `146.046ms`, `192` calls, `0.760656ms` avg.
+  - `gdn_stage:out_proj`: `70.184ms`, `192` calls, `0.365542ms` avg.
+  - `full_attn_stage:qkv_proj`: `40.899ms`, `64` calls, `0.639047ms`
+    avg.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a071-current-profile-after-a070.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a071-current-profile-after-a070-summary.txt`
+
+Verdict:
+- Keep as target-selection evidence only; no source changed.
+- The next Vulkan target should be MLP boundary/data movement or a
+  residency-level GDN recurrent/in-proj/conv change.
+- Do not default-enable A070's full-chunk shader without changing its
+  one-workgroup parallelization strategy.
+- The recent Metal GDN A/B and QKV/Z prefill-combine work does not map
+  directly to Vulkan because the current Vulkan GDN prefill in-proj already
+  emits q/k/v/z/a/b together. The recent Metal MLP pointwise fusion is also
+  not a direct Vulkan port: this profile's `mlp:fused` bucket is dominated by
+  the wider fused dispatch/boundary shape, not just by SiLU/multiply.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3531,6 +3593,12 @@ Verdict:
   priority is MLP fused first, then GDN in-proj/recurrent/out-proj. Treat the
   larger outer `paged_layer:*` buckets as boundary/movement evidence, not as a
   shader name.
+- A071 refreshes the target set after A070 and the recent Metal MLP work:
+  concrete prefill priority is MLP fused first, then GDN recurrent/in-proj/conv,
+  with full-attention QKV behind those. Decode still puts MLP fused first, then
+  GDN recurrent/in-proj. Treat direct Metal MLP pointwise and GDN combined
+  projection ports as low-confidence unless a Vulkan inner-stage profile shows
+  the same inner operation, rather than boundary movement, is limiting.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

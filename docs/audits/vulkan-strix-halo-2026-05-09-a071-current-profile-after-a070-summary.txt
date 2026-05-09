@@ -1,0 +1,142 @@
+A071: current Vulkan profile after A070 and recent Metal work
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+
+Purpose
+-------
+
+Refresh the current Strix Halo Vulkan target profile after:
+
+- A070 fixed `gdn_full_chunk_forward` parity but kept the route opt-in.
+- Recent Metal commits added the accepted MLP SiLU/multiply fusion and
+  documented post-fusion profile data.
+- The local `main` branch was rebased onto the PR #1002 Metal CI fix and
+  later upstream Metal performance commits.
+
+No source was changed for this profile.
+
+Command
+-------
+
+`KILN_PROFILE_PAGED_LAYERS=1 KILN_PROFILE_GDN_STAGES=1
+KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_MLP_STAGES=1
+KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path
+Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1
+--prompt-tokens 64 --max-output-tokens 8 --seed 71 --quiet`
+
+Correctness / Routing Evidence
+------------------------------
+
+- Backend JSON reported `backend: "vulkan"`.
+- GPU JSON reported
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`.
+- The measured run emitted non-empty decode token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- This is a bench-token smoke, not an endpoint visible-text smoke. The last
+  endpoint-level visible-text confirmation remains A054/A058/A060-class
+  evidence with explicit `chat_template_kwargs: {"enable_thinking": false}`.
+
+Latency
+-------
+
+- Prefill: 2325.134809 ms.
+- Mean ITL: 120.370599750 ms.
+- P50 ITL: 119.112639 ms.
+- P99 ITL: 132.543078 ms.
+- Generated tokens: 9.
+- Decode throughput: 8.307676 tok/s.
+
+The ITL is profiling-heavy and should not be compared directly to A070's
+no-profile final default smoke (`94.610663 ms` mean ITL). Use this run for
+stage ranking, not endpoint acceptance.
+
+Prefill Stage Ranking, seq_len=64
+---------------------------------
+
+Outer paged-layer buckets:
+
+- `paged_layer:linear`: 1802.496 ms total / 24 calls / 75.104000 ms avg.
+- `paged_layer:full`: 515.537 ms total / 8 calls / 64.442125 ms avg.
+
+Concrete MLP bucket:
+
+- `mlp_stage:fused`: 916.453 ms total / 32 calls / 28.639156 ms avg.
+
+Concrete GDN buckets:
+
+- `gdn_stage:recurrent`: 315.745 ms total / 24 calls / 13.156042 ms avg.
+- `gdn_stage:in_proj`: 254.924 ms total / 24 calls / 10.621833 ms avg.
+- `gdn_stage:conv`: 222.692 ms total / 24 calls / 9.278833 ms avg.
+- `gdn_stage:out_proj`: 123.636 ms total / 24 calls / 5.151500 ms avg.
+- `gdn_stage:gated_norm`: 112.097 ms total / 24 calls / 4.670708 ms avg.
+- `gdn_stage:gates`: 24.080 ms total / 24 calls / 1.003333 ms avg.
+- `gdn_stage:qk_norm`: 17.736 ms total / 24 calls / 0.739000 ms avg.
+- `gdn_stage:qkv_split`: 12.511 ms total / 24 calls / 0.521292 ms avg.
+
+Concrete full-attention buckets:
+
+- `full_attn_stage:qkv_proj`: 181.910 ms total / 8 calls / 22.738750 ms avg.
+- `full_attn_stage:rope`: 10.129 ms total / 8 calls / 1.266125 ms avg.
+- `full_attn_stage:qk_norm`: 8.890 ms total / 8 calls / 1.111250 ms avg.
+- `full_attn_stage:q_transpose`: 6.309 ms total / 8 calls / 0.788625 ms avg.
+
+Decode Stage Ranking, seq_len=1
+-------------------------------
+
+This run generated only 9 tokens, so decode totals are useful for shape and
+ordering but not as a stable acceptance benchmark.
+
+Outer paged-layer buckets:
+
+- `paged_layer:linear`: 752.619 ms total / 192 calls / 3.919891 ms avg.
+- `paged_layer:full`: 160.441 ms total / 64 calls / 2.506891 ms avg.
+
+Concrete MLP bucket:
+
+- `mlp_stage:fused`: 273.825 ms total / 256 calls / 1.069629 ms avg.
+
+Concrete GDN buckets:
+
+- `gdn_stage:recurrent`: 162.719 ms total / 192 calls / 0.847495 ms avg.
+- `gdn_stage:in_proj`: 146.046 ms total / 192 calls / 0.760656 ms avg.
+- `gdn_stage:out_proj`: 70.184 ms total / 192 calls / 0.365542 ms avg.
+- `gdn_stage:gated_norm`: 67.452 ms total / 192 calls / 0.351313 ms avg.
+- `gdn_stage:gates`: 56.721 ms total / 192 calls / 0.295422 ms avg.
+- `gdn_stage:conv`: 26.633 ms total / 192 calls / 0.138714 ms avg.
+
+Concrete full-attention buckets:
+
+- `full_attn_stage:qkv_proj`: 40.899 ms total / 64 calls / 0.639047 ms avg.
+- `full_attn_stage:o_proj`: 20.306 ms total / 64 calls / 0.317281 ms avg.
+- `full_attn_stage:decode_scores`: 12.426 ms total / 64 calls / 0.194156 ms avg.
+
+Interpretation
+--------------
+
+- Prefill is still dominated by the Vulkan MLP fused path, followed by GDN
+  recurrent, GDN in-proj, GDN conv, and full-attention QKV projection.
+- Decode keeps the same concrete ordering at the top: MLP fused first, then
+  GDN recurrent/in-proj, then GDN out-proj/gated-norm/gates and full-attention
+  QKV/O projection.
+- The recent Metal MLP SiLU/multiply fusion does not directly transfer to this
+  Vulkan profile because the Vulkan MLP fused bucket is much wider than only
+  the pointwise SiLU/multiply operation and still includes CPU/GPU boundary
+  effects around the current backend tensor shape.
+- The recent Metal GDN A/B projection and QKV/Z prefill-combine experiments do
+  not directly transfer either: Vulkan GDN prefill already uses a custom
+  in-proj route that emits q/k/v/z/a/b products together.
+
+Verdict
+-------
+
+Keep as target-selection evidence only.
+
+The next Vulkan work should prioritize reducing MLP boundary/data movement or
+changing GDN prefill/decode residency around recurrent/in-proj/conv. Do not
+default-enable the corrected A070 full-chunk shader without changing its
+parallelization strategy, and do not spend more time on direct Metal tile ports
+unless an isolated Vulkan profile shows that the same inner operation, not the
+host/device boundary, is the limiting factor.
+
+No CUDA or Metal source path changed.

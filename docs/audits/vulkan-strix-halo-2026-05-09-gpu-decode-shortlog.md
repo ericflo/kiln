@@ -78,6 +78,7 @@ before or with each accepted change and each measured rejection.
 | A068 | Fix embedded SPIR-V lookup for the accepted parallel recurrent shader. | Found `gdn_recurrent_step_parallel` in `build.rs` and the Vulkan prewarm list, but not in `pipeline.rs` `SHADER_SPIRVS`, so accepted A059/A067 dispatches could fall back to runtime shader compilation on hosts that otherwise have embedded SPIR-V. Added the missing lookup entry only. Validation passed: `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`, focused GDN recurrent parity, and `git diff --check` with the Rust toolchain path restored. | Keep as a Vulkan-only deployment/prewarm fix. No shader math, CUDA path, or Metal path changed. |
 | A069 | Trial batched transfers in Vulkan GDN chunk prep/scan. | Temporary candidate batched prep uploads/readbacks and scan uploads/readbacks behind `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`. Profiled `gdn_stage:recurrent seq_len=64` improved from exact rollback `242.102ms` total / `10.087583ms` avg to candidate `229.076ms` / `9.544833ms`, and profiled prefill improved `2241.253ms -> 2219.945ms`. Fresh no-profile exact rollback/candidate did not confirm a prefill win: rollback `2173.140ms` prefill / `97.937ms` mean ITL, candidate `2188.749ms` prefill / `96.187ms` mean ITL. | Rejected and removed before commit. Do not retry this by simply batching the current GDN chunk prep/scan transfers; next GDN prefill work needs fewer CPU boundary/readback steps or residency across adjacent stages. Final committed state has no CUDA/Metal source changes. |
 | A070 | Fix Vulkan `gdn_full_chunk_forward` parity and reject default enable. | Rewrote the stale full-chunk shader so it matches the split `gdn_chunk_prep` + `gdn_chunk_scan` + state-update contract, added `gdn_full_chunk_forward_matches_split_vulkan_path`, and kept the path opt-in via `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`. Candidate, rollback, and final default all emitted identical first 32 token IDs. Default enable regressed prefill: candidate `2216.728ms` versus rollback split path `2138.199ms`; final no-env default stayed on the split path at `2248.036ms` prefill / `94.611ms` mean ITL after rebasing onto the latest Metal MLP commits. | Keep the shader correctness/parity fix as opt-in tuning groundwork. Reject default enable; the current one-workgroup fused chunk serializes too much work. CUDA/Metal source paths untouched. |
+| A071 | Refresh current Vulkan profile after A070 and recent Metal work. | Profiled current `main` with full-attn, GDN, MLP, paged-layer timers, and token logging. Backend JSON reported `vulkan` on `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, and the measured run emitted non-empty token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`. Profiling-heavy latency was `2325.135ms` prefill / `120.371ms` mean ITL. Top prefill concrete buckets were `mlp:fused` `916.453ms`, `gdn:recurrent` `315.745ms`, `gdn:in_proj` `254.924ms`, `gdn:conv` `222.692ms`, and full-attn `qkv_proj` `181.910ms`. Short decode profile kept `mlp:fused` first, then GDN recurrent/in-proj. | Keep as target-selection evidence only; no source change. Next Vulkan work should target MLP boundary/data movement or residency-level GDN recurrent/in-proj/conv changes. Recent Metal MLP pointwise and GDN combined-projection wins do not directly map to the current Vulkan bottleneck shape. |
 
 Additional validation after rejected A069:
 
@@ -104,6 +105,12 @@ Additional validation after A070:
 - `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
 - Candidate, rollback, and final default latency smokes used
   `KILN_BENCH_LOG_TOKENS=1` and returned the same first 32 token IDs.
+
+Additional validation after A071:
+
+- Profile-only run, no source changed.
+- `KILN_BENCH_LOG_TOKENS=1` returned non-empty decode token IDs on the Vulkan
+  backend.
 
 Additional validation after A044:
 
