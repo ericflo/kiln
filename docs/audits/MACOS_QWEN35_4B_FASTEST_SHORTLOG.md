@@ -2137,3 +2137,11 @@
   stages were `mlp:gate_up_fused` `355.106 ms`, `gdn:in_proj` `245.389 ms`,
   `mlp:down_proj` `217.996 ms`, and `gdn:out_proj` `93.911 ms`; use this as
   the batch-3 live hotspot map after the E458 threshold win.
+- 2026-05-09 E461: Rejected lowering Metal MLP gate/up row-quad selection from
+  rows `>=5` to rows `>=3`. Temporary batch-3 parity passed, but the
+  newly-affected Qwen3.5 synthetic rows both regressed versus row-pair
+  rollback: batch `3` `1959.860 us` candidate versus `1850.344 us` rollback,
+  and batch `4` `2132.771 us` versus `1877.346 us`. Batch `5+` still favored
+  row-quad, matching E456, but no endpoint A/B was run because the target
+  batch-3 hotspot was synthetically negative. Source reverted; keep the
+  accepted E456 threshold at rows `>=5`.

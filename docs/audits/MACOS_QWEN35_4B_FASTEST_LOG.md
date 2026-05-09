@@ -19568,3 +19568,56 @@ Accepted as a profile checkpoint. The post-E458 four-stream batch-3 live shape
 now shows MLP gate/up, GDN in-proj, MLP down, and GDN out as the dominant
 filtered decode-stage costs. Use this as the next-target map for batch-3 live
 optimization.
+
+## E461 - Rejected MLP Gate/Up Row-Quad at Batch 3
+
+### Hypothesis
+
+E460 showed the four-stream max-batch-3 live profile is dominated by
+`mlp:gate_up_fused`. E456 accepted the Metal MLP gate/up row-quad path at
+rows `>=5`, leaving batches `3` and `4` on row-pair. Test whether extending
+that row-quad path down to batch `3` improves the live batch-3 hotspot.
+
+### Candidate
+
+Temporarily changed `metal_mlp_gate_up_bf16` row-quad selection from rows
+`>=5` to rows `>=3`, updated the synthetic policy label, and temporarily
+expanded focused MLP gate/up parity to include batch `3`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed with the temporary batch-3 coverage:
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture`
+
+Qwen3.5 MLP gate/up synthetic A/B with warmup `5`, iters `20`:
+
+| batch | candidate policy | candidate fused | row-quad disabled policy | row-quad disabled fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| `1` | rowwise | `1614.829 us` | rowwise | `1608.542 us` | same path |
+| `2` | row-pair | `1763.354 us` | row-pair | `1830.852 us` | same path |
+| `3` | row-quad | `1959.860 us` | row-pair | `1850.344 us` | rejected |
+| `4` | row-quad | `2132.771 us` | row-pair | `1877.346 us` | rejected |
+| `5` | row-quad | `1955.910 us` | row-pair | `3137.690 us` | positive |
+| `6` | row-quad | `2074.219 us` | row-pair | `2961.010 us` | positive |
+| `7` | row-quad | `2106.106 us` | row-pair | `3470.117 us` | positive |
+| `8` | row-quad | `2117.708 us` | row-pair | `3564.119 us` | positive |
+
+The existing E456 threshold is validated: batch `5+` benefits from row-quad,
+but the newly affected batch `3` and `4` rows regress. No endpoint A/B was run
+because the targeted synthetic signal was negative for the exact batch-3 live
+hotspot.
+
+### Artifacts
+
+- `e461_mlp_gate_up_rowquad_ge3_parity.log`
+- `e461_mlp_gate_up_rowquad_ge3_shapes_default_w5_i20.log`
+- `e461_mlp_gate_up_rowquad_ge3_shapes_disabled_w5_i20.log`
+- `e461_mlp_gate_up_rowquad_ge3_summary.txt`
+
+### Decision
+
+Rejected. Keep the accepted E456 Metal MLP gate/up row-quad threshold at rows
+`>=5`; batches `3` and `4` should remain on row-pair.

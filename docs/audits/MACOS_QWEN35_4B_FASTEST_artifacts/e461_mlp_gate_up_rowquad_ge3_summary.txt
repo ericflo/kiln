@@ -1,0 +1,21 @@
+E461 rejected MLP gate/up row-quad at batch >=3 summary
+
+Temporary candidate lowered Metal MLP gate/up row-quad selection from rows >=5 to rows >=3 and expanded focused parity to batch 3. Source was reverted after evaluation.
+
+Focused parity:
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture: passed with temporary batch 3 coverage
+
+Synthetic Qwen3.5 MLP gate/up decode batch BF16 A/B, warmup=5, iters=20:
+
+| batch | candidate policy | candidate fused | row-quad disabled policy | row-quad disabled fused | decision |
+| ---: | --- | ---: | --- | ---: | --- |
+| 1 | rowwise | 1614.829 us | rowwise | 1608.542 us | same-path/no decision |
+| 2 | row_pair | 1763.354 us | row_pair | 1830.852 us | same-path/no decision |
+| 3 | row_quad | 1959.860 us | row_pair | 1850.344 us | regression |
+| 4 | row_quad | 2132.771 us | row_pair | 1877.346 us | regression |
+| 5 | row_quad | 1955.910 us | row_pair | 3137.690 us | win |
+| 6 | row_quad | 2074.219 us | row_pair | 2961.010 us | win |
+| 7 | row_quad | 2106.106 us | row_pair | 3470.117 us | win |
+| 8 | row_quad | 2117.708 us | row_pair | 3564.119 us | win |
+
+Decision: rejected. Batch 3 and batch 4, the newly affected rows, both regress versus the row-pair rollback. Keep the accepted E456 threshold at rows >=5.
