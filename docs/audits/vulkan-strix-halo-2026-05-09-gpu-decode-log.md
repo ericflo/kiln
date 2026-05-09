@@ -3185,6 +3185,76 @@ Verdict:
   a Vulkan-specific tile, reduced data movement, or stronger profiler evidence
   that the existing scalar column path is the bottleneck.
 
+### 2026-05-09 A065: Reject Serial Contiguous Paged Attention Through Existing Vulkan Kernel
+
+Context:
+- The latest Metal logs (E398-E400) reinforce that isolated shader wins are
+  not enough when endpoint latency is dominated by movement and boundaries.
+- Vulkan still advertises no single-sequence `flash_attn_paged_decode`
+  support, so the serial path can skip the GPU attention route and use the
+  existing CPU fallback after Vulkan QKV projection work.
+- This trial tested whether routing the common contiguous single-sequence
+  decode case through the existing compact-window Vulkan paged-attention kernel
+  was good enough as a table-stakes GPU attention replacement.
+
+Change tested:
+- Temporarily added a guarded Vulkan `flash_attn_paged_decode_contiguous`
+  implementation.
+- It accepted only CPU F32 tensors, `batch=1`, `q_len=1`, contiguous live
+  K/V slots, valid GQA ratio, and `head_dim <= 256`.
+- It transposed Q into `[1, 1, num_heads, head_dim]`, narrowed the contiguous
+  K/V window, dispatched `dispatch_paged_attn_decode_batch_f32`, and reshaped
+  the result back to `[1, 1, num_heads * head_dim]`.
+- Rollback env during the trial:
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_CONTIGUOUS=1`.
+
+Evidence:
+- The temporary model-level Vulkan parity test
+  `contiguous_paged_decode_matches_cpu_reference` passed.
+- Focused kernel parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  paged_attn_decode_batch_matches_cpu_reference -- --nocapture`.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- Release Vulkan build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate and rollback serial paged latency runs produced identical first 32
+  token IDs:
+  `[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6,
+  2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682,
+  2047, 1238, 11834, 321, 26912, 13, 2838, 8211]`.
+- Candidate latency: `2177.489ms` prefill, `100.529ms` mean ITL,
+  `9.947 tok/s` decode.
+- Rollback latency: `2136.109ms` prefill, `97.554ms` mean ITL,
+  `10.251 tok/s` decode.
+- Candidate `decode_attn_contiguous seq_len=1` totaled `515.340ms` over
+  `1024` calls (`0.503262ms avg`).
+- Rollback CPU fallback components (`kv_read`, `decode_group_layout`,
+  `decode_scores`, `decode_softmax`, `decode_weighted_sum`) totaled
+  `247.977ms` over `1024` calls (`0.242165ms avg`).
+
+Cleanup validation after removing the source trial:
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`31` tests)
+- `git diff --check`
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a065-paged-contiguous-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a065-paged-contiguous-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a065-paged-contiguous-comparison.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a065-paged-contiguous-summary.txt`
+
+Verdict:
+- Reject and remove the source change. The GPU route was correct, but the
+  existing compact-window Vulkan kernel plus per-call CPU extraction/upload and
+  readback was slower than the current CPU fallback components.
+- Do not retry serial contiguous paged attention by simply wrapping
+  `dispatch_paged_attn_decode_batch_f32`. The table-stakes GPU attention fix
+  needs K/V residency, fused write+read behavior, or another design that avoids
+  re-uploading the active K/V window and reading attention output back across
+  the backend boundary every full-attention layer.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3231,6 +3301,9 @@ Verdict:
 - Do not retry serial packed-BF16 GDN in-proj QKV/Z pairing by directly
   mirroring Metal E396; A064 measured target-stage and wall-facing latency
   regressions on the single-token Vulkan path.
+- Do not retry serial contiguous paged attention by wrapping the existing
+  compact-window Vulkan paged-attention kernel; A065 proved correctness but
+  measured a large target-stage and ITL regression from per-call movement.
 - Do not retry dyn-seqlen paged-attention optimization by only pushing
   `seq_lens` through push constants; A035 measured that as slower on the
   sampled actor fixture.

@@ -1,0 +1,12 @@
+candidate: prefill_ms=2177.488760 mean_itl_ms=100.528645 decode_tps=9.947413
+candidate: decode_attn_contiguous_seq1_total_ms=515.340000 count=1024 avg_ms=0.503262
+candidate: first32_token_ids=[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6, 2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682, 2047, 1238, 11834, 321, 26912, 13, 2838, 8211]
+rollback: prefill_ms=2136.109324 mean_itl_ms=97.553847 decode_tps=10.250749
+rollback: cpu_decode_attn_seq1_component_total_ms=247.977000 count=1024 avg_ms=0.242165
+rollback: first32_token_ids=[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6, 2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682, 2047, 1238, 11834, 321, 26912, 13, 2838, 8211]
+same_first32_token_ids=True
+delta_mean_itl_ms=2.974798
+delta_prefill_ms=41.379436
+delta_decode_tps=-0.303336
+delta_decode_attn_seq1_total_ms=267.363000
+delta_decode_attn_seq1_avg_ms=0.261097
