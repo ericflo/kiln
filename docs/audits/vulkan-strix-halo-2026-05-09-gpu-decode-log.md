@@ -2115,6 +2115,61 @@ Verdict:
   workload, and the clean first pair regressed.
 - Keep using the existing stable sigmoid MLP shaders.
 
+### 2026-05-09 A043: Reject Vulkan F32 MLP Gate/Up Row-Quad for Full Batch 8
+
+Hypothesis:
+- Metal E375 accepted an MLP gate/up row-quad path only for full decode batches
+  (`rows >= 8`) after row-quad at batch `4` regressed.
+- Vulkan A040/A041 showed that row-pairing live MLP batches `4..7` is not a
+  win, but an F32 gate/up row-quad only at batch `8` might still help the
+  existing prefill/full-batch MLP path by sharing weight loads across four
+  rows.
+
+Experiment:
+- Added a temporary F32 `mlp_gate_up_decode_batched_rows4` shader.
+- Routed only non-BF16 MLP gate/up batches `>=8` through the temporary shader.
+- Kept the existing down-projection row-pair path unchanged.
+- Used rollback env `KILN_DISABLE_VULKAN_MLP_GATE_UP_ROW_QUAD=1`.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_batched_matches_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_MLP_GATE_UP_ROW_QUAD=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_batched_matches_cpu_reference -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Same-binary endpoint A/B, eight concurrent streaming prompts,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- All four runs did the same amount of decode-batcher work: `56` jobs, `8`
+  batches, `56` rows, and max batch `8`.
+- Pair 1, rollback first:
+  - Rollback disabled: `22.017650s`.
+  - Candidate: `25.939359s`.
+- Pair 2, candidate first:
+  - Candidate: `24.859819s`.
+  - Rollback disabled: `27.180268s`.
+- All runs returned HTTP 200, coherent visible sequence text, and empty
+  reasoning text.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a043-mlp-gate-up-rowquad-n8-*`
+
+Verdict:
+- Rejected and removed. The n8 endpoint A/B was order-sensitive and averaged
+  slower than rollback, so Metal's row-quad lesson does not transfer directly
+  to the current Vulkan F32 MLP gate/up shader.
+- Do not retry row-quad MLP gate/up without a different Vulkan-specific tile or
+  evidence from isolated shader timing.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2128,6 +2183,8 @@ Verdict:
   gate/up-only row-pair as slower or unstable against rollback.
 - Do not retry packed-BF16 MLP branchless SiLU without a stronger numerical and
   performance reason; A042 was slower than rollback.
+- Do not retry F32 MLP gate/up row-quad by direct Metal mirroring; A043 was not
+  a reliable n8 endpoint win.
 - Do not set a static Vulkan live decode-batcher wait based only on env sweeps;
   A037's same-binary no-env candidate was slower even though it formed larger
   batches.

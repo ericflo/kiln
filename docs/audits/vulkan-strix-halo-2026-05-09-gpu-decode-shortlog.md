@@ -53,6 +53,23 @@ before or with each accepted change and each measured rejection.
 | A040 | Trial packed-BF16 Vulkan MLP gate/up and down row-pair for live batches `4..7`. | Temporary row-pair gate/up and down shaders passed focused candidate and rollback BF16 MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` and max batch `4` was unstable: candidate won pair 1 (`17.081s` vs rollback `17.957s`) but lost pair 2 (`20.896s` vs rollback `19.352s`) with identical counters and coherent visible text. | Rejected and removed; direct live-batch MLP row-pair did not produce a reliable gain. |
 | A041 | Trial packed-BF16 Vulkan MLP gate/up-only row-pair for live batches `4..7`. | Temporary gate/up-only row-pair path passed focused candidate and rollback BF16 MLP parity and release Vulkan build. Endpoint A/B with wait `5000us` and max batch `4` consistently favored rollback: pair 1 rollback `16.244s` vs candidate `21.055s`; pair 2 candidate `18.424s` vs rollback `15.632s`, with identical counters and coherent visible text. | Rejected and removed; do not retry MLP live-batch row-pair by direct shader mirroring. Kept the added batch-5 BF16 MLP parity coverage. |
 | A042 | Trial packed-BF16 Vulkan MLP branchless SiLU shader variants. | Temporary single-row and batched BF16 gate/up shaders passed focused candidate and rollback MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` favored rollback: pair 1 rollback `16.782s` vs candidate `18.933s`; pair 2 candidate `16.454s` vs rollback `16.142s` even though rollback generated more rows (`23` vs `17`). | Rejected and removed; keep the existing stable sigmoid MLP shaders. |
+| A043 | Trial Metal-inspired F32 Vulkan MLP gate/up row-quad for full batch `8`. | Temporary row-quad gate/up shader passed focused candidate and rollback batched MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Eight-request endpoint A/B with wait `5000us` exercised max batch `8` with identical `56` jobs / `8` batches / `56` rows: candidate lost pair 1 (`25.939s` vs rollback `22.018s`) and won pair 2 (`24.860s` vs rollback `27.180s`). | Rejected and removed; not a reliable n8 endpoint win, so Metal row-quad does not directly transfer to Vulkan F32 MLP gate/up. |
+
+Additional validation after rejected A043:
+
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate and rollback passed focused batched MLP parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_batched_matches_cpu_reference -- --nocapture`.
+- Temporary candidate passed full Vulkan kernel parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate and rollback n8 server runs returned HTTP 200 with non-empty visible
+  content and empty reasoning text.
+- Source change was removed after the paired endpoint A/B was not a reliable
+  win.
 
 Additional validation after rejected A042:
 
