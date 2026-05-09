@@ -39,6 +39,7 @@ before or with each accepted change and each measured rejection.
 | A026 | Store Vulkan full-attention QKV BF16 weights as packed buffers and expand in shader. | Added packed-BF16 QKV shader, dispatcher, backend gate, and parity test. `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, full Vulkan parity (`27 passed`), release Vulkan build, and `git diff --check` passed. Main-branch serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate measured `398.8ms` prefill / `111.5ms` mean ITL versus same-binary rollback `621.6ms` prefill / `118.4ms` mean ITL. Direct, explicit batch, and concurrent live-batcher smokes with `enable_thinking=false` all returned non-empty visible text. | Keep; measurable Vulkan-only serial win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS=1`. |
 | A027 | Store single-row Vulkan MLP gate/up/down weights as packed BF16 buffers and expand in shader. | Added packed-BF16 gate/up shader, fused MLP dispatcher path, backend row-count gate, and parity test. `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, focused MLP parity, full Vulkan parity (`28 passed`), release Vulkan build, and `git diff --check` passed. Main-branch serial stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`; candidate measured `102.1ms` / `95.0ms` mean ITL versus same-binary rollback `112.4ms` / `113.6ms`. F32 MLP weights remain prewarmed for prefill/batched paths after packed-only prewarm regressed cold prefill to `3298.7ms`. Direct, explicit batch, and concurrent live-batcher smokes with `enable_thinking=false` all returned non-empty visible text. | Keep; measurable Vulkan-only serial win, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`. |
 | A028 | Extend packed-BF16 Vulkan MLP decode to small multi-row batches below the row-pair threshold. | Added packed-BF16 batched gate/up shader and reused `linear_decode_batched_bf16w` for down projection when flattened row count is `2..7`; row-pair batches stay on F32. Focused MLP parity covers batch `1` and `3`; full Vulkan parity passed (`28 passed`); release Vulkan build and `git diff --check` passed. Serial stayed coherent at `98.3ms` mean ITL. First four-prompt A/B was mixed (`4.390s` candidate vs `4.330s` rollback explicit batch, `9.493s` candidate vs `9.818s` rollback concurrent chat); second fresh-prompt A/B favored candidate on both (`4.320s` vs `4.544s`, `10.092s` vs `10.378s`). | Keep; small-batch Vulkan win with row-pair prefill left untouched, rollback via `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`. |
+| A029 | Trial packed-BF16 Vulkan MLP row-pair shaders for `row_count >= 8`. | Temporary row-pair gate/up and down BF16 shaders passed `cargo check`, focused parity including batch `9`, release Vulkan build, and `git diff --check`. Candidate stayed coherent and measured `384.1ms` prefill / `96.5ms` mean ITL, then `390.2ms` / `98.0ms` after adding a row-pair rollback env. Same-binary row-pair rollback with `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_ROWPAIR_WEIGHTS=1` produced the same tokens at `383.4ms` prefill / `96.5ms` mean ITL. | Rejected and removed; direct row-pair BF16 mirroring did not beat the current F32 row-pair path. |
 
 Additional validation after A025:
 
@@ -82,6 +83,14 @@ Additional validation after A028:
 - Two direct server A/B pairs against rollback env
   `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1` for explicit batch
   and four concurrent live-batcher requests
+
+Additional validation after rejected A029:
+
+- Temporary row-pair BF16 MLP shaders passed focused parity including batch `9`.
+- Temporary row-pair BF16 MLP code passed `cargo check -p kiln-vulkan-kernel`,
+  `cargo check -p kiln-model --features vulkan`, release Vulkan build, and
+  `git diff --check`.
+- Same-binary serial A/B favored rollback, so the row-pair code was removed.
 
 Additional validation after A027:
 

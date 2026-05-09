@@ -1307,13 +1307,50 @@ Verdict:
   stayed clean, and row-pair prefill/batch behavior is still left untouched.
 - CUDA and Metal code paths are untouched.
 
+### 2026-05-09 A029: Reject Packed-BF16 MLP Row-Pair Prefill Path
+
+Issue:
+- A028 deliberately left row-pair MLP batches (`row_count >= 8`) on the
+  existing F32 shaders. A row-pair packed-BF16 variant could reduce weight
+  bandwidth for prompt prefill, but it also changes a path where previous
+  row-pair geometry was already tuned.
+
+Implementation Tried:
+- Temporarily added packed-BF16 row-pair variants for both pieces of fused MLP:
+  `mlp_gate_up_decode_batched_rows2_bf16w.comp` and
+  `linear_decode_batched_rows2_bf16w.comp`.
+- Temporarily extended the packed MLP dispatcher to use those shaders when the
+  existing row-pair threshold selected row-pair geometry.
+- Added a row-pair-specific rollback env during the trial:
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_ROWPAIR_WEIGHTS=1`.
+- Extended focused parity to batch `9`, which exercises the row-pair path.
+
+Evidence:
+- The temporary row-pair code passed `cargo check -p kiln-vulkan-kernel`,
+  `cargo check -p kiln-model --features vulkan`, focused packed MLP parity
+  including batch `9`, release Vulkan build, and `git diff --check`.
+- Candidate serial paged smoke stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]` and measured `384.1ms` prefill /
+  `96.5ms` mean ITL.
+- Same-binary candidate after adding the row-pair-specific rollback env measured
+  `390.2ms` prefill / `98.0ms` mean ITL.
+- Same-binary row-pair rollback with
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_ROWPAIR_WEIGHTS=1` produced the same
+  token IDs and measured `383.4ms` prefill / `96.5ms` mean ITL.
+
+Verdict:
+- Rejected and removed. The packed-BF16 row-pair path did not beat the current
+  F32 row-pair shaders on the prompt-prefill shape, so A028 remains scoped to
+  row counts below the row-pair threshold.
+- Do not retry row-pair BF16 by direct shader mirroring; it needs a different
+  geometry or broader prefill fusion to justify another pass.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
-- Extend packed-BF16 MLP work to row-pair (`row_count >= 8`) only if a
-  dedicated shader beats the current F32 row-pair path; do not trade serial and
-  small-batch wins for a prefill regression.
+- Do not extend packed-BF16 MLP to row-pair (`row_count >= 8`) by direct shader
+  mirroring; A029 measured that as slower than the current F32 row-pair path.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
 - Continue profiling the remaining serial decode hotspots: GDN recurrent/gated
