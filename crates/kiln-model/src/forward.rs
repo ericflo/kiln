@@ -4961,7 +4961,8 @@ fn gated_deltanet_forward_decode_if(
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_out,
             &weights.out_proj_t,
