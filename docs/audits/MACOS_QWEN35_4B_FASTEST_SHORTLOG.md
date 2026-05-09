@@ -1952,3 +1952,10 @@
   candidate hidden-square tile4 was `969.438 us`, rollback tile8 was
   `894.369 us`. Source was reverted; keep the existing global batch8
   `row_quad_tile8` selector.
+- 2026-05-09 E442: Confirmed the current Metal batch transposed-GEMV row-pair
+  policy across the E440 Qwen shape matrix. With
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1`, every tested shape and
+  batch was slower than default: no-row-pair/default ratios ranged from
+  `1.409x` to `1.912x` for batch `2/3/4` and from `2.214x` to `2.570x` for
+  batch `8`. No source change; keep row-pair for batch `2/3/4` and row-quad
+  for batch `8`.
