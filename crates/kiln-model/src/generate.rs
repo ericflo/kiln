@@ -23,11 +23,12 @@ use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_head, model_forward_paged,
-    model_forward_paged_batched_decode_hidden, model_forward_paged_decode_contiguous_batch_greedy,
-    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    GpuWeights, LinearAttentionState, model_forward, model_forward_head_backend_decode_if,
+    model_forward_paged, model_forward_paged_batched_decode_hidden,
+    model_forward_paged_decode_contiguous_batch_greedy, model_forward_paged_last_token,
+    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
 use crate::kv_cache::KvCache;
@@ -2048,10 +2049,17 @@ impl ModelRunner {
                 )
                 .context("batched decode forward pass failed")?;
 
+                let logits = model_forward_head_backend_decode_if(
+                    Some(&*self.backend),
+                    &hidden,
+                    &self.weights,
+                    &self.config,
+                )
+                .context("batched decode lm head")?;
                 let mut sampled = Vec::with_capacity(states.len());
                 for (idx, params) in params.iter().enumerate() {
-                    let row_hidden = hidden.narrow(0, idx, 1)?;
-                    let row = model_forward_head(&row_hidden, &self.weights, &self.config)
+                    let row = logits
+                        .narrow(0, idx, 1)
                         .with_context(|| format!("batched decode lm head row {idx}"))?;
                     let token = if params.temperature == 0.0 {
                         greedy_sample(&row)?

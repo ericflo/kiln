@@ -7888,9 +7888,18 @@ pub fn model_forward_head(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
 ) -> Result<Tensor> {
+    model_forward_head_backend_decode_if(None, hidden, weights, config)
+}
+
+pub fn model_forward_head_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = lm_head_forward(&normed, &weights.embed_tokens_t)?;
+    let logits = lm_head_forward_backend_decode_if(backend, &normed, &weights.embed_tokens_t)?;
     Ok(logits)
 }
 
@@ -8164,16 +8173,16 @@ pub fn model_forward_paged_batched_decode(
         linear_states,
         lora,
     )?;
-    model_forward_head(&hidden, weights, config).context("batched decode lm head")
+    model_forward_head_backend_decode_if(Some(backend), &hidden, weights, config)
+        .context("batched decode lm head")
 }
 
 /// Batched paged decode through the transformer stack, stopping before the
 /// final LM head.
 ///
-/// Returning `[batch, 1, hidden]` lets the caller project and sample each row
-/// independently. That keeps the batch-shaped GDN/MLP speedup while bounding
-/// LM-head workspace to one `[1, 1, vocab]` row at a time, instead of
-/// materialising `[batch, 1, vocab]` logits for the whole microbatch.
+/// Returning `[batch, 1, hidden]` lets the caller choose between projecting the
+/// whole batch with a backend-aware LM head or sampling rows independently when
+/// bounded LM-head workspace is more important than projection throughput.
 #[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_batched_decode_hidden(
     backend: &dyn BackendRuntime,
@@ -8227,6 +8236,8 @@ pub fn model_forward_paged_batched_decode_hidden(
     let device = weights.embed_tokens.device();
     let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
     hidden = hidden.unsqueeze(1)?;
+    let use_metal_decode_ffn = sequence_lengths.iter().all(|&p| p > 0)
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
@@ -8342,7 +8353,14 @@ pub fn model_forward_paged_batched_decode_hidden(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                let ffn_out = swiglu_ffn_backend_profiled(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    None,
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
                     (hidden + ffn_out)?
@@ -8353,7 +8371,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                 let positions_f32: Vec<f32> = sequence_lengths.iter().map(|&p| p as f32).collect();
                 let positions = Tensor::from_slice(positions_f32.as_slice(), batch_size, device)?;
                 let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-                hidden = transformer_block_paged_decode_contiguous_batch(
+                match transformer_block_paged_decode_contiguous_batch(
                     backend,
                     &hidden,
                     layer,
@@ -8367,10 +8385,53 @@ pub fn model_forward_paged_batched_decode_hidden(
                     layer_lora,
                     None,
                     None,
-                )
-                .with_context(|| {
-                    format!("batched decode transformer block {layer_idx} (full attention, paged)")
-                })?;
+                ) {
+                    Ok(out) => hidden = out,
+                    Err(err) => {
+                        tracing::debug!(
+                            layer = layer_idx,
+                            error = %err,
+                            "batched full-attention decode declined; falling back to rowwise"
+                        );
+                        let mut rows = Vec::with_capacity(batch_size);
+                        for row_idx in 0..batch_size {
+                            let row_hidden = hidden.narrow(0, row_idx, 1)?.contiguous()?;
+                            let row_position = Tensor::from_slice(
+                                &[sequence_lengths[row_idx] as f32],
+                                1usize,
+                                device,
+                            )?;
+                            let row = transformer_block_paged(
+                                backend,
+                                &row_hidden,
+                                layer,
+                                config,
+                                &row_position,
+                                sequence_lengths[row_idx],
+                                config.num_attention_heads,
+                                config.num_kv_heads,
+                                config.head_dim,
+                                config.rotary_dim(),
+                                &weights.rotary_inv_freq,
+                                config.rms_norm_eps,
+                                paged_cache,
+                                &block_tables[row_idx],
+                                full_attn_idx,
+                                layer_lora,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "rowwise fallback transformer block {layer_idx} row {row_idx} (full attention, paged)"
+                                )
+                            })?;
+                            rows.push(row);
+                        }
+                        let row_refs: Vec<&Tensor> = rows.iter().collect();
+                        hidden = Tensor::cat(&row_refs, 0).with_context(|| {
+                            format!("cat rowwise fallback transformer block {layer_idx} outputs")
+                        })?;
+                    }
+                }
                 full_attn_idx += 1;
             }
         }
