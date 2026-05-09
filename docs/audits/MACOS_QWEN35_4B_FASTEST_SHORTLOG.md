@@ -1966,3 +1966,10 @@
   tie (`1964.735 us` row-pair versus `1962.617 us` rowwise). Batch `3/4/8`
   were still clear regressions without row-pair (`3.12/3.59/6.79 ms` versus
   `1.92/2.03/2.23 ms`). No source change; keep current MLP gate/up row-pair.
+- 2026-05-09 E444: Rejected `fast::exp` in the dedicated Metal MLP gate/up
+  serial kernel. The temporary candidate selected only for aligned bs=1 serial
+  decode and left batch paths unchanged. Short same-binary pairs were noise
+  (`1684.021` fast versus `1679.600 us` rollback, then `1666.696` fast versus
+  `1679.260 us` rollback), and the longer warmup-10/iters-50 pair favored the
+  current standard-exp kernel (`1719.310 us` fast versus `1692.736 us`
+  rollback). Source reverted; keep standard `exp`.

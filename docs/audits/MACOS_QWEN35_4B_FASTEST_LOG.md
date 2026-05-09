@@ -18280,3 +18280,67 @@ row-pair is disabled.
 
 Rejected. Keep the current MLP gate/up row-pair selector. A batch-2-only
 rowwise exception is not justified by a noisy `0-3%` synthetic difference.
+
+## 2026-05-09 - E444 rejected MLP gate/up serial fast-exp kernel
+
+### Purpose
+
+E391 rejected `fast::exp` in the shared MLP gate/up kernel before E433 added
+the dedicated bs=1 serial kernel. Since `mlp:gate_up_fused` remains the top
+serial decode stage, retest the fast-exp idea only inside that dedicated serial
+kernel so batch paths are not exposed.
+
+### Change
+
+Temporary only; reverted after measurement.
+
+- Added `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_FAST_EXP=1` as rollback.
+- Added a dedicated `kiln_mlp_gate_up_serial_fast_exp_bf16` Metal kernel.
+- Default selected that fast-exp kernel only when the existing dedicated serial
+  gate/up path would have selected: rows `1`, serial vector loads enabled,
+  even intermediate size, and aligned gate/up buffers.
+- Batch `2/3/4/8` stayed on existing kernels.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=5 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Same benchmark with `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_FAST_EXP=1`
+- Counter-order repeat of the default and rollback benchmarks
+- Longer pair with warmup `10`, iterations `50`
+- `git diff --check`
+
+### Results
+
+Batch `1` was the only row selecting the candidate fast-exp serial kernel.
+
+| run | fast-exp b1 | rollback b1 | result |
+| --- | ---: | ---: | --- |
+| pair 1 | `1684.021 us` | `1679.600 us` | fast/rollback `1.003x` |
+| counter pair | `1666.696 us` | `1679.260 us` | fast/rollback `0.993x` |
+| longer w10/i50 | `1719.310 us` | `1692.736 us` | fast/rollback `1.016x` |
+
+The short pairs were effectively noise. The longer pair favored the current
+standard-exp serial kernel by `1.6%`, so there is no useful isolated win to
+carry into endpoint testing.
+
+### Artifacts
+
+- `e444_mlp_gate_up_serial_fast_exp_candidate.diff`
+- `e444_mlp_gate_up_serial_fast_exp_fmt_check.log`
+- `e444_mlp_gate_up_serial_fast_exp_parity.log`
+- `e444_mlp_gate_up_serial_fast_exp_default.log`
+- `e444_mlp_gate_up_serial_fast_exp_disabled.log`
+- `e444_mlp_gate_up_serial_fast_exp_disabled_rerun.log`
+- `e444_mlp_gate_up_serial_fast_exp_default_rerun.log`
+- `e444_mlp_gate_up_serial_fast_exp_default_w10_i50.log`
+- `e444_mlp_gate_up_serial_fast_exp_disabled_w10_i50.log`
+- `e444_mlp_gate_up_serial_fast_exp_summary.md`
+- `e444_mlp_gate_up_serial_fast_exp_reverted_fmt_check.log`
+- `e444_mlp_gate_up_serial_fast_exp_git_diff_check.log`
+
+### Decision
+
+Rejected. Keep the current dedicated Metal MLP gate/up serial kernel using
+standard `exp`. Runtime source was reverted; CUDA/Vulkan behavior is unchanged.
