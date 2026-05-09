@@ -12702,3 +12702,104 @@ max batch `3`, so this is the wrong tradeoff.
 Rejected and reverted. Keep the existing combined row-pair MLP gate/up kernel.
 Do not split the row-pair path into a separate Metal function unless a different
 decomposition can win batch `2/3` without hurting batch `1`.
+
+## 2026-05-09 E369 - Accepted larger-batch GDN in-proj row-pair mode
+
+### Goal
+
+E367 ranked `gdn:in_proj` behind MLP gate/up and down-projection in live Metal
+decode. E361 already paired adjacent QKV/Z columns for batched rows, but the
+kernel still processed each batch row independently and reloaded the same GDN
+in-projection weights for every row. This experiment tested reusing each weight
+load across two adjacent decode rows.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` as a same-binary rollback
+  knob.
+- Added row-pair mode to `kiln_gdn_in_proj_decode_bf16`.
+- The existing batch `1` path is unchanged.
+- The first unrestricted row-pair candidate applied to all `batch > 1`, but it
+  regressed batch `2/3`. The accepted source only enables row-pair mode for
+  `batch >= 4`.
+- Extended the synthetic GDN in-proj bench to include batch `3`, matching
+  recent live max-batch probes.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=2 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=2 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Longer final-gate synthetic confirmation with warmup `5`, iters `20`, disabled
+  and enabled.
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Same-binary four-request streaming endpoint probe with `KILN_DECODE_BATCH_WAIT_US=100`,
+  disabled and enabled, greedy `max_tokens=8`.
+
+### Results
+
+The unrestricted row-pair candidate was rejected for batch `2/3`: in the short
+same-binary bench it moved batch `2/3` from `1697.984/1532.938 us` to
+`1883.901/1956.818 us`. The final candidate therefore gates row-pair mode to
+`batch >= 4`.
+
+Final long same-binary synthetic bench, Qwen-shaped BF16 GDN in-proj decode,
+warmup `5`, iters `20`, lower is better:
+
+- batch `1`: disabled `1318.579 us`, final `1298.652 us` (same old path/noise)
+- batch `2`: disabled `1504.013 us`, final `1604.644 us` (same old path/noise)
+- batch `3`: disabled `1667.994 us`, final `1705.560 us` (same old path/noise)
+- batch `4`: disabled `2684.158 us`, final `1787.494 us`
+- batch `8`: disabled `4093.979 us`, final `3108.410 us`
+
+The only intended row-pair cases, batch `4/8`, improved by `33.4%` and `24.1%`.
+Max diffs were `0` in all synthetic rows.
+
+Same-binary endpoint probe, four varied prompts, greedy `max_tokens=8`,
+`KILN_DECODE_BATCH_WAIT_US=100`:
+
+- row-pair disabled: wall `6.038664s`, generated `32` tokens, submitted `28`
+  jobs, `8` worker batches, `28` rows, max batch `4`
+- row-pair enabled: wall `5.932975s`, generated `32` tokens, submitted `28`
+  jobs, `8` worker batches, `28` rows, max batch `4`
+
+The endpoint probe improved by `1.75%` with the same batching shape.
+
+### Artifact
+
+- `e369_gdn_in_proj_rows2_current.log`
+- `e369_gdn_in_proj_rows2_parity.log`
+- `e369_gdn_in_proj_rows2_disabled_baseline.log`
+- `e369_gdn_in_proj_rows2_candidate.log`
+- `e369_gdn_in_proj_rows2_ge4_parity.log`
+- `e369_gdn_in_proj_rows2_ge4_disabled_baseline.log`
+- `e369_gdn_in_proj_rows2_ge4_candidate.log`
+- `e369_gdn_in_proj_rows2_ge4_disabled_baseline_long.log`
+- `e369_gdn_in_proj_rows2_ge4_candidate_long.log`
+- `e369_cargo_check_metal.log`
+- `e369_cargo_check_vulkan.log`
+- `e369_release_build_metal.log`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_server.log`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_health.json`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_metrics.prom`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_time.json`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_response_0.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_response_1.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_response_2.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_disabled_response_3.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_server.log`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_health.json`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_metrics.prom`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_time.json`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_response_0.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_response_1.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_response_2.sse`
+- `e369_gdn_in_proj_rows2_ge4_endpoint_response_3.sse`
+
+### Decision
+
+Accepted. Keep GDN in-proj row-pair mode enabled by default only for
+`batch >= 4`, with `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR=1` as the rollback
+knob. Batch `1/2/3` stay on the previous E361 path.

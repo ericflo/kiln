@@ -1328,3 +1328,13 @@
   only improving batch `4/8` from `2131.391/3547.505 us` to
   `2071.964/3384.490 us`. Source was reverted; keep the existing combined
   row-pair MLP gate/up kernel.
+- 2026-05-09 E369: Accepted larger-batch row-pair mode for the Metal GDN
+  in-projection kernel, gated to `batch >= 4` to avoid the batch `2/3`
+  regressions seen in the unrestricted candidate. Long same-binary synthetic
+  bench with the final gate improved batch `4/8` from `2684.158/4093.979 us`
+  to `1787.494/3108.410 us` (`33.4%/24.1%`), while batch `1/2/3` remain on
+  the old path. GDN in-proj parity, Metal/Vulkan checks, and release build
+  passed. A same-binary four-request endpoint probe with `100us` decode wait
+  formed max batch `4` in both cases and improved disabled/enabled
+  `6.038664/5.932975s` with `32` generated tokens, `28` jobs, `8` worker
+  batches, and `28` rows.

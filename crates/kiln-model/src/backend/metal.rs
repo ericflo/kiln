@@ -35,6 +35,7 @@ const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
+const DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR";
 const ENABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_ENABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
@@ -850,6 +851,10 @@ fn metal_gdn_prefill_qkv_conv_split_disabled() -> bool {
         || env_truthy(DISABLE_METAL_CONV1D_PREFILL)
         || env_truthy(DISABLE_METAL_FUSED_CONV1D)
         || env_truthy(DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT)
+}
+
+fn metal_gdn_in_proj_row_pair_disabled() -> bool {
+    env_truthy(DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR)
 }
 
 fn metal_gdn_gates_disabled() -> bool {
@@ -3063,6 +3068,7 @@ kernel void kiln_gdn_in_proj_decode_bf16(
     constant uint& z_dim [[buffer(11)]],
     constant uint& nv [[buffer(12)]],
     constant uint& batch [[buffer(13)]],
+    constant uint& row_pair_mode [[buffer(14)]],
     uint gid [[thread_position_in_grid]]
 ) {
     // Keep bs=1 on the lean one-column path; paired columns only win once
@@ -3102,67 +3108,194 @@ kernel void kiln_gdn_in_proj_decode_bf16(
         return;
     }
 
+    if (row_pair_mode == 0) {
+        const uint qkv_pairs = (qkv_dim + 1) >> 1;
+        const uint z_pairs = (z_dim + 1) >> 1;
+        const uint total = qkv_pairs + z_pairs + (nv * 2);
+        if (gid >= total * batch) {
+            return;
+        }
+        const uint batch_idx = gid / total;
+        const uint local_gid = gid - batch_idx * total;
+        const uint x_base = batch_idx * hidden;
+
+        if (local_gid < qkv_pairs) {
+            const uint col0 = local_gid << 1;
+            const uint col1 = col0 + 1;
+            float acc0 = 0.0f;
+            float acc1 = 0.0f;
+            for (uint i = 0; i < hidden; ++i) {
+                const float xv = static_cast<float>(x[x_base + i]);
+                const uint w_idx = i * qkv_dim + col0;
+                acc0 += xv * static_cast<float>(qkv_t[w_idx]);
+                if (col1 < qkv_dim) {
+                    acc1 += xv * static_cast<float>(qkv_t[w_idx + 1]);
+                }
+            }
+            const uint out_base = batch_idx * qkv_dim;
+            qkv_out[out_base + col0] = static_cast<bfloat>(acc0);
+            if (col1 < qkv_dim) {
+                qkv_out[out_base + col1] = static_cast<bfloat>(acc1);
+            }
+        } else if (local_gid < qkv_pairs + z_pairs) {
+            const uint local_z = local_gid - qkv_pairs;
+            const uint col0 = local_z << 1;
+            const uint col1 = col0 + 1;
+            float acc0 = 0.0f;
+            float acc1 = 0.0f;
+            for (uint i = 0; i < hidden; ++i) {
+                const float xv = static_cast<float>(x[x_base + i]);
+                const uint w_idx = i * z_dim + col0;
+                acc0 += xv * static_cast<float>(z_t[w_idx]);
+                if (col1 < z_dim) {
+                    acc1 += xv * static_cast<float>(z_t[w_idx + 1]);
+                }
+            }
+            const uint out_base = batch_idx * z_dim;
+            z_out[out_base + col0] = static_cast<bfloat>(acc0);
+            if (col1 < z_dim) {
+                z_out[out_base + col1] = static_cast<bfloat>(acc1);
+            }
+        } else if (local_gid < qkv_pairs + z_pairs + nv) {
+            const uint col = local_gid - qkv_pairs - z_pairs;
+            float acc = 0.0f;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[x_base + i]) * static_cast<float>(a_t[i * nv + col]);
+            }
+            a_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
+        } else {
+            const uint col = local_gid - qkv_pairs - z_pairs - nv;
+            float acc = 0.0f;
+            for (uint i = 0; i < hidden; ++i) {
+                acc += static_cast<float>(x[x_base + i]) * static_cast<float>(b_t[i * nv + col]);
+            }
+            b_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
+        }
+        return;
+    }
+
     const uint qkv_pairs = (qkv_dim + 1) >> 1;
     const uint z_pairs = (z_dim + 1) >> 1;
     const uint total = qkv_pairs + z_pairs + (nv * 2);
-    if (gid >= total * batch) {
+    const uint row_pairs = (batch + 1) >> 1;
+    if (gid >= total * row_pairs) {
         return;
     }
-    const uint batch_idx = gid / total;
-    const uint local_gid = gid - batch_idx * total;
-    const uint x_base = batch_idx * hidden;
+    const uint row_pair = gid / total;
+    const uint local_gid = gid - row_pair * total;
+    const uint row0 = row_pair << 1;
+    const uint row1 = row0 + 1;
+    const bool has_row1 = row1 < batch;
+    const uint x_base0 = row0 * hidden;
+    const uint x_base1 = row1 * hidden;
 
     if (local_gid < qkv_pairs) {
         const uint col0 = local_gid << 1;
         const uint col1 = col0 + 1;
-        float acc0 = 0.0f;
-        float acc1 = 0.0f;
+        const bool has_col1 = col1 < qkv_dim;
+        float acc00 = 0.0f;
+        float acc01 = 0.0f;
+        float acc10 = 0.0f;
+        float acc11 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            const float xv = static_cast<float>(x[x_base + i]);
+            const float xv0 = static_cast<float>(x[x_base0 + i]);
             const uint w_idx = i * qkv_dim + col0;
-            acc0 += xv * static_cast<float>(qkv_t[w_idx]);
-            if (col1 < qkv_dim) {
-                acc1 += xv * static_cast<float>(qkv_t[w_idx + 1]);
+            const float w0 = static_cast<float>(qkv_t[w_idx]);
+            acc00 += xv0 * w0;
+            if (has_col1) {
+                const float w1 = static_cast<float>(qkv_t[w_idx + 1]);
+                acc01 += xv0 * w1;
+                if (has_row1) {
+                    const float xv1 = static_cast<float>(x[x_base1 + i]);
+                    acc10 += xv1 * w0;
+                    acc11 += xv1 * w1;
+                }
+            } else if (has_row1) {
+                const float xv1 = static_cast<float>(x[x_base1 + i]);
+                acc10 += xv1 * w0;
             }
         }
-        const uint out_base = batch_idx * qkv_dim;
-        qkv_out[out_base + col0] = static_cast<bfloat>(acc0);
-        if (col1 < qkv_dim) {
-            qkv_out[out_base + col1] = static_cast<bfloat>(acc1);
+        const uint out_base0 = row0 * qkv_dim;
+        qkv_out[out_base0 + col0] = static_cast<bfloat>(acc00);
+        if (has_col1) {
+            qkv_out[out_base0 + col1] = static_cast<bfloat>(acc01);
+        }
+        if (has_row1) {
+            const uint out_base1 = row1 * qkv_dim;
+            qkv_out[out_base1 + col0] = static_cast<bfloat>(acc10);
+            if (has_col1) {
+                qkv_out[out_base1 + col1] = static_cast<bfloat>(acc11);
+            }
         }
     } else if (local_gid < qkv_pairs + z_pairs) {
         const uint local_z = local_gid - qkv_pairs;
         const uint col0 = local_z << 1;
         const uint col1 = col0 + 1;
-        float acc0 = 0.0f;
-        float acc1 = 0.0f;
+        const bool has_col1 = col1 < z_dim;
+        float acc00 = 0.0f;
+        float acc01 = 0.0f;
+        float acc10 = 0.0f;
+        float acc11 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            const float xv = static_cast<float>(x[x_base + i]);
+            const float xv0 = static_cast<float>(x[x_base0 + i]);
             const uint w_idx = i * z_dim + col0;
-            acc0 += xv * static_cast<float>(z_t[w_idx]);
-            if (col1 < z_dim) {
-                acc1 += xv * static_cast<float>(z_t[w_idx + 1]);
+            const float w0 = static_cast<float>(z_t[w_idx]);
+            acc00 += xv0 * w0;
+            if (has_col1) {
+                const float w1 = static_cast<float>(z_t[w_idx + 1]);
+                acc01 += xv0 * w1;
+                if (has_row1) {
+                    const float xv1 = static_cast<float>(x[x_base1 + i]);
+                    acc10 += xv1 * w0;
+                    acc11 += xv1 * w1;
+                }
+            } else if (has_row1) {
+                const float xv1 = static_cast<float>(x[x_base1 + i]);
+                acc10 += xv1 * w0;
             }
         }
-        const uint out_base = batch_idx * z_dim;
-        z_out[out_base + col0] = static_cast<bfloat>(acc0);
-        if (col1 < z_dim) {
-            z_out[out_base + col1] = static_cast<bfloat>(acc1);
+        const uint out_base0 = row0 * z_dim;
+        z_out[out_base0 + col0] = static_cast<bfloat>(acc00);
+        if (has_col1) {
+            z_out[out_base0 + col1] = static_cast<bfloat>(acc01);
+        }
+        if (has_row1) {
+            const uint out_base1 = row1 * z_dim;
+            z_out[out_base1 + col0] = static_cast<bfloat>(acc10);
+            if (has_col1) {
+                z_out[out_base1 + col1] = static_cast<bfloat>(acc11);
+            }
         }
     } else if (local_gid < qkv_pairs + z_pairs + nv) {
         const uint col = local_gid - qkv_pairs - z_pairs;
-        float acc = 0.0f;
+        float acc0 = 0.0f;
+        float acc1 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(a_t[i * nv + col]);
+            const float w = static_cast<float>(a_t[i * nv + col]);
+            acc0 += static_cast<float>(x[x_base0 + i]) * w;
+            if (has_row1) {
+                acc1 += static_cast<float>(x[x_base1 + i]) * w;
+            }
         }
-        a_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
+        a_out[row0 * nv + col] = static_cast<bfloat>(acc0);
+        if (has_row1) {
+            a_out[row1 * nv + col] = static_cast<bfloat>(acc1);
+        }
     } else {
         const uint col = local_gid - qkv_pairs - z_pairs - nv;
-        float acc = 0.0f;
+        float acc0 = 0.0f;
+        float acc1 = 0.0f;
         for (uint i = 0; i < hidden; ++i) {
-            acc += static_cast<float>(x[x_base + i]) * static_cast<float>(b_t[i * nv + col]);
+            const float w = static_cast<float>(b_t[i * nv + col]);
+            acc0 += static_cast<float>(x[x_base0 + i]) * w;
+            if (has_row1) {
+                acc1 += static_cast<float>(x[x_base1 + i]) * w;
+            }
         }
-        b_out[batch_idx * nv + col] = static_cast<bfloat>(acc);
+        b_out[row0 * nv + col] = static_cast<bfloat>(acc0);
+        if (has_row1) {
+            b_out[row1 * nv + col] = static_cast<bfloat>(acc1);
+        }
     }
 }
 "#;
@@ -5544,12 +5677,18 @@ fn metal_gdn_in_proj_decode_bf16(
     let (_, z_dim) = z_t.dims2()?;
     let (_, nv) = a_t.dims2()?;
     let output_total = qkv_dim + z_dim + (nv * 2);
+    let row_pair_enabled = batch >= 4 && !metal_gdn_in_proj_row_pair_disabled();
     let dispatch_cols = if batch == 1 {
         output_total
     } else {
         qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + (nv * 2)
     };
-    let dispatch_total = batch * dispatch_cols;
+    let dispatch_rows = if row_pair_enabled {
+        batch.div_ceil(2)
+    } else {
+        batch
+    };
+    let dispatch_total = dispatch_rows * dispatch_cols;
 
     // The kernel writes every output element exactly once. Keep bs=1 on one
     // backing allocation, but use separate batch outputs so each `[B,1,N]`
@@ -5661,11 +5800,13 @@ fn metal_gdn_in_proj_decode_bf16(
         let z_dim_u32 = z_dim as u32;
         let nv_u32 = nv as u32;
         let batch_u32 = batch as u32;
+        let row_pair_mode_u32 = u32::from(row_pair_enabled);
         encoder.set_bytes(9, &hidden_u32);
         encoder.set_bytes(10, &qkv_dim_u32);
         encoder.set_bytes(11, &z_dim_u32);
         encoder.set_bytes(12, &nv_u32);
         encoder.set_bytes(13, &batch_u32);
+        encoder.set_bytes(14, &row_pair_mode_u32);
 
         let threads_per_grid = objc2_metal::MTLSize {
             width: dispatch_total,
@@ -12126,7 +12267,7 @@ mod tests {
         let b_t = patterned_bf16_2d(hidden, nv, &device, 31, 0.00390625)?;
         device.synchronize()?;
 
-        for batch in [1usize, 2, 4, 8] {
+        for batch in [1usize, 2, 3, 4, 8] {
             let x = patterned_bf16_decode_batch(batch, hidden, &device)?;
             assert!(metal_gdn_in_proj_decode_supports(
                 &x, &qkv_t, &z_t, &a_t, &b_t

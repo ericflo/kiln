@@ -1,0 +1,21 @@
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" ولن"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-2a2235c7-97a0-4778-91f2-df0b93f9e3b2","object":"chat.completion.chunk","created":1778317200,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
