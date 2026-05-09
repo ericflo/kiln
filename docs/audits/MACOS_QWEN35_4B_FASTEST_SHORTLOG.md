@@ -1631,3 +1631,8 @@
   `mlp:gate_proj` `67.594 ms`, `gdn:recurrent` `36.002 ms`, and
   `gdn:out_proj` `30.199 ms`. Accepted as target-selection evidence; no source
   change.
+- 2026-05-09 E406: Rejected a prebuilt combined MLP gate/up prefill matmul
+  layout (`[2560,18432]`) as a replacement for separate gate/up projection
+  matmuls. Parity was exact, but same-binary synthetic timing regressed:
+  `seq_len=64` current `4671.175 us` versus combined `5835.092 us` (`0.801x`).
+  Temporary benchmark source reverted; do not add this combined prefill layout.

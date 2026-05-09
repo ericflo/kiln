@@ -15562,3 +15562,49 @@ Accepted as target-selection evidence; no source change. E404 lowered the
 GDN gates/recurrent area, but prefill remains led by GDN input projection and
 split MLP projection matmuls. Do not retry E403's rejected `[T,1,H]` batch-GEMV
 reshape route for GDN prefill.
+
+## 2026-05-09 - E406 rejected MLP prefill combined gate/up matmul
+
+### Hypothesis
+
+E405 ranks the split MLP prefill projection matmuls as three of the top
+remaining prefill buckets. E332 already rejected pushing prefill through the
+decode-style fused gate/up kernel, but a different materialization-boundary
+idea is to prebuild a `[hidden, 2 * intermediate]` gate/up weight and compute
+`[gate, up]` with one prefill matmul before splitting and applying SiLU/mul.
+
+### Change Tested
+
+Temporarily added an ignored synthetic benchmark-only helper that:
+
+- prebuilt `combined_t = cat(gate_t, up_t, dim=-1)`
+- ran one `x.broadcast_matmul(combined_t)` for `x=[1,T,2560]`
+- split the result into gate/up halves
+- applied the same `silu(gate) * up` computation as the current path
+- compared against the current two-matmul prefill path
+
+No production path was changed. The temporary benchmark source was reverted
+after the measurement.
+
+### Results
+
+Synthetic Metal Qwen3.5 MLP gate/up prefill, same binary:
+
+- `seq_len=16`: current `4270.758 us`, combined `4823.392 us`,
+  speedup `0.885x`
+- `seq_len=64`: current `4671.175 us`, combined `5835.092 us`,
+  speedup `0.801x`
+- `seq_len=128`: current `8193.108 us`, combined `10642.592 us`,
+  speedup `0.770x`
+- max and mean absolute diffs were `0` for all tested sequence lengths
+
+### Artifact
+
+- `e406_mlp_prefill_combined_gate_up_synthetic.log`
+
+### Decision
+
+Rejected before endpoint measurement. Even with the combined weight prebuilt
+outside the timed region, the single wider prefill matmul is slower than the
+current split gate/up projection path. Do not add a combined gate/up prefill
+weight layout for this purpose.
