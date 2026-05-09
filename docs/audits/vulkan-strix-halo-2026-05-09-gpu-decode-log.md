@@ -665,6 +665,51 @@ Verdict:
   path: CPU gather/compaction of K/V, upload of compact K/V, and readback of
   attention output.
 
+### 2026-05-09 A016: Reject Direct Rust K/V Compaction for Dyn-Seqlen Batch
+
+Hypothesis:
+- The A011 dyn-seqlen path currently builds a gather tensor and uses Candle
+  `index_select`/`reshape`/`contiguous` to compact paged K/V before the Vulkan
+  dispatch.
+- For CPU F32 contiguous K/V pools, directly copying selected slots from Candle
+  CPU storage into compact `Vec<f32>` buffers could avoid that tensor churn and
+  reduce overhead before the Vulkan upload.
+
+Experiment:
+- Added an uncommitted compact-slice Vulkan dispatcher and a backend path that
+  gathered K/V slots directly from CPU F32 pool storage.
+- Added an uncommitted rollback env,
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_DIRECT_COMPACT=1`.
+- After short-context regression appeared, tried a thresholded variant that
+  only used direct compaction for `max_seqlen_k >= 64`, with
+  `KILN_VULKAN_PAGED_ATTN_DIRECT_COMPACT_MIN_SEQLEN` as an uncommitted tuning
+  env.
+- Removed the code after measurement.
+
+Evidence:
+- Focused paged-attention parity passed with the compact-slice dispatcher added.
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Unthresholded direct compaction returned HTTP 200 but regressed the primary
+  short sampled batch to `time_total=7.795046s` and `time_total=7.807411s`.
+- The same binary with
+  `KILN_DISABLE_VULKAN_PAGED_ATTN_DIRECT_COMPACT=1` returned HTTP 200 at
+  `time_total=7.670023s` on the primary short sampled batch.
+- Unthresholded direct compaction improved the longer sampled batch to
+  `time_total=26.873467s`, versus rollback `time_total=27.058533s`.
+- The thresholded default avoided most of the short-context regression
+  (`time_total=7.727216s`) but no longer showed a meaningful longer-context
+  win (`time_total=27.040179s` versus rollback `27.058533s`).
+
+Verdict:
+- Rejected and removed before commit. Direct Rust K/V compaction can help a
+  longer request, but the short-context regression and weak thresholded win do
+  not justify adding another compaction path.
+- The next K/V data-movement attempt should avoid host compaction more
+  fundamentally, likely by changing residency/upload strategy rather than
+  replacing Candle gather with Rust-side gather.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
