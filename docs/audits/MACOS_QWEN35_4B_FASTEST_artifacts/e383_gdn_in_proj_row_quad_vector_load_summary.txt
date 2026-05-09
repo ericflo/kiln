@@ -1,0 +1,45 @@
+E383 Metal GDN in-projection row-quad qkv/z vector-load trial
+
+Decision: rejected; source reverted.
+
+Exploration:
+- Inspected the current batched transposed GEMV row-quad down-projection path
+  and confirmed it already uses bfloat4 vector loads. A tile-8 row-quad variant
+  would require a larger 32-accumulator kernel, so this experiment instead
+  tested the narrower GDN in-projection qkv/z adjacent-column load shape.
+- Captured a current transposed GEMV down-proj synthetic baseline for reference.
+
+Candidate:
+- Added a temporary KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1
+  toggle.
+- Added temporary row_pair_mode=5 for GDN in-proj row-quad when qkv/z dims were
+  even and qkv/z buffers were 4-byte aligned.
+- Mode 5 loaded qkv_t/z_t column pairs with bfloat2 in the row-quad qkv/z
+  branches. a_t/b_t stayed scalar.
+
+Synthetic results:
+- Pre-edit GDN in-proj batch 8 baseline: 2177.171 us.
+- Same-binary scalar toggle batch 8: 2219.721 us.
+- Vector candidate batch 8: 2112.425 us.
+- Synthetic vector candidate was 4.8% faster than same-binary scalar and 3.0%
+  faster than the pre-edit baseline.
+
+Endpoint results:
+- Default wait100, max_tokens=24: scalar toggle 17.820214s, vector default
+  17.878880s. Token/job/row counts matched, max batch was 8, but worker batches
+  differed 24 vs 26, so this run was not clean and default was slightly slower.
+- wait200, max_tokens=24: scalar toggle 17.863463s, vector default 18.300302s.
+  Token/job/worker-batch/row counts matched exactly at 192 tokens, 184 jobs, 24
+  worker batches, 184 rows, max batch 8. Vector was 2.4% slower.
+
+Validation run before rejection:
+- cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture
+- KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture
+- KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture
+- cargo build --release --features metal --bin kiln
+- Same-binary endpoint A/B at default wait100 and wait200.
+
+Reason:
+- The synthetic kernel microbench improved, but the clean wait200 endpoint A/B
+  regressed with identical scheduler counters. Rejected to protect serving
+  throughput.

@@ -14031,3 +14031,108 @@ Accepted as target-selection evidence. No source change. Continue with MLP
 gate/up and MLP down-projection as primary targets; GDN in/out projection remain
 secondary targets with enough variance to require endpoint confirmation for any
 micro-optimization.
+
+## 2026-05-09 E383 - Reject GDN in-projection row-quad qkv/z vector loads
+
+### Goal
+
+Continue after E382's target-selection profile. `mlp:down_proj` remains hot,
+but code inspection showed the current batched transposed-GEMV row-quad path
+already uses `bfloat4` vector loads. The next narrow load-shape candidate was
+GDN in-projection row-quad, where qkv/z adjacent-column pairs were still loaded
+as scalar BF16 values.
+
+### Change
+
+Temporary only; reverted before commit.
+
+- Added a temporary `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1`
+  toggle.
+- Added a temporary `row_pair_mode=5` for GDN in-projection row-quad when qkv/z
+  dims were even and qkv/z Metal buffer offsets were 4-byte aligned.
+- Mode `5` loaded qkv/z column pairs with `bfloat2` in the row-quad qkv/z
+  branches. `a_t` and `b_t` stayed on the existing scalar path.
+
+### Validation
+
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=3 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- Same-binary endpoint A/B at default wait100, eight cache-warmed varied
+  prompts, greedy `max_tokens=24`.
+- Same-binary endpoint A/B at `KILN_DECODE_BATCH_WAIT_US=200`, eight
+  cache-warmed varied prompts, greedy `max_tokens=24`.
+
+### Results
+
+Current transposed-GEMV down-projection synthetic baseline, captured before
+leaving that path alone:
+
+- batch `2`: `1256.708 us`
+- batch `3`: `1963.550 us`
+- batch `4`: `2084.371 us`
+- batch `8`: `3076.633 us`
+
+Pre-edit Qwen-shaped BF16 GDN in-projection synthetic baseline:
+
+- batch `1`: `1272.362 us`
+- batch `2`: `1662.008 us`
+- batch `3`: `2710.025 us`
+- batch `4`: `1770.258 us`
+- batch `8`: `2177.171 us`
+
+Same-binary GDN in-projection vector candidate versus scalar toggle:
+
+- batch `1`: scalar `1464.583 us`, vector `1174.996 us`
+- batch `2`: scalar `1687.554 us`, vector `1824.392 us`
+- batch `3`: scalar `2873.933 us`, vector `2698.233 us`
+- batch `4`: scalar `1800.325 us`, vector `1703.821 us`
+- batch `8`: scalar `2219.721 us`, vector `2112.425 us`
+
+The intended batch-8 synthetic shape improved by `4.8%` versus same-binary
+scalar row-quad and by `3.0%` versus the pre-edit baseline.
+
+Default-wait endpoint A/B, eight varied prompts, greedy `max_tokens=24`:
+
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1`: wall
+  `17.820214s`, `192` generated tokens, `184` jobs, `24` worker batches,
+  `184` rows, max batch `8`
+- vector default: wall `17.878880s`, `192` generated tokens, `184` jobs, `26`
+  worker batches, `184` rows, max batch `8`
+
+This run was not clean because worker batches differed, and vector default was
+slightly slower.
+
+Wait200 endpoint A/B, eight varied prompts, greedy `max_tokens=24`:
+
+- `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD_VECTOR_LOAD=1`: wall
+  `17.863463s`, `192` generated tokens, `184` jobs, `24` worker batches,
+  `184` rows, max batch `8`
+- vector default: wall `18.300302s`, `192` generated tokens, `184` jobs, `24`
+  worker batches, `184` rows, max batch `8`
+
+With identical scheduler counters, vector mode regressed endpoint wall by
+`2.4%`.
+
+### Artifact
+
+- `e383_down_proj_row_quad_tile8_baseline.log`
+- `e383_gdn_in_proj_row_quad_vector_load_baseline.log`
+- `e383_gdn_in_proj_row_quad_vector_load_parity.log`
+- `e383_gdn_in_proj_row_quad_vector_load_candidate.log`
+- `e383_gdn_in_proj_row_quad_vector_load_disabled.log`
+- `e383_release_build_metal.log`
+- `e383_gdn_in_proj_row_quad_vector_load_endpoint_*`
+- `e383_gdn_in_proj_row_quad_vector_load_endpoint_summary.json`
+- `e383_gdn_in_proj_row_quad_vector_load_endpoint_wait200_*`
+- `e383_gdn_in_proj_row_quad_vector_load_endpoint_wait200_summary.json`
+- `e383_gdn_in_proj_row_quad_vector_load_summary.txt`
+
+### Decision
+
+Rejected. The synthetic microbench improved, but the clean wait200 endpoint A/B
+regressed with identical token, job, worker-batch, row, and max-batch counters.
+Source reverted; no CUDA/Vulkan behavior changed.

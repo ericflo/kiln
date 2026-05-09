@@ -1,0 +1,78 @@
+{
+  "case": "default",
+  "vector_load_disabled": false,
+  "port": 8499,
+  "request_elapsed_s": 17.878879750031047,
+  "statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "requests": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 17.87758233305067,
+      "bytes": 5210
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 17.200539958081208,
+      "bytes": 5215
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 17.87721737497486,
+      "bytes": 5216
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 17.87676583393477,
+      "bytes": 5216
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_s": 17.876518583041616,
+      "bytes": 5216
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_s": 17.876338416012004,
+      "bytes": 5216
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_s": 17.875772583996877,
+      "bytes": 5210
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_s": 17.87535874999594,
+      "bytes": 5216
+    }
+  ],
+  "counters": {
+    "tokens_generated": 192.0,
+    "jobs_submitted": 184.0,
+    "worker_batches": 26.0,
+    "batcher_rows": 184.0,
+    "max_batch": 8.0
+  },
+  "prompt_count": 8,
+  "max_tokens": 24,
+  "temperature": 0.0,
+  "stream": true,
+  "decode_wait_env": null
+}

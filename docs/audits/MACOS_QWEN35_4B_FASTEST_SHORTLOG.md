@@ -1457,3 +1457,12 @@
   and `gdn:out_proj` `129.519 ms`. Accepted as target-selection evidence; no
   source change. Continue with MLP gate/up/down first, with GDN in/out close
   behind.
+- 2026-05-09 E383: Rejected a Metal GDN in-projection row-quad qkv/z
+  `bfloat2` vector-load mode. The temporary mode improved synthetic batch `8`
+  from same-binary scalar `2219.721 us` to vector `2112.425 us` (`4.8%`) and
+  beat the pre-edit baseline `2177.171 us`, but serving did not hold. Default
+  wait100 max_tokens=24 was slightly slower with mismatched worker batches
+  (`17.820214s` scalar with `24` batches vs `17.878880s` vector with `26`),
+  and wait200 max_tokens=24 regressed with identical counters
+  (`17.863463s` scalar vs `18.300302s` vector, both `192` tokens, `184` jobs,
+  `24` worker batches, max batch `8`). Source reverted.
