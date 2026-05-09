@@ -1,0 +1,48 @@
+# A091 Vulkan Full-Chunk Re-Test Summary
+
+Date: 2026-05-09
+Host: AMD Radeon 8060S Graphics (RADV_STRIX_HALO)
+Model: Qwen3.5-4B
+Backend: vulkan
+Source: current `main` after PR #1008 and A090 (`99d8cd09`)
+
+Hypothesis:
+- A070 rejected default-on `gdn_full_chunk_forward`, but A078 later fixed the
+  host-visible staging memory type and A090 now shows GDN recurrent as the
+  largest prefill bucket.
+- Re-test the existing opt-in full-chunk path before doing new source work.
+
+Build:
+- `PATH="$HOME/.cargo/bin:$PATH" cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Passed, warnings only.
+
+Harness:
+
+```text
+KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench \
+  --model-path Qwen3.5-4B --paged --latency-only \
+  --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 \
+  --seed 92 --quiet
+```
+
+Default:
+- Token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1108.173699ms`
+- Mean ITL: `85.617283ms`
+- P99 ITL: `87.406575ms`
+
+Candidate:
+- Env: `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`
+- Token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Prefill: `1160.650990ms`
+- Mean ITL: `85.418004ms`
+- P99 ITL: `87.708990ms`
+
+Verdict:
+- Reject. The candidate preserved backend selection and token IDs, and decode
+  was effectively flat, but prefill regressed by `52.477291ms`.
+- Keep `gdn_full_chunk_forward` opt-in only. The cached staging change does not
+  make the current one-workgroup fused full-chunk shader a default win.
+- Next recurrent work needs a different shape: split the recurrent profile
+  further, reduce boundaries, or build a head-last/resident route that changes
+  data movement rather than only enabling the existing full-chunk shader.

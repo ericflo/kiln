@@ -5078,6 +5078,49 @@ Verdict:
 - A088/A089 already rejected conv1d transfer batching by grouped copy
   submissions. Further conv work needs a different algorithmic shape.
 
+### 2026-05-09 A091: Reject Current Full-Chunk Re-Test
+
+Hypothesis:
+- A070 rejected default-on `gdn_full_chunk_forward`, but A078 later fixed the
+  host-visible staging memory type and A090 now shows GDN recurrent as the
+  largest prefill bucket.
+- Re-test the existing opt-in full-chunk path before doing new recurrent
+  source work.
+
+Command:
+- Build:
+  `PATH="$HOME/.cargo/bin:$PATH" cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Default:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 92 --quiet`
+- Candidate:
+  `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1 KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 92 --quiet`
+
+Evidence:
+- Release build passed; warnings only.
+- Default current-main run reported backend `vulkan`, token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`, prefill
+  `1108.173699ms`, mean ITL `85.617283ms`, p99 ITL `87.406575ms`.
+- Candidate with `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1` reported
+  backend `vulkan`, the same token IDs, prefill `1160.650990ms`, mean ITL
+  `85.418004ms`, p99 ITL `87.708990ms`.
+- Raw logs:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a091-fullchunk-current-build.log`,
+  `docs/audits/vulkan-strix-halo-2026-05-09-a091-fullchunk-current-default.log`,
+  and
+  `docs/audits/vulkan-strix-halo-2026-05-09-a091-fullchunk-current-enabled.log`.
+- Durable aggregate summary:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a091-fullchunk-current-summary.txt`.
+
+Verdict:
+- Reject. The candidate preserved Vulkan backend selection and token IDs, and
+  decode was effectively flat, but prefill regressed by `52.477291ms`.
+- Keep `gdn_full_chunk_forward` opt-in only. A078's cached staging-memory win
+  does not make the current one-workgroup fused full-chunk shader a default
+  prefill win.
+- Next recurrent work needs a different shape: split the recurrent profile
+  further, reduce boundaries, or build a head-last/resident route that changes
+  data movement rather than only enabling the existing full-chunk shader.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -5197,6 +5240,11 @@ Verdict:
   Next work should target GDN recurrent/conv or MLP/GDN boundary/fusion/
   residency, not another direct conv transfer batching attempt or simple
   row/lane retile already rejected by A085-A087.
+- A091 re-tests the existing opt-in `gdn_full_chunk_forward` after cached
+  staging and current-main changes and rejects it again: same-token prefill
+  regressed from `1108.174ms` default to `1160.651ms` enabled. Keep the shader
+  opt-in; do not enable it by default without a materially different fused
+  chunk shape.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
