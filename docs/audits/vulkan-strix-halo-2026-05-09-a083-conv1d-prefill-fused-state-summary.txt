@@ -1,0 +1,40 @@
+Vulkan Strix Halo A083 summary, 2026-05-09
+
+Experiment:
+- Temporarily added a Vulkan `causal_conv1d_prefill_k4` shader inspired by the
+  Metal conv prefill layout.
+- The candidate used one workgroup per `(batch, channel)` stream, computed all
+  output timesteps, then advanced `conv_state` after a workgroup barrier.
+- Rollback env during the trial:
+  `KILN_DISABLE_VULKAN_CONV1D_PREFILL_FUSED_STATE=1`
+
+Validation while temporary source was present:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity causal_conv1d_prefill_matches_stateful_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+No-profile same-binary A/B, seed 85:
+- Rollback:
+  - prefill `1083.188208ms`
+  - mean ITL `85.965637ms`
+  - p99 ITL `87.387417ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - prefill `1149.654298ms`
+  - mean ITL `87.241238125ms`
+  - p99 ITL `88.50741199999999ms`
+  - same token IDs
+
+Correctness:
+- Candidate and rollback benches reported backend `vulkan` on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`.
+- Candidate and rollback produced the same token IDs.
+
+Verdict:
+- Reject and remove the temporary source.
+- The Metal one-workgroup-per-channel conv prefill shape does not transfer to
+  the current Vulkan Strix Halo prefill path as a default.
+- Final source contains no A083 Vulkan shader or dispatcher changes, and CUDA
+  and Metal source paths are untouched.
