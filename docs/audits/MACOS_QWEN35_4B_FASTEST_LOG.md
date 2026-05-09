@@ -16204,3 +16204,75 @@ counter-ordered endpoint pair favored rollback. Keep the current
 `broadcast_matmul` route for prefill output projections unless a future
 candidate provides a stronger fused or shape-specific kernel with repeatable
 serving-path improvement.
+
+## 2026-05-09 - E416 rejected strided K/V SDPA prefill layout
+
+### Purpose
+
+E413 still shows `full_attn:prefill_kv_head_layout` at `3.552 ms` total for the
+64-token prefill profile. The current full-attention initial-prefill path
+transposes K/V from token-major `[B,T,H,D]` to head-major `[B,H,T,D]` and then
+calls `.contiguous()` before Candle Metal SDPA. This experiment tested whether
+Candle Metal SDPA can consume the transposed K/V views directly, avoiding those
+copies.
+
+### Temporary Change
+
+Temporarily changed the initial-prefill full-attention path to pass
+`k_cache_token_major.transpose(1, 2)?` and `v_cache_token_major.transpose(1, 2)?`
+directly into `flash_attention_forward_head_major` on Metal. Rollback:
+`KILN_DISABLE_METAL_SDPA_STRIDED_KV_PREFILL=1`, which restored the existing
+`.contiguous()` calls. The temporary source was reverted before commit.
+
+### Profile Results
+
+The strided K/V path ran successfully. With `KILN_PROFILE_FULL_ATTN_STAGES=1`,
+Qwen3.5-4B paged, `--prompt-tokens 64`, `--max-output-tokens 8`, and one
+latency warmup:
+
+- Default strided K/V measured prefill: `426.555750 ms`
+- Rollback contiguous K/V measured prefill: `424.299375 ms`
+
+Summing the `seq_len=64`, `start_pos=0` profile rows across the warmup and
+measured prefill passes:
+
+- `prefill_kv_head_layout`: default `0.039 ms`, rollback `7.352 ms`
+- `prefill_attn_head_major`: default `17.102 ms`, rollback `17.673 ms`
+- `q_transpose`: default `11.403 ms`, rollback `9.705 ms`
+- `qkv_split`: default `22.721 ms`, rollback `19.764 ms`
+- `qkv_proj`: default `122.530 ms`, rollback `120.548 ms`
+
+The intended copy removal is visible, but the profiled serving prefill total did
+not improve.
+
+### Endpoint A/B
+
+Same release binary, Qwen3.5-4B paged, `--prompt-tokens 64`,
+`--max-output-tokens 64`, one latency warmup:
+
+- Default strided K/V prefill: `377.843334 ms`, mean ITL `159.751366 ms`
+- Rollback contiguous K/V prefill: `376.645250 ms`, mean ITL `160.216613 ms`
+
+The candidate was `1.198084 ms` slower on prefill (`0.318%` higher). Decode ITL
+is not a decision signal because the temporary route only changes prefill.
+
+### Validation
+
+- `cargo check -p kiln-model --features metal`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo fmt --check`
+
+### Artifacts
+
+- `e416_sdpa_strided_kv_metal_check.log`
+- `e416_sdpa_strided_kv_release_bench_build.log`
+- `e416_sdpa_strided_kv_profile_default.log`
+- `e416_sdpa_strided_kv_profile_disabled.log`
+- `e416_sdpa_strided_kv_latency_default_64out.log`
+- `e416_sdpa_strided_kv_latency_disabled_64out.log`
+
+### Decision
+
+Rejected and reverted before commit. Candle Metal SDPA accepts strided K/V views
+and removes the explicit K/V head-layout copy, but the full prefill path does
+not get faster. Keep the current contiguous K/V layout before SDPA.

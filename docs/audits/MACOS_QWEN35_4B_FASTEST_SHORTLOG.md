@@ -1710,3 +1710,10 @@
   `379.116000 ms` vs rollback `381.452792 ms`, but counter-ordered pair favored
   rollback `369.355250 ms` vs default `380.529541 ms`; aggregate default was
   slower (`379.822771 ms` vs `375.404021 ms`). Temporary source was reverted.
+- 2026-05-09 E416: Rejected passing transposed non-contiguous K/V views directly
+  into Metal SDPA for full-attention initial prefill. Intrusive profiling showed
+  the intended copy removal (`prefill_kv_head_layout` `7.352 -> 0.039 ms`
+  across two profiled prefill passes), but measured profiled prefill did not
+  improve (`424.299375 ms` rollback vs `426.555750 ms` default). Non-intrusive
+  paged 64-token endpoint A/B also favored rollback: contiguous K/V
+  `376.645250 ms` vs strided K/V `377.843334 ms`. Temporary source was reverted.
