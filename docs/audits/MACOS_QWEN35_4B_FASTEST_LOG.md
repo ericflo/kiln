@@ -20448,3 +20448,79 @@ because the main target shape (`mlp_down_proj`) regressed.
 
 Rejected and reverted. Keep E464's accepted row-triple tile8 batch-3 transposed
 GEMV kernel.
+
+## E473 - Rejected Shape-Scoped GDN Out-Proj Row-Triple Unroll2
+
+### Hypothesis
+
+E472 rejected applying row-triple tile8 unroll2 to the shared batch-3 transposed
+GEMV kernel because the MLP down-projection and attention-output shapes
+regressed. But E472 also showed a strong synthetic win for the smaller
+`gdn_out_proj` shape. Test a narrower version that enables the unroll only for
+batch `3`, `input_dim=4096`, `output_dim=2560`, leaving MLP down-projection and
+attention row-triple shapes on the existing E464 path.
+
+### Candidate
+
+Temporarily added rollback env
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2=1` and
+threaded an `unroll2` constant through
+`kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16`. The selector set the
+flag only for the Qwen3.5 GDN out-projection shape at batch `3`; all other
+row-triple tile8 calls passed `0`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture`
+
+Qwen3.5 batch transposed GEMV shape A/B with warmup `5`, iters `20`:
+
+| label | candidate policy | candidate batch-3 fused | rollback policy | rollback batch-3 fused | result |
+| --- | --- | ---: | --- | ---: | --- |
+| `gdn_out_proj` | row_triple_tile8_gdn_out_unroll2 | `450.146 us` | row_triple_tile8 | `479.863 us` | `6.19%` faster |
+
+All synthetic rows reported exact BF16 diffs. The other batch-3 shape rows kept
+the normal `row_triple_tile8` policy in both arms and are treated as same-path
+timing noise.
+
+Matched four-stream GDN-stage live profile A/B, sequence prompt, `max_tokens=3`:
+
+| arm | elapsed | HTTP statuses | stream events | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| candidate | `3.885463 s` | `200 x4` | `24` | `12` | `8` | `4` | `8` | `3` |
+| rollback | `3.990698 s` | `200 x4` | `24` | `12` | `8` | `4` | `8` | `3` |
+
+Filtered request decode rows (`seq_len=1`, start positions `49/50`) in the
+GDN-stage profile:
+
+| stage | candidate total | rollback total | result |
+| --- | ---: | ---: | --- |
+| `gdn:out_proj` | `91.393 ms` | `86.430 ms` | rejected, `5.74%` slower |
+| total GDN | `335.012 ms` | `391.852 ms` | lower, but driven by unrelated `gdn:in_proj` noise |
+
+The target stage regressed in the real live profile. The total-GDN improvement
+is not accepted as evidence because `gdn:in_proj` moved by `60.535 ms` even
+though this candidate does not change GDN in-proj.
+
+### Artifacts
+
+- `e473_gdn_out_rowtriple_unroll2_b3_candidate.diff`
+- `e473_gdn_out_rowtriple_unroll2_b3_fmt_initial.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_fmt.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_parity.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_shapes_default_w5_i20.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_shapes_disabled_w5_i20.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_build.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_live_batch4_gdn_profile_default_*`
+- `e473_gdn_out_rowtriple_unroll2_b3_live_batch4_gdn_profile_disabled_*`
+- `e473_gdn_out_rowtriple_unroll2_b3_fmt_reverted.log`
+- `e473_gdn_out_rowtriple_unroll2_b3_summary.txt`
+
+### Decision
+
+Rejected and reverted. Keep E464's accepted row-triple tile8 batch-3 transposed
+GEMV kernel for GDN out-projection too.

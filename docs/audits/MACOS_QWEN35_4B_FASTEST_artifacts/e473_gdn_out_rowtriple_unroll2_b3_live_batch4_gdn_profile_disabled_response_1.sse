@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-1ee49c8c-774f-4743-85a0-e51de001ae59","object":"chat.completion.chunk","created":1778368590,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-1ee49c8c-774f-4743-85a0-e51de001ae59","object":"chat.completion.chunk","created":1778368590,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-1ee49c8c-774f-4743-85a0-e51de001ae59","object":"chat.completion.chunk","created":1778368590,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-1ee49c8c-774f-4743-85a0-e51de001ae59","object":"chat.completion.chunk","created":1778368590,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-1ee49c8c-774f-4743-85a0-e51de001ae59","object":"chat.completion.chunk","created":1778368590,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

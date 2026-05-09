@@ -2268,3 +2268,12 @@
   rollback `1022.104 us`, `9.77%` slower. `gdn_out_proj` improved, but
   `attn_output` also regressed, so the shared kernel change was rejected and
   reverted.
+- 2026-05-09 E473: Rejected a shape-scoped GDN out-proj batch-3 row-triple
+  unroll2 mode. The temporary
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2=1` guard
+  enabled unroll2 only for batch `3`, `input_dim=4096`, `output_dim=2560`.
+  Focused parity and release Metal build passed. Synthetic `gdn_out_proj`
+  improved `450.146 us` versus rollback `479.863 us`, but the matched
+  four-stream live GDN-stage profile showed the target `gdn:out_proj` stage
+  regressed: `91.393 ms` candidate versus `86.430 ms` rollback. Source was
+  reverted.

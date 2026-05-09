@@ -1,0 +1,33 @@
+E473 rejected shape-scoped Metal GDN out-proj batch-3 row-triple unroll2.
+
+Candidate:
+- Temporarily added KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2=1.
+- Temporarily threaded an unroll2 flag through the row-triple tile8 transposed
+  GEMV kernel, but enabled it only for batch 3 and the Qwen3.5 GDN out-proj
+  shape input_dim=4096, output_dim=2560.
+- MLP down-proj and attention row-triple shapes kept the existing non-unrolled
+  row_triple_tile8 policy.
+
+Validation:
+- cargo fmt --check passed before and after reverting.
+- cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture passed.
+- cargo build --release --features metal --bin kiln passed for the candidate.
+
+Synthetic Qwen3.5 batch-3 transposed GEMV A/B:
+- gdn_out_proj: candidate 450.146 us vs rollback 479.863 us, 6.19% faster.
+- All synthetic rows reported exact BF16 diffs.
+
+Live four-stream GDN-stage profile A/B:
+- Both arms: 4 HTTP 200 responses, 12 server tokens, 8 submitted decode jobs,
+  4 worker batches, 8 decode rows, max_observed_batch=3.
+- Candidate elapsed: 3.885463 s.
+- Rollback elapsed: 3.990698 s.
+- Target stage gdn:out_proj: candidate 91.393 ms vs rollback 86.430 ms,
+  5.74% slower.
+- Total GDN was lower for candidate because unrelated gdn:in_proj profile time
+  moved from 233.057 ms to 172.522 ms; this is treated as profile noise, not
+  target evidence.
+
+Decision:
+- Rejected and reverted. The live target stage regressed despite the synthetic
+  win.

@@ -1,0 +1,168 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index ca63fbe..39a0a82 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -79,6 +79,8 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8";
+ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8: &str =
+     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8";
++const DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2: &str =
++    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2";
+ const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
+ const METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS: usize = 16;
+@@ -1038,6 +1040,10 @@ fn metal_transposed_coop_gemv_row_triple_tile8_disabled() -> bool {
+     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8)
+ }
+
++fn metal_transposed_coop_gemv_gdn_out_row_triple_unroll2_disabled() -> bool {
++    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_GDN_OUT_ROW_TRIPLE_UNROLL2)
++}
++
+ fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
+     if metal_transposed_coop_gemv_tile8_disabled() {
+         MetalTransposedCoopGemvTile::Tile4
+@@ -3800,6 +3806,7 @@ kernel void kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16(
+     device bfloat* out [[buffer(2)]],
+     constant uint& input_dim [[buffer(3)]],
+     constant uint& output_dim [[buffer(4)]],
++    constant uint& unroll2 [[buffer(5)]],
+     uint2 tgroup [[threadgroup_position_in_grid]],
+     uint simd_group [[simdgroup_index_in_threadgroup]],
+     uint lane [[thread_index_in_simdgroup]]
+@@ -3845,7 +3852,7 @@ kernel void kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16(
+     float acc26 = 0.0f;
+     float acc27 = 0.0f;
+
+-    for (uint row = lane; row < input_dim; row += 32) {
++    for (uint row = lane; row < input_dim; row += ((unroll2 != 0 && vector_load_safe) ? 64 : 32)) {
+         const float xv0 = static_cast<float>(x[x_base0 + row]);
+         const float xv1 = static_cast<float>(x[x_base1 + row]);
+         const float xv2 = static_cast<float>(x[x_base2 + row]);
+@@ -3934,6 +3941,51 @@ kernel void kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16(
+                 acc27 += xv2 * w7;
+             }
+         }
++        if (unroll2 != 0 && vector_load_safe) {
++            const uint row_next = row + 32;
++            if (row_next < input_dim) {
++                const float xv0_next = static_cast<float>(x[x_base0 + row_next]);
++                const float xv1_next = static_cast<float>(x[x_base1 + row_next]);
++                const float xv2_next = static_cast<float>(x[x_base2 + row_next]);
++                const uint weight_base_next = row_next * output_dim + col_base;
++                device const bfloat4* w4_ptr_next =
++                    (device const bfloat4*)(weight_t + weight_base_next);
++                const bfloat4 w_lo_next = w4_ptr_next[0];
++                const bfloat4 w_hi_next = w4_ptr_next[1];
++                const float w0_next = static_cast<float>(w_lo_next[0]);
++                const float w1_next = static_cast<float>(w_lo_next[1]);
++                const float w2_next = static_cast<float>(w_lo_next[2]);
++                const float w3_next = static_cast<float>(w_lo_next[3]);
++                const float w4_next = static_cast<float>(w_hi_next[0]);
++                const float w5_next = static_cast<float>(w_hi_next[1]);
++                const float w6_next = static_cast<float>(w_hi_next[2]);
++                const float w7_next = static_cast<float>(w_hi_next[3]);
++                acc0 += xv0_next * w0_next;
++                acc1 += xv0_next * w1_next;
++                acc2 += xv0_next * w2_next;
++                acc3 += xv0_next * w3_next;
++                acc4 += xv0_next * w4_next;
++                acc5 += xv0_next * w5_next;
++                acc6 += xv0_next * w6_next;
++                acc7 += xv0_next * w7_next;
++                acc10 += xv1_next * w0_next;
++                acc11 += xv1_next * w1_next;
++                acc12 += xv1_next * w2_next;
++                acc13 += xv1_next * w3_next;
++                acc14 += xv1_next * w4_next;
++                acc15 += xv1_next * w5_next;
++                acc16 += xv1_next * w6_next;
++                acc17 += xv1_next * w7_next;
++                acc20 += xv2_next * w0_next;
++                acc21 += xv2_next * w1_next;
++                acc22 += xv2_next * w2_next;
++                acc23 += xv2_next * w3_next;
++                acc24 += xv2_next * w4_next;
++                acc25 += xv2_next * w5_next;
++                acc26 += xv2_next * w6_next;
++                acc27 += xv2_next * w7_next;
++            }
++        }
+     }
+
+     acc0 = simd_sum(acc0);
+@@ -7597,6 +7649,10 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
+         && batch == 3
+         && !metal_transposed_coop_gemv_row_quad_tile8_disabled()
+         && !metal_transposed_coop_gemv_row_triple_tile8_disabled();
++    let gdn_out_row_triple_unroll2_enabled = row_triple_tile8_enabled
++        && input_dim == 4096
++        && output_dim == 2560
++        && !metal_transposed_coop_gemv_gdn_out_row_triple_unroll2_disabled();
+     let row_quad_tile8_enabled = row_quad_enabled
+         && !row_triple_tile8_enabled
+         && !metal_transposed_coop_gemv_row_quad_tile8_disabled();
+@@ -7625,7 +7681,9 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
+         metal_transposed_coop_gemv_batch_pipeline(device)?
+     };
+     let encoder = device.command_encoder()?;
+-    encoder.set_label(if row_triple_tile8_enabled {
++    encoder.set_label(if gdn_out_row_triple_unroll2_enabled {
++        "kiln_transposed_coop_gemv8_batch_row_triple_tile8_gdn_out_unroll2_bf16"
++    } else if row_triple_tile8_enabled {
+         "kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16"
+     } else if row_quad_tile8_enabled {
+         "kiln_transposed_coop_gemv8_batch_row_quad_tile8_bf16"
+@@ -7666,7 +7724,14 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
+         let output_dim_u32 = output_dim as u32;
+         encoder.set_bytes(3, &input_dim_u32);
+         encoder.set_bytes(4, &output_dim_u32);
+-        if row_quad_tile8_enabled {
++        if row_triple_tile8_enabled {
++            let unroll2_u32 = if gdn_out_row_triple_unroll2_enabled {
++                1u32
++            } else {
++                0u32
++            };
++            encoder.set_bytes(5, &unroll2_u32);
++        } else if row_quad_tile8_enabled {
+             let batch_u32 = batch as u32;
+             encoder.set_bytes(5, &batch_u32);
+         } else if !row_triple_tile8_enabled {
+@@ -15199,7 +15264,7 @@ mod tests {
+                 metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                     .context("bench fused batch transposed coop GEMV Qwen shape")
+             })?;
+-            let policy = metal_transposed_coop_decode_batch_policy(batch);
++            let policy = metal_transposed_coop_decode_batch_policy(batch, input_dim, output_dim);
+
+             eprintln!(
+                 "synthetic Metal Qwen3.5 transposed GEMV decode batch shape BF16: label={label} \
+@@ -15212,14 +15277,25 @@ mod tests {
+         Ok(())
+     }
+
+-    fn metal_transposed_coop_decode_batch_policy(batch: usize) -> &'static str {
++    fn metal_transposed_coop_decode_batch_policy(
++        batch: usize,
++        input_dim: usize,
++        output_dim: usize,
++    ) -> &'static str {
+         if batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled() {
+             if batch >= 3 && !metal_transposed_coop_gemv_row_quad_disabled() {
+                 if batch == 3
+                     && !metal_transposed_coop_gemv_row_quad_tile8_disabled()
+                     && !metal_transposed_coop_gemv_row_triple_tile8_disabled()
+                 {
+-                    "row_triple_tile8"
++                    if input_dim == QWEN35_GDN_VALUE_OUT
++                        && output_dim == QWEN35_HIDDEN
++                        && !metal_transposed_coop_gemv_gdn_out_row_triple_unroll2_disabled()
++                    {
++                        "row_triple_tile8_gdn_out_unroll2"
++                    } else {
++                        "row_triple_tile8"
++                    }
+                 } else if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
+                     "row_quad_tile8"
+                 } else {

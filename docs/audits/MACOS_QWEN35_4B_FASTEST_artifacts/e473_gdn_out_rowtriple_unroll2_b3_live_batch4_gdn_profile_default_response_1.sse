@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-06f21670-f6a5-4f75-a3ec-e3e4d1742625","object":"chat.completion.chunk","created":1778368486,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-06f21670-f6a5-4f75-a3ec-e3e4d1742625","object":"chat.completion.chunk","created":1778368486,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-06f21670-f6a5-4f75-a3ec-e3e4d1742625","object":"chat.completion.chunk","created":1778368486,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-06f21670-f6a5-4f75-a3ec-e3e4d1742625","object":"chat.completion.chunk","created":1778368486,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"毎回"}}]}
+
+data: {"id":"chatcmpl-06f21670-f6a5-4f75-a3ec-e3e4d1742625","object":"chat.completion.chunk","created":1778368486,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
