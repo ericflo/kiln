@@ -1,0 +1,5 @@
+result=rejected_timeout_before_inference_prewarm_complete
+health_poll_responses_logged=90
+prewarm_weight_log_seen=True
+prewarm_complete_log_seen=False
+server_log=docs/audits/vulkan-strix-halo-2026-05-09-a052-vulkan-resident-paged-kv-candidate-server.log

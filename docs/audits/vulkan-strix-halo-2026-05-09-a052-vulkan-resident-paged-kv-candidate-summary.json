@@ -1,0 +1,14 @@
+{
+  "env": {
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PORT": "8502",
+    "KILN_DECODE_BATCH_WAIT_US": "5000"
+  },
+  "result": "rejected_timeout_before_inference_prewarm_complete",
+  "ready": false,
+  "health_poll_responses_logged": 90,
+  "prewarm_weight_log_seen": true,
+  "prewarm_complete_log_seen": false,
+  "server_log": "docs/audits/vulkan-strix-halo-2026-05-09-a052-vulkan-resident-paged-kv-candidate-server.log",
+  "notes": "Candidate source enabled a full-size Vulkan resident mirror of mutable paged-KV pools. The server reached normal HTTP health responses and completed Vulkan decode weight prewarm, but did not log background inference prewarm completion or become inference_prewarm_complete before the run was stopped."
+}

@@ -2416,10 +2416,61 @@ Verdict:
   and removes a class of dtype/byte-size mismatches before further GDN or MLP
   tuning.
 
+### 2026-05-09 A052: Reject Full-Size Resident Vulkan Paged-KV Mirror
+
+Hypothesis:
+- The Vulkan dyn-seqlen paged-attention path still builds a CPU gather tensor,
+  CPU-compacts K/V, and uploads compact K/V each call. A backend-resident
+  paged-KV mirror plus a block-table-addressed shader could skip the compaction
+  and compact K/V upload when every active slot has been mirrored.
+
+Experiment:
+- Temporarily added:
+  - a `BackendRuntime::sync_paged_kv_token_major_slots` hook,
+  - Vulkan resident K/V pool buffers keyed by paged-cache tensor id,
+  - partial slot-row uploads after CPU paged-cache writes,
+  - a `paged_attn_decode_batch_paged` shader that reads resident
+    `[total_slots, num_kv_heads, head_dim]` pools via `block_table`, and
+  - focused parity coverage for the resident shader and partial row upload.
+- Focused Vulkan paged-attention parity passed for both the existing compact
+  path and the temporary resident-paged path:
+  `cargo test -p kiln-vulkan-kernel paged_attn_decode_batch --test gdn_parity
+  -- --nocapture`.
+- Typecheck/build validation passed before endpoint smoke:
+  `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan`, and
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+
+Evidence:
+- The endpoint candidate did not reach `inference_prewarm_complete`. The server
+  reached normal HTTP health responses and logged Vulkan decode weight cache
+  prewarm, but never logged `background inference prewarm complete` before the
+  run was stopped.
+- The candidate log recorded `90` health responses, `prewarm_weight_log_seen=true`,
+  and `prewarm_complete_log_seen=false`.
+- The likely root cause is shape, not shader math: the candidate allocated a
+  full-size resident mirror of the mutable paged-KV pools. On the measured
+  Qwen3.5-4B Strix Halo configuration, server memory budgeting reports
+  `kv_cache_gb=65.7457152`; mirroring that pool in Vulkan is too large for a
+  simple default-on residency strategy.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a052-vulkan-resident-paged-kv-candidate-*`
+
+Verdict:
+- Rejected and removed. Do not retry full-size resident paged-KV mirroring.
+  The next K/V movement attempt needs a sparse/active-slot residency design, a
+  compact resident window, or a smaller per-layer/per-request capacity model
+  rather than duplicating the entire paged-KV allocation.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
-  K/V compaction and per-call compact K/V uploads.
+  K/V compaction and per-call compact K/V uploads, but do not do this by
+  mirroring the entire paged-KV pool in Vulkan. A052 showed that full-size
+  resident mirroring prevented prewarm readiness on the current Qwen3.5-4B
+  Strix Halo serving shape.
 - Use A049, not A039, for warmed-serving target selection. After A048, do not
   use measurements taken before `inference_prewarm_complete=true` as serving
   evidence.
