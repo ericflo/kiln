@@ -4717,6 +4717,67 @@ Verdict:
   one-workgroup-per-channel fused-state shape without a new hypothesis.
 - Final source has no A084 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A085: Reject MLP F32 Down Rows4 Tile8
+
+Goal:
+- Test whether the recent Metal rowquad tile8 down-projection idea transfers
+  to Vulkan's large-batch hybrid MLP path after A081/A082.
+- Keep the accepted packed-BF16 gate/up rows4 path and change only the F32 down
+  projection shape.
+
+Temporary change:
+- Added temporary shader
+  `linear_decode_batched_rows4_tile8.comp`.
+- Wired it only into the large-batch hybrid MLP down path before A082's
+  accepted F32 rows4 down shader.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4_TILE8=1`
+- Added temporary profile flagging for `down_rows4_tile8`.
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary rollback-env A/B, seed 87:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 87 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4_TILE8=1`
+  - prefill `1057.3230350000001ms`
+  - mean ITL `85.74086399999999ms`
+  - p99 ITL `87.49705ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-candidate.log`
+  - prefill `1393.835745ms`
+  - mean ITL `85.50839149999999ms`
+  - p99 ITL `87.011703ms`
+  - same token IDs
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-source-reverted-diffcheck.log`
+
+Verdict:
+- Reject and remove the temporary source. The candidate preserved Vulkan
+  backend selection and token IDs, but prefill regressed badly against the
+  accepted A082 rows4 down path.
+- Do not retry a direct Metal rowquad tile8 down-projection port for Vulkan F32
+  MLP down without a new hypothesis.
+- Final source has no A085 code, and CUDA/Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4809,6 +4870,10 @@ Verdict:
   fused-state shader and rejects it: same-token no-profile A/B regressed
   prefill `1050.457ms` rollback to `1090.345ms` candidate. Do not retry that
   direct conv prefill shape without a new hypothesis.
+- A085 rejects a direct Metal rowquad tile8 down-projection port for Vulkan F32
+  MLP down: same-token no-profile A/B regressed prefill `1057.323ms` rollback
+  to `1393.836ms` candidate. Keep A082's rows4 down shader unless a new
+  hypothesis changes the memory/dispatch shape.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

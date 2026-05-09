@@ -1,0 +1,55 @@
+A085: Reject Vulkan MLP F32 down rows4 tile8 variant
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Goal:
+- Test whether a Metal rowquad tile8 down-projection idea transfers to the
+  Vulkan large-batch hybrid MLP path after A081/A082.
+- Keep the existing packed-BF16 gate/up rows4 path and replace only the F32
+  down rows4 shader with a temporary tile8 variant.
+
+Temporary change:
+- Added temporary shader:
+  crates/kiln-vulkan-kernel/csrc/shaders/linear_decode_batched_rows4_tile8.comp
+- Wired it only into the large-batch hybrid MLP down path before A082's
+  accepted rows4 shader.
+- Temporary rollback env:
+  KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4_TILE8=1
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_gate_up_f32_down_matches_cpu_reference -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Same-binary rollback-env A/B, seed 87:
+- Harness:
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 87 --quiet
+- Rollback:
+  - env: KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4_TILE8=1
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-rollback.log
+  - backend: vulkan
+  - prefill: 1057.3230350000001ms
+  - mean ITL: 85.74086399999999ms
+  - p99 ITL: 87.49705ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+- Candidate:
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a085-mlp-f32-down-rows4-tile8-candidate.log
+  - backend: vulkan
+  - prefill: 1393.835745ms
+  - mean ITL: 85.50839149999999ms
+  - p99 ITL: 87.011703ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+
+Verdict:
+- Reject and remove the temporary source.
+- The candidate preserved backend selection and token IDs, but the prefill
+  regression is too large to keep.
+- Do not retry a direct Metal rowquad tile8 down-projection port for Vulkan
+  F32 MLP down without a new hypothesis.
+- Final source has no A085 code, and CUDA/Metal source paths are untouched.
