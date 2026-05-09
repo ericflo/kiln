@@ -18736,3 +18736,48 @@ do not select the serial mode.
 Rejected. The unroll2 variant regressed the directly affected synthetic row, so
 no endpoint A/B was run. Source was reverted; keep E446's serial x2 hidden-load
 mode.
+
+## 2026-05-09 - E451 rejected fused-QKV tile16 kernel
+
+### Purpose
+
+Test tile16 on the actual Metal fused full-attention Q/K/V projection. Earlier
+generic `attn_qkv_like` proxies sometimes favored wider or smaller tiles, and
+E394 showed those proxies can disagree with the real fused-QKV split. This
+experiment measured the actual Qwen3.5 fused-QKV shape directly:
+`[1,1,2560]` with `q=[2560,2048]`, `k=[2560,1024]`, and `v=[2560,1024]`.
+
+### Candidate
+
+Temporarily added `kiln_fused_qkv_transposed_coop_gemv16_bf16`, a fused-QKV
+tile16 kernel with the same four-simdgroup mapping as the tile8 kernel but
+sixteen output columns per simdgroup. Selection was shape-gated to the exact
+Qwen3.5 fused-QKV split above, and
+`KILN_DISABLE_METAL_FUSED_QKV_TILE16=1` rolled back to the current fused tile8
+kernel. A temporary ignored synthetic bench measured the actual fused-QKV path.
+
+### Results
+
+Focused fused-QKV parity passed. The new Qwen fused-QKV synthetic bench passed
+with exact BF16 diffs.
+
+Short same-binary synthetic A/B:
+
+| default tile16 | rollback tile8 | result |
+| ---: | ---: | --- |
+| `540.096 us` | `493.633 us` | rollback `8.6%` faster |
+
+The regression is large enough that no endpoint A/B was run.
+
+### Artifacts
+
+- `e451_fused_qkv_tile16_candidate.diff`
+- `e451_fused_qkv_tile16_parity.log`
+- `e451_fused_qkv_tile16_default_short.log`
+- `e451_fused_qkv_tile16_disabled_short.log`
+
+### Decision
+
+Rejected. Actual fused-QKV tile16 regressed versus the current tile8 fused
+kernel, despite older generic QKV-like tile16 proxy wins. Source was reverted;
+keep fused-QKV on tile8.

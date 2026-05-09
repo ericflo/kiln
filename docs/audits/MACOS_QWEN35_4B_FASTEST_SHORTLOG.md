@@ -2029,3 +2029,12 @@
   Focused parity passed, but the affected batch-1 synthetic row regressed:
   `1222.517 us` candidate versus `1188.833 us` rollback. No endpoint A/B was
   run. Source reverted; keep E446 mode 7.
+- 2026-05-09 E451: Rejected actual Metal fused-QKV tile16. The temporary
+  `kiln_fused_qkv_transposed_coop_gemv16_bf16` kernel used sixteen output
+  columns per simdgroup and was shape-gated to the Qwen3.5 fused-QKV split
+  `[1,1,2560]` with q/k/v outputs `2048/1024/1024`; rollback env
+  `KILN_DISABLE_METAL_FUSED_QKV_TILE16=1` restored current tile8. Focused
+  parity and the temporary Qwen fused-QKV synthetic bench passed with exact
+  BF16 diffs, but same-binary synthetic was a clear loss: `540.096 us` tile16
+  versus `493.633 us` tile8. No endpoint A/B was run. Source reverted; keep
+  fused-QKV on tile8.
