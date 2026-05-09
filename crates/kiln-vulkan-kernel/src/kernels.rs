@@ -36,6 +36,12 @@ fn mlp_chained_dispatch_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
 }
 
+fn mlp_chained_transfer_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_TRANSFER_SUBMIT").is_err())
+}
+
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
@@ -3353,6 +3359,8 @@ fn dispatch_mlp_decode_cached_impl(
     let down_rows4 =
         gate_up_bf16_weights && !down_bf16_weights && batch >= 8 && mlp_f32_down_rows4_enabled();
     let down_rows2 = !down_bf16_weights && !down_rows4 && use_prefill_row_pair_matmul(batch);
+    let chained_dispatch = mlp_chained_dispatch_enabled();
+    let chained_transfer_submit = chained_dispatch && mlp_chained_transfer_submit_enabled();
     let total_start = profile_stages.then(Instant::now);
     let stage_start = profile_stages.then(Instant::now);
     let x_data = extract_tensor_bytes(x)?.0;
@@ -3393,7 +3401,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_rows2,
         stage_start,
     );
-    {
+    if !chained_transfer_submit {
         let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -3428,9 +3436,9 @@ fn dispatch_mlp_decode_cached_impl(
         (batch * intermediate * 4) as u64,
     )
     .context("failed to create mlp_decode hidden buffer")?;
-    let out_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
-            .context("failed to create mlp_decode output buffer")?;
+    let out_size = (batch * out_dim * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create mlp_decode output buffer")?;
     finish_vulkan_mlp_kernel_stage_profile(
         "create_work_buffers",
         batch,
@@ -3583,34 +3591,94 @@ fn dispatch_mlp_decode_cached_impl(
         (batch * out_dim.div_ceil(32)) as u32
     };
 
-    if mlp_chained_dispatch_enabled() {
-        let stage_start = profile_stages.then(Instant::now);
-        run_two_stage_compute_pipeline(
-            vk_device,
-            &gate_up_spirv,
-            &gate_up_handles,
-            &gate_up_push,
-            gate_up_workgroups,
-            &linear_spirv,
-            &linear_handles,
-            &linear_push,
-            linear_workgroups,
-        )
-        .context("mlp_decode chained gate/up + down kernels failed")?;
-        finish_vulkan_mlp_kernel_stage_profile(
-            "chained_dispatch",
-            batch,
-            hidden,
-            intermediate,
-            out_dim,
-            gate_up_bf16_weights,
-            down_bf16_weights,
-            gate_up_rows2,
-            gate_up_rows4,
-            down_rows4,
-            down_rows2,
-            stage_start,
-        );
+    let out_data = if chained_dispatch {
+        if chained_transfer_submit {
+            let stage_start = profile_stages.then(Instant::now);
+            let out_data = run_two_stage_compute_pipeline_with_transfer_readback(
+                vk_device,
+                &x_buf,
+                &x_data,
+                &out_buf,
+                out_size,
+                &gate_up_spirv,
+                &gate_up_handles,
+                &gate_up_push,
+                gate_up_workgroups,
+                &linear_spirv,
+                &linear_handles,
+                &linear_push,
+                linear_workgroups,
+            )
+            .context("mlp_decode chained transfer + gate/up + down kernels failed")?;
+            finish_vulkan_mlp_kernel_stage_profile(
+                "chained_transfer_dispatch_readback",
+                batch,
+                hidden,
+                intermediate,
+                out_dim,
+                gate_up_bf16_weights,
+                down_bf16_weights,
+                gate_up_rows2,
+                gate_up_rows4,
+                down_rows4,
+                down_rows2,
+                stage_start,
+            );
+            out_data
+        } else {
+            let stage_start = profile_stages.then(Instant::now);
+            run_two_stage_compute_pipeline(
+                vk_device,
+                &gate_up_spirv,
+                &gate_up_handles,
+                &gate_up_push,
+                gate_up_workgroups,
+                &linear_spirv,
+                &linear_handles,
+                &linear_push,
+                linear_workgroups,
+            )
+            .context("mlp_decode chained gate/up + down kernels failed")?;
+            finish_vulkan_mlp_kernel_stage_profile(
+                "chained_dispatch",
+                batch,
+                hidden,
+                intermediate,
+                out_dim,
+                gate_up_bf16_weights,
+                down_bf16_weights,
+                gate_up_rows2,
+                gate_up_rows4,
+                down_rows4,
+                down_rows2,
+                stage_start,
+            );
+            let stage_start = profile_stages.then(Instant::now);
+            let command_pool = vk_device.transient_command_pool()?;
+            let out_data = VulkanBuffer::read_back_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &out_buf,
+            )
+            .context("failed to read back mlp_decode output")?;
+            finish_vulkan_mlp_kernel_stage_profile(
+                "readback",
+                batch,
+                hidden,
+                intermediate,
+                out_dim,
+                gate_up_bf16_weights,
+                down_bf16_weights,
+                gate_up_rows2,
+                gate_up_rows4,
+                down_rows4,
+                down_rows2,
+                stage_start,
+            );
+            out_data
+        }
     } else {
         let stage_start = profile_stages.then(Instant::now);
         run_compute_pipeline(
@@ -3660,9 +3728,6 @@ fn dispatch_mlp_decode_cached_impl(
             down_rows2,
             stage_start,
         );
-    }
-
-    let out_data = {
         let stage_start = profile_stages.then(Instant::now);
         let command_pool = vk_device.transient_command_pool()?;
         let out_data = VulkanBuffer::read_back_with_command_pool(
@@ -5295,6 +5360,225 @@ fn run_two_stage_compute_pipeline(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_two_stage_compute_pipeline_with_transfer_readback(
+    vk_device: &VulkanDevice,
+    upload_dst: &VulkanBuffer,
+    upload_data: &[u8],
+    readback_src: &VulkanBuffer,
+    readback_size: u64,
+    first_spirv: &[u8],
+    first_handles: &[vk::Buffer],
+    first_push_constants: &[u32],
+    first_workgroup_count: u32,
+    second_spirv: &[u8],
+    second_handles: &[vk::Buffer],
+    second_push_constants: &[u32],
+    second_workgroup_count: u32,
+) -> Result<Vec<u8>> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+    let upload_stage =
+        VulkanBuffer::create_host_visible(device, host_visible_mt, upload_data.len() as u64)
+            .context("failed to create two-stage upload staging buffer")?;
+    VulkanBuffer::write_host_visible(device, &upload_stage, upload_data)?;
+    let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
+        .context("failed to create two-stage readback staging buffer")?;
+
+    let (first_set_layout, first_layout, first_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            first_spirv,
+            first_handles.len(),
+            (first_push_constants.len() * 4) as u32,
+        )?;
+    let (second_set_layout, second_layout, second_pipeline) = vk_device
+        .get_or_create_compute_pipeline(
+            second_spirv,
+            second_handles.len(),
+            (second_push_constants.len() * 4) as u32,
+        )?;
+    anyhow::ensure!(
+        first_handles.len() + second_handles.len() <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {}",
+        first_handles.len() + second_handles.len()
+    );
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let set_layouts = [first_set_layout, second_set_layout];
+    let descriptor_sets = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate transfer two-stage descriptor sets")?
+    };
+    let first_descriptor_set = descriptor_sets[0];
+    let second_descriptor_set = descriptor_sets[1];
+
+    {
+        let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
+            Vec::with_capacity(first_buf_infos.len() + second_buf_infos.len());
+        descriptor_write_infos.extend(
+            first_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(first_descriptor_set, i as u32, info)
+            }),
+        );
+        descriptor_write_infos.extend(
+            second_buf_infos.iter().enumerate().map(|(i, info)| {
+                make_write_descriptor_set_buf(second_descriptor_set, i as u32, info)
+            }),
+        );
+        unsafe {
+            device.update_descriptor_sets(&descriptor_write_infos, &[]);
+        }
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate transfer two-stage command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin transfer two-stage command buffer")?;
+        device.cmd_copy_buffer(
+            cmd,
+            upload_stage.handle(),
+            upload_dst.handle(),
+            &[vk::BufferCopy::builder()
+                .size(upload_data.len() as u64)
+                .build()],
+        );
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+            vk::AccessFlags::SHADER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, first_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            first_layout,
+            0,
+            &[first_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            first_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(first_push_constants),
+        );
+        device.cmd_dispatch(cmd, first_workgroup_count, 1, 1);
+
+        let first_to_second_barrier =
+            make_memory_barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[first_to_second_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, second_pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            second_layout,
+            0,
+            &[second_descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            second_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(second_push_constants),
+        );
+        device.cmd_dispatch(cmd, second_workgroup_count, 1, 1);
+
+        let second_to_readback_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::DependencyFlags::empty(),
+            &[second_to_readback_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            readback_src.handle(),
+            readback_stage.handle(),
+            &[vk::BufferCopy::builder().size(readback_size).build()],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end transfer two-stage command buffer")?;
+    }
+
+    unsafe {
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit transfer two-stage compute dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for transfer two-stage queue")?;
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transfer two-stage transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    VulkanBuffer::read_host_visible(device, &readback_stage)
+        .context("failed to read transfer two-stage output")
 }
 
 // ---------------------------------------------------------------------------

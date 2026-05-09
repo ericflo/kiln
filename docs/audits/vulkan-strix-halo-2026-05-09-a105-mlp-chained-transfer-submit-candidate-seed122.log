@@ -1,0 +1,63 @@
+
+  kiln-bench v0.2.13
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB)
+  Model path             Qwen3.5-4B
+  Model loaded           13.48s (backend: vulkan, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 1043.4ms (61 tok/s)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506]
+    Decode (paged): 9 tokens, mean ITL 78.8ms (12.7 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=5] (64 prompt tokens)...
+    Prefill (paged): 930.8ms (69 tok/s)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506]
+    Decode (paged): 9 tokens, mean ITL 78.8ms (12.7 tok/s)
+
+  ▌ Benchmark results
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB VRAM, source: linux-drm-sysfs)
+  Model load             13.48s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                930.8 ms (69 tok/s)
+  Time to first token    930.8 ms
+  Mean inter-token       78.8 ms (12.7 tok/s)
+  P50 inter-token        77.6 ms
+  P99 inter-token        86.8 ms
+  Tokens generated       9
+  Spec method            off
+
+{
+  "backend": "vulkan",
+  "gpu_info": {
+    "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+    "total_vram_mb": 98304,
+    "vram_source": "linux-drm-sysfs"
+  },
+  "model_load": {
+    "load_time_secs": 13.483877902,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 930.842728,
+    "prefill_tokens_per_sec": 68.75490141874965,
+    "time_to_first_token_ms": 930.842728,
+    "mean_inter_token_ms": 78.78206049999999,
+    "p50_inter_token_ms": 77.640702,
+    "p99_inter_token_ms": 86.781922,
+    "num_tokens_generated": 9,
+    "decode_tokens_per_sec": 12.69324505672202,
+    "spec_method": "off"
+  },
+  "training": null
+}

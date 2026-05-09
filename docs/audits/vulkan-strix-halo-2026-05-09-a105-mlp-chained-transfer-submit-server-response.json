@@ -1,0 +1,1 @@
+{"id":"chatcmpl-6232206c-cce9-4878-9d6b-bf5111762540","object":"chat.completion","created":1778361020,"model":"Qwen3.5-4B","choices":[{"index":0,"message":{"role":"assistant","content":"Red Blue"},"finish_reason":"stop"}],"usage":{"prompt_tokens":18,"completion_tokens":3,"total_tokens":21}}

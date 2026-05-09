@@ -1,0 +1,23 @@
+# HELP kiln_requests_total Total inference requests.
+# TYPE kiln_requests_total counter
+kiln_requests_total{status="ok"} 1
+kiln_requests_total{status="error"} 0
+kiln_requests_total{status="timeout"} 0
+kiln_requests_total{status="rejected"} 0
+# HELP kiln_tokens_generated_total Total tokens generated.
+# TYPE kiln_tokens_generated_total counter
+kiln_tokens_generated_total 3
+# HELP kiln_decode_batcher_enabled Whether the live greedy decode batcher is enabled.
+# TYPE kiln_decode_batcher_enabled gauge
+kiln_decode_batcher_enabled 1
+# HELP kiln_decode_batcher_jobs_total Live greedy decode batcher jobs.
+# TYPE kiln_decode_batcher_jobs_total counter
+kiln_decode_batcher_jobs_total{result="submitted"} 0
+kiln_decode_batcher_jobs_total{result="runner_busy"} 0
+kiln_decode_batcher_jobs_total{result="failed"} 0
+# HELP kiln_decode_batcher_batches_total Live greedy decode batches executed by the rendezvous worker.
+# TYPE kiln_decode_batcher_batches_total counter
+kiln_decode_batcher_batches_total 0
+# HELP kiln_decode_batcher_rows_total Live greedy decode rows executed by the rendezvous worker.
+# TYPE kiln_decode_batcher_rows_total counter
+kiln_decode_batcher_rows_total 0

@@ -6290,3 +6290,82 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-release-bench-build.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-candidate-seed*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a104-gdn-gates-single-submit-rollback-seed*.log`
+
+### 2026-05-09 A105: Accept MLP Chained Transfer Submit
+
+Scope:
+- Vulkan-only MLP decode command-boundary change in
+  `crates/kiln-vulkan-kernel/src/kernels.rs`.
+- The candidate folds input upload, already-kept chained gate/up dispatch,
+  down-projection dispatch, and output copy/readback into one command buffer
+  and one queue submit.
+- The path is default-enabled only when the existing MLP chained dispatch path
+  is enabled.
+- Rollback env: `KILN_DISABLE_VULKAN_MLP_CHAINED_TRANSFER_SUBMIT=1`.
+- Broader rollback remains `KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH=1`.
+- CUDA and Metal source paths are untouched.
+
+Correctness and build evidence:
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs`
+  passed.
+- `git diff --check` passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- Focused MLP parity passed in candidate and rollback modes:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode -- --nocapture`
+  reported 4 passed in each mode.
+- Full Vulkan kernel parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  reported 34 passed.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- Release Vulkan bench and server builds passed with existing warnings:
+  `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+  and `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Live server smoke selected Vulkan on
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)` and returned visible
+  `content: "Red Blue"` with
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Metrics after the smoke included `kiln_requests_total{status="ok"} 1` and
+  `kiln_tokens_generated_total 3`.
+- CUDA feature check remains host-blocked by missing `nvcc` in `cudarc` and
+  `candle-kernels`.
+- Metal feature check remains host-blocked by `objc2` requiring an Apple
+  target.
+
+Same-binary no-profile A/B:
+- All runs stayed on backend `vulkan`.
+- All runs kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Seed `121`: candidate `945.615ms` prefill / `79.879ms` mean ITL /
+  `85.714ms` p99; rollback `1036.099ms` / `80.344ms` / `87.567ms`.
+- Seed `122` counter-order: rollback `980.168ms` / `80.366ms` / `90.922ms`;
+  candidate `930.843ms` / `78.782ms` / `86.782ms`.
+- Seed `123`: candidate `960.356ms` / `79.152ms` / `87.726ms`; rollback
+  `1048.030ms` / `82.437ms` / `96.613ms`.
+- Three-pair average: candidate `945.605ms` prefill / `79.271ms` mean ITL /
+  `86.741ms` p99; rollback `1021.432ms` / `81.049ms` / `91.701ms`.
+- Approximate 64 prompt + 8 ITL total: candidate `1579.774ms`; rollback
+  `1669.825ms`.
+
+Verdict:
+- Keep.
+- This is a stable same-token Vulkan-only win across three production-path
+  A/B pairs and directly targets the MLP submit/readback boundary identified
+  by A103.
+- The new rollback guard is specific to transfer/readback folding, so the
+  older chained compute dispatch remains diagnosable independently.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-focused-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-focused-parity-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-full-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-model-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-server-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-metrics-snippet.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-candidate-seed*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-rollback-seed*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-cuda-check.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a105-mlp-chained-transfer-submit-metal-check.log`
