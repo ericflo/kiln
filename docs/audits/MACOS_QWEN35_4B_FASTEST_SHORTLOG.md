@@ -1524,3 +1524,9 @@
   (`12.841861s` default vs `12.812476s` legacy), and same-counter full MLP
   gate/up/down `max_tokens=8` was slower (`7.911692s` default vs `7.714893s`
   legacy). Source reverted.
+- 2026-05-09 E390: Rejected Metal fused-kernel threadgroup width retuning.
+  Temporary MLP/GDN `256 -> 128` dispatch groups gave only a small MLP batch-8
+  synthetic gain (`2460.151 -> 2413.901 us`) while regressing GDN batch-8
+  (`2263.555 -> 2328.708 us`) and MLP batch-2/3. A temporary MLP-only `512`
+  group regressed every measured batch, including batch-8
+  (`2460.151 -> 3756.891 us`). Source reverted; keep `256`.

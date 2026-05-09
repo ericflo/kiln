@@ -1,0 +1,63 @@
+{
+  "experiment": "E390 rejected Metal MLP/GDN fused-kernel threadgroup width",
+  "date": "2026-05-09",
+  "status": "rejected",
+  "source_reverted": true,
+  "hypothesis": "The serial one-thread-per-output fused Metal decode kernels might run faster with a smaller or larger threadgroup width than the current 256 threads.",
+  "baseline": {
+    "threadgroup_width": 256,
+    "mlp_gate_up_fused_us": {
+      "batch_1": 1661.620,
+      "batch_2": 1945.797,
+      "batch_3": 1837.042,
+      "batch_4": 2178.219,
+      "batch_8": 2460.151
+    },
+    "gdn_in_proj_fused_us": {
+      "batch_1": 1222.611,
+      "batch_2": 1760.833,
+      "batch_3": 2967.798,
+      "batch_4": 2174.993,
+      "batch_8": 2263.555
+    },
+    "down_proj_batch_gemv_fused_us": {
+      "batch_2": 1182.880,
+      "batch_3": 2216.615,
+      "batch_4": 2050.219,
+      "batch_8": 2948.302
+    }
+  },
+  "variant_128": {
+    "temporary_change": "Changed MLP gate/up and GDN in-proj dispatch threadgroup width from 256 to 128.",
+    "mlp_gate_up_fused_us": {
+      "batch_1": 1652.448,
+      "batch_2": 2109.693,
+      "batch_3": 2081.016,
+      "batch_4": 1979.958,
+      "batch_8": 2413.901
+    },
+    "gdn_in_proj_fused_us": {
+      "batch_1": 1534.347,
+      "batch_2": 1595.014,
+      "batch_3": 3099.847,
+      "batch_4": 2167.139,
+      "batch_8": 2328.708
+    }
+  },
+  "variant_512": {
+    "temporary_change": "Changed only MLP gate/up dispatch threadgroup width from 256 to 512.",
+    "mlp_gate_up_fused_us": {
+      "batch_1": 1800.370,
+      "batch_2": 2163.375,
+      "batch_3": 3329.990,
+      "batch_4": 3246.620,
+      "batch_8": 3756.891
+    }
+  },
+  "commands": [
+    "KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture",
+    "KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=2 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=6 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture",
+    "KILN_METAL_BATCH_GEMV_BENCH_WARMUP=3 KILN_METAL_BATCH_GEMV_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture"
+  ],
+  "decision": "Rejected before endpoint measurement. The 128-thread variant gave only a small MLP batch-8 synthetic gain while regressing GDN batch-8 and MLP batch-2/3. The 512-thread MLP variant regressed every measured batch, especially batch-3/4/8."
+}

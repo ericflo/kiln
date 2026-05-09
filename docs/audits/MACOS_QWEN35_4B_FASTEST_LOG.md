@@ -14612,3 +14612,58 @@ the same-counters endpoint runs did not improve and the full MLP active-adapter
 case regressed. Keep the source reverted; endpoint-visible LoRA work should
 stay focused on changes that reduce total serving wall time, not just a local
 kernel microbench.
+
+## 2026-05-09 - E390 rejected Metal fused-kernel threadgroup width retune
+
+### Hypothesis
+
+The current Metal MLP gate/up and GDN in-proj fused decode kernels use one
+thread per output-column pair and dispatch `256` threads per threadgroup. A
+smaller group might improve occupancy for the register-heavy row-pair/row-quad
+paths, while a larger group might reduce scheduler overhead.
+
+### Temporary change
+
+Two temporary source variants were tested and then reverted:
+
+- MLP gate/up and GDN in-proj dispatch threadgroup width `256 -> 128`
+- MLP gate/up dispatch threadgroup width `256 -> 512`
+
+### Results
+
+Baseline current source synthetic times:
+
+- MLP gate/up fused: batch `1` `1661.620 us`, batch `2` `1945.797 us`,
+  batch `3` `1837.042 us`, batch `4` `2178.219 us`, batch `8` `2460.151 us`
+- GDN in-proj fused: batch `1` `1222.611 us`, batch `2` `1760.833 us`,
+  batch `3` `2967.798 us`, batch `4` `2174.993 us`, batch `8` `2263.555 us`
+- Down-proj batch GEMV baseline, measured for context: batch `8`
+  `2948.302 us`
+
+The `128`-thread variant was mixed:
+
+- MLP gate/up batch `8` improved only slightly (`2460.151 -> 2413.901 us`,
+  `1.019x`), and batch `4` improved (`2178.219 -> 1979.958 us`, `1.100x`).
+- MLP gate/up batch `2` and `3` regressed (`1945.797 -> 2109.693 us`,
+  `1837.042 -> 2081.016 us`).
+- GDN in-proj batch `8` regressed (`2263.555 -> 2328.708 us`), as did batch
+  `1` and `3`; only batch `2` and `4` improved.
+
+The `512`-thread MLP-only variant regressed every measured MLP batch:
+
+- batch `1`: `1661.620 -> 1800.370 us`
+- batch `2`: `1945.797 -> 2163.375 us`
+- batch `3`: `1837.042 -> 3329.990 us`
+- batch `4`: `2178.219 -> 3246.620 us`
+- batch `8`: `2460.151 -> 3756.891 us`
+
+### Artifact
+
+- `e390_metal_threadgroup_width_synthetic_comparison.json`
+
+### Decision
+
+Rejected before endpoint measurement. The only positive full-batch MLP signal
+was too small to justify accepting smaller threadgroups, and it came with
+regressions in GDN full batch and smaller MLP batches. Keep the source at the
+current `256`-thread threadgroup width.
