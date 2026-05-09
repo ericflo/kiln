@@ -20339,3 +20339,57 @@ clear: MLP gate/up first, MLP down-projection second, then GDN in-proj.
 
 Accepted as a no-source-change profile checkpoint. Use it for current-source
 target ordering only.
+
+## E471 - Rejected Batch-3 MLP Gate/Up Row-Triple Fast Exp Sigmoid
+
+### Hypothesis
+
+E470 keeps `mlp:gate_up_fused` as the hottest stage. E466's accepted batch-3
+row-triple path spends most of its time in the dot-product loop, but every
+thread also evaluates up to six sigmoid exponentials. Test whether using
+Metal's `fast::exp` only for the batch-3 row-triple final sigmoid is a cheap
+latency win without touching accumulation, serial, batch-2, or batch-5+ paths.
+
+### Candidate
+
+Temporarily added rollback env
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP=1` and selected temporary
+`row_pair_mode == 9` only for the existing batch-3 row-triple vector-load path.
+Mode `9` reused E466's row-triple accumulation loop and replaced only the six
+final `exp` calls with `fast::exp`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture`
+
+Qwen3.5 MLP gate/up synthetic A/B with warmup `5`, iters `20`:
+
+| batch | candidate policy | candidate fused | rollback policy | rollback fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| `3` | row_triple_fast_exp | `1851.871 us` | row_triple | `1845.058 us` | rejected, `0.37%` slower |
+
+Both arms stayed within the existing BF16 tolerance at batch `3`
+(`max_abs_diff=5.960464e-8`, `mean_abs_diff=2.138449e-9`). Other batch rows
+use the same policy in both arms and are treated as same-path timing noise.
+No endpoint A/B was run because the exact affected synthetic batch did not
+improve.
+
+### Artifacts
+
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_candidate.diff`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_fmt_initial.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_fmt.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_parity.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_shapes_default_w5_i20.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_shapes_disabled_w5_i20.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_fmt_reverted.log`
+- `e471_mlp_gate_up_rowtriple_fast_exp_b3_summary.txt`
+
+### Decision
+
+Rejected and reverted. Keep E466's accepted batch-3 row-triple MLP gate/up
+path with the regular sigmoid expression.

@@ -2251,3 +2251,11 @@
   `mlp:gate_up_fused` `378.123 ms`, `mlp:down_proj` `238.212 ms`,
   `gdn:in_proj` `197.945 ms`, and `gdn:out_proj` `95.131 ms`; use this only as
   current-source rank-order evidence.
+- 2026-05-09 E471: Rejected a batch-3-only MLP gate/up row-triple `fast::exp`
+  sigmoid mode. The temporary `row_pair_mode == 9` kept E466's row-triple
+  accumulation loop and used `fast::exp` only for the final sigmoid calls, with
+  rollback env `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP=1`. Focused
+  parity passed, but Qwen3.5 synthetic batch `3` regressed: candidate
+  `row_triple_fast_exp` `1851.871 us` versus rollback `row_triple`
+  `1845.058 us`, `0.37%` slower. No endpoint A/B was run. Source was reverted;
+  keep E466's accepted row-triple path.

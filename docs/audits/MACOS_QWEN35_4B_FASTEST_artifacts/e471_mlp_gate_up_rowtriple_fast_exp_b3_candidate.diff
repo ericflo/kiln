@@ -1,0 +1,140 @@
+diff --git a/crates/kiln-model/src/backend/metal.rs b/crates/kiln-model/src/backend/metal.rs
+index ca63fbe..39b2e15 100644
+--- a/crates/kiln-model/src/backend/metal.rs
++++ b/crates/kiln-model/src/backend/metal.rs
+@@ -39,6 +39,8 @@ const DISABLE_METAL_MLP_GATE_UP_FUSION: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_F
+ const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE";
++const DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP: &str =
++    "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP";
+ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
+     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
+ const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
+@@ -958,6 +960,10 @@ fn metal_mlp_gate_up_row_triple_disabled() -> bool {
+     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE)
+ }
+
++fn metal_mlp_gate_up_row_triple_fast_exp_disabled() -> bool {
++    env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP)
++}
++
+ fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
+     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD)
+ }
+@@ -2601,7 +2607,7 @@ kernel void kiln_mlp_gate_up_bf16(
+         return;
+     }
+
+-    if (row_pair_mode == 3 || row_pair_mode == 7) {
++    if (row_pair_mode == 3 || row_pair_mode == 7 || row_pair_mode == 9) {
+         const uint total = cols2;
+         if (gid >= total) {
+             return;
+@@ -2624,7 +2630,7 @@ kernel void kiln_mlp_gate_up_bf16(
+         float up_acc20 = 0.0f;
+         float gate_acc21 = 0.0f;
+         float up_acc21 = 0.0f;
+-        if (row_pair_mode == 7) {
++        if (row_pair_mode == 7 || row_pair_mode == 9) {
+             for (uint i = 0; i < hidden; ++i) {
+                 const uint w_idx0 = i * intermediate + col0;
+                 const bfloat2 gate_w = *(device const bfloat2*)(gate_t + w_idx0);
+@@ -2691,27 +2697,52 @@ kernel void kiln_mlp_gate_up_bf16(
+             }
+         }
+
+-        const float gate_sigmoid00 = 1.0f / (1.0f + exp(-gate_acc00));
+-        out[col0] = static_cast<bfloat>((gate_acc00 * gate_sigmoid00) * up_acc00);
+-        if (has_col1) {
+-            const float gate_sigmoid01 = 1.0f / (1.0f + exp(-gate_acc01));
+-            out[col1] = static_cast<bfloat>((gate_acc01 * gate_sigmoid01) * up_acc01);
+-        }
++        if (row_pair_mode == 9) {
++            const float gate_sigmoid00 = 1.0f / (1.0f + fast::exp(-gate_acc00));
++            out[col0] = static_cast<bfloat>((gate_acc00 * gate_sigmoid00) * up_acc00);
++            if (has_col1) {
++                const float gate_sigmoid01 = 1.0f / (1.0f + fast::exp(-gate_acc01));
++                out[col1] = static_cast<bfloat>((gate_acc01 * gate_sigmoid01) * up_acc01);
++            }
+
+-        const uint out_base1 = intermediate;
+-        const float gate_sigmoid10 = 1.0f / (1.0f + exp(-gate_acc10));
+-        out[out_base1 + col0] = static_cast<bfloat>((gate_acc10 * gate_sigmoid10) * up_acc10);
+-        if (has_col1) {
+-            const float gate_sigmoid11 = 1.0f / (1.0f + exp(-gate_acc11));
+-            out[out_base1 + col1] = static_cast<bfloat>((gate_acc11 * gate_sigmoid11) * up_acc11);
+-        }
++            const uint out_base1 = intermediate;
++            const float gate_sigmoid10 = 1.0f / (1.0f + fast::exp(-gate_acc10));
++            out[out_base1 + col0] = static_cast<bfloat>((gate_acc10 * gate_sigmoid10) * up_acc10);
++            if (has_col1) {
++                const float gate_sigmoid11 = 1.0f / (1.0f + fast::exp(-gate_acc11));
++                out[out_base1 + col1] = static_cast<bfloat>((gate_acc11 * gate_sigmoid11) * up_acc11);
++            }
+
+-        const uint out_base2 = intermediate << 1;
+-        const float gate_sigmoid20 = 1.0f / (1.0f + exp(-gate_acc20));
+-        out[out_base2 + col0] = static_cast<bfloat>((gate_acc20 * gate_sigmoid20) * up_acc20);
+-        if (has_col1) {
+-            const float gate_sigmoid21 = 1.0f / (1.0f + exp(-gate_acc21));
+-            out[out_base2 + col1] = static_cast<bfloat>((gate_acc21 * gate_sigmoid21) * up_acc21);
++            const uint out_base2 = intermediate << 1;
++            const float gate_sigmoid20 = 1.0f / (1.0f + fast::exp(-gate_acc20));
++            out[out_base2 + col0] = static_cast<bfloat>((gate_acc20 * gate_sigmoid20) * up_acc20);
++            if (has_col1) {
++                const float gate_sigmoid21 = 1.0f / (1.0f + fast::exp(-gate_acc21));
++                out[out_base2 + col1] = static_cast<bfloat>((gate_acc21 * gate_sigmoid21) * up_acc21);
++            }
++        } else {
++            const float gate_sigmoid00 = 1.0f / (1.0f + exp(-gate_acc00));
++            out[col0] = static_cast<bfloat>((gate_acc00 * gate_sigmoid00) * up_acc00);
++            if (has_col1) {
++                const float gate_sigmoid01 = 1.0f / (1.0f + exp(-gate_acc01));
++                out[col1] = static_cast<bfloat>((gate_acc01 * gate_sigmoid01) * up_acc01);
++            }
++
++            const uint out_base1 = intermediate;
++            const float gate_sigmoid10 = 1.0f / (1.0f + exp(-gate_acc10));
++            out[out_base1 + col0] = static_cast<bfloat>((gate_acc10 * gate_sigmoid10) * up_acc10);
++            if (has_col1) {
++                const float gate_sigmoid11 = 1.0f / (1.0f + exp(-gate_acc11));
++                out[out_base1 + col1] = static_cast<bfloat>((gate_acc11 * gate_sigmoid11) * up_acc11);
++            }
++
++            const uint out_base2 = intermediate << 1;
++            const float gate_sigmoid20 = 1.0f / (1.0f + exp(-gate_acc20));
++            out[out_base2 + col0] = static_cast<bfloat>((gate_acc20 * gate_sigmoid20) * up_acc20);
++            if (has_col1) {
++                const float gate_sigmoid21 = 1.0f / (1.0f + exp(-gate_acc21));
++                out[out_base2 + col1] = static_cast<bfloat>((gate_acc21 * gate_sigmoid21) * up_acc21);
++            }
+         }
+         return;
+     }
+@@ -7215,7 +7246,11 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
+                 && gate_buf.offset_in_bytes % 4 == 0
+                 && up_buf.offset_in_bytes % 4 == 0
+             {
+-                7
++                if metal_mlp_gate_up_row_triple_fast_exp_disabled() {
++                    7
++                } else {
++                    9
++                }
+             } else if row_group_size == 4
+                 && !metal_mlp_gate_up_row_quad_vector_load_disabled()
+                 && intermediate % 2 == 0
+@@ -14982,7 +15017,11 @@ mod tests {
+                 && !metal_mlp_gate_up_row_pair_disabled()
+                 && !metal_mlp_gate_up_row_triple_disabled()
+             {
+-                "row_triple"
++                if metal_mlp_gate_up_row_triple_fast_exp_disabled() {
++                    "row_triple"
++                } else {
++                    "row_triple_fast_exp"
++                }
+             } else if batch >= 5
+                 && !metal_mlp_gate_up_row_pair_disabled()
+                 && !metal_mlp_gate_up_row_quad_disabled()

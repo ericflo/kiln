@@ -1,0 +1,23 @@
+E471 rejected Metal MLP gate/up batch-3 row-triple fast::exp sigmoid.
+
+Candidate:
+- Temporarily added KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_FAST_EXP=1.
+- Temporarily selected row_pair_mode == 9 for exactly the existing batch-3
+  row-triple vector-load path.
+- Mode 9 kept E466's accumulation loop but used Metal fast::exp for the six
+  final sigmoid evaluations.
+
+Validation:
+- cargo fmt --check passed before and after reverting.
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture passed.
+
+Synthetic Qwen3.5 MLP gate/up A/B:
+- Candidate batch 3 row_triple_fast_exp fused: 1851.871 us.
+- Rollback batch 3 row_triple fused: 1845.058 us.
+- Result: candidate is 0.37% slower on the exact affected synthetic shape.
+- Both arms stayed within the existing BF16 tolerance:
+  max_abs_diff=5.960464e-8, mean_abs_diff=2.138449e-9.
+
+Decision:
+- Rejected and reverted. No endpoint A/B was run because the exact synthetic
+  target did not improve.
