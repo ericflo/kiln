@@ -1796,3 +1796,13 @@
   `1.940 -> 1.139 ms` and batch4 down `153.167 -> 2.487 ms`. Rank-8/16 parity,
   benches, Metal/Vulkan/server Metal checks, fmt, and diff check passed; CUDA
   remains locally blocked by missing `nvcc`.
+- 2026-05-09 E425: Accepted lowering the same Metal LoRA delta/add gate further
+  from `rank >= 8` to `rank >= 4`. Rank-4 isolated delta/add was exact and still
+  faster than fallback: batch1 gate/up `664.956 -> 136.329 us` (`4.878x`),
+  batch1 down `1048.683 -> 358.923 us` (`2.922x`), batch4 gate/up
+  `535.023 -> 143.942 us` (`3.717x`), and batch4 down
+  `886.077 -> 153.435 us` (`5.775x`). Full rank-4 LoRA projection improved
+  versus the old fallback adapter path, including serial down
+  `1.920 -> 1.071 ms` and batch4 down `152.766 -> 2.406 ms`. Rank-4/8/16
+  parity, benches, Metal/Vulkan/server Metal checks, fmt, and diff check passed;
+  CUDA remains locally blocked by missing `nvcc`.
