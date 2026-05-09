@@ -1727,3 +1727,11 @@
   while seq128 stayed slower `1134.662 -> 1462.650 us` (`0.776x`). Temporary
   source was reverted; keep separate K/V matmuls unless a future kernel can
   consume the packed non-contiguous halves directly.
+- 2026-05-09 E418: Measured existing Metal MLP gate/up decode-batch row-policy
+  switches as batch/continuous-batching target evidence; no source change. The
+  default fused kernel is far faster than Candle fallback at batch >1 (for
+  warmup/iters `5/20`, batch8 fallback `613293.877 us` vs fused `2334.835 us`).
+  Short row-policy runs showed no better default: disabling row-pair badly
+  regressed batch3/4/8 (`2777.275/3467.267/6209.917 us`), disabling row-quad
+  regressed batch8 (`3782.842 us`), and disabling vector-load paths did not
+  produce a robust win. Keep the current Metal MLP gate/up row policy.

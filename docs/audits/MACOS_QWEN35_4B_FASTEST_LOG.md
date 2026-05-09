@@ -16341,3 +16341,66 @@ returns non-contiguous K/V slices that do not match the existing production
 attention path. The production-relevant contiguous path is noisy at `seq_len=64`
 and clearly slower at `seq_len=128`, so it does not justify a loader-time
 packed weight, LoRA guardrails, or endpoint A/B work.
+
+## 2026-05-09 - E418 measured Metal MLP gate/up decode-batch row policy
+
+### Purpose
+
+The active goal includes batch and continuous-batching decode throughput, not
+just 64-token prefill. The Metal MLP gate/up decode-batch kernel already has
+runtime row policy switches for serial, row-pair, row-quad, and vector-load
+variants. This experiment measured those existing switches before considering a
+default-policy source change.
+
+### Baseline
+
+Command:
+
+`KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=5 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+| batch | fallback | fused default | speedup |
+| --- | ---: | ---: | ---: |
+| 1 | `2696.721 us` | `1697.644 us` | `1.589x` |
+| 2 | `125094.360 us` | `2210.910 us` | `56.580x` |
+| 3 | `206724.517 us` | `1995.444 us` | `103.598x` |
+| 4 | `278264.742 us` | `1949.758 us` | `142.718x` |
+| 8 | `613293.877 us` | `2334.835 us` | `262.671x` |
+
+The fused path matched the fallback within BF16 tolerance:
+`max_abs_diff <= 5.960464e-8`.
+
+### Row-Policy Matrix
+
+Shorter confirmation runs used warmup `2`, iterations `5`, and compare only the
+`fused=` timing because Candle fallback dominates the wall time.
+
+| config | b1 | b2 | b3 | b4 | b8 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| default | `1701.600 us` | `2078.075 us` | `2111.333 us` | `1845.358 us` | `2452.058 us` |
+| no serial vector load | `1718.667 us` | `1925.883 us` | `2165.808 us` | `2170.708 us` | `2436.667 us` |
+| no row quad | `1623.833 us` | `2147.208 us` | `2292.517 us` | `2071.300 us` | `3782.842 us` |
+| no row quad vector load | `1876.658 us` | `1932.800 us` | `1900.892 us` | `1893.700 us` | `2721.742 us` |
+| no row pair | `1628.133 us` | `1903.308 us` | `2777.275 us` | `3467.267 us` | `6209.917 us` |
+
+### Validation
+
+- `cargo fmt --check`
+- `git diff --exit-code -- crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/forward.rs`
+
+### Artifacts
+
+- `e418_mlp_gate_up_decode_batch_default.log`
+- `e418_mlp_gate_up_decode_batch_default_w2_i5.log`
+- `e418_mlp_gate_up_decode_batch_no_serial_vector_w2_i5.log`
+- `e418_mlp_gate_up_decode_batch_no_row_quad_w2_i5.log`
+- `e418_mlp_gate_up_decode_batch_no_row_quad_vector_w2_i5.log`
+- `e418_mlp_gate_up_decode_batch_no_row_pair_w2_i5.log`
+- `e418_mlp_gate_up_decode_batch_fmt_check.log`
+- `e418_mlp_gate_up_decode_batch_source_diff_check.log`
+
+### Decision
+
+Accepted as decode-batch target evidence; no source change. Row-pair mode is
+important for batch 3 and up, row-quad mode is important for batch 8, and
+disabling vector-load variants does not produce a robust win. Keep the current
+Metal MLP gate/up row policy.
