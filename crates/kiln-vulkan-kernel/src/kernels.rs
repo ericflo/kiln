@@ -177,6 +177,12 @@ fn gdn_gated_norm_batched_uploads_enabled() -> bool {
     })
 }
 
+fn gdn_chunk_batched_transfers_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS").is_err())
+}
+
 fn paged_attn_batched_uploads_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
@@ -6137,33 +6143,47 @@ pub fn dispatch_gdn_chunk_prep(
 
     // Create input buffers + upload
     let g_buf = VulkanBuffer::create_device_local(device, device_local_mt, g_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, &g_data)?;
-
     let v_buf = VulkanBuffer::create_device_local(device, device_local_mt, v_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, &v_data)?;
-
     let kkt_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, kkt_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, &kkt_data)?;
-
     let qkt_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, qkt_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, &qkt_data)?;
-
     let ks_entry_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, ks_entry_data.len() as u64)?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &ks_entry_buf,
-        &ks_entry_data,
-    )?;
-
     let q_s_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, q_s_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, &q_s_data)?;
+    if gdn_chunk_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        upload_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[
+                (&g_buf, &g_data),
+                (&v_buf, &v_data),
+                (&kkt_buf, &kkt_data),
+                (&qkt_buf, &qkt_data),
+                (&ks_entry_buf, &ks_entry_data),
+                (&q_s_buf, &q_s_data),
+            ],
+        )
+        .context("failed to upload gdn_chunk_prep inputs")?;
+    } else {
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &g_buf, &g_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &v_buf, &v_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &kkt_buf, &kkt_data)?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &qkt_buf, &qkt_data)?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &ks_entry_buf,
+            &ks_entry_data,
+        )?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &q_s_buf, &q_s_data)?;
+    }
 
     // Create output buffers (f32 shader outputs, converted to bf16 below).
     let cc_size = (batch * heads * chunk * chunk * 4) as u64;
@@ -6214,15 +6234,52 @@ pub fn dispatch_gdn_chunk_prep(
     )?;
 
     // Read back all outputs
-    let a_strict_data =
-        VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &a_strict_buf)?;
-    let b_mask_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &b_mask_buf)?;
-    let v_prime_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &v_prime_buf)?;
-    let q_s_scaled_data =
-        VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &q_s_scaled_buf)?;
-    let decay_last_col_data =
-        VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &decay_last_col_buf)?;
-    let p_last_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &p_last_buf)?;
+    let (
+        a_strict_data,
+        b_mask_data,
+        v_prime_data,
+        q_s_scaled_data,
+        decay_last_col_data,
+        p_last_data,
+    ) = if gdn_chunk_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        let mut data = read_back_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[
+                &a_strict_buf,
+                &b_mask_buf,
+                &v_prime_buf,
+                &q_s_scaled_buf,
+                &decay_last_col_buf,
+                &p_last_buf,
+            ],
+        )
+        .context("failed to read back gdn_chunk_prep outputs")?;
+        anyhow::ensure!(
+            data.len() == 6,
+            "gdn_chunk_prep batched readback returned wrong count"
+        );
+        (
+            data.remove(0),
+            data.remove(0),
+            data.remove(0),
+            data.remove(0),
+            data.remove(0),
+            data.remove(0),
+        )
+    } else {
+        (
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &a_strict_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &b_mask_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &v_prime_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &q_s_scaled_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &decay_last_col_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &p_last_buf)?,
+        )
+    };
 
     // Cleanup
     drop(g_buf);
@@ -6477,65 +6534,79 @@ pub fn dispatch_gdn_chunk_scan(
     // Create input buffers + upload
     let a_strict_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, a_strict_data.len() as u64)?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &a_strict_buf,
-        &a_strict_data,
-    )?;
-
     let b_mask_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, b_mask_data.len() as u64)?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &b_mask_buf,
-        &b_mask_data,
-    )?;
-
     let v_prime_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, v_prime_data.len() as u64)?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &v_prime_buf,
-        &v_prime_data,
-    )?;
-
     let q_s_scaled_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, q_s_scaled_data.len() as u64)?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &q_s_scaled_buf,
-        &q_s_scaled_data,
-    )?;
-
     let beta_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, beta_data.len() as u64)?;
-    VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, &beta_data)?;
-
     let decay_last_col_buf = VulkanBuffer::create_device_local(
         device,
         device_local_mt,
         decay_last_col_data.len() as u64,
     )?;
-    VulkanBuffer::upload_data(
-        device,
-        host_visible_mt,
-        queue,
-        qfi,
-        &decay_last_col_buf,
-        &decay_last_col_data,
-    )?;
+    if gdn_chunk_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        upload_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[
+                (&a_strict_buf, &a_strict_data),
+                (&b_mask_buf, &b_mask_data),
+                (&v_prime_buf, &v_prime_data),
+                (&q_s_scaled_buf, &q_s_scaled_data),
+                (&beta_buf, &beta_data),
+                (&decay_last_col_buf, &decay_last_col_data),
+            ],
+        )
+        .context("failed to upload gdn_chunk_scan inputs")?;
+    } else {
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &a_strict_buf,
+            &a_strict_data,
+        )?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &b_mask_buf,
+            &b_mask_data,
+        )?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &v_prime_buf,
+            &v_prime_data,
+        )?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &q_s_scaled_buf,
+            &q_s_scaled_data,
+        )?;
+        VulkanBuffer::upload_data(device, host_visible_mt, queue, qfi, &beta_buf, &beta_data)?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            qfi,
+            &decay_last_col_buf,
+            &decay_last_col_data,
+        )?;
+    }
 
     // Create output buffers (f32)
     let out_size = (batch * heads * chunk * dv * 4) as u64;
@@ -6573,8 +6644,27 @@ pub fn dispatch_gdn_chunk_scan(
     )?;
 
     // Read back outputs
-    let out_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &out_buf)?;
-    let p_out_data = VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &p_out_buf)?;
+    let (out_data, p_out_data) = if gdn_chunk_batched_transfers_enabled() {
+        let command_pool = vk_device.transient_command_pool()?;
+        let mut data = read_back_buffers_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &[&out_buf, &p_out_buf],
+        )
+        .context("failed to read back gdn_chunk_scan outputs")?;
+        anyhow::ensure!(
+            data.len() == 2,
+            "gdn_chunk_scan batched readback returned wrong count"
+        );
+        (data.remove(0), data.remove(0))
+    } else {
+        (
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &out_buf)?,
+            VulkanBuffer::read_back(device, host_visible_mt, queue, qfi, &p_out_buf)?,
+        )
+    };
 
     // Cleanup
     drop(a_strict_buf);

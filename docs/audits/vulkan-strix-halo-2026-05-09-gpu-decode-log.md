@@ -6085,3 +6085,74 @@ Interpretation:
 Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a101-current-after-mlp-chain-profile-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a101-current-after-mlp-chain-profile.log`
+
+### 2026-05-09 A102: Accept GDN Chunk Batched Transfers
+
+Scope:
+- Vulkan-only GDN recurrent prefill boundary reduction.
+- `dispatch_gdn_chunk_prep` now batches its six device-local uploads and six
+  output readbacks using the existing transient command-pool transfer helper.
+- `dispatch_gdn_chunk_scan` now batches its six uploads and two readbacks the
+  same way.
+- Rollback: `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`.
+- CUDA and Metal source paths are untouched.
+
+Correctness and safety:
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs`
+  passed.
+- `git diff --check` passed.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed with pre-existing
+  warnings.
+- Focused parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_chunk_prep_and_scan -- --nocapture`.
+- Full Vulkan GDN parity passed: `34` tests.
+- Release Vulkan bench and server builds passed.
+- CUDA feature check remains host-blocked by missing `nvcc`.
+- Metal feature check remains host-blocked by `objc2` requiring an Apple
+  target.
+- Live server smoke selected Vulkan on `AMD Radeon 8060S Graphics
+  (RADV_STRIX_HALO)` and returned HTTP 200 with visible
+  `content == "Red Blue"` using
+  `chat_template_kwargs: {"enable_thinking": false}`. The after-request metrics
+  snapshot showed `kiln_requests_total{status="ok"} 1` and
+  `kiln_tokens_generated_total 3`.
+
+Unprofiled production A/B:
+- All runs stayed on backend `vulkan` and kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Seed `113`: candidate `1010.724ms` prefill / `81.213ms` mean ITL /
+  `89.518ms` p99; rollback `1020.696ms` / `82.097ms` / `91.154ms`.
+- Seed `114` counter-order: rollback `979.646ms` / `81.994ms` / `93.775ms`;
+  candidate `990.791ms` / `81.196ms` / `91.730ms`.
+- Seed `116`: candidate `984.626ms` / `81.535ms` / `90.224ms`; rollback
+  `1009.529ms` / `81.082ms` / `91.950ms`.
+- Three-pair average: candidate `995.380ms` prefill / `81.315ms` mean ITL /
+  `90.491ms` p99; rollback `1003.290ms` / `81.724ms` / `92.293ms`.
+
+Profile evidence:
+- Profiled seed `115` candidate measured `963.769ms` prefill / `81.255ms`
+  mean ITL / `91.362ms` p99.
+- Profiled seed `115` rollback measured `1053.466ms` prefill / `82.389ms`
+  mean ITL / `96.748ms` p99.
+- Measured-pass recurrent prefill split:
+  - `chunk_prep`: `61.509ms` rollback -> `52.540ms` candidate.
+  - `chunk_scan`: `81.817ms` rollback -> `73.896ms` candidate.
+  - `state_update`: `40.221ms` rollback -> `36.723ms` candidate.
+  - `matmul_prep`: `93.410ms` rollback -> `70.346ms` candidate. This is
+    adjacent rather than directly changed, so treat it as supportive but noisy.
+
+Verdict:
+- Accepted.
+- The production signal is small but positive across the three-pair average,
+  and the focused profile confirms the intended chunk transfer stages moved
+  down.
+- This is a narrow Vulkan boundary reduction. It does not repeat the rejected
+  A098 shared-prefix shader or the rejected A091 full-chunk-forward shape.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-server-response.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-server-metrics-after.txt`
