@@ -1,0 +1,32 @@
+    Checking kiln-model v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-model)
+warning: function `compute_chunk_body_reference` is never used
+    --> crates/kiln-model/src/forward.rs:3699:4
+     |
+3699 | fn compute_chunk_body_reference(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `apply_causal_mask` is never used
+    --> crates/kiln-model/src/forward.rs:7566:4
+     |
+7566 | fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
+     |    ^^^^^^^^^^^^^^^^^
+
+warning: function `model_forward_paged_with_graph_inputs` is never used
+    --> crates/kiln-model/src/forward.rs:8706:15
+     |
+8706 | pub(crate) fn model_forward_paged_with_graph_inputs(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `fp8_scales` is never read
+  --> crates/kiln-model/src/paged_kv_cache.rs:37:5
+   |
+25 | pub struct PagedKvCache {
+   |            ------------ field in this struct
+...
+37 |     fp8_scales: Vec<(f32, f32)>,
+   |     ^^^^^^^^^^
+
+warning: `kiln-model` (lib) generated 4 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.95s

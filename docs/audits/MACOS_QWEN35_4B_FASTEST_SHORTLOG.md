@@ -2229,3 +2229,15 @@
   `1944.575 us` versus E466 rollback `row_triple` `1780.627 us`, `9.21%`
   slower. No endpoint A/B was run. Source was reverted; keep E466's accepted
   row-triple path.
+- 2026-05-09 E469: Accepted a Metal GDN in-proj batch-3-only row-triple mode
+  with rollback env `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE=1`. The selector
+  uses it only for `batch == 3`; batch `>=8` remains row-quad and other grouped
+  shapes remain row-pair. Focused parity passed. Qwen3.5 synthetic batch `3`
+  improved from rollback `row_pair` `1743.798 us` to default `row_triple`
+  `1490.188 us`, `14.54%` lower, with exact BF16 diffs. Matched four-stream
+  `max_tokens=8` live A/B reached max batch `3` in both arms and was slightly
+  positive: `4.615 s` default versus `4.631 s` rollback, both `32` server
+  tokens, `28` submitted jobs, `14` worker batches, and `28` rows. A matched
+  GDN-stage profile showed `gdn:in_proj` down from `259.955 ms` to `222.855 ms`
+  and total GDN down from `453.122 ms` to `394.053 ms`. Metal/Vulkan model and
+  server checks passed; CUDA remains locally blocked by missing `nvcc`.

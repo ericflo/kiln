@@ -1,0 +1,16 @@
+{
+  "model": "kiln",
+  "stream": true,
+  "temperature": 0,
+  "max_tokens": 8,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Continue sequences tersely and do not end early."
+    },
+    {
+      "role": "user",
+      "content": "Continue this beta sequence with many comma-separated terms: one, two, three, four, five, six, seven,"
+    }
+  ]
+}

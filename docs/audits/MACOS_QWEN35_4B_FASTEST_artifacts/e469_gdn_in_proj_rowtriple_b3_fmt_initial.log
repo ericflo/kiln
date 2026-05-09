@@ -1,0 +1,39 @@
+Diff in /Users/ericflo/Development/kiln/crates/kiln-model/src/backend/metal.rs:52:
+ const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
+ const DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR";
+ const DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD";
+[31m-const DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE: &str =
+(B[m[31m-    "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE";
+(B[m[32m+const DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE";
+(B[m const DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD: &str =
+     "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD";
+ const DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD: &str =
+Diff in /Users/ericflo/Development/kiln/crates/kiln-model/src/backend/metal.rs:15974:
+             let physical_tokens = batch;
+
+             let row_pair_enabled = batch >= 3 && !metal_gdn_in_proj_row_pair_disabled();
+[31m-            let policy = if row_pair_enabled
+(B[m[31m-                && batch == 3
+(B[m[31m-                && !metal_gdn_in_proj_row_triple_disabled()
+(B[m[31m-            {
+(B[m[31m-                "row_triple"
+(B[m[31m-            } else if row_pair_enabled && batch >= 8 && !metal_gdn_in_proj_row_quad_disabled() {
+(B[m[31m-                "row_quad"
+(B[m[31m-            } else if row_pair_enabled {
+(B[m[31m-                "row_pair"
+(B[m[31m-            } else {
+(B[m[31m-                "rowwise"
+(B[m[31m-            };
+(B[m[32m+            let policy =
+(B[m[32m+                if row_pair_enabled && batch == 3 && !metal_gdn_in_proj_row_triple_disabled() {
+(B[m[32m+                    "row_triple"
+(B[m[32m+                } else if row_pair_enabled && batch >= 8 && !metal_gdn_in_proj_row_quad_disabled() {
+(B[m[32m+                    "row_quad"
+(B[m[32m+                } else if row_pair_enabled {
+(B[m[32m+                    "row_pair"
+(B[m[32m+                } else {
+(B[m[32m+                    "rowwise"
+(B[m[32m+                };
+(B[m
+             eprintln!(
+                 "synthetic Metal Qwen3.5 GDN in-proj decode batch BF16: batch={batch} \

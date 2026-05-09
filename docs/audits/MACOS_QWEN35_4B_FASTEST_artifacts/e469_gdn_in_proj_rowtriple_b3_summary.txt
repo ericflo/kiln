@@ -1,0 +1,46 @@
+E469 accepted Metal GDN in-proj batch-3 row-triple mode.
+
+Candidate:
+- Added KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE=1 rollback.
+- Added a Metal kernel row_pair_mode == 3 branch for exactly batch 3 in
+  kiln_gdn_in_proj_decode_bf16.
+- The selector uses row-triple only for batch 3, keeps row-quad for batch >= 8,
+  and keeps row-pair/rowwise for the other existing shapes.
+
+Validation:
+- cargo fmt --check passed after cargo fmt.
+- cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul -- --nocapture passed.
+- cargo build --release --features metal --bin kiln passed.
+- cargo check -p kiln-model --features metal passed.
+- cargo check -p kiln-model --features vulkan passed.
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench passed.
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench passed.
+- cargo check -p kiln-model --features cuda is locally blocked by missing nvcc/CUDA toolkit.
+
+Synthetic Qwen3.5 GDN in-proj A/B:
+- Default batch 3 row_triple fused: 1490.188 us.
+- Rollback batch 3 row_pair fused: 1743.798 us.
+- Result: row-triple is 14.54% lower latency on the affected synthetic shape.
+- Both arms had exact BF16 diffs in the bench output.
+
+Four-stream live no-profile A/B, sequence prompt, max_tokens=8:
+- Default elapsed: 4.614942875 s.
+- Rollback elapsed: 4.631164292 s.
+- Both arms: 4 HTTP 200 responses, 40 events, 32 server tokens, 28 submitted
+  decode-batcher jobs, 14 worker batches, 28 rows, max_observed_batch=3.
+- Result: default is 0.35% lower wall time.
+
+Four-stream GDN-stage profile A/B, sequence prompt, max_tokens=3:
+- Default elapsed: 4.214983042 s.
+- Rollback elapsed: 5.075285458 s.
+- Both arms: 4 HTTP 200 responses, 20 events, 12 server tokens, 8 submitted
+  decode-batcher jobs, 4 worker batches, 8 rows, max_observed_batch=3.
+- Filtered seq_len=1 GDN in_proj: default 222.855 ms, rollback 259.955 ms,
+  37.100 ms lower, 14.27%.
+- Filtered total GDN: default 394.053 ms, rollback 453.122 ms, 59.069 ms lower,
+  13.04%.
+
+Decision:
+- Accepted. The exact synthetic target and stage-profile target improve by
+  roughly the same amount; no-profile wall time is small but positive and
+  shape-matched.

@@ -20161,3 +20161,103 @@ No endpoint A/B was run because the exact affected synthetic batch regressed.
 
 Rejected and reverted. Keep E466's accepted batch-3 row-triple MLP gate/up
 mode.
+
+## E469 - Accepted Batch-3 GDN In-Proj Row-Triple Mode
+
+### Hypothesis
+
+E467 still shows `gdn:in_proj` as the next-largest non-MLP hotspot. The current
+batch-3 grouped GDN in-proj path uses the row-pair kernel as a pair plus a
+singleton second group, reloading the same transposed weights for the third
+row. A dedicated exactly-batch-3 row-triple branch should remove that singleton
+pass while leaving batch `1`, batch `2`, and larger grouped shapes alone.
+
+### Candidate
+
+Added rollback env `KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE=1` and a
+`row_pair_mode == 3` branch in `kiln_gdn_in_proj_decode_bf16`. The new branch
+computes rows `0`, `1`, and `2` in one threadgroup shape over the existing
+`qkv`, `z`, `a`, and `b` output regions. The host selector chooses it only when
+`batch == 3`; batch `>=8` still selects row-quad, other grouped batches still
+select row-pair, and ungrouped paths are unchanged.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul -- --nocapture`
+
+Qwen3.5 GDN in-proj synthetic A/B with warmup `5`, iters `20`:
+
+| batch | default policy | default fused | rollback policy | rollback fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| `3` | row_triple | `1490.188 us` | row_pair | `1743.798 us` | accepted, `14.54%` lower |
+
+Both arms reported exact BF16 diffs in the benchmark output. Other batch rows
+use the same existing policies in both arms and are treated as same-path timing
+noise.
+
+Matched four-stream live no-profile A/B, sequence prompt, barrier and
+post-prewarm settle, `max_tokens=8`:
+
+| arm | elapsed | HTTP statuses | stream events | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default | `4.614942875 s` | `200 x4` | `40` | `32` | `28` | `14` | `28` | `3` |
+| rollback | `4.631164292 s` | `200 x4` | `40` | `32` | `28` | `14` | `28` | `3` |
+
+The live no-profile wall-time win is small but shape-matched: default is
+`0.35%` lower.
+
+Matched four-stream GDN-stage profile A/B, sequence prompt, `max_tokens=3`:
+
+| arm | elapsed | HTTP statuses | stream events | server tokens | submitted jobs | worker batches | rows | max batch |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| default | `4.214983042 s` | `200 x4` | `20` | `12` | `8` | `4` | `8` | `3` |
+| rollback | `5.075285458 s` | `200 x4` | `20` | `12` | `8` | `4` | `8` | `3` |
+
+Filtered decode rows (`seq_len=1`) in the GDN-stage profile:
+
+| stage | default total | rollback total | delta |
+| --- | ---: | ---: | ---: |
+| `gdn:in_proj` | `222.855 ms` | `259.955 ms` | `37.100 ms` lower, `14.27%` |
+| total GDN | `394.053 ms` | `453.122 ms` | `59.069 ms` lower, `13.04%` |
+
+The exact synthetic target and the stage-profile target agree on the size of
+the improvement. The no-profile endpoint win is smaller, but positive and
+shape-matched.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul -- --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda` remains locally blocked by
+  missing `nvcc`/CUDA toolkit, same local limitation as prior experiments.
+
+### Artifacts
+
+- `e469_gdn_in_proj_rowtriple_b3_fmt_initial.log`
+- `e469_gdn_in_proj_rowtriple_b3_fmt.log`
+- `e469_gdn_in_proj_rowtriple_b3_parity.log`
+- `e469_gdn_in_proj_rowtriple_b3_shapes_default_w5_i20.log`
+- `e469_gdn_in_proj_rowtriple_b3_shapes_disabled_w5_i20.log`
+- `e469_gdn_in_proj_rowtriple_b3_build.log`
+- `e469_gdn_in_proj_rowtriple_b3_live_batch4_mt8_default_*`
+- `e469_gdn_in_proj_rowtriple_b3_live_batch4_mt8_disabled_*`
+- `e469_gdn_in_proj_rowtriple_b3_live_batch4_gdn_profile_default_*`
+- `e469_gdn_in_proj_rowtriple_b3_live_batch4_gdn_profile_disabled_*`
+- `e469_gdn_in_proj_rowtriple_b3_check_metal.log`
+- `e469_gdn_in_proj_rowtriple_b3_check_vulkan.log`
+- `e469_gdn_in_proj_rowtriple_b3_check_server_metal.log`
+- `e469_gdn_in_proj_rowtriple_b3_check_server_vulkan.log`
+- `e469_gdn_in_proj_rowtriple_b3_check_cuda.log`
+- `e469_gdn_in_proj_rowtriple_b3_summary.txt`
+
+### Decision
+
+Accepted. Keep the batch-3-only GDN in-proj row-triple mode with rollback env
+`KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE=1`.

@@ -1,0 +1,44 @@
+{
+  "elapsed_s": 4.214983041980304,
+  "statuses": [
+    200,
+    200,
+    200,
+    200
+  ],
+  "generated_token_events_total": 20,
+  "requests": [
+    {
+      "index": 0,
+      "topic": "alpha",
+      "status": 200,
+      "elapsed_s": 3.8715532909845933,
+      "bytes": 971,
+      "events": 5
+    },
+    {
+      "index": 1,
+      "topic": "beta",
+      "status": 200,
+      "elapsed_s": 4.210895417025313,
+      "bytes": 961,
+      "events": 5
+    },
+    {
+      "index": 2,
+      "topic": "gamma",
+      "status": 200,
+      "elapsed_s": 4.210759499925189,
+      "bytes": 961,
+      "events": 5
+    },
+    {
+      "index": 3,
+      "topic": "delta",
+      "status": 200,
+      "elapsed_s": 4.210456083994359,
+      "bytes": 959,
+      "events": 5
+    }
+  ]
+}
