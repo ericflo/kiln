@@ -224,6 +224,137 @@ fn gdn_in_proj_decode_batched_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn gdn_in_proj_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, qkv_dim, z_dim, a_dim, b_dim) = (8usize, 5usize, 3usize, 2usize, 4usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.125)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 11.0) - 5.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let qkv_w = make_weight(qkv_dim, 0.03125)?;
+    let z_w = make_weight(z_dim, 0.043)?;
+    let a_w = make_weight(a_dim, -0.027)?;
+    let b_w = make_weight(b_dim, 0.019)?;
+
+    let qkv_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &qkv_w)?;
+    let z_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &z_w)?;
+    let a_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &a_w)?;
+    let b_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &b_w)?;
+
+    let (got_qkv, got_z, got_a, got_b) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
+            &vk, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        )
+        .context("dispatch_gdn_in_proj_decode_cached_bf16_weights")?;
+
+    assert_close(
+        "in_proj bf16 qkv",
+        &got_qkv,
+        &x.broadcast_matmul(&qkv_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "in_proj bf16 z",
+        &got_z,
+        &x.broadcast_matmul(&z_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "in_proj bf16 a",
+        &got_a,
+        &x.broadcast_matmul(&a_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "in_proj bf16 b",
+        &got_b,
+        &x.broadcast_matmul(&b_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn gdn_in_proj_decode_batched_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, qkv_dim, z_dim, a_dim, b_dim) =
+        (3usize, 8usize, 5usize, 3usize, 2usize, 4usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.071)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 11.0) - 5.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let qkv_w = make_weight(qkv_dim, 0.03125)?;
+    let z_w = make_weight(z_dim, 0.043)?;
+    let a_w = make_weight(a_dim, -0.027)?;
+    let b_w = make_weight(b_dim, 0.019)?;
+
+    let qkv_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &qkv_w)?;
+    let z_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &z_w)?;
+    let a_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &a_w)?;
+    let b_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &b_w)?;
+
+    let (got_qkv, got_z, got_a, got_b) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
+            &vk, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        )
+        .context("dispatch_gdn_in_proj_decode_cached_bf16_weights batched")?;
+
+    assert_close(
+        "batched in_proj bf16 qkv",
+        &got_qkv,
+        &x.broadcast_matmul(&qkv_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "batched in_proj bf16 z",
+        &got_z,
+        &x.broadcast_matmul(&z_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "batched in_proj bf16 a",
+        &got_a,
+        &x.broadcast_matmul(&a_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    assert_close(
+        "batched in_proj bf16 b",
+        &got_b,
+        &x.broadcast_matmul(&b_w.to_dtype(DType::F32)?)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn linear_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
@@ -297,6 +428,86 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn linear_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, out_dim) = (9usize, 7usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 5.0) - 2.0) * 0.17)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.023)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        1,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_cached_bf16_weights")?;
+    assert_close(
+        "linear decode bf16 weights",
+        &got,
+        &x.broadcast_matmul(&weight_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn linear_decode_batched_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, out_dim) = (4usize, 11usize, 9usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.071)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * -0.013)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        batch,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_cached_bf16_weights batched")?;
+    assert_close(
+        "linear decode batched bf16 weights",
+        &got,
+        &x.broadcast_matmul(&weight_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn linear_decode_argmax_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
@@ -337,6 +548,52 @@ fn linear_decode_argmax_matches_cpu_reference() -> Result<()> {
     anyhow::ensure!(
         got == expected as u32,
         "linear argmax mismatch got {got} expected {expected}"
+    );
+    Ok(())
+}
+
+#[test]
+fn linear_decode_argmax_bf16_packed_weights_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, out_dim) = (10usize, 35usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.13)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.019)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bf16_weights(
+        &vk,
+        &x,
+        &weight_buf,
+        hidden,
+        out_dim,
+    )
+    .context("dispatch_linear_decode_argmax_cached_bf16_weights")?;
+
+    let logits = tensor_data_f32(&x.broadcast_matmul(&weight_f32)?)?;
+    let (expected, _) =
+        logits
+            .iter()
+            .enumerate()
+            .fold((0usize, f32::NEG_INFINITY), |best, (idx, &score)| {
+                if score > best.1 { (idx, score) } else { best }
+            });
+    anyhow::ensure!(
+        got == expected as u32,
+        "linear bf16 argmax mismatch got {got} expected {expected}"
     );
     Ok(())
 }
@@ -389,6 +646,62 @@ fn linear_decode_argmax_batched_matches_cpu_reference() -> Result<()> {
     anyhow::ensure!(
         got == expected,
         "batched linear argmax mismatch got {:?} expected {:?}",
+        got,
+        expected
+    );
+    Ok(())
+}
+
+#[test]
+fn linear_decode_argmax_batched_bf16_packed_weights_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, out_dim) = (4usize, 13usize, 71usize);
+    let x = cpu_f32(
+        (0..batch * hidden)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * 0.047)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let weight = cpu_bf16(
+        (0..hidden * out_dim)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * -0.017)
+            .collect(),
+        (hidden, out_dim),
+    )?;
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
+    let got =
+        kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights(
+            &vk,
+            &x,
+            &weight_buf,
+            batch,
+            hidden,
+            out_dim,
+        )
+        .context("dispatch_linear_decode_argmax_batched_cached_bf16_weights")?;
+
+    let logits = tensor_data_f32(&x.broadcast_matmul(&weight_f32)?)?;
+    let expected: Vec<u32> = (0..batch)
+        .map(|row| {
+            let start = row * out_dim;
+            let row_logits = &logits[start..start + out_dim];
+            let (token, _) = row_logits.iter().enumerate().fold(
+                (0usize, f32::NEG_INFINITY),
+                |best, (idx, &score)| {
+                    if score > best.1 { (idx, score) } else { best }
+                },
+            );
+            token as u32
+        })
+        .collect();
+    anyhow::ensure!(
+        got == expected,
+        "batched linear bf16 argmax mismatch got {:?} expected {:?}",
         got,
         expected
     );
@@ -535,6 +848,127 @@ fn full_attn_qkv_decode_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn full_attn_qkv_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, q_dim, k_dim, v_dim) = (9usize, 7usize, 3usize, 5usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.11)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let q_w = make_weight(q_dim, 0.019)?;
+    let k_w = make_weight(k_dim, -0.031)?;
+    let v_w = make_weight(v_dim, 0.023)?;
+    let q_w_f32 = q_w.to_dtype(DType::F32)?;
+    let k_w_f32 = k_w.to_dtype(DType::F32)?;
+    let v_w_f32 = v_w.to_dtype(DType::F32)?;
+    let q_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &q_w)?;
+    let k_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &k_w)?;
+    let v_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &v_w)?;
+    let (got_q, got_k, got_v) =
+        kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights(
+            &vk, &x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+        )
+        .context("dispatch_full_attn_qkv_decode_cached_bf16_weights")?;
+
+    assert_close(
+        "full attn bf16 q",
+        &got_q,
+        &x.broadcast_matmul(&q_w_f32)?,
+        1e-5,
+    )?;
+    assert_close(
+        "full attn bf16 k",
+        &got_k,
+        &x.broadcast_matmul(&k_w_f32)?,
+        1e-5,
+    )?;
+    assert_close(
+        "full attn bf16 v",
+        &got_v,
+        &x.broadcast_matmul(&v_w_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn paged_attn_decode_batch_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, max_seqlen, num_heads, num_kv_heads, head_dim) =
+        (2usize, 5usize, 4usize, 2usize, 8usize);
+    let seq_lens = vec![3u32, 5u32];
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let q_data: Vec<f32> = (0..batch * num_heads * head_dim)
+        .map(|i| ((i as f32 % 17.0) - 8.0) * 0.07)
+        .collect();
+    let k_data: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+        .map(|i| ((i as f32 % 19.0) - 9.0) * 0.05)
+        .collect();
+    let v_data: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+        .map(|i| ((i as f32 % 23.0) - 11.0) * 0.03)
+        .collect();
+    let q = cpu_f32(q_data.clone(), (batch, 1, num_heads, head_dim))?;
+    let k = cpu_f32(k_data.clone(), (batch, max_seqlen, num_kv_heads, head_dim))?;
+    let v = cpu_f32(v_data.clone(), (batch, max_seqlen, num_kv_heads, head_dim))?;
+
+    let got = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
+        &vk, &q, &k, &v, &seq_lens, scale,
+    )
+    .context("dispatch_paged_attn_decode_batch_f32")?;
+
+    let gqa_ratio = num_heads / num_kv_heads;
+    let mut expected = vec![0.0f32; batch * num_heads * head_dim];
+    for b in 0..batch {
+        let seq_len = seq_lens[b] as usize;
+        for h in 0..num_heads {
+            let kv_h = h / gqa_ratio;
+            let mut logits = vec![0.0f32; seq_len];
+            for (t, logit) in logits.iter_mut().enumerate() {
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    let q_idx = ((b * num_heads + h) * head_dim) + d;
+                    let k_idx = (((b * max_seqlen + t) * num_kv_heads + kv_h) * head_dim) + d;
+                    dot += q_data[q_idx] * k_data[k_idx];
+                }
+                *logit = dot * scale;
+            }
+            let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let denom: f32 = logits.iter().map(|&l| (l - max_logit).exp()).sum();
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for (t, &logit) in logits.iter().enumerate() {
+                    let weight = (logit - max_logit).exp() / denom;
+                    let v_idx = (((b * max_seqlen + t) * num_kv_heads + kv_h) * head_dim) + d;
+                    acc += weight * v_data[v_idx];
+                }
+                expected[((b * num_heads + h) * head_dim) + d] = acc;
+            }
+        }
+    }
+    let expected = cpu_f32(expected, (batch, 1, num_heads, head_dim))?;
+    assert_close("paged attn decode batch", &got, &expected, 1e-5)?;
+    Ok(())
+}
+
+#[test]
 fn mlp_gate_up_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
@@ -634,6 +1068,72 @@ fn mlp_decode_matches_cpu_reference() -> Result<()> {
     let hidden_t = ((gate * sigmoid)? * up)?;
     let expected = hidden_t.broadcast_matmul(&down_w)?;
     assert_close("mlp decode", &got, &expected, 1e-5)?;
+    Ok(())
+}
+
+#[test]
+fn mlp_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    for batch in [1usize, 3usize] {
+        let (hidden, intermediate, out_dim) = (9usize, 7usize, 5usize);
+        let x = cpu_f32(
+            (0..batch * hidden)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * 0.047)
+                .collect(),
+            (batch, 1, hidden),
+        )?;
+        let gate_w = cpu_bf16(
+            (0..hidden * intermediate)
+                .map(|i| ((i as f32 % 11.0) - 5.0) * 0.029)
+                .collect(),
+            (hidden, intermediate),
+        )?;
+        let up_w = cpu_bf16(
+            (0..hidden * intermediate)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * -0.017)
+                .collect(),
+            (hidden, intermediate),
+        )?;
+        let down_w = cpu_bf16(
+            (0..intermediate * out_dim)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+                .collect(),
+            (intermediate, out_dim),
+        )?;
+        let gate_f32 = gate_w.to_dtype(DType::F32)?;
+        let up_f32 = up_w.to_dtype(DType::F32)?;
+        let down_f32 = down_w.to_dtype(DType::F32)?;
+        let gate_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &gate_w)?;
+        let up_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &up_w)?;
+        let down_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &down_w)?;
+        let got = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+            &vk,
+            &x,
+            &gate_buf,
+            &up_buf,
+            &down_buf,
+            hidden,
+            intermediate,
+            out_dim,
+        )
+        .with_context(|| format!("dispatch_mlp_decode_cached_bf16_weights batch={batch}"))?;
+
+        let gate = x.broadcast_matmul(&gate_f32)?;
+        let up = x.broadcast_matmul(&up_f32)?;
+        let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let hidden_t = ((gate * sigmoid)? * up)?;
+        let expected = hidden_t.broadcast_matmul(&down_f32)?;
+        assert_close(
+            &format!("mlp decode bf16 packed weights batch={batch}"),
+            &got,
+            &expected,
+            1e-5,
+        )?;
+    }
     Ok(())
 }
 

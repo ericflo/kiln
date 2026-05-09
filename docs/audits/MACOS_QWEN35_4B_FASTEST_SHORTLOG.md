@@ -1184,3 +1184,88 @@
   `KILN_DECODE_BATCH_WAIT_US` as the opt-in admission-delay knob until an
   adaptive policy beats zero wait across both four-way and eight-way serving
   probes.
+- 2026-05-09 E355: Accepted current-main Metal post-Vulkan-merge baseline.
+  `cargo check --locked -p kiln-server --features metal --bin kiln --bin
+  kiln-bench`, release `kiln`/`kiln-bench` build, strict Metal paged-attention
+  batch parity, hybrid model-forward batch parity, and two-job live decode
+  batcher parity all passed. Warm serial paged p64/o16 greedy measured
+  `454.0 ms` prefill and `169.3 ms` mean ITL (`5.91 tok/s`) after a cold
+  warmup run. No source change; this establishes the control before targeting
+  Metal's missing divergent-length batch attention path.
+- 2026-05-09 E356: Accepted Metal dyn-seqlen paged batch decode attention and
+  enabled mixed-length live decode admission by default on Metal. The new BF16
+  Qwen-shaped Metal kernel handles per-row `seqused_k`/block tables for
+  `[B,1,16,256]` decode, while uniform batches still prefer the faster strict
+  path. Parity passed against rowwise paged decode
+  (`max_abs_diff=6.1035156e-5`, `mean_abs_diff=2.1966246e-6`), mixed-seq live
+  batcher parity passed, and Metal/Vulkan `cargo check` passed. Synthetic
+  dyn-seqlen attention beat rowwise by `1.572x/1.302x/1.656x` at batch
+  `2/4/8`. On the varied-prompt four-request streaming probe, disabling
+  mixed-seq admission took `8.104361s` with `28` one-row worker batches; default
+  Metal mixed-seq took `5.728904s` with `14` worker batches and max batch `3`,
+  a `1.414x` wall-time speedup. `KILN_DECODE_BATCH_MIXED_SEQ=0` remains the
+  kill switch and non-Metal devices only opt in via env.
+- 2026-05-09 E357: Rejected changing the default Metal decode-batcher wait
+  after E356. A same-binary varied-prompt four-request streaming sweep with
+  mixed-seq admission measured wait `0/50/100/200/300us` at
+  `5.733101/6.232374/5.561121/5.679272/5.710941s`. Nonzero waits all formed
+  `8` worker batches with max batch `4` versus zero wait's `14` batches and max
+  batch `3`, but the only winner was `100us` by a narrow `3.0%`, while `50us`
+  regressed badly and E354 already showed admission waits can hurt larger
+  concurrency. No source change; keep zero wait as the default and retain
+  `KILN_DECODE_BATCH_WAIT_US` for explicit workload tuning.
+- 2026-05-09 E358: Refreshed synchronized stage profiling on the current
+  Metal mixed-seq serving path. Four varied prompts with greedy `max_tokens=3`
+  generated `12` tokens, submitted `8` decode jobs through `4` worker batches,
+  and observed max batch `3`; wall time was `6.340215s` with profiling
+  synchronization enabled. Live `seq_len=1` stage totals still point at
+  projection-heavy decode work: MLP `gate_up_fused` `376.300 ms`, MLP
+  `down_proj` `279.810 ms`, GDN `in_proj` `255.876 ms`, GDN `out_proj`
+  `115.709 ms`, then full-attention `qkv_proj_batch` `50.610 ms`. No source
+  change; next Metal attempts should stay focused on MLP/GDN projection kernels
+  rather than paged attention.
+- 2026-05-09 E359: Rejected and reverted a four-column serial variant of the
+  Metal MLP gate/up fused decode kernel. The idea was to reuse each input
+  element across four adjacent intermediate columns instead of two. Parity
+  passed, but the Qwen-shaped synthetic bench regressed at every batch size:
+  baseline fused `1805.161/1953.260/2132.995/7228.188 us` at batch `1/2/4/8`
+  versus candidate `2324.990/2580.365/3731.068/8243.922 us`. Keep the current
+  two-column serial kernel; do not try wider serial column grouping for this
+  shape without a materially different register/memory strategy.
+- 2026-05-09 E360: Rejected and reverted `fast::exp` inside the Metal MLP
+  gate/up sigmoid. Decode-batch parity passed, but the same Qwen-shaped
+  synthetic bench produced `1816.448/2107.578/2122.781/7380.891 us` at batch
+  `1/2/4/8` versus E359's current-kernel baseline
+  `1805.161/1953.260/2132.995/7228.188 us`. The only apparent win was a
+  noise-level `0.5%` at batch `4`; batch `1/2/8` regressed. Keep precise
+  `exp` in this kernel.
+- 2026-05-09 E361: Accepted batched-only paired QKV/Z columns in the Metal GDN
+  in-projection decode kernel. The first paired attempt improved batch
+  `2/4/8` but regressed batch `1`, so the final kernel keeps the old one-column
+  path for `batch == 1` and uses two-column QKV/Z work only for batched rows.
+  Parity, Metal/Vulkan `cargo check`, and release build passed. Synthetic GDN
+  in-proj fused times improved from `1214.896/2456.740/3423.047/5547.948 us`
+  to `1207.161/1672.229/2728.719/4085.151 us` at batch `1/2/4/8`. The
+  varied-prompt four-request endpoint probe improved from E357's zero-wait
+  `5.733101s` to `5.502041s` with the same `28` jobs, `14` worker batches, and
+  max batch `3`; a single-request smoke completed in `1.497457s`.
+- 2026-05-09 E362: Refreshed synchronized stage profiling after E361. Four
+  varied prompts with greedy `max_tokens=3` generated `12` tokens, submitted
+  `8` decode jobs through `4` worker batches, and observed max batch `3`; wall
+  time was `6.153190s` with profiling synchronization enabled. Live `seq_len=1`
+  stage totals now rank MLP `gate_up_fused` `328.811 ms`, MLP `down_proj`
+  `258.280 ms`, GDN `in_proj` `209.395 ms`, GDN `out_proj` `105.372 ms`, and
+  full-attention `qkv_proj_batch` `49.102 ms`. No source change; E361 moved GDN
+  in-proj down from E358's `255.876 ms`, and the next Metal attempts should
+  prioritize MLP gate/up or down-projection instead.
+- 2026-05-09 E363: Accepted Metal LoRA decode base-projection fast path.
+  `linear_with_lora_t_decode` now uses the Metal transposed cooperative GEMV
+  for the base projection even when a LoRA projection is active, then adds the
+  existing `x @ A^T @ B^T * scale` delta. Metal LoRA parity passed for batch
+  `1` and `4`, the existing backend LoRA delta test passed, Metal/Vulkan
+  checks and release Metal build passed. Qwen-shaped BF16 rank-16 synthetic
+  LoRA projections at batch `4` improved from fallback `135.994/150.156 ms` to
+  fast `6.770/6.326 ms` for MLP gate-or-up/down, a `20.1x/23.7x` speedup with
+  max diffs `0` and `1.5625e-2`. No real-adapter endpoint run was available;
+  this is a LoRA-config targeted win and leaves the no-LoRA fused MLP path
+  unchanged.

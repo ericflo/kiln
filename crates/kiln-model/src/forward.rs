@@ -11,10 +11,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
-#[cfg(feature = "cuda")]
-use crate::lora_loader::compute_lora_delta;
 use crate::lora_loader::{
-    LoraLayerWeights, LoraProjectionWeights, LoraWeights, linear_with_lora_t,
+    LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
 };
 use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
 use crate::transposed_weight_cache::{
@@ -305,20 +303,39 @@ fn linear_with_lora_t_decode(
 ) -> Result<Tensor> {
     #[cfg(feature = "metal")]
     {
-        if lora.is_none()
-            && !crate::mtp_debug::is_mtp_fp32_head_armed()
+        if !crate::mtp_debug::is_mtp_fp32_head_armed()
             && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
             && (crate::backend::metal::metal_transposed_coop_gemv_supports(x, weight_t)
                 || crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
                     x, weight_t,
                 ))
         {
-            return crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
+            let base = crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
                 .context("metal transposed coop GEMV failed");
+            return add_lora_delta_to_base(base?, x, lora, lora_scale)
+                .context("metal transposed coop GEMV LoRA delta failed");
         }
     }
 
     linear_with_lora_t(x, weight_t, lora, lora_scale)
+}
+
+fn add_lora_delta_to_base(
+    base: Tensor,
+    x: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    let Some(proj) = lora else {
+        return Ok(base);
+    };
+    let delta = compute_lora_delta(x, proj, lora_scale)?;
+    let delta = if delta.dtype() == base.dtype() {
+        delta
+    } else {
+        delta.to_dtype(base.dtype())?
+    };
+    Ok((base + delta)?)
 }
 
 fn linear_with_lora_t_decode_if(
@@ -335,6 +352,22 @@ fn linear_with_lora_t_decode_if(
     }
 }
 
+fn linear_with_lora_t_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Tensor> {
+    if let Some(backend) = backend {
+        if let Some(base) = backend.linear_decode(x, weight_t)? {
+            return add_lora_delta_to_base(base, x, lora, lora_scale);
+        }
+    }
+    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
+}
+
 #[cfg(feature = "metal")]
 fn metal_attn_gate_debug_active() -> bool {
     crate::mtp_debug::is_subop_capture_armed()
@@ -345,7 +378,7 @@ fn metal_attn_gate_debug_active() -> bool {
 }
 
 fn attention_output_gate_decode_if(
-    use_metal_decode_gemv: bool,
+    _use_metal_decode_gemv: bool,
     attn_output: Tensor,
     gate: Option<&Tensor>,
 ) -> Result<Tensor> {
@@ -355,7 +388,7 @@ fn attention_output_gate_decode_if(
 
     #[cfg(feature = "metal")]
     {
-        if use_metal_decode_gemv
+        if _use_metal_decode_gemv
             && !metal_attn_gate_debug_active()
             && crate::backend::metal::metal_attn_gate_sigmoid_mul_supports(&attn_output, gate)
         {
@@ -370,6 +403,7 @@ fn attention_output_gate_decode_if(
 }
 
 fn full_attn_qkv_proj_decode_if(
+    backend: &dyn BackendRuntime,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
@@ -402,21 +436,40 @@ fn full_attn_qkv_proj_decode_if(
         }
     }
 
+    if lora_layer.is_none()
+        && attn_weights.q_proj_marlin.is_none()
+        && !crate::mtp_debug::is_mtp_fp32_head_armed()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+    {
+        if let Some(out) = backend.full_attn_qkv_decode(
+            x,
+            &attn_weights.q_proj_t,
+            &attn_weights.k_proj_t,
+            &attn_weights.v_proj_t,
+        )? {
+            kiln_nvtx::range!(c"kiln/proj/qkv_fused");
+            return Ok(out);
+        }
+    }
+
     let q_raw = q_proj_forward_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         attn_weights,
         lora_layer.and_then(|l| l.q_proj.as_ref()),
         lora_scale,
     )?;
-    let k = linear_with_lora_t_decode_if(
+    let k = linear_with_lora_t_backend_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         &attn_weights.k_proj_t,
         lora_layer.and_then(|l| l.k_proj.as_ref()),
         lora_scale,
     )?;
-    let v = linear_with_lora_t_decode_if(
+    let v = linear_with_lora_t_backend_decode_if(
+        Some(backend),
         use_metal_decode_gemv,
         x,
         &attn_weights.v_proj_t,
@@ -1593,6 +1646,28 @@ fn cached_transpose(weight: &Tensor) -> Result<Tensor> {
     Ok(weight.t()?.contiguous()?)
 }
 
+fn cpu_needs_f32_matmul(lhs: &Tensor, rhs: &Tensor) -> bool {
+    matches!(lhs.device(), Device::Cpu) && (lhs.dtype() != DType::F32 || rhs.dtype() != DType::F32)
+}
+
+fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    if cpu_needs_f32_matmul(lhs, rhs) {
+        let lhs_f32 = lhs.to_dtype(DType::F32)?;
+        let rhs_f32 = rhs.to_dtype(DType::F32)?;
+        Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
+    } else {
+        Ok(lhs.broadcast_matmul(rhs)?)
+    }
+}
+
+fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
+    if matches!(t.device(), Device::Cpu) && t.dtype() != DType::F32 {
+        Ok(t.to_dtype(DType::F32)?)
+    } else {
+        Ok(t)
+    }
+}
+
 /// Tiny BF16 placeholder that replaces a projection's pre-transposed
 /// contiguous copy (`*_proj_t`) once Marlin has absorbed it. Dropping the
 /// original `Tensor` field releases the underlying CUDA buffer (the
@@ -2161,11 +2236,11 @@ impl GpuWeights {
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
     let index = Tensor::new(token_ids, embed_weights.device())?;
     let out = embed_weights.index_select(&index, 0)?;
-    Ok(out)
+    promote_cpu_activation(out)
 }
 
 fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result<Tensor> {
-    Ok(embed_weights.index_select(index, 0)?)
+    promote_cpu_activation(embed_weights.index_select(index, 0)?)
 }
 
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
@@ -2204,7 +2279,7 @@ fn embedding_lookup_from_transposed_index(
     embed_tokens_t: &Tensor,
 ) -> Result<Tensor> {
     let gathered = embed_tokens_t.index_select(index, 1)?;
-    Ok(gathered.t()?.contiguous()?)
+    promote_cpu_activation(gathered.t()?.contiguous()?)
 }
 
 /// RMSNorm: x * weight / sqrt(mean(x^2) + eps).
@@ -2737,7 +2812,7 @@ pub fn swiglu_ffn(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, false, None)
+    swiglu_ffn_impl(None, x, mlp, lora, false, None)
 }
 
 fn swiglu_ffn_metal_decode(
@@ -2745,20 +2820,29 @@ fn swiglu_ffn_metal_decode(
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, true, None)
+    swiglu_ffn_impl(None, x, mlp, lora, true, None)
 }
 
-fn swiglu_ffn_profiled(
+fn swiglu_ffn_backend_profiled(
+    backend: &dyn BackendRuntime,
     x: &Tensor,
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
     use_metal_decode_gemv: bool,
     profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
-    swiglu_ffn_impl(x, mlp, lora, use_metal_decode_gemv, profile_context)
+    swiglu_ffn_impl(
+        Some(backend),
+        x,
+        mlp,
+        lora,
+        use_metal_decode_gemv,
+        profile_context,
+    )
 }
 
 fn swiglu_ffn_impl(
+    backend: Option<&dyn BackendRuntime>,
     x: &Tensor,
     mlp: &GpuFfnWeights,
     lora: Option<(&LoraLayerWeights, f32)>,
@@ -2771,6 +2855,57 @@ fn swiglu_ffn_impl(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
+    if lora_layer.is_none()
+        && mlp.gate_proj_marlin.is_none()
+        && mlp.up_proj_marlin.is_none()
+        && mlp.down_proj_marlin.is_none()
+    {
+        if let Some(backend) = backend {
+            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+            if let Some(out) =
+                backend.mlp_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t, &mlp.down_proj_t)?
+            {
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "fused",
+                    seq_len,
+                    stage_profile,
+                )?;
+                return Ok(out);
+            }
+            if let Some(hidden) = backend.mlp_gate_up_decode(x, &mlp.gate_proj_t, &mlp.up_proj_t)? {
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gate_up_fused",
+                    seq_len,
+                    stage_profile,
+                )?;
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let out = {
+                    kiln_nvtx::range!(c"kiln/mlp/down");
+                    mlp_proj_forward_decode_if(
+                        Some(backend),
+                        use_metal_decode_gemv,
+                        &hidden,
+                        &mlp.down_proj_t,
+                        mlp.down_proj_marlin.as_ref(),
+                        None,
+                        lora_scale,
+                    )?
+                };
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "down_proj",
+                    seq_len,
+                    stage_profile,
+                )?;
+                return Ok(out);
+            }
+        }
+    }
     #[cfg(feature = "metal")]
     let gate_up_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     #[cfg(feature = "metal")]
@@ -2786,6 +2921,7 @@ fn swiglu_ffn_impl(
         let out = {
             kiln_nvtx::range!(c"kiln/mlp/down");
             mlp_proj_forward_decode_if(
+                backend,
                 use_metal_decode_gemv,
                 &hidden,
                 &mlp.down_proj_t,
@@ -2808,7 +2944,9 @@ fn swiglu_ffn_impl(
     let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
-        mlp_proj_forward(
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
             x,
             &mlp.gate_proj_t,
             mlp.gate_proj_marlin.as_ref(),
@@ -2837,7 +2975,9 @@ fn swiglu_ffn_impl(
     let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
-        mlp_proj_forward(
+        mlp_proj_forward_decode_if(
+            backend,
+            use_metal_decode_gemv,
             x,
             &mlp.up_proj_t,
             mlp.up_proj_marlin.as_ref(),
@@ -2867,6 +3007,7 @@ fn swiglu_ffn_impl(
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
         mlp_proj_forward_decode_if(
+            backend,
             use_metal_decode_gemv,
             &hidden,
             &mlp.down_proj_t,
@@ -2955,10 +3096,11 @@ fn mlp_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
-    mlp_proj_forward_decode_if(false, x, weight_t, marlin, lora, lora_scale)
+    mlp_proj_forward_decode_if(None, false, x, weight_t, marlin, lora, lora_scale)
 }
 
 fn mlp_proj_forward_decode_if(
+    backend: Option<&dyn BackendRuntime>,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     weight_t: &Tensor,
@@ -2980,7 +3122,14 @@ fn mlp_proj_forward_decode_if(
     // Non-CUDA builds never carry Marlin weights; reference the parameter so
     // the signature stays unified without a dead_code warning.
     let _ = marlin;
-    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
+    linear_with_lora_t_backend_decode_if(
+        backend,
+        use_metal_decode_gemv,
+        x,
+        weight_t,
+        lora,
+        lora_scale,
+    )
 }
 
 fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
@@ -2998,7 +3147,20 @@ fn lm_head_forward(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Tensor> {
                 .context("metal batch lm_head GEMV failed");
         }
     }
-    Ok(x.broadcast_matmul(embed_tokens_t)?)
+    broadcast_matmul_cpu_compatible(x, embed_tokens_t)
+}
+
+fn lm_head_forward_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Tensor> {
+    if let Some(backend) = backend {
+        if let Some(logits) = backend.linear_decode(x, embed_tokens_t)? {
+            return Ok(logits);
+        }
+    }
+    lm_head_forward(x, embed_tokens_t)
 }
 
 fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
@@ -3013,6 +3175,19 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
     Ok(logits.flatten_all()?.argmax(0)?.to_scalar::<u32>()?)
 }
 
+fn lm_head_argmax_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<u32> {
+    if let Some(backend) = backend {
+        if let Some(token) = backend.linear_decode_argmax(x, embed_tokens_t)? {
+            return Ok(token);
+        }
+    }
+    lm_head_argmax(x, embed_tokens_t)
+}
+
 fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> {
     #[cfg(feature = "metal")]
     {
@@ -3023,6 +3198,21 @@ fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> 
     }
     let logits = lm_head_forward(x, embed_tokens_t)?;
     crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
+}
+
+fn lm_head_argmax_rows_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    embed_tokens_t: &Tensor,
+) -> Result<Vec<u32>> {
+    if let Some(backend) = backend {
+        if backend.supports_linear_decode_argmax_batch() {
+            if let Some(tokens) = backend.linear_decode_argmax_batch(x, embed_tokens_t)? {
+                return Ok(tokens);
+            }
+        }
+    }
+    lm_head_argmax_rows(x, embed_tokens_t)
 }
 
 fn lm_head_weighted_prep_argmax(
@@ -3280,20 +3470,32 @@ const GDN_RECURRENT_PREFILL_MAX_TOKENS: usize = 2048;
 
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
 /// Used for the strictly lower-triangular `A_strict` mask (i < t, exclusive).
-fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
     let t = Tensor::arange(0u32, n as u32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
-    Ok(rows.gt(&cols)?.to_dtype(dtype)?)
+    Ok(rows.gt(&cols)?)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    Ok(strict_lower_tri_bool(n, device)?.to_dtype(dtype)?)
 }
 
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row >= col else 0.0.
 /// Used for the causal (inclusive) lower-triangular `B_mask` mask (i <= t).
-fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+fn causal_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
     let t = Tensor::arange(0u32, n as u32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
-    Ok(rows.ge(&cols)?.to_dtype(dtype)?)
+    Ok(rows.ge(&cols)?)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn causal_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+    Ok(causal_lower_tri_bool(n, device)?.to_dtype(dtype)?)
 }
 
 /// Compute the chunk-local W = (I + A_strict)^{-1} (beta * V_prime) by
@@ -3451,7 +3653,7 @@ fn gdn_chunkwise_recurrence(
     state: &mut Tensor, // [B, nv, dk, dv]
     chunk_size: usize,
 ) -> Result<Tensor> {
-    let (_, _, seq_len, _) = q.dims4()?;
+    let (batch, heads, seq_len, _) = q.dims4()?;
     let dtype = q.dtype();
     let device = q.device();
 
@@ -3584,26 +3786,42 @@ fn gdn_chunkwise_recurrence(
                     let g_f32 = g_c.to_dtype(DType::F32)?;
                     let big_g = g_f32.cumsum(candle_core::D::Minus1)?; // [B, nv, C], F32
 
-                    // Decay matrix D[t, i] = exp(G[t] - G[i]).
+                    // Decay matrix D[t, i] = exp(G[t] - G[i]). Mask before
+                    // exp: masked future positions can otherwise overflow to
+                    // inf, and inf * 0 is NaN.
                     let big_g_col = big_g.unsqueeze(3)?; // [B, nv, C, 1]
                     let big_g_row = big_g.unsqueeze(2)?; // [B, nv, 1, C]
-                    let decay_f32 = big_g_col.broadcast_sub(&big_g_row)?.exp()?;
-                    let decay = decay_f32.to_dtype(dtype)?; // back to hot dtype
+                    let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
+                    let zero_delta = Tensor::zeros_like(&decay_delta)?;
+                    let strict_bool = strict_lower_tri_bool(c, device)?
+                        .reshape((1, 1, c, c))?
+                        .broadcast_as((batch, heads, c, c))?;
+                    let causal_bool = causal_lower_tri_bool(c, device)?
+                        .reshape((1, 1, c, c))?
+                        .broadcast_as((batch, heads, c, c))?;
+                    let strict_decay = strict_bool
+                        .where_cond(&decay_delta, &zero_delta)?
+                        .exp()?
+                        .to_dtype(dtype)?;
+                    let causal_decay = causal_bool
+                        .where_cond(&decay_delta, &zero_delta)?
+                        .exp()?
+                        .to_dtype(dtype)?;
 
                     // p[t] = exp(G[t]).
                     let p = big_g.exp()?.to_dtype(dtype)?; // [B, nv, C]
                     let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
 
-                    let strict_mask = strict_lower_tri_mask(c, dtype, device)?;
-                    let causal_mask = causal_lower_tri_mask(c, dtype, device)?;
+                    let strict_mask = strict_bool.to_dtype(dtype)?;
+                    let causal_mask = causal_bool.to_dtype(dtype)?;
 
                     let v_prime = (&v_c - ks_entry.broadcast_mul(&p_col)?)?;
                     let a_strict = kkt
-                        .broadcast_mul(&decay)?
+                        .broadcast_mul(&strict_decay)?
                         .broadcast_mul(&strict_mask)?
                         .contiguous()?;
                     let b_mask = qkt
-                        .broadcast_mul(&decay)?
+                        .broadcast_mul(&causal_decay)?
                         .broadcast_mul(&causal_mask)?
                         .contiguous()?;
                     let q_s_scaled = q_s.broadcast_mul(&p_col)?;
@@ -3961,7 +4179,6 @@ fn gated_deltanet_forward_decode_if(
     let v_dim = config.linear_v_dim();
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
-
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
@@ -3977,10 +4194,10 @@ fn gated_deltanet_forward_decode_if(
         )? {
             (mixed_qkv, z, a, b)
         } else {
-            let mixed_qkv = x.broadcast_matmul(&weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-            let z = x.broadcast_matmul(&weights.in_proj_z_t)?; // [B, T, v_dim]
-            let a = x.broadcast_matmul(&weights.in_proj_a_t)?; // [B, T, nv]
-            let b = x.broadcast_matmul(&weights.in_proj_b_t)?; // [B, T, nv]
+            let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
+            let z = broadcast_matmul_cpu_compatible(x, &weights.in_proj_z_t)?; // [B, T, v_dim]
+            let a = broadcast_matmul_cpu_compatible(x, &weights.in_proj_a_t)?; // [B, T, nv]
+            let b = broadcast_matmul_cpu_compatible(x, &weights.in_proj_b_t)?; // [B, T, nv]
             (mixed_qkv, z, a, b)
         }
     };
@@ -4754,7 +4971,8 @@ fn gated_deltanet_forward_decode_if(
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_out,
             &weights.out_proj_t,
@@ -4809,10 +5027,11 @@ pub fn q_proj_forward(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
-    q_proj_forward_decode_if(false, x, attn_weights, lora, lora_scale)
+    q_proj_forward_decode_if(None, false, x, attn_weights, lora, lora_scale)
 }
 
 fn q_proj_forward_decode_if(
+    backend: Option<&dyn BackendRuntime>,
     use_metal_decode_gemv: bool,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
@@ -4830,7 +5049,8 @@ fn q_proj_forward_decode_if(
         }
         return Ok(base);
     }
-    linear_with_lora_t_decode_if(
+    linear_with_lora_t_backend_decode_if(
+        backend,
         use_metal_decode_gemv,
         x,
         &attn_weights.q_proj_t,
@@ -4872,6 +5092,7 @@ pub fn gqa_attention(
     let (q_raw, k, v) = {
         kiln_nvtx::range!(c"kiln/proj/qkv");
         full_attn_qkv_proj_decode_if(
+            backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
@@ -4926,7 +5147,9 @@ pub fn gqa_attention(
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -5001,7 +5224,8 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -5231,7 +5455,9 @@ fn try_flash_attn_paged_decode(
                 let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
-                    linear_with_lora_t_decode(
+                    linear_with_lora_t_backend_decode_if(
+                        Some(backend),
+                        use_metal_decode_gemv,
                         &attn_output,
                         &attn_weights.o_proj_t,
                         lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -5433,7 +5659,9 @@ fn try_flash_attn_paged_decode(
     let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
+            use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -5445,20 +5673,22 @@ fn try_flash_attn_paged_decode(
     Ok(Some(out))
 }
 
-/// Batched full-attention decode for rows whose live paged-KV windows are
-/// contiguous and share a common sequence length.
+/// Batched full-attention decode for rows whose live paged-KV windows can be
+/// addressed through a block table. Uniform contiguous rows use the strict
+/// faster path when available; divergent row lengths use the backend's
+/// dyn-seqlen path.
 ///
 /// This is the scheduler-facing low-level primitive for true decode batching:
 /// it projects Q/K/V for `[batch, 1, hidden]`, writes one K/V row per request
 /// into the shared paged cache, runs the batched contiguous paged-attention
 /// backend kernel, then applies the attention output gate and `o_proj`.
 ///
-/// Current backend constraints are intentionally strict:
+/// Current backend constraints are intentionally narrow:
 /// - one decode token per row,
-/// - all rows at the same `start_pos`,
 /// - non-FP8 paged cache,
-/// - each row's live `0..start_pos+1` KV window is one contiguous pool run,
-/// - backend accepts `flash_attn_paged_decode_contiguous_batch`.
+/// - either each row's live `0..start_pos+1` KV window is one contiguous pool
+///   run with a uniform length, or the backend accepts
+///   `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_attention_paged_decode_contiguous_batch(
     backend: &dyn BackendRuntime,
@@ -5522,8 +5752,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // paged KV pool. `flash_attn_paged_decode_dyn_seqlen` masks padding
     // beyond each row's seqused_k.
     let page_block_size = paged_cache.block_size();
-    let max_blocks_per_seq =
-        ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+    let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
     let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
     let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
     for (row_idx, bt) in block_tables.iter().enumerate() {
@@ -5555,9 +5784,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // window is uniform across rows.
     let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
         let live_window_starts = vec![0usize; batch];
-        match paged_cache
-            .contiguous_slot_run_starts(block_tables, &live_window_starts, max_seqlen_k)
-        {
+        match paged_cache.contiguous_slot_run_starts(
+            block_tables,
+            &live_window_starts,
+            max_seqlen_k,
+        ) {
             Some(slots) => {
                 let v: Result<Vec<u32>> = slots
                     .iter()
@@ -5586,6 +5817,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv_batch_decode");
         let out = full_attn_qkv_proj_decode_if(
+            backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
@@ -5730,9 +5962,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
         let force_dyn_seqlen = !kill_dyn_seqlen
             && std::env::var("KILN_FORCE_FUSED_PAGED_DECODE_DYN_SEQLEN_BATCH").is_ok();
-        let prefer_strict = !force_dyn_seqlen
-            && uniform_start_pos
-            && strict_start_slots.is_some();
+        let prefer_strict = !force_dyn_seqlen && uniform_start_pos && strict_start_slots.is_some();
 
         let try_strict = |out_acc: &mut Option<Tensor>| -> Result<()> {
             // Strict contiguous-batch path: pre-12-B-prime code path that
@@ -5745,8 +5975,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             let start_slots =
                 Tensor::from_slice(strict_slots.as_slice(), batch, x.device())?.contiguous()?;
             let q_strict = {
-                let stage_profile =
-                    start_full_attn_stage_profile(profile_device, profile_context)?;
+                let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
                 finish_full_attn_stage_profile(
                     profile_device,
@@ -5840,7 +6069,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let out = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
-        let out = linear_with_lora_t_decode_if(
+        let out = linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -5947,6 +6177,7 @@ fn gqa_attention_paged_with_rope_tables(
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
         let out = full_attn_qkv_proj_decode_if(
+            backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
@@ -6250,7 +6481,9 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6486,9 +6719,21 @@ fn gqa_attention_paged_with_rope_tables(
         } else {
             match fast_read {
                 Some((k, v)) => (k, v),
-                None => paged_cache
-                    .read(full_attn_layer_idx, block_table, total_seq_len)
-                    .context("paged KV cache read failed")?,
+                None => {
+                    let stage_profile =
+                        start_full_attn_stage_profile(profile_device, profile_context)?;
+                    let out = paged_cache
+                        .read(full_attn_layer_idx, block_table, total_seq_len)
+                        .context("paged KV cache read failed")?;
+                    finish_full_attn_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "kv_read",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    out
+                }
             }
         };
         (k, v, total_seq_len)
@@ -6511,7 +6756,9 @@ fn gqa_attention_paged_with_rope_tables(
             }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6545,7 +6792,9 @@ fn gqa_attention_paged_with_rope_tables(
             }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6594,27 +6843,49 @@ fn gqa_attention_paged_with_rope_tables(
         // K:         [batch, num_kv_heads, kv_len, head_dim]
         //          -> [batch * num_kv_heads, kv_len, head_dim]
         // V:         same as K
-        let q_grouped = q
-            .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
-            .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
-            .contiguous()?;
-        // Unsqueeze K/V to [batch*num_kv_heads, 1, kv_len, head_dim] so that
-        // broadcast_matmul pairs each Q group with its own KV head (dim 0),
-        // broadcasting over the gqa_ratio dim (dim 1).  Without the unsqueeze
-        // the 3-D K would be padded to [1, batch*num_kv_heads, ...] and the
-        // gqa_ratio dim would incorrectly index into different KV heads.
-        let k_flat = k
-            .reshape((batch * num_kv_heads, kv_len, head_dim))?
-            .unsqueeze(1)?
-            .contiguous()?;
-        let v_flat = v
-            .reshape((batch * num_kv_heads, kv_len, head_dim))?
-            .unsqueeze(1)?
-            .contiguous()?;
+        let (q_grouped, k_flat, v_flat) = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let q_grouped = q
+                .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
+                .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
+                .contiguous()?;
+            // Unsqueeze K/V to [batch*num_kv_heads, 1, kv_len, head_dim] so that
+            // broadcast_matmul pairs each Q group with its own KV head (dim 0),
+            // broadcasting over the gqa_ratio dim (dim 1).  Without the unsqueeze
+            // the 3-D K would be padded to [1, batch*num_kv_heads, ...] and the
+            // gqa_ratio dim would incorrectly index into different KV heads.
+            let k_flat = k
+                .reshape((batch * num_kv_heads, kv_len, head_dim))?
+                .unsqueeze(1)?
+                .contiguous()?;
+            let v_flat = v
+                .reshape((batch * num_kv_heads, kv_len, head_dim))?
+                .unsqueeze(1)?
+                .contiguous()?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_group_layout",
+                seq_len,
+                stage_profile,
+            )?;
+            (q_grouped, k_flat, v_flat)
+        };
 
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
-        let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
-        let attn_scores = (attn_scores / scale)?;
+        let attn_scores = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
+            let attn_scores = (attn_scores / scale)?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_scores",
+                seq_len,
+                stage_profile,
+            )?;
+            attn_scores
+        };
 
         // Phase C7: reshape grouped scores back to canonical
         // [batch, num_heads, 1, kv_len] for diff against HF.
@@ -6626,7 +6897,18 @@ fn gqa_attention_paged_with_rope_tables(
         }
 
         // No causal mask needed for decode (q_len=1 attends to everything)
-        let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+        let attn_weights_softmax = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let out = cuda_softmax_last_dim(&attn_scores)?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_softmax",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
 
         // Phase C7: reshape grouped probs back to canonical
         // [batch, num_heads, 1, kv_len] for diff against HF.
@@ -6638,15 +6920,26 @@ fn gqa_attention_paged_with_rope_tables(
         }
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
-        let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
+        let attn_output = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
 
-        // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
-        //               == [batch, num_heads, 1, head_dim]
-        let attn_output = attn_output
-            .reshape((batch, num_heads, 1, head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, 1, num_heads * head_dim))?;
+            // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
+            //               == [batch, num_heads, 1, head_dim]
+            let attn_output = attn_output
+                .reshape((batch, num_heads, 1, head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((batch, 1, num_heads * head_dim))?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_weighted_sum",
+                seq_len,
+                stage_profile,
+            )?;
+            attn_output
+        };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
         }
@@ -6657,8 +6950,19 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_c7_sdpa_tap("attn_out", &attn_output)?;
         }
 
-        let attn_output =
-            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        let attn_output = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let out =
+                attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
         }
@@ -6667,14 +6971,24 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
         }
         let out = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t_decode_if(
+            let out = linear_with_lora_t_backend_decode_if(
+                Some(backend),
                 use_metal_decode_gemv,
                 &attn_output,
                 &attn_weights.o_proj_t,
                 lora_layer.and_then(|l| l.o_proj.as_ref()),
                 lora_scale,
-            )?
+            )?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+                stage_profile,
+            )?;
+            out
         };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
@@ -6735,7 +7049,8 @@ fn gqa_attention_paged_with_rope_tables(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -7045,9 +7360,23 @@ fn transformer_block_paged_with_rope_tables(
     let ffn_out = if b12_layer_31 {
         swiglu_ffn_b12_tapped(&normed, &layer.mlp, lora)?
     } else if use_metal_decode_ffn {
-        swiglu_ffn_profiled(&normed, &layer.mlp, lora, true, profile_mlp_context)?
+        swiglu_ffn_backend_profiled(
+            backend,
+            &normed,
+            &layer.mlp,
+            lora,
+            true,
+            profile_mlp_context,
+        )?
     } else {
-        swiglu_ffn_profiled(&normed, &layer.mlp, lora, false, profile_mlp_context)?
+        swiglu_ffn_backend_profiled(
+            backend,
+            &normed,
+            &layer.mlp,
+            lora,
+            false,
+            profile_mlp_context,
+        )?
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
@@ -7139,7 +7468,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
         rms_norm(&x, &layer.post_attention_layernorm, config.rms_norm_eps)?
     };
-    let ffn_out = swiglu_ffn_profiled(
+    let ffn_out = swiglu_ffn_backend_profiled(
+        backend,
         &normed,
         &layer.mlp,
         lora,
@@ -7279,7 +7609,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn_profiled(
+                let ffn_out = swiglu_ffn_backend_profiled(
+                    backend,
                     &normed_post,
                     &layer.mlp,
                     layer_lora,
@@ -7302,7 +7633,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
 ///
 /// This is the model-loop counterpart to
 /// [`transformer_block_paged_decode_contiguous_batch`]. It accepts one token
-/// per batch row, a block table per row, a common decode position, and an
+/// per batch row, a block table per row, per-row decode positions, and an
 /// optional batch-shaped [`LinearAttentionState`]. It returns full logits with
 /// shape `[batch, 1, vocab_size]`.
 #[allow(clippy::too_many_arguments)]
@@ -7331,7 +7662,7 @@ pub fn model_forward_paged_decode_contiguous_batch(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_decode");
         let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_forward(&normed, &weights.embed_tokens_t)?
+        lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
     };
     Ok(logits)
 }
@@ -7364,7 +7695,7 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy(
     let token_ids = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode");
         let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_argmax_rows(&normed, &weights.embed_tokens_t)?
+        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
     };
     Ok(token_ids)
 }
@@ -7498,7 +7829,7 @@ pub fn model_forward(
     let logits = {
         kiln_nvtx::range!(c"kiln/lm_head");
         hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_forward(&hidden, &weights.embed_tokens_t)?
+        lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
     };
 
     Ok(logits)
@@ -7661,9 +7992,18 @@ pub fn model_forward_head(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
 ) -> Result<Tensor> {
+    model_forward_head_backend_decode_if(None, hidden, weights, config)
+}
+
+pub fn model_forward_head_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = lm_head_forward(&normed, &weights.embed_tokens_t)?;
+    let logits = lm_head_forward_backend_decode_if(backend, &normed, &weights.embed_tokens_t)?;
     Ok(logits)
 }
 
@@ -7937,16 +8277,16 @@ pub fn model_forward_paged_batched_decode(
         linear_states,
         lora,
     )?;
-    model_forward_head(&hidden, weights, config).context("batched decode lm head")
+    model_forward_head_backend_decode_if(Some(backend), &hidden, weights, config)
+        .context("batched decode lm head")
 }
 
 /// Batched paged decode through the transformer stack, stopping before the
 /// final LM head.
 ///
-/// Returning `[batch, 1, hidden]` lets the caller project and sample each row
-/// independently. That keeps the batch-shaped GDN/MLP speedup while bounding
-/// LM-head workspace to one `[1, 1, vocab]` row at a time, instead of
-/// materialising `[batch, 1, vocab]` logits for the whole microbatch.
+/// Returning `[batch, 1, hidden]` lets the caller choose between projecting the
+/// whole batch with a backend-aware LM head or sampling rows independently when
+/// bounded LM-head workspace is more important than projection throughput.
 #[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_batched_decode_hidden(
     backend: &dyn BackendRuntime,
@@ -8000,6 +8340,8 @@ pub fn model_forward_paged_batched_decode_hidden(
     let device = weights.embed_tokens.device();
     let mut hidden = embedding_lookup_from_weights(input_tokens, weights)?;
     hidden = hidden.unsqueeze(1)?;
+    let use_metal_decode_ffn = sequence_lengths.iter().all(|&p| p > 0)
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
@@ -8115,7 +8457,14 @@ pub fn model_forward_paged_batched_decode_hidden(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                let ffn_out = swiglu_ffn_backend_profiled(
+                    backend,
+                    &normed_post,
+                    &layer.mlp,
+                    layer_lora,
+                    use_metal_decode_ffn,
+                    None,
+                )?;
                 hidden = {
                     kiln_nvtx::range!(c"kiln/batched_decode/residual/mlp");
                     (hidden + ffn_out)?
@@ -8123,12 +8472,10 @@ pub fn model_forward_paged_batched_decode_hidden(
                 linear_attn_idx += 1;
             }
             GpuAttentionWeights::Full(_) => {
-                let positions_f32: Vec<f32> =
-                    sequence_lengths.iter().map(|&p| p as f32).collect();
-                let positions =
-                    Tensor::from_slice(positions_f32.as_slice(), batch_size, device)?;
+                let positions_f32: Vec<f32> = sequence_lengths.iter().map(|&p| p as f32).collect();
+                let positions = Tensor::from_slice(positions_f32.as_slice(), batch_size, device)?;
                 let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-                hidden = transformer_block_paged_decode_contiguous_batch(
+                match transformer_block_paged_decode_contiguous_batch(
                     backend,
                     &hidden,
                     layer,
@@ -8142,12 +8489,53 @@ pub fn model_forward_paged_batched_decode_hidden(
                     layer_lora,
                     None,
                     None,
-                )
-                .with_context(|| {
-                    format!(
-                        "batched decode transformer block {layer_idx} (full attention, paged)"
-                    )
-                })?;
+                ) {
+                    Ok(out) => hidden = out,
+                    Err(err) => {
+                        tracing::debug!(
+                            layer = layer_idx,
+                            error = %err,
+                            "batched full-attention decode declined; falling back to rowwise"
+                        );
+                        let mut rows = Vec::with_capacity(batch_size);
+                        for row_idx in 0..batch_size {
+                            let row_hidden = hidden.narrow(0, row_idx, 1)?.contiguous()?;
+                            let row_position = Tensor::from_slice(
+                                &[sequence_lengths[row_idx] as f32],
+                                1usize,
+                                device,
+                            )?;
+                            let row = transformer_block_paged(
+                                backend,
+                                &row_hidden,
+                                layer,
+                                config,
+                                &row_position,
+                                sequence_lengths[row_idx],
+                                config.num_attention_heads,
+                                config.num_kv_heads,
+                                config.head_dim,
+                                config.rotary_dim(),
+                                &weights.rotary_inv_freq,
+                                config.rms_norm_eps,
+                                paged_cache,
+                                &block_tables[row_idx],
+                                full_attn_idx,
+                                layer_lora,
+                            )
+                            .with_context(|| {
+                                format!(
+                                    "rowwise fallback transformer block {layer_idx} row {row_idx} (full attention, paged)"
+                                )
+                            })?;
+                            rows.push(row);
+                        }
+                        let row_refs: Vec<&Tensor> = rows.iter().collect();
+                        hidden = Tensor::cat(&row_refs, 0).with_context(|| {
+                            format!("cat rowwise fallback transformer block {layer_idx} outputs")
+                        })?;
+                    }
+                }
                 full_attn_idx += 1;
             }
         }
@@ -9082,7 +9470,8 @@ fn model_forward_paged_inner(
                         config.rms_norm_eps,
                     )?
                 };
-                let ffn_out = swiglu_ffn_profiled(
+                let ffn_out = swiglu_ffn_backend_profiled(
+                    backend,
                     &normed_post,
                     &layer.mlp,
                     layer_lora,
@@ -9131,7 +9520,7 @@ fn model_forward_paged_inner(
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_forward(&hidden, &weights.embed_tokens_t)?
+                lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), None, None))
         }
@@ -9140,7 +9529,7 @@ fn model_forward_paged_inner(
                 kiln_nvtx::range!(c"kiln/lm_head");
                 let last = hidden.narrow(1, seq_len - 1, 1)?;
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_forward(&normed, &weights.embed_tokens_t)?
+                lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), None, None))
         }
@@ -9156,7 +9545,7 @@ fn model_forward_paged_inner(
                     return Ok((None, None, Some(token)));
                 }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-                lm_head_argmax(&normed, &weights.embed_tokens_t)?
+                lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
             };
             Ok((None, None, Some(token)))
         }
@@ -9179,7 +9568,7 @@ fn model_forward_paged_inner(
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                lm_head_forward(&normed, &weights.embed_tokens_t)?
+                lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), Some(last_hidden), None))
         }
@@ -9198,7 +9587,11 @@ fn model_forward_paged_inner(
             }
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
-                lm_head_forward(&last_hidden, &weights.embed_tokens_t)?
+                lm_head_forward_backend_decode_if(
+                    Some(backend),
+                    &last_hidden,
+                    &weights.embed_tokens_t,
+                )?
             };
             Ok((Some(logits), Some(last_hidden), None))
         }
@@ -9484,6 +9877,205 @@ mod tests {
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
         CpuBackend::new(device.clone())
+    }
+
+    #[derive(Debug)]
+    struct FixedLinearBackend {
+        device: Device,
+        values: Vec<f32>,
+        dims: (usize, usize, usize),
+    }
+
+    impl BackendRuntime for FixedLinearBackend {
+        fn name(&self) -> &'static str {
+            "fixed-linear-test"
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+
+        fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
+            Ok(Some(Tensor::from_vec(
+                self.values.clone(),
+                self.dims,
+                &self.device,
+            )?))
+        }
+    }
+
+    #[test]
+    fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
+        let device = Device::Cpu;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
+        let lora = LoraProjectionWeights {
+            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2), &device)?,
+            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1), &device)?,
+        };
+        let backend = FixedLinearBackend {
+            device: device.clone(),
+            values: vec![10.0, 20.0, 30.0],
+            dims: (1, 1, 3),
+        };
+
+        let out = linear_with_lora_t_backend_decode_if(
+            Some(&backend),
+            false,
+            &x,
+            &weight_t,
+            Some(&lora),
+            0.5,
+        )?;
+
+        let values = out.flatten_all()?.to_vec1::<f32>()?;
+        let expected = [37.5, 53.0, 68.5];
+        for (got, expected) in values.iter().zip(expected) {
+            assert!(
+                (got - expected).abs() < 1e-6,
+                "got {got}, expected {expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_linear_decode_lora_matches_broadcast_matmul() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_metal_linear_decode_lora_matches_broadcast_matmul"
+            );
+            return Ok(());
+        };
+
+        let input_dim = 128usize;
+        let output_dim = 133usize;
+        let rank = 4usize;
+        let mut exercised_fast_path = false;
+        for batch in [1usize, 4usize] {
+            let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, &device)?;
+            let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0078125, &device)?;
+            let lora = LoraProjectionWeights {
+                a: patterned_bf16(&[rank, input_dim], 0.001, &device)?,
+                b: patterned_bf16(&[output_dim, rank], 0.0015, &device)?,
+            };
+            let supported = if batch == 1 {
+                crate::backend::metal::metal_transposed_coop_gemv_supports(&x, &weight_t)
+            } else {
+                crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(
+                    &x, &weight_t,
+                )
+            };
+            if !supported {
+                eprintln!(
+                    "Metal transposed coop GEMV disabled for batch={batch}, skipping LoRA parity row"
+                );
+                continue;
+            }
+            exercised_fast_path = true;
+
+            let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 0.75)?;
+            let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 0.75)?;
+
+            assert_eq!(fast.dims(), &[batch, 1usize, output_dim]);
+            assert_eq!(fast.dtype(), DType::BF16);
+
+            let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
+            assert!(
+                max < 2e-2,
+                "Metal LoRA linear decode batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 3e-3,
+                "Metal LoRA linear decode batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
+
+        if !exercised_fast_path {
+            eprintln!("Metal transposed coop GEMV unavailable, no LoRA fast path rows exercised");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "synthetic Metal LoRA projection microbench; run explicitly with --ignored --nocapture"]
+    fn bench_metal_linear_decode_lora_qwen35_synthetic() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = std::env::var("KILN_METAL_LORA_LINEAR_BENCH_WARMUP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2);
+        let iters = std::env::var("KILN_METAL_LORA_LINEAR_BENCH_ITERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5);
+
+        bench_metal_lora_linear_case(&device, "mlp_gate_or_up", 4, 2560, 9216, 16, warmup, iters)?;
+        bench_metal_lora_linear_case(&device, "down_proj", 4, 9216, 2560, 16, warmup, iters)?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[allow(clippy::too_many_arguments)]
+    fn bench_metal_lora_linear_case(
+        device: &Device,
+        label: &str,
+        batch: usize,
+        input_dim: usize,
+        output_dim: usize,
+        rank: usize,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<()> {
+        let x = patterned_bf16(&[batch, 1usize, input_dim], 0.01, device)?;
+        let weight_t = patterned_bf16(&[input_dim, output_dim], 0.0001, device)?;
+        let lora = LoraProjectionWeights {
+            a: patterned_bf16(&[rank, input_dim], 0.0002, device)?,
+            b: patterned_bf16(&[output_dim, rank], 0.0002, device)?,
+        };
+        if !crate::backend::metal::metal_transposed_coop_gemv_decode_batch_supports(&x, &weight_t) {
+            eprintln!("metal_lora_linear_bench label={label} skipped unsupported shape");
+            return Ok(());
+        }
+
+        let fallback = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+        let fast = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+        let (max, mean) = tensor_abs_diff_stats(&fallback, &fast)?;
+
+        for _ in 0..warmup {
+            let out = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+            let out = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let out = linear_with_lora_t_decode(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+        let fast_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            let out = linear_with_lora_t(&x, &weight_t, Some(&lora), 1.0)?;
+            std::hint::black_box(out);
+        }
+        synchronize_for_profile(device)?;
+        let fallback_ms = start.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+        eprintln!(
+            "metal_lora_linear_bench label={label} batch={batch} input_dim={input_dim} output_dim={output_dim} rank={rank} iters={iters} fast_ms={fast_ms:.3} fallback_ms={fallback_ms:.3} speedup={:.3} max_abs_diff={max:e} mean_abs_diff={mean:e}",
+            fallback_ms / fast_ms
+        );
+        Ok(())
     }
 
     #[test]
@@ -10994,8 +11586,20 @@ mod tests {
             DType::BF16,
             &device,
         )?;
-        assert!(batch_cache.write_token_major_native(0, &bt0, 0, &prefix_k_row0, &prefix_v_row0)?);
-        assert!(batch_cache.write_token_major_native(0, &bt1, 0, &prefix_k_row1, &prefix_v_row1)?);
+        assert!(batch_cache.write_token_major_native(
+            0,
+            &bt0,
+            0,
+            &prefix_k_row0,
+            &prefix_v_row0
+        )?);
+        assert!(batch_cache.write_token_major_native(
+            0,
+            &bt1,
+            0,
+            &prefix_k_row1,
+            &prefix_v_row1
+        )?);
 
         let batched = model_forward_paged_decode_contiguous_batch(
             &*backend,
@@ -13051,6 +13655,39 @@ mod tests {
                 .to_scalar::<f32>()?;
             assert!(d < 1e-3, "chunkwise(cs={cs}) output diff {d}");
             assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_chunkwise_masks_decay_before_exp() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let b = 1;
+        let nv = 2;
+        let t = 13;
+        let dk = 4;
+        let dv = 4;
+
+        let q = det_tensor(&[b, nv, t, dk], 0.3, 0.0, &device)?.to_dtype(dtype)?;
+        let k = det_tensor(&[b, nv, t, dk], 0.2, 0.0, &device)?.to_dtype(dtype)?;
+        let v = det_tensor(&[b, nv, t, dv], 0.4, 0.0, &device)?.to_dtype(dtype)?;
+        let beta = Tensor::ones((b, nv, t), dtype, &device)?;
+        let g = Tensor::from_vec(vec![-100.0f32; b * nv * t], (b, nv, t), &device)?;
+        let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
+        let backend = test_backend(&device);
+
+        let mut state = state_init.clone();
+        let out = gdn_chunkwise_recurrence(&backend, &q, &k, &v, &beta, &g, &mut state, t)?;
+
+        for (name, tensor) in [("out", &out), ("state", &state)] {
+            let values = tensor.flatten_all()?.to_vec1::<f32>()?;
+            assert!(
+                values.iter().all(|v| v.is_finite()),
+                "{name} contains non-finite values"
+            );
         }
 
         Ok(())

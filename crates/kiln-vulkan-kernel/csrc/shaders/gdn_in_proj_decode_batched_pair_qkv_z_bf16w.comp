@@ -1,0 +1,129 @@
+// Batched single-token GDN input projections with packed bf16 weights.
+//
+// QKV and Z columns are paired per lane to reduce repeated input-row reads in
+// batched decode. A/B stay single-column because they are tiny on Qwen3.5.
+//
+// Output layout is projection-major:
+//   qkv[batch, qkv_dim], z[batch, z_dim], a[batch, a_dim], b[batch, b_dim].
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 80, local_size_y = 3, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint qkv_dim;
+    uint z_dim;
+    uint a_dim;
+    uint b_dim;
+    uint total_out;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer QkvWeightBuf { uint data_qkv_w[]; };
+layout(binding = 2) readonly buffer ZWeightBuf { uint data_z_w[]; };
+layout(binding = 3) readonly buffer AWeightBuf { uint data_a_w[]; };
+layout(binding = 4) readonly buffer BWeightBuf { uint data_b_w[]; };
+layout(binding = 5) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial0[240];
+shared float partial1[240];
+
+float unpack_bf16(uint packed, uint idx) {
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint qkv_pairs = (qkv_dim + 1) / 2;
+    uint z_pairs = (z_dim + 1) / 2;
+    uint dispatch_cols = qkv_pairs + z_pairs + a_dim + b_dim;
+    uint col_groups = (dispatch_cols + 79) / 80;
+    uint batch_idx = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
+    uint unit_idx = col_group * 80 + col_lane;
+    uint partial_idx = col_lane * 3 + red_lane;
+
+    uint col0 = 0;
+    uint width = qkv_dim;
+    uint projection = 0;
+    bool paired = false;
+
+    if (unit_idx < qkv_pairs) {
+        col0 = unit_idx * 2;
+        width = qkv_dim;
+        projection = 0;
+        paired = true;
+    } else if (unit_idx < qkv_pairs + z_pairs) {
+        col0 = (unit_idx - qkv_pairs) * 2;
+        width = z_dim;
+        projection = 1;
+        paired = true;
+    } else if (unit_idx < qkv_pairs + z_pairs + a_dim) {
+        col0 = unit_idx - qkv_pairs - z_pairs;
+        width = a_dim;
+        projection = 2;
+    } else {
+        col0 = unit_idx - qkv_pairs - z_pairs - a_dim;
+        width = b_dim;
+        projection = 3;
+    }
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+    bool valid0 = batch_idx < batch && unit_idx < dispatch_cols && col0 < width;
+    bool valid1 = paired && (col0 + 1) < width;
+    if (valid0) {
+        uint x_base = batch_idx * hidden;
+        for (uint h = red_lane; h < hidden; h += 3) {
+            float xv = data_x[x_base + h];
+            uint off0 = h * width + col0;
+            if (projection == 0) {
+                sum0 += xv * unpack_bf16(data_qkv_w[off0 >> 1], off0);
+                if (valid1) {
+                    sum1 += xv * unpack_bf16(data_qkv_w[(off0 + 1) >> 1], off0 + 1);
+                }
+            } else if (projection == 1) {
+                sum0 += xv * unpack_bf16(data_z_w[off0 >> 1], off0);
+                if (valid1) {
+                    sum1 += xv * unpack_bf16(data_z_w[(off0 + 1) >> 1], off0 + 1);
+                }
+            } else if (projection == 2) {
+                sum0 += xv * unpack_bf16(data_a_w[off0 >> 1], off0);
+            } else {
+                sum0 += xv * unpack_bf16(data_b_w[off0 >> 1], off0);
+            }
+        }
+    }
+
+    partial0[partial_idx] = sum0;
+    partial1[partial_idx] = sum1;
+    barrier();
+
+    if (red_lane == 0 && valid0) {
+        float total0 = 0.0;
+        float total1 = 0.0;
+        for (uint lane = 0; lane < 3; lane++) {
+            total0 += partial0[col_lane * 3 + lane];
+            total1 += partial1[col_lane * 3 + lane];
+        }
+
+        uint dst = 0;
+        if (projection == 0) {
+            dst = batch_idx * qkv_dim + col0;
+        } else if (projection == 1) {
+            dst = batch * qkv_dim + batch_idx * z_dim + col0;
+        } else if (projection == 2) {
+            dst = batch * (qkv_dim + z_dim) + batch_idx * a_dim + col0;
+        } else {
+            dst = batch * (qkv_dim + z_dim + a_dim) + batch_idx * b_dim + col0;
+        }
+        data_out[dst] = total0;
+        if (valid1) {
+            data_out[dst + 1] = total1;
+        }
+    }
+}

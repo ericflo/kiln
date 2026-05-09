@@ -1,0 +1,33 @@
+{
+  "wall_sec": 6.34021529101301,
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 6.333829166018404,
+      "bytes": 1016,
+      "error": null
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 6.333367707906291,
+      "bytes": 1010,
+      "error": null
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 5.840493541909382,
+      "bytes": 1026,
+      "error": null
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 6.3332320840563625,
+      "bytes": 1010,
+      "error": null
+    }
+  ]
+}

@@ -11590,3 +11590,691 @@ zero wait. Keep the live decode batcher enabled because immediate draining
 still batches already-arrived peers, but leave admission delay as opt-in until
 an adaptive policy beats zero wait across both the E352 four-request and this
 eight-request serving shape.
+
+## 2026-05-09 E355 - Current-main Metal baseline after Vulkan merge
+
+### Goal
+
+Re-anchor Metal correctness and serial latency on current `main` before
+changing the Metal backend. Since the branch now includes later CUDA/Vulkan
+decode-batch work, this experiment checks that existing Metal strict batching
+still passes and captures a warm bs=1 paged decode control.
+
+### Change
+
+No source change. Generated validation and benchmark artifacts only.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_matches_rowwise --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 16 --temperature 0.0 --seed 355`
+
+### Results
+
+Validation passed. The hybrid Metal model-forward batch parity test reported
+`max_abs_diff=0` and `mean_abs_diff=0` for both logits rows and all three GDN
+state rows. The two-job live decode batcher test also passed.
+
+Warm serial paged p64/o16 greedy latency:
+
+- prefill `453.961 ms`
+- generated tokens `17`
+- mean ITL `169.283 ms`
+- p50 ITL `166.230 ms`
+- p99 ITL `192.908 ms`
+- decode throughput `5.907 tok/s`
+
+The first warmup pass paid Metal/Candle first-use cost (`8547.9 ms` prefill,
+`208.8 ms` mean ITL) and was not used as the control.
+
+### Artifact
+
+- `e355_cargo_check_metal.log`
+- `e355_metal_paged_attn_batch_parity.log`
+- `e355_metal_hybrid_batch_parity.log`
+- `e355_metal_decode_batcher_parity.log`
+- `e355_release_build_metal.log`
+- `e355_m1_bs1_p64_o16_current.json`
+- `e355_m1_bs1_p64_o16_current.stderr.log`
+
+### Decision
+
+Accepted as the current-main Metal control. The next measured target is Metal's
+missing divergent-length batch attention path: generic forward now carries the
+CUDA/Vulkan-style dyn-seqlen plumbing, but Metal still only implements the
+strict uniform-length contiguous batch kernel, so mixed-prompt continuous
+batching cannot use true Metal batch attention yet.
+
+## 2026-05-09 E356 - Enabled Metal mixed-length decode batching
+
+### Goal
+
+Remove the main Metal serving blocker left after the CUDA/Vulkan dyn-seqlen
+merge: live greedy requests with different prompt lengths could enter the
+decode batcher, but Metal could only execute the strict uniform-length
+contiguous paged-attention batch kernel. Varied-prompt concurrency therefore
+fell back to one-row decode work instead of true batched attention.
+
+### Change
+
+- Added a BF16 Metal dyn-seqlen paged decode attention kernel for Qwen-shaped
+  `[B,1,16,256]` queries, `[slots,4,256]` K/V pools, per-row block tables, and
+  per-row `seqused_k`.
+- Added the Metal backend hook for
+  `flash_attn_paged_decode_contiguous_batch_dyn_seqlen`; uniform batches still
+  prefer the existing strict path unless the dyn-seqlen force env is set.
+- Added Metal parity coverage and an ignored synthetic attention benchmark.
+- Added `DecodeBatcherConfig::allow_mixed_seq_lens` and
+  `KILN_DECODE_BATCH_MIXED_SEQ`.
+- Switched server config construction to `DecodeBatcherConfig::from_env_for_device`.
+  Metal defaults mixed-seq admission on; non-Metal devices only opt in through
+  the env knob. `KILN_DECODE_BATCH_MIXED_SEQ=0` disables the new admission mode.
+- Logged `mixed_seq_lens` when the live decode batcher is created.
+
+### Validation
+
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo test -p kiln-model --features metal test_paged_attn_decode_contiguous_batch_dyn_seqlen_matches_rowwise --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_mixed_seq_lens_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_decode_batcher_batches_two_greedy_jobs_metal --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal bench_paged_attn_decode_contiguous_batch_dyn_seqlen_synthetic --lib -- --ignored --nocapture`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/backend/metal.rs crates/kiln-model/src/generate.rs crates/kiln-model/src/forward.rs crates/kiln-server/src/state.rs`
+- `git diff --check`
+
+### Results
+
+The dyn-seqlen Metal parity test matched rowwise paged decode with
+`max_abs_diff=6.1035156e-5` and `mean_abs_diff=2.1966246e-6`. The live mixed
+sequence length decode batcher test passed, as did the existing uniform
+sequence length batcher test.
+
+Synthetic Metal Qwen3.5 dyn-seqlen paged decode attention, `max_seqlen_k=512`,
+`page_block_size=16`, warmup `3`, iters `10`:
+
+- batch `2`: rowwise `613.671 us`, batched `390.312 us`, speedup `1.572x`
+- batch `4`: rowwise `896.212 us`, batched `688.371 us`, speedup `1.302x`
+- batch `8`: rowwise `1392.321 us`, batched `840.796 us`, speedup `1.656x`
+
+Same-source release endpoint A/B, four concurrent varied-prompt streaming chat
+requests, greedy `max_tokens=8`, `32` generated tokens each run:
+
+- `KILN_DECODE_BATCH_MIXED_SEQ=0`:
+  - wall time `8.104361s`
+  - all `4` requests returned `200`
+  - `28` submitted batcher jobs
+  - `28` worker batches
+  - `28` rows
+  - max batch `1`
+- default Metal mixed-seq admission:
+  - wall time `5.728904s`
+  - all `4` requests returned `200`
+  - `28` submitted batcher jobs
+  - `14` worker batches
+  - `28` rows
+  - max batch `3`
+
+The default Metal mixed-seq path reduced wall time by `29.3%` and improved
+wall-time throughput by `1.414x` on this varied-prompt concurrency probe. A
+single-request smoke on the enabled server took `1.627647s`; subtracting the
+previous cumulative metrics shows the lone request added `7` submitted jobs,
+`7` worker batches, and `7` rows, so bs=1 still runs as one-row decode work.
+
+### Artifact
+
+- `e356_cargo_check_metal.log`
+- `e356_cargo_check_vulkan.log`
+- `e356_dyn_seqlen_parity.log`
+- `e356_decode_batcher_mixed_seq_parity.log`
+- `e356_decode_batcher_uniform_seq_parity.log`
+- `e356_dyn_seqlen_synthetic.log`
+- `e356_release_build_metal.log`
+- `e356_mixed_seq_disabled_server.log`
+- `e356_mixed_seq_disabled_health.json`
+- `e356_mixed_seq_disabled_metrics.prom`
+- `e356_mixed_seq_disabled_time.json`
+- `e356_mixed_seq_disabled_response_0.sse`
+- `e356_mixed_seq_disabled_response_1.sse`
+- `e356_mixed_seq_disabled_response_2.sse`
+- `e356_mixed_seq_disabled_response_3.sse`
+- `e356_mixed_seq_enabled_server.log`
+- `e356_mixed_seq_enabled_health.json`
+- `e356_mixed_seq_enabled_metrics.prom`
+- `e356_mixed_seq_enabled_time.json`
+- `e356_mixed_seq_enabled_response_0.sse`
+- `e356_mixed_seq_enabled_response_1.sse`
+- `e356_mixed_seq_enabled_response_2.sse`
+- `e356_mixed_seq_enabled_response_3.sse`
+- `e356_single_mixed_enabled_time.json`
+- `e356_single_mixed_enabled_response.sse`
+- `e356_single_mixed_enabled_metrics.prom`
+
+### Decision
+
+Accepted. Default Metal live decode batching now admits mixed sequence lengths
+and uses the dyn-seqlen Metal paged-attention batch path when rows diverge.
+Uniform batches keep the faster strict kernel, Vulkan still compiles after the
+shared config change, and CUDA/Vulkan do not change default admission behavior
+unless `KILN_DECODE_BATCH_MIXED_SEQ` is explicitly set.
+
+## 2026-05-09 E357 - Rechecked decode wait after mixed-seq batching
+
+### Goal
+
+After E356 made mixed-prompt decode rows batchable on Metal, remeasure the
+admission-wait knob on the same varied-prompt four-request streaming workload.
+E352 found a `200us` wait helped an earlier four-way same-position shape, while
+E354 showed the same default hurt eight-way serving. Mixed sequence lengths
+change the batcher's opportunity set, so this checks whether a small wait is
+now strong enough to become the default.
+
+### Change
+
+No source change. Ran a same-binary endpoint sweep with
+`KILN_DECODE_BATCH_WAIT_US=0/50/100/200/300`, mixed-seq admission enabled by
+the E356 Metal default, and a fresh prewarmed release server per wait value.
+
+### Validation
+
+- Reused the E356 release `kiln` binary built from commit `26dbcde`.
+- Each server reported `mixed_seq_lens=true` and the expected `wait_us`.
+- Each measured run waited for the `inference_prewarm_complete` health check.
+- Each run returned `200` for all four streaming chat requests.
+- Metrics were captured after each run.
+
+### Results
+
+Four concurrent varied-prompt streaming chat requests, greedy `max_tokens=8`,
+`32` generated tokens each run:
+
+- `0us`: wall `5.733101s`, `28` submitted jobs, `14` worker batches, `28` rows,
+  max batch `3`
+- `50us`: wall `6.232374s`, `28` submitted jobs, `8` worker batches, `28` rows,
+  max batch `4`
+- `100us`: wall `5.561121s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `200us`: wall `5.679272s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `300us`: wall `5.710941s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+
+The nonzero waits did make batches fuller: `8` worker batches and max batch `4`
+instead of zero wait's `14` worker batches and max batch `3`. That fullness did
+not translate into a robust default win. `100us` was fastest in this single
+sweep by `3.0%` over zero wait, but `50us` regressed by `8.7%`, `200us` and
+`300us` were only marginally faster than zero wait, and E354 already showed an
+admission wait can regress larger concurrent serving.
+
+### Artifact
+
+- `e357_wait0_server.log`
+- `e357_wait0_health.json`
+- `e357_wait0_metrics.prom`
+- `e357_wait0_time.json`
+- `e357_wait0_response_0.sse`
+- `e357_wait0_response_1.sse`
+- `e357_wait0_response_2.sse`
+- `e357_wait0_response_3.sse`
+- `e357_wait50_server.log`
+- `e357_wait50_health.json`
+- `e357_wait50_metrics.prom`
+- `e357_wait50_time.json`
+- `e357_wait50_response_0.sse`
+- `e357_wait50_response_1.sse`
+- `e357_wait50_response_2.sse`
+- `e357_wait50_response_3.sse`
+- `e357_wait100_server.log`
+- `e357_wait100_health.json`
+- `e357_wait100_metrics.prom`
+- `e357_wait100_time.json`
+- `e357_wait100_response_0.sse`
+- `e357_wait100_response_1.sse`
+- `e357_wait100_response_2.sse`
+- `e357_wait100_response_3.sse`
+- `e357_wait200_server.log`
+- `e357_wait200_health.json`
+- `e357_wait200_metrics.prom`
+- `e357_wait200_time.json`
+- `e357_wait200_response_0.sse`
+- `e357_wait200_response_1.sse`
+- `e357_wait200_response_2.sse`
+- `e357_wait200_response_3.sse`
+- `e357_wait300_server.log`
+- `e357_wait300_health.json`
+- `e357_wait300_metrics.prom`
+- `e357_wait300_time.json`
+- `e357_wait300_response_0.sse`
+- `e357_wait300_response_1.sse`
+- `e357_wait300_response_2.sse`
+- `e357_wait300_response_3.sse`
+
+### Decision
+
+Rejected changing the default wait. Keep zero wait as the Metal default because
+the only E357 winner was narrow and not monotonic, while prior eight-way data
+showed wait-based admission can lose despite fuller batches. Keep
+`KILN_DECODE_BATCH_WAIT_US` as an explicit tuning knob for workloads that match
+the `100us` varied-prompt profile.
+
+## 2026-05-09 E358 - Refreshed mixed-seq live stage profile
+
+### Goal
+
+Pick the next Metal implementation target using the current E356 mixed-seq
+serving path instead of the older E348 profile. Mixed-length paged attention is
+no longer the serving blocker, so the next target should come from live
+post-E356 stage timings.
+
+### Change
+
+No source change. Ran one prewarmed release server with
+`KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`, and
+`KILN_PROFILE_MLP_STAGES=1`. The server log includes an `E358_MEASURE_START`
+marker after background prewarm so live request profile lines can be separated
+from warmup. The measured request used the same varied-prompt four-request
+shape as E356/E357, but with greedy `max_tokens=3` to keep synchronized profile
+overhead bounded.
+
+### Validation
+
+- Server reported `mixed_seq_lens=true` and `wait_us=0`.
+- The measurement waited for the `inference_prewarm_complete` health check.
+- All four streaming chat requests returned `200`.
+- Metrics and parsed profile summary were captured.
+
+### Results
+
+Profiled live run:
+
+- wall time `6.340215s` with profiling synchronization enabled
+- `12` generated tokens
+- active request peak `3`
+- `8` submitted batcher jobs
+- `4` worker batches
+- `8` rows
+- max batch `3`
+
+Stage totals after `E358_MEASURE_START`, including live request prefill and
+decode:
+
+- GDN total `5612.854 ms`
+- MLP total `4133.830 ms`
+- full attention total `1518.052 ms`
+
+Top `seq_len=1` live decode stages:
+
+- `mlp:gate_up_fused`: `376.300 ms`
+- `mlp:down_proj`: `279.810 ms`
+- `gdn:in_proj`: `255.876 ms`
+- `gdn:out_proj`: `115.709 ms`
+- `full_attn:qkv_proj_batch`: `50.610 ms`
+- `gdn:gates_recur_gated_norm`: `39.883 ms`
+- `full_attn:qkv_proj`: `36.909 ms`
+- `gdn:qkv_conv_norm`: `29.990 ms`
+
+The current live decode bottlenecks are still MLP/GDN projection-heavy stages.
+The E356 dyn-seqlen paged attention work made mixed prompt rows batchable, but
+full-attention decode attention itself is now far below the MLP and GDN
+projection slices in the synchronized profile.
+
+### Artifact
+
+- `e358_mixed_stage_profile_server.log`
+- `e358_mixed_stage_profile_health.json`
+- `e358_mixed_stage_profile_metrics.prom`
+- `e358_mixed_stage_profile_time.json`
+- `e358_mixed_stage_profile_response_0.sse`
+- `e358_mixed_stage_profile_response_1.sse`
+- `e358_mixed_stage_profile_response_2.sse`
+- `e358_mixed_stage_profile_response_3.sse`
+- `e358_mixed_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue Metal work on
+MLP/GDN projection kernels, with MLP `gate_up_fused` and `down_proj` as the
+largest current decode slices, rather than spending the next pass on paged
+attention.
+
+## 2026-05-09 E359 - Rejected four-column MLP gate/up serial kernel
+
+### Goal
+
+Try a narrower alternative to the rejected E349 simdgroup-cooperative MLP
+gate/up rewrite. The current accepted kernel computes two adjacent intermediate
+columns per thread, reusing each input `x` element across gate/up accumulation
+for those two columns. This experiment tested whether widening that simple
+serial shape to four adjacent columns per thread would reduce input rereads
+enough to beat the current two-column kernel without the overhead of the E349
+cooperative reduction.
+
+### Change
+
+- Temporarily changed `kiln_mlp_gate_up_bf16` from two columns per thread to
+  four columns per thread.
+- Updated the Rust dispatch width from `intermediate.div_ceil(2)` to
+  `intermediate.div_ceil(4)`.
+- Reverted the source after the candidate lost the synthetic bench.
+
+### Validation
+
+- Baseline:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- Candidate parity:
+  `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- Candidate bench:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Qwen-shaped BF16 MLP gate/up decode batch synthetic bench, lower is better:
+
+- batch `1`: baseline `1805.161 us`, candidate `2324.990 us`
+- batch `2`: baseline `1953.260 us`, candidate `2580.365 us`
+- batch `4`: baseline `2132.995 us`, candidate `3731.068 us`
+- batch `8`: baseline `7228.188 us`, candidate `8243.922 us`
+
+The four-column serial kernel passed parity but regressed by `28.8%`, `32.1%`,
+`74.9%`, and `14.1%` at batch `1/2/4/8`. Reusing `x` across more columns did
+not pay for the added accumulators/register pressure.
+
+### Artifact
+
+- `e359_mlp_gate_up_cols2_baseline.log`
+- `e359_mlp_gate_up_cols4_parity.log`
+- `e359_mlp_gate_up_cols4_candidate.log`
+
+### Decision
+
+Rejected and reverted. Keep the current two-column serial fused gate/up kernel.
+Avoid wider serial column grouping for this MLP shape unless a later design
+substantially changes the register/memory tradeoff.
+
+## 2026-05-09 E360 - Rejected fast exp in MLP gate/up sigmoid
+
+### Goal
+
+Check whether the MLP gate/up fused kernel is meaningfully spending time in
+the sigmoid exponentials. Since the output is BF16, replacing `exp` with Metal
+`fast::exp` might have been acceptable if it improved the top E358 decode
+stage without changing the projection shape.
+
+### Change
+
+- Temporarily changed the two sigmoid calls in `kiln_mlp_gate_up_bf16` from
+  `exp` to `fast::exp`.
+- Reverted the source after the candidate did not beat the E359 current-kernel
+  baseline.
+
+### Validation
+
+- Candidate parity:
+  `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- Candidate bench:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Qwen-shaped BF16 MLP gate/up decode batch synthetic bench, lower is better:
+
+- batch `1`: E359 baseline `1805.161 us`, fast-exp candidate `1816.448 us`
+- batch `2`: E359 baseline `1953.260 us`, fast-exp candidate `2107.578 us`
+- batch `4`: E359 baseline `2132.995 us`, fast-exp candidate `2122.781 us`
+- batch `8`: E359 baseline `7228.188 us`, fast-exp candidate `7380.891 us`
+
+The candidate passed parity but did not produce a robust speedup. Batch `4`
+improved by only `0.5%`, while batch `1`, `2`, and `8` regressed.
+
+### Artifact
+
+- `e360_mlp_gate_up_fast_exp_parity.log`
+- `e360_mlp_gate_up_fast_exp_candidate.log`
+
+### Decision
+
+Rejected and reverted. Keep `exp` in the MLP gate/up kernel; this micro-change
+does not address the real cost of the projection-heavy stage.
+
+## 2026-05-09 E361 - Accepted batched GDN in-proj paired QKV/Z columns
+
+### Goal
+
+E358 ranked `gdn:in_proj` as the third-largest live `seq_len=1` decode stage
+behind MLP gate/up and down-projection. E351 already rejected a
+simdgroup-cooperative rewrite, but the current GDN in-proj kernel still runs
+one output column per thread and rereads the same input row for every QKV/Z
+column. This experiment tested a narrower scalar change: pair adjacent QKV and
+Z columns per thread for batched decode rows, while leaving the tiny A/B
+projections single-column.
+
+### Change
+
+- Added a `batch == 1` branch that keeps the existing one-column path.
+- For `batch > 1`, the Metal GDN in-proj kernel now dispatches pairs of
+  adjacent QKV columns and pairs of adjacent Z columns per thread.
+- A/B projections remain one output column per thread because they are only
+  `32` columns each in the Qwen3.5 shape.
+- Updated Rust dispatch width to use the old output-column count for `batch ==
+  1` and the paired QKV/Z count for batched rows.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_gdn_in_proj_decode_matches_broadcast_matmul --lib -- --nocapture`
+- `KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_WARMUP=2 KILN_METAL_GDN_IN_PROJ_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_gdn_in_proj_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Same varied-prompt four-request streaming endpoint probe as E357, greedy
+  `max_tokens=8`
+- Single-request streaming smoke, greedy `max_tokens=8`
+- `rustfmt --edition 2024 --check --config skip_children=true crates/kiln-model/src/backend/metal.rs`
+- `git diff --check`
+
+### Results
+
+The first paired QKV/Z candidate improved batched rows but regressed batch `1`
+(`1214.896 us` baseline to `1292.479 us`), so the final accepted source keeps
+the old one-column path for `batch == 1`.
+
+Qwen-shaped BF16 GDN in-proj decode batch synthetic bench, lower is better:
+
+- batch `1`: baseline `1214.896 us`, final `1207.161 us`
+- batch `2`: baseline `2456.740 us`, final `1672.229 us`
+- batch `4`: baseline `3423.047 us`, final `2728.719 us`
+- batch `8`: baseline `5547.948 us`, final `4085.151 us`
+
+The final kernel is flat at batch `1` and improves batch `2/4/8` by `31.9%`,
+`20.3%`, and `26.4%` in the synthetic bench.
+
+Same varied-prompt four-request streaming endpoint probe, greedy
+`max_tokens=8`, `32` generated tokens:
+
+- E357 zero-wait current-source control: wall `5.733101s`, `28` submitted jobs,
+  `14` worker batches, max batch `3`
+- E361 candidate: wall `5.502041s`, `28` submitted jobs, `14` worker batches,
+  max batch `3`
+
+The endpoint probe improved by `4.0%` with the same batching shape. A
+single-request smoke on the same server completed in `1.497457s`; subtracting
+the prior cumulative metrics shows the lone request added `7` submitted jobs,
+`7` worker batches, and `7` rows, so it stayed on one-row decode work.
+
+### Artifact
+
+- `e361_gdn_in_proj_current_baseline.log`
+- `e361_gdn_in_proj_pair_qkv_z_parity.log`
+- `e361_gdn_in_proj_pair_qkv_z_candidate.log`
+- `e361_gdn_in_proj_batch_pair_qkv_z_parity.log`
+- `e361_gdn_in_proj_batch_pair_qkv_z_candidate.log`
+- `e361_cargo_check_metal.log`
+- `e361_cargo_check_vulkan.log`
+- `e361_release_build_metal.log`
+- `e361_mixed_endpoint_server.log`
+- `e361_mixed_endpoint_health.json`
+- `e361_mixed_endpoint_metrics.prom`
+- `e361_mixed_endpoint_time.json`
+- `e361_mixed_endpoint_response_0.sse`
+- `e361_mixed_endpoint_response_1.sse`
+- `e361_mixed_endpoint_response_2.sse`
+- `e361_mixed_endpoint_response_3.sse`
+- `e361_single_endpoint_time.json`
+- `e361_single_endpoint_response.sse`
+- `e361_single_endpoint_metrics.prom`
+
+### Decision
+
+Accepted. This is a measured low-level and endpoint win on the current Metal
+mixed-seq path, while preserving the old single-row GDN in-proj dispatch shape.
+
+## 2026-05-09 E362 - Refreshed live stage profile after GDN in-proj win
+
+### Goal
+
+Re-profile the current Metal mixed-seq serving path after E361 so the next
+implementation target reflects the accepted GDN in-projection change. E358 was
+taken before E361 and still ranked GDN in-proj third; this run checks whether
+that bottleneck moved and what now dominates live decode.
+
+### Change
+
+No source change. Ran one prewarmed release server with
+`KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`, and
+`KILN_PROFILE_MLP_STAGES=1`. The server log includes an `E362_MEASURE_START`
+marker after background prewarm. The measured request used the same
+varied-prompt four-request shape as E358, greedy `max_tokens=3`.
+
+### Validation
+
+- Server reported `backend="metal"`, `mixed_seq_lens=true`, and `wait_us=0`.
+- The measurement waited for the `inference_prewarm_complete` health check.
+- All four streaming chat requests returned `200`.
+- Metrics and parsed profile summary were captured.
+
+### Results
+
+Profiled live run:
+
+- wall time `6.153190s` with profiling synchronization enabled
+- `12` generated tokens
+- active request peak `4`
+- `8` submitted batcher jobs
+- `4` worker batches
+- `8` rows
+- max batch `3`
+
+Stage totals after `E362_MEASURE_START`, including live request prefill and
+decode:
+
+- GDN total `5303.808 ms`
+- MLP total `4349.367 ms`
+- full attention total `1523.606 ms`
+
+Top `seq_len=1` live decode stages:
+
+- `mlp:gate_up_fused`: `328.811 ms`
+- `mlp:down_proj`: `258.280 ms`
+- `gdn:in_proj`: `209.395 ms`
+- `gdn:out_proj`: `105.372 ms`
+- `full_attn:qkv_proj_batch`: `49.102 ms`
+- `gdn:gates_recur_gated_norm`: `41.106 ms`
+- `gdn:qkv_conv_norm`: `30.589 ms`
+- `full_attn:qkv_proj`: `28.772 ms`
+
+Compared with E358, live decode GDN in-proj moved from `255.876 ms` to
+`209.395 ms`, while MLP gate/up and down-projection remain the top two decode
+stage totals. Full-attention decode remains much smaller than the main
+projection-heavy MLP/GDN slices.
+
+### Artifact
+
+- `e362_post_gdn_in_proj_stage_profile_server.log`
+- `e362_post_gdn_in_proj_stage_profile_health.json`
+- `e362_post_gdn_in_proj_stage_profile_metrics.prom`
+- `e362_post_gdn_in_proj_stage_profile_time.json`
+- `e362_post_gdn_in_proj_stage_profile_response_0.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_1.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_2.sse`
+- `e362_post_gdn_in_proj_stage_profile_response_3.sse`
+- `e362_post_gdn_in_proj_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue Metal work
+on MLP decode projection stages, with `mlp:gate_up_fused` and `mlp:down_proj`
+as the current top targets.
+
+## 2026-05-09 E363 - Accepted Metal LoRA decode base-projection fast path
+
+### Goal
+
+Cover the active LoRA configuration after E362. The no-LoRA Metal decode path
+already uses fused MLP gate/up and transposed cooperative GEMV projections, but
+LoRA adapters bypass the MLP gate/up fusion and the direct Metal GEMV helper
+previously refused to run when `lora.is_some()`. The goal was to preserve LoRA
+math while letting Metal still accelerate the base projection.
+
+### Change
+
+- Removed the `lora.is_none()` gate from `linear_with_lora_t_decode`'s direct
+  Metal transposed cooperative GEMV dispatch.
+- Added `add_lora_delta_to_base`, shared by direct Metal decode and the generic
+  backend `linear_decode` helper, to compute the existing
+  `x @ A^T @ B^T * scale` delta and cast it to the accelerated base dtype
+  before addition.
+- Added a Metal parity test covering LoRA decode at batch `1` and `4`.
+- Added an ignored Qwen3.5-sized synthetic LoRA projection microbench.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --lib -- --nocapture`
+- `KILN_METAL_LORA_LINEAR_BENCH_WARMUP=2 KILN_METAL_LORA_LINEAR_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Correctness:
+
+- Metal LoRA linear decode parity passed for batch `1` and `4`.
+- Existing backend accelerated-base plus LoRA-delta parity test passed.
+- Metal and Vulkan builds still check successfully.
+
+Qwen-shaped BF16 rank-16 LoRA projection synthetic bench at batch `4`, lower
+is better:
+
+- MLP gate-or-up shape `[4,1,2560] x [2560,9216]`: fast `6.770 ms`,
+  fallback `135.994 ms`, `20.088x` speedup, `max_abs_diff=0`
+- MLP down-projection shape `[4,1,9216] x [9216,2560]`: fast `6.326 ms`,
+  fallback `150.156 ms`, `23.735x` speedup, `max_abs_diff=1.5625e-2`,
+  `mean_abs_diff=3.0517578e-5`
+
+No real-adapter endpoint run was available in this checkout, so this remains a
+synthetic LoRA projection result rather than an end-to-end adapter serving
+measurement. The source change is still useful for the "all configurations"
+goal: it restores the already-accepted Metal base projection fast path in LoRA
+decode while leaving the no-LoRA fused MLP path unchanged.
+
+### Artifact
+
+- `e363_metal_lora_linear_parity.log`
+- `e363_backend_lora_delta_parity.log`
+- `e363_metal_lora_linear_bench.log`
+- `e363_cargo_check_metal.log`
+- `e363_cargo_check_vulkan.log`
+- `e363_release_build_metal.log`
+- `e363_cargo_fmt_check.log`
+- `e363_git_diff_check.log`
+
+### Decision
+
+Accepted. This is a scoped Metal LoRA decode improvement with parity coverage
+and no CUDA/Vulkan dispatch changes beyond reusing the same delta-add helper.

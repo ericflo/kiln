@@ -12,7 +12,7 @@ use uuid::Uuid;
 use kiln_core::request::Request;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
-use kiln_core::tokenizer::ChatMessage;
+use kiln_core::tokenizer::{ChatMessage, ChatTemplateOptions};
 use kiln_model::adapter_merge::{PeftLora, merge_concat};
 use kiln_model::lora_loader::LoraWeights;
 use kiln_model::{
@@ -341,6 +341,8 @@ struct RenderedPromptCacheKey<'a> {
     tools: Option<&'a [serde_json::Value]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 fn normalized_tools_for_cache(tools: Option<&[serde_json::Value]>) -> Option<&[serde_json::Value]> {
@@ -366,6 +368,12 @@ fn normalized_tool_choice_for_cache<'a>(
         return None;
     }
     tool_choice
+}
+
+fn normalized_chat_template_kwargs_for_cache(
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    chat_template_kwargs.filter(|kwargs| !kwargs.is_empty())
 }
 
 fn normalized_tool_choice_option_for_synthetic_request(
@@ -442,14 +450,18 @@ fn render_prompt_text(
     messages: &[Message],
     tools: Option<&[serde_json::Value]>,
     tool_choice: Option<&serde_json::Value>,
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<String, ApiError> {
     let normalized_tools = normalized_tools_for_cache(tools);
     let normalized_tool_choice = normalized_tool_choice_for_cache(normalized_tools, tool_choice);
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(chat_template_kwargs);
     let message_keys = message_cache_keys(messages);
     let key = serde_json::to_string(&RenderedPromptCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
+        chat_template_kwargs: normalized_chat_template_kwargs,
     })
     .map_err(|err| ApiError::internal(format!("failed to key rendered prompt cache: {err}")))?;
 
@@ -458,9 +470,15 @@ fn render_prompt_text(
     }
 
     let chat_messages: Vec<ChatMessage> = messages.iter().map(message_to_chat).collect();
+    let chat_template_options = chat_template_options_from_kwargs(normalized_chat_template_kwargs);
     let prompt_text = state
         .tokenizer
-        .apply_chat_template_full(&chat_messages, normalized_tools, normalized_tool_choice)
+        .apply_chat_template_full_with_options(
+            &chat_messages,
+            normalized_tools,
+            normalized_tool_choice,
+            chat_template_options,
+        )
         .map_err(ApiError::chat_template_failed)?;
     state
         .rendered_prompt_cache
@@ -468,6 +486,14 @@ fn render_prompt_text(
         .unwrap()
         .insert(key, prompt_text.clone());
     Ok(prompt_text)
+}
+
+fn chat_template_options_from_kwargs(
+    chat_template_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> ChatTemplateOptions {
+    ChatTemplateOptions {
+        template_kwargs: chat_template_kwargs.cloned().unwrap_or_default(),
+    }
 }
 
 fn encode_prompt_tokens(state: &AppState, prompt_text: &str) -> Result<Vec<TokenId>, ApiError> {
@@ -530,6 +556,8 @@ struct DeterministicChatRequestCacheKey<'a> {
     tools: Option<&'a [serde_json::Value]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
     temperature_bits: u32,
     max_tokens: usize,
     stop: Vec<String>,
@@ -545,6 +573,8 @@ struct DeterministicChatChoicesCacheKey<'a> {
     tools: Option<&'a [serde_json::Value]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
@@ -593,12 +623,15 @@ fn deterministic_chat_request_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         temperature_bits,
         max_tokens: sampling.max_tokens,
         stop,
@@ -643,12 +676,15 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatRequestCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         temperature_bits,
         max_tokens,
         stop,
@@ -697,12 +733,15 @@ fn deterministic_chat_choices_cache_key_with_vocab_size(
     let normalized_tools = normalized_tools_for_cache(req.tools.as_deref());
     let normalized_tool_choice =
         normalized_tool_choice_for_cache(normalized_tools, req.tool_choice.as_ref());
+    let normalized_chat_template_kwargs =
+        normalized_chat_template_kwargs_for_cache(req.chat_template_kwargs.as_ref());
     let message_keys = message_cache_keys(&req.messages);
 
     serde_json::to_string(&DeterministicChatChoicesCacheKey {
         messages: &message_keys,
         tools: normalized_tools,
         tool_choice: normalized_tool_choice,
+        chat_template_kwargs: normalized_chat_template_kwargs,
         n: n_per,
         temperature_bits,
         max_tokens: sampling.max_tokens,
@@ -773,6 +812,9 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
         messages: &message_keys,
         tools: None,
         tool_choice: None,
+        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
+            req.chat_template_kwargs.as_ref(),
+        ),
         n: n_per,
         temperature_bits,
         max_tokens,
@@ -835,6 +877,9 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
         messages: &message_keys,
         tools: None,
         tool_choice: None,
+        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
+            req.chat_template_kwargs.as_ref(),
+        ),
         temperature_bits,
         max_tokens,
         stop,
@@ -1679,6 +1724,12 @@ pub struct ChatCompletionRequest {
     /// responsibility for now.
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+    /// Kiln extension: additional top-level variables forwarded into the
+    /// HuggingFace Jinja chat-template context. This lets callers configure
+    /// template-specific switches such as Qwen's `enable_thinking=false`
+    /// without smuggling control flags through user-visible prompt text.
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// A single source adapter for per-request composition.
@@ -2213,6 +2264,7 @@ async fn chat_completions_inner(
         &req.messages,
         req.tools.as_deref(),
         req.tool_choice.as_ref(),
+        req.chat_template_kwargs.as_ref(),
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
 
@@ -4381,6 +4433,10 @@ pub struct BatchCompletionRequest {
     /// Per-prompt adapter override is a future extension.
     #[serde(default)]
     pub adapters: Option<Vec<AdapterRef>>,
+    /// Kiln extension: additional top-level variables forwarded into the
+    /// HuggingFace Jinja chat-template context for every prompt in the batch.
+    #[serde(default)]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// Aggregated batch response. `completions.len() == prompts.len() * n`.
@@ -4422,6 +4478,8 @@ struct BatchPromptMessageCacheKey<'a> {
 #[derive(Serialize)]
 struct DeterministicBatchCacheKeyWire<'a> {
     prompts: Vec<Vec<BatchPromptMessageCacheKey<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<&'a serde_json::Map<String, serde_json::Value>>,
     n: usize,
     temperature_bits: u32,
     max_tokens: usize,
@@ -4539,6 +4597,9 @@ fn deterministic_batch_cache_key_with_vocab_size(
             .iter()
             .map(|messages| batch_prompt_cache_key(messages))
             .collect(),
+        chat_template_kwargs: normalized_chat_template_kwargs_for_cache(
+            req.chat_template_kwargs.as_ref(),
+        ),
         n: req.n.unwrap_or(1),
         temperature_bits,
         max_tokens,
@@ -5230,7 +5291,13 @@ async fn batch_completions_inner(
         let created = now_epoch();
 
         for prompt_group in batch_prompt_groups(&req.prompts) {
-            let prompt_text = render_prompt_text(state, &prompt_group.messages, None, None)?;
+            let prompt_text = render_prompt_text(
+                state,
+                &prompt_group.messages,
+                None,
+                None,
+                req.chat_template_kwargs.as_ref(),
+            )?;
             let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
             let prompt_token_count = prompt_tokens.len();
 
@@ -5355,6 +5422,7 @@ async fn batch_completions_inner(
         let max_tokens = req.max_tokens;
         let max_completion_tokens = req.max_completion_tokens;
         let seed = req.seed;
+        let chat_template_kwargs = req.chat_template_kwargs.clone();
 
         handles.push(tokio::spawn(async move {
             let BatchPromptGroup {
@@ -5362,7 +5430,13 @@ async fn batch_completions_inner(
                 prompt_indices,
             } = prompt_group;
             let prepared_prompt = if prepare_prompt_groups {
-                let prompt_text = render_prompt_text(&state_clone, &messages, None, None)?;
+                let prompt_text = render_prompt_text(
+                    &state_clone,
+                    &messages,
+                    None,
+                    None,
+                    chat_template_kwargs.as_ref(),
+                )?;
                 let prompt_tokens = encode_prompt_tokens(&state_clone, &prompt_text)?;
                 Some((prompt_text, prompt_tokens))
             } else {
@@ -5398,6 +5472,7 @@ async fn batch_completions_inner(
                         adapters: None,
                         tools: None,
                         tool_choice: None,
+                        chat_template_kwargs: chat_template_kwargs.clone(),
                     };
                     let resp = if let Some((prompt_text, prompt_tokens)) = prepared_prompt.as_ref()
                     {
@@ -5543,6 +5618,7 @@ async fn generate_multi_chat_response(
             &req.messages,
             req.tools.as_deref(),
             req.tool_choice.as_ref(),
+            req.chat_template_kwargs.as_ref(),
         )?;
         let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
         let resp = response_from_cached_completion(
@@ -5611,6 +5687,7 @@ async fn generate_multi_chat_response(
             adapters: None,
             tools: tools.clone(),
             tool_choice: tool_choice.clone(),
+            chat_template_kwargs: req.chat_template_kwargs.clone(),
         };
         let resp = generate_one_response(state, synth_req).await?;
         responses.push((completion_idx, resp));
@@ -5745,6 +5822,7 @@ async fn generate_one_response(
         &req.messages,
         req.tools.as_deref(),
         req.tool_choice.as_ref(),
+        req.chat_template_kwargs.as_ref(),
     )?;
     let prompt_tokens = encode_prompt_tokens(state, &prompt_text)?;
 
@@ -6295,6 +6373,80 @@ mod tests {
         assert!(
             prompt.contains("Now read /etc/hosts."),
             "follow-up user turn missing — last_query_index regression? {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn qwen35_chat_template_kwargs_disable_thinking() {
+        let json = r#"{
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [
+                {"role": "user", "content": "Answer with exactly one word."}
+            ],
+            "chat_template_kwargs": {"enable_thinking": false},
+            "temperature": 0.0,
+            "max_tokens": 12
+        }"#;
+        let req = parse_request(json);
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+        let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
+
+        let prompt = tok
+            .apply_chat_template_full_with_options(
+                &chat_messages,
+                req.tools.as_deref(),
+                req.tool_choice.as_ref(),
+                chat_template_options_from_kwargs(req.chat_template_kwargs.as_ref()),
+            )
+            .expect("Qwen3.5 prompt with chat_template_kwargs should render");
+
+        assert!(
+            prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"),
+            "enable_thinking=false should pre-close the reasoning block: {prompt:?}"
+        );
+        assert!(
+            !prompt_starts_in_reasoning(&prompt),
+            "pre-closed reasoning prompt should not put generated text into reasoning_content"
+        );
+        let (reasoning_content, content) = split_reasoning_response("Blue", &prompt);
+        assert_eq!(reasoning_content, None);
+        assert_eq!(content, "Blue");
+    }
+
+    #[test]
+    fn qwen35_no_think_text_is_not_a_control_flag() {
+        let json = r#"{
+            "model": "Qwen/Qwen3.5-4B",
+            "messages": [
+                {"role": "user", "content": "Explain what the literal /no_think tag means."}
+            ],
+            "temperature": 0.0,
+            "max_tokens": 12
+        }"#;
+        let req = parse_request(json);
+        let template =
+            include_str!("../../../kiln-core/test_fixtures/qwen35_4b_chat_template.jinja");
+        let tok = crate::api::test_tokenizer().with_chat_template(template.to_string());
+        let chat_messages: Vec<ChatMessage> = req.messages.iter().map(message_to_chat).collect();
+
+        let prompt = tok
+            .apply_chat_template_full_with_options(
+                &chat_messages,
+                req.tools.as_deref(),
+                req.tool_choice.as_ref(),
+                chat_template_options_from_kwargs(req.chat_template_kwargs.as_ref()),
+            )
+            .expect("Qwen3.5 prompt should render");
+
+        assert!(
+            prompt.ends_with("<|im_start|>assistant\n<think>\n"),
+            "plain prompt text must not disable template thinking: {prompt:?}"
+        );
+        assert!(
+            prompt_starts_in_reasoning(&prompt),
+            "open reasoning prompt should still split generated text as reasoning_content"
         );
     }
 
@@ -7531,6 +7683,35 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_chat_request_cache_key_includes_chat_template_kwargs() {
+        let sampling = SamplingParams {
+            temperature: 0.0,
+            max_tokens: 4,
+            ..Default::default()
+        };
+        let default_req = parse_request(
+            r#"{"messages":[{"role":"user","content":"same template kwargs"}],"temperature":0.0,"max_tokens":4}"#,
+        );
+        let empty_kwargs = parse_request(
+            r#"{"messages":[{"role":"user","content":"same template kwargs"}],"temperature":0.0,"max_tokens":4,"chat_template_kwargs":{}}"#,
+        );
+        let no_think = parse_request(
+            r#"{"messages":[{"role":"user","content":"same template kwargs"}],"temperature":0.0,"max_tokens":4,"chat_template_kwargs":{"enable_thinking":false}}"#,
+        );
+
+        assert_eq!(
+            deterministic_chat_request_cache_key(&default_req, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&empty_kwargs, &sampling).unwrap(),
+            "empty chat_template_kwargs should normalize to omitted"
+        );
+        assert_ne!(
+            deterministic_chat_request_cache_key(&default_req, &sampling).unwrap(),
+            deterministic_chat_request_cache_key(&no_think, &sampling).unwrap(),
+            "template kwargs change rendered prompts and must split request-cache entries"
+        );
+    }
+
+    #[test]
     fn deterministic_chat_request_cache_key_normalizes_empty_tools() {
         let sampling = SamplingParams {
             temperature: 0.0,
@@ -8021,6 +8202,30 @@ mod tests {
             deterministic_batch_cache_key(&plain, 2),
             deterministic_batch_cache_key(&defaults, 2),
             "default OpenAI option fields should not split deterministic batch-cache entries"
+        );
+    }
+
+    #[test]
+    fn deterministic_batch_cache_key_includes_chat_template_kwargs() {
+        let default_req = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch template kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4}"#,
+        );
+        let empty_kwargs = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch template kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"chat_template_kwargs":{}}"#,
+        );
+        let no_think = parse_batch_request(
+            r#"{"prompts":[[{"role":"user","content":"same batch template kwargs"}]],"n":2,"temperature":0.0,"max_tokens":4,"chat_template_kwargs":{"enable_thinking":false}}"#,
+        );
+
+        assert_eq!(
+            deterministic_batch_cache_key(&default_req, 2),
+            deterministic_batch_cache_key(&empty_kwargs, 2),
+            "empty batch chat_template_kwargs should normalize to omitted"
+        );
+        assert_ne!(
+            deterministic_batch_cache_key(&default_req, 2),
+            deterministic_batch_cache_key(&no_think, 2),
+            "template kwargs change rendered prompts and must split batch-cache entries"
         );
     }
 
@@ -10816,6 +11021,7 @@ mod tests {
             &req.messages,
             req.tools.as_deref(),
             req.tool_choice.as_ref(),
+            req.chat_template_kwargs.as_ref(),
         )
         .unwrap();
         let prompt_tokens = encode_prompt_tokens(&state, &prompt_text).unwrap();
