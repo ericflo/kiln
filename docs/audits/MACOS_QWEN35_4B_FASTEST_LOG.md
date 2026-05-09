@@ -14196,3 +14196,105 @@ microbench was effectively tied with the current three-projection path and did
 not justify expanding the fused-QKV route into the active LoRA path. Source
 reverted; no CUDA/Vulkan behavior changed. The stronger LoRA target remains
 the rank-small delta computation itself.
+
+## 2026-05-09 E385 - Accepted rank-gated Metal LoRA decode delta/add
+
+### Goal
+
+Target the LoRA-specific cost left after E363. The accelerated LoRA decode path
+already uses Metal for the base projection, but the LoRA delta still used the
+generic `x @ A^T @ B^T` composition plus add. For Qwen3.5-sized rank-16 LoRA
+decode batches, that generic low-rank delta path was a measurable part of each
+projection.
+
+### Change
+
+- Added a two-stage Metal BF16 LoRA decode delta path:
+  - `kiln_lora_hidden_decode_bf16` computes `[B, rank] = x @ A^T` with one
+    SIMD group per `(batch, rank)` row and stores BF16 hidden values to match
+    the generic path's intermediate dtype.
+  - `kiln_lora_add_decode_bf16` computes the scaled BF16 delta
+    `[B,1,out] = hidden @ B^T * scale`.
+- The final `base + delta` still uses the existing Tensor add, preserving the
+  established BF16 addition behavior.
+- Routed `add_lora_delta_to_base` through the Metal delta helper only for a
+  conservative supported envelope:
+  - BF16 Metal contiguous tensors,
+  - decode batch `B > 1`,
+  - `input_dim >= 1024`,
+  - `output_dim >= 1024`,
+  - rank `>= 16`.
+- Added `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1` as a targeted rollback.
+- Added focused parity for the supported delta/add helper and kept the
+  existing smaller rank-4 LoRA parity on the generic fallback path.
+
+An earlier unrestricted candidate was faster but failed the existing small
+rank-4 LoRA parity fixture. The final rank/dimension gate intentionally leaves
+small and serial LoRA shapes on the proven generic delta path.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+- `KILN_METAL_LORA_DELTA_BENCH_WARMUP=5 KILN_METAL_LORA_DELTA_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_LORA_LINEAR_BENCH_WARMUP=5 KILN_METAL_LORA_LINEAR_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+- `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1 KILN_METAL_LORA_LINEAR_BENCH_WARMUP=5 KILN_METAL_LORA_LINEAR_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+- `cargo test -p kiln-model --features metal test_precompile_custom_kernels_smoke --lib -- --nocapture`
+- `cargo build --release --features metal --bin kiln`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+Correctness:
+
+- Existing Metal LoRA linear decode parity passed; the small rank-4 fixture
+  remains on the generic delta path.
+- Supported-shape Metal delta/add parity passed for batch `2` and `4`.
+- Supported-shape delta/add benchmark reported `max_abs_diff=0` and
+  `mean_abs_diff=0` versus the generic delta/add reference for both Qwen-shaped
+  projection cases.
+
+Isolated Qwen-shaped BF16 rank-16 LoRA delta/add at batch `4`, lower is better:
+
+- MLP gate-or-up delta `[4,1,2560] -> [4,1,9216]`: Metal `317.852 us`,
+  generic `1351.933 us`, `4.253x` speedup.
+- MLP down-proj delta `[4,1,9216] -> [4,1,2560]`: Metal `209.762 us`,
+  generic `1771.433 us`, `8.445x` speedup.
+
+End-to-end Qwen-shaped LoRA linear projection synthetic at batch `4`, lower is
+better:
+
+- Default Metal delta path:
+  - MLP gate-or-up projection: `2.481 ms`
+  - MLP down-projection: `2.494 ms`
+- `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`:
+  - MLP gate-or-up projection: `3.453 ms`
+  - MLP down-projection: `3.994 ms`
+
+Same-binary improvement:
+
+- MLP gate-or-up projection: `28.1%` faster.
+- MLP down-projection: `37.6%` faster.
+
+### Artifact
+
+- `e385_metal_linear_lora_parity.log`
+- `e385_lora_delta_add_parity.log`
+- `e385_lora_delta_add_bench.log`
+- `e385_lora_linear_default_bench.log`
+- `e385_lora_linear_disabled_bench.log`
+- `e385_precompile_custom_kernels_smoke.log`
+- `e385_release_build_metal.log`
+- `e385_cargo_check_metal.log`
+- `e385_cargo_check_vulkan.log`
+- `e385_cargo_fmt_check.log`
+- `e385_git_diff_check.log`
+
+### Decision
+
+Accepted for batched Qwen-class BF16 rank-16+ LoRA decode projections. This
+does not change serial bs=1 LoRA or small-rank/small-dimension adapters; those
+continue through the generic delta path. No CUDA/Vulkan source behavior changed.

@@ -37,6 +37,7 @@ const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
+const DISABLE_METAL_LORA_DELTA_DECODE: &str = "KILN_DISABLE_METAL_LORA_DELTA_DECODE";
 const DISABLE_METAL_GDN_IN_PROJ_FUSION: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION";
 const DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR";
 const DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD: &str = "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD";
@@ -191,6 +192,10 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
         if !metal_fused_qkv_proj_disabled() {
             metal_fused_qkv_transposed_coop_gemv_pipeline(metal_device)?;
         }
+    }
+    if !metal_lora_delta_decode_disabled() {
+        metal_lora_hidden_decode_pipeline(metal_device)?;
+        metal_lora_add_decode_pipeline(metal_device)?;
     }
     metal_paged_kv_head_major_read_pipeline(metal_device)?;
     metal_paged_kv_head_major_read_append_token_major_pipeline(metal_device)?;
@@ -913,6 +918,10 @@ fn metal_attn_gate_fusion_disabled() -> bool {
 
 fn metal_fused_qkv_proj_disabled() -> bool {
     env_truthy(DISABLE_METAL_FUSED_QKV_PROJ) || metal_transposed_coop_gemv_tile8_disabled()
+}
+
+fn metal_lora_delta_decode_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LORA_DELTA_DECODE)
 }
 
 pub(crate) fn metal_lm_head_argmax_disabled() -> bool {
@@ -3394,6 +3403,65 @@ kernel void kiln_fused_qkv_transposed_coop_gemv8_bf16(
 }
 "#;
 
+const METAL_LORA_DELTA_DECODE_KERNEL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kiln_lora_hidden_decode_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* a [[buffer(1)]],
+    device bfloat* hidden [[buffer(2)]],
+    constant uint& batch [[buffer(3)]],
+    constant uint& input_dim [[buffer(4)]],
+    constant uint& rank [[buffer(5)]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint rank_idx = tgroup.x;
+    const uint batch_idx = tgroup.y;
+    if (batch_idx >= batch || rank_idx >= rank) {
+        return;
+    }
+
+    float acc = 0.0f;
+    const uint x_base = batch_idx * input_dim;
+    const uint a_base = rank_idx * input_dim;
+    for (uint col = lane; col < input_dim; col += 32) {
+        acc += static_cast<float>(x[x_base + col]) * static_cast<float>(a[a_base + col]);
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        hidden[batch_idx * rank + rank_idx] = static_cast<bfloat>(acc);
+    }
+}
+
+kernel void kiln_lora_add_decode_bf16(
+    device const bfloat* hidden [[buffer(0)]],
+    device const bfloat* b [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant float& scale [[buffer(3)]],
+    constant uint& batch [[buffer(4)]],
+    constant uint& output_dim [[buffer(5)]],
+    constant uint& rank [[buffer(6)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    const uint total = batch * output_dim;
+    if (gid >= total) {
+        return;
+    }
+    const uint batch_idx = gid / output_dim;
+    const uint output_idx = gid - batch_idx * output_dim;
+
+    float delta = 0.0f;
+    const uint hidden_base = batch_idx * rank;
+    const uint b_base = output_idx * rank;
+    for (uint r = 0; r < rank; ++r) {
+        delta += static_cast<float>(hidden[hidden_base + r]) * static_cast<float>(b[b_base + r]);
+    }
+    out[gid] = static_cast<bfloat>(scale * delta);
+}
+"#;
+
 const METAL_GDN_IN_PROJ_KERNEL: &str = r#"
 #include <metal_stdlib>
 using namespace metal;
@@ -4368,6 +4436,7 @@ fn metal_shared_library(
         METAL_ATTN_GATE_SIGMOID_MUL_KERNEL,
         METAL_TRANSPOSED_COOP_GEMV_KERNEL,
         METAL_FUSED_QKV_TRANSPOSED_COOP_GEMV_KERNEL,
+        METAL_LORA_DELTA_DECODE_KERNEL,
         METAL_GDN_IN_PROJ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_KERNEL,
         METAL_PAGED_KV_HEAD_MAJOR_READ_APPEND_TOKEN_MAJOR_KERNEL,
@@ -4818,6 +4887,64 @@ fn metal_fused_qkv_transposed_coop_gemv_pipeline(
         .device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal fused QKV projection pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_lora_hidden_decode_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal LoRA hidden decode pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lora_hidden_decode_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal LoRA hidden decode function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal LoRA hidden decode pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_lora_add_decode_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal LoRA add decode pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lora_add_decode_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal LoRA add decode function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal LoRA add decode pipeline: {e:?}"))?;
     cache.insert(device.id(), pipeline.clone());
     Ok(pipeline)
 }
@@ -6163,6 +6290,212 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
     }
 
     Ok((q_out, k_out, v_out))
+}
+
+pub(crate) fn metal_lora_add_decode_supports(
+    base: &Tensor,
+    x: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+) -> bool {
+    if metal_lora_delta_decode_disabled() {
+        return false;
+    }
+    if base.dtype() != DType::BF16
+        || x.dtype() != DType::BF16
+        || a.dtype() != DType::BF16
+        || b.dtype() != DType::BF16
+    {
+        return false;
+    }
+    if !matches!(base.device(), Device::Metal(_))
+        || !matches!(x.device(), Device::Metal(_))
+        || !matches!(a.device(), Device::Metal(_))
+        || !matches!(b.device(), Device::Metal(_))
+    {
+        return false;
+    }
+    if !base.is_contiguous() || !x.is_contiguous() || !a.is_contiguous() || !b.is_contiguous() {
+        return false;
+    }
+
+    let Ok((batch, seq_len, input_dim)) = x.dims3() else {
+        return false;
+    };
+    let Ok((base_batch, base_seq_len, output_dim)) = base.dims3() else {
+        return false;
+    };
+    let Ok((rank, a_input_dim)) = a.dims2() else {
+        return false;
+    };
+    let Ok((b_output_dim, b_rank)) = b.dims2() else {
+        return false;
+    };
+    let Some(total_output) = batch.checked_mul(output_dim) else {
+        return false;
+    };
+    let Some(hidden_total) = batch.checked_mul(rank) else {
+        return false;
+    };
+
+    batch > 1
+        && seq_len == 1
+        && base_batch == batch
+        && base_seq_len == 1
+        && input_dim > 0
+        && output_dim > 0
+        && input_dim >= 1024
+        && output_dim >= 1024
+        && rank >= 16
+        && a_input_dim == input_dim
+        && b_output_dim == output_dim
+        && b_rank == rank
+        && batch <= u32::MAX as usize
+        && input_dim <= u32::MAX as usize
+        && output_dim <= u32::MAX as usize
+        && rank <= u32::MAX as usize
+        && total_output <= u32::MAX as usize
+        && hidden_total <= u32::MAX as usize
+}
+
+pub(crate) fn metal_lora_add_decode_bf16(
+    base: &Tensor,
+    x: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        metal_lora_add_decode_supports(base, x, a, b),
+        "metal LoRA decode add supports only contiguous BF16 Metal base/x/A/B decode tensors"
+    );
+    let (batch, _, input_dim) = x.dims3()?;
+    let (_, _, output_dim) = base.dims3()?;
+    let (rank, _) = a.dims2()?;
+
+    let hidden = unsafe { Tensor::empty((batch, rank), DType::BF16, x.device())? };
+    let delta = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, base.device())? };
+
+    let Device::Metal(device) = x.device() else {
+        anyhow::bail!("metal LoRA decode add requires Metal tensors");
+    };
+    let encoder = device.command_encoder()?;
+
+    {
+        let pipeline = metal_lora_hidden_decode_pipeline(device)?;
+        encoder.set_label("kiln_lora_hidden_decode_bf16");
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
+
+        let x_metal = match &*x_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA hidden x must be on Metal"),
+        };
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA hidden A must be on Metal"),
+        };
+        let hidden_metal = match &*hidden_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA hidden output must be on Metal"),
+        };
+
+        let x_buf = candle_core::metal_backend::buffer_o(x_metal.buffer(), &x_layout, x.dtype());
+        let a_buf = candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a.dtype());
+        let hidden_buf = candle_core::metal_backend::buffer_o(
+            hidden_metal.buffer(),
+            &hidden_layout,
+            hidden.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(hidden_buf.buffer), hidden_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let input_dim_u32 = input_dim as u32;
+        let rank_u32 = rank as u32;
+        encoder.set_bytes(3, &batch_u32);
+        encoder.set_bytes(4, &input_dim_u32);
+        encoder.set_bytes(5, &rank_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: rank,
+            height: batch,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 32,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+    }
+
+    {
+        let pipeline = metal_lora_add_decode_pipeline(device)?;
+        encoder.set_label("kiln_lora_add_decode_bf16");
+        encoder.set_compute_pipeline_state(&pipeline);
+
+        let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (delta_storage, delta_layout) = delta.storage_and_layout();
+
+        let hidden_metal = match &*hidden_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA add hidden must be on Metal"),
+        };
+        let b_metal = match &*b_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA add B must be on Metal"),
+        };
+        let delta_metal = match &*delta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal LoRA delta output must be on Metal"),
+        };
+
+        let hidden_buf = candle_core::metal_backend::buffer_o(
+            hidden_metal.buffer(),
+            &hidden_layout,
+            hidden.dtype(),
+        );
+        let b_buf = candle_core::metal_backend::buffer_o(b_metal.buffer(), &b_layout, b.dtype());
+        let delta_buf = candle_core::metal_backend::buffer_o(
+            delta_metal.buffer(),
+            &delta_layout,
+            delta.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(hidden_buf.buffer), hidden_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(delta_buf.buffer), delta_buf.offset_in_bytes);
+
+        let batch_u32 = batch as u32;
+        let output_dim_u32 = output_dim as u32;
+        let rank_u32 = rank as u32;
+        encoder.set_bytes(3, &scale);
+        encoder.set_bytes(4, &batch_u32);
+        encoder.set_bytes(5, &output_dim_u32);
+        encoder.set_bytes(6, &rank_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: batch * output_dim,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+    }
+
+    drop(encoder);
+    Ok((base.clone() + delta)?)
 }
 
 fn metal_gdn_in_proj_decode_supports(
@@ -11245,6 +11578,7 @@ pub fn try_new_metal() -> Option<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
     use candle_core::D;
     use std::time::Instant;
 
@@ -13636,6 +13970,133 @@ mod tests {
         assert!(
             q_mean < 3e-3 && k_mean < 3e-3 && v_mean < 3e-3,
             "Metal fused QKV mean_abs_diff q={q_mean:e} k={k_mean:e} v={v_mean:e} exceeds tolerance"
+        );
+
+        Ok(())
+    }
+
+    fn lora_add_reference(
+        base: &Tensor,
+        x: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        scale: f32,
+    ) -> Result<Tensor> {
+        let proj = LoraProjectionWeights {
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let delta = compute_lora_delta(x, &proj, scale)?;
+        let delta = if delta.dtype() == base.dtype() {
+            delta
+        } else {
+            delta.to_dtype(base.dtype())?
+        };
+        Ok((base.clone() + delta)?)
+    }
+
+    #[test]
+    fn test_lora_decode_add_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+
+        let input_dim = 1024usize;
+        let output_dim = 1152usize;
+        let rank = 16usize;
+        for batch in [2usize, 4usize] {
+            let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
+            let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
+            let a = patterned_bf16_2d(rank, input_dim, &device, 29, 0.002)?;
+            let b = patterned_bf16_2d(output_dim, rank, &device, 31, 0.003)?;
+
+            assert!(metal_lora_add_decode_supports(&base, &x, &a, &b));
+            let reference = lora_add_reference(&base, &x, &a, &b, 0.75)?;
+            let fused = metal_lora_add_decode_bf16(&base, &x, &a, &b, 0.75)?;
+
+            assert_eq!(fused.dims(), &[batch, 1usize, output_dim]);
+            assert_eq!(fused.dtype(), DType::BF16);
+
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 2e-2,
+                "Metal LoRA decode add batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 3e-3,
+                "Metal LoRA decode add batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "synthetic Metal LoRA delta/add microbench; run explicitly with --ignored --nocapture"]
+    fn bench_lora_decode_add_qwen35_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_LORA_DELTA_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
+
+        bench_lora_decode_add_case(
+            &device,
+            "mlp_gate_or_up",
+            4,
+            QWEN35_HIDDEN,
+            QWEN35_INTERMEDIATE,
+            16,
+            warmup,
+            iters,
+        )?;
+        bench_lora_decode_add_case(
+            &device,
+            "down_proj",
+            4,
+            QWEN35_INTERMEDIATE,
+            QWEN35_HIDDEN,
+            16,
+            warmup,
+            iters,
+        )?;
+
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bench_lora_decode_add_case(
+        device: &Device,
+        label: &str,
+        batch: usize,
+        input_dim: usize,
+        output_dim: usize,
+        rank: usize,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<()> {
+        let base = patterned_bf16_decode_batch(batch, output_dim, device)?;
+        let x = patterned_bf16_decode_batch(batch, input_dim, device)?;
+        let a = patterned_bf16_2d(rank, input_dim, device, 29, 0.0002)?;
+        let b = patterned_bf16_2d(output_dim, rank, device, 31, 0.0002)?;
+
+        assert!(metal_lora_add_decode_supports(&base, &x, &a, &b));
+        let reference = lora_add_reference(&base, &x, &a, &b, 1.0)?;
+        let fused = metal_lora_add_decode_bf16(&base, &x, &a, &b, 1.0)?;
+        let max = max_abs_diff(&reference, &fused)?;
+        let mean = mean_abs_diff(&reference, &fused)?;
+
+        let fused_us = bench_metal_tensor_op(device, warmup, iters, || {
+            metal_lora_add_decode_bf16(&base, &x, &a, &b, 1.0)
+        })?;
+        let fallback_us = bench_metal_tensor_op(device, warmup, iters, || {
+            lora_add_reference(&base, &x, &a, &b, 1.0)
+        })?;
+
+        eprintln!(
+            "metal_lora_delta_add_bench label={label} batch={batch} input_dim={input_dim} output_dim={output_dim} rank={rank} iters={iters} fused_us={fused_us:.3} fallback_us={fallback_us:.3} speedup={:.3} max_abs_diff={max:e} mean_abs_diff={mean:e}",
+            fallback_us / fused_us
         );
 
         Ok(())

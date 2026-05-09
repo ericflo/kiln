@@ -1473,3 +1473,13 @@
   synthetic was effectively tied: fused base `1.928 ms` vs separate
   projections `1.929 ms` (`1.001x`). Source reverted; the better LoRA target
   is the rank-small delta computation itself.
+- 2026-05-09 E385: Accepted a conservative Metal LoRA decode delta/add fast
+  path for batched Qwen-class BF16 rank-16+ projections only (`B > 1`,
+  `input_dim >= 1024`, `output_dim >= 1024`). The two-stage kernel computes
+  BF16 `[B,rank] = x @ A^T`, BF16 scaled delta, then reuses the existing Tensor
+  add for `base + delta`; `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1` rolls back.
+  Existing small rank-4 LoRA parity still passes via the generic fallback, and
+  supported-shape delta/add parity passed. Isolated batch-4 Qwen-shaped delta
+  speedups were `4.253x` gate/up and `8.445x` down. End-to-end LoRA linear
+  projection improved default versus disabled from `3.453 -> 2.481 ms`
+  (`28.1%`) for gate/up and `3.994 -> 2.494 ms` (`37.6%`) for down.

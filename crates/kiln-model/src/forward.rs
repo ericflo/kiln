@@ -329,6 +329,15 @@ fn add_lora_delta_to_base(
     let Some(proj) = lora else {
         return Ok(base);
     };
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lora_add_decode_supports(&base, x, &proj.a, &proj.b) {
+            return crate::backend::metal::metal_lora_add_decode_bf16(
+                &base, x, &proj.a, &proj.b, lora_scale,
+            )
+            .context("metal LoRA decode delta/add failed");
+        }
+    }
     let delta = compute_lora_delta(x, proj, lora_scale)?;
     let delta = if delta.dtype() == base.dtype() {
         delta
