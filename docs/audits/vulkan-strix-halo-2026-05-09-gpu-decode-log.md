@@ -6156,3 +6156,84 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-server-response.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a102-gdn-chunk-batched-transfers-server-metrics-after.txt`
+
+### 2026-05-09 A103: Current Profile After GDN Chunk Transfer Batching
+
+Scope:
+- Profile-only refresh on `main` after A102.
+- No source changes.
+- CUDA and Metal source paths are untouched.
+
+Build and profile:
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+  passed with existing warnings.
+- Profile command used:
+  `KILN_BENCH_LOG_TOKENS=1`,
+  `KILN_PROFILE_GDN_STAGES=1`,
+  `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`,
+  `KILN_PROFILE_MLP_STAGES=1`,
+  `KILN_PROFILE_FULL_ATTN_STAGES=1`,
+  `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`, and
+  `KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1` with
+  `./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+  --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+  --max-output-tokens 8 --seed 117 --quiet`.
+
+Correctness signal:
+- Final measured pass stayed on backend `vulkan`.
+- Token IDs stayed
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Measured `990.023395ms` prefill, `82.616511125ms` mean ITL, and
+  `92.072881ms` p99.
+- Output tokens: `9`.
+
+Prefill stage totals:
+- GDN recurrent: `247.035ms` across `24` calls, `10.293ms` avg.
+- MLP fused: `232.175ms` across `32` calls, `7.255ms` avg.
+- GDN in-proj: `124.230ms` across `24` calls, `5.176ms` avg.
+- Full-attn QKV projection: `98.913ms` across `8` calls, `12.364ms` avg.
+- GDN conv: `68.834ms` across `24` calls, `2.868ms` avg.
+- GDN out-proj: `58.029ms` across `24` calls, `2.418ms` avg.
+- GDN gated-norm: `32.953ms` across `24` calls, `1.373ms` avg.
+- Full-attn output projection: `24.501ms` across `8` calls, `3.063ms` avg.
+
+Decode stage totals:
+- MLP fused: `232.694ms` across `256` calls, `0.909ms` avg.
+- GDN in-proj: `100.500ms` across `192` calls, `0.523ms` avg.
+- GDN recurrent: `74.277ms` across `192` calls, `0.387ms` avg.
+- GDN out-proj: `44.544ms` across `192` calls, `0.232ms` avg.
+- GDN gated-norm: `40.264ms` across `192` calls, `0.210ms` avg.
+- GDN gates: `34.391ms` across `192` calls, `0.179ms` avg.
+- Full-attn QKV projection: `26.912ms` across `64` calls, `0.420ms` avg.
+- Full-attn output projection: `16.595ms` across `64` calls, `0.259ms` avg.
+- GDN conv: `15.961ms` across `192` calls, `0.083ms` avg.
+
+Inner-stage observations:
+- MLP batch `64` total was `231.110ms`; chained dispatch was `216.047ms`.
+- MLP batch `1` total was `227.494ms`; chained dispatch was `188.574ms`.
+- GDN in-proj batch `64` total was `123.160ms`; record/submit/wait was
+  `100.390ms`.
+- GDN in-proj batch `1` total was `96.093ms`; record/submit/wait was
+  `83.555ms`.
+- GDN recurrent prefill split was `75.716ms` chunk scan, `75.507ms`
+  matmul prep, `55.606ms` chunk prep, `36.170ms` state update, and
+  `3.092ms` slice inputs.
+- GDN recurrent decode uses `single_token_backend_step`, totaling `72.921ms`.
+
+Interpretation:
+- This is target-selection evidence, not a runtime change.
+- The current path is still GPU-routed and token-stable after A102.
+- A102's chunk transfer batching remains plausible in the recurrent prefill
+  split, but this seed should not be treated as a direct A101-to-A103
+  regression claim.
+- Current prefill remains led by GDN recurrent and MLP fused, followed by GDN
+  in-proj and full-attn QKV.
+- Current decode remains led by MLP fused, then GDN in-proj, then GDN
+  recurrent.
+- Next work should target MLP/GDN boundary, residency, or submission overhead.
+  Avoid direct repeats of rejected retile/native-head-last/shared-prefix ports.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a103-current-after-gdn-chunk-transfer-batching-release-bench-build.log`
