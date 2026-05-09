@@ -27,6 +27,9 @@ pub struct CudaBackend {
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
+    /// Kill switch for CUDA batched LM-head argmax. This path avoids the
+    /// full-logits `[batch, 1, vocab]` fallback under greedy decode.
+    lm_head_argmax_batch_enabled: bool,
 }
 
 impl CudaBackend {
@@ -41,6 +44,8 @@ impl CudaBackend {
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
+        let lm_head_argmax_batch_enabled =
+            std::env::var("KILN_DISABLE_CUDA_LM_HEAD_ARGMAX_BATCH").is_err();
         Self {
             device,
             gdn_enabled,
@@ -48,6 +53,7 @@ impl CudaBackend {
             gdn_gated_rms_norm_enabled,
             gdn_decode_fused_enabled,
             fused_conv1d_enabled,
+            lm_head_argmax_batch_enabled,
         }
     }
 }
@@ -87,6 +93,26 @@ impl BackendRuntime for CudaBackend {
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
         self.gdn_enabled
+    }
+
+    fn supports_linear_decode_argmax_batch(&self) -> bool {
+        self.lm_head_argmax_batch_enabled
+    }
+
+    fn linear_decode_argmax_batch(
+        &self,
+        x: &Tensor,
+        weight_t: &Tensor,
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.lm_head_argmax_batch_enabled {
+            return Ok(None);
+        }
+        if !kiln_lm_head_kernel::supports_bf16_batch(x, weight_t) {
+            return Ok(None);
+        }
+        let tokens = kiln_lm_head_kernel::argmax_bf16_batch(x, weight_t)
+            .context("CUDA batched LM-head argmax kernel failed")?;
+        Ok(Some(tokens))
     }
 
     fn flash_attn_prefill(
@@ -417,5 +443,55 @@ impl BackendRuntime for CudaBackend {
         let out = kiln_conv1d_kernel::causal_conv1d_prefill(x, weight, conv_state, kernel_size)
             .context("causal_conv1d_prefill kernel failed")?;
         Ok(Some(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deterministic_data(len: usize, seed: u32, scale: f32) -> Vec<f32> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                let unit = ((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0;
+                unit * scale
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cuda_backend_lm_head_argmax_batch_matches_materialized_logits() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping CUDA LM-head argmax backend test: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+        assert!(backend.supports_linear_decode_argmax_batch());
+
+        for batch in [1usize, 2, 4, 8] {
+            let hidden = 129usize;
+            let vocab = 263usize;
+            let x_data = deterministic_data(batch * hidden, 0xDEC0_DED0 + batch as u32, 0.75);
+            let w_data = deterministic_data(hidden * vocab, 0xFACE_FEED, 0.5);
+            let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let weight_t = Tensor::from_slice(&w_data, (hidden, vocab), &device)?
+                .to_dtype(DType::BF16)?
+                .contiguous()?;
+            let logits = x.broadcast_matmul(&weight_t)?;
+            let reference = crate::sampling::greedy_sample_rows(&logits)?;
+            let fused = backend
+                .linear_decode_argmax_batch(&x, &weight_t)?
+                .context("CUDA backend declined BF16 argmax batch test shape")?;
+            assert_eq!(fused, reference, "batch={batch}");
+        }
+
+        Ok(())
     }
 }

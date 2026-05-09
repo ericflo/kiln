@@ -1,0 +1,16 @@
+[package]
+name = "kiln-lm-head-kernel"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CUDA LM-head greedy argmax kernels for batched decode"
+build = "build.rs"
+
+[dependencies]
+candle-core = { workspace = true, features = ["cuda"] }
+half = "2"
+
+[build-dependencies]
+cc = "1"

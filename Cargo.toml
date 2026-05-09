@@ -6,6 +6,7 @@ members = [
     "crates/kiln-flash-attn",
     "crates/kiln-flce-kernel",
     "crates/kiln-gdn-kernel",
+    "crates/kiln-lm-head-kernel",
     "crates/kiln-marlin-gemm",
     "crates/kiln-model",
     "crates/kiln-nvtx",
@@ -16,7 +17,7 @@ members = [
     "crates/kiln-vulkan-kernel",
 ]
 # kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
-# kiln-rmsnorm-kernel, and kiln-vulkan-kernel unconditionally depend on
+# kiln-lm-head-kernel, kiln-rmsnorm-kernel, and kiln-vulkan-kernel unconditionally depend on
 # platform-specific GPU runtimes (cudarc, vulkan-rs) which fail to link on
 # hosts without the matching GPU stack. They're only compiled when a downstream
 # crate opts in via --features cuda or --features vulkan.
@@ -95,6 +96,7 @@ kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
+kiln-lm-head-kernel = { path = "crates/kiln-lm-head-kernel" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
