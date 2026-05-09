@@ -1,0 +1,4 @@
+wait_us=5000
+elapsed_s=12.878943
+metrics_delta={"batches": 7.0, "jobs": 7.0, "max_batch": 1.0, "rows": 7.0}
+status=200 finish=length text='6 7 8 9 ' reasoning_len=0

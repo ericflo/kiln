@@ -1,0 +1,7 @@
+wait_us=20000
+wall_s=17.645154
+metrics_delta={"batches": 8.0, "jobs": 23.0, "max_batch": 4.0, "rows": 23.0}
+response_0 status=200 finish=length elapsed_s=17.639219 text='6 7 8 9 ' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=17.440283 text='11 12 13' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=17.638504 text='16 17 18' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=16.388456 text='13' reasoning_len=0

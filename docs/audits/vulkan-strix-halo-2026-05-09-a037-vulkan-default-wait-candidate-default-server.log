@@ -1,0 +1,46 @@
+
+  ┌─────────────────────────────────────┐
+  │           🔥 K I L N 🔥             │
+  │   inference · training · adapters   │
+  └─────────────────────────────────────┘
+
+  Version: 0.2.13
+  Mode: GPU inference
+  Model: Qwen3.5-4B
+  CUDA: not available
+  Listen: http://127.0.0.1:8420
+
+  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
+
+{"timestamp":"2026-05-09T09:03:35.044074Z","level":"INFO","fields":{"message":"Vulkan available — using Vulkan GPU (AMD/Intel)"},"target":"kiln_server::device"}
+{"timestamp":"2026-05-09T09:03:35.044784Z","level":"INFO","fields":{"message":"Loading model from Qwen3.5-4B (2 shards)"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:03:35.045935Z","level":"INFO","fields":{"message":"Using weight name prefix: \"model.language_model.\""},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:03:35.046040Z","level":"INFO","fields":{"message":"Native MTP head detected; deferring CPU load until first use","mtp_prefix":"mtp."},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:03:35.046047Z","level":"INFO","fields":{"message":"Loaded 4206M parameters (8022 MB) across 32 layers"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:03:48.007256Z","level":"INFO","fields":{"message":"selected first Vulkan device","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-09T09:03:48.012812Z","level":"INFO","fields":{"message":"Vulkan compute pipelines prewarmed","elapsed_ms":5},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-09T09:03:48.012822Z","level":"INFO","fields":{"message":"Vulkan device initialized","vendor":"AMD","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-09T09:03:48.013497Z","level":"WARN","fields":{"message":"post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing","estimated_model_gb":9.15668992},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013504Z","level":"INFO","fields":{"message":"memory-aware KV cache sizing","total_vram_gb":103.079215104,"model_gb":9.15668992,"post_load_used_vram_gb":0.0,"sizing_residency_gb":9.15668992,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013507Z","level":"INFO","fields":{"message":"allocating paged KV cache","num_blocks":125400,"block_size":16,"kv_dtype":"BF16","fp8_enabled":false},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013561Z","level":"INFO","fields":{"message":"KV cache auto-sizer succeeded on first attempt","inference_fraction":0.7,"num_blocks":125400},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013620Z","level":"INFO","fields":{"message":"GPU memory budget","total_vram_gb":103.079215104,"model_gb":9.15668992,"estimated_model_gb":9.15668992,"post_load_used_vram_gb":0.0,"kv_cache_gb":65.7457152,"training_budget_gb":28.176809984,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013623Z","level":"INFO","fields":{"message":"prefix cache budget","max_blocks":31350,"max_entries":20,"state_bytes_per_entry":52690944,"max_state_bytes":1053818880,"min_register_tokens":64},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:03:48.013631Z","level":"INFO","fields":{"message":"live greedy decode batcher enabled","backend":"vulkan","max_batch":8,"wait_us":5000,"mixed_seq_lens":true},"target":"kiln_server::state"}
+  ✓ Ready on http://127.0.0.1:8420
+
+{"timestamp":"2026-05-09T09:03:48.040437Z","level":"INFO","fields":{"message":"starting background inference prewarm"},"target":"kiln"}
+{"timestamp":"2026-05-09T09:03:48.040821Z","level":"INFO","fields":{"message":"tokenizer warmup complete","elapsed_ms":0,"tokens":8},"target":"kiln"}
+{"timestamp":"2026-05-09T09:03:48.042624Z","level":"INFO","fields":{"message":"selected first Vulkan device","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-09T09:03:48.043954Z","level":"INFO","fields":{"message":"Vulkan shader and pipeline verification complete"},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-09T09:03:48.044181Z","level":"INFO","fields":{"message":"Vulkan custom kernels precompiled during background prewarm","elapsed_ms":3},"target":"kiln"}
+{"timestamp":"2026-05-09T09:03:48.755662Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.149706},"target":"kiln_server::api","span":{"duration_ms":0.149706,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.149706,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:03:48.756312Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.041479},"target":"kiln_server::api","span":{"duration_ms":0.041479,"method":"GET","path":"/metrics","status":200,"name":"http_request"},"spans":[{"duration_ms":0.041479,"method":"GET","path":"/metrics","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:03:48.758813Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.559743},"target":"kiln_server::api","span":{"duration_ms":0.559743,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.559743,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:03:48.759085Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.806876},"target":"kiln_server::api","span":{"duration_ms":0.806876,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.806876,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:03:48.759108Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.8017569999999999},"target":"kiln_server::api","span":{"duration_ms":0.8017569999999999,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.8017569999999999,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:03:48.759383Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.413758},"target":"kiln_server::api","span":{"duration_ms":0.413758,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.413758,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:04:04.462310Z","level":"INFO","fields":{"message":"background inference prewarm complete","elapsed_ms":16421},"target":"kiln"}
+{"timestamp":"2026-05-09T09:04:09.948310Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.10324699999999999},"target":"kiln_server::api","span":{"duration_ms":0.103247,"method":"GET","path":"/metrics","status":200,"name":"http_request"},"spans":[{"duration_ms":0.103247,"method":"GET","path":"/metrics","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:04:09.984248Z","level":"INFO","fields":{"message":"received SIGTERM — initiating graceful shutdown"},"target":"kiln"}
+{"timestamp":"2026-05-09T09:04:10.094504Z","level":"INFO","fields":{"message":"training worker shutting down"},"target":"kiln_server::training_queue"}

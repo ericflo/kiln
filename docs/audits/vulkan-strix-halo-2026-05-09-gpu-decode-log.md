@@ -1772,10 +1772,70 @@ Verdict:
   changes that fit RADV/Strix Halo, rather than mirroring Metal's row-pair
   shape directly.
 
+### 2026-05-09 A037: Reject Vulkan Default Decode-Batcher Wait
+
+Hypothesis:
+- Recent CUDA work improved concurrent decode by removing serialization around
+  per-request state/runner ownership, and A030 showed Vulkan mixed-sequence
+  live batching could improve when a rendezvous wait collected more rows.
+- A small Vulkan-only default wait might increase live greedy batch size without
+  changing CUDA/Metal defaults and without requiring a shader change.
+
+Implementation Tried:
+- Temporarily changed `DecodeBatcherConfig::from_env_for_backend` so runtime
+  backend `"vulkan"` used `5ms` as the default wait when callers did not set
+  `KILN_DECODE_BATCH_WAIT_US`.
+- Added a temporary unit test proving CPU/CUDA/Metal defaults stayed zero and
+  Vulkan defaulted to `5ms`.
+- Removed all source after same-binary endpoint A/B regressed badly.
+
+Validation:
+- Temporary candidate passed
+  `cargo test -p kiln-model decode_batcher_default --lib`.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+
+Evidence:
+- Env-only wait sweep before the source change, no `KILN_BATCHING_ENGINE`, four
+  concurrent streaming prompts, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - `0us`: `19.276472s`, `23` jobs, `14` batches, max batch `3`.
+  - `5ms`: `16.916277s`, `23` jobs, `8` batches, max batch `4`.
+  - `20ms`: `17.645154s`, `23` jobs, `8` batches, max batch `4`.
+  - `50ms`: `20.705177s`, `23` jobs, `8` batches, max batch `4`.
+- Env-only single-stream probe did not show a latency penalty:
+  - `0us`: `14.245776s`, `7` one-row batches.
+  - `5ms`: `12.878943s`, `7` one-row batches.
+- Decisive same-binary A/B after implementing the no-env default, rollback
+  first:
+  - Rollback, explicit `KILN_DECODE_BATCH_WAIT_US=0`: `15.159138s`, `23`
+    jobs, `14` batches, max batch `3`.
+  - Candidate, no wait env: `21.191151s`, `23` jobs, `8` batches, max batch
+    `4`.
+  - Both runs returned HTTP 200, coherent visible text
+    `"6 7 8 9 "`, `"11 12 13"`, `"16 17 18"`, and `"13"`, with reasoning
+    length `0`.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a037-decode-wait-sweep-*`
+- `vulkan-strix-halo-2026-05-09-a037-decode-wait-single-*`
+- `vulkan-strix-halo-2026-05-09-a037-vulkan-default-wait-*`
+
+Verdict:
+- Rejected and removed. More batching was not automatically better on this
+  shape; the no-env candidate reduced dispatch count but increased wall time.
+- Do not set a static Vulkan default wait from the A030/A037 env sweeps alone.
+  Any future scheduler wait work needs an adaptive policy or a stronger
+  repeated A/B that covers both throughput and single-request latency.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Do not set a static Vulkan live decode-batcher wait based only on env sweeps;
+  A037's same-binary no-env candidate was slower even though it formed larger
+  batches.
 - Do not retry packed-BF16 generic linear row-pair by directly mirroring the
   Metal row-pair shape; A036 measured it as slower than the existing Vulkan
   batched linear path.

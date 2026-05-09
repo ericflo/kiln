@@ -1,0 +1,8 @@
+case=rollback-wait0
+wait_env=0
+wall_s=15.159138
+metrics_delta={"batches": 14.0, "jobs": 23.0, "max_batch": 3.0, "rows": 23.0}
+response_0 status=200 finish=length elapsed_s=14.967407 text='6 7 8 9 ' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=15.150398 text='11 12 13' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=15.150065 text='16 17 18' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=13.770581 text='13' reasoning_len=0

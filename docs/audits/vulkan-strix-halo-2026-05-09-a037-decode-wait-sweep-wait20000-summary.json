@@ -1,0 +1,57 @@
+{
+  "wait_us": 20000,
+  "ready_after_s": 14,
+  "wall_s": 17.645153843001026,
+  "metrics_before": {
+    "jobs": 0.0,
+    "batches": 0.0,
+    "rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "jobs": 23.0,
+    "batches": 8.0,
+    "rows": 23.0,
+    "max_batch": 4.0
+  },
+  "metrics_delta": {
+    "jobs": 23.0,
+    "batches": 8.0,
+    "rows": 23.0,
+    "max_batch": 4.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 17.63921943999958,
+      "finish_reason": "length",
+      "text": "6 7 8 9 ",
+      "reasoning_len": 0
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 17.440282924999337,
+      "finish_reason": "length",
+      "text": "11 12 13",
+      "reasoning_len": 0
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 17.6385041120011,
+      "finish_reason": "length",
+      "text": "16 17 18",
+      "reasoning_len": 0
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 16.388455820000672,
+      "finish_reason": "stop",
+      "text": "13",
+      "reasoning_len": 0
+    }
+  ]
+}

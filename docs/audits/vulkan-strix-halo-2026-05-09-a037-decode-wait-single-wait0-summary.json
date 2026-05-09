@@ -1,0 +1,17 @@
+{
+  "wait_us": 0,
+  "ready_after_s": 13,
+  "metrics_delta": {
+    "jobs": 7.0,
+    "batches": 7.0,
+    "rows": 7.0,
+    "max_batch": 1.0
+  },
+  "result": {
+    "status": 200,
+    "elapsed_s": 14.245775909999793,
+    "finish_reason": "length",
+    "text": "6 7 8 9 ",
+    "reasoning_len": 0
+  }
+}
