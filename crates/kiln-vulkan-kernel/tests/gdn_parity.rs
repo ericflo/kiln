@@ -1072,6 +1072,65 @@ fn mlp_decode_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn mlp_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (hidden, intermediate, out_dim) = (9usize, 7usize, 5usize);
+    let x = cpu_f32(
+        (0..hidden)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.13)
+            .collect(),
+        (1, 1, hidden),
+    )?;
+    let gate_w = cpu_bf16(
+        (0..hidden * intermediate)
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.029)
+            .collect(),
+        (hidden, intermediate),
+    )?;
+    let up_w = cpu_bf16(
+        (0..hidden * intermediate)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * -0.017)
+            .collect(),
+        (hidden, intermediate),
+    )?;
+    let down_w = cpu_bf16(
+        (0..intermediate * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+            .collect(),
+        (intermediate, out_dim),
+    )?;
+    let gate_f32 = gate_w.to_dtype(DType::F32)?;
+    let up_f32 = up_w.to_dtype(DType::F32)?;
+    let down_f32 = down_w.to_dtype(DType::F32)?;
+    let gate_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &gate_w)?;
+    let up_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &up_w)?;
+    let down_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &down_w)?;
+    let got = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+        &vk,
+        &x,
+        &gate_buf,
+        &up_buf,
+        &down_buf,
+        hidden,
+        intermediate,
+        out_dim,
+    )
+    .context("dispatch_mlp_decode_cached_bf16_weights")?;
+
+    let gate = x.broadcast_matmul(&gate_f32)?;
+    let up = x.broadcast_matmul(&up_f32)?;
+    let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
+    let hidden_t = ((gate * sigmoid)? * up)?;
+    let expected = hidden_t.broadcast_matmul(&down_f32)?;
+    assert_close("mlp decode bf16 packed weights", &got, &expected, 1e-5)?;
+    Ok(())
+}
+
+#[test]
 fn mlp_decode_batched_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

@@ -1191,17 +1191,80 @@ Verdict:
   visible-output smokes.
 - CUDA and Metal code paths are untouched.
 
+### 2026-05-09 A027: Pack Single-Row MLP Decode BF16 Weights for Vulkan
+
+Issue:
+- After A023/A024/A026, the fused MLP decode remained the largest remaining
+  BF16 projection path still reading cached F32 weights. The serial decode path
+  performs gate, up, and down projections for every MLP layer, so packed BF16
+  weight bandwidth should matter if the shader conversion cost stays low.
+
+Implementation:
+- Added `mlp_gate_up_decode_bf16w.comp` for the single-row SwiGLU gate/up
+  kernel, reading packed BF16 gate/up weights and expanding with
+  `uintBitsToFloat(bf16_bits << 16)`.
+- Reused `linear_decode_bf16w.comp` for the down projection inside the existing
+  fused MLP two-kernel dispatch, keeping the hidden activation resident on the
+  Vulkan device.
+- Added `dispatch_mlp_decode_cached_bf16_weights` and a backend gate that uses
+  the packed path only when the flattened row count is one and gate/up/down
+  weights are all BF16.
+- Added rollback env
+  `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`.
+- Kept F32 MLP weights prewarmed as well as packed weights. This is intentional:
+  prefill and multi-row batch MLP still use the existing F32 kernels, and an
+  earlier version that prewarmed only packed MLP weights regressed cold prefill
+  to `3298.7ms` despite improving decode to `96.7ms` mean ITL.
+- Added CPU-reference parity coverage for the packed-BF16 fused MLP dispatch.
+
+Evidence:
+- `cargo check -p kiln-vulkan-kernel` passed.
+- `cargo check -p kiln-model --features vulkan` passed; warnings were existing
+  unused-code warnings.
+- Focused packed MLP parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`.
+- Full Vulkan parity passed:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  returned `28 passed`.
+- Release Vulkan build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- `git diff --check` passed.
+- Serial paged latency on `main` with Qwen3.5-4B stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`.
+  - Candidate after F32+packed MLP prewarm: `390.6ms` prefill / `102.1ms`
+    mean ITL, then `357.7ms` prefill / `95.0ms` mean ITL.
+  - Same-binary rollback with
+    `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS=1`: `415.4ms`
+    prefill / `112.4ms` mean ITL, then `358.0ms` prefill / `113.6ms`
+    mean ITL.
+- Main-branch Vulkan server smoke (`KILN_BATCHING_ENGINE=1`, Qwen3.5-4B) with
+  `chat_template_kwargs: {"enable_thinking": false}` returned non-empty visible
+  text:
+  - direct chat: `content == "Blue"`, `3` completion tokens, `1.105s` wall;
+  - explicit `/v1/completions/batch`: four `text == "Blue"` completions,
+    `12` total completion tokens, `6.041s` wall;
+  - four concurrent `/v1/chat/completions` requests through the live batcher:
+    all returned `content == "1 2 3 4 5 6 7 8 "`, no reasoning content,
+    `16` completion tokens each, `9.970s` total wall.
+
+Verdict:
+- Keep. This is a Vulkan-only serial decode win with matching token IDs, no
+  cold-prefill regression after keeping F32 MLP prewarm, and successful
+  direct/batch/concurrent visible-output smokes.
+- CUDA and Metal code paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
-- Extend the packed-BF16 weight strategy to the remaining high-traffic Vulkan
-  projection kernels if profiling confirms the shader conversion cost stays
-  below the bandwidth savings: fused MLP gate/up/down remains the main target.
+- Extend packed-BF16 MLP work to multi-row/batched decode only if a dedicated
+  batched shader beats the current F32 row-pair path; do not trade a serial win
+  for a prefill or continuous-batch regression.
 - Improve LoRA throughput without adding per-projection dispatch fanout. A019
   shows standalone low-rank delta kernels are correct but slower.
-- Continue profiling the remaining serial decode hotspots: fused MLP decode,
-  GDN `in_proj`, GDN recurrent/gated norm, and full-attention QKV projection.
+- Continue profiling the remaining serial decode hotspots: GDN recurrent/gated
+  norm, paged-attention K/V movement, and any residual fused MLP/down-projection
+  time after A027.
 - For GDN batch fusion, do not reuse the generic
   `gdn_decode_gates_recurrent_rmsnorm` hook without first changing its
   residency/data-movement behavior; A013 measured it as a large regression.

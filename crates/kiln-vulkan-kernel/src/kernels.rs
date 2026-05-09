@@ -95,6 +95,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_argmax_batched_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_batched_reduce", 3, 4),
         ("mlp_gate_up_decode", 4, 8),
+        ("mlp_gate_up_decode_bf16w", 4, 8),
         ("mlp_gate_up_decode_batched", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
         ("paged_attn_decode_batch", 5, 20),
@@ -2669,6 +2670,56 @@ pub fn dispatch_mlp_decode_cached(
     intermediate: usize,
     out_dim: usize,
 ) -> Result<Tensor> {
+    dispatch_mlp_decode_cached_impl(
+        vk_device,
+        x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        false,
+    )
+}
+
+/// Dispatch single-token SwiGLU MLP with packed BF16 immutable weights.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_mlp_decode_cached_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+) -> Result<Tensor> {
+    dispatch_mlp_decode_cached_impl(
+        vk_device,
+        x,
+        gate_weight_t,
+        up_weight_t,
+        down_weight_t,
+        hidden,
+        intermediate,
+        out_dim,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_mlp_decode_cached_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    gate_weight_t: &VulkanBuffer,
+    up_weight_t: &VulkanBuffer,
+    down_weight_t: &VulkanBuffer,
+    hidden: usize,
+    intermediate: usize,
+    out_dim: usize,
+    bf16_weights: bool,
+) -> Result<Tensor> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -2687,6 +2738,10 @@ pub fn dispatch_mlp_decode_cached(
         "mlp_decode: x buffer has {} bytes, expected {}",
         x_data.len(),
         batch * hidden * 4
+    );
+    anyhow::ensure!(
+        !bf16_weights || batch == 1,
+        "mlp_decode packed BF16 weights currently support batch=1, got {batch}"
     );
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create mlp_decode x buffer")?;
@@ -2714,7 +2769,12 @@ pub fn dispatch_mlp_decode_cached(
             .context("failed to create mlp_decode output buffer")?;
 
     let use_rows2 = use_prefill_row_pair_matmul(batch);
-    let gate_up_glsl = if batch == 1 {
+    let gate_up_glsl = if bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/mlp_gate_up_decode_bf16w.comp"
+        )
+    } else if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/mlp_gate_up_decode.comp"
@@ -2757,7 +2817,12 @@ pub fn dispatch_mlp_decode_cached(
     )
     .context("mlp_decode gate/up kernel failed")?;
 
-    let linear_glsl = if batch == 1 {
+    let linear_glsl = if bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_bf16w.comp"
+        )
+    } else if batch == 1 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode.comp"

@@ -44,6 +44,7 @@ pub struct VulkanBackend {
     bf16_packed_linear_weights_enabled: bool,
     bf16_packed_gdn_in_proj_weights_enabled: bool,
     bf16_packed_full_attn_qkv_weights_enabled: bool,
+    bf16_packed_mlp_decode_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
@@ -139,6 +140,8 @@ impl VulkanBackend {
         // After descriptor-pool reuse and tiled projection kernels it is now
         // consistently faster than the split generic GEMV path on Strix Halo.
         let mlp_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_MLP_DECODE").is_err();
+        let bf16_packed_mlp_decode_weights_enabled = mlp_decode_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS").is_err();
         // The fused Vulkan MLP gate/up shader is validated, but on Strix Halo
         // it was slower than the generic cached GEMV path in short decode
         // benchmarks. Keep it opt-in until it is tiled/tuned.
@@ -191,6 +194,7 @@ impl VulkanBackend {
             bf16_packed_linear_weights_enabled,
             bf16_packed_gdn_in_proj_weights_enabled,
             bf16_packed_full_attn_qkv_weights_enabled,
+            bf16_packed_mlp_decode_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             weight_cache: Mutex::new(HashMap::new()),
@@ -245,6 +249,11 @@ impl VulkanBackend {
 
     fn use_bf16_packed_full_attn_qkv_weights(&self, weights: &[&Tensor]) -> bool {
         self.bf16_packed_full_attn_qkv_weights_enabled
+            && weights.iter().all(|weight| weight.dtype() == DType::BF16)
+    }
+
+    fn use_bf16_packed_mlp_decode_weights(&self, weights: &[&Tensor]) -> bool {
+        self.bf16_packed_mlp_decode_weights_enabled
             && weights.iter().all(|weight| weight.dtype() == DType::BF16)
     }
 
@@ -369,6 +378,52 @@ impl VulkanBackend {
             for (suffix, weight) in weights {
                 self.prewarm_f32_weight(
                     &format!("layers.{layer_idx}.attention.{suffix}"),
+                    weight,
+                    f32_count,
+                    f32_bytes,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prewarm_mlp_decode_weights(
+        &self,
+        layer_idx: usize,
+        gate_weight_t: &Tensor,
+        up_weight_t: &Tensor,
+        down_weight_t: &Tensor,
+        f32_count: &mut usize,
+        f32_bytes: &mut usize,
+        bf16_count: &mut usize,
+        bf16_bytes: &mut usize,
+    ) -> Result<()> {
+        let weights = [
+            ("gate_proj_t", gate_weight_t),
+            ("up_proj_t", up_weight_t),
+            ("down_proj_t", down_weight_t),
+        ];
+        if self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t]) {
+            for (suffix, weight) in weights {
+                self.prewarm_bf16_packed_weight(
+                    &format!("layers.{layer_idx}.mlp.{suffix}"),
+                    weight,
+                    bf16_count,
+                    bf16_bytes,
+                )?;
+            }
+            for (suffix, weight) in weights {
+                self.prewarm_f32_weight(
+                    &format!("layers.{layer_idx}.mlp.{suffix}"),
+                    weight,
+                    f32_count,
+                    f32_bytes,
+                )?;
+            }
+        } else {
+            for (suffix, weight) in weights {
+                self.prewarm_f32_weight(
+                    &format!("layers.{layer_idx}.mlp.{suffix}"),
                     weight,
                     f32_count,
                     f32_bytes,
@@ -1221,23 +1276,15 @@ impl BackendRuntime for VulkanBackend {
                 }
             }
 
-            self.prewarm_f32_weight(
-                &format!("layers.{layer_idx}.mlp.gate_proj_t"),
+            self.prewarm_mlp_decode_weights(
+                layer_idx,
                 &layer.mlp.gate_proj_t,
-                &mut count,
-                &mut bytes,
-            )?;
-            self.prewarm_f32_weight(
-                &format!("layers.{layer_idx}.mlp.up_proj_t"),
                 &layer.mlp.up_proj_t,
-                &mut count,
-                &mut bytes,
-            )?;
-            self.prewarm_f32_weight(
-                &format!("layers.{layer_idx}.mlp.down_proj_t"),
                 &layer.mlp.down_proj_t,
                 &mut count,
                 &mut bytes,
+                &mut bf16_packed_count,
+                &mut bf16_packed_bytes,
             )?;
         }
 
@@ -1413,25 +1460,43 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
-        let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
-        let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
         let row_count = batch * seq_len;
         let dispatch_x = if seq_len == 1 {
             x.clone()
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let out = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
-            vk_device,
-            &dispatch_x,
-            &gate_buf,
-            &up_buf,
-            &down_buf,
-            hidden,
-            intermediate,
-            out_dim,
-        )
+        let out = if row_count == 1
+            && self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t])
+        {
+            let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
+            let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
+            let down_buf = self.cached_bf16_packed_weight_buffer(down_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+                vk_device,
+                &dispatch_x,
+                &gate_buf,
+                &up_buf,
+                &down_buf,
+                hidden,
+                intermediate,
+                out_dim,
+            )
+        } else {
+            let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
+            let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
+            let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached(
+                vk_device,
+                &dispatch_x,
+                &gate_buf,
+                &up_buf,
+                &down_buf,
+                hidden,
+                intermediate,
+                out_dim,
+            )
+        }
         .context("mlp_decode kernel failed")?;
         let out = if seq_len == 1 {
             out
