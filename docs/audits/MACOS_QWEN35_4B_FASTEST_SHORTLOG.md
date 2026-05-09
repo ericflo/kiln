@@ -1448,3 +1448,12 @@
   from `13.069378s` to `12.988253s` (`0.6%`) and `max_tokens=24` from
   `18.452436s` to `18.176732s` (`1.5%`) with identical token/job/row counts
   and max batch `8`, though worker-batch counts differed by one in both runs.
+- 2026-05-09 E382: Refreshed synchronized stage profiling on the current
+  default Metal n8 path after E381. The run generated `24` tokens from eight
+  short streaming requests, submitted `16` decode-batcher jobs through `3`
+  worker batches, and observed max batch `8`; endpoint wall was `10.921401s`.
+  Post-boundary `seq_len=1` decode totals were led by `mlp:gate_up_fused`
+  `442.225 ms`, `mlp:down_proj` `320.375 ms`, `gdn:in_proj` `307.696 ms`,
+  and `gdn:out_proj` `129.519 ms`. Accepted as target-selection evidence; no
+  source change. Continue with MLP gate/up/down first, with GDN in/out close
+  behind.

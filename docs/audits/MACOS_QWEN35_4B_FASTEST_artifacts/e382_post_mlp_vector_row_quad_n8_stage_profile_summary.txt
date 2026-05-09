@@ -1,0 +1,104 @@
+E382 post-MLP-vector-row-quad n8 default-wait stage profile summary
+
+Scope: stage lines after the eight measured chat request response-start log entries; eight concurrent short prompts; max_tokens=3; temperature=0; stream=true; no KILN_DECODE_BATCH_WAIT_US env (Metal default 100us); full_attn/GDN/MLP stage profiling enabled.
+Note: an attempted E382_MEASURE_START append was overwritten by the server stdout file descriptor, so this parser uses the request response-start boundary after prewarm.
+Total parsed stage events: 4088
+
+Endpoint shape:
+- wall: 10.921401s
+- metric counters: {'tokens_generated': 24.0, 'jobs_submitted': 16.0, 'jobs_failed': 0.0, 'worker_batches': 3.0, 'batcher_rows': 16.0, 'max_batch': 8.0}
+- HTTP statuses: [200, 200, 200, 200, 200, 200, 200, 200]
+- generated tokens: 24
+- decode-batcher submitted jobs: 16
+- worker batches: 3
+- batcher rows: 16
+- max observed batch: 8
+
+Kind totals after request boundary:
+- gdn: 20927.112 ms
+- mlp: 13850.888 ms
+- full_attn: 5688.689 ms
+
+Top seq_len=1 decode stages:
+- mlp:gate_up_fused: 442.225 ms (96 samples, avg 4.607 ms)
+- mlp:down_proj: 320.375 ms (96 samples, avg 3.337 ms)
+- gdn:in_proj: 307.696 ms (72 samples, avg 4.274 ms)
+- gdn:out_proj: 129.519 ms (72 samples, avg 1.799 ms)
+- full_attn:qkv_proj_batch: 60.085 ms (16 samples, avg 3.755 ms)
+- full_attn:qkv_proj: 58.603 ms (8 samples, avg 7.325 ms)
+- gdn:gates_recur_gated_norm: 55.774 ms (72 samples, avg 0.775 ms)
+- gdn:qkv_conv_norm: 31.522 ms (72 samples, avg 0.438 ms)
+- full_attn:o_proj_batch: 31.286 ms (16 samples, avg 1.955 ms)
+- full_attn:rope_batch: 18.439 ms (16 samples, avg 1.152 ms)
+- full_attn:o_proj: 17.664 ms (8 samples, avg 2.208 ms)
+- full_attn:kv_write: 11.212 ms (8 samples, avg 1.401 ms)
+- full_attn:qkv_split_batch: 7.492 ms (16 samples, avg 0.468 ms)
+- full_attn:decode_attn_contiguous_batch: 7.012 ms (16 samples, avg 0.438 ms)
+- full_attn:kv_write_batch: 5.849 ms (16 samples, avg 0.366 ms)
+- full_attn:attn_gate_batch: 5.319 ms (16 samples, avg 0.332 ms)
+- full_attn:qk_norm_batch: 5.218 ms (16 samples, avg 0.326 ms)
+- full_attn:rope: 3.064 ms (8 samples, avg 0.383 ms)
+- full_attn:qkv_split: 2.896 ms (8 samples, avg 0.362 ms)
+- full_attn:decode_attn_contiguous: 2.529 ms (8 samples, avg 0.316 ms)
+- full_attn:qk_norm: 2.491 ms (8 samples, avg 0.311 ms)
+- full_attn:attn_gate: 2.251 ms (8 samples, avg 0.281 ms)
+- gdn:gated_norm: 0.339 ms (72 samples, avg 0.005 ms)
+- gdn:post_transpose: 0.052 ms (72 samples, avg 0.001 ms)
+
+Top all stage buckets:
+- gdn:gates seq_len=16: 4315.211 ms (72 samples)
+- gdn:gates seq_len=17: 4036.803 ms (72 samples)
+- mlp:gate_silu seq_len=16: 1763.483 ms (96 samples)
+- mlp:gate_silu seq_len=17: 1675.539 ms (96 samples)
+- gdn:in_proj seq_len=16: 1650.877 ms (72 samples)
+- gdn:in_proj seq_len=17: 1430.500 ms (72 samples)
+- gdn:gates seq_len=20: 1421.725 ms (24 samples)
+- gdn:gates seq_len=18: 1188.723 ms (24 samples)
+- mlp:down_proj seq_len=16: 951.339 ms (96 samples)
+- mlp:gate_proj seq_len=17: 906.363 ms (96 samples)
+- mlp:down_proj seq_len=17: 904.045 ms (96 samples)
+- mlp:up_proj seq_len=16: 901.174 ms (96 samples)
+- mlp:gate_proj seq_len=16: 878.061 ms (96 samples)
+- mlp:up_proj seq_len=17: 863.927 ms (96 samples)
+- gdn:qkv_conv_split_norm seq_len=16: 647.941 ms (72 samples)
+- gdn:qkv_conv_split_norm seq_len=17: 608.904 ms (72 samples)
+- gdn:in_proj seq_len=18: 560.295 ms (24 samples)
+- gdn:out_proj seq_len=16: 527.517 ms (72 samples)
+- gdn:in_proj seq_len=20: 522.349 ms (24 samples)
+- gdn:recurrent seq_len=16: 512.234 ms (72 samples)
+- full_attn:qkv_proj seq_len=17: 509.404 ms (24 samples)
+- mlp:gate_silu seq_len=18: 505.339 ms (32 samples)
+- mlp:hidden_mul seq_len=16: 503.662 ms (96 samples)
+- gdn:out_proj seq_len=17: 492.941 ms (72 samples)
+- mlp:hidden_mul seq_len=17: 472.271 ms (96 samples)
+- mlp:gate_silu seq_len=20: 465.148 ms (32 samples)
+- mlp:gate_up_fused seq_len=1: 442.225 ms (96 samples)
+- mlp:gate_proj seq_len=18: 403.716 ms (32 samples)
+- mlp:down_proj seq_len=18: 401.373 ms (32 samples)
+- gdn:recurrent seq_len=17: 390.445 ms (72 samples)
+
+Top aggregate stage buckets:
+- gdn:gates: 10962.462 ms (192 samples, avg 57.096 ms)
+- gdn:in_proj: 4471.717 ms (264 samples, avg 16.938 ms)
+- mlp:gate_silu: 4409.509 ms (256 samples, avg 17.225 ms)
+- mlp:down_proj: 2874.128 ms (352 samples, avg 8.165 ms)
+- mlp:gate_proj: 2511.559 ms (256 samples, avg 9.811 ms)
+- mlp:up_proj: 2410.887 ms (256 samples, avg 9.418 ms)
+- gdn:qkv_conv_split_norm: 1658.743 ms (192 samples, avg 8.639 ms)
+- gdn:out_proj: 1477.082 ms (264 samples, avg 5.595 ms)
+- full_attn:qkv_proj: 1228.996 ms (72 samples, avg 17.069 ms)
+- gdn:recurrent: 1212.087 ms (192 samples, avg 6.313 ms)
+- mlp:hidden_mul: 1202.580 ms (256 samples, avg 4.698 ms)
+- gdn:gated_norm: 980.273 ms (264 samples, avg 3.713 ms)
+- full_attn:prefill_attn_fallback: 799.260 ms (64 samples, avg 12.488 ms)
+- full_attn:kv_write: 601.549 ms (72 samples, avg 8.355 ms)
+- full_attn:prefill_kv_head_layout: 591.936 ms (64 samples, avg 9.249 ms)
+- full_attn:kv_read: 544.122 ms (64 samples, avg 8.502 ms)
+- full_attn:qk_norm: 495.848 ms (72 samples, avg 6.887 ms)
+- full_attn:qkv_split: 487.139 ms (72 samples, avg 6.766 ms)
+- mlp:gate_up_fused: 442.225 ms (96 samples, avg 4.607 ms)
+- full_attn:q_transpose: 405.722 ms (72 samples, avg 5.635 ms)
+- full_attn:rope: 341.774 ms (72 samples, avg 4.747 ms)
+- gdn:post_transpose: 77.452 ms (264 samples, avg 0.293 ms)
+- full_attn:qkv_proj_batch: 60.085 ms (16 samples, avg 3.755 ms)
+- gdn:gates_recur_gated_norm: 55.774 ms (72 samples, avg 0.775 ms)

@@ -13945,3 +13945,89 @@ safe. The scalar row-quad branch remains available with
 `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD=1`, and the broader
 `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` rollback still disables full-batch
 row-quad entirely.
+
+## 2026-05-09 E382 - Profile current default n8 path after MLP row-quad vector loads
+
+### Goal
+
+Refresh synchronized Metal stage profiling after E381. The E380 profile still
+measured scalar MLP gate/up row-quad, so this run identifies the next decode
+target after the accepted `bfloat2` row-quad vector-load mode.
+
+### Method
+
+- Rebuilt release `kiln` with `--features metal` on the rebased head.
+- Started `target/release/kiln serve` with:
+  - no `KILN_DECODE_BATCH_WAIT_US` env, so Metal uses the `100us` default
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Issued eight concurrent short streaming chat requests, greedy
+  `max_tokens=3`.
+- An attempted marker append was overwritten by the server stdout file
+  descriptor, so the parser used the eight measured chat request response-start
+  entries as the post-prewarm boundary.
+
+### Results
+
+The server logged backend `metal`, `max_batch=8`, `wait_us=100`, and
+`mixed_seq_lens=true`.
+
+The profiled endpoint run:
+
+- wall `10.921401s`
+- `24` generated tokens
+- `16` submitted decode-batcher jobs
+- `3` worker batches
+- `16` batcher rows
+- max observed batch `8`
+- all eight requests returned `200`
+
+Kind totals after the request boundary:
+
+- GDN: `20927.112 ms`
+- MLP: `13850.888 ms`
+- full attention: `5688.689 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `442.225 ms`
+- `mlp:down_proj`: `320.375 ms`
+- `gdn:in_proj`: `307.696 ms`
+- `gdn:out_proj`: `129.519 ms`
+- `full_attn:qkv_proj_batch`: `60.085 ms`
+- `full_attn:qkv_proj`: `58.603 ms`
+- `gdn:gates_recur_gated_norm`: `55.774 ms`
+- `gdn:qkv_conv_norm`: `31.522 ms`
+
+Compared with E380 on the same shape, `mlp:gate_up_fused` is essentially flat
+at the stage-profile level (`443.570 ms` to `442.225 ms`), while the endpoint
+wall moved from `11.478781s` to `10.921401s`. The next targets remain MLP
+gate/up and MLP down-projection first, with GDN in-projection/out-projection
+still close behind and variable run to run.
+
+### Artifact
+
+- `e382_release_build_metal.log`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_server.log`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_health.json`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_metrics.prom`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_time.json`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_endpoint_summary.json`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_0.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_1.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_2.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_3.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_4.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_5.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_6.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_response_7.sse`
+- `e382_post_mlp_vector_row_quad_n8_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue with MLP
+gate/up and MLP down-projection as primary targets; GDN in/out projection remain
+secondary targets with enough variance to require endpoint confirmation for any
+micro-optimization.
