@@ -1,0 +1,39 @@
+2026-05-09 A099: rejected native head-last Vulkan GDN recurrent prefill
+
+Temporary change
+- Added a Vulkan-only native head-last GDN recurrent prefill shader for short
+  prefill (`seq_len <= 128`) using q/k `[B,T,QH,dk]`, v/beta/g
+  `[B,T,VH,*]`, and state `[B,VH,dk,dv]`.
+- Routed Vulkan BF16 CPU tensors through it by default, with rollback env
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PREFILL_NATIVE_HEAD_LAST=1`.
+
+Correctness and compile checks while present
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_recurrent_prefill_native_head_last_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Candidate and rollback latency runs stayed on backend `vulkan` and kept token
+  IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+
+A/B result, seed 107
+- Candidate: `969.531481ms` prefill, `82.469858875ms` mean ITL,
+  `89.513801ms` p99.
+- Rollback: `933.872209ms` prefill, `81.86911375000001ms` mean ITL,
+  `88.483723ms` p99.
+
+Verdict
+- Rejected and reverted. The temporary kernel was correct on the sampled model
+  token IDs, but it was slower than the existing expanded-QK chunkwise recurrent
+  prefill path.
+- Do not directly port Metal's native head-last recurrent prefill shape to this
+  Vulkan path without a different scheduling/data-residency model.
+- Final source has no Vulkan, CUDA, or Metal runtime changes from A099.
+
+Artifacts
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-check-kernel.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-check-model-vulkan.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-rollback.log`

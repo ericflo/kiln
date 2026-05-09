@@ -5890,3 +5890,50 @@ Verdict:
 Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-*.log`
+
+### 2026-05-09 A099: Reject Native Head-Last GDN Recurrent Prefill
+
+Goal:
+- Test whether Metal's native head-last GDN recurrent prefill shape transfers to
+  Vulkan for the short `seq_len=64` prefill case.
+- Keep the experiment Vulkan-only, correctness-gated, and rollbackable.
+
+Temporary implementation:
+- Added `gdn_recurrent_prefill_native_head_last.comp`.
+- Input layout matched the model-native tensors: q/k `[B,T,QH,dk]`,
+  v/beta/g `[B,T,VH,*]`, and state `[B,VH,dk,dv]`.
+- One workgroup owned one flattened `(batch, value_head, d)` lane, reduced over
+  `dk`, and walked tokens sequentially.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PREFILL_NATIVE_HEAD_LAST=1`.
+
+Validation while present:
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_recurrent_prefill_native_head_last_matches_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Candidate and rollback bench runs stayed on backend `vulkan` and kept token
+  IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+
+No-profile A/B, seed 107:
+- Candidate:
+  - prefill `969.531481ms`
+  - mean ITL `82.469858875ms`
+  - p99 ITL `89.513801ms`
+- Rollback:
+  - prefill `933.872209ms`
+  - mean ITL `81.86911375000001ms`
+  - p99 ITL `88.483723ms`
+
+Verdict:
+- Rejected and reverted. The temporary kernel was correct on the sampled token
+  sequence, but it was slower than the existing expanded-QK chunkwise recurrent
+  prefill path.
+- Do not directly port the Metal native head-last recurrent prefill shape to
+  Vulkan without a different scheduling/data-residency model.
+- Final source has no Vulkan, CUDA, or Metal runtime changes from A099.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a099-gdn-native-head-last-*.log`
