@@ -19492,3 +19492,79 @@ MLP down, GDN out, and attention-QKV-like projections.
 
 Rejected. Keep the accepted E458 generic Metal batch transposed-GEMV row-quad
 threshold at batch `>=3`. Batch `2` should remain on row-pair.
+
+## E460 - Post-E458 Four-Stream All-Stage Live Batch Profile
+
+### Purpose
+
+Capture the post-E458 all-stage live profile for the four-stream shape that
+exercises the newly accepted generic Metal batch transposed-GEMV row-quad
+threshold at max batch `3`.
+
+### Method
+
+No source change. Reused the release Metal server build with
+`KILN_PROFILE_MLP_STAGES=1`, `KILN_PROFILE_GDN_STAGES=1`,
+`KILN_PROFILE_FULL_ATTN_STAGES=1`, `KILN_DECODE_BATCHER=1`, and
+`KILN_DECODE_BATCH_WAIT_US=0`. Ran four concurrent streaming chat requests
+with `max_tokens=3` against Qwen3.5-4B.
+
+An initial uncommitted pass was discarded and rerun after local-machine
+activity could have affected timings. The artifacts below are from the clean
+rerun.
+
+### Results
+
+The clean rerun completed in `5.990943 s` with all four requests returning
+HTTP `200`. Streaming produced `20` SSE events and server metrics reported
+`12` generated tokens. The decode batcher submitted `8` jobs, ran `4` worker
+batches, processed `8` decode rows, and reached `max_observed_batch=3`.
+
+Filtered all-stage decode profile rows (`seq_len=1`, excluding prewarm
+`start_pos=64`) totaled:
+
+| subsystem | total |
+| --- | ---: |
+| MLP | `573.102 ms` |
+| GDN | `441.251 ms` |
+| full attention | `158.302 ms` |
+
+By decode position:
+
+| start_pos | total |
+| ---: | ---: |
+| `29` | `746.889 ms` |
+| `30` | `425.766 ms` |
+
+Hottest filtered stages:
+
+| stage | total | count | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `355.106 ms` | `128` | `2.774 ms` |
+| `gdn:in_proj` | `245.389 ms` | `96` | `2.556 ms` |
+| `mlp:down_proj` | `217.996 ms` | `128` | `1.703 ms` |
+| `gdn:out_proj` | `93.911 ms` | `96` | `0.978 ms` |
+| `gdn:qkv_conv_norm` | `62.946 ms` | `96` | `0.656 ms` |
+| `gdn:gates_recur_gated_norm` | `38.768 ms` | `96` | `0.404 ms` |
+| `full_attn:qkv_proj` | `34.727 ms` | `16` | `2.170 ms` |
+| `full_attn:qkv_proj_batch` | `24.383 ms` | `16` | `1.524 ms` |
+| `full_attn:o_proj` | `18.338 ms` | `16` | `1.146 ms` |
+| `full_attn:o_proj_batch` | `12.879 ms` | `16` | `0.805 ms` |
+
+### Artifacts
+
+- `e460_post_batch3_rowquad_live_batch4_profile_build.log`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_health.json`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_metrics.prom`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_request_*.json`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_response_*.sse`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_server.log`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_time.json`
+- `e460_post_batch3_rowquad_live_batch4_all_profile_summary.txt`
+
+### Decision
+
+Accepted as a profile checkpoint. The post-E458 four-stream batch-3 live shape
+now shows MLP gate/up, GDN in-proj, MLP down, and GDN out as the dominant
+filtered decode-stage costs. Use this as the next-target map for batch-3 live
+optimization.

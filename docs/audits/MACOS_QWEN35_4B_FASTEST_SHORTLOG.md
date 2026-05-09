@@ -2126,3 +2126,14 @@
   `455.356 us` versus `421.217 us`; only attention output improved
   (`313.071 us` versus `336.300 us`). No endpoint A/B was run. Source
   reverted; keep the accepted E458 batch `>=3` threshold.
+- 2026-05-09 E460: Captured the post-E458 four-stream all-stage live batch
+  profile for the max-batch-3 shape. No source change. After discarding an
+  initial uncommitted pass due to possible local-machine noise, the clean
+  rerun completed in `5.991 s`, returned four HTTP `200` responses, generated
+  `12` server tokens, submitted `8` decode-batcher jobs, ran `4` worker
+  batches, processed `8` decode rows, and reached `max_observed_batch=3`.
+  Filtered decode rows (`seq_len=1`, excluding prewarm `start_pos=64`) totaled
+  MLP `573.102 ms`, GDN `441.251 ms`, and full attention `158.302 ms`. Hottest
+  stages were `mlp:gate_up_fused` `355.106 ms`, `gdn:in_proj` `245.389 ms`,
+  `mlp:down_proj` `217.996 ms`, and `gdn:out_proj` `93.911 ms`; use this as
+  the batch-3 live hotspot map after the E458 threshold win.
