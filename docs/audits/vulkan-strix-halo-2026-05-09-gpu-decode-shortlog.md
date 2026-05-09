@@ -52,6 +52,22 @@ before or with each accepted change and each measured rejection.
 | A039 | Profile Vulkan after A038 GDN in-proj row-pair. | Four concurrent streaming requests with wait `5000us`, `max_tokens=3`, and `chat_template_kwargs: {"enable_thinking": false}` returned HTTP 200 with visible text (`"6 7"`, `"11 "`, `"16 "`, `"13"`) and empty reasoning text. Wall time was `17.514s`, counters were `8` jobs / `3` batches / `8` rows / max batch `4`. Profile totals were MLP `12790.460ms`, GDN `10374.416ms`, full-attn `1828.641ms`; live `seq_len=1` top stage was `mlp:fused` at `2635.685ms`. | Keep as target-selection evidence; no source change. Next Vulkan work should split or optimize packed-BF16 MLP decode before smaller GDN residuals. |
 | A040 | Trial packed-BF16 Vulkan MLP gate/up and down row-pair for live batches `4..7`. | Temporary row-pair gate/up and down shaders passed focused candidate and rollback BF16 MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-vulkan-kernel`, `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` and max batch `4` was unstable: candidate won pair 1 (`17.081s` vs rollback `17.957s`) but lost pair 2 (`20.896s` vs rollback `19.352s`) with identical counters and coherent visible text. | Rejected and removed; direct live-batch MLP row-pair did not produce a reliable gain. |
 | A041 | Trial packed-BF16 Vulkan MLP gate/up-only row-pair for live batches `4..7`. | Temporary gate/up-only row-pair path passed focused candidate and rollback BF16 MLP parity and release Vulkan build. Endpoint A/B with wait `5000us` and max batch `4` consistently favored rollback: pair 1 rollback `16.244s` vs candidate `21.055s`; pair 2 candidate `18.424s` vs rollback `15.632s`, with identical counters and coherent visible text. | Rejected and removed; do not retry MLP live-batch row-pair by direct shader mirroring. Kept the added batch-5 BF16 MLP parity coverage. |
+| A042 | Trial packed-BF16 Vulkan MLP branchless SiLU shader variants. | Temporary single-row and batched BF16 gate/up shaders passed focused candidate and rollback MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` favored rollback: pair 1 rollback `16.782s` vs candidate `18.933s`; pair 2 candidate `16.454s` vs rollback `16.142s` even though rollback generated more rows (`23` vs `17`). | Rejected and removed; keep the existing stable sigmoid MLP shaders. |
+
+Additional validation after rejected A042:
+
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate and rollback passed focused packed-BF16 MLP parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`.
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed full Vulkan kernel parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`.
+- Temporary candidate passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate and rollback server runs returned HTTP 200 with non-empty visible
+  content and empty reasoning text.
+- Source change was removed after rollback beat candidate.
 
 Additional validation after rejected A041:
 

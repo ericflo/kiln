@@ -2060,6 +2060,61 @@ Verdict:
   MLP row-pair variants for live batches `4..7` without a materially different
   tile or residency strategy.
 
+### 2026-05-09 A042: Reject Packed-BF16 MLP Branchless SiLU Shader Variant
+
+Hypothesis:
+- A039 showed `mlp:fused` dominated the live Vulkan profile.
+- The packed-BF16 MLP gate/up shaders compute SiLU with a branchy stable sigmoid
+  helper. A branchless `x / (1 + exp(-x))` variant might reduce per-element
+  activation overhead without changing tiling, dispatch counts, or data
+  movement.
+
+Experiment:
+- Added temporary packed-BF16 single-row and batched MLP gate/up shader variants
+  with branchless SiLU.
+- Routed only packed-BF16 MLP gate/up through the temporary shaders.
+- Used rollback env `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_FAST_SILU=1`.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs
+  crates/kiln-vulkan-kernel/tests/gdn_parity.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_BF16_PACKED_MLP_FAST_SILU=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Same-binary endpoint A/B, four concurrent streaming prompts,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Pair 1, rollback first:
+    - Rollback disabled: `16.782208s`, `17` jobs, `8` batches, `17` rows,
+      max batch `4`.
+    - Candidate: `18.933005s`, identical counters.
+  - Pair 2, candidate first:
+    - Candidate: `16.454005s`, `17` jobs, `8` batches, `17` rows, max batch
+      `4`.
+    - Rollback disabled: `16.141746s`, `23` jobs, `8` batches, `23` rows,
+      max batch `4`.
+  - All runs returned HTTP 200, coherent visible text. Pair 2 was not a clean
+    same-work comparison because rollback generated extra visible tokens
+    (`"6 7 8 9 "` for response 0) and still finished slightly faster.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a042-mlp-bf16-fast-silu-*`
+
+Verdict:
+- Rejected and removed. Branchless SiLU did not improve the live endpoint
+  workload, and the clean first pair regressed.
+- Keep using the existing stable sigmoid MLP shaders.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2071,6 +2126,8 @@ Verdict:
 - Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
   direct shader mirroring; A040 and A041 measured both full MLP row-pair and
   gate/up-only row-pair as slower or unstable against rollback.
+- Do not retry packed-BF16 MLP branchless SiLU without a stronger numerical and
+  performance reason; A042 was slower than rollback.
 - Do not set a static Vulkan live decode-batcher wait based only on env sweeps;
   A037's same-binary no-env candidate was slower even though it formed larger
   batches.
