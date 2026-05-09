@@ -75,6 +75,8 @@ const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8";
+const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8: &str =
+    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8";
 const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
 const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
 const METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS: usize = 16;
@@ -216,6 +218,9 @@ pub fn precompile_custom_kernels(device: &Device) -> Result<()> {
         metal_transposed_coop_gemv_pipeline(metal_device, default_tile)?;
         metal_transposed_coop_gemv_batch_pipeline(metal_device)?;
         if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
+            if !metal_transposed_coop_gemv_row_triple_tile8_disabled() {
+                metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(metal_device)?;
+            }
             metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(metal_device)?;
         }
         if default_tile != MetalTransposedCoopGemvTile::Tile4 {
@@ -1017,6 +1022,10 @@ fn metal_transposed_coop_gemv_row_quad_disabled() -> bool {
 
 fn metal_transposed_coop_gemv_row_quad_tile8_disabled() -> bool {
     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8)
+}
+
+fn metal_transposed_coop_gemv_row_triple_tile8_disabled() -> bool {
+    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8)
 }
 
 fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
@@ -3660,6 +3669,248 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     }
 }
 
+kernel void kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device bfloat* out [[buffer(2)]],
+    constant uint& input_dim [[buffer(3)]],
+    constant uint& output_dim [[buffer(4)]],
+    uint2 tgroup [[threadgroup_position_in_grid]],
+    uint simd_group [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    constexpr uint TILE_COLS = 8;
+    constexpr uint ROW_GROUP_SIZE = 3;
+    const uint col_base = (tgroup.x * 4 + simd_group) * TILE_COLS;
+    if (col_base >= output_dim) {
+        return;
+    }
+
+    const uint batch_idx = tgroup.y * ROW_GROUP_SIZE;
+    const uint batch1 = batch_idx + 1;
+    const uint batch2 = batch_idx + 2;
+    const uint x_base0 = batch_idx * input_dim;
+    const uint x_base1 = batch1 * input_dim;
+    const uint x_base2 = batch2 * input_dim;
+    const bool full_tile = col_base + TILE_COLS - 1 < output_dim;
+    const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+    float acc4 = 0.0f;
+    float acc5 = 0.0f;
+    float acc6 = 0.0f;
+    float acc7 = 0.0f;
+    float acc10 = 0.0f;
+    float acc11 = 0.0f;
+    float acc12 = 0.0f;
+    float acc13 = 0.0f;
+    float acc14 = 0.0f;
+    float acc15 = 0.0f;
+    float acc16 = 0.0f;
+    float acc17 = 0.0f;
+    float acc20 = 0.0f;
+    float acc21 = 0.0f;
+    float acc22 = 0.0f;
+    float acc23 = 0.0f;
+    float acc24 = 0.0f;
+    float acc25 = 0.0f;
+    float acc26 = 0.0f;
+    float acc27 = 0.0f;
+
+    for (uint row = lane; row < input_dim; row += 32) {
+        const float xv0 = static_cast<float>(x[x_base0 + row]);
+        const float xv1 = static_cast<float>(x[x_base1 + row]);
+        const float xv2 = static_cast<float>(x[x_base2 + row]);
+        const uint weight_base = row * output_dim + col_base;
+        if (vector_load_safe) {
+            device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+            const bfloat4 w_lo = w4_ptr[0];
+            const bfloat4 w_hi = w4_ptr[1];
+            const float w0 = static_cast<float>(w_lo[0]);
+            const float w1 = static_cast<float>(w_lo[1]);
+            const float w2 = static_cast<float>(w_lo[2]);
+            const float w3 = static_cast<float>(w_lo[3]);
+            const float w4 = static_cast<float>(w_hi[0]);
+            const float w5 = static_cast<float>(w_hi[1]);
+            const float w6 = static_cast<float>(w_hi[2]);
+            const float w7 = static_cast<float>(w_hi[3]);
+            acc0 += xv0 * w0;
+            acc1 += xv0 * w1;
+            acc2 += xv0 * w2;
+            acc3 += xv0 * w3;
+            acc4 += xv0 * w4;
+            acc5 += xv0 * w5;
+            acc6 += xv0 * w6;
+            acc7 += xv0 * w7;
+            acc10 += xv1 * w0;
+            acc11 += xv1 * w1;
+            acc12 += xv1 * w2;
+            acc13 += xv1 * w3;
+            acc14 += xv1 * w4;
+            acc15 += xv1 * w5;
+            acc16 += xv1 * w6;
+            acc17 += xv1 * w7;
+            acc20 += xv2 * w0;
+            acc21 += xv2 * w1;
+            acc22 += xv2 * w2;
+            acc23 += xv2 * w3;
+            acc24 += xv2 * w4;
+            acc25 += xv2 * w5;
+            acc26 += xv2 * w6;
+            acc27 += xv2 * w7;
+        } else {
+            const float w0 = static_cast<float>(weight_t[weight_base + 0]);
+            acc0 += xv0 * w0;
+            acc10 += xv1 * w0;
+            acc20 += xv2 * w0;
+            if (col_base + 1 < output_dim) {
+                const float w1 = static_cast<float>(weight_t[weight_base + 1]);
+                acc1 += xv0 * w1;
+                acc11 += xv1 * w1;
+                acc21 += xv2 * w1;
+            }
+            if (col_base + 2 < output_dim) {
+                const float w2 = static_cast<float>(weight_t[weight_base + 2]);
+                acc2 += xv0 * w2;
+                acc12 += xv1 * w2;
+                acc22 += xv2 * w2;
+            }
+            if (col_base + 3 < output_dim) {
+                const float w3 = static_cast<float>(weight_t[weight_base + 3]);
+                acc3 += xv0 * w3;
+                acc13 += xv1 * w3;
+                acc23 += xv2 * w3;
+            }
+            if (col_base + 4 < output_dim) {
+                const float w4 = static_cast<float>(weight_t[weight_base + 4]);
+                acc4 += xv0 * w4;
+                acc14 += xv1 * w4;
+                acc24 += xv2 * w4;
+            }
+            if (col_base + 5 < output_dim) {
+                const float w5 = static_cast<float>(weight_t[weight_base + 5]);
+                acc5 += xv0 * w5;
+                acc15 += xv1 * w5;
+                acc25 += xv2 * w5;
+            }
+            if (col_base + 6 < output_dim) {
+                const float w6 = static_cast<float>(weight_t[weight_base + 6]);
+                acc6 += xv0 * w6;
+                acc16 += xv1 * w6;
+                acc26 += xv2 * w6;
+            }
+            if (col_base + 7 < output_dim) {
+                const float w7 = static_cast<float>(weight_t[weight_base + 7]);
+                acc7 += xv0 * w7;
+                acc17 += xv1 * w7;
+                acc27 += xv2 * w7;
+            }
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+    acc4 = simd_sum(acc4);
+    acc5 = simd_sum(acc5);
+    acc6 = simd_sum(acc6);
+    acc7 = simd_sum(acc7);
+    acc10 = simd_sum(acc10);
+    acc11 = simd_sum(acc11);
+    acc12 = simd_sum(acc12);
+    acc13 = simd_sum(acc13);
+    acc14 = simd_sum(acc14);
+    acc15 = simd_sum(acc15);
+    acc16 = simd_sum(acc16);
+    acc17 = simd_sum(acc17);
+    acc20 = simd_sum(acc20);
+    acc21 = simd_sum(acc21);
+    acc22 = simd_sum(acc22);
+    acc23 = simd_sum(acc23);
+    acc24 = simd_sum(acc24);
+    acc25 = simd_sum(acc25);
+    acc26 = simd_sum(acc26);
+    acc27 = simd_sum(acc27);
+
+    if (lane == 0) {
+        const uint out_base0 = batch_idx * output_dim;
+        out[out_base0 + col_base + 0] = static_cast<bfloat>(acc0);
+        if (col_base + 1 < output_dim) {
+            out[out_base0 + col_base + 1] = static_cast<bfloat>(acc1);
+        }
+        if (col_base + 2 < output_dim) {
+            out[out_base0 + col_base + 2] = static_cast<bfloat>(acc2);
+        }
+        if (col_base + 3 < output_dim) {
+            out[out_base0 + col_base + 3] = static_cast<bfloat>(acc3);
+        }
+        if (col_base + 4 < output_dim) {
+            out[out_base0 + col_base + 4] = static_cast<bfloat>(acc4);
+        }
+        if (col_base + 5 < output_dim) {
+            out[out_base0 + col_base + 5] = static_cast<bfloat>(acc5);
+        }
+        if (col_base + 6 < output_dim) {
+            out[out_base0 + col_base + 6] = static_cast<bfloat>(acc6);
+        }
+        if (col_base + 7 < output_dim) {
+            out[out_base0 + col_base + 7] = static_cast<bfloat>(acc7);
+        }
+
+        const uint out_base1 = batch1 * output_dim;
+        out[out_base1 + col_base + 0] = static_cast<bfloat>(acc10);
+        if (col_base + 1 < output_dim) {
+            out[out_base1 + col_base + 1] = static_cast<bfloat>(acc11);
+        }
+        if (col_base + 2 < output_dim) {
+            out[out_base1 + col_base + 2] = static_cast<bfloat>(acc12);
+        }
+        if (col_base + 3 < output_dim) {
+            out[out_base1 + col_base + 3] = static_cast<bfloat>(acc13);
+        }
+        if (col_base + 4 < output_dim) {
+            out[out_base1 + col_base + 4] = static_cast<bfloat>(acc14);
+        }
+        if (col_base + 5 < output_dim) {
+            out[out_base1 + col_base + 5] = static_cast<bfloat>(acc15);
+        }
+        if (col_base + 6 < output_dim) {
+            out[out_base1 + col_base + 6] = static_cast<bfloat>(acc16);
+        }
+        if (col_base + 7 < output_dim) {
+            out[out_base1 + col_base + 7] = static_cast<bfloat>(acc17);
+        }
+
+        const uint out_base2 = batch2 * output_dim;
+        out[out_base2 + col_base + 0] = static_cast<bfloat>(acc20);
+        if (col_base + 1 < output_dim) {
+            out[out_base2 + col_base + 1] = static_cast<bfloat>(acc21);
+        }
+        if (col_base + 2 < output_dim) {
+            out[out_base2 + col_base + 2] = static_cast<bfloat>(acc22);
+        }
+        if (col_base + 3 < output_dim) {
+            out[out_base2 + col_base + 3] = static_cast<bfloat>(acc23);
+        }
+        if (col_base + 4 < output_dim) {
+            out[out_base2 + col_base + 4] = static_cast<bfloat>(acc24);
+        }
+        if (col_base + 5 < output_dim) {
+            out[out_base2 + col_base + 5] = static_cast<bfloat>(acc25);
+        }
+        if (col_base + 6 < output_dim) {
+            out[out_base2 + col_base + 6] = static_cast<bfloat>(acc26);
+        }
+        if (col_base + 7 < output_dim) {
+            out[out_base2 + col_base + 7] = static_cast<bfloat>(acc27);
+        }
+    }
+}
+
 kernel void kiln_transposed_coop_gemv8_batch_row_quad_tile8_bf16(
     device const bfloat* x [[buffer(0)]],
     device const bfloat* weight_t [[buffer(1)]],
@@ -5727,6 +5978,46 @@ fn metal_transposed_coop_gemv_batch_pipeline(
     Ok(pipeline)
 }
 
+fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().map_err(|_| {
+        anyhow::anyhow!("metal batch transposed coop GEMV row-triple tile8 cache poisoned")
+    })?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function(
+            "kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16",
+            None,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "load metal batch transposed coop GEMV row-triple tile8 function: {e:?}"
+            )
+        })?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "build metal batch transposed coop GEMV row-triple tile8 pipeline: {e:?}"
+            )
+        })?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -7049,9 +7340,16 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     let row_grouping_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
     let row_quad_enabled =
         row_grouping_enabled && batch >= 3 && !metal_transposed_coop_gemv_row_quad_disabled();
-    let row_quad_tile8_enabled =
-        row_quad_enabled && !metal_transposed_coop_gemv_row_quad_tile8_disabled();
-    let row_group_size = if row_quad_enabled {
+    let row_triple_tile8_enabled = row_quad_enabled
+        && batch == 3
+        && !metal_transposed_coop_gemv_row_quad_tile8_disabled()
+        && !metal_transposed_coop_gemv_row_triple_tile8_disabled();
+    let row_quad_tile8_enabled = row_quad_enabled
+        && !row_triple_tile8_enabled
+        && !metal_transposed_coop_gemv_row_quad_tile8_disabled();
+    let row_group_size = if row_triple_tile8_enabled {
+        3usize
+    } else if row_quad_enabled {
         4usize
     } else if row_grouping_enabled {
         2usize
@@ -7066,13 +7364,17 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     let Device::Metal(device) = x.device() else {
         anyhow::bail!("metal batch transposed coop GEMV requires Metal tensors");
     };
-    let pipeline = if row_quad_tile8_enabled {
+    let pipeline = if row_triple_tile8_enabled {
+        metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(device)?
+    } else if row_quad_tile8_enabled {
         metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(device)?
     } else {
         metal_transposed_coop_gemv_batch_pipeline(device)?
     };
     let encoder = device.command_encoder()?;
-    encoder.set_label(if row_quad_tile8_enabled {
+    encoder.set_label(if row_triple_tile8_enabled {
+        "kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16"
+    } else if row_quad_tile8_enabled {
         "kiln_transposed_coop_gemv8_batch_row_quad_tile8_bf16"
     } else {
         "kiln_transposed_coop_gemv8_batch_bf16"
@@ -7114,14 +7416,14 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
         if row_quad_tile8_enabled {
             let batch_u32 = batch as u32;
             encoder.set_bytes(5, &batch_u32);
-        } else {
+        } else if !row_triple_tile8_enabled {
             let row_pair_mode_u32 = if row_group_size > 1 { batch as u32 } else { 0 };
             let row_group_size_u32 = row_group_size as u32;
             encoder.set_bytes(5, &row_pair_mode_u32);
             encoder.set_bytes(6, &row_group_size_u32);
         }
 
-        let tile_cols = if row_quad_tile8_enabled {
+        let tile_cols = if row_triple_tile8_enabled || row_quad_tile8_enabled {
             METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS
         } else if row_quad_enabled {
             METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS
@@ -14651,7 +14953,12 @@ mod tests {
     fn metal_transposed_coop_decode_batch_policy(batch: usize) -> &'static str {
         if batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled() {
             if batch >= 3 && !metal_transposed_coop_gemv_row_quad_disabled() {
-                if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
+                if batch == 3
+                    && !metal_transposed_coop_gemv_row_quad_tile8_disabled()
+                    && !metal_transposed_coop_gemv_row_triple_tile8_disabled()
+                {
+                    "row_triple_tile8"
+                } else if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
                     "row_quad_tile8"
                 } else {
                     "row_quad_tile4_shared"

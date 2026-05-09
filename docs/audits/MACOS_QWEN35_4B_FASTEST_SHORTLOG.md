@@ -2169,3 +2169,18 @@
   `mlp:gate_up_fused` `344.922 ms`, `mlp:down_proj` `224.202 ms`,
   `gdn:in_proj` `217.244 ms`, and `gdn:out_proj` `91.655 ms`; use this as the
   post-E462 batch-3 live hotspot map.
+- 2026-05-09 E464: Accepted a Metal batch-3-only
+  `kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16` specialization for
+  the shared batch transposed-GEMV path, with rollback env
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8=1`. The selector
+  uses it only when batch `3` would otherwise use `row_quad_tile8`; batch `2`
+  stays row-pair and batch `4+` stays row-quad. Focused parity passed.
+  Qwen3.5 synthetic batch `3` improved for every shared shape:
+  `mlp_down_proj` `1037.035 us` versus rollback `1291.529 us`,
+  `gdn_out_proj` `476.277 us` versus `569.929 us`, `attn_output`
+  `305.406 us` versus `351.073 us`, and `attn_qkv_like` `488.504 us` versus
+  `539.835 us`, all with exact BF16 diffs. Matched four-stream `max_tokens=8`
+  live A/B reached max batch `3` in both arms and favored default:
+  `4.550 s` versus rollback `4.609 s`, both `32` server tokens, `28`
+  submitted jobs, `14` worker batches, and `28` rows. Metal/Vulkan model and
+  server checks passed; CUDA remains locally blocked by missing `nvcc`.

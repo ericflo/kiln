@@ -1,0 +1,34 @@
+E464 accepted Metal batch-3 transposed GEMV row-triple tile8
+
+Change:
+- Add kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16.
+- Select it only for batch == 3 when the existing row-quad tile8 path would otherwise run.
+- Keep KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8=1 as rollback to row_quad_tile8.
+- Precompile the new pipeline and update the synthetic bench policy label.
+
+Focused parity:
+- cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture: passed
+
+Qwen3.5 synthetic A/B, warmup=5, iters=20:
+- mlp_down_proj batch3: row_triple_tile8 1037.035 us vs row_quad_tile8 rollback 1291.529 us
+- gdn_out_proj batch3: row_triple_tile8 476.277 us vs row_quad_tile8 rollback 569.929 us
+- attn_output batch3: row_triple_tile8 305.406 us vs row_quad_tile8 rollback 351.073 us
+- attn_qkv_like batch3: row_triple_tile8 488.504 us vs row_quad_tile8 rollback 539.835 us
+- All logged max_abs_diff and mean_abs_diff values were 0.
+
+Live endpoint A/B, four streaming requests, max_tokens=8:
+- default row_triple_tile8: elapsed 4.550030 s, statuses 200,200,200,200, stream events 40, server tokens 32, jobs 28, worker batches 14, rows 28, max batch 3
+- rollback row_quad_tile8: elapsed 4.608888 s, statuses 200,200,200,200, stream events 40, server tokens 32, jobs 28, worker batches 14, rows 28, max batch 3
+- Candidate was 1.28% faster wall time with identical server-side batch shape.
+
+Validation:
+- cargo fmt --check: passed
+- cargo build --release --features metal --bin kiln: passed with existing warnings
+- cargo check -p kiln-model --features metal: passed with existing warnings
+- cargo check -p kiln-model --features vulkan: passed with existing warnings
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check -p kiln-model --features cuda: blocked by local missing nvcc/CUDA toolkit
+
+Decision:
+- Accepted. Batch-3 row-triple tile8 is correct, improves all targeted Qwen3.5 synthetic shapes, and gives a small matched live endpoint win.

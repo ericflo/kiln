@@ -19783,3 +19783,88 @@ The remaining top candidates are `mlp:gate_up_fused`, `mlp:down_proj`, and
 
 Accepted as a no-source-change profile checkpoint. Use this as the post-E462
 max-batch-3 live hotspot map.
+
+## E464 - Accepted Batch-3 Row-Triple Tile8 Transposed GEMV
+
+### Hypothesis
+
+E463 showed `mlp:down_proj` and `gdn:in_proj` are the next largest batch-3
+hotspots. `mlp:down_proj`, `gdn:out_proj`, and several attention projections
+use the shared Metal batch transposed-GEMV path. E458 already accepted
+`row_quad_tile8` at batch `3`, but batch `3` currently runs through a row-quad
+kernel with a masked fourth row. A dedicated row-triple tile8 kernel should
+avoid the fourth row's accumulator and reduction work while preserving the same
+tile width and selector semantics.
+
+### Candidate
+
+Added `kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16` and selected it
+only when `batch == 3` and the existing row-quad tile8 path would otherwise be
+used. Batch `4+` stays on the accepted row-quad path, batch `2` stays on
+row-pair, and `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8=1`
+rolls only this new specialization back to `row_quad_tile8`. The precompile
+path now warms the new pipeline, and the ignored Qwen3.5 shape bench reports
+`row_triple_tile8` when selected.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_decode_batch_matches_broadcast_matmul -- --nocapture`
+
+Qwen3.5 synthetic A/B with warmup `5`, iters `20`:
+
+| label | batch | candidate policy | candidate fused | rollback policy | rollback fused | result |
+| --- | ---: | --- | ---: | --- | ---: | ---: |
+| `mlp_down_proj` | `3` | row_triple_tile8 | `1037.035 us` | row_quad_tile8 | `1291.529 us` | `1.245x` |
+| `gdn_out_proj` | `3` | row_triple_tile8 | `476.277 us` | row_quad_tile8 | `569.929 us` | `1.197x` |
+| `attn_output` | `3` | row_triple_tile8 | `305.406 us` | row_quad_tile8 | `351.073 us` | `1.150x` |
+| `attn_qkv_like` | `3` | row_triple_tile8 | `488.504 us` | row_quad_tile8 | `539.835 us` | `1.105x` |
+
+All logged synthetic rows matched broadcast matmul exactly (`max_abs_diff=0`,
+`mean_abs_diff=0`). Other batch sizes are policy-identical and were treated as
+same-path noise rather than selector evidence.
+
+No-profile live endpoint A/B with four streaming requests, `max_tokens=8`:
+
+| arm | elapsed | stream events | server tokens | jobs | worker batches | rows | max batch | result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| default row-triple | `4.550030 s` | `40` | `32` | `28` | `14` | `28` | `3` | positive |
+| rollback row-quad | `4.608888 s` | `40` | `32` | `28` | `14` | `28` | `3` | baseline |
+
+The live delta is small (`1.28%`) but the server-side shape is matched and the
+synthetic batch-3 signal is consistently positive across all shared
+transposed-GEMV Qwen3.5 shapes.
+
+Validation:
+
+- `cargo fmt --check`: passed
+- `cargo build --release --features metal --bin kiln`: passed with existing warnings
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: blocked by local missing `nvcc`
+  / CUDA toolkit, matching the known local CUDA environment limitation
+
+### Artifacts
+
+- `e464_transposed_gemv_rowtriple_b3_fmt.log`
+- `e464_transposed_gemv_rowtriple_b3_parity.log`
+- `e464_transposed_gemv_rowtriple_b3_shapes_default_w5_i20.log`
+- `e464_transposed_gemv_rowtriple_b3_shapes_disabled_w5_i20.log`
+- `e464_transposed_gemv_rowtriple_b3_build.log`
+- `e464_transposed_gemv_rowtriple_b3_live_batch4_mt8_default_*`
+- `e464_transposed_gemv_rowtriple_b3_live_batch4_mt8_disabled_*`
+- `e464_transposed_gemv_rowtriple_b3_check_metal.log`
+- `e464_transposed_gemv_rowtriple_b3_check_vulkan.log`
+- `e464_transposed_gemv_rowtriple_b3_check_server_metal.log`
+- `e464_transposed_gemv_rowtriple_b3_check_server_vulkan.log`
+- `e464_transposed_gemv_rowtriple_b3_check_cuda.log`
+- `e464_transposed_gemv_rowtriple_b3_summary.txt`
+
+### Decision
+
+Accepted. Batch-3 row-triple tile8 is correct, improves all targeted Qwen3.5
+synthetic shapes, and gives a small matched live endpoint win. Roll back with
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8=1` if needed.
