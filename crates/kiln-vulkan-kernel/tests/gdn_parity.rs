@@ -2356,3 +2356,106 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     )?;
     Ok(())
 }
+
+#[test]
+fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, heads, chunk, dk, dv) = (1usize, 1usize, 64usize, 5usize, 4usize);
+    let g = cpu_bf16(
+        (0..chunk)
+            .map(|i| -0.015 - ((i % 7) as f32) * 0.0015)
+            .collect(),
+        (batch, heads, chunk),
+    )?;
+    let v = cpu_bf16(
+        (0..batch * heads * chunk * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+            .collect(),
+        (batch, heads, chunk, dv),
+    )?;
+    let kkt = cpu_bf16(
+        (0..batch * heads * chunk * chunk)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.004)
+            .collect(),
+        (batch, heads, chunk, chunk),
+    )?;
+    let qkt = cpu_bf16(
+        (0..batch * heads * chunk * chunk)
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.005)
+            .collect(),
+        (batch, heads, chunk, chunk),
+    )?;
+    let ks_entry = cpu_bf16(
+        (0..batch * heads * chunk * dv)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.007)
+            .collect(),
+        (batch, heads, chunk, dv),
+    )?;
+    let q_s = cpu_bf16(
+        (0..batch * heads * chunk * dv)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * 0.006)
+            .collect(),
+        (batch, heads, chunk, dv),
+    )?;
+    let beta = cpu_bf16(
+        (0..chunk).map(|i| 0.2 + ((i % 9) as f32) * 0.045).collect(),
+        (batch, heads, chunk),
+    )?;
+    let k_t = cpu_bf16(
+        (0..batch * heads * dk * chunk)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.003)
+            .collect(),
+        (batch, heads, dk, chunk),
+    )?;
+    let state = cpu_bf16(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 31.0) - 15.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_prep(
+            &vk, &g, &v, &kkt, &qkt, &ks_entry, &q_s,
+        )
+        .context("dispatch_gdn_chunk_prep")?;
+    let (expected_out, w_weighted) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan(
+        &vk,
+        &a_strict,
+        &b_mask,
+        &v_prime,
+        &q_s_scaled,
+        &beta,
+        &decay_last_col,
+    )
+    .context("dispatch_gdn_chunk_scan")?;
+
+    let (got_out, got_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward(
+        &vk, &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &state,
+    )
+    .context("dispatch_gdn_full_chunk_forward")?;
+
+    let p_last = tensor_data_f32(&p_last)?;
+    let state_data = tensor_data_f32(&state)?;
+    let k_t_data = tensor_data_f32(&k_t)?;
+    let w_weighted_data = tensor_data_f32(&w_weighted)?;
+    let mut expected_state = vec![0.0f32; batch * heads * dk * dv];
+    for k_idx in 0..dk {
+        for d in 0..dv {
+            let mut delta = 0.0f32;
+            for t in 0..chunk {
+                delta += k_t_data[k_idx * chunk + t] * w_weighted_data[t * dv + d];
+            }
+            expected_state[k_idx * dv + d] = state_data[k_idx * dv + d] * p_last[0] + delta;
+        }
+    }
+    let expected_state = cpu_bf16(expected_state, (batch, heads, dk, dv))?;
+
+    assert_close("full chunk out", &got_out, &expected_out, 2e-2)?;
+    assert_close("full chunk state", &got_state, &expected_state, 3e-2)?;
+    Ok(())
+}

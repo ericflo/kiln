@@ -32,6 +32,7 @@ pub struct VulkanBackend {
     gdn_prefill_in_proj_enabled: bool,
     gdn_gates_enabled: bool,
     gdn_gated_rms_norm_enabled: bool,
+    gdn_full_chunk_forward_enabled: bool,
     fused_conv1d_enabled: bool,
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
@@ -109,6 +110,11 @@ impl VulkanBackend {
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
         let gdn_gated_rms_norm_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATED_RMS_NORM").is_err();
+        // The fused full-chunk shader is parity-covered, but default-on A070
+        // latency regressed on Strix Halo. Keep it available for explicit
+        // tuning without changing the production route.
+        let gdn_full_chunk_forward_enabled =
+            gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD").is_ok();
         // forward_sub is opt-in only (default off): solve_tri shared-memory
         // layout is not yet validated against CPU parity and may exceed
         // maxComputeSharedMemorySize on many GPUs.
@@ -182,6 +188,7 @@ impl VulkanBackend {
             gdn_prefill_in_proj_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
+            gdn_full_chunk_forward_enabled,
             fused_conv1d_enabled,
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
@@ -590,10 +597,7 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
-        // The fused full-chunk shader has not been validated against the
-        // canonical prep + scan + state-update path. Keep Vulkan on the
-        // correct split path until that kernel has parity coverage.
-        false
+        self.has_vulkan() && self.gdn_full_chunk_forward_enabled
     }
 
     fn supports_gdn_gates(&self) -> bool {

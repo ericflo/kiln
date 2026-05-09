@@ -77,6 +77,7 @@ before or with each accepted change and each measured rejection.
 | A067 | Route resident-state GDN recurrent steps through the existing parallel-reduce shader. | Added resident `dk >= 32` selection for `gdn_recurrent_step_parallel.comp`, preserving rollback via `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`. Candidate and rollback first 32 token IDs matched. No-profile A/B improved mean ITL from rollback `96.538ms` to candidate `94.300ms`, while profiled A/B was neutral (`99.453ms` rollback, `99.554ms` candidate) and recurrent decode bucket only moved `1698.004ms -> 1692.770ms` over `3072` calls. Full Vulkan GDN parity passed (`32` tests); chat-template kwargs tests passed. | Keep as a guarded Vulkan-only mean-ITL win. Candidate p99 had one outlier (`130.534ms`), so recheck tail latency later. CUDA/Metal source paths untouched; local feature checks remain environment-blocked (`nvcc` missing; `objc2` requires Apple target). |
 | A068 | Fix embedded SPIR-V lookup for the accepted parallel recurrent shader. | Found `gdn_recurrent_step_parallel` in `build.rs` and the Vulkan prewarm list, but not in `pipeline.rs` `SHADER_SPIRVS`, so accepted A059/A067 dispatches could fall back to runtime shader compilation on hosts that otherwise have embedded SPIR-V. Added the missing lookup entry only. Validation passed: `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`, focused GDN recurrent parity, and `git diff --check` with the Rust toolchain path restored. | Keep as a Vulkan-only deployment/prewarm fix. No shader math, CUDA path, or Metal path changed. |
 | A069 | Trial batched transfers in Vulkan GDN chunk prep/scan. | Temporary candidate batched prep uploads/readbacks and scan uploads/readbacks behind `KILN_DISABLE_VULKAN_GDN_CHUNK_BATCHED_TRANSFERS=1`. Profiled `gdn_stage:recurrent seq_len=64` improved from exact rollback `242.102ms` total / `10.087583ms` avg to candidate `229.076ms` / `9.544833ms`, and profiled prefill improved `2241.253ms -> 2219.945ms`. Fresh no-profile exact rollback/candidate did not confirm a prefill win: rollback `2173.140ms` prefill / `97.937ms` mean ITL, candidate `2188.749ms` prefill / `96.187ms` mean ITL. | Rejected and removed before commit. Do not retry this by simply batching the current GDN chunk prep/scan transfers; next GDN prefill work needs fewer CPU boundary/readback steps or residency across adjacent stages. Final committed state has no CUDA/Metal source changes. |
+| A070 | Fix Vulkan `gdn_full_chunk_forward` parity and reject default enable. | Rewrote the stale full-chunk shader so it matches the split `gdn_chunk_prep` + `gdn_chunk_scan` + state-update contract, added `gdn_full_chunk_forward_matches_split_vulkan_path`, and kept the path opt-in via `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`. Candidate, rollback, and final default all emitted identical first 32 token IDs. Default enable regressed prefill: candidate `2216.728ms` versus rollback split path `2138.199ms`; final no-env default stayed on the split path at `2248.036ms` prefill / `94.611ms` mean ITL after rebasing onto the latest Metal MLP commits. | Keep the shader correctness/parity fix as opt-in tuning groundwork. Reject default enable; the current one-workgroup fused chunk serializes too much work. CUDA/Metal source paths untouched. |
 
 Additional validation after rejected A069:
 
@@ -93,6 +94,16 @@ Additional validation after rejected A069:
   `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`.
 - Source change was removed after the fresh no-profile exact rollback beat
   candidate prefill.
+
+Additional validation after A070:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_full_chunk_forward_matches_split_vulkan_path -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- Candidate, rollback, and final default latency smokes used
+  `KILN_BENCH_LOG_TOKENS=1` and returned the same first 32 token IDs.
 
 Additional validation after A044:
 

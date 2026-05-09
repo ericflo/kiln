@@ -1,8 +1,16 @@
-// GDN full chunk forward kernel (fused prep + scan)
+// GDN full chunk forward kernel (fused prep + scan + state update).
+//
+// This mirrors the existing Vulkan split path for 64-token chunks:
+//   1. gdn_chunk_prep produces bf16-rounded A/B masks, V', q_s_scaled,
+//      decay_last_col, and p_last.
+//   2. gdn_chunk_scan performs per-dv forward substitution and returns
+//      out plus bf16-rounded W * decay_last_col.
+//   3. Rust updates state with p_last * state + k_t @ w_weighted.
+
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {
     uint batch;
@@ -23,40 +31,108 @@ layout(binding = 7) readonly buffer KTBuf { float data_k_t[]; };
 layout(binding = 8) buffer StateBuf { float data_state[]; };
 layout(binding = 9) writeonly buffer OutBuf { float data_out[]; };
 
+shared float s_a_row[64];
+shared float s_b_row[64];
+shared float s_w[8192];
+shared float s_big_g[64];
+shared float s_p[64];
+shared float s_decay_last[64];
+shared float s_p_last;
+
+float bf16_round(float x) {
+    uint bits = floatBitsToUint(x);
+    uint lsb = (bits >> 16) & 1u;
+    bits += 0x7fffu + lsb;
+    bits &= 0xffff0000u;
+    return uintBitsToFloat(bits);
+}
+
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    uint total = batch * heads * chunk * dv;
-    if (idx >= total) return;
+    const uint C = 64;
+    const uint MAX_DV = 128;
 
-    uint b = idx / (heads * chunk * dv);
-    uint h = (idx / (chunk * dv)) % heads;
-    uint c = (idx / dv) % chunk;
-    uint d = idx % dv;
-
-    uint bh = b * heads + h;
-    uint g_base = bh * chunk;
-    uint cc_base = bh * chunk * chunk;
-    uint cv_base = bh * chunk * dv;
-
-    // Compute decay
-    float decay = exp(data_g[g_base + c]);
-    
-    // Compute v_prime and q_s_scaled
-    float p = exp(data_g[g_base + chunk - 1] - data_g[g_base + c]);
-    float v_prime = data_v[cv_base + c * dv + d] - data_ks_entry[cv_base + c * dv + d] * p;
-    float q_s_scaled = data_q_s[cv_base + c * dv + d] * p;
-
-    // Scan through chunk
-    float acc = 0.0;
-    for (uint j = 0; j <= c; j++) {
-        float product = 1.0;
-        for (uint k = j + 1; k <= c; k++) {
-            product *= (k > j) ? data_kkt[cc_base + k * chunk + j] * exp(data_g[g_base + k] - data_g[g_base + j]) : 1.0;
-        }
-        float pj = exp(data_g[g_base + chunk - 1] - data_g[g_base + j]);
-        float vp_j = data_v[cv_base + j * dv + d] - data_ks_entry[cv_base + j * dv + d] * pj;
-        acc += product * vp_j;
+    uint bh = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    uint total_bh = batch * heads;
+    if (bh >= total_bh || chunk != C || dv > MAX_DV) {
+        return;
     }
 
-    data_out[cv_base + c * dv + d] = acc * data_beta[bh * chunk + c];
+    uint g_base = bh * C;
+    uint cc_base = bh * C * C;
+    uint cv_base = bh * C * dv;
+    uint kt_base = bh * dk * C;
+    uint state_base = bh * dk * dv;
+
+    for (uint i = tid; i < C; i += 128) {
+        s_big_g[i] = data_g[g_base + i];
+    }
+    barrier();
+
+    if (tid == 0) {
+        float acc = 0.0;
+        for (uint i = 0; i < C; ++i) {
+            acc += s_big_g[i];
+            s_big_g[i] = acc;
+        }
+        s_p_last = bf16_round(exp(s_big_g[C - 1]));
+    }
+    barrier();
+
+    for (uint i = tid; i < C; i += 128) {
+        s_p[i] = exp(s_big_g[i]);
+        s_decay_last[i] = bf16_round(exp(s_big_g[C - 1] - s_big_g[i]));
+    }
+    barrier();
+
+    for (uint t = 0; t < C; ++t) {
+        for (uint i = tid; i < C; i += 128) {
+            uint ti = t * C + i;
+            float decay = exp(s_big_g[t] - s_big_g[i]);
+            float a_val = (i < t) ? data_kkt[cc_base + ti] * decay : 0.0;
+            float b_val = (i <= t) ? data_qkt[cc_base + ti] * decay : 0.0;
+            s_a_row[i] = bf16_round(a_val);
+            s_b_row[i] = bf16_round(b_val);
+        }
+        barrier();
+
+        if (tid < dv) {
+            float acc_a = 0.0;
+            for (uint i = 0; i < t; ++i) {
+                acc_a += s_a_row[i] * s_w[i * MAX_DV + tid];
+            }
+
+            uint td = t * dv + tid;
+            float p_t = s_p[t];
+            float v_prime = bf16_round(data_v[cv_base + td] - data_ks_entry[cv_base + td] * p_t);
+            float w_val = data_beta[g_base + t] * (v_prime - acc_a);
+            s_w[t * MAX_DV + tid] = w_val;
+        }
+        barrier();
+
+        if (tid < dv) {
+            float intra = 0.0;
+            for (uint i = 0; i <= t; ++i) {
+                intra += s_b_row[i] * s_w[i * MAX_DV + tid];
+            }
+
+            uint td = t * dv + tid;
+            float q_s_scaled = bf16_round(data_q_s[cv_base + td] * s_p[t]);
+            data_out[cv_base + td] = q_s_scaled + intra;
+        }
+        barrier();
+    }
+
+    if (tid < dv) {
+        for (uint k_idx = 0; k_idx < dk; ++k_idx) {
+            float delta = 0.0;
+            for (uint t = 0; t < C; ++t) {
+                float w_weighted = bf16_round(s_w[t * MAX_DV + tid] * s_decay_last[t]);
+                delta += data_k_t[kt_base + k_idx * C + t] * w_weighted;
+            }
+            uint state_idx = state_base + k_idx * dv + tid;
+            float state_scaled = bf16_round(data_state[state_idx] * s_p_last);
+            data_state[state_idx] = state_scaled + bf16_round(delta);
+        }
+    }
 }

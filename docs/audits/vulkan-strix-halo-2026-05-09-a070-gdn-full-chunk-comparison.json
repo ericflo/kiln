@@ -1,0 +1,71 @@
+{
+  "id": "A070",
+  "date": "2026-05-09",
+  "target": {
+    "model": "Qwen3.5-4B",
+    "backend": "vulkan",
+    "gpu": "AMD Radeon 8060S Graphics (RADV_STRIX_HALO)"
+  },
+  "change": "Correct Vulkan gdn_full_chunk_forward shader and keep it opt-in after default-enable benchmark regressed.",
+  "opt_in_env": "KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1",
+  "token_ids_first_32": [
+    271,
+    1206,
+    1423,
+    680,
+    1204,
+    1691,
+    51864,
+    3520,
+    506,
+    279,
+    19719,
+    6,
+    2981,
+    11,
+    567,
+    1118,
+    1144,
+    310,
+    7995,
+    1204,
+    1599,
+    18237,
+    1292,
+    682,
+    2047,
+    1238,
+    11834,
+    321,
+    26912,
+    13,
+    2838,
+    8211
+  ],
+  "temporary_default_enabled_candidate": {
+    "log": "docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-candidate-correctness.log",
+    "prefill_time_ms": 2216.728457,
+    "mean_inter_token_ms": 97.447407906,
+    "p50_inter_token_ms": 97.383123,
+    "p99_inter_token_ms": 101.75463,
+    "num_tokens_generated": 33
+  },
+  "rollback_split_path": {
+    "log": "docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-rollback-correctness.log",
+    "prefill_time_ms": 2138.19923,
+    "mean_inter_token_ms": 97.653634125,
+    "p50_inter_token_ms": 97.228359,
+    "p99_inter_token_ms": 105.155503,
+    "num_tokens_generated": 33
+  },
+  "final_default": {
+    "log": "docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-final-default-correctness.log",
+    "prefill_time_ms": 2248.035943,
+    "mean_inter_token_ms": 94.610662531,
+    "p50_inter_token_ms": 94.244448,
+    "p99_inter_token_ms": 99.724918,
+    "num_tokens_generated": 33
+  },
+  "verdict": "keep opt-in shader parity fix, reject default enable",
+  "reason": "The corrected fused full-chunk shader preserved token IDs but default-on candidate prefill regressed versus the split path."
+}

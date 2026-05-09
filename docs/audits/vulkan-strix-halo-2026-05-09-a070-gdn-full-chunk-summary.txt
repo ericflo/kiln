@@ -1,0 +1,89 @@
+A070: Vulkan GDN full-chunk shader parity fix, default enable rejected
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, Vulkan backend, AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+
+Candidate
+---------
+
+The existing `gdn_full_chunk_forward.comp` shader was embedded and prewarmed,
+but the Vulkan backend kept `supports_gdn_full_chunk_forward()` hard-disabled
+because the shader had not been validated against the split chunk path.
+
+Inspection found the shader was stale: it did not implement the same
+prep/scan/state-update contract as the current split path and did not write the
+updated recurrent state. A corrected version was implemented and covered by a
+new parity test against the existing Vulkan split path:
+
+- `gdn_chunk_prep`
+- `gdn_chunk_scan`
+- Rust-side `p_last * state + k_t @ w_weighted` state update
+
+Default enable was tested and rejected. The final committed route keeps the
+shader opt-in only:
+
+- `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`
+
+Correctness Evidence
+--------------------
+
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_full_chunk_forward_matches_split_vulkan_path -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- Candidate, rollback, and final default latency smokes all emitted the same
+  first 32 decode token IDs:
+
+`[271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]`
+
+Performance Evidence
+--------------------
+
+Temporary default-enabled candidate:
+
+- log: vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-candidate-correctness.log
+- prefill: 2216.728457 ms
+- mean ITL: 97.447407906 ms
+- p50 ITL: 97.383123 ms
+- p99 ITL: 101.754630 ms
+- generated tokens: 33
+
+Rollback/split path:
+
+- log: vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-rollback-correctness.log
+- prefill: 2138.199230 ms
+- mean ITL: 97.653634125 ms
+- p50 ITL: 97.228359 ms
+- p99 ITL: 105.155503 ms
+- generated tokens: 33
+
+Final default after making the fused shader opt-in:
+
+- log: vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-final-default-correctness.log
+- prefill: 2248.035943 ms
+- mean ITL: 94.610662531 ms
+- p50 ITL: 94.244448 ms
+- p99 ITL: 99.724918 ms
+- generated tokens: 33
+
+Validation
+----------
+
+- cargo fmt --check
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_full_chunk_forward_matches_split_vulkan_path -- --nocapture
+- cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Verdict
+-------
+
+Keep the shader correctness/parity fix and the opt-in tuning gate. Reject
+default enable on Strix Halo: candidate prefill was 2216.728457 ms versus
+rollback 2138.199230 ms.
+
+The result confirms that correctness alone is not enough here. This fused
+shader serializes too much work inside one workgroup and loses to the existing
+split prep/scan path despite reducing CPU boundary crossings. Future work
+should not enable this shape by default without changing the parallelization
+strategy.
+
+CUDA and Metal source paths were not changed.

@@ -1,0 +1,63 @@
+
+  kiln-bench v0.2.13
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB)
+  Model path             Qwen3.5-4B
+  Model loaded           14.06s (backend: vulkan, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=6] (64 prompt tokens)...
+    Prefill (paged): 2251.3ms (28 tok/s)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]
+    Decode (paged): 33 tokens, mean ITL 97.1ms (10.3 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=6] (64 prompt tokens)...
+    Prefill (paged): 2138.2ms (30 tok/s)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]
+    Decode (paged): 33 tokens, mean ITL 97.7ms (10.2 tok/s)
+
+  ▌ Benchmark results
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB VRAM, source: linux-drm-sysfs)
+  Model load             14.06s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                2138.2 ms (30 tok/s)
+  Time to first token    2138.2 ms
+  Mean inter-token       97.7 ms (10.2 tok/s)
+  P50 inter-token        97.2 ms
+  P99 inter-token        105.2 ms
+  Tokens generated       33
+  Spec method            off
+
+{
+  "backend": "vulkan",
+  "gpu_info": {
+    "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+    "total_vram_mb": 98304,
+    "vram_source": "linux-drm-sysfs"
+  },
+  "model_load": {
+    "load_time_secs": 14.058993984,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 2138.19923,
+    "prefill_tokens_per_sec": 29.931729046595905,
+    "time_to_first_token_ms": 2138.19923,
+    "mean_inter_token_ms": 97.65363412499998,
+    "p50_inter_token_ms": 97.228359,
+    "p99_inter_token_ms": 105.155503,
+    "num_tokens_generated": 33,
+    "decode_tokens_per_sec": 10.240274301722001,
+    "spec_method": "off"
+  },
+  "training": null
+}

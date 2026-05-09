@@ -3455,6 +3455,59 @@ Verdict:
   keep prep/scan products resident across adjacent stages.
 - Final committed state has no CUDA or Metal source path changes.
 
+### 2026-05-09 A070: Fix Full-Chunk Shader Parity, Reject Default Enable
+
+Problem:
+- Vulkan already had `gdn_full_chunk_forward.comp` embedded and prewarmed, but
+  `VulkanBackend::supports_gdn_full_chunk_forward()` was hard-disabled because
+  it lacked parity coverage.
+- Inspection showed the shader was stale: it did not implement the same
+  prep/scan/state-update contract as the current split path and did not write
+  the updated recurrent state.
+
+Change:
+- Rewrote the Vulkan full-chunk shader to mirror the current split full-chunk
+  path for 64-token chunks:
+  `gdn_chunk_prep`, `gdn_chunk_scan`, then
+  `p_last * state + k_t @ w_weighted`.
+- Added `gdn_full_chunk_forward_matches_split_vulkan_path` to compare fused
+  output and state against the existing split Vulkan path.
+- Kept the fused route opt-in after benchmarking:
+  `KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD=1`.
+
+Evidence:
+- Focused and full Vulkan parity passed.
+- Temporary default-enabled candidate, rollback, and final default all emitted
+  the same first 32 decode token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]`.
+- Default enable was slower on the real latency path:
+  candidate `2216.728457ms` prefill, `97.447407906ms` mean ITL;
+  rollback split path `2138.199230ms` prefill, `97.653634125ms` mean ITL.
+- Final no-env default, after making the fused route opt-in, stayed on the
+  known split path and measured `2248.035943ms` prefill,
+  `94.610662531ms` mean ITL with the same token IDs.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-comparison.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-candidate-correctness.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-rollback-correctness.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a070-gdn-full-chunk-final-default-correctness.log`
+
+Validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_full_chunk_forward_matches_split_vulkan_path -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Verdict:
+- Keep the shader correctness/parity fix and opt-in tuning gate.
+- Reject default enable. The corrected single-workgroup full-chunk shape
+  serializes too much work and loses prefill wall time to the current split
+  prep/scan route despite reducing boundary crossings.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3486,6 +3539,9 @@ Verdict:
 - Do not retry GDN chunk prep/scan transfer batching alone; A069 improved the
   profiled recurrent substage but did not produce a default-safe no-profile
   prefill win.
+- Do not enable the current Vulkan `gdn_full_chunk_forward` shape by default;
+  A070 fixed its parity, but the one-workgroup fused chunk regressed prefill
+  against the split prep/scan/state-update route.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

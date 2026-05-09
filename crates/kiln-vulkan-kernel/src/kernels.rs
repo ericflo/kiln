@@ -5549,6 +5549,10 @@ pub fn dispatch_gdn_full_chunk_forward(
     let dv = dims_v[3];
     let dims_kt = k_t.dims();
     let dk = dims_kt[2];
+    anyhow::ensure!(
+        chunk == 64 && dv <= 128,
+        "gdn_full_chunk_forward supports chunk=64 and dv<=128, got chunk={chunk} dv={dv}"
+    );
 
     // Create input buffers + upload
     let g_buf = VulkanBuffer::create_device_local(device, device_local_mt, g_data.len() as u64)?;
@@ -5606,9 +5610,9 @@ pub fn dispatch_gdn_full_chunk_forward(
         dv as u32,
     ];
 
-    // Workgroup count: total elements / 256
-    let total = batch * heads * chunk * dv;
-    let workgroup_count = ((total + 255) / 256) as u32;
+    // One workgroup owns one (batch, head) chunk. Threads within the workgroup
+    // cooperate over the fixed 64-token chunk and dv lanes.
+    let workgroup_count = (batch * heads) as u32;
 
     // Bindings: g=0, v=1, kkt=2, qkt=3, ks_entry=4, q_s=5, beta=6, k_t=7, state=8, out=9
     let all_handles = vec![
