@@ -20109,3 +20109,55 @@ rank-order checkpoint: `mlp:gate_up_fused` remains first, while
 
 Accepted as a no-source-change profile checkpoint. Use it only for post-E466
 target ordering, not for wall-time or source-decision evidence.
+
+## E468 - Rejected Batch-3 MLP Gate/Up Row-Triple X2 Hidden Loads
+
+### Hypothesis
+
+E467 still ranks `mlp:gate_up_fused` first. E466's accepted batch-3 row-triple
+path still loads each hidden element scalar for each of the three rows. E448
+rejected serial MLP gate/up x2 hidden loads, but that was a batch-1 dedicated
+serial path. Test a narrower batch-3-only x2 hidden-load mode inside the new
+row-triple branch, rolling back only to E466's accepted row-triple mode.
+
+### Candidate
+
+Temporarily added `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_X2=1` and
+temporary `row_pair_mode == 8` for exactly the E466 row-triple batch-3 path.
+Mode `8` loaded each row's hidden input as aligned `bfloat2` pairs and unrolled
+the hidden loop by two while keeping the row-triple `bfloat2` gate/up column
+loads. If disabled, the selector fell back to E466's row-triple mode `7`.
+
+The source change was reverted after evaluation.
+
+### Results
+
+Focused parity passed with the temporary x2 mode:
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture`
+
+Qwen3.5 MLP gate/up synthetic A/B with warmup `5`, iters `20`:
+
+| batch | candidate policy | candidate fused | rollback policy | rollback fused | result |
+| ---: | --- | ---: | --- | ---: | --- |
+| `3` | row_triple_x2 | `1944.575 us` | row_triple | `1780.627 us` | rejected, `9.21%` slower |
+
+Both arms stayed within the existing BF16 tolerance at batch `3`
+(`max_abs_diff=5.960464e-8`, `mean_abs_diff=2.138449e-9`). Other batch rows
+use the same policy in both arms and are treated as same-path timing noise.
+No endpoint A/B was run because the exact affected synthetic batch regressed.
+
+### Artifacts
+
+- `e468_mlp_gate_up_rowtriple_x2_b3_candidate.diff`
+- `e468_mlp_gate_up_rowtriple_x2_b3_fmt_initial.log`
+- `e468_mlp_gate_up_rowtriple_x2_b3_parity.log`
+- `e468_mlp_gate_up_rowtriple_x2_b3_shapes_default_w5_i20.log`
+- `e468_mlp_gate_up_rowtriple_x2_b3_shapes_disabled_w5_i20.log`
+- `e468_mlp_gate_up_rowtriple_x2_b3_fmt_reverted.log`
+- `e468_mlp_gate_up_rowtriple_x2_b3_summary.txt`
+
+### Decision
+
+Rejected and reverted. Keep E466's accepted batch-3 row-triple MLP gate/up
+mode.

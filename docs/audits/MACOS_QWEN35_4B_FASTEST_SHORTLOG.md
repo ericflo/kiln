@@ -2221,3 +2221,11 @@
   only as rank-order evidence. Hottest stages are `mlp:gate_up_fused`
   `395.715 ms`, `mlp:down_proj` `245.139 ms`, `gdn:in_proj` `232.506 ms`, and
   `gdn:out_proj` `100.359 ms`.
+- 2026-05-09 E468: Rejected a batch-3-only MLP gate/up row-triple x2
+  hidden-load mode. The temporary `row_pair_mode == 8` loaded hidden inputs as
+  `bfloat2` pairs inside E466's row-triple branch, with rollback env
+  `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_X2=1`. Focused parity passed, but
+  Qwen3.5 synthetic batch `3` regressed: candidate `row_triple_x2`
+  `1944.575 us` versus E466 rollback `row_triple` `1780.627 us`, `9.21%`
+  slower. No endpoint A/B was run. Source was reverted; keep E466's accepted
+  row-triple path.

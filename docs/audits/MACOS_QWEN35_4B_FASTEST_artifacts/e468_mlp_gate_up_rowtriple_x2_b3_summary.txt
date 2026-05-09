@@ -1,0 +1,18 @@
+E468 rejected Metal MLP gate/up batch-3 row-triple x2 hidden loads
+
+Candidate:
+- Added a temporary KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE_X2=1 rollback guard.
+- Added temporary row_pair_mode 8 for exactly the E466 row-triple batch-3 path.
+- Mode 8 loaded each row's hidden input as bfloat2 pairs and unrolled the hidden loop by two while keeping the row-triple bfloat2 gate/up column loads.
+
+Focused parity:
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture: passed
+
+Qwen3.5 synthetic A/B, warmup=5, iters=20:
+- candidate row_triple_x2 batch3: 1944.575 us
+- rollback E466 row_triple batch3: 1780.627 us
+- candidate was 9.21% slower at the exact affected batch.
+- Batch-3 max_abs_diff was 5.960464e-8 and mean_abs_diff was 2.138449e-9 in both arms.
+
+Decision:
+- Rejected and source reverted. Keep E466's accepted row-triple mode for batch 3.
