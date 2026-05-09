@@ -18030,3 +18030,70 @@ on measured projection kernels rather than wait-window or admission tuning.
 Accepted as a refreshed current-state batching measurement. No runtime change:
 keep the existing zero-wait Metal live batcher behavior and continue targeting
 MLP gate/up/down plus GDN projection kernels before revisiting scheduler waits.
+
+## 2026-05-09 - E440 added Qwen-shape Metal batch GEMV bench
+
+### Purpose
+
+E439 showed current live batching still spends most profiled time in
+projection-heavy stages, but the existing batch transposed-GEMV synthetic bench
+only covered the MLP down-projection shape. Add measurement coverage for the
+other Qwen3.5 batch projection geometries that use the same selected Metal
+transposed-GEMV path.
+
+### Change
+
+- Added ignored Metal bench
+  `bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic`.
+- The bench covers:
+  - MLP down-projection `[B,1,9216] x [9216,2560]`
+  - GDN out-projection `[B,1,4096] x [4096,2560]`
+  - attention output `[B,1,2560] x [2560,2560]`
+  - attention QKV-like `[B,1,2560] x [2560,4096]`
+- It prints the selected batch row policy (`row_pair_tile8_shared` or
+  `row_quad_tile8`) for batch `2/3/4/8`.
+- No runtime kernel or selector behavior changed.
+
+### Validation
+
+- `cargo fmt --check`
+- `KILN_METAL_BATCH_GEMV_SHAPES_BENCH_WARMUP=2 KILN_METAL_BATCH_GEMV_SHAPES_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_BATCH_GEMV_SHAPES_BENCH_WARMUP=5 KILN_METAL_BATCH_GEMV_SHAPES_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic --lib -- --ignored --nocapture`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-model --features cuda` remains locally blocked by
+  missing `nvcc`
+- `git diff --check`
+
+### Results
+
+Longer `warmup=5`, `iters=20` selected-path timings:
+
+| label | batch2 | batch3 | batch4 | batch8 |
+| --- | ---: | ---: | ---: | ---: |
+| mlp_down_proj | `1071.554 us` | `2024.062 us` | `2043.938 us` | `2897.725 us` |
+| gdn_out_proj | `495.569 us` | `903.560 us` | `954.365 us` | `1317.763 us` |
+| attn_output | `334.760 us` | `607.650 us` | `552.200 us` | `996.023 us` |
+| attn_qkv_like | `418.392 us` | `811.804 us` | `960.577 us` | `1235.338 us` |
+
+Policy selection was `row_pair_tile8_shared` for batch `2/3/4` and
+`row_quad_tile8` for batch `8` in all four shapes. All rows matched broadcast
+matmul exactly in the logged run (`max_abs_diff=0`, `mean_abs_diff=0`).
+
+### Artifacts
+
+- `e440_batch_gemv_shapes_short.log`
+- `e440_batch_gemv_shapes_w5_i20.log`
+- `e440_batch_gemv_shapes_summary.md`
+- `e440_batch_gemv_shapes_fmt_check.log`
+- `e440_batch_gemv_shapes_check_metal.log`
+- `e440_batch_gemv_shapes_check_vulkan.log`
+- `e440_batch_gemv_shapes_check_cuda.log`
+- `e440_batch_gemv_shapes_git_diff_check.log`
+
+### Decision
+
+Accepted as measurement tooling only. The shape matrix confirms that the
+largest generic batch-GEMV cost is still MLP down-projection; GDN out and
+attention projections are smaller. Use this bench for future selector or kernel
+A/Bs instead of extrapolating from the down-projection-only synthetic.

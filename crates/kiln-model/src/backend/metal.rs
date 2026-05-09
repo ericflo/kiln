@@ -13183,6 +13183,7 @@ mod tests {
     const QWEN35_HIDDEN: usize = 2560;
     const QWEN35_INTERMEDIATE: usize = 9216;
     const QWEN35_ATTN_QKV_OUT: usize = 4096;
+    const QWEN35_GDN_VALUE_OUT: usize = 4096;
 
     #[test]
     fn test_precompile_custom_kernels_smoke() -> Result<()> {
@@ -14483,6 +14484,117 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    #[ignore = "synthetic Metal microbench; run explicitly with --ignored --nocapture"]
+    fn bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = env_usize("KILN_METAL_BATCH_GEMV_SHAPES_BENCH_WARMUP", 5);
+        let iters = env_usize("KILN_METAL_BATCH_GEMV_SHAPES_BENCH_ITERS", 20);
+
+        bench_transposed_coop_decode_batch_shape_case(
+            &device,
+            "mlp_down_proj",
+            QWEN35_INTERMEDIATE,
+            QWEN35_HIDDEN,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_decode_batch_shape_case(
+            &device,
+            "gdn_out_proj",
+            QWEN35_GDN_VALUE_OUT,
+            QWEN35_HIDDEN,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_decode_batch_shape_case(
+            &device,
+            "attn_output",
+            QWEN35_HIDDEN,
+            QWEN35_HIDDEN,
+            warmup,
+            iters,
+        )?;
+        bench_transposed_coop_decode_batch_shape_case(
+            &device,
+            "attn_qkv_like",
+            QWEN35_HIDDEN,
+            QWEN35_ATTN_QKV_OUT,
+            warmup,
+            iters,
+        )?;
+
+        Ok(())
+    }
+
+    fn bench_transposed_coop_decode_batch_shape_case(
+        device: &Device,
+        label: &str,
+        input_dim: usize,
+        output_dim: usize,
+        warmup: usize,
+        iters: usize,
+    ) -> Result<()> {
+        let weight_t =
+            patterned_bf16_2d(input_dim, output_dim, device, 37, 0.0009765625)?.contiguous()?;
+        device.synchronize()?;
+
+        for batch in [2usize, 3, 4, 8] {
+            let x = patterned_bf16_decode_batch(batch, input_dim, device)?.contiguous()?;
+            device.synchronize()?;
+            assert!(metal_transposed_coop_gemv_decode_batch_supports(
+                &x, &weight_t
+            ));
+
+            let reference = x.broadcast_matmul(&weight_t)?;
+            let fused = metal_transposed_coop_gemv_bf16(&x, &weight_t)?;
+            device.synchronize()?;
+            let max = max_abs_diff(&reference, &fused)?;
+            let mean = mean_abs_diff(&reference, &fused)?;
+            assert!(
+                max < 1.5e-1,
+                "Qwen3.5 batch transposed coop GEMV label={label} batch={batch} max_abs_diff={max:e} exceeds tolerance"
+            );
+            assert!(
+                mean < 2.5e-2,
+                "Qwen3.5 batch transposed coop GEMV label={label} batch={batch} mean_abs_diff={mean:e} exceeds tolerance"
+            );
+
+            let fused_us = bench_metal_tensor_op(device, warmup, iters, || {
+                metal_transposed_coop_gemv_bf16(&x, &weight_t)
+                    .context("bench fused batch transposed coop GEMV Qwen shape")
+            })?;
+            let policy = metal_transposed_coop_decode_batch_policy(batch);
+
+            eprintln!(
+                "synthetic Metal Qwen3.5 transposed GEMV decode batch shape BF16: label={label} \
+                 batch={batch} policy={policy} x=[{batch},1,{input_dim}] \
+                 weight_t=[{input_dim},{output_dim}] warmup={warmup} iters={iters} \
+                 fused_us={fused_us:.3} max_abs_diff={max:.6e} mean_abs_diff={mean:.6e}",
+            );
+        }
+
+        Ok(())
+    }
+
+    fn metal_transposed_coop_decode_batch_policy(batch: usize) -> &'static str {
+        if batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled() {
+            if batch >= 8 && !metal_transposed_coop_gemv_row_quad_disabled() {
+                if !metal_transposed_coop_gemv_row_quad_tile8_disabled() {
+                    "row_quad_tile8"
+                } else {
+                    "row_quad_tile4_shared"
+                }
+            } else {
+                "row_pair_tile8_shared"
+            }
+        } else {
+            "rowwise_tile8_shared"
+        }
     }
 
     #[test]

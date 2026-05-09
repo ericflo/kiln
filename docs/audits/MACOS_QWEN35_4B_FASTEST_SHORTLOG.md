@@ -1931,3 +1931,16 @@
   time was not a stable win over disabled control. Keep zero-wait batching as
   is; do not tune waits from this sample, and keep focusing on MLP/GDN
   projection kernels.
+- 2026-05-09 E440: Accepted Qwen-shape batch transposed-GEMV measurement
+  tooling. Added ignored Metal bench
+  `bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic` for MLP
+  down-projection, GDN out-projection, attention output, and attention QKV-like
+  geometries across batch `2/3/4/8`, printing the selected row policy. No
+  runtime behavior changed. Longer `warmup=5`, `iters=20` timings were:
+  MLP down `1071.554/2024.062/2043.938/2897.725 us`, GDN out
+  `495.569/903.560/954.365/1317.763 us`, attention output
+  `334.760/607.650/552.200/996.023 us`, and attention QKV-like
+  `418.392/811.804/960.577/1235.338 us`. Batch `2/3/4` selected
+  `row_pair_tile8_shared`; batch `8` selected `row_quad_tile8`; all rows
+  matched broadcast matmul exactly. Metal/Vulkan checks and fmt passed; CUDA
+  remains locally blocked by missing `nvcc`.
