@@ -1348,3 +1348,14 @@
   MLP `down_proj` `302.606 ms`, GDN `in_proj` `199.478 ms`, and GDN
   `out_proj` `105.149 ms`. No source change; continue treating MLP gate/up
   and down-projection as the primary Metal decode targets.
+- 2026-05-09 E371: Rechecked the Metal decode-batcher wait knob after E369 on
+  the current four-request varied-prompt streaming shape, greedy `max_tokens=8`.
+  Wait `0/50/100/200/300us` measured
+  `6.639580/5.927269/5.893206/5.946073/6.012905s`. Zero wait produced `14`
+  worker batches and max batch `3`; all nonzero waits produced `8` worker
+  batches and max batch `4`. `100us` is now the best explicit tuning point for
+  this four-request Metal shape, `11.2%` faster than zero wait, but no default
+  changed: the wait default is still global rather than backend-specific, and
+  E354 showed fixed waits can regress eight concurrent streams despite fuller
+  batches. Next default-policy work needs a post-E369 eight-way check or an
+  adaptive admission rule.

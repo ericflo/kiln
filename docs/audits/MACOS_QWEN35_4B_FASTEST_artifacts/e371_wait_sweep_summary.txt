@@ -1,0 +1,32 @@
+E371 decode-batch wait sweep after E369 GDN in-proj row-pair
+
+Shape:
+- Current Metal release server after E370.
+- Qwen3.5-4B, four concurrent varied streaming chat requests.
+- Greedy decoding, max_tokens=8, temperature=0.0.
+- Mixed sequence-length admission enabled by Metal default.
+- One fresh prewarmed server per KILN_DECODE_BATCH_WAIT_US value.
+
+Results:
+
+wait_us  wall_s     generated  jobs  worker_batches  rows  max_batch
+0        6.639580   32         28    14              28    3
+50       5.927269   32         28    8               28    4
+100      5.893206   32         28    8               28    4
+200      5.946073   32         28    8               28    4
+300      6.012905   32         28    8               28    4
+
+Relative to zero wait:
+- 50us: 10.7282% faster.
+- 100us: 11.2413% faster.
+- 200us: 10.4450% faster.
+- 300us: 9.4385% faster.
+
+Decision:
+- Treat 100us as the best explicit tuning point for this current four-request
+  Metal shape.
+- Do not change the default from zero wait on this evidence alone. The wait
+  default is not backend-specific in DecodeBatcherConfig, and E354 previously
+  showed wait-based admission can regress eight concurrent streams even when it
+  forms fuller batches. A post-E369 eight-way check is required before making a
+  default or adaptive-policy change.

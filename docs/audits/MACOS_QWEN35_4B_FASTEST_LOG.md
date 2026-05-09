@@ -11790,7 +11790,7 @@ the E356 Metal default, and a fresh prewarmed release server per wait value.
 ### Results
 
 Four concurrent varied-prompt streaming chat requests, greedy `max_tokens=8`,
-`32` generated tokens each run:
+`32` total generated tokens each run:
 
 - `0us`: wall `5.733101s`, `28` submitted jobs, `14` worker batches, `28` rows,
   max batch `3`
@@ -12876,3 +12876,106 @@ bucket well below the two dominant MLP decode stages. MLP `gate_up_fused` and
 Accepted as target-selection evidence. No source change. Continue focusing
 Metal work on MLP gate/up and down-projection first, with GDN out-projection
 and full-attention QKV projection as smaller secondary targets.
+
+## 2026-05-09 E371 - Recheck decode wait after GDN in-proj row-pair
+
+### Goal
+
+Rerun the Metal live decode-batcher admission-wait sweep on current code after
+E369. E357 rejected a default wait change after E356 because the best point was
+only narrowly ahead of zero wait and prior E354 eight-way data showed fixed
+admission waits can lose despite forming fuller batches. E369 made batch `4+`
+GDN in-projection materially cheaper, so the four-request max-batch-4 shape
+needed a fresh measurement before deciding whether the wait knob deserved
+another source change.
+
+### Change
+
+No source change. Ran a same-binary endpoint sweep with
+`KILN_DECODE_BATCH_WAIT_US=0/50/100/200/300`, mixed-seq admission enabled by the
+Metal default, and a fresh prewarmed release server per wait value.
+
+### Validation
+
+- Reused the current release `target/release/kiln` binary after E370.
+- Each server reported backend `metal`, `max_batch=8`, `mixed_seq_lens=true`,
+  and the expected `wait_us`.
+- Each measured run waited for the `inference_prewarm_complete` health check.
+- Each run returned `200` for all four streaming chat requests.
+- Metrics were captured after each run.
+
+### Results
+
+Four concurrent varied-prompt streaming chat requests, greedy `max_tokens=8`,
+`32` generated tokens each run:
+
+- `0us`: wall `6.639580s`, `28` submitted jobs, `14` worker batches, `28` rows,
+  max batch `3`
+- `50us`: wall `5.927269s`, `28` submitted jobs, `8` worker batches, `28` rows,
+  max batch `4`
+- `100us`: wall `5.893206s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `200us`: wall `5.946073s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `300us`: wall `6.012905s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+
+All nonzero waits formed the desired max-batch-4 shape. The `100us` wait was
+the fastest point and improved wall time by `11.2%` versus zero wait on this
+current four-request workload; `50us`, `200us`, and `300us` also improved by
+`10.7%`, `10.4%`, and `9.4%` respectively.
+
+### Artifact
+
+- `e371_wait_sweep_summary.json`
+- `e371_wait_sweep_summary.txt`
+- `e371_wait_sweep_wait0_server.log`
+- `e371_wait_sweep_wait0_health.json`
+- `e371_wait_sweep_wait0_metrics.prom`
+- `e371_wait_sweep_wait0_time.json`
+- `e371_wait_sweep_wait0_response_0.sse`
+- `e371_wait_sweep_wait0_response_1.sse`
+- `e371_wait_sweep_wait0_response_2.sse`
+- `e371_wait_sweep_wait0_response_3.sse`
+- `e371_wait_sweep_wait50_server.log`
+- `e371_wait_sweep_wait50_health.json`
+- `e371_wait_sweep_wait50_metrics.prom`
+- `e371_wait_sweep_wait50_time.json`
+- `e371_wait_sweep_wait50_response_0.sse`
+- `e371_wait_sweep_wait50_response_1.sse`
+- `e371_wait_sweep_wait50_response_2.sse`
+- `e371_wait_sweep_wait50_response_3.sse`
+- `e371_wait_sweep_wait100_server.log`
+- `e371_wait_sweep_wait100_health.json`
+- `e371_wait_sweep_wait100_metrics.prom`
+- `e371_wait_sweep_wait100_time.json`
+- `e371_wait_sweep_wait100_response_0.sse`
+- `e371_wait_sweep_wait100_response_1.sse`
+- `e371_wait_sweep_wait100_response_2.sse`
+- `e371_wait_sweep_wait100_response_3.sse`
+- `e371_wait_sweep_wait200_server.log`
+- `e371_wait_sweep_wait200_health.json`
+- `e371_wait_sweep_wait200_metrics.prom`
+- `e371_wait_sweep_wait200_time.json`
+- `e371_wait_sweep_wait200_response_0.sse`
+- `e371_wait_sweep_wait200_response_1.sse`
+- `e371_wait_sweep_wait200_response_2.sse`
+- `e371_wait_sweep_wait200_response_3.sse`
+- `e371_wait_sweep_wait300_server.log`
+- `e371_wait_sweep_wait300_health.json`
+- `e371_wait_sweep_wait300_metrics.prom`
+- `e371_wait_sweep_wait300_time.json`
+- `e371_wait_sweep_wait300_response_0.sse`
+- `e371_wait_sweep_wait300_response_1.sse`
+- `e371_wait_sweep_wait300_response_2.sse`
+- `e371_wait_sweep_wait300_response_3.sse`
+
+### Decision
+
+Accepted as updated configuration evidence for the current Metal four-request
+shape: `KILN_DECODE_BATCH_WAIT_US=100` is now the best measured explicit
+tuning point after E369. No default change yet. The wait default is currently
+global in `DecodeBatcherConfig`, and E354 showed fixed wait admission can
+regress eight concurrent streams even while forming fuller batches. Before a
+default or adaptive-policy change, rerun the larger-concurrency check on the
+post-E369 code.

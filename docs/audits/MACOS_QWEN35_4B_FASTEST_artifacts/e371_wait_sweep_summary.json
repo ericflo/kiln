@@ -1,0 +1,22 @@
+[
+  {
+    "request_elapsed_s": 6.63957954198122,
+    "wait_us": 0
+  },
+  {
+    "request_elapsed_s": 5.927269125008024,
+    "wait_us": 50
+  },
+  {
+    "request_elapsed_s": 5.893206167034805,
+    "wait_us": 100
+  },
+  {
+    "request_elapsed_s": 5.946073374943808,
+    "wait_us": 200
+  },
+  {
+    "request_elapsed_s": 6.012904749950394,
+    "wait_us": 300
+  }
+]

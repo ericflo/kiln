@@ -1,0 +1,21 @@
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":" osiąg"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"reasoning_content":"!"}}]}
+
+data: {"id":"chatcmpl-40c1eb39-a78a-4adc-bffe-ffb946866687","object":"chat.completion.chunk","created":1778318099,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
