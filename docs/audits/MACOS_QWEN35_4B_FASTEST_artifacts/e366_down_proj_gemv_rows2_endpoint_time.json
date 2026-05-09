@@ -1,0 +1,20 @@
+{
+  "concurrency": 4,
+  "decode_batch_wait_us": 0,
+  "elapsed_seconds": 6.620583709096536,
+  "errors": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "max_tokens": 8,
+  "port": 8475,
+  "statuses": [
+    200,
+    200,
+    200,
+    200
+  ],
+  "transposed_gemv_row_pair_disabled": false
+}

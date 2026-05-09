@@ -47,6 +47,8 @@ const DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR: &str =
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV: &str = "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV";
 const DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8: &str =
     "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8";
+const DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR: &str =
+    "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR";
 const METAL_TRANSPOSED_COOP_GEMV_TILE4_COLS: usize = 4;
 const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
 const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
@@ -919,6 +921,10 @@ pub(crate) fn metal_transposed_coop_gemv_disabled() -> bool {
 
 fn metal_transposed_coop_gemv_tile8_disabled() -> bool {
     env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8)
+}
+
+fn metal_transposed_coop_gemv_row_pair_disabled() -> bool {
+    env_truthy(DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR)
 }
 
 fn metal_transposed_coop_gemv_default_tile() -> MetalTransposedCoopGemvTile {
@@ -2636,11 +2642,11 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     device bfloat* out [[buffer(2)]],
     constant uint& input_dim [[buffer(3)]],
     constant uint& output_dim [[buffer(4)]],
+    constant uint& row_pair_mode [[buffer(5)]],
     uint2 tgroup [[threadgroup_position_in_grid]],
     uint simd_group [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]
 ) {
-    const uint batch_idx = tgroup.y;
     const uint col_base = (tgroup.x * 4 + simd_group) * 8;
     if (col_base >= output_dim) {
         return;
@@ -2656,45 +2662,170 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     float acc7 = 0.0f;
     const bool full_tile = col_base + 7 < output_dim;
     const bool vector_load_safe = full_tile && (output_dim % 4 == 0);
+    const uint batch_idx = row_pair_mode == 0 ? tgroup.y : tgroup.y * 2;
     const uint x_base = batch_idx * input_dim;
 
+    if (row_pair_mode == 0) {
+        for (uint row = lane; row < input_dim; row += 32) {
+            const float xv = static_cast<float>(x[x_base + row]);
+            const uint weight_base = row * output_dim + col_base;
+            if (vector_load_safe) {
+                device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
+                const bfloat4 w0 = w4_ptr[0];
+                const bfloat4 w1 = w4_ptr[1];
+                acc0 += xv * static_cast<float>(w0[0]);
+                acc1 += xv * static_cast<float>(w0[1]);
+                acc2 += xv * static_cast<float>(w0[2]);
+                acc3 += xv * static_cast<float>(w0[3]);
+                acc4 += xv * static_cast<float>(w1[0]);
+                acc5 += xv * static_cast<float>(w1[1]);
+                acc6 += xv * static_cast<float>(w1[2]);
+                acc7 += xv * static_cast<float>(w1[3]);
+            } else {
+                acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+                if (col_base + 1 < output_dim) {
+                    acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+                }
+                if (col_base + 2 < output_dim) {
+                    acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+                }
+                if (col_base + 3 < output_dim) {
+                    acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+                }
+                if (col_base + 4 < output_dim) {
+                    acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+                }
+                if (col_base + 5 < output_dim) {
+                    acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+                }
+                if (col_base + 6 < output_dim) {
+                    acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+                }
+                if (col_base + 7 < output_dim) {
+                    acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+                }
+            }
+        }
+
+        acc0 = simd_sum(acc0);
+        acc1 = simd_sum(acc1);
+        acc2 = simd_sum(acc2);
+        acc3 = simd_sum(acc3);
+        acc4 = simd_sum(acc4);
+        acc5 = simd_sum(acc5);
+        acc6 = simd_sum(acc6);
+        acc7 = simd_sum(acc7);
+
+        if (lane == 0) {
+            const uint out_base = batch_idx * output_dim;
+            out[out_base + col_base + 0] = static_cast<bfloat>(acc0);
+            if (col_base + 1 < output_dim) {
+                out[out_base + col_base + 1] = static_cast<bfloat>(acc1);
+            }
+            if (col_base + 2 < output_dim) {
+                out[out_base + col_base + 2] = static_cast<bfloat>(acc2);
+            }
+            if (col_base + 3 < output_dim) {
+                out[out_base + col_base + 3] = static_cast<bfloat>(acc3);
+            }
+            if (col_base + 4 < output_dim) {
+                out[out_base + col_base + 4] = static_cast<bfloat>(acc4);
+            }
+            if (col_base + 5 < output_dim) {
+                out[out_base + col_base + 5] = static_cast<bfloat>(acc5);
+            }
+            if (col_base + 6 < output_dim) {
+                out[out_base + col_base + 6] = static_cast<bfloat>(acc6);
+            }
+            if (col_base + 7 < output_dim) {
+                out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
+            }
+        }
+        return;
+    }
+
+    const uint batch1 = batch_idx + 1;
+    const bool has_batch1 = batch1 < row_pair_mode;
+    const uint x_base1 = batch1 * input_dim;
+    float acc10 = 0.0f;
+    float acc11 = 0.0f;
+    float acc12 = 0.0f;
+    float acc13 = 0.0f;
+    float acc14 = 0.0f;
+    float acc15 = 0.0f;
+    float acc16 = 0.0f;
+    float acc17 = 0.0f;
+
     for (uint row = lane; row < input_dim; row += 32) {
-        const float xv = static_cast<float>(x[x_base + row]);
+        const float xv0 = static_cast<float>(x[x_base + row]);
+        const float xv1 = has_batch1 ? static_cast<float>(x[x_base1 + row]) : 0.0f;
         const uint weight_base = row * output_dim + col_base;
         if (vector_load_safe) {
             device const bfloat4* w4_ptr = (device const bfloat4*)(weight_t + weight_base);
             const bfloat4 w0 = w4_ptr[0];
             const bfloat4 w1 = w4_ptr[1];
-            acc0 += xv * static_cast<float>(w0[0]);
-            acc1 += xv * static_cast<float>(w0[1]);
-            acc2 += xv * static_cast<float>(w0[2]);
-            acc3 += xv * static_cast<float>(w0[3]);
-            acc4 += xv * static_cast<float>(w1[0]);
-            acc5 += xv * static_cast<float>(w1[1]);
-            acc6 += xv * static_cast<float>(w1[2]);
-            acc7 += xv * static_cast<float>(w1[3]);
+            const float w00 = static_cast<float>(w0[0]);
+            const float w01 = static_cast<float>(w0[1]);
+            const float w02 = static_cast<float>(w0[2]);
+            const float w03 = static_cast<float>(w0[3]);
+            const float w04 = static_cast<float>(w1[0]);
+            const float w05 = static_cast<float>(w1[1]);
+            const float w06 = static_cast<float>(w1[2]);
+            const float w07 = static_cast<float>(w1[3]);
+            acc0 += xv0 * w00;
+            acc1 += xv0 * w01;
+            acc2 += xv0 * w02;
+            acc3 += xv0 * w03;
+            acc4 += xv0 * w04;
+            acc5 += xv0 * w05;
+            acc6 += xv0 * w06;
+            acc7 += xv0 * w07;
+            acc10 += xv1 * w00;
+            acc11 += xv1 * w01;
+            acc12 += xv1 * w02;
+            acc13 += xv1 * w03;
+            acc14 += xv1 * w04;
+            acc15 += xv1 * w05;
+            acc16 += xv1 * w06;
+            acc17 += xv1 * w07;
         } else {
-            acc0 += xv * static_cast<float>(weight_t[weight_base + 0]);
+            const float w00 = static_cast<float>(weight_t[weight_base + 0]);
+            acc0 += xv0 * w00;
+            acc10 += xv1 * w00;
             if (col_base + 1 < output_dim) {
-                acc1 += xv * static_cast<float>(weight_t[weight_base + 1]);
+                const float w01 = static_cast<float>(weight_t[weight_base + 1]);
+                acc1 += xv0 * w01;
+                acc11 += xv1 * w01;
             }
             if (col_base + 2 < output_dim) {
-                acc2 += xv * static_cast<float>(weight_t[weight_base + 2]);
+                const float w02 = static_cast<float>(weight_t[weight_base + 2]);
+                acc2 += xv0 * w02;
+                acc12 += xv1 * w02;
             }
             if (col_base + 3 < output_dim) {
-                acc3 += xv * static_cast<float>(weight_t[weight_base + 3]);
+                const float w03 = static_cast<float>(weight_t[weight_base + 3]);
+                acc3 += xv0 * w03;
+                acc13 += xv1 * w03;
             }
             if (col_base + 4 < output_dim) {
-                acc4 += xv * static_cast<float>(weight_t[weight_base + 4]);
+                const float w04 = static_cast<float>(weight_t[weight_base + 4]);
+                acc4 += xv0 * w04;
+                acc14 += xv1 * w04;
             }
             if (col_base + 5 < output_dim) {
-                acc5 += xv * static_cast<float>(weight_t[weight_base + 5]);
+                const float w05 = static_cast<float>(weight_t[weight_base + 5]);
+                acc5 += xv0 * w05;
+                acc15 += xv1 * w05;
             }
             if (col_base + 6 < output_dim) {
-                acc6 += xv * static_cast<float>(weight_t[weight_base + 6]);
+                const float w06 = static_cast<float>(weight_t[weight_base + 6]);
+                acc6 += xv0 * w06;
+                acc16 += xv1 * w06;
             }
             if (col_base + 7 < output_dim) {
-                acc7 += xv * static_cast<float>(weight_t[weight_base + 7]);
+                const float w07 = static_cast<float>(weight_t[weight_base + 7]);
+                acc7 += xv0 * w07;
+                acc17 += xv1 * w07;
             }
         }
     }
@@ -2707,6 +2838,14 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
     acc5 = simd_sum(acc5);
     acc6 = simd_sum(acc6);
     acc7 = simd_sum(acc7);
+    acc10 = simd_sum(acc10);
+    acc11 = simd_sum(acc11);
+    acc12 = simd_sum(acc12);
+    acc13 = simd_sum(acc13);
+    acc14 = simd_sum(acc14);
+    acc15 = simd_sum(acc15);
+    acc16 = simd_sum(acc16);
+    acc17 = simd_sum(acc17);
 
     if (lane == 0) {
         const uint out_base = batch_idx * output_dim;
@@ -2731,6 +2870,31 @@ kernel void kiln_transposed_coop_gemv8_batch_bf16(
         }
         if (col_base + 7 < output_dim) {
             out[out_base + col_base + 7] = static_cast<bfloat>(acc7);
+        }
+        if (has_batch1) {
+            const uint out_base1 = batch1 * output_dim;
+            out[out_base1 + col_base + 0] = static_cast<bfloat>(acc10);
+            if (col_base + 1 < output_dim) {
+                out[out_base1 + col_base + 1] = static_cast<bfloat>(acc11);
+            }
+            if (col_base + 2 < output_dim) {
+                out[out_base1 + col_base + 2] = static_cast<bfloat>(acc12);
+            }
+            if (col_base + 3 < output_dim) {
+                out[out_base1 + col_base + 3] = static_cast<bfloat>(acc13);
+            }
+            if (col_base + 4 < output_dim) {
+                out[out_base1 + col_base + 4] = static_cast<bfloat>(acc14);
+            }
+            if (col_base + 5 < output_dim) {
+                out[out_base1 + col_base + 5] = static_cast<bfloat>(acc15);
+            }
+            if (col_base + 6 < output_dim) {
+                out[out_base1 + col_base + 6] = static_cast<bfloat>(acc16);
+            }
+            if (col_base + 7 < output_dim) {
+                out[out_base1 + col_base + 7] = static_cast<bfloat>(acc17);
+            }
         }
     }
 }
@@ -5060,6 +5224,12 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
     );
     let (batch, _, input_dim) = x.dims3()?;
     let (_, output_dim) = weight_t.dims2()?;
+    let row_pair_enabled = batch > 1 && !metal_transposed_coop_gemv_row_pair_disabled();
+    let row_groups = if row_pair_enabled {
+        batch.div_ceil(2)
+    } else {
+        batch
+    };
 
     // The kernel writes every batch/output channel exactly once.
     let out = unsafe { Tensor::empty((batch, 1usize, output_dim), DType::BF16, x.device())? };
@@ -5102,14 +5272,16 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
 
         let input_dim_u32 = input_dim as u32;
         let output_dim_u32 = output_dim as u32;
+        let row_pair_mode_u32 = if row_pair_enabled { batch as u32 } else { 0 };
         encoder.set_bytes(3, &input_dim_u32);
         encoder.set_bytes(4, &output_dim_u32);
+        encoder.set_bytes(5, &row_pair_mode_u32);
 
         let cols_per_threadgroup =
             METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
         let threadgroups_per_grid = objc2_metal::MTLSize {
             width: output_dim.div_ceil(cols_per_threadgroup),
-            height: batch,
+            height: row_groups,
             depth: 1,
         };
         let threads_per_threadgroup = objc2_metal::MTLSize {
@@ -11211,7 +11383,7 @@ mod tests {
         let weight_t = patterned_bf16_2d(input_dim, output_dim, &device, 37, 0.0009765625)?;
         device.synchronize()?;
 
-        for batch in [2usize, 4, 8] {
+        for batch in [2usize, 3, 4, 8] {
             let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
             device.synchronize()?;
             assert!(metal_transposed_coop_gemv_decode_batch_supports(

@@ -12449,3 +12449,94 @@ decode.
 
 Accepted as target-selection evidence. No source change; keep focusing Metal
 work on MLP decode projection stages.
+
+## 2026-05-09 E366 - Accepted row-pair batched transposed GEMV
+
+### Goal
+
+E365 ranked `mlp:down_proj` as the second-largest live Metal decode stage.
+That projection routes through the generic Metal batched transposed cooperative
+GEMV kernel. The existing batch kernel runs one decode row per grid-Y entry,
+which reloads the same transposed weight tile for each row. This experiment
+tested reusing each weight load across two adjacent decode rows.
+
+### Change
+
+- Added `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1` as a kill switch.
+- Added row-pair mode to `kiln_transposed_coop_gemv8_batch_bf16`.
+- When enabled, the host dispatches `ceil(batch / 2)` grid-Y groups and passes
+  the physical batch size to the kernel; the kernel computes row `2y` and
+  `2y+1` for the same output tile.
+- When disabled, the kernel uses the old one-row path in the same binary.
+- Extended the Qwen-shaped batch GEMV bench to include batch `3`, matching the
+  recent endpoint max-batch shape.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv --lib -- --nocapture`
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1 KILN_METAL_BATCH_GEMV_BENCH_WARMUP=2 KILN_METAL_BATCH_GEMV_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_BATCH_GEMV_BENCH_WARMUP=2 KILN_METAL_BATCH_GEMV_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Same-binary four-request streaming endpoint probe with row-pair disabled and
+  enabled, greedy `max_tokens=8`
+
+### Results
+
+Transposed GEMV parity passed for single-row tile selection, single-row output,
+and batched decode output.
+
+Qwen-shaped BF16 transposed GEMV synthetic bench,
+`[B,1,9216] x [9216,2560]`, same binary, lower is better:
+
+- batch `2`: disabled `2278.698 us`, row-pair `1333.661 us`
+- batch `3`: disabled `2786.995 us`, row-pair `2068.260 us`
+- batch `4`: disabled `3750.932 us`, row-pair `2125.349 us`
+- batch `8`: disabled `7129.385 us`, row-pair `4016.448 us`
+
+The row-pair path improved batch `2/3/4/8` by `41.5%`, `25.8%`, `43.3%`, and
+`43.7%`. Max and mean diffs were `0` in this bench.
+
+Same-binary endpoint probe, four varied prompts, greedy `max_tokens=8`,
+zero decode-batch wait:
+
+- row-pair disabled: wall `6.769653s`, generated `32` tokens, submitted `28`
+  jobs, `14` worker batches, `28` rows, max batch `3`
+- row-pair enabled: wall `6.620584s`, generated `32` tokens, submitted `28`
+  jobs, `14` worker batches, `28` rows, max batch `3`
+
+The endpoint probe improved by `2.2%` with the same batching shape.
+
+### Artifact
+
+- `e366_down_proj_gemv_rows2_parity_all.log`
+- `e366_down_proj_gemv_rows2_disabled_baseline.log`
+- `e366_down_proj_gemv_rows2_candidate.log`
+- `e366_cargo_check_metal.log`
+- `e366_cargo_check_vulkan.log`
+- `e366_release_build_metal.log`
+- `e366_cargo_fmt_check.log`
+- `e366_git_diff_check.log`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_server.log`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_health.json`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_metrics.prom`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_time.json`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_response_0.sse`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_response_1.sse`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_response_2.sse`
+- `e366_down_proj_gemv_rows2_endpoint_disabled_response_3.sse`
+- `e366_down_proj_gemv_rows2_endpoint_server.log`
+- `e366_down_proj_gemv_rows2_endpoint_health.json`
+- `e366_down_proj_gemv_rows2_endpoint_metrics.prom`
+- `e366_down_proj_gemv_rows2_endpoint_time.json`
+- `e366_down_proj_gemv_rows2_endpoint_response_0.sse`
+- `e366_down_proj_gemv_rows2_endpoint_response_1.sse`
+- `e366_down_proj_gemv_rows2_endpoint_response_2.sse`
+- `e366_down_proj_gemv_rows2_endpoint_response_3.sse`
+
+### Decision
+
+Accepted. Keep row-pair mode enabled by default for batched Metal transposed
+cooperative GEMV, with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1` as
+the rollback knob.

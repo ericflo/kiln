@@ -1293,3 +1293,16 @@
   `gate_up_fused` `434.457 ms`, MLP `down_proj` `314.999 ms`, GDN `in_proj`
   `242.788 ms`, and GDN `out_proj` `124.879 ms`. No source change; continue
   treating MLP gate/up and down-proj as the dominant Metal decode targets.
+- 2026-05-09 E366: Accepted row-pair mode for the Metal batched transposed
+  cooperative GEMV path, targeting MLP down-projection and other batched decode
+  projections. The old one-row-per-grid-Y path remains available via
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1`; default row-pair
+  computes two adjacent decode rows per cooperative tile and reuses each
+  weight load across both rows. Same-binary Qwen-shaped `[B,1,9216] x
+  [9216,2560]` bench improved fused times from
+  `2278.698/2786.995/3750.932/7129.385 us` to
+  `1333.661/2068.260/2125.349/4016.448 us` at batch `2/3/4/8`
+  (`41.5%/25.8%/43.3%/43.7%`). Transposed GEMV parity, Metal/Vulkan checks,
+  and release build passed. Same-binary four-request endpoint improved
+  disabled/enabled `6.769653/6.620584s` with `32` generated tokens, `28`
+  jobs, `14` batches, and max batch `3`.
