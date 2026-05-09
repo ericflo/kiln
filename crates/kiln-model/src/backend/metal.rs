@@ -6861,7 +6861,7 @@ pub(crate) fn metal_lora_add_decode_supports(
         && output_dim > 0
         && input_dim >= 1024
         && output_dim >= 1024
-        && rank >= 4
+        && rank > 0
         && a_input_dim == input_dim
         && b_output_dim == output_dim
         && b_rank == rank
@@ -15780,7 +15780,7 @@ mod tests {
 
         let input_dim = 1024usize;
         let output_dim = 1152usize;
-        for rank in [4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
             for batch in [1usize, 2usize, 4usize] {
                 let base = patterned_bf16_decode_batch(batch, output_dim, &device)?;
                 let x = patterned_bf16_decode_batch(batch, input_dim, &device)?;
@@ -15819,7 +15819,7 @@ mod tests {
         let warmup = env_usize("KILN_METAL_LORA_DELTA_BENCH_WARMUP", 5);
         let iters = env_usize("KILN_METAL_LORA_DELTA_BENCH_ITERS", 20);
 
-        for rank in [4usize, 8usize, 16usize] {
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
             for batch in [1usize, 4usize] {
                 bench_lora_decode_add_case(
                     &device,

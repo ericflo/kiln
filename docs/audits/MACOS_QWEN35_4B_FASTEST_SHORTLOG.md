@@ -1806,3 +1806,13 @@
   `1.920 -> 1.071 ms` and batch4 down `152.766 -> 2.406 ms`. Rank-4/8/16
   parity, benches, Metal/Vulkan/server Metal checks, fmt, and diff check passed;
   CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E426: Accepted lowering the Metal LoRA delta/add gate from
+  `rank >= 4` to `rank > 0`, so every positive-rank Qwen-class BF16 decode
+  adapter can use the helper. Rank-1/2 isolated delta/add was exact and faster
+  than fallback: rank1 serial gate/up `551.819 -> 141.148 us`, rank1 serial
+  down `865.110 -> 202.965 us`, rank2 serial gate/up `487.188 -> 135.438 us`,
+  and rank2 serial down `711.212 -> 153.554 us`. Full projection also improved
+  versus the old fallback adapter path, e.g. rank1 serial down
+  `1.837 -> 1.110 ms` and rank2 serial down `1.878 -> 1.115 ms`. Rank
+  `1/2/4/8/16` parity, benches, Metal/Vulkan/server Metal checks, fmt, and diff
+  check passed; CUDA remains locally blocked by missing `nvcc`.

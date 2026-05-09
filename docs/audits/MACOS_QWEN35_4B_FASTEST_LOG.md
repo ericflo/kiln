@@ -16985,3 +16985,99 @@ Accepted. Rank-4 LoRA now uses the Metal delta/add helper for the same guarded
 Qwen-class decode shapes. The helper remains exact, full-projection timings are
 substantially faster than the old fallback adapter path, and ranks below 4 stay
 on the generic path.
+
+## 2026-05-09 - E426 accepted Metal LoRA all-positive-rank decode support
+
+### Purpose
+
+E425 stopped at rank 4. This experiment tested whether the same helper remains
+worth using for rank-1 and rank-2 adapters. If those rows still beat fallback,
+the rank gate can be simplified to "positive rank" while retaining the existing
+Qwen-class dimension and BF16/contiguity safeguards.
+
+### Change
+
+Changed `metal_lora_add_decode_supports` from `rank >= 4` to `rank > 0`.
+The focused parity and synthetic benches now cover ranks `1`, `2`, `4`, `8`,
+and `16`.
+
+Rollback remains `KILN_DISABLE_METAL_LORA_DELTA_DECODE=1`.
+
+### Isolated Delta/Add Bench
+
+Warmup `5`, iterations `20`; rank-1 and rank-2 rows had exact parity against
+the reference LoRA delta/add path.
+
+| rank | shape | batch | fused | fallback | speedup |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | MLP gate/up `2560 -> 9216` | 1 | `141.148 us` | `551.819 us` | `3.910x` |
+| 1 | MLP down `9216 -> 2560` | 1 | `202.965 us` | `865.110 us` | `4.262x` |
+| 1 | MLP gate/up `2560 -> 9216` | 4 | `147.377 us` | `492.773 us` | `3.344x` |
+| 1 | MLP down `9216 -> 2560` | 4 | `159.533 us` | `758.581 us` | `4.755x` |
+| 2 | MLP gate/up `2560 -> 9216` | 1 | `135.438 us` | `487.188 us` | `3.597x` |
+| 2 | MLP down `9216 -> 2560` | 1 | `153.554 us` | `711.212 us` | `4.632x` |
+| 2 | MLP gate/up `2560 -> 9216` | 4 | `132.529 us` | `484.346 us` | `3.655x` |
+| 2 | MLP down `9216 -> 2560` | 4 | `155.521 us` | `849.194 us` | `5.460x` |
+
+The same run kept ranks `4`, `8`, and `16` passing as regression coverage.
+
+### Full LoRA Linear Bench
+
+Warmup `5`, iterations `20`; values include base projection plus LoRA adapter
+application. For rank 1 and 2, the old E425 gate would have forced the fallback
+adapter delta path.
+
+| rank | shape | batch | fast | fallback | speedup |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 1 | MLP gate/up `2560 -> 9216` | 1 | `1.303 ms` | `1.635 ms` | `1.255x` |
+| 1 | MLP down `9216 -> 2560` | 1 | `1.110 ms` | `1.837 ms` | `1.654x` |
+| 1 | MLP gate/up `2560 -> 9216` | 4 | `2.342 ms` | `139.525 ms` | `59.578x` |
+| 1 | MLP down `9216 -> 2560` | 4 | `2.333 ms` | `152.590 ms` | `65.407x` |
+| 2 | MLP gate/up `2560 -> 9216` | 1 | `1.267 ms` | `1.606 ms` | `1.268x` |
+| 2 | MLP down `9216 -> 2560` | 1 | `1.115 ms` | `1.878 ms` | `1.685x` |
+| 2 | MLP gate/up `2560 -> 9216` | 4 | `2.571 ms` | `140.036 ms` | `54.474x` |
+| 2 | MLP down `9216 -> 2560` | 4 | `2.334 ms` | `152.863 ms` | `65.506x` |
+
+Rank-1/2 full gate/up rows were exact. Rank-1/2 down rows reported
+`max_abs_diff=1.5625e-2` with mean diff at most `6.1035156e-5`, matching the
+existing BF16 decode envelope.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_lora_decode_add_matches_reference --lib -- --nocapture`
+  - passed for rank `1`, `2`, `4`, `8`, and `16`, batch `1`, `2`, and `4`
+- `cargo test -p kiln-model --features metal test_metal_linear_decode_lora_matches_broadcast_matmul --lib -- --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_lora_decode_add_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+  - passed
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check -p kiln-model --features cuda`
+  - blocked by local environment: `nvcc` is not installed, so `cudarc` and
+    `candle-kernels` build scripts fail before checking Kiln source
+- `git diff --check`
+
+### Artifacts
+
+- `e426_lora_rank1_delta_parity.log`
+- `e426_lora_rank1_delta_bench.log`
+- `e426_lora_rank1_linear_parity.log`
+- `e426_lora_rank1_linear_bench.log`
+- `e426_lora_rank1_fmt_check.log`
+- `e426_lora_rank1_metal_check.log`
+- `e426_lora_rank1_vulkan_check.log`
+- `e426_lora_rank1_server_metal_check.log`
+- `e426_lora_rank1_cuda_check.log`
+- `e426_lora_rank1_diff_check.log`
+
+### Decision
+
+Accepted. The Metal LoRA delta/add helper now covers every positive-rank
+Qwen-class BF16 decode adapter shape. Rank-1 and rank-2 rows remain exact in the
+helper, full-projection timings are faster than the old fallback adapter path,
+and the existing dimension/device/layout gates continue to keep small or
+non-Metal shapes on the generic implementation.
