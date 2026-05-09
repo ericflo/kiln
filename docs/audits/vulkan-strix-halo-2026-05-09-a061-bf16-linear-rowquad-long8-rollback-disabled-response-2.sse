@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"silver"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" gold"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" copper"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" iron"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" zinc"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" lead"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" tin"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" nickel"}}]}
+
+data: {"id":"chatcmpl-0397ada5-a02f-4c13-9364-66a8476f75d0","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

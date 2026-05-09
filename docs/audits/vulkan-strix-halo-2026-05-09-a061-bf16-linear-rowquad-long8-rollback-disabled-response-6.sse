@@ -1,0 +1,22 @@
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"cat"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" dog"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" horse"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" cow"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" sheep"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" pig"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" goat"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" rabbit"}}]}
+
+data: {"id":"chatcmpl-4a36ad3e-e01b-4824-9820-34e3050f2803","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]
+

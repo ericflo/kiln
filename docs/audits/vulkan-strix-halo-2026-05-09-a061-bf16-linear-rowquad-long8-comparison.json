@@ -1,0 +1,33 @@
+{
+  "candidate_full_o_proj_batch_seq1_ms": 48.608,
+  "candidate_gdn_out_proj_seq1_ms": 262.32700000000017,
+  "candidate_metrics_delta": {
+    "batcher_rows": 53.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 53.0,
+    "max_batch_after": 8.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 60.0,
+    "worker_batches": 8.0
+  },
+  "candidate_outputs_nonempty": true,
+  "candidate_reasoning_empty": true,
+  "candidate_wall_s": 9.89912382899638,
+  "full_o_proj_batch_seq1_delta_ms_candidate_minus_rollback": 6.949000000000005,
+  "gdn_out_proj_seq1_delta_ms_candidate_minus_rollback": 52.045000000000016,
+  "rollback_full_o_proj_batch_seq1_ms": 41.65899999999999,
+  "rollback_gdn_out_proj_seq1_ms": 210.28200000000015,
+  "rollback_metrics_delta": {
+    "batcher_rows": 53.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 53.0,
+    "max_batch_after": 8.0,
+    "requests_ok": 8.0,
+    "tokens_generated": 60.0,
+    "worker_batches": 8.0
+  },
+  "rollback_outputs_nonempty": true,
+  "rollback_reasoning_empty": true,
+  "rollback_wall_s": 10.268622461000632,
+  "wall_delta_s_candidate_minus_rollback": -0.3694986320042517
+}

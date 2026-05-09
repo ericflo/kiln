@@ -1,0 +1,39 @@
+ready_after_s=31.035332
+wall_s=5.404615
+all_outputs_match_expected=True
+all_reasoning_empty=True
+metrics_delta={'requests_ok': 8.0, 'tokens_generated': 16.0, 'jobs_submitted': 8.0, 'jobs_failed': 0.0, 'worker_batches': 2.0, 'batcher_rows': 8.0, 'max_batch_after': 7.0}
+profile_rows=3392
+top_live_seq1_stage_totals:
+- gdn_stage:recurrent seq_len=1 total_ms=131.539 count=48 avg_ms=2.740
+- mlp_stage:fused seq_len=1 total_ms=109.523 count=64 avg_ms=1.711
+- paged_layer:linear seq_len=1 total_ms=76.817 count=24 avg_ms=3.201
+- gdn_stage:in_proj seq_len=1 total_ms=75.390 count=48 avg_ms=1.571
+- gdn_stage:gated_norm seq_len=1 total_ms=32.260 count=48 avg_ms=0.672
+- gdn_stage:out_proj seq_len=1 total_ms=28.607 count=48 avg_ms=0.596
+- full_attn_stage:qkv_proj_batch seq_len=1 total_ms=21.861 count=8 avg_ms=2.733
+- gdn_stage:conv seq_len=1 total_ms=17.760 count=48 avg_ms=0.370
+- paged_layer:full seq_len=1 total_ms=16.191 count=8 avg_ms=2.024
+- gdn_stage:gates seq_len=1 total_ms=11.197 count=48 avg_ms=0.233
+- full_attn_stage:decode_attn_contiguous_batch seq_len=1 total_ms=10.067 count=8 avg_ms=1.258
+- full_attn_stage:o_proj_batch seq_len=1 total_ms=6.705 count=8 avg_ms=0.838
+- full_attn_stage:qkv_proj seq_len=1 total_ms=4.781 count=8 avg_ms=0.598
+- full_attn_stage:o_proj seq_len=1 total_ms=2.181 count=8 avg_ms=0.273
+- gdn_stage:qk_norm seq_len=1 total_ms=1.814 count=48 avg_ms=0.038
+- full_attn_stage:rope_batch seq_len=1 total_ms=1.031 count=8 avg_ms=0.129
+- full_attn_stage:qk_norm_batch seq_len=1 total_ms=0.565 count=8 avg_ms=0.071
+- full_attn_stage:decode_scores seq_len=1 total_ms=0.408 count=8 avg_ms=0.051
+- full_attn_stage:attn_gate_batch seq_len=1 total_ms=0.356 count=8 avg_ms=0.044
+- full_attn_stage:kv_write_batch seq_len=1 total_ms=0.209 count=8 avg_ms=0.026
+- full_attn_stage:rope seq_len=1 total_ms=0.179 count=8 avg_ms=0.022
+- gdn_stage:qkv_split seq_len=1 total_ms=0.153 count=48 avg_ms=0.003
+- full_attn_stage:qk_norm seq_len=1 total_ms=0.115 count=8 avg_ms=0.014
+- full_attn_stage:kv_read seq_len=1 total_ms=0.102 count=8 avg_ms=0.013
+response_0 status=200 finish=length elapsed_s=5.098493 text='blue green' expected='blue green' matches=True reasoning_len=0 error=None
+response_1 status=200 finish=length elapsed_s=5.133824 text='red yellow' expected='red yellow' matches=True reasoning_len=0 error=None
+response_2 status=200 finish=length elapsed_s=5.133505 text='north south' expected='north south' matches=True reasoning_len=0 error=None
+response_3 status=200 finish=length elapsed_s=5.133733 text='silver gold' expected='silver gold' matches=True reasoning_len=0 error=None
+response_4 status=200 finish=length elapsed_s=5.133214 text='orange purple' expected='orange purple' matches=True reasoning_len=0 error=None
+response_5 status=200 finish=length elapsed_s=5.402050 text='circle square' expected='circle square' matches=True reasoning_len=0 error=None
+response_6 status=200 finish=length elapsed_s=5.132103 text='alpha omega' expected='alpha omega' matches=True reasoning_len=0 error=None
+response_7 status=200 finish=length elapsed_s=5.133182 text='winter summer' expected='winter summer' matches=True reasoning_len=0 error=None

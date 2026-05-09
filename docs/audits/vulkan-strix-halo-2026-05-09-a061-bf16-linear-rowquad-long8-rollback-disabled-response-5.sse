@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":"winter"}}]}
+
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" summer"}}]}
+
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" spring"}}]}
+
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{"content":" autumn"}}]}
+
+data: {"id":"chatcmpl-ad3eb988-5d55-4e35-ab8d-e7e2090d0d28","object":"chat.completion.chunk","created":1778331237,"model":"qwen3.5-4b-kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

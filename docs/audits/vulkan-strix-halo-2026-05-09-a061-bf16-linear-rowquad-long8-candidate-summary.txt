@@ -1,0 +1,39 @@
+ready_after_s=31.031030
+wall_s=9.899124
+all_outputs_nonempty=True
+all_reasoning_empty=True
+metrics_delta={'requests_ok': 8.0, 'tokens_generated': 60.0, 'jobs_submitted': 53.0, 'jobs_failed': 0.0, 'worker_batches': 8.0, 'batcher_rows': 53.0, 'max_batch_after': 8.0}
+profile_rows=5256
+top_live_seq1_stage_totals:
+- gdn_stage:recurrent seq_len=1 total_ms=884.366 count=192 avg_ms=4.606
+- mlp_stage:fused seq_len=1 total_ms=655.172 count=256 avg_ms=2.559
+- gdn_stage:in_proj seq_len=1 total_ms=534.154 count=192 avg_ms=2.782
+- paged_layer:linear seq_len=1 total_ms=501.828 count=24 avg_ms=20.910
+- gdn_stage:out_proj seq_len=1 total_ms=262.327 count=192 avg_ms=1.366
+- gdn_stage:gated_norm seq_len=1 total_ms=244.528 count=192 avg_ms=1.274
+- gdn_stage:gates seq_len=1 total_ms=189.962 count=192 avg_ms=0.989
+- full_attn_stage:qkv_proj_batch seq_len=1 total_ms=152.565 count=56 avg_ms=2.724
+- gdn_stage:conv seq_len=1 total_ms=126.694 count=192 avg_ms=0.660
+- full_attn_stage:decode_attn_contiguous_batch seq_len=1 total_ms=74.388 count=56 avg_ms=1.328
+- paged_layer:full seq_len=1 total_ms=52.361 count=8 avg_ms=6.545
+- full_attn_stage:o_proj_batch seq_len=1 total_ms=48.608 count=56 avg_ms=0.868
+- full_attn_stage:o_proj seq_len=1 total_ms=17.577 count=8 avg_ms=2.197
+- full_attn_stage:qkv_proj seq_len=1 total_ms=15.016 count=8 avg_ms=1.877
+- gdn_stage:qk_norm seq_len=1 total_ms=12.528 count=192 avg_ms=0.065
+- full_attn_stage:rope_batch seq_len=1 total_ms=8.544 count=56 avg_ms=0.153
+- full_attn_stage:qk_norm_batch seq_len=1 total_ms=4.650 count=56 avg_ms=0.083
+- full_attn_stage:attn_gate_batch seq_len=1 total_ms=3.066 count=56 avg_ms=0.055
+- full_attn_stage:kv_write_batch seq_len=1 total_ms=1.421 count=56 avg_ms=0.025
+- gdn_stage:qkv_split seq_len=1 total_ms=1.273 count=192 avg_ms=0.007
+- full_attn_stage:qkv_split_batch seq_len=1 total_ms=0.693 count=56 avg_ms=0.012
+- full_attn_stage:decode_scores seq_len=1 total_ms=0.522 count=8 avg_ms=0.065
+- full_attn_stage:rope seq_len=1 total_ms=0.214 count=8 avg_ms=0.027
+- gdn_stage:post_transpose seq_len=1 total_ms=0.187 count=192 avg_ms=0.001
+response_0 status=200 finish=length elapsed_s=9.406276 text_len=46 nonempty=True reasoning_len=0 text='blue green red yellow orange purple pink brown' error=None
+response_1 status=200 finish=length elapsed_s=9.895617 text_len=43 nonempty=True reasoning_len=0 text='north south east west north south east west' error=None
+response_2 status=200 finish=length elapsed_s=9.896444 text_len=44 nonempty=True reasoning_len=0 text='silver gold copper iron zinc lead tin nickel' error=None
+response_3 status=200 finish=length elapsed_s=9.896634 text_len=50 nonempty=True reasoning_len=0 text='circle square triangle oval rectangle pentagon hex' error=None
+response_4 status=200 finish=length elapsed_s=9.896005 text_len=39 nonempty=True reasoning_len=0 text='alpha beta gamma delta epsilon zeta eta' error=None
+response_5 status=200 finish=stop elapsed_s=8.249366 text_len=27 nonempty=True reasoning_len=0 text='winter summer spring autumn' error=None
+response_6 status=200 finish=length elapsed_s=9.896234 text_len=39 nonempty=True reasoning_len=0 text='cat dog horse cow sheep pig goat rabbit' error=None
+response_7 status=200 finish=length elapsed_s=9.896709 text_len=39 nonempty=True reasoning_len=0 text='one two three four five six seven eight' error=None

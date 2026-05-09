@@ -2933,6 +2933,102 @@ Verdict:
   shape, but the warmed profile still has meaningful work in MLP, GDN
   recurrent, paged-layer linear/K/V movement, and backend-boundary overhead.
 
+### 2026-05-09 A061: Reject Packed-BF16 Generic Linear Row-Quad; Fix A060 SPIR-V Lookup
+
+Goals:
+- Check whether Metal E377's full-batch row-quad lesson transfers to Vulkan's
+  generic packed-BF16 transposed linear path. This is distinct from A036, which
+  tried packed-BF16 generic row-pair for all `batch > 1` and lost on small live
+  batches.
+- While preparing the trial, fix a correctness/deployability miss from A060:
+  `gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w` was added to `build.rs`
+  but not to `pipeline.rs`'s embedded SPIR-V lookup table. That meant production
+  builds with embedded shaders could still fall back to runtime shader
+  compilation for the accepted A060 path.
+
+Temporary change tried:
+- Added a temporary `linear_decode_batched_rows4_bf16w.comp` shader for generic
+  packed-BF16 linear decode.
+- Routed generic packed-BF16 `linear_decode` to that shader only for
+  `batch >= 8`, with rollback
+  `KILN_DISABLE_VULKAN_BF16_LINEAR_ROW_QUAD=1`.
+- Added temporary build, prewarm, and parity coverage.
+- Removed all generic-linear row-quad source after measurement. The only source
+  retained from this experiment is the A060 `pipeline.rs` embedded-SPIR-V lookup
+  fix.
+
+Validation while the temporary shader was present:
+- `cargo fmt --check` passed after formatting.
+- `cargo check -p kiln-vulkan-kernel` passed.
+- Focused packed-BF16 generic linear parity passed for the existing batched path
+  and the new batch-8 row-quad path.
+- Rollback-focused parity with
+  `KILN_DISABLE_VULKAN_BF16_LINEAR_ROW_QUAD=1` passed.
+- Full Vulkan parity passed with `32` tests.
+- `cargo check -p kiln-model --features vulkan` passed.
+- `cargo check -p kiln-server --features vulkan` passed.
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+  passed.
+- `git diff --check` passed.
+
+Endpoint evidence:
+- All endpoint arms waited for `inference_prewarm_complete=true`.
+- Short exact-output A/B pairs used
+  `chat_template_kwargs: {"enable_thinking": false}` and returned exact visible
+  texts `"blue green"`, `"red yellow"`, `"north south"`, `"silver gold"`,
+  `"orange purple"`, `"circle square"`, `"alpha omega"`, and
+  `"winter summer"` with empty reasoning. These pairs were correct but did not
+  prove the row-quad shader: max observed batches were `7`, `7`, and `4`.
+- The longer `max_tokens=8` pair did exercise full batches. Both arms had
+  identical counters: `8` OK requests, `60` generated tokens, `53` submitted
+  decode-batcher jobs, `8` worker batches, `53` rows, max batch `8`, and `0`
+  failed jobs. Both returned non-empty visible output with empty reasoning.
+- In that full-batch pair, wall time favored the candidate
+  (`9.899124s` vs rollback `10.268622s`), but the stages the shader was meant
+  to improve regressed:
+  - `gdn_stage:out_proj seq_len=1`: candidate `262.327ms` vs rollback
+    `210.282ms` (`+52.045ms`).
+  - `full_attn_stage:o_proj_batch seq_len=1`: candidate `48.608ms` vs rollback
+    `41.659ms` (`+6.949ms`).
+  - `paged_layer:linear seq_len=1` also worsened materially in the profiled
+    window (`501.828ms` candidate vs `310.102ms` rollback).
+
+Final retained change and validation:
+- Retained the `pipeline.rs` map entry for
+  `gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w`, so A060 now uses
+  embedded SPIR-V instead of relying on runtime fallback.
+- After removing the rejected generic-linear row-quad code, validation passed:
+  `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`, full
+  `gdn_parity`, `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan`, release Vulkan build, and
+  `git diff --check`.
+- Best-effort CUDA/Metal checks remain environment-blocked on this Linux host
+  before project typecheck: CUDA fails because `nvcc` is not installed, and
+  Metal fails because `objc2` requires an Apple target.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a061-bf16-linear-rowquad-*`
+- `vulkan-strix-halo-2026-05-09-a061-bf16-linear-rowquad-wait200ms-*`
+- `vulkan-strix-halo-2026-05-09-a061-bf16-linear-rowquad-long8-*`
+- Final reduced-patch validation:
+  `vulkan-strix-halo-2026-05-09-a061-bf16-linear-rowquad-final-*`
+- Post-rebase validation after PR #1002 plus latest `origin/main`
+  (`9f1babbc`):
+  `vulkan-strix-halo-2026-05-09-a061-postrebase-*`
+  - `cargo fmt --check`: pass.
+  - `cargo check -p kiln-vulkan-kernel`: pass.
+  - `cargo check -p kiln-model --features vulkan`: pass with existing warnings.
+  - `git diff --check`: pass.
+
+Verdict:
+- Reject the generic packed-BF16 row-quad linear shader. The only full-batch
+  same-counters run showed targeted stage regressions, so the wall-time win is
+  not strong enough to keep the shader.
+- Keep the A060 embedded-SPIR-V lookup fix. Do not retry generic packed-BF16
+  row-quad by direct Metal E377 mirroring without a different Vulkan-specific
+  tile, a residency change, or profiler evidence that explains the stage
+  regression.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2944,8 +3040,10 @@ Verdict:
   A048, do not use measurements taken before
   `inference_prewarm_complete=true` as serving evidence.
 - A059 only gives a small guarded reduction in the GDN recurrent shape, and
-  A060 only helps full-batch packed-BF16 GDN in-proj. The post-prewarm profiles
-  still leave MLP, GDN recurrent, paged-layer linear work, K/V movement, and
+  A060 only helps full-batch packed-BF16 GDN in-proj. A061 showed that direct
+  full-batch row-quad mirroring for generic packed-BF16 linear decode worsens
+  the targeted generic-linear stages. The post-prewarm profiles still leave
+  MLP, GDN recurrent, paged-layer linear work, K/V movement, and
   backend-boundary overhead as the main target set. Next work should target
   either packed-BF16 MLP boundary/data movement, sparse/active K/V movement, or
   a GDN path that materially reduces movement, not just a direct fused-hook
@@ -2971,6 +3069,9 @@ Verdict:
 - Do not retry packed-BF16 generic linear row-pair by directly mirroring the
   Metal row-pair shape; A036 measured it as slower than the existing Vulkan
   batched linear path.
+- Do not retry generic packed-BF16 linear row-quad by directly mirroring Metal
+  E377; A061 measured full-batch target-stage regressions despite a noisy wall
+  win.
 - Do not retry dyn-seqlen paged-attention optimization by only pushing
   `seq_lens` through push constants; A035 measured that as slower on the
   sampled actor fixture.
