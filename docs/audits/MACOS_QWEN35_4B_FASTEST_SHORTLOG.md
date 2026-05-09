@@ -1944,3 +1944,11 @@
   `row_pair_tile8_shared`; batch `8` selected `row_quad_tile8`; all rows
   matched broadcast matmul exactly. Metal/Vulkan checks and fmt passed; CUDA
   remains locally blocked by missing `nvcc`.
+- 2026-05-09 E441: Rejected a hidden-square exception for Metal batch8
+  `row_quad_tile8`. A first global-disable probe suggested attention-output
+  `[8,1,2560] x [2560,2560]` might prefer shared tile4 (`996.023/953.096 us`
+  tile8 versus `909.385 us` tile4), while MLP down, GDN out, and QKV-like
+  favored tile8. The implemented shape-gate A/B reversed the target result:
+  candidate hidden-square tile4 was `969.438 us`, rollback tile8 was
+  `894.369 us`. Source was reverted; keep the existing global batch8
+  `row_quad_tile8` selector.

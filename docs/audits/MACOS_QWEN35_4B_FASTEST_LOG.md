@@ -18097,3 +18097,75 @@ Accepted as measurement tooling only. The shape matrix confirms that the
 largest generic batch-GEMV cost is still MLP down-projection; GDN out and
 attention projections are smaller. Use this bench for future selector or kernel
 A/Bs instead of extrapolating from the down-projection-only synthetic.
+
+## 2026-05-09 - E441 rejected hidden-square row-quad tile8 gate
+
+### Purpose
+
+E440 showed batch8 `row_quad_tile8` is selected for all Qwen3.5 batch
+transposed-GEMV shapes, while E432 originally validated the dedicated tile8
+row-quad path mainly on MLP down-projection. Test whether the smaller
+hidden-square attention-output shape `[B,1,2560] x [2560,2560]` should stay on
+the old shared tile4 row-quad path while larger shapes keep dedicated tile8.
+
+### Change
+
+Temporarily added a Metal selector gate that routed only batch8
+`input_dim=2560`, `output_dim=2560` through `row_quad_tile4_shared`, with
+`KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8_HIDDEN_SQUARE_GATE=1`
+as a rollback env. The candidate was reverted after measurement; no runtime
+source change remains.
+
+### Validation
+
+- `cargo fmt --check`
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8=1 KILN_METAL_BATCH_GEMV_SHAPES_BENCH_WARMUP=5 KILN_METAL_BATCH_GEMV_SHAPES_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic --lib -- --ignored --nocapture`
+- `KILN_METAL_BATCH_GEMV_SHAPES_BENCH_WARMUP=5 KILN_METAL_BATCH_GEMV_SHAPES_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_transposed_coop_gemv_decode_batch_qwen35_shapes_synthetic --lib -- --ignored --nocapture`
+- Candidate gate A/B with and without
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8_HIDDEN_SQUARE_GATE=1`
+- `git diff --check`
+
+### Results
+
+Initial global tile8-disable probes suggested a possible hidden-square
+exception at batch8:
+
+| label | default1 | tile8 disabled | default2 | verdict |
+| --- | ---: | ---: | ---: | --- |
+| mlp_down_proj | `2897.725` row_quad_tile8 | `3108.740` row_quad_tile4_shared | `2718.700` row_quad_tile8 | tile8 favored |
+| gdn_out_proj | `1317.763` row_quad_tile8 | `1433.075` row_quad_tile4_shared | `1247.850` row_quad_tile8 | tile8 favored |
+| attn_output | `996.023` row_quad_tile8 | `909.385` row_quad_tile4_shared | `953.096` row_quad_tile8 | tile4 looked faster |
+| attn_qkv_like | `1235.338` row_quad_tile8 | `1429.346` row_quad_tile4_shared | `1212.088` row_quad_tile8 | tile8 favored |
+
+The implemented shape gate reversed the target result in the direct rollback
+A/B:
+
+| label | candidate default | rollback env | verdict |
+| --- | ---: | ---: | --- |
+| mlp_down_proj | `2747.446` row_quad_tile8 | `2754.502` row_quad_tile8 | same policy; noise |
+| gdn_out_proj | `1325.562` row_quad_tile8 | `1291.787` row_quad_tile8 | same policy; noise |
+| attn_output | `969.438` row_quad_tile4_shared | `894.369` row_quad_tile8 | rollback tile8 favored |
+| attn_qkv_like | `1275.692` row_quad_tile8 | `1216.490` row_quad_tile8 | same policy; noise |
+
+The only intended behavior change, hidden-square batch8, was not a stable win.
+Partial batch2/3/4 timings also moved around under unchanged policies, so they
+were treated as noise rather than selector evidence.
+
+### Artifacts
+
+- `e441_batch_gemv_shapes_row_quad_tile8_disabled.log`
+- `e441_batch_gemv_shapes_tile8_disabled_summary.md`
+- `e441_batch_gemv_shapes_default_rerun.log`
+- `e441_batch_gemv_shapes_tile8_disabled_counter_summary.md`
+- `e441_hidden_square_gate_default.log`
+- `e441_hidden_square_gate_disabled.log`
+- `e441_hidden_square_gate_summary.md`
+- `e441_hidden_square_gate_fmt_check.log`
+- `e441_rejected_hidden_square_gate_fmt_check.log`
+- `e441_rejected_hidden_square_gate_git_diff_check.log`
+
+### Decision
+
+Rejected. Keep the existing global batch8 `row_quad_tile8` selector for the
+Qwen3.5 batch transposed-GEMV shapes. The temporary hidden-square exception was
+reverted and no CUDA/Vulkan behavior changed.
