@@ -1306,3 +1306,16 @@
   and release build passed. Same-binary four-request endpoint improved
   disabled/enabled `6.769653/6.620584s` with `32` generated tokens, `28`
   jobs, `14` batches, and max batch `3`.
+- 2026-05-09 E367: Refreshed synchronized stage profiling after E366 using the
+  same reconstructed varied-prompt shape as E365. Four requests with greedy
+  `max_tokens=3` generated `12` tokens, submitted `8` jobs through `4` worker
+  batches, and observed max batch `3`; wall time was `7.686367s` with
+  profiling synchronization enabled. Stage totals after the marker were GDN
+  `6579.779 ms`, MLP `5368.780 ms`, and full attention `2005.446 ms`. Top
+  live `seq_len=1` decode stages were MLP `gate_up_fused` `462.981 ms`, MLP
+  `down_proj` `300.378 ms`, GDN `in_proj` `281.279 ms`, and GDN `out_proj`
+  `123.249 ms`. Compared with E365's same prompt shape, `mlp:down_proj`
+  decode fell from `314.999 ms` to `300.378 ms`, but synchronized wall time and
+  some unrelated stage buckets moved the other way, so treat this as
+  target-selection evidence rather than an endpoint regression. MLP gate/up
+  remains the largest live Metal decode target.

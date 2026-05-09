@@ -12540,3 +12540,83 @@ The endpoint probe improved by `2.2%` with the same batching shape.
 Accepted. Keep row-pair mode enabled by default for batched Metal transposed
 cooperative GEMV, with `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR=1` as
 the rollback knob.
+
+## 2026-05-09 E367 - Profile after batched GEMV row-pair
+
+### Goal
+
+Refresh synchronized stage profiling on the same reconstructed varied-prompt
+shape as E365 after enabling E366's row-pair Metal batched transposed GEMV path.
+The purpose was to confirm the next Metal target after the down-projection
+optimization.
+
+### Method
+
+- Built release `kiln`/`kiln-bench` with `--features metal`.
+- Started `target/release/kiln serve` with:
+  - `KILN_DECODE_BATCH_WAIT_US=0`
+  - `KILN_PROFILE_FULL_ATTN_STAGES=1`
+  - `KILN_PROFILE_GDN_STAGES=1`
+  - `KILN_PROFILE_MLP_STAGES=1`
+- Waited for the health check's `inference_prewarm_complete` entry to pass.
+- Wrote `E367_MEASURE_START` to the server log after prewarm.
+- Issued four concurrent streaming chat requests using the reconstructed
+  E365/E366 varied prompts, greedy `max_tokens=3`.
+- Parsed only stage lines after `E367_MEASURE_START`.
+
+### Results
+
+The run generated `12` tokens across four requests. Decode batching shape
+matched E365:
+
+- `8` submitted decode-batcher jobs
+- `4` worker batches
+- `8` batcher rows
+- max observed batch `3`
+
+Synchronized profiled wall time was `7.686367s`.
+
+Kind totals after the marker:
+
+- GDN: `6579.779 ms`
+- MLP: `5368.780 ms`
+- full attention: `2005.446 ms`
+
+Top live `seq_len=1` decode stages:
+
+- `mlp:gate_up_fused`: `462.981 ms`
+- `mlp:down_proj`: `300.378 ms`
+- `gdn:in_proj`: `281.279 ms`
+- `gdn:out_proj`: `123.249 ms`
+- `gdn:gates_recur_gated_norm`: `57.103 ms`
+- `gdn:qkv_conv_norm`: `43.471 ms`
+- `full_attn:qkv_proj`: `41.131 ms`
+- `full_attn:qkv_proj_batch`: `36.925 ms`
+
+Compared with E365's same reconstructed prompt shape, `mlp:down_proj` decode
+fell from `314.999 ms` to `300.378 ms`. The synchronized wall time and several
+unrelated stage buckets moved the other way, so this profile should not be read
+as endpoint-regression evidence; E366's same-binary endpoint probe remains the
+acceptance measurement for the GEMV row-pair change.
+
+The ranking is still clear: MLP `gate_up_fused` remains the largest live Metal
+decode stage, followed by MLP `down_proj` and GDN `in_proj`.
+
+### Artifact
+
+- `e367_release_build_metal.log`
+- `e367_post_gemv_rows2_stage_profile_server.log`
+- `e367_post_gemv_rows2_stage_profile_health.json`
+- `e367_post_gemv_rows2_stage_profile_metrics.prom`
+- `e367_post_gemv_rows2_stage_profile_time.json`
+- `e367_post_gemv_rows2_stage_profile_response_0.sse`
+- `e367_post_gemv_rows2_stage_profile_response_1.sse`
+- `e367_post_gemv_rows2_stage_profile_response_2.sse`
+- `e367_post_gemv_rows2_stage_profile_response_3.sse`
+- `e367_post_gemv_rows2_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change. Continue focusing
+Metal work on the MLP gate/up decode path first, with down-projection and GDN
+in-projection still secondary targets.
