@@ -119,6 +119,7 @@ before or with each accepted change and each measured rejection.
 | A109 | Reject Vulkan MLP BF16 gate/up rows8. | Temporary candidate passed formatting, diff, kernel check, focused parity with a batch-16 case, Vulkan model check, and release bench build. Same-token A/B stayed on backend `vulkan`; three-pair average was candidate `1012.138ms` prefill / `79.400ms` ITL / `90.505ms` p99 vs rollback `984.921ms` / `79.496ms` / `88.804ms`. | Rejected and reverted. Do not keep the rows8 gate/up shape; source removed, artifacts retained. |
 | A110 | Lower Vulkan packed-BF16 GDN in-proj row-pair selection to batch `>=3`. | Focused row-pair parity now covers batch 3 and batch 5; full Vulkan parity passed (`34 passed`), and Vulkan model/server checks plus release server build passed. Two valid live batch-3 A/B pairs kept identical counters (`6` rows / `3` worker batches / max batch `3`) and matching visible outputs. Average wall improved from rollback `1.871787s` to candidate `1.723976s` (`7.9%`). | Keep. Vulkan-only threshold transfer from Metal E462; rollback via `KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR=1`. |
 | A111 | Reject Vulkan packed-BF16 generic linear row-triple at batch 3. | Temporary Metal E464-inspired row-triple shader passed candidate and rollback focused parity, full Vulkan parity (`34 passed`), Vulkan model/server checks, and release server build. Live batch-3 A/B kept identical counters and matching visible outputs; two-pair average was candidate `1.723962s` vs rollback `1.737988s`, only `0.8%` faster. | Rejected and reverted. Correct but too small/noisy to justify another generic linear shader; final source has no A111 runtime changes. |
+| A112 | Reject Vulkan MLP gate/up packed-BF16 row-triple at batch 3. | Temporary Metal E466-inspired MLP gate/up row-triple shader passed candidate and rollback focused parity, full Vulkan parity (`34 passed`), Vulkan model/server checks, and release server build. Short exact batch-3 probe was candidate `1.581423s` vs rollback `1.579940s`; longer capped max-batch-3 probe regressed candidate `5.103933s` vs rollback `4.950162s`, with matching visible outputs. | Rejected and reverted. Correct but slower on Vulkan; do not direct-port Metal E466's row-triple MLP tile without a different Vulkan-specific hypothesis. |
 
 Additional validation after rejected A069:
 
@@ -541,4 +542,23 @@ Additional validation after rejected A111:
 - Two live old-batcher A/B pairs preserved visible output and identical decode
   batcher counters, but only showed a `0.8%` average wall-time win.
 - Source change was removed after measurement; final source has no A111 runtime
+  changes and CUDA/Metal source paths are untouched.
+
+Additional validation after rejected A112:
+
+- Temporary candidate passed `cargo fmt --check`.
+- Temporary candidate passed `git diff --check`.
+- Temporary candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Temporary candidate passed focused BF16 MLP parity and focused rollback parity
+  with `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS3=1`.
+- Temporary candidate passed full Vulkan kernel parity (`34 passed`).
+- Temporary candidate passed `cargo check -p kiln-model --features vulkan`.
+- Temporary candidate passed
+  `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`.
+- Temporary candidate passed
+  `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Live old-batcher A/B preserved visible output, but the candidate tied/slightly
+  lost the short exact batch-3 probe and regressed the capped max-batch-3
+  longer probe.
+- Source change was removed after measurement; final source has no A112 runtime
   changes and CUDA/Metal source paths are untouched.

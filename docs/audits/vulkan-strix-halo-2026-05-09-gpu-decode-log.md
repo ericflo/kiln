@@ -6668,3 +6668,65 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-candidate-batch3*`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a111-linear-bf16-rowtriple-b3-rollback-batch3*`
+
+### 2026-05-09 A112: Rejected MLP Gate/Up BF16 Row-Triple Batch 3
+
+Goal:
+
+- Test whether Metal E466's accepted exact-batch-3 MLP gate/up row-triple
+  idea transfers to Vulkan. This is narrower than A111 because it targets
+  MLP gate/up directly instead of generic linear decode.
+
+Candidate:
+
+- Temporarily added `mlp_gate_up_decode_batched_rows3_bf16w.comp`.
+- Routed packed-BF16 MLP gate/up decode with `batch == 3` to that shader.
+- Added temporary rollback env:
+  `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS3=1`.
+- CUDA and Metal source paths were untouched.
+
+Validation while present:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused candidate parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- Focused rollback parity with
+  `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS3=1`.
+- Full Vulkan kernel parity: `34 passed`.
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Live A/B:
+
+- Valid probes used the old live decode-batcher with
+  `KILN_MODEL_PATH=Qwen3.5-4B KILN_DECODE_BATCH_WAIT_US=5000`.
+- Rollback also set `KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS3=1`.
+- Short exact batch-3 probe: candidate `1.581423s`; rollback `1.579940s`.
+  Both arms had identical counters:
+  `requests_ok=3`, `tokens_generated=9`, `jobs_submitted=6`,
+  `worker_batches=3`, `batcher_rows=6`, `max_batch_after=3`,
+  `jobs_failed=0`, and matching visible output `"The sequence you"`.
+- Four-stream `max_tokens=8` probe without max-batch cap reached max batch 4,
+  so it was not pure batch-3 evidence. It still regressed: rollback
+  `4.928977s`, candidate `4.998365s`, with matching visible outputs.
+- Four-stream `max_tokens=8` probe with `KILN_DECODE_BATCH_MAX=3`: rollback
+  `4.950162s`, candidate `5.103933s`. Both arms generated 32 tokens from
+  28 submitted jobs / 28 rows and max batch 3, with matching visible output.
+
+Verdict:
+
+- Rejected and reverted. The candidate was correct but failed to improve the
+  short exact batch-3 probe and clearly regressed the longer capped max-batch-3
+  endpoint probe.
+- Metal E466's MLP gate/up row-triple tile does not transfer directly to
+  Vulkan's current MLP gate/up shader geometry.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-candidate-*`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-rollback-*`

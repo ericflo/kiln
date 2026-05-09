@@ -1,0 +1,65 @@
+{
+  "case": "candidate-batch4-mt8-max3",
+  "ready_after_s": 32.13101728200854,
+  "wall_s": 5.103933481004788,
+  "metrics_before": {
+    "requests_ok": 0.0,
+    "requests_error": 0.0,
+    "tokens_generated": 0.0,
+    "jobs_submitted": 0.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 0.0,
+    "batcher_rows": 0.0,
+    "max_batch": 0.0
+  },
+  "metrics_after": {
+    "requests_ok": 4.0,
+    "requests_error": 0.0,
+    "tokens_generated": 32.0,
+    "jobs_submitted": 28.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 10.0,
+    "batcher_rows": 28.0,
+    "max_batch": 3.0
+  },
+  "metrics_delta": {
+    "requests_ok": 4.0,
+    "requests_error": 0.0,
+    "tokens_generated": 32.0,
+    "jobs_submitted": 28.0,
+    "jobs_failed": 0.0,
+    "worker_batches": 10.0,
+    "batcher_rows": 28.0,
+    "max_batch_after": 3.0
+  },
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_s": 4.795975194996572,
+      "text": "eight, nine, ten, eleven,",
+      "events": 10
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_s": 5.097810275998199,
+      "text": "eight, nine, ten, eleven,",
+      "events": 10
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_s": 5.098061437995057,
+      "text": "eight, nine, ten, eleven,",
+      "events": 10
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_s": 5.097259672998916,
+      "text": "eight, nine, ten, eleven,",
+      "events": 10
+    }
+  ]
+}
