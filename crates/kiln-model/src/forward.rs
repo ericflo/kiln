@@ -10697,6 +10697,45 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
+    #[test]
+    #[ignore = "synthetic Metal QKV-shaped LoRA projection microbench; run explicitly with --ignored --nocapture"]
+    fn bench_metal_linear_decode_lora_qwen35_qkv_synthetic() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        let warmup = std::env::var("KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP")
+            .or_else(|_| std::env::var("KILN_METAL_LORA_LINEAR_BENCH_WARMUP"))
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(2);
+        let iters = std::env::var("KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS")
+            .or_else(|_| std::env::var("KILN_METAL_LORA_LINEAR_BENCH_ITERS"))
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5);
+
+        for rank in [1usize, 2usize, 4usize, 8usize, 16usize] {
+            for batch in [1usize, 2usize, 4usize, 8usize] {
+                bench_metal_lora_linear_case(
+                    &device, "q_proj", batch, 2560, 8192, rank, warmup, iters,
+                )?;
+                bench_metal_lora_linear_case(
+                    &device,
+                    "k_or_v_proj",
+                    batch,
+                    2560,
+                    1024,
+                    rank,
+                    warmup,
+                    iters,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
     #[allow(clippy::too_many_arguments)]
     fn bench_metal_lora_linear_case(
         device: &Device,

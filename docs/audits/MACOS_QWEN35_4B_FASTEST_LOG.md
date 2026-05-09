@@ -18344,3 +18344,76 @@ carry into endpoint testing.
 
 Rejected. Keep the current dedicated Metal MLP gate/up serial kernel using
 standard `exp`. Runtime source was reverted; CUDA/Vulkan behavior is unchanged.
+
+## 2026-05-09 - E445 accepted QKV-shaped LoRA linear bench coverage
+
+### Purpose
+
+The checked-in full LoRA linear synthetic bench covered Qwen3.5 MLP gate/up and
+down-projection shapes after the E421-E427 LoRA delta/add work, but it did not
+cover full-attention Q/K/V-sized LoRA projections. E384 already rejected
+reusing the fused-QKV base projection for LoRA decode, so this experiment only
+adds current-path measurement coverage for the separate accelerated LoRA linear
+route.
+
+### Change
+
+Added an ignored Metal bench:
+
+- `bench_metal_linear_decode_lora_qwen35_qkv_synthetic`
+- shapes:
+  - `q_proj`: `[B,1,2560] x [2560,8192]`
+  - `k_or_v_proj`: `[B,1,2560] x [2560,1024]`
+- ranks: `1/2/4/8/16`
+- batches: `1/2/4/8`
+
+The bench reuses the existing `bench_metal_lora_linear_case` helper, so it
+compares `linear_with_lora_t_decode` against the generic LoRA path and reports
+diff stats. No runtime route changes were made.
+
+### Validation
+
+- `KILN_METAL_LORA_QKV_LINEAR_BENCH_WARMUP=2 KILN_METAL_LORA_QKV_LINEAR_BENCH_ITERS=5 cargo test -p kiln-model --features metal bench_metal_linear_decode_lora_qwen35_qkv_synthetic --lib -- --ignored --nocapture`
+- `cargo fmt --check`
+- `git diff --check`
+
+The benchmark passed. All q/k/v-shaped rows matched exactly:
+
+- `max_abs_diff=0`
+- `mean_abs_diff=0`
+
+Existing unrelated test warnings in `paged_kv_cache.rs`, `quantized.rs`, and
+dead-code warnings were emitted during the test build.
+
+### Results
+
+Representative rank-16 Qwen3.5-shaped full LoRA linear timings, lower is
+better:
+
+| shape | batch | fast | fallback | speedup |
+| --- | ---: | ---: | ---: | ---: |
+| q_proj | 1 | `1.102 ms` | `2.420 ms` | `2.196x` |
+| k_or_v_proj | 1 | `0.295 ms` | `0.974 ms` | `3.298x` |
+| q_proj | 2 | `1.161 ms` | `54.835 ms` | `47.242x` |
+| k_or_v_proj | 2 | `0.347 ms` | `7.603 ms` | `21.895x` |
+| q_proj | 4 | `2.104 ms` | `120.158 ms` | `57.112x` |
+| k_or_v_proj | 4 | `0.346 ms` | `16.183 ms` | `46.827x` |
+| q_proj | 8 | `2.346 ms` | `264.243 ms` | `112.629x` |
+| k_or_v_proj | 8 | `0.546 ms` | `34.010 ms` | `62.286x` |
+
+The full rank/batch sweep showed the same qualitative result: the current
+accelerated LoRA linear path is already strongly favored for QKV-shaped LoRA
+projections. The batch-1 q-projection rows are a modest `1.79-2.29x` faster,
+while batch `2/4/8` rows are dominated by the generic fallback's batch cost.
+
+### Artifacts
+
+- `e445_lora_qkv_linear_bench.log`
+- `e445_lora_qkv_linear_fmt_check.log`
+- `e445_lora_qkv_linear_diff_check.log`
+
+### Decision
+
+Accepted as measurement tooling. This fills the checked-in QKV-shaped LoRA
+coverage gap without reopening the rejected E384 fused-QKV LoRA path. Runtime
+source is unchanged for Metal/CUDA/Vulkan execution.

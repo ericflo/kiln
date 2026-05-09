@@ -1973,3 +1973,12 @@
   `1679.260 us` rollback), and the longer warmup-10/iters-50 pair favored the
   current standard-exp kernel (`1719.310 us` fast versus `1692.736 us`
   rollback). Source reverted; keep standard `exp`.
+- 2026-05-09 E445: Accepted QKV-shaped Metal LoRA linear measurement coverage.
+  Added ignored bench `bench_metal_linear_decode_lora_qwen35_qkv_synthetic`
+  for q-projection `[B,1,2560] x [2560,8192]` and k/v-projection
+  `[B,1,2560] x [2560,1024]`, ranks `1/2/4/8/16`, batches `1/2/4/8`. The
+  focused run passed with exact BF16 diffs. Representative rank-16 fast-path
+  timings were q_proj `1.102/1.161/2.104/2.346 ms` and k_or_v_proj
+  `0.295/0.347/0.346/0.546 ms` for batch `1/2/4/8`, with speedups from
+  `2.196x` to `112.629x` versus the generic LoRA fallback. Runtime Metal,
+  CUDA, and Vulkan behavior is unchanged.
