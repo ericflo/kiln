@@ -1,0 +1,6 @@
+wall_s=19.136329
+metrics_delta={"batches": 14.0, "jobs": 23.0, "max_batch": 3.0, "rows": 23.0}
+response_0 status=200 finish=length elapsed_s=18.953168 text='6 7 8 9 ' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=19.132957 text='11 12 13' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=19.132748 text='16 17 18' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=17.743263 text='thirteen' reasoning_len=0

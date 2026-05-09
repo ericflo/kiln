@@ -1713,10 +1713,72 @@ Verdict:
   compact-window upload size, or attention/output materialization boundaries
   rather than just eliminating the row-length descriptor.
 
+### 2026-05-09 A036: Reject Packed-BF16 Generic Linear Row-Pair
+
+Hypothesis:
+- Recent Metal work improved small batched transposed GEMV by pairing adjacent
+  output rows inside a single kernel. Vulkan live greedy decode still spends
+  meaningful time in generic packed-BF16 linear decode for small batches, so a
+  row-pair shader might reduce repeated reads and dispatch-side overhead for
+  `batch > 1`.
+
+Implementation Tried:
+- Added temporary `linear_decode_batched_rows2_bf16w.comp`.
+- Added temporary build/pipeline/prewarm entries for the shader.
+- Routed both normal and single-submit packed-BF16 generic linear decode batch
+  paths to the row-pair shader when `batch > 1`, with rollback env
+  `KILN_DISABLE_VULKAN_BF16_LINEAR_ROW_PAIR=1`.
+- Removed all source after same-binary endpoint A/B favored the existing
+  one-row-per-workgroup path.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-vulkan-kernel/build.rs
+  crates/kiln-vulkan-kernel/src/pipeline.rs
+  crates/kiln-vulkan-kernel/src/kernels.rs`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  linear_decode_batched_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `KILN_DISABLE_VULKAN_BF16_LINEAR_ROW_PAIR=1 cargo test
+  -p kiln-vulkan-kernel --test gdn_parity
+  linear_decode_batched_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Evidence:
+- Candidate and rollback focused BF16 generic linear parity both passed.
+- Focused packed-BF16 MLP parity also passed, covering the main higher-level
+  caller that reuses the generic linear decode helper.
+- No-env live greedy decode-batcher smoke, four varied prompts,
+  `KILN_DECODE_BATCH_WAIT_US=0`, `max_tokens=8`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`:
+  - Rollback first:
+    `KILN_DISABLE_VULKAN_BF16_LINEAR_ROW_PAIR=1` returned HTTP 200 in
+    `18.438183s`, with decode-batcher delta `23` jobs, `14` batches, `23`
+    rows, max batch `3`, coherent visible text, and reasoning length `0`.
+  - Candidate returned HTTP 200 in `19.136329s`, with the same decode-batcher
+    delta and the same visible output shape.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a036-bf16-linear-rowpair-rollback-*`
+- `vulkan-strix-halo-2026-05-09-a036-bf16-linear-rowpair-candidate-*`
+
+Verdict:
+- Rejected and removed. The row-pair shape that helped Metal's small batched
+  transposed GEMV does not transfer directly to Vulkan's packed-BF16 generic
+  linear decode path on Strix Halo.
+- Future generic linear work should start with shader-stage timing and tiling
+  changes that fit RADV/Strix Halo, rather than mirroring Metal's row-pair
+  shape directly.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
   K/V compaction and per-call compact K/V uploads.
+- Do not retry packed-BF16 generic linear row-pair by directly mirroring the
+  Metal row-pair shape; A036 measured it as slower than the existing Vulkan
+  batched linear path.
 - Do not retry dyn-seqlen paged-attention optimization by only pushing
   `seq_lens` through push constants; A035 measured that as slower on the
   sampled actor fixture.

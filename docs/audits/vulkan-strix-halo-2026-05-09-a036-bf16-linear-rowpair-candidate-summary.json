@@ -1,0 +1,55 @@
+{
+  "metrics_after": {
+    "batches": 14.0,
+    "jobs": 23.0,
+    "max_batch": 3.0,
+    "rows": 23.0
+  },
+  "metrics_before": {
+    "batches": 0.0,
+    "jobs": 0.0,
+    "max_batch": 0.0,
+    "rows": 0.0
+  },
+  "metrics_delta": {
+    "batches": 14.0,
+    "jobs": 23.0,
+    "max_batch": 3.0,
+    "rows": 23.0
+  },
+  "results": [
+    {
+      "elapsed_s": 18.953167703999497,
+      "finish_reason": "length",
+      "index": 0,
+      "reasoning_len": 0,
+      "status": 200,
+      "text": "6 7 8 9 "
+    },
+    {
+      "elapsed_s": 19.13295693100008,
+      "finish_reason": "length",
+      "index": 1,
+      "reasoning_len": 0,
+      "status": 200,
+      "text": "11 12 13"
+    },
+    {
+      "elapsed_s": 19.132747687999654,
+      "finish_reason": "length",
+      "index": 2,
+      "reasoning_len": 0,
+      "status": 200,
+      "text": "16 17 18"
+    },
+    {
+      "elapsed_s": 17.743262527001207,
+      "finish_reason": "stop",
+      "index": 3,
+      "reasoning_len": 0,
+      "status": 200,
+      "text": "thirteen"
+    }
+  ],
+  "wall_s": 19.136329216002196
+}
