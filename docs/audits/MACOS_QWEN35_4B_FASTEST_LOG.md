@@ -11761,3 +11761,102 @@ and uses the dyn-seqlen Metal paged-attention batch path when rows diverge.
 Uniform batches keep the faster strict kernel, Vulkan still compiles after the
 shared config change, and CUDA/Vulkan do not change default admission behavior
 unless `KILN_DECODE_BATCH_MIXED_SEQ` is explicitly set.
+
+## 2026-05-09 E357 - Rechecked decode wait after mixed-seq batching
+
+### Goal
+
+After E356 made mixed-prompt decode rows batchable on Metal, remeasure the
+admission-wait knob on the same varied-prompt four-request streaming workload.
+E352 found a `200us` wait helped an earlier four-way same-position shape, while
+E354 showed the same default hurt eight-way serving. Mixed sequence lengths
+change the batcher's opportunity set, so this checks whether a small wait is
+now strong enough to become the default.
+
+### Change
+
+No source change. Ran a same-binary endpoint sweep with
+`KILN_DECODE_BATCH_WAIT_US=0/50/100/200/300`, mixed-seq admission enabled by
+the E356 Metal default, and a fresh prewarmed release server per wait value.
+
+### Validation
+
+- Reused the E356 release `kiln` binary built from commit `26dbcde`.
+- Each server reported `mixed_seq_lens=true` and the expected `wait_us`.
+- Each measured run waited for the `inference_prewarm_complete` health check.
+- Each run returned `200` for all four streaming chat requests.
+- Metrics were captured after each run.
+
+### Results
+
+Four concurrent varied-prompt streaming chat requests, greedy `max_tokens=8`,
+`32` generated tokens each run:
+
+- `0us`: wall `5.733101s`, `28` submitted jobs, `14` worker batches, `28` rows,
+  max batch `3`
+- `50us`: wall `6.232374s`, `28` submitted jobs, `8` worker batches, `28` rows,
+  max batch `4`
+- `100us`: wall `5.561121s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `200us`: wall `5.679272s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+- `300us`: wall `5.710941s`, `28` submitted jobs, `8` worker batches, `28`
+  rows, max batch `4`
+
+The nonzero waits did make batches fuller: `8` worker batches and max batch `4`
+instead of zero wait's `14` worker batches and max batch `3`. That fullness did
+not translate into a robust default win. `100us` was fastest in this single
+sweep by `3.0%` over zero wait, but `50us` regressed by `8.7%`, `200us` and
+`300us` were only marginally faster than zero wait, and E354 already showed an
+admission wait can regress larger concurrent serving.
+
+### Artifact
+
+- `e357_wait0_server.log`
+- `e357_wait0_health.json`
+- `e357_wait0_metrics.prom`
+- `e357_wait0_time.json`
+- `e357_wait0_response_0.sse`
+- `e357_wait0_response_1.sse`
+- `e357_wait0_response_2.sse`
+- `e357_wait0_response_3.sse`
+- `e357_wait50_server.log`
+- `e357_wait50_health.json`
+- `e357_wait50_metrics.prom`
+- `e357_wait50_time.json`
+- `e357_wait50_response_0.sse`
+- `e357_wait50_response_1.sse`
+- `e357_wait50_response_2.sse`
+- `e357_wait50_response_3.sse`
+- `e357_wait100_server.log`
+- `e357_wait100_health.json`
+- `e357_wait100_metrics.prom`
+- `e357_wait100_time.json`
+- `e357_wait100_response_0.sse`
+- `e357_wait100_response_1.sse`
+- `e357_wait100_response_2.sse`
+- `e357_wait100_response_3.sse`
+- `e357_wait200_server.log`
+- `e357_wait200_health.json`
+- `e357_wait200_metrics.prom`
+- `e357_wait200_time.json`
+- `e357_wait200_response_0.sse`
+- `e357_wait200_response_1.sse`
+- `e357_wait200_response_2.sse`
+- `e357_wait200_response_3.sse`
+- `e357_wait300_server.log`
+- `e357_wait300_health.json`
+- `e357_wait300_metrics.prom`
+- `e357_wait300_time.json`
+- `e357_wait300_response_0.sse`
+- `e357_wait300_response_1.sse`
+- `e357_wait300_response_2.sse`
+- `e357_wait300_response_3.sse`
+
+### Decision
+
+Rejected changing the default wait. Keep zero wait as the Metal default because
+the only E357 winner was narrow and not monotonic, while prior eight-way data
+showed wait-based admission can lose despite fuller batches. Keep
+`KILN_DECODE_BATCH_WAIT_US` as an explicit tuning knob for workloads that match
+the `100us` varied-prompt profile.

@@ -1205,3 +1205,12 @@
   Metal mixed-seq took `5.728904s` with `14` worker batches and max batch `3`,
   a `1.414x` wall-time speedup. `KILN_DECODE_BATCH_MIXED_SEQ=0` remains the
   kill switch and non-Metal devices only opt in via env.
+- 2026-05-09 E357: Rejected changing the default Metal decode-batcher wait
+  after E356. A same-binary varied-prompt four-request streaming sweep with
+  mixed-seq admission measured wait `0/50/100/200/300us` at
+  `5.733101/6.232374/5.561121/5.679272/5.710941s`. Nonzero waits all formed
+  `8` worker batches with max batch `4` versus zero wait's `14` batches and max
+  batch `3`, but the only winner was `100us` by a narrow `3.0%`, while `50us`
+  regressed badly and E354 already showed admission waits can hurt larger
+  concurrency. No source change; keep zero wait as the default and retain
+  `KILN_DECODE_BATCH_WAIT_US` for explicit workload tuning.
