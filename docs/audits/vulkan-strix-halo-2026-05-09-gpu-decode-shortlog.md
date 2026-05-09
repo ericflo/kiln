@@ -20,10 +20,12 @@ before or with each accepted change and each measured rejection.
 | A007 | Recheck existing Vulkan feature gates. | Tokens stayed coherent. Fused conv1d regressed to `197.3ms`; disabling MLP decode regressed to `209.8ms`; GDN fused did not prove a win; disabling full-attn QKV was noisy and not better than default on rerun. | Reject toggles; keep defaults. |
 | A008 | Route full-attention `o_proj` through backend decode. | Full-attn `o_proj` profile dropped from `68.313ms total / 4.270ms mean` to `5.413ms total / 0.338ms mean`. Unprofiled serial bench stayed coherent with token IDs `[2838,6587,310,5227,1024,75119,220]`, `480.8ms` prefill, `135.1ms` mean ITL, `7.4 tok/s`. | Keep; serial throughput win. |
 | A009 | Trial Vulkan MLP decode single-submit command recording. | Focused MLP parity passed, but default single-submit regressed serial bench to `159.6ms` mean ITL; disabling it in the same binary returned to `135.8ms` with the same token IDs. | Rejected and removed before commit. |
+| A010 | Add full-attention QKV single-submit dispatch. | Default runs preserved token IDs `[2838,6587,310,5227,1024,75119,220]` and measured `132.3ms` and `133.1ms` mean ITL. Rollback first measured `134.2ms` with same IDs; a second rollback was noisy and diverged IDs. Profiled QKV bucket moved slightly from `59.768ms` to `59.019ms`. | Keep as a small Vulkan-only win. |
 
-Validation snapshot after A008:
+Validation snapshot after A010:
 
 - `rustfmt --edition 2024 --check crates/kiln-model/src/forward.rs`
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs`
 - `git diff --check`
 - `cargo check -p kiln-model`
 - `cargo check -p kiln-model --features vulkan`

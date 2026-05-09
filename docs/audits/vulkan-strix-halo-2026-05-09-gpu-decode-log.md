@@ -369,6 +369,53 @@ Verdict:
   combined command buffer loses; the next MLP attempt should target shader
   arithmetic or residency, not merely submit count.
 
+### 2026-05-09 A010: Full-Attention QKV Single-Submit Dispatch
+
+Hypothesis:
+- The full-attention QKV fused shader still used separate helper calls for x
+  upload, compute dispatch, and output readback. Unlike the rejected MLP
+  single-submit trial, this path is a single compute kernel, so combining the
+  transfer/compute/readback sequence into one command buffer should reduce
+  queue-submit overhead without changing shader arithmetic.
+
+Change:
+- Added a default-enabled single-submit path in
+  `dispatch_full_attn_qkv_decode_cached`.
+- Added rollback guard
+  `KILN_DISABLE_VULKAN_FULL_ATTN_QKV_SINGLE_SUBMIT=1`.
+- Kept the existing multi-submit path as the rollback implementation.
+
+Evidence:
+- Focused QKV parity passed with the default path and with the rollback env.
+- Full Vulkan kernel parity suite passed, 19 tests.
+- Default no-profile serial runs preserved the known token IDs
+  `[2838,6587,310,5227,1024,75119,220]` and measured `132.3ms` and `133.1ms`
+  mean ITL.
+- Rollback first measured `134.2ms` mean ITL with the same token IDs; a second
+  rollback run measured `139.0ms` but diverged to token IDs
+  `[2838,29772,220,16,17,18237,791]`, so treat rollback timing as noisy rather
+  than a strict same-token comparison.
+- Short profiled run with default single-submit stayed coherent with token IDs
+  `[2838,6587,310]`, prefill `458.2ms`, mean ITL `131.5ms`.
+- The profiled full-attention QKV bucket moved only slightly:
+  A008 `qkv_proj count=24 total=59.768ms mean=2.490ms`; A010
+  `qkv_proj count=24 total=59.019ms mean=2.459ms`.
+
+Validation:
+- `rustfmt --edition 2024 --check crates/kiln-vulkan-kernel/src/kernels.rs`
+- `git diff --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Verdict:
+- Keep, but characterize as a small Vulkan-only source win. The benefit is in
+  whole-token no-profile latency, while stage profiling shows only a marginal
+  QKV bucket reduction.
+- No CUDA or Metal source is touched by this change. CUDA/Metal feature checks
+  remain environment-blocked on this Linux host as recorded above.
+
 ## Current Open Work
 
 - Implement a real Vulkan batched paged full-attention backend if sampled or
