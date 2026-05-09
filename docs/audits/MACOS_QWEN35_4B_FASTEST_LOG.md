@@ -15859,3 +15859,48 @@ Accepted. The endpoint gain is modest but positive in both pairs, the kernel is
 low-memory and Metal-only, and the rollback is simple. This avoids retesting the
 rejected E406 combined gate/up matmul layout while removing some remaining
 pointwise prefill overhead.
+
+## 2026-05-09 - E411 refreshed post-E410 intrusive prefill profile
+
+### Purpose
+
+Refresh target-selection evidence after E410. As with E405 and E408, this is
+an intrusive profile that synchronizes around every profiled stage, so endpoint
+timings from this run are not used as latency evidence.
+
+### Command
+
+`KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1 KILN_PROFILE_MLP_STAGES=1 ./target/release/kiln-bench --model-path /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --temperature 0.0 --seed 411`
+
+### Results
+
+Filtering the measured second run to `seq_len=64` profile rows:
+
+- `gdn:in_proj`: `24` calls, `75.201 ms` total, `3.133 ms` average
+- `mlp:down_proj`: `32` calls, `72.622 ms` total, `2.269 ms` average
+- `mlp:up_proj`: `32` calls, `70.607 ms` total, `2.206 ms` average
+- `mlp:gate_proj`: `32` calls, `68.202 ms` total, `2.131 ms` average
+- `gdn:recurrent`: `24` calls, `31.285 ms` total, `1.304 ms` average
+- `gdn:out_proj`: `24` calls, `28.110 ms` total, `1.171 ms` average
+- `full_attn:qkv_proj`: `8` calls, `19.875 ms` total, `2.484 ms` average
+- `full_attn:prefill_attn_fallback`: `8` calls, `14.522 ms` total,
+  `1.815 ms` average
+- `gdn:qkv_conv_split_norm`: `24` calls, `14.160 ms` total,
+  `0.590 ms` average
+- `mlp:gate_silu_hidden_mul`: `32` calls, `13.416 ms` total,
+  `0.419 ms` average
+- `full_attn:qkv_split`: `8` calls, `8.675 ms` total, `1.084 ms` average
+- `gdn:gated_norm`: `24` calls, `7.793 ms` total, `0.325 ms` average
+- `gdn:gates`: `24` calls, `5.951 ms` total, `0.248 ms` average
+
+### Artifacts
+
+- `e411_current_paged_latency_profile_after_e410.log`
+- `e411_prefill_profile_after_e410_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. E410 moved the MLP
+pointwise stage below the larger projection and GDN buckets. Remaining prefill
+work is still dominated by GDN qkv/z input projection and the three MLP
+projection matmuls.

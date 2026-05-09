@@ -1,0 +1,23 @@
+E411 post-E410 measured seq_len=64 prefill stage totals
+rows=376
+gdn:in_proj	calls=24	total_ms=75.201	avg_ms=3.133
+mlp:down_proj	calls=32	total_ms=72.622	avg_ms=2.269
+mlp:up_proj	calls=32	total_ms=70.607	avg_ms=2.206
+mlp:gate_proj	calls=32	total_ms=68.202	avg_ms=2.131
+gdn:recurrent	calls=24	total_ms=31.285	avg_ms=1.304
+gdn:out_proj	calls=24	total_ms=28.110	avg_ms=1.171
+full_attn:qkv_proj	calls=8	total_ms=19.875	avg_ms=2.484
+full_attn:prefill_attn_fallback	calls=8	total_ms=14.522	avg_ms=1.815
+gdn:qkv_conv_split_norm	calls=24	total_ms=14.160	avg_ms=0.590
+mlp:gate_silu_hidden_mul	calls=32	total_ms=13.416	avg_ms=0.419
+full_attn:qkv_split	calls=8	total_ms=8.675	avg_ms=1.084
+gdn:gated_norm	calls=24	total_ms=7.793	avg_ms=0.325
+gdn:gates	calls=24	total_ms=5.951	avg_ms=0.248
+full_attn:q_transpose	calls=8	total_ms=5.082	avg_ms=0.635
+full_attn:kv_read	calls=8	total_ms=3.648	avg_ms=0.456
+full_attn:prefill_kv_head_layout	calls=8	total_ms=3.553	avg_ms=0.444
+full_attn:qk_norm	calls=8	total_ms=2.881	avg_ms=0.360
+full_attn:kv_write	calls=8	total_ms=2.757	avg_ms=0.345
+full_attn:rope	calls=8	total_ms=2.728	avg_ms=0.341
+full_attn:prefill_attn_head_major	calls=8	total_ms=0.036	avg_ms=0.004
+gdn:post_transpose	calls=24	total_ms=0.011	avg_ms=0.000
