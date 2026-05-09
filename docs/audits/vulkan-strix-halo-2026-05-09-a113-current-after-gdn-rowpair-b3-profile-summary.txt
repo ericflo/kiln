@@ -1,0 +1,69 @@
+A113 Current Vulkan Profile After A110/A112
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Profiled source:
+- `main` at `74e75f7b`.
+- No source changes in A113.
+- Release Vulkan `kiln-bench` rebuild passed with existing warnings.
+
+Profile command:
+- `KILN_BENCH_LOG_TOKENS=1`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`
+- `KILN_PROFILE_MLP_STAGES=1`
+- `KILN_PROFILE_FULL_ATTN_STAGES=1`
+- `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`
+- `KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1`
+- `./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 117 --quiet`
+
+Correctness signal:
+- backend: `vulkan`
+- token IDs: `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- prefill: `995.890288ms`
+- mean ITL: `81.107347625ms`
+- p50 ITL: `80.114678ms`
+- p99 ITL: `89.524793ms`
+- output tokens: `9`
+
+Measured-pass prefill buckets:
+- GDN recurrent: `248.884ms` / `24` calls.
+- MLP fused: `230.460ms` / `32` calls.
+- GDN in-proj: `126.143ms` / `24` calls.
+- Full-attention QKV projection: `98.506ms` / `8` calls.
+- GDN conv: `63.064ms` / `24` calls.
+- GDN out-proj: `58.584ms` / `24` calls.
+- GDN gated norm: `36.625ms` / `24` calls.
+- Full-attention output projection: `23.634ms` / `8` calls.
+
+Measured-pass decode buckets:
+- MLP fused: `215.996ms` / `256` calls.
+- GDN in-proj: `104.535ms` / `192` calls.
+- GDN recurrent: `71.995ms` / `192` calls.
+- GDN out-proj: `44.460ms` / `192` calls.
+- GDN gated norm: `41.206ms` / `192` calls.
+- GDN gates: `34.319ms` / `192` calls.
+- Full-attention QKV projection: `27.349ms` / `64` calls.
+- Full-attention output projection: `17.260ms` / `64` calls.
+- GDN conv: `15.255ms` / `192` calls.
+
+Inner-stage notes:
+- Vulkan MLP batch64 total was `229.291ms`; chained transfer/dispatch/readback was `224.454ms`.
+- Vulkan MLP batch1 total was `210.987ms`; chained transfer/dispatch/readback was `197.555ms`.
+- Vulkan GDN in-proj batch64 used `row_group_size=4`, `pair_qkv_z=true`; total was `125.063ms`, record/submit/wait was `100.468ms`.
+- Vulkan GDN in-proj batch1 used `row_group_size=1`, `pair_qkv_z=false`; total was `99.732ms`, record/submit/wait was `84.222ms`.
+- GDN recurrent prefill split was `chunk_scan` `74.714ms`, `matmul_prep` `72.523ms`, `chunk_prep` `57.003ms`, `state_update` `41.086ms`, and `slice_inputs` `2.187ms`.
+- GDN recurrent decode uses `single_token_backend_step`, totaling `70.204ms`.
+
+Interpretation:
+- This is profile-only target-selection evidence, not a runtime change.
+- The serial paged bench does not exercise A110's exact batch-3 GDN in-proj row-pair threshold; A110 remains covered by its live endpoint A/B artifacts.
+- Current serial prefill remains led by GDN recurrent and MLP fused, followed by GDN in-proj and full-attention QKV.
+- Current serial decode remains led by MLP fused, followed by GDN in-proj and GDN recurrent.
+- A111/A112 show that direct Metal row-triple ports are not currently justified on Vulkan. The next Vulkan candidate should change boundary, residency, or submission shape around MLP/GDN, not repeat direct small-row retile ports.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile.log`

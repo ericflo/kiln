@@ -6730,3 +6730,96 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-*.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-candidate-*`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a112-mlp-gateup-rowtriple-b3-rollback-*`
+
+### 2026-05-09 A113: Current Serial Profile After A110/A112
+
+Scope:
+
+- No source change.
+- Refresh the profiled serial hotspot map on current `main` after A110's
+  accepted batch-3 GDN in-proj threshold and the rejected A111/A112 row-triple
+  transfer attempts.
+- CUDA and Metal source paths are untouched.
+
+Build and profile:
+
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+  passed with existing warnings.
+- Profile command used:
+  `KILN_BENCH_LOG_TOKENS=1`,
+  `KILN_PROFILE_GDN_STAGES=1`,
+  `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`,
+  `KILN_PROFILE_MLP_STAGES=1`,
+  `KILN_PROFILE_FULL_ATTN_STAGES=1`,
+  `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`, and
+  `KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1` with
+  `./target/release/kiln-bench --model-path Qwen3.5-4B --paged
+  --latency-only --latency-warmup-runs 1 --prompt-tokens 64
+  --max-output-tokens 8 --seed 117 --quiet`.
+
+Correctness signal:
+
+- Final measured pass stayed on backend `vulkan`.
+- Token IDs stayed
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+- Measured `995.890288ms` prefill, `81.107347625ms` mean ITL,
+  `80.114678ms` p50, and `89.524793ms` p99.
+- Output tokens: `9`.
+
+Prefill stage totals:
+
+- GDN recurrent: `248.884ms` across `24` calls.
+- MLP fused: `230.460ms` across `32` calls.
+- GDN in-proj: `126.143ms` across `24` calls.
+- Full-attn QKV projection: `98.506ms` across `8` calls.
+- GDN conv: `63.064ms` across `24` calls.
+- GDN out-proj: `58.584ms` across `24` calls.
+- GDN gated norm: `36.625ms` across `24` calls.
+- Full-attn output projection: `23.634ms` across `8` calls.
+
+Decode stage totals:
+
+- MLP fused: `215.996ms` across `256` calls.
+- GDN in-proj: `104.535ms` across `192` calls.
+- GDN recurrent: `71.995ms` across `192` calls.
+- GDN out-proj: `44.460ms` across `192` calls.
+- GDN gated norm: `41.206ms` across `192` calls.
+- GDN gates: `34.319ms` across `192` calls.
+- Full-attn QKV projection: `27.349ms` across `64` calls.
+- Full-attn output projection: `17.260ms` across `64` calls.
+- GDN conv: `15.255ms` across `192` calls.
+
+Inner-stage observations:
+
+- MLP batch `64` total was `229.291ms`; chained transfer/dispatch/readback
+  was `224.454ms`.
+- MLP batch `1` total was `210.987ms`; chained transfer/dispatch/readback
+  was `197.555ms`.
+- GDN in-proj batch `64` used `row_group_size=4`, `pair_qkv_z=true`;
+  total was `125.063ms`, record/submit/wait was `100.468ms`.
+- GDN in-proj batch `1` used `row_group_size=1`, `pair_qkv_z=false`;
+  total was `99.732ms`, record/submit/wait was `84.222ms`.
+- GDN recurrent prefill split was `chunk_scan` `74.714ms`,
+  `matmul_prep` `72.523ms`, `chunk_prep` `57.003ms`, `state_update`
+  `41.086ms`, and `slice_inputs` `2.187ms`.
+- GDN recurrent decode uses `single_token_backend_step`, totaling
+  `70.204ms`.
+
+Interpretation:
+
+- This is target-selection evidence, not a runtime change.
+- The serial paged bench does not exercise A110's exact batch-3 GDN in-proj
+  row-pair threshold; A110 remains covered by its live endpoint A/B artifacts.
+- Current serial prefill remains led by GDN recurrent and MLP fused, followed
+  by GDN in-proj and full-attention QKV.
+- Current serial decode remains led by MLP fused, followed by GDN in-proj and
+  GDN recurrent.
+- A111/A112 show that direct Metal row-triple ports are not currently justified
+  on Vulkan. The next Vulkan candidate should change boundary, residency, or
+  submission shape around MLP/GDN, not repeat direct small-row retile ports.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a113-current-after-gdn-rowpair-b3-profile.log`
