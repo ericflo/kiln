@@ -2392,16 +2392,19 @@ fn embedding_lookup_from_transposed_index(
 /// Returns: same shape as `x`.
 ///
 /// Dispatch (CUDA path; bf16 inputs within the kernel envelope, hidden <= 8192):
-///   - Default: `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd` — fused
-///     forward kernel + manual CUDA backward kernel routed through
-///     `CustomOp2`. The autograd graph saves only `x` and `weight` (not the
-///     F32 intermediates that the candle-op chain materializes), shrinking
-///     per-layer saved-tensor peak during Phase 10 long-context training.
-///     Inference (no grad needed) skips the backward path entirely — the
-///     CustomOp2 still uses the same single-launch fused forward kernel.
-///   - Auto-gated by total VRAM: the fused path runs only on GPUs with
-///     ≥ 47 GiB total VRAM (A6000-class and above). On smaller GPUs (A40,
-///     RTX 3090/4090, L40, etc.) the dispatch routes through
+///   - Inference tensors that do not participate in autograd use
+///     `kiln_rmsnorm_kernel::fused_rmsnorm`, the forward-only single-launch
+///     kernel. This path does not build a `CustomOp2` and is therefore not
+///     subject to the training saved-tensor VRAM regression described below.
+///   - Training/autograd tensors use
+///     `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd` — fused forward
+///     kernel + manual CUDA backward kernel routed through `CustomOp2`. The
+///     autograd graph saves only `x` and `weight` (not the F32 intermediates
+///     that the candle-op chain materializes), shrinking per-layer
+///     saved-tensor peak during Phase 10 long-context training.
+///   - Auto-gated by total VRAM for autograd only: the `CustomOp2` path runs
+///     only on GPUs with ≥ 47 GiB total VRAM (A6000-class and above). On
+///     smaller GPUs (A40, RTX 3090/4090, L40, etc.) the dispatch routes through
 ///     `rms_norm_fallback` automatically. Rationale: PR #638's CustomOp2
 ///     saved-tensor expansion costs +18.6 GiB peak at T=2048 on A40-class
 ///     hardware (see `docs/audits/PHASE10_VRAM_REGRESSION_MECHANISM.md`,
@@ -2430,13 +2433,15 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     {
         let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
-        if !kernel_disabled
-            && !bwd_disabled
-            && should_use_fused_rmsnorm()
-            && kiln_rmsnorm_kernel::supports(x, weight)
-        {
-            return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
-                .context("fused_rmsnorm_with_autograd CustomOp2 failed");
+        if !kernel_disabled && !bwd_disabled && kiln_rmsnorm_kernel::supports(x, weight) {
+            if !x.track_op() && !weight.track_op() {
+                return kiln_rmsnorm_kernel::fused_rmsnorm(x, weight, eps as f32)
+                    .context("fused_rmsnorm inference forward failed");
+            }
+            if should_use_fused_rmsnorm() {
+                return kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd(x, weight, eps as f32)
+                    .context("fused_rmsnorm_with_autograd CustomOp2 failed");
+            }
         }
     }
     #[cfg(feature = "metal")]

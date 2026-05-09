@@ -1,0 +1,154 @@
+# WSL CUDA Qwen3.5-4B Throughput Log
+
+Date: 2026-05-09
+
+Host: WSL2, CUDA 12.4, NVIDIA GeForce RTX 4090 Laptop GPU, 16376 MiB VRAM.
+
+Model: `./Qwen3.5-4B`
+
+Server environment used for accepted measurements:
+
+```text
+KILN_MODEL_PATH=./Qwen3.5-4B
+KILN_DROP_PROJECTION_ORIGINALS=1
+KILN_NUM_BLOCKS=512
+KILN_PREFIX_CACHE_MAX_ENTRIES=1
+KILN_GRAD_CHECKPOINT_SEGMENTS=32
+KILN_USE_FLCE=1
+```
+
+## Recovery Notes
+
+Recent CUDA graph experiments were rejected after the machine showed WSL/CUDA
+memory pressure and a driver crash:
+
+- `dmesg` showed `dxgkio_make_resident: Ioctl failed: -12` around 14:57.
+- `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA=1` crashed in `libcuda.so.1.1` at
+  15:21 with a `tokio-rt-worker` SIGSEGV.
+- Raising `KILN_CUDA_GRAPH_CACHE_MAX` to 128 improved warmed latency after the
+  cache filled, but its cold-fill behavior and memory risk are not acceptable
+  on 16 GiB GPUs.
+
+Those graph paths were not kept. The accepted change is limited to RMSNorm
+dispatch.
+
+## Accepted Change
+
+`crates/kiln-model/src/forward.rs` now routes CUDA BF16 RMSNorm as follows:
+
+- If both tensors are outside Candle autograd (`!track_op()`), inference uses
+  `kiln_rmsnorm_kernel::fused_rmsnorm`, the forward-only fused kernel.
+- If either tensor is tracked by autograd, training keeps the existing
+  `should_use_fused_rmsnorm()` 47 GiB VRAM gate before using
+  `fused_rmsnorm_with_autograd`.
+- `KILN_DISABLE_RMSNORM_KERNEL` and `KILN_DISABLE_RMSNORM_BACKWARD` still force
+  the fallback path.
+
+This keeps the training OOM protection intact while removing the RMSNorm
+fallback penalty from normal inference on the 4090 Laptop GPU.
+
+## Endpoint Probe
+
+Probe shape:
+
+- endpoint: `/v1/chat/completions`
+- prompt: integer-list prompt with unique nonce
+- `max_tokens`: 64
+- `temperature`: 0
+
+Recovered fallback baseline, RMSNorm gate OFF:
+
+```text
+3.806, 3.296, 3.296, 3.284, 3.273, 3.371 seconds
+```
+
+Forced fused RMSNorm proxy (`KILN_FORCE_RMSNORM_KERNEL=1`):
+
+```text
+3.3585, 2.8251, 2.8154, 2.8015, 2.7930, 2.7735 seconds
+```
+
+Patched default server, no force override:
+
+```text
+3.2055, 2.7625, 2.7347, 2.7066, 2.7377, 2.7352 seconds
+```
+
+Warmed average, runs 1-5:
+
+| path | seconds | completion tok/s |
+| --- | ---: | ---: |
+| fallback baseline | 3.3040 | 19.37 |
+| forced fused proxy | 2.8017 | 22.84 |
+| patched default | 2.7353 | 23.40 |
+
+Patched default vs fallback baseline:
+
+- 17.2% lower warmed request latency.
+- 20.8% higher warmed completion throughput.
+
+## Memory
+
+Patched default server health after load:
+
+```json
+{
+  "blocks_total": 512,
+  "blocks_free": 512,
+  "gpu_memory": {
+    "total_vram_gb": 17.171480576,
+    "model_gb": 10.036969472,
+    "kv_cache_gb": 0.268435456,
+    "training_budget_gb": 6.866075648
+  }
+}
+```
+
+After the six-request patched probe, `nvidia-smi` reported:
+
+```text
+16376 MiB total, 10046 MiB used, 6005 MiB free
+```
+
+## Training Verification
+
+Training smoke request:
+
+- endpoint: `/v1/train/sft`
+- examples: 1
+- epochs: 1
+- LoRA rank: 4
+- `auto_load`: false
+- output adapter: `smoke-rmsnorm-inference-fastpath`
+
+Result:
+
+```text
+job_id=3e7ed8d6-f66b-4d4f-ad0e-cc49e58021c4
+state=completed
+final_loss=4.8016462326049805
+```
+
+Server log confirmed training stayed on the protected path:
+
+```text
+kiln rmsnorm gate total_vram_mib=16376 threshold_mib=48128 detection_source=nvidia-smi force_override=false fused_path="OFF"
+```
+
+The smoke adapter was then unloaded and deleted through the adapter API.
+
+## Validation
+
+Commands run:
+
+```bash
+cargo fmt --all --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" cargo build --release --features cuda --bin kiln
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" cargo test --release -p kiln-model --features cuda rms_norm --lib
+```
+
+Focused test result:
+
+```text
+3 passed; 0 failed; 293 filtered out
+```
