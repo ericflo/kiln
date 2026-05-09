@@ -11994,3 +11994,48 @@ not pay for the added accumulators/register pressure.
 Rejected and reverted. Keep the current two-column serial fused gate/up kernel.
 Avoid wider serial column grouping for this MLP shape unless a later design
 substantially changes the register/memory tradeoff.
+
+## 2026-05-09 E360 - Rejected fast exp in MLP gate/up sigmoid
+
+### Goal
+
+Check whether the MLP gate/up fused kernel is meaningfully spending time in
+the sigmoid exponentials. Since the output is BF16, replacing `exp` with Metal
+`fast::exp` might have been acceptable if it improved the top E358 decode
+stage without changing the projection shape.
+
+### Change
+
+- Temporarily changed the two sigmoid calls in `kiln_mlp_gate_up_bf16` from
+  `exp` to `fast::exp`.
+- Reverted the source after the candidate did not beat the E359 current-kernel
+  baseline.
+
+### Validation
+
+- Candidate parity:
+  `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- Candidate bench:
+  `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=2 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=8 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Qwen-shaped BF16 MLP gate/up decode batch synthetic bench, lower is better:
+
+- batch `1`: E359 baseline `1805.161 us`, fast-exp candidate `1816.448 us`
+- batch `2`: E359 baseline `1953.260 us`, fast-exp candidate `2107.578 us`
+- batch `4`: E359 baseline `2132.995 us`, fast-exp candidate `2122.781 us`
+- batch `8`: E359 baseline `7228.188 us`, fast-exp candidate `7380.891 us`
+
+The candidate passed parity but did not produce a robust speedup. Batch `4`
+improved by only `0.5%`, while batch `1`, `2`, and `8` regressed.
+
+### Artifact
+
+- `e360_mlp_gate_up_fast_exp_parity.log`
+- `e360_mlp_gate_up_fast_exp_candidate.log`
+
+### Decision
+
+Rejected and reverted. Keep `exp` in the MLP gate/up kernel; this micro-change
+does not address the real cost of the projection-heavy stage.

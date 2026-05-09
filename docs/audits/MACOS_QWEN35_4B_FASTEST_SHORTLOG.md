@@ -1232,3 +1232,10 @@
   versus candidate `2324.990/2580.365/3731.068/8243.922 us`. Keep the current
   two-column serial kernel; do not try wider serial column grouping for this
   shape without a materially different register/memory strategy.
+- 2026-05-09 E360: Rejected and reverted `fast::exp` inside the Metal MLP
+  gate/up sigmoid. Decode-batch parity passed, but the same Qwen-shaped
+  synthetic bench produced `1816.448/2107.578/2122.781/7380.891 us` at batch
+  `1/2/4/8` versus E359's current-kernel baseline
+  `1805.161/1953.260/2132.995/7228.188 us`. The only apparent win was a
+  noise-level `0.5%` at batch `4`; batch `1/2/8` regressed. Keep precise
+  `exp` in this kernel.
