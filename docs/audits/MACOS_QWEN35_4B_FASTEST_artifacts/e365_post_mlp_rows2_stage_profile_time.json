@@ -1,0 +1,24 @@
+{
+  "concurrency": 4,
+  "decode_batch_wait_us": 0,
+  "elapsed_seconds": 7.027177624986507,
+  "errors": [
+    null,
+    null,
+    null,
+    null
+  ],
+  "max_tokens": 3,
+  "port": 8473,
+  "profiles": [
+    "full_attn",
+    "gdn",
+    "mlp"
+  ],
+  "statuses": [
+    200,
+    200,
+    200,
+    200
+  ]
+}

@@ -1282,3 +1282,14 @@
   build passed. Same-binary four-request endpoint probe was flat:
   disabled/enabled `6.582271/6.576782s` with `32` generated tokens, `28`
   submitted jobs, `14` worker batches, and max batch `3`.
+- 2026-05-09 E365: Refreshed synchronized stage profiling after E364 on the
+  reconstructed varied-prompt shape used in the E364 endpoint probe. This is
+  not directly comparable to E362's prompt mix, but it confirms the target
+  order: four requests with greedy `max_tokens=3` generated `12` tokens,
+  submitted `8` jobs through `4` worker batches, and observed max batch `3`;
+  wall time was `7.027178s` with profiling synchronization enabled. Stage
+  totals after the marker were GDN `5814.303 ms`, MLP `5102.197 ms`, and full
+  attention `1925.676 ms`; top live `seq_len=1` decode stages were MLP
+  `gate_up_fused` `434.457 ms`, MLP `down_proj` `314.999 ms`, GDN `in_proj`
+  `242.788 ms`, and GDN `out_proj` `124.879 ms`. No source change; continue
+  treating MLP gate/up and down-proj as the dominant Metal decode targets.

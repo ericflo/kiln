@@ -12372,3 +12372,80 @@ path improves substantially.
 
 Accepted. Keep row-pair mode enabled by default for batched Metal MLP gate/up
 decode, with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1` as the rollback knob.
+
+## 2026-05-09 E365 - Refreshed stage profile after MLP row-pair change
+
+### Goal
+
+Re-profile the current Metal serving path after E364 to keep the next target
+selection grounded in measured stages. This run used the reconstructed
+varied-prompt shape from E364's endpoint comparison, so it is not a direct
+before/after comparison with E362's exact prompt mix.
+
+### Change
+
+No source change. Rebuilt the release Metal binary on the rebased current tree
+and ran a prewarmed release server with `KILN_PROFILE_FULL_ATTN_STAGES=1`,
+`KILN_PROFILE_GDN_STAGES=1`, and `KILN_PROFILE_MLP_STAGES=1`. The server log
+contains an `E365_MEASURE_START` marker after background prewarm.
+
+### Validation
+
+- `cargo build --release --features metal --bin kiln --bin kiln-bench`
+- Server reported a loaded Qwen3.5-4B model and passed
+  `inference_prewarm_complete`.
+- Four streaming chat requests returned `200`, greedy `max_tokens=3`.
+- Metrics and parsed profile summary were captured.
+
+### Results
+
+Profiled live run:
+
+- wall time `7.027178s` with profiling synchronization enabled
+- `12` generated tokens
+- active request peak `3`
+- `8` submitted batcher jobs
+- `4` worker batches
+- `8` rows
+- max batch `3`
+
+Stage totals after `E365_MEASURE_START`, including live request prefill and
+decode:
+
+- GDN total `5814.303 ms`
+- MLP total `5102.197 ms`
+- full attention total `1925.676 ms`
+
+Top `seq_len=1` live decode stages:
+
+- `mlp:gate_up_fused`: `434.457 ms`
+- `mlp:down_proj`: `314.999 ms`
+- `gdn:in_proj`: `242.788 ms`
+- `gdn:out_proj`: `124.879 ms`
+- `full_attn:qkv_proj_batch`: `52.249 ms`
+- `gdn:gates_recur_gated_norm`: `50.751 ms`
+- `full_attn:qkv_proj`: `41.580 ms`
+- `gdn:qkv_conv_norm`: `38.638 ms`
+
+Because this prompt mix differs from E362, treat the absolute stage totals as
+target-selection evidence rather than a regression/progression comparison. The
+ordering is still clear: MLP gate/up and down-projection dominate live Metal
+decode.
+
+### Artifact
+
+- `e365_release_build_metal.log`
+- `e365_post_mlp_rows2_stage_profile_server.log`
+- `e365_post_mlp_rows2_stage_profile_health.json`
+- `e365_post_mlp_rows2_stage_profile_metrics.prom`
+- `e365_post_mlp_rows2_stage_profile_time.json`
+- `e365_post_mlp_rows2_stage_profile_response_0.sse`
+- `e365_post_mlp_rows2_stage_profile_response_1.sse`
+- `e365_post_mlp_rows2_stage_profile_response_2.sse`
+- `e365_post_mlp_rows2_stage_profile_response_3.sse`
+- `e365_post_mlp_rows2_stage_profile_summary.txt`
+
+### Decision
+
+Accepted as target-selection evidence. No source change; keep focusing Metal
+work on MLP decode projection stages.

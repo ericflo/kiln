@@ -1,0 +1,50 @@
+E365 post-MLP-row-pair stage profile summary
+
+Kind totals after E365_MEASURE_START:
+- gdn: 5814.303 ms
+- mlp: 5102.197 ms
+- full_attn: 1925.676 ms
+
+Top seq_len=1 decode stages:
+- mlp:gate_up_fused: 434.457 ms (128 samples)
+- mlp:down_proj: 314.999 ms (128 samples)
+- gdn:in_proj: 242.788 ms (96 samples)
+- gdn:out_proj: 124.879 ms (96 samples)
+- full_attn:qkv_proj_batch: 52.249 ms (16 samples)
+- gdn:gates_recur_gated_norm: 50.751 ms (96 samples)
+- full_attn:qkv_proj: 41.580 ms (16 samples)
+- gdn:qkv_conv_norm: 38.638 ms (96 samples)
+- full_attn:o_proj_batch: 23.275 ms (16 samples)
+- full_attn:o_proj: 19.207 ms (16 samples)
+- full_attn:rope_batch: 16.383 ms (16 samples)
+- full_attn:kv_write: 13.290 ms (16 samples)
+- full_attn:qkv_split: 7.430 ms (16 samples)
+- full_attn:decode_attn_contiguous_batch: 6.975 ms (16 samples)
+- full_attn:qkv_split_batch: 6.686 ms (16 samples)
+- full_attn:kv_write_batch: 6.094 ms (16 samples)
+- full_attn:attn_gate_batch: 6.077 ms (16 samples)
+- full_attn:qk_norm: 6.070 ms (16 samples)
+- full_attn:rope: 5.523 ms (16 samples)
+- full_attn:decode_attn_contiguous: 5.251 ms (16 samples)
+
+Top all stage buckets:
+- gdn:gates seq_len=128: 702.880 ms (24 samples)
+- gdn:gates seq_len=80: 576.535 ms (24 samples)
+- gdn:gates seq_len=40: 547.919 ms (24 samples)
+- gdn:gates seq_len=192: 500.262 ms (24 samples)
+- gdn:in_proj seq_len=40: 442.426 ms (24 samples)
+- mlp:gate_up_fused seq_len=1: 434.457 ms (128 samples)
+- gdn:in_proj seq_len=192: 392.820 ms (24 samples)
+- gdn:in_proj seq_len=128: 335.983 ms (24 samples)
+- mlp:down_proj seq_len=192: 328.653 ms (32 samples)
+- mlp:down_proj seq_len=1: 314.999 ms (128 samples)
+- mlp:gate_proj seq_len=192: 287.724 ms (32 samples)
+- mlp:up_proj seq_len=192: 286.395 ms (32 samples)
+- mlp:gate_silu seq_len=80: 283.718 ms (32 samples)
+- mlp:gate_silu seq_len=40: 272.991 ms (32 samples)
+- mlp:down_proj seq_len=128: 271.498 ms (32 samples)
+- mlp:gate_silu seq_len=128: 269.538 ms (32 samples)
+- mlp:down_proj seq_len=40: 263.138 ms (32 samples)
+- gdn:in_proj seq_len=80: 252.484 ms (24 samples)
+- gdn:in_proj seq_len=1: 242.788 ms (96 samples)
+- mlp:gate_proj seq_len=80: 242.555 ms (32 samples)
