@@ -878,6 +878,49 @@ Verdict:
 - Keep the existing `80x3` batched GDN input-projection geometry until a
   broader GDN residency/fusion change can reduce launch and data-movement cost.
 
+### 2026-05-09 A021: Reject Vulkan MLP Gate/Up Two-Column Decode Shader
+
+Hypothesis:
+- The Metal audit accepted a two-adjacent-column MLP gate/up decode kernel and
+  rejected wider cooperative variants. Vulkan serial profiling still ranks
+  `mlp:fused` as the largest decode-stage bucket, so the same two-column idea
+  might reduce repeated hidden-row loads in the single-token Vulkan F32 shader.
+
+Experiment:
+- Temporarily changed
+  `crates/kiln-vulkan-kernel/csrc/shaders/mlp_gate_up_decode.comp` so each
+  `local_size_x = 64, local_size_y = 4` workgroup computed two adjacent output
+  columns per `col_lane` and covered `128` intermediate columns per workgroup.
+- Updated the two matching single-row MLP gate/up launch counts in
+  `crates/kiln-vulkan-kernel/src/kernels.rs` from `div_ceil(64)` to
+  `div_ceil(128)`.
+- Restored both files after measurement.
+
+Evidence:
+- Focused MLP parity passed:
+  `cargo test -p kiln-vulkan-kernel mlp_ --test gdn_parity -- --nocapture`
+  (`3` tests passed).
+- `cargo check -p kiln-model --features vulkan` passed.
+- Candidate release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Candidate serial paged bench stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, but regressed to
+  `141.6ms` mean ITL.
+- Candidate short profile showed the targeted bucket got worse:
+  `mlp:fused total=218.030ms`, `count=96`, `mean=2.271ms`, versus the
+  pre-trial profile at about `202.545ms` total / `2.110ms` mean.
+- Same-branch rollback to the original one-column shader rebuilt cleanly and
+  returned to coherent token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, `450.9ms` prefill, and
+  `129.1ms` mean ITL.
+
+Verdict:
+- Rejected and removed before commit. On Strix Halo Vulkan F32, the extra
+  accumulators/shared memory and lower workgroup count lose more than the
+  adjacent-column input-load reuse saves.
+- Do not port Metal's two-column gate/up decode shape directly to Vulkan
+  without a different shader structure or new hardware/profile evidence.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
