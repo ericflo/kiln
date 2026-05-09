@@ -18227,3 +18227,56 @@ Disabling row-pair was slower for every tested row. Selected timings:
 Accepted as policy evidence only. Keep the current row-pair path for batch
 `2/3/4` and row-quad path for batch `8`; there is no measured rowwise exception
 worth a selector change.
+
+## 2026-05-09 - E443 rejected MLP gate/up batch2 rowwise exception
+
+### Purpose
+
+E418's older MLP gate/up row-policy sweep showed one tempting short-run data
+point where disabling row-pair was slightly faster at batch `2`, while batch
+`3/4/8` clearly needed row-pair/row-quad. Since E439's live batcher often
+coalesced small batches and MLP gate/up remains the largest decode stage,
+retest whether a rows==2 rowwise exception is worth a selector change.
+
+### Change
+
+No source change. Ran the existing Qwen3.5 MLP gate/up decode-batch bench in
+default and `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1` modes, then repeated in
+counter-order.
+
+### Validation
+
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=5 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=5 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- counter-order repeat of both commands
+- `cargo fmt --check`
+- `git diff --check`
+
+### Results
+
+| batch | default1 | no row pair1 | no row pair2 | default2 | verdict |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | `1676.208` | `1624.977` | `1801.737` | `1654.338` | env does not change policy; noise |
+| 2 | `1953.688` | `1889.987` | `1962.617` | `1964.735` | no source change; tie/noise |
+| 3 | `1973.442` | `3128.746` | `3119.140` | `1917.848` | row-pair clearly favored |
+| 4 | `2012.179` | `3598.829` | `3593.256` | `2025.869` | row-pair clearly favored |
+| 8 | `2368.365` | `6895.800` | `6786.956` | `2228.929` | row-pair clearly favored |
+
+Batch `2` is the only possible exception, but the counter-order repeat reduced
+the initial rowwise edge to a tie. Batch `3/4/8` remain clear regressions when
+row-pair is disabled.
+
+### Artifacts
+
+- `e443_mlp_gate_up_batch_default.log`
+- `e443_mlp_gate_up_batch_no_row_pair.log`
+- `e443_mlp_gate_up_batch_no_row_pair_rerun.log`
+- `e443_mlp_gate_up_batch_default_rerun.log`
+- `e443_mlp_gate_up_batch_no_row_pair_summary.md`
+- `e443_mlp_gate_up_batch_no_row_pair_fmt_check.log`
+- `e443_mlp_gate_up_batch_no_row_pair_git_diff_check.log`
+
+### Decision
+
+Rejected. Keep the current MLP gate/up row-pair selector. A batch-2-only
+rowwise exception is not justified by a noisy `0-3%` synthetic difference.

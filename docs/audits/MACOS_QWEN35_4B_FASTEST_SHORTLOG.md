@@ -1959,3 +1959,10 @@
   `1.409x` to `1.912x` for batch `2/3/4` and from `2.214x` to `2.570x` for
   batch `8`. No source change; keep row-pair for batch `2/3/4` and row-quad
   for batch `8`.
+- 2026-05-09 E443: Rejected an MLP gate/up batch-2 rowwise exception. Current
+  same-source default versus `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR=1`
+  repeated E418's tempting batch-2 signal in the first pair (`1953.688 us`
+  row-pair versus `1889.987 us` rowwise), but the counter-order repeat was a
+  tie (`1964.735 us` row-pair versus `1962.617 us` rowwise). Batch `3/4/8`
+  were still clear regressions without row-pair (`3.12/3.59/6.79 ms` versus
+  `1.92/2.03/2.23 ms`). No source change; keep current MLP gate/up row-pair.
