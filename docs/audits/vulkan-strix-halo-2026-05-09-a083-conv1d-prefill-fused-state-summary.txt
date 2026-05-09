@@ -8,6 +8,14 @@ Experiment:
 - Rollback env during the trial:
   `KILN_DISABLE_VULKAN_CONV1D_PREFILL_FUSED_STATE=1`
 
+Correction:
+- Follow-up inspection found the dispatcher branch was accidentally inserted
+  into `dispatch_causal_conv1d_update`, not
+  `dispatch_causal_conv1d_prefill`.
+- This means A083 is not valid evidence about the GDN conv prefill bucket.
+- Treat this as a voided implementation-mismatch trial; do not use its timings
+  to accept or reject the intended prefill optimization.
+
 Validation while temporary source was present:
 - `cargo fmt --check`
 - `cargo check -p kiln-vulkan-kernel`
@@ -33,8 +41,8 @@ Correctness:
 - Candidate and rollback produced the same token IDs.
 
 Verdict:
-- Reject and remove the temporary source.
-- The Metal one-workgroup-per-channel conv prefill shape does not transfer to
-  the current Vulkan Strix Halo prefill path as a default.
+- Void and remove the temporary source.
+- The intended Metal-style Vulkan conv prefill experiment still needs a
+  correctly wired implementation before any accept/reject decision.
 - Final source contains no A083 Vulkan shader or dispatcher changes, and CUDA
   and Metal source paths are untouched.

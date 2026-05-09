@@ -4575,25 +4575,35 @@ Verdict:
   non-hybrid F32/BF16 linear routes are unchanged.
 - CUDA and Metal source paths are untouched.
 
-### 2026-05-09 A083: Reject Metal-Style Conv1d Prefill Fused State
+### 2026-05-09 A083: Voided Misapplied Conv1d Fused-State Trial
 
 Goal:
 - After A082, GDN conv remained one of the larger prefill buckets.
 - The Metal backend has a conv prefill kernel that assigns one workgroup to one
   `(batch, channel)` stream, computes all timesteps, then advances state after
   a workgroup barrier.
-- Test whether that shape transfers to Vulkan and can replace the current
-  two-dispatch `causal_conv1d.comp` plus `causal_conv1d_state_advance.comp`
-  prefill route.
+- Intended test: whether that shape transfers to Vulkan and can replace the
+  current two-dispatch `causal_conv1d.comp` plus
+  `causal_conv1d_state_advance.comp` prefill route.
+
+Correction:
+- Follow-up inspection found the temporary dispatcher branch was accidentally
+  inserted into `dispatch_causal_conv1d_update`, not
+  `dispatch_causal_conv1d_prefill`.
+- Therefore this A/B is not valid evidence about the GDN conv prefill bucket.
+- Treat A083 as a voided implementation-mismatch trial. Do not use its timings
+  to accept or reject the intended prefill optimization.
 
 Temporary change:
 - Added a temporary `causal_conv1d_prefill_k4` Vulkan shader.
 - It used one workgroup per `(batch, channel)` stream, local size `64`, shared
   initial state and weights, and in-place state advance after a workgroup
   barrier.
+- The dispatcher branch was wired to the single-token update route by mistake.
 - Temporary rollback env:
   `KILN_DISABLE_VULKAN_CONV1D_PREFILL_FUSED_STATE=1`
-- Extended focused conv prefill parity to include `seq_len=64` while testing.
+- Extended focused conv prefill parity to include `seq_len=64` while testing,
+  but that focused test did not exercise the accidentally wired update branch.
 - CUDA and Metal source paths were untouched.
 
 Temporary validation:
@@ -4623,6 +4633,14 @@ Same-binary rollback-env A/B, seed 85:
   - p99 ITL `88.50741199999999ms`
   - same token IDs
 
+Interpretation:
+- Candidate and rollback stayed on backend `vulkan` and produced the same token
+  IDs, so the temporary code did not cause obvious output corruption.
+- The prefill timing regression is not attributable to a valid prefill-path
+  experiment because the temporary route was not wired into prefill.
+- The mean-ITL regression is consistent with the mistaken update-path wiring,
+  but no further conclusion should be drawn because the source was removed.
+
 Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a083-conv1d-prefill-fused-state-summary.txt`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a083-conv1d-prefill-fused-state-candidate.log`
@@ -4632,10 +4650,9 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a083-conv1d-prefill-fused-state-source-reverted-diffcheck.log`
 
 Verdict:
-- Reject and remove the temporary source. Same-token no-profile A/B showed a
-  clear prefill regression against the old two-dispatch path.
-- Do not retry Vulkan conv prefill by directly mirroring Metal's
-  one-workgroup-per-channel shape without a new hypothesis.
+- Void and remove the temporary source.
+- The intended Vulkan conv prefill fused-state experiment still needs a
+  correctly wired implementation before any accept/reject decision.
 - Final source has no A083 code, and CUDA/Metal source paths are untouched.
 
 ## Current Open Work
@@ -4722,10 +4739,10 @@ Verdict:
   `233.559ms`, GDN recurrent `230.371ms`, GDN conv `163.942ms`, GDN in-proj
   `121.632ms`, and full-attention QKV `97.752ms`; next prefill work should not
   assume one remaining MLP projection is dominant without a fresh profile.
-- Do not retry Vulkan conv1d prefill by directly mirroring Metal's
-  one-workgroup-per-channel fused-state kernel. A083 passed parity and kept the
-  same token IDs, but regressed no-profile prefill from `1083.188ms` rollback
-  to `1149.654ms` candidate on the same seed and binary.
+- A083 does not provide valid evidence for or against Metal-style Vulkan
+  conv1d prefill. The temporary route was accidentally wired into
+  `dispatch_causal_conv1d_update`, not prefill, and was removed. A correctly
+  wired prefill experiment is still required before judging that idea.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent
