@@ -4850,16 +4850,24 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
         None
     };
 
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/gdn_recurrent_prefill.comp"
-    );
-    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
     let dims = q.dims();
     let (batch, heads, dk) = (dims[0], dims[1], dims[2]);
     let dims_v = v.dims();
     let dv = dims_v[2];
+
+    let parallel_reduce = use_gdn_recurrent_parallel_reduce(dk, dv);
+    let glsl_path = if parallel_reduce {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_step_parallel.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_prefill.comp"
+        )
+    };
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
     let make_device_and_staging = |data: &[u8]| -> Result<(VulkanBuffer, VulkanBuffer)> {
         let device_buf =
@@ -4905,6 +4913,11 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
     let total = batch * heads * dv;
     let workgroup_count = total.div_ceil(256) as u32;
+    let dispatch_counts = if parallel_reduce {
+        (batch as u32, heads as u32, dv as u32)
+    } else {
+        (workgroup_count, 1, 1)
+    };
     let all_handles = vec![
         q_buf.handle(),
         k_buf.handle(),
@@ -5019,7 +5032,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
             0,
             bytemuck::cast_slice(&push_constants),
         );
-        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
+        device.cmd_dispatch(cmd, dispatch_counts.0, dispatch_counts.1, dispatch_counts.2);
 
         let compute_barrier = make_memory_barrier(
             vk::AccessFlags::SHADER_WRITE,

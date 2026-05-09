@@ -1,0 +1,138 @@
+{
+  "id": "A067",
+  "date": "2026-05-09",
+  "experiment": "resident GDN recurrent parallel reduce",
+  "change": {
+    "source": [
+      "crates/kiln-vulkan-kernel/src/kernels.rs",
+      "crates/kiln-vulkan-kernel/tests/gdn_parity.rs"
+    ],
+    "description": "Route Vulkan resident-state GDN recurrent steps through the existing 32-lane parallel-reduce shader when dk >= 32, using the existing KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE rollback gate."
+  },
+  "correctness": {
+    "first_32_token_ids_candidate": [
+      271,
+      1206,
+      1423,
+      680,
+      1204,
+      1691,
+      51864,
+      3520,
+      506,
+      279,
+      19719,
+      6,
+      2981,
+      11,
+      567,
+      1118,
+      1144,
+      310,
+      7995,
+      1204,
+      1599,
+      18237,
+      1292,
+      682,
+      2047,
+      1238,
+      11834,
+      321,
+      26912,
+      13,
+      2838,
+      8211
+    ],
+    "first_32_token_ids_rollback": [
+      271,
+      1206,
+      1423,
+      680,
+      1204,
+      1691,
+      51864,
+      3520,
+      506,
+      279,
+      19719,
+      6,
+      2981,
+      11,
+      567,
+      1118,
+      1144,
+      310,
+      7995,
+      1204,
+      1599,
+      18237,
+      1292,
+      682,
+      2047,
+      1238,
+      11834,
+      321,
+      26912,
+      13,
+      2838,
+      8211
+    ],
+    "matched": true
+  },
+  "no_profile_ab": {
+    "candidate": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a067-resident-recurrent-parallel-candidate-noprofile.log",
+      "prefill_time_ms": 2203.2399429999996,
+      "mean_inter_token_ms": 94.300438359375,
+      "p50_inter_token_ms": 93.53585000000001,
+      "p99_inter_token_ms": 130.533562,
+      "decode_tokens_per_sec": 10.604404575395952
+    },
+    "rollback": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a067-resident-recurrent-parallel-rollback-noprofile.log",
+      "env": "KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1",
+      "prefill_time_ms": 2036.7582569999997,
+      "mean_inter_token_ms": 96.537889765625,
+      "p50_inter_token_ms": 95.942934,
+      "p99_inter_token_ms": 105.84627300000001,
+      "decode_tokens_per_sec": 10.358627088574272
+    },
+    "delta": {
+      "mean_inter_token_ms": -2.23745140625,
+      "decode_tokens_per_sec": 0.24577748682167962,
+      "decode_tokens_per_sec_percent": 2.3726842953286267
+    }
+  },
+  "profiled_ab": {
+    "candidate": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a067-resident-recurrent-parallel-candidate.log",
+      "prefill_time_ms": 2125.4031250000003,
+      "mean_inter_token_ms": 99.55432775000001,
+      "gdn_recurrent_seq1_total_ms": 1692.770,
+      "gdn_recurrent_seq1_count": 3072,
+      "gdn_recurrent_seq1_avg_ms": 0.551032,
+      "gdn_recurrent_seq64_total_ms": 524.144,
+      "gdn_recurrent_seq64_count": 48,
+      "gdn_recurrent_seq64_avg_ms": 10.919667
+    },
+    "rollback": {
+      "log": "docs/audits/vulkan-strix-halo-2026-05-09-a067-resident-recurrent-parallel-rollback.log",
+      "env": "KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1",
+      "prefill_time_ms": 2107.554641,
+      "mean_inter_token_ms": 99.45250806249997,
+      "gdn_recurrent_seq1_total_ms": 1698.004,
+      "gdn_recurrent_seq1_count": 3072,
+      "gdn_recurrent_seq1_avg_ms": 0.552736,
+      "gdn_recurrent_seq64_total_ms": 495.107,
+      "gdn_recurrent_seq64_count": 48,
+      "gdn_recurrent_seq64_avg_ms": 10.314729
+    }
+  },
+  "verdict": "keep",
+  "notes": [
+    "The profiled stage A/B is effectively neutral because profiling overhead dominates the boundary cost, but no-profile decode improved from 96.538 ms to 94.300 ms mean ITL.",
+    "Candidate p99 had one 130.5 ms outlier; keep the rollback gate and recheck p99 in later longer runs.",
+    "CUDA and Metal source paths were not touched."
+  ]
+}

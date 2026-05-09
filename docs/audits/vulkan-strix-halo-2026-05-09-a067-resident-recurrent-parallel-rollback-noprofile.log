@@ -1,0 +1,191 @@
+
+  kiln-bench v0.2.13
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB)
+  Model path             Qwen3.5-4B
+  Model loaded           12.71s (backend: vulkan, 0 MB VRAM)
+
+  ▌ Latency warmup run 1/1 (not measured)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 2244.3ms (29 tok/s)
+    Paged decode step 1: 96.8ms (pos 64)
+    Paged decode step 2: 96.0ms (pos 65)
+    Paged decode step 3: 96.0ms (pos 66)
+    Paged decode step 4: 95.1ms (pos 67)
+    Paged decode step 5: 94.8ms (pos 68)
+    Paged decode step 6: 96.6ms (pos 69)
+    Paged decode step 7: 96.9ms (pos 70)
+    Paged decode step 8: 95.4ms (pos 71)
+    Paged decode step 9: 96.3ms (pos 72)
+    Paged decode step 10: 96.2ms (pos 73)
+    Paged decode step 11: 94.6ms (pos 74)
+    Paged decode step 12: 96.0ms (pos 75)
+    Paged decode step 13: 94.5ms (pos 76)
+    Paged decode step 14: 97.0ms (pos 77)
+    Paged decode step 15: 95.2ms (pos 78)
+    Paged decode step 16: 95.8ms (pos 79)
+    Paged decode step 17: 95.3ms (pos 80)
+    Paged decode step 18: 94.4ms (pos 81)
+    Paged decode step 19: 94.6ms (pos 82)
+    Paged decode step 20: 94.9ms (pos 83)
+    Paged decode step 21: 95.9ms (pos 84)
+    Paged decode step 22: 98.5ms (pos 85)
+    Paged decode step 23: 96.2ms (pos 86)
+    Paged decode step 24: 95.3ms (pos 87)
+    Paged decode step 25: 93.6ms (pos 88)
+    Paged decode step 26: 96.4ms (pos 89)
+    Paged decode step 27: 93.9ms (pos 90)
+    Paged decode step 28: 95.4ms (pos 91)
+    Paged decode step 29: 95.0ms (pos 92)
+    Paged decode step 30: 94.7ms (pos 93)
+    Paged decode step 31: 94.2ms (pos 94)
+    Paged decode step 32: 95.3ms (pos 95)
+    Paged decode step 33: 96.0ms (pos 96)
+    Paged decode step 34: 95.3ms (pos 97)
+    Paged decode step 35: 94.6ms (pos 98)
+    Paged decode step 36: 94.7ms (pos 99)
+    Paged decode step 37: 95.4ms (pos 100)
+    Paged decode step 38: 95.5ms (pos 101)
+    Paged decode step 39: 94.4ms (pos 102)
+    Paged decode step 40: 94.6ms (pos 103)
+    Paged decode step 41: 96.2ms (pos 104)
+    Paged decode step 42: 96.1ms (pos 105)
+    Paged decode step 43: 96.5ms (pos 106)
+    Paged decode step 44: 97.1ms (pos 107)
+    Paged decode step 45: 96.4ms (pos 108)
+    Paged decode step 46: 98.0ms (pos 109)
+    Paged decode step 47: 96.0ms (pos 110)
+    Paged decode step 48: 98.7ms (pos 111)
+    Paged decode step 49: 96.6ms (pos 112)
+    Paged decode step 50: 95.2ms (pos 113)
+    Paged decode step 51: 97.0ms (pos 114)
+    Paged decode step 52: 96.5ms (pos 115)
+    Paged decode step 53: 94.1ms (pos 116)
+    Paged decode step 54: 95.8ms (pos 117)
+    Paged decode step 55: 95.1ms (pos 118)
+    Paged decode step 56: 95.3ms (pos 119)
+    Paged decode step 57: 102.4ms (pos 120)
+    Paged decode step 58: 97.1ms (pos 121)
+    Paged decode step 59: 95.9ms (pos 122)
+    Paged decode step 60: 96.5ms (pos 123)
+    Paged decode step 61: 94.5ms (pos 124)
+    Paged decode step 62: 96.8ms (pos 125)
+    Paged decode step 63: 95.4ms (pos 126)
+    Paged decode step 64: 96.2ms (pos 127)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]
+    Decode (paged): 65 tokens, mean ITL 95.8ms (10.4 tok/s)
+
+  ▌ Latency benchmark (PAGED — production path)
+  Measuring latency [PAGED, block_size=16, blocks=8] (64 prompt tokens)...
+    Prefill (paged): 2036.8ms (31 tok/s)
+    Paged decode step 1: 105.8ms (pos 64)
+    Paged decode step 2: 95.7ms (pos 65)
+    Paged decode step 3: 94.4ms (pos 66)
+    Paged decode step 4: 95.5ms (pos 67)
+    Paged decode step 5: 95.5ms (pos 68)
+    Paged decode step 6: 93.7ms (pos 69)
+    Paged decode step 7: 95.0ms (pos 70)
+    Paged decode step 8: 97.9ms (pos 71)
+    Paged decode step 9: 94.8ms (pos 72)
+    Paged decode step 10: 95.0ms (pos 73)
+    Paged decode step 11: 94.9ms (pos 74)
+    Paged decode step 12: 95.2ms (pos 75)
+    Paged decode step 13: 95.5ms (pos 76)
+    Paged decode step 14: 96.9ms (pos 77)
+    Paged decode step 15: 95.0ms (pos 78)
+    Paged decode step 16: 96.1ms (pos 79)
+    Paged decode step 17: 94.3ms (pos 80)
+    Paged decode step 18: 95.3ms (pos 81)
+    Paged decode step 19: 95.3ms (pos 82)
+    Paged decode step 20: 95.2ms (pos 83)
+    Paged decode step 21: 97.1ms (pos 84)
+    Paged decode step 22: 95.8ms (pos 85)
+    Paged decode step 23: 95.5ms (pos 86)
+    Paged decode step 24: 95.6ms (pos 87)
+    Paged decode step 25: 95.7ms (pos 88)
+    Paged decode step 26: 96.8ms (pos 89)
+    Paged decode step 27: 98.7ms (pos 90)
+    Paged decode step 28: 96.8ms (pos 91)
+    Paged decode step 29: 96.6ms (pos 92)
+    Paged decode step 30: 99.1ms (pos 93)
+    Paged decode step 31: 98.1ms (pos 94)
+    Paged decode step 32: 96.6ms (pos 95)
+    Paged decode step 33: 98.6ms (pos 96)
+    Paged decode step 34: 94.9ms (pos 97)
+    Paged decode step 35: 96.1ms (pos 98)
+    Paged decode step 36: 95.3ms (pos 99)
+    Paged decode step 37: 95.8ms (pos 100)
+    Paged decode step 38: 96.3ms (pos 101)
+    Paged decode step 39: 97.0ms (pos 102)
+    Paged decode step 40: 95.6ms (pos 103)
+    Paged decode step 41: 95.9ms (pos 104)
+    Paged decode step 42: 95.9ms (pos 105)
+    Paged decode step 43: 95.5ms (pos 106)
+    Paged decode step 44: 96.4ms (pos 107)
+    Paged decode step 45: 99.9ms (pos 108)
+    Paged decode step 46: 95.6ms (pos 109)
+    Paged decode step 47: 96.4ms (pos 110)
+    Paged decode step 48: 96.1ms (pos 111)
+    Paged decode step 49: 95.8ms (pos 112)
+    Paged decode step 50: 96.1ms (pos 113)
+    Paged decode step 51: 95.6ms (pos 114)
+    Paged decode step 52: 96.3ms (pos 115)
+    Paged decode step 53: 103.0ms (pos 116)
+    Paged decode step 54: 102.6ms (pos 117)
+    Paged decode step 55: 99.4ms (pos 118)
+    Paged decode step 56: 97.6ms (pos 119)
+    Paged decode step 57: 96.4ms (pos 120)
+    Paged decode step 58: 97.8ms (pos 121)
+    Paged decode step 59: 98.5ms (pos 122)
+    Paged decode step 60: 94.8ms (pos 123)
+    Paged decode step 61: 95.6ms (pos 124)
+    Paged decode step 62: 96.3ms (pos 125)
+    Paged decode step 63: 96.5ms (pos 126)
+    Paged decode step 64: 95.4ms (pos 127)
+    Paged decode first 32 token ids: [271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]
+    Decode (paged): 65 tokens, mean ITL 96.5ms (10.4 tok/s)
+
+  ▌ Benchmark results
+  GPU                    AMD Radeon 8060S Graphics (RADV STRIX_HALO) (98304 MB VRAM, source: linux-drm-sysfs)
+  Model load             12.71s (0 MB VRAM)
+
+  ▌ Inference throughput
+  Runs         Prompt     Output        tok/s    VRAM MB
+
+  ▌ Latency (single request)
+  Prompt tokens          64
+  Prefill                2036.8 ms (31 tok/s)
+  Time to first token    2036.8 ms
+  Mean inter-token       96.5 ms (10.4 tok/s)
+  P50 inter-token        95.9 ms
+  P99 inter-token        105.8 ms
+  Tokens generated       65
+  Spec method            off
+
+{
+  "backend": "vulkan",
+  "gpu_info": {
+    "name": "AMD Radeon 8060S Graphics (RADV STRIX_HALO)",
+    "total_vram_mb": 98304,
+    "vram_source": "linux-drm-sysfs"
+  },
+  "model_load": {
+    "load_time_secs": 12.708408179,
+    "model_vram_mb": 0
+  },
+  "inference": [],
+  "latency": {
+    "prompt_tokens": 64,
+    "prefill_time_ms": 2036.7582569999997,
+    "prefill_tokens_per_sec": 31.42248216254562,
+    "time_to_first_token_ms": 2036.7582569999997,
+    "mean_inter_token_ms": 96.537889765625,
+    "p50_inter_token_ms": 95.942934,
+    "p99_inter_token_ms": 105.84627300000001,
+    "num_tokens_generated": 65,
+    "decode_tokens_per_sec": 10.358627088574272,
+    "spec_method": "off"
+  },
+  "training": null
+}

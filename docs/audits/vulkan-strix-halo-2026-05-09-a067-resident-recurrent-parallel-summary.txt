@@ -1,0 +1,59 @@
+A067 resident GDN recurrent parallel reduce
+
+Verdict: keep.
+
+Change:
+- `dispatch_gdn_recurrent_step_resident_state` now selects the existing
+  `gdn_recurrent_step_parallel.comp` shader when `dk >= 32`, matching the
+  non-resident single-submit path's parallel-reduce gate.
+- The existing rollback env also covers this path:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`.
+- Added
+  `gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference`
+  to exercise resident-state reuse with `dk=64`.
+
+Correctness:
+- Candidate and rollback produced identical first 32 token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]`.
+- Full Vulkan GDN parity passed: `32 passed`.
+- Qwen chat-template kwargs tests passed, including literal `/no_think` not
+  being treated as a control flag.
+
+Performance evidence:
+- No-profile same-binary candidate:
+  `2203.240ms` prefill, `94.300ms` mean ITL, `93.536ms` p50,
+  `130.534ms` p99, `10.604 tok/s`.
+- No-profile rollback:
+  `2036.758ms` prefill, `96.538ms` mean ITL, `95.943ms` p50,
+  `105.846ms` p99, `10.359 tok/s`.
+- Profiled candidate:
+  `2125.403ms` prefill, `99.554ms` mean ITL,
+  `gdn recurrent seq_len=1` `1692.770ms / 3072 = 0.551032ms`.
+- Profiled rollback:
+  `2107.555ms` prefill, `99.453ms` mean ITL,
+  `gdn recurrent seq_len=1` `1698.004ms / 3072 = 0.552736ms`.
+
+Interpretation:
+- The profiled run is effectively neutral, but the lower-overhead run shows a
+  `2.237ms` mean-ITL win and the same token output. Keep the change with its
+  rollback gate.
+- Candidate p99 had one visible outlier. Recheck tail latency in a later
+  longer no-profile run before treating this as a p99 win.
+
+Validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo test -p kiln-core qwen35_4b_chat_template_can_disable_thinking -- --nocapture`
+- `cargo test -p kiln-server qwen35 -- --nocapture`
+- `cargo test -p kiln-server chat_template_kwargs -- --nocapture`
+
+CUDA/Metal:
+- CUDA/Metal source paths were not touched.
+- Local CUDA feature check remains environment-blocked before project
+  typecheck because `nvcc` is unavailable.
+- Local Metal feature check remains environment-blocked before project
+  typecheck because `objc2` requires an Apple target.

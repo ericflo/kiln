@@ -3312,6 +3312,60 @@ Verdict:
   currently the top serial bucket, and A065 shows that simply moving it through
   the existing compact/upload Vulkan kernel is the wrong shape.
 
+### 2026-05-09 A067: Use Parallel Recurrent Shader In Resident-State GDN
+
+Problem:
+- A066 showed `gdn_stage:recurrent seq_len=1` remains a major serial decode
+  bucket: `1694.722ms` total across `3072` profiled calls.
+- The benchmark enters the Vulkan recurrent resident-state scope, but
+  `dispatch_gdn_recurrent_step_resident_state` still compiled
+  `gdn_recurrent_prefill.comp`. The newer 32-lane parallel recurrent shader
+  from A059 was only selected by the non-resident single-submit path.
+
+Change:
+- `dispatch_gdn_recurrent_step_resident_state` now uses
+  `use_gdn_recurrent_parallel_reduce(dk, dv)` and dispatches
+  `gdn_recurrent_step_parallel.comp` as `(batch, heads, dv)` for `dk >= 32`.
+- The fallback remains the original serial `gdn_recurrent_prefill.comp`.
+- The existing rollback env covers both paths:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE=1`.
+- Added resident-state two-step parity coverage that forces `dk=64`.
+
+Evidence:
+- Candidate and rollback emitted identical first 32 decode token IDs:
+  `[271,1206,1423,680,1204,1691,51864,3520,506,279,19719,6,2981,11,567,1118,1144,310,7995,1204,1599,18237,1292,682,2047,1238,11834,321,26912,13,2838,8211]`.
+- No-profile same-binary A/B:
+  candidate `2203.240ms` prefill, `94.300ms` mean ITL, `10.604 tok/s`;
+  rollback `2036.758ms` prefill, `96.538ms` mean ITL, `10.359 tok/s`.
+- Profiled A/B was neutral at the wall level:
+  candidate `99.554ms` mean ITL versus rollback `99.453ms`.
+- Profiled recurrent decode bucket moved only slightly:
+  candidate `1692.770ms / 3072 = 0.551032ms`; rollback
+  `1698.004ms / 3072 = 0.552736ms`.
+- Candidate p99 in the no-profile run was worse (`130.534ms` versus
+  rollback `105.846ms`) because of one visible outlier; do not treat A067 as a
+  tail-latency win without a longer confirmation.
+
+Validation:
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+- `cargo test -p kiln-core qwen35_4b_chat_template_can_disable_thinking -- --nocapture`
+- `cargo test -p kiln-server qwen35 -- --nocapture`
+- `cargo test -p kiln-server chat_template_kwargs -- --nocapture`
+- CUDA check remains blocked on this host before project typecheck because
+  `nvcc` is unavailable.
+- Metal check remains blocked on this host before project typecheck because
+  `objc2` requires an Apple target.
+
+Verdict:
+- Keep as a guarded Vulkan-only decode win. The lower-overhead run shows a
+  `2.237ms` mean-ITL improvement with stable token output.
+- CUDA and Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3335,6 +3389,11 @@ Verdict:
   priority is MLP fused first, then GDN in-proj/recurrent/out-proj. Treat the
   larger outer `paged_layer:*` buckets as boundary/movement evidence, not as a
   shader name.
+- A067 shows that applying the existing parallel recurrent shader to the
+  resident-state path is worth keeping, but it is only a small mean-ITL win and
+  does not materially shrink the profiled recurrent bucket. Further recurrent
+  work should reduce boundary/data-movement cost or fuse adjacent GDN stages,
+  not only swap the inner reduction shape.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

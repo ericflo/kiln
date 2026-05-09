@@ -1958,6 +1958,131 @@ fn gdn_decode_gates_recurrent_rmsnorm_matches_f32_cpu_reference() -> Result<()> 
 }
 
 #[test]
+fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, heads, dk, dv) = (1usize, 2usize, 64usize, 7usize);
+    let q1 = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.011)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let k1 = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * -0.009)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let v1 = cpu_f32(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.013)
+            .collect(),
+        (batch, heads, dv),
+    )?;
+    let beta1 = cpu_f32(
+        (0..batch * heads)
+            .map(|i| 0.25 + (i as f32) * 0.07)
+            .collect(),
+        (batch, heads),
+    )?;
+    let g1 = cpu_f32(
+        (0..batch * heads)
+            .map(|i| -0.04 - (i as f32) * 0.03)
+            .collect(),
+        (batch, heads),
+    )?;
+    let q2 = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * -0.007)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let k2 = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 31.0) - 15.0) * 0.006)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let v2 = cpu_f32(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * -0.015)
+            .collect(),
+        (batch, heads, dv),
+    )?;
+    let beta2 = cpu_f32(
+        (0..batch * heads)
+            .map(|i| 0.41 + (i as f32) * 0.05)
+            .collect(),
+        (batch, heads),
+    )?;
+    let g2 = cpu_f32(
+        (0..batch * heads)
+            .map(|i| -0.08 - (i as f32) * 0.02)
+            .collect(),
+        (batch, heads),
+    )?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 37.0) - 18.0) * 0.003)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (expected_out1, expected_state1) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state,
+        )
+        .context("dispatch_gdn_recurrent_step parallel reference step 1")?;
+    let (expected_out2, _expected_state2) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &expected_state1,
+        )
+        .context("dispatch_gdn_recurrent_step parallel reference step 2")?;
+
+    let (got_out1, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state, None,
+        )
+        .context("dispatch_gdn_recurrent_step_resident_state parallel step 1")?;
+    let (got_out2, _resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_resident_state(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &state,
+            Some(resident_state),
+        )
+        .context("dispatch_gdn_recurrent_step_resident_state parallel step 2")?;
+
+    assert_close(
+        "resident parallel recurrent out step 1",
+        &got_out1,
+        &expected_out1,
+        5e-4,
+    )?;
+    assert_close(
+        "resident parallel recurrent out step 2",
+        &got_out2,
+        &expected_out2,
+        5e-4,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_decode_gates_recurrent_rmsnorm_resident_state_matches_two_step_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
