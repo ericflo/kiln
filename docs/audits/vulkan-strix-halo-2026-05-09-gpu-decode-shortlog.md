@@ -54,6 +54,20 @@ before or with each accepted change and each measured rejection.
 | A041 | Trial packed-BF16 Vulkan MLP gate/up-only row-pair for live batches `4..7`. | Temporary gate/up-only row-pair path passed focused candidate and rollback BF16 MLP parity and release Vulkan build. Endpoint A/B with wait `5000us` and max batch `4` consistently favored rollback: pair 1 rollback `16.244s` vs candidate `21.055s`; pair 2 candidate `18.424s` vs rollback `15.632s`, with identical counters and coherent visible text. | Rejected and removed; do not retry MLP live-batch row-pair by direct shader mirroring. Kept the added batch-5 BF16 MLP parity coverage. |
 | A042 | Trial packed-BF16 Vulkan MLP branchless SiLU shader variants. | Temporary single-row and batched BF16 gate/up shaders passed focused candidate and rollback MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Endpoint A/B with wait `5000us` favored rollback: pair 1 rollback `16.782s` vs candidate `18.933s`; pair 2 candidate `16.454s` vs rollback `16.142s` even though rollback generated more rows (`23` vs `17`). | Rejected and removed; keep the existing stable sigmoid MLP shaders. |
 | A043 | Trial Metal-inspired F32 Vulkan MLP gate/up row-quad for full batch `8`. | Temporary row-quad gate/up shader passed focused candidate and rollback batched MLP parity, full Vulkan parity (`29 passed`), `cargo check -p kiln-model --features vulkan`, and release Vulkan build. Eight-request endpoint A/B with wait `5000us` exercised max batch `8` with identical `56` jobs / `8` batches / `56` rows: candidate lost pair 1 (`25.939s` vs rollback `22.018s`) and won pair 2 (`24.860s` vs rollback `27.180s`). | Rejected and removed; not a reliable n8 endpoint win, so Metal row-quad does not directly transfer to Vulkan F32 MLP gate/up. |
+| A044 | Temporarily split Vulkan MLP inner-stage timings. | Temporary `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` instrumentation timed extract, alloc, upload, gate/up, down, readback, and tensor creation inside `dispatch_mlp_decode_cached_impl`; release Vulkan build passed. Four streaming requests with wait `5000us` returned coherent visible text and empty reasoning. Live packed-BF16 inner totals were gate/up `83.117ms`, down `58.250ms`, readback `37.642ms`, upload `34.392ms`, with tiny alloc/extract/tensor times. The outer `mlp:fused seq_len=1` profile bucket was still much larger at `4875.221ms`. | Keep as target-selection evidence; no source change retained. Next MLP work should target residency/transfer or backend boundary overhead before another direct shader-shape trial. |
+
+Additional validation after A044:
+
+- Temporary instrumentation build passed
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Profiled Vulkan server run with four concurrent streams,
+  `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`,
+  `KILN_PROFILE_MLP_STAGES=1`, `max_tokens=3`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- All four streams returned HTTP 200 with non-empty visible content and empty
+  reasoning text.
+- Temporary instrumentation was removed after profiling.
 
 Additional validation after rejected A043:
 

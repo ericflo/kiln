@@ -1,0 +1,56 @@
+wall_s=20.015352
+metrics_delta={'jobs': 7.0, 'batches': 3.0, 'rows': 7.0, 'max_batch': 3.0}
+kernel_live_bf16_by_stage:
+- gate_up: total_ms=83.117 count=128 avg_ms=0.649
+- down: total_ms=58.250 count=128 avg_ms=0.455
+- readback_out: total_ms=37.642 count=128 avg_ms=0.294
+- upload_x: total_ms=34.392 count=128 avg_ms=0.269
+- alloc_x: total_ms=2.115 count=128 avg_ms=0.017
+- alloc_hidden_out: total_ms=1.956 count=128 avg_ms=0.015
+- extract_x: total_ms=0.296 count=128 avg_ms=0.002
+- create_tensor: total_ms=0.242 count=128 avg_ms=0.002
+kernel_by_stage_all:
+- gate_up: total_ms=2553.449 count=288 avg_ms=8.866
+- down: total_ms=1415.468 count=288 avg_ms=4.915
+- readback_out: total_ms=761.346 count=288 avg_ms=2.644
+- upload_x: total_ms=754.549 count=288 avg_ms=2.620
+- alloc_hidden_out: total_ms=6.195 count=288 avg_ms=0.022
+- alloc_x: total_ms=5.937 count=288 avg_ms=0.021
+- extract_x: total_ms=4.546 count=288 avg_ms=0.016
+- create_tensor: total_ms=2.729 count=288 avg_ms=0.009
+top_kernel_stage_totals:
+- gate_up batch=64 bf16=false rows2=true: total_ms=644.714 count=32 avg_ms=20.147
+- gate_up batch=36 bf16=false rows2=true: total_ms=536.683 count=32 avg_ms=16.771
+- gate_up batch=32 bf16=false rows2=true: total_ms=478.297 count=32 avg_ms=14.947
+- gate_up batch=31 bf16=false rows2=true: total_ms=467.099 count=32 avg_ms=14.597
+- down batch=26 bf16=false rows2=true: total_ms=395.416 count=32 avg_ms=12.357
+- gate_up batch=26 bf16=false rows2=true: total_ms=343.539 count=32 avg_ms=10.736
+- down batch=31 bf16=false rows2=true: total_ms=329.176 count=32 avg_ms=10.287
+- down batch=36 bf16=false rows2=true: total_ms=273.469 count=32 avg_ms=8.546
+- down batch=32 bf16=false rows2=true: total_ms=228.211 count=32 avg_ms=7.132
+- readback_out batch=26 bf16=false rows2=true: total_ms=226.516 count=32 avg_ms=7.079
+- upload_x batch=26 bf16=false rows2=true: total_ms=201.724 count=32 avg_ms=6.304
+- upload_x batch=32 bf16=false rows2=true: total_ms=193.819 count=32 avg_ms=6.057
+- readback_out batch=31 bf16=false rows2=true: total_ms=184.039 count=32 avg_ms=5.751
+- upload_x batch=36 bf16=false rows2=true: total_ms=174.972 count=32 avg_ms=5.468
+- readback_out batch=36 bf16=false rows2=true: total_ms=157.913 count=32 avg_ms=4.935
+- upload_x batch=31 bf16=false rows2=true: total_ms=141.553 count=32 avg_ms=4.424
+- down batch=64 bf16=false rows2=true: total_ms=130.946 count=32 avg_ms=4.092
+- readback_out batch=32 bf16=false rows2=true: total_ms=99.657 count=32 avg_ms=3.114
+- readback_out batch=64 bf16=false rows2=true: total_ms=55.579 count=32 avg_ms=1.737
+- gate_up batch=1 bf16=true rows2=false: total_ms=43.900 count=64 avg_ms=0.686
+- gate_up batch=3 bf16=true rows2=false: total_ms=39.217 count=64 avg_ms=0.613
+- down batch=3 bf16=true rows2=false: total_ms=30.293 count=64 avg_ms=0.473
+- readback_out batch=1 bf16=true rows2=false: total_ms=28.359 count=64 avg_ms=0.443
+- down batch=1 bf16=true rows2=false: total_ms=27.957 count=64 avg_ms=0.437
+mlp_stage_totals:
+- fused seq_len=64: total_ms=7049.287 count=32 avg_ms=220.290
+- fused seq_len=1: total_ms=4875.221 count=128 avg_ms=38.088
+- fused seq_len=26: total_ms=1174.328 count=32 avg_ms=36.698
+- fused seq_len=36: total_ms=1151.580 count=32 avg_ms=35.987
+- fused seq_len=31: total_ms=1128.085 count=32 avg_ms=35.253
+- fused seq_len=32: total_ms=1005.861 count=32 avg_ms=31.433
+response_0 status=200 finish=stop elapsed_s=19.443349 text='6' reasoning_len=0
+response_1 status=200 finish=length elapsed_s=20.013610 text='11 ' reasoning_len=0
+response_2 status=200 finish=length elapsed_s=20.013790 text='16 ' reasoning_len=0
+response_3 status=200 finish=stop elapsed_s=20.013866 text='13' reasoning_len=0

@@ -2170,6 +2170,68 @@ Verdict:
 - Do not retry row-quad MLP gate/up without a different Vulkan-specific tile or
   evidence from isolated shader timing.
 
+### 2026-05-09 A044: Temporary Vulkan MLP Inner-Stage Split Profile
+
+Goal:
+- A039 showed `mlp:fused` dominates the current Vulkan live profile, while
+  A040 through A043 rejected direct shader tiling and SiLU variants. Split the
+  current MLP decode implementation to find whether the next target is
+  gate/up, down-projection, upload/readback, allocation, or outer backend
+  overhead.
+
+Experiment:
+- Added temporary `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1` instrumentation
+  inside `dispatch_mlp_decode_cached_impl`.
+- Timed `extract_x`, `alloc_x`, `upload_x`, `alloc_hidden_out`, `gate_up`,
+  `down`, `readback_out`, and `create_tensor`.
+- Built the temporary binary with `cargo build --release --features vulkan
+  --bin kiln --bin kiln-bench`.
+- Ran four concurrent streaming requests with `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_PROFILE_MLP_STAGES=1`, `max_tokens=3`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Removed all temporary instrumentation after the run; no source change is
+  retained.
+
+Evidence:
+- Endpoint wall time was `20.015352s`.
+- Decode-batcher counters moved by `7` jobs, `3` batches, `7` rows, max batch
+  `3`.
+- All responses returned HTTP 200 with coherent visible text:
+  - `response_0`: finish `stop`, text `"6"`.
+  - `response_1`: finish `length`, text `"11 "`.
+  - `response_2`: finish `length`, text `"16 "`.
+  - `response_3`: finish `stop`, text `"13"`.
+- Inner current-live packed-BF16 MLP stages:
+  - `gate_up`: `83.117ms`, `128` samples, average `0.649ms`.
+  - `down`: `58.250ms`, `128` samples, average `0.455ms`.
+  - `readback_out`: `37.642ms`, `128` samples, average `0.294ms`.
+  - `upload_x`: `34.392ms`, `128` samples, average `0.269ms`.
+  - `alloc_x`: `2.115ms`.
+  - `alloc_hidden_out`: `1.956ms`.
+  - `extract_x`: `0.296ms`.
+  - `create_tensor`: `0.242ms`.
+- Inner all-MLP stages, including request prefill rows:
+  - `gate_up`: `2553.449ms`.
+  - `down`: `1415.468ms`.
+  - `readback_out`: `761.346ms`.
+  - `upload_x`: `754.549ms`.
+- The outer `mlp:fused seq_len=1` profile bucket was still much larger
+  (`4875.221ms`, `128` samples) than the summed inner live timings. This means
+  the stage-level timer is catching additional backend/runner/queue effects not
+  explained by only the two shader dispatches.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a044-mlp-kernel-split-profile-*`
+
+Verdict:
+- Keep as target-selection evidence; no source change.
+- For current live packed-BF16 MLP, gate/up and down are still the largest
+  measured inner stages, but upload/readback are already a substantial fraction
+  of the same inner work. Pure tiling tweaks have repeatedly failed; the next
+  MLP work should attack outer overhead and residency/transfer shape, or gather
+  an even narrower trace around the backend cache/runner boundary before
+  writing another shader variant.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2178,6 +2240,11 @@ Verdict:
   dominates live `seq_len=1` work (`2635.685ms`) and total profiled time
   (`12790.460ms`), so split or optimize packed-BF16 MLP decode before spending
   more time on smaller GDN residuals.
+- Use A044's split profile before another MLP shader trial: inner live BF16
+  gate/up plus down totaled `141.367ms`, while upload/readback totaled
+  `72.034ms`, and the outer `mlp:fused` bucket remained much larger. The next
+  MLP improvement should focus on residency/transfer or backend boundary
+  overhead, not direct row-pair/row-quad/SilU shader mirroring.
 - Do not retry packed-BF16 MLP row-pair variants for live batches `4..7` by
   direct shader mirroring; A040 and A041 measured both full MLP row-pair and
   gate/up-only row-pair as slower or unstable against rollback.
