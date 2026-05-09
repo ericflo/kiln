@@ -1466,3 +1466,10 @@
   and wait200 max_tokens=24 regressed with identical counters
   (`17.863463s` scalar vs `18.300302s` vector, both `192` tokens, `184` jobs,
   `24` worker batches, max batch `8`). Source reverted.
+- 2026-05-09 E384: Rejected a LoRA serial decode route that reused the Metal
+  fused-QKV base projection and then added q/k/v LoRA deltas. Focused parity
+  against the current separate accelerated projection path was exact
+  (`max_abs_diff=0` for q/k/v), but the Qwen3.5-shaped rank-16 LoRA QKV
+  synthetic was effectively tied: fused base `1.928 ms` vs separate
+  projections `1.929 ms` (`1.001x`). Source reverted; the better LoRA target
+  is the rank-small delta computation itself.

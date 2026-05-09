@@ -14136,3 +14136,63 @@ With identical scheduler counters, vector mode regressed endpoint wall by
 Rejected. The synthetic microbench improved, but the clean wait200 endpoint A/B
 regressed with identical token, job, worker-batch, row, and max-batch counters.
 Source reverted; no CUDA/Vulkan behavior changed.
+
+## 2026-05-09 E384 - Reject LoRA full-attention fused QKV base projection
+
+### Goal
+
+Revisit the active LoRA decode path after E363. LoRA full-attention Q/K/V
+currently computes three separate accelerated base projections and then adds
+the per-projection LoRA deltas. The no-LoRA serial decode path can use a fused
+Metal QKV base projection, so this experiment tested whether LoRA decode could
+reuse that fused base projection and add q/k/v LoRA deltas afterward.
+
+### Change
+
+Temporary only; reverted before commit.
+
+- Removed the `lora_layer.is_none()` gate from the serial Metal fused-QKV
+  dispatch in `full_attn_qkv_proj_decode_if`.
+- Routed the fused `q_base`, `k_base`, and `v_base` tensors through
+  `add_lora_delta_to_base` with the matching LoRA projection before returning.
+- Added a focused Metal parity test against the existing separate
+  `linear_with_lora_t_decode` path.
+- Added a Qwen3.5-shaped synthetic LoRA QKV microbench:
+  `x=[1,1,2560]`, `q=[2560,8192]`, `k/v=[2560,1024]`, rank `16`.
+
+### Validation
+
+- `cargo test -p kiln-model --features metal test_full_attn_qkv_decode_lora_fused_base_matches_separate_linear --lib -- --nocapture`
+- `KILN_METAL_LORA_QKV_BENCH_WARMUP=5 KILN_METAL_LORA_QKV_BENCH_ITERS=20 cargo test -p kiln-model --features metal bench_metal_full_attn_qkv_decode_lora_qwen35_synthetic --lib -- --ignored --nocapture`
+
+### Results
+
+Correctness passed against the current separate accelerated base projection
+path plus LoRA deltas:
+
+- q/k/v `max_abs_diff=0`
+- q/k/v `mean_abs_diff=0`
+
+Qwen3.5-shaped BF16 rank-16 LoRA QKV synthetic, lower is better:
+
+- fused base QKV plus three LoRA deltas: `1.928 ms`
+- three separate accelerated base projections plus three LoRA deltas:
+  `1.929 ms`
+- speedup: `1.001x`
+
+An earlier short same-shape run was slower for the fused-base path, so the
+longer artifact should be read as "no measurable gain" rather than a real
+improvement.
+
+### Artifact
+
+- `e384_lora_qkv_fused_base_parity.log`
+- `e384_lora_qkv_fused_base_bench.log`
+
+### Decision
+
+Rejected. The candidate was exact, but the Qwen-shaped LoRA serial decode
+microbench was effectively tied with the current three-projection path and did
+not justify expanding the fused-QKV route into the active LoRA path. Source
+reverted; no CUDA/Vulkan behavior changed. The stronger LoRA target remains
+the rank-small delta computation itself.
