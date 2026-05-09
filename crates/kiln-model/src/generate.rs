@@ -1987,17 +1987,20 @@ impl ModelRunner {
 
         // Fast path: when row_count > 1, all rows greedy with a common seq_len,
         // and the cache is non-FP8, route through the contiguous-batched
-        // primitive. That single forward pass batches GQA across rows and uses
-        // the fused argmax LM head, eliminating the per-row GQA loop and
-        // per-row [1, 1, vocab] LM-head allocations that produce the c=8
-        // throughput collapse documented in
-        // docs/audits/PHASE12_B_PRIME_BATCHING_DIAGNOSIS.md.
+        // primitive only when the backend can reduce the LM head to token IDs
+        // without materializing [batch, 1, vocab] logits. CUDA does not yet
+        // implement batched LM-head argmax; letting it fall through to the
+        // portable full-logits projection OOMs at c>=8.
         let common_seq_len = sequence_lengths[0];
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let all_greedy = params.iter().all(|p| p.temperature == 0.0);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
-        let try_contiguous_batched =
-            row_count > 1 && positions_uniform && all_greedy && !cache_is_fp8;
+        let batched_argmax_supported = self.backend.supports_linear_decode_argmax_batch();
+        let try_contiguous_batched = row_count > 1
+            && positions_uniform
+            && all_greedy
+            && !cache_is_fp8
+            && batched_argmax_supported;
 
         let mut sampled: Option<Vec<TokenId>> = None;
         if try_contiguous_batched {
@@ -2072,6 +2075,58 @@ impl ModelRunner {
                     )?
                 };
                 vec![token]
+            } else if self.backend.name() == "cuda" {
+                drop(pc_guard);
+                let mut sampled = Vec::with_capacity(states.len());
+                for idx in 0..states.len() {
+                    let state = &mut states[idx];
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    let row = if self.cuda_graph.is_enabled() {
+                        let lease = state
+                            .cuda_graph_lease
+                            .get_or_insert_with(|| self.cuda_graph.lease());
+                        lease
+                            .decode_step_paged(
+                                &*self.backend,
+                                input_tokens[idx],
+                                &self.weights,
+                                &self.config,
+                                pc_guard,
+                                &block_tables[idx],
+                                sequence_lengths[idx],
+                                &mut state.linear_state,
+                                self.active_lora.as_ref(),
+                            )
+                            .with_context(|| format!("CUDA rowwise decode row {idx} failed"))?
+                    } else {
+                        CudaGraphRunners::decode_step_paged_eager(
+                            &*self.backend,
+                            input_tokens[idx],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &block_tables[idx],
+                            sequence_lengths[idx],
+                            &mut state.linear_state,
+                            self.active_lora.as_ref(),
+                        )
+                        .with_context(|| format!("CUDA rowwise eager decode row {idx} failed"))?
+                    };
+                    let params = &params[idx];
+                    let token = if params.temperature == 0.0 {
+                        greedy_sample(&row)?
+                    } else {
+                        sample_with_params(
+                            &row,
+                            params.temperature,
+                            params.top_p,
+                            params.top_k,
+                            state.step_seed,
+                        )?
+                    };
+                    sampled.push(token);
+                }
+                sampled
             } else {
                 let mut linear_states: Vec<&mut LinearAttentionState> = states
                     .iter_mut()
