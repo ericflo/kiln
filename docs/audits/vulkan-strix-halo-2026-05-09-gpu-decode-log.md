@@ -3255,6 +3255,63 @@ Verdict:
   re-uploading the active K/V window and reading attention output back across
   the backend boundary every full-attention layer.
 
+### 2026-05-09 A066: Current Vulkan Serial Profile Refresh
+
+Context:
+- A064 and A065 rejected two plausible direct ports: Metal E396-style serial
+  GDN QKV/Z pairing and routing serial contiguous paged attention through the
+  existing compact-window Vulkan kernel.
+- Fresh Metal E401-E403 entries also rejected GDN out-proj tile16 and GDN
+  prefill batch-GEMV reshaping, so direct tile/vector-load mirroring is a weak
+  next choice.
+- This run refreshes the current Vulkan target profile after A063-A065 without
+  changing source.
+
+Evidence:
+- Command:
+  `KILN_PROFILE_FULL_ATTN_STAGES=1 KILN_PROFILE_GDN_STAGES=1
+  KILN_PROFILE_MLP_STAGES=1 KILN_PROFILE_PAGED_LAYERS=1
+  KILN_BENCH_LOG_TOKENS=1 KILN_BENCH_LOG_ITL=1 ./target/release/kiln-bench
+  --model-path Qwen3.5-4B --latency-only --paged --prompt-tokens 64
+  --max-output-tokens 64 --latency-warmup-runs 1 --skip-training`.
+- First 32 token IDs remained stable:
+  `[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6,
+  2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682,
+  2047, 1238, 11834, 321, 26912, 13, 2838, 8211]`.
+- Latency: `2143.047ms` prefill, `97.878ms` mean ITL, `10.217 tok/s`
+  decode.
+- Top decode `seq_len=1` buckets:
+  - `paged_layer:linear`: `9202.070ms`, `count=3072`, `2.995465ms avg`
+  - `mlp_stage:fused`: `3932.765ms`, `count=4096`, `0.960148ms avg`
+  - `paged_layer:full`: `2629.782ms`, `count=1024`, `2.568146ms avg`
+  - `gdn_stage:in_proj`: `1805.955ms`, `count=3072`, `0.587876ms avg`
+  - `gdn_stage:recurrent`: `1694.722ms`, `count=3072`, `0.551667ms avg`
+  - `gdn_stage:out_proj`: `946.798ms`, `count=3072`, `0.308202ms avg`
+  - `gdn_stage:gated_norm`: `800.555ms`, `count=3072`, `0.260597ms avg`
+  - `full_attn_stage:qkv_proj`: `559.460ms`, `count=1024`, `0.546348ms avg`
+  - `full_attn_stage:decode_attn_contiguous`: `558.178ms`, `count=1024`,
+    `0.545096ms avg`
+  - `full_attn_stage:o_proj`: `406.832ms`, `count=1024`, `0.397297ms avg`
+- Top prefill `seq_len=64` buckets:
+  - `paged_layer:linear`: `3492.121ms`, `count=48`, `72.752521ms avg`
+  - `mlp_stage:fused`: `1729.956ms`, `count=64`, `27.030562ms avg`
+  - `paged_layer:full`: `933.551ms`, `count=16`, `58.346938ms avg`
+  - `gdn_stage:in_proj`: `761.293ms`, `count=48`, `15.860271ms avg`
+  - `gdn_stage:recurrent`: `522.399ms`, `count=48`, `10.883313ms avg`
+  - `full_attn_stage:qkv_proj`: `323.984ms`, `count=16`, `20.249000ms avg`
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a066-current-profile.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a066-current-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a066-current-profile-summary.txt`
+
+Verdict:
+- Keep as target-selection evidence; no source changed.
+- The best next Vulkan targets are MLP boundary/data movement and GDN
+  recurrent/in-proj movement/residency. Full-attention attention math is not
+  currently the top serial bucket, and A065 shows that simply moving it through
+  the existing compact/upload Vulkan kernel is the wrong shape.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -3274,6 +3331,10 @@ Verdict:
   either packed-BF16 MLP boundary/data movement, sparse/active K/V movement, or
   a GDN path that materially reduces movement, not just a direct fused-hook
   route.
+- A066 refreshes the serial target set after A063-A065: concrete decode-stage
+  priority is MLP fused first, then GDN in-proj/recurrent/out-proj. Treat the
+  larger outer `paged_layer:*` buckets as boundary/movement evidence, not as a
+  shader name.
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).

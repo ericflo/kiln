@@ -1,0 +1,28 @@
+latency: prefill_ms=2143.047355 mean_itl_ms=97.877698 decode_tps=10.216832
+first32_token_ids=[271, 1206, 1423, 680, 1204, 1691, 51864, 3520, 506, 279, 19719, 6, 2981, 11, 567, 1118, 1144, 310, 7995, 1204, 1599, 18237, 1292, 682, 2047, 1238, 11834, 321, 26912, 13, 2838, 8211]
+top_decode_seq1:
+  paged_layer:linear seq_len=1 total_ms=9202.070 count=3072 avg_ms=2.995465
+  mlp_stage:fused seq_len=1 total_ms=3932.765 count=4096 avg_ms=0.960148
+  paged_layer:full seq_len=1 total_ms=2629.782 count=1024 avg_ms=2.568146
+  gdn_stage:in_proj seq_len=1 total_ms=1805.955 count=3072 avg_ms=0.587876
+  gdn_stage:recurrent seq_len=1 total_ms=1694.722 count=3072 avg_ms=0.551667
+  gdn_stage:out_proj seq_len=1 total_ms=946.798 count=3072 avg_ms=0.308202
+  gdn_stage:gated_norm seq_len=1 total_ms=800.555 count=3072 avg_ms=0.260597
+  gdn_stage:gates seq_len=1 total_ms=570.519 count=3072 avg_ms=0.185716
+  full_attn_stage:qkv_proj seq_len=1 total_ms=559.460 count=1024 avg_ms=0.546348
+  full_attn_stage:decode_attn_contiguous seq_len=1 total_ms=558.178 count=1024 avg_ms=0.545096
+  full_attn_stage:o_proj seq_len=1 total_ms=406.832 count=1024 avg_ms=0.397297
+  gdn_stage:conv seq_len=1 total_ms=248.825 count=3072 avg_ms=0.080998
+top_prefill_seq64:
+  paged_layer:linear seq_len=64 total_ms=3492.121 count=48 avg_ms=72.752521
+  mlp_stage:fused seq_len=64 total_ms=1729.956 count=64 avg_ms=27.030562
+  paged_layer:full seq_len=64 total_ms=933.551 count=16 avg_ms=58.346938
+  gdn_stage:in_proj seq_len=64 total_ms=761.293 count=48 avg_ms=15.860271
+  gdn_stage:recurrent seq_len=64 total_ms=522.399 count=48 avg_ms=10.883313
+  full_attn_stage:qkv_proj seq_len=64 total_ms=323.984 count=16 avg_ms=20.249000
+  gdn_stage:conv seq_len=64 total_ms=316.226 count=48 avg_ms=6.588042
+  gdn_stage:out_proj seq_len=64 total_ms=235.153 count=48 avg_ms=4.899021
+  gdn_stage:gated_norm seq_len=64 total_ms=227.236 count=48 avg_ms=4.734083
+  gdn_stage:gates seq_len=64 total_ms=43.119 count=48 avg_ms=0.898313
+  gdn_stage:qk_norm seq_len=64 total_ms=28.577 count=48 avg_ms=0.595354
+  gdn_stage:qkv_split seq_len=64 total_ms=18.466 count=48 avg_ms=0.384708
