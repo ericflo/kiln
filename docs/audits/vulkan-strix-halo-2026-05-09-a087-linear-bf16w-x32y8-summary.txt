@@ -1,0 +1,56 @@
+A087: Reject Vulkan single-row BF16 linear x32/y8 shader
+
+Date: 2026-05-09
+Target: Qwen3.5-4B, AMD Radeon 8060S Graphics (RADV_STRIX_HALO), Vulkan backend.
+
+Goal:
+- Test whether a Metal simdgroup-width idea transfers to Vulkan's serial
+  packed-BF16 linear projection path.
+- Replace the current single-row BF16 linear `16x16` workgroup shape with a
+  temporary `32x8` shape that halves workgroup count for wide projections.
+
+Temporary change:
+- Added temporary shader:
+  crates/kiln-vulkan-kernel/csrc/shaders/linear_decode_bf16w_x32y8.comp
+- Wired it into single-row packed-BF16 generic linear decode and MLP down
+  projection.
+- Temporary rollback env:
+  KILN_DISABLE_VULKAN_LINEAR_BF16W_X32Y8=1
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- cargo fmt --check
+- cargo check -p kiln-vulkan-kernel
+- cargo check -p kiln-model --features vulkan
+- cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_bf16_packed_weights_match_cpu_reference -- --nocapture
+- cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture
+- cargo build --release -p kiln-server --bin kiln-bench --features vulkan
+
+Same-binary rollback-env A/B, seed 89:
+- Harness:
+  KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 89 --quiet
+- Rollback:
+  - env: KILN_DISABLE_VULKAN_LINEAR_BF16W_X32Y8=1
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-rollback.log
+  - backend: vulkan
+  - prefill: 1065.1256799999999ms
+  - mean ITL: 87.01332412500001ms
+  - p99 ITL: 94.389665ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+- Candidate:
+  - artifact:
+    docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-candidate.log
+  - backend: vulkan
+  - prefill: 1086.9497640000002ms
+  - mean ITL: 94.090429125ms
+  - p99 ITL: 94.935111ms
+  - token IDs: [271,1206,1423,680,1204,1691,51864,3520,506]
+
+Verdict:
+- Reject and remove the temporary source.
+- The candidate preserved backend selection and token IDs, but regressed both
+  prefill and serial decode latency.
+- Keep the current single-row BF16 linear `16x16` shader; do not retry the
+  direct `32x8` lane trade without a new occupancy or cache hypothesis.
+- Final source has no A087 code, and CUDA/Metal source paths are untouched.

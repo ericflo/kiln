@@ -4838,6 +4838,67 @@ Verdict:
   new occupancy/register-pressure hypothesis.
 - Final source has no A086 code, and CUDA/Metal source paths are untouched.
 
+### 2026-05-09 A087: Reject Single-Row BF16 Linear X32/Y8
+
+Goal:
+- Test whether a Metal simdgroup-width idea transfers to Vulkan's serial
+  packed-BF16 linear projection path.
+- Replace the current single-row BF16 linear `16x16` workgroup shape with a
+  temporary `32x8` shape that halves workgroup count for wide projections.
+
+Temporary change:
+- Added temporary shader `linear_decode_bf16w_x32y8.comp`.
+- Selected it for single-row packed-BF16 generic linear decode and MLP down
+  projection.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_LINEAR_BF16W_X32Y8=1`
+- CUDA and Metal source paths were untouched.
+
+Temporary validation:
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity linear_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode_bf16_packed_weights_match_cpu_reference -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`
+
+Same-binary rollback-env A/B, seed 89:
+- Harness:
+  `KILN_BENCH_LOG_TOKENS=1 ./target/release/kiln-bench --model-path Qwen3.5-4B --paged --latency-only --latency-warmup-runs 1 --prompt-tokens 64 --max-output-tokens 8 --seed 89 --quiet`
+- Rollback:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-rollback.log`
+  - rollback env:
+    `KILN_DISABLE_VULKAN_LINEAR_BF16W_X32Y8=1`
+  - prefill `1065.1256799999999ms`
+  - mean ITL `87.01332412500001ms`
+  - p99 ITL `94.389665ms`
+  - token IDs `[271,1206,1423,680,1204,1691,51864,3520,506]`
+- Candidate:
+  - artifact:
+    `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-candidate.log`
+  - prefill `1086.9497640000002ms`
+  - mean ITL `94.090429125ms`
+  - p99 ITL `94.935111ms`
+  - same token IDs
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-candidate.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-rollback.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-cargo-*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-linear-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-mlp-parity-test.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a087-linear-bf16w-x32y8-source-reverted-diffcheck.log`
+
+Verdict:
+- Reject and remove the temporary source. The candidate preserved Vulkan
+  backend selection and token IDs, but regressed both prefill and serial decode
+  latency.
+- Keep the current single-row BF16 linear `16x16` shader; do not retry the
+  direct `32x8` lane trade without a new occupancy or cache hypothesis.
+- Final source has no A087 code, and CUDA/Metal source paths are untouched.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -4938,6 +4999,10 @@ Verdict:
   regressed prefill `1066.390ms` rollback to `1142.299ms` candidate and also
   worsened mean/p99 ITL. Keep rows4 for large-batch GDN in-proj; direct larger
   row grouping is likely pressure-limited on Strix Halo.
+- A087 rejects the direct single-row packed-BF16 linear `32x8` lane trade:
+  same-token no-profile A/B regressed prefill `1065.126ms` rollback to
+  `1086.950ms` candidate and mean ITL `87.013ms` to `94.090ms`. Keep the
+  current `16x16` serial BF16 linear shader.
 - A067 shows that applying the existing parallel recurrent shader to the
   resident-state path is worth keeping, but it is only a small mean-ITL win and
   does not materially shrink the profiled recurrent bucket. Further recurrent

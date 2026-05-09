@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/gdn_parity.rs (target/debug/deps/gdn_parity-76b8eec335dda4df)
+
+running 1 test
+test mlp_decode_bf16_packed_weights_match_cpu_reference ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.02s
