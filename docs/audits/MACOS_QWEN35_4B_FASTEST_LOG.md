@@ -15736,3 +15736,52 @@ Accepted as target-selection evidence; no source change. Despite E407's
 endpoint prefill win, the intrusive profile still ranks GDN in-proj first,
 now dominated by the larger qkv/z projection matmuls rather than the optimized
 A/B subpart. MLP split projections remain the other large prefill target.
+
+## 2026-05-09 - E409 rejected GDN prefill combined qkv/z projection
+
+### Hypothesis
+
+E408 still ranks GDN in-proj first after E407. Since E407 only combined the
+small A/B gate projections, the larger qkv and z prefill matmuls remain. A
+temporary benchmark can test whether prebuilding a `[hidden, qkv_dim + z_dim]`
+transpose and computing qkv/z with one matmul is faster than the current two
+matmuls.
+
+### Change Tested
+
+Temporarily added an ignored synthetic benchmark-only helper that:
+
+- prebuilt `qkv_z_t = cat(qkv_t, z_t, dim=-1)` with Qwen3.5-4B shapes
+- ran one `x.broadcast_matmul(qkv_z_t)` and split qkv/z views
+- also measured the production-relevant variant that makes both split qkv and
+  z tensors contiguous, because existing downstream qkv-conv and gated-norm
+  kernels call or require contiguous tensors
+- compared against the current separate qkv and z prefill matmuls
+
+No production path was changed. The temporary benchmark source was reverted
+after the measurement.
+
+### Results
+
+Same-binary synthetic Metal Qwen3.5 GDN qkv/z prefill:
+
+- `seq_len=16`: split `3002.900 us`, combined-view `2824.812 us`
+  (`1.063x`), combined-contiguous `3311.094 us` (`0.907x`)
+- `seq_len=64`: split `3125.902 us`, combined-view `2807.077 us`
+  (`1.114x`), combined-contiguous `3513.310 us` (`0.890x`)
+- `seq_len=128`: split `5230.167 us`, combined-view `4886.648 us`
+  (`1.070x`), combined-contiguous `6172.531 us` (`0.847x`)
+- max absolute diff was `0` for all tested sequence lengths
+
+### Artifact
+
+- `e409_gdn_prefill_qkv_z_combined_synthetic.log`
+
+### Decision
+
+Rejected before endpoint measurement. The view-only combined qkv/z matmul is
+modestly faster, but the result is not production-compatible with the existing
+downstream kernels. Once qkv and z are materialized contiguously, the combined
+path is slower at every tested prefill length and would also require a very
+large duplicated weight cache. Do not add a combined qkv/z prefill layout unless
+a future fused downstream path can consume the combined tensor directly.

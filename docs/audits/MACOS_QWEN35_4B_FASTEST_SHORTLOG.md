@@ -1653,3 +1653,10 @@
   `gdn:out_proj` `30.371 ms`. Accepted as target-selection evidence; no source
   change. The remaining GDN in-proj work is mostly the large qkv/z projections,
   while split MLP projection matmuls remain the other major prefill target.
+- 2026-05-09 E409: Rejected a prebuilt combined GDN qkv/z prefill matmul
+  layout (`[2560,12288]`). View-only split results looked modestly faster, but
+  the production-relevant contiguous variant regressed: at `seq_len=64`, split
+  qkv/z was `3125.902 us`, combined-view was `2807.077 us` (`1.114x`), and
+  combined-contiguous was `3513.310 us` (`0.890x`). Parity was exact. Temporary
+  benchmark source reverted; do not add this layout without a downstream fused
+  path that can consume the combined tensor directly.
