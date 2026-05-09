@@ -13180,3 +13180,146 @@ Accepted. Metal live greedy decode batching now defaults to `100us` admission
 wait, backed by current four-request, eight-request, and bs=1 endpoint probes.
 Non-Metal backends retain zero wait by default, so CUDA/Vulkan behavior is not
 changed by this policy.
+
+## 2026-05-09 E375 - Add MLP gate/up row-quad for full Metal decode batches
+
+### Goal
+
+Target the largest remaining live Metal decode stage after E370:
+`mlp:gate_up_fused`. E364's row-pair mode reused the same gate/up weight loads
+across two decode rows and improved larger synthetic batches, but the new
+E374 default wait can now form full eight-row batches. This experiment tests
+whether reusing each gate/up column-pair load across four rows is worthwhile
+when the decode batch is full.
+
+### Change
+
+- Added a row-quad branch to the existing Metal MLP gate/up BF16 decode kernel.
+- The new branch computes one gate/up column pair for four decode rows in one
+  scalar kernel instance.
+- The first opt-in candidate enabled row-quad at rows `>=4`; that threshold was
+  rejected after synthetic batch `4` regressed.
+- The final source enables row-quad only for rows `>=8`.
+- Batch `1` stays on the original single-row path; batch `2/3/4` stay on the
+  E364 row-pair path.
+- Added `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` as the rollback knob.
+
+### Validation
+
+- `KILN_ENABLE_METAL_MLP_GATE_UP_ROW_QUAD=1 cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `KILN_ENABLE_METAL_MLP_GATE_UP_ROW_QUAD=1 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_WARMUP=3 KILN_METAL_MLP_GATE_UP_BATCH_BENCH_ITERS=10 cargo test -p kiln-model --features metal bench_mlp_gate_up_decode_batch_synthetic --lib -- --ignored --nocapture`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture`
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- Same-binary endpoint A/B on the eight-request short-prompt streaming shape
+  with default Metal `100us` decode wait.
+
+### Results
+
+The rows `>=4` candidate was correct but rejected as too broad:
+
+- baseline batch `4`: `2175.496 us`
+- row-quad rows `>=4` batch `4`: `2259.879 us`
+- baseline batch `8`: `3742.525 us`
+- row-quad rows `>=4` batch `8`: `2487.892 us`
+
+The final rows `>=8` threshold avoids the batch `4` regression and preserves
+the intended full-batch gain:
+
+- baseline batch `8`: `3742.525 us`
+- row-quad rows `>=8` batch `8`: `2599.438 us`
+
+That is a `30.5%` synthetic win for the only intended row-quad batch size under
+the default `max_batch=8`.
+
+Same-binary endpoint A/B before the source flip, baseline versus opt-in
+row-quad rows `>=8`:
+
+- baseline: wall `8.423100s`, `64` generated tokens, `56` jobs, `10` worker
+  batches, `56` rows, max batch `8`
+- row-quad opt-in: wall `8.244108s`, `64` generated tokens, `56` jobs, `9`
+  worker batches, `56` rows, max batch `8`
+
+Final same-binary endpoint A/B after enabling row-quad by default, default
+versus rollback disabled:
+
+- final default: wall `8.204494s`, `64` generated tokens, `56` jobs, `8`
+  worker batches, `56` rows, max batch `8`
+- `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1`: wall `8.729105s`, `64`
+  generated tokens, `56` jobs, `9` worker batches, `56` rows, max batch `8`
+
+The final default is `6.0%` faster than the rollback-disabled path on this
+serving shape.
+
+### Artifact
+
+- `e375_mlp_gate_up_row_quad_parity.log`
+- `e375_mlp_gate_up_row_quad_baseline.log`
+- `e375_mlp_gate_up_row_quad_candidate.log`
+- `e375_mlp_gate_up_row_quad_ge8_parity.log`
+- `e375_mlp_gate_up_row_quad_ge8_candidate.log`
+- `e375_release_build_metal.log`
+- `e375_mlp_gate_up_row_quad_endpoint_summary.json`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_server.log`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_health.json`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_metrics.prom`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_time.json`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_0.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_1.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_2.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_3.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_4.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_5.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_6.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_baseline_response_7.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_server.log`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_health.json`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_metrics.prom`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_time.json`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_0.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_1.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_2.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_3.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_4.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_5.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_6.sse`
+- `e375_mlp_gate_up_row_quad_endpoint_row_quad_ge8_response_7.sse`
+- `e375_mlp_gate_up_row_quad_final_parity.log`
+- `e375_cargo_check_metal.log`
+- `e375_cargo_check_vulkan.log`
+- `e375_release_build_metal_final.log`
+- `e375_mlp_gate_up_row_quad_summary.txt`
+- `e375_mlp_gate_up_row_quad_final_endpoint_summary.json`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_server.log`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_health.json`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_metrics.prom`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_time.json`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_0.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_1.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_2.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_3.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_4.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_5.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_6.sse`
+- `e375_mlp_gate_up_row_quad_final_default_endpoint_response_7.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_server.log`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_health.json`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_metrics.prom`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_time.json`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_0.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_1.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_2.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_3.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_4.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_5.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_6.sse`
+- `e375_mlp_gate_up_row_quad_rollback_disabled_endpoint_response_7.sse`
+
+### Decision
+
+Accepted. Enable Metal MLP gate/up row-quad by default only for rows `>=8`,
+with `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` as the rollback. This improves
+the full-batch default Metal serving path without changing bs=1 or batch
+`2/3/4` kernel selection.

@@ -1,0 +1,36 @@
+E375 Metal MLP gate/up row-quad for full decode batches
+
+Change:
+- Added a row-quad branch to the existing Metal MLP gate/up BF16 decode kernel.
+- The new branch computes the same gate/up column pair for four decode rows,
+  reusing gate/up BF16 weight loads across those rows.
+- The final gate enables row-quad only when rows >= 8. Batch 1 remains on the
+  original single-row path, and batch 2/3/4 remain on the E364 row-pair path.
+- Rollback: KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1.
+
+Synthetic same-binary notes:
+- First opt-in attempt enabled row-quad at rows >= 4. It was correct, but batch
+  4 regressed from 2175.496 us to 2259.879 us, so that threshold was rejected.
+- Final rows >= 8 threshold kept smaller batches on the existing path and
+  improved batch 8 fused time from 3742.525 us to 2599.438 us, a 30.5432%
+  synthetic improvement.
+
+Endpoint A/B, final default versus rollback disabled:
+
+case               wall_s     generated  jobs  worker_batches  rows  max_batch
+final_default      8.204494   64         56    8               56    8
+rollback_disabled  8.729105   64         56    9               56    8
+
+All requests returned HTTP 200. The final default was 6.0099% faster than the
+rollback-disabled path on the eight-request short-prompt streaming shape.
+
+Validation:
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference --lib -- --nocapture
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench
+- cargo build --release --features metal --bin kiln
+
+Decision:
+- Accepted. Keep row-quad enabled by default only for rows >= 8, with the
+  rollback env var above. This improves the default Metal wait100 full-batch
+  serving path without changing bs=1 or batch 2/3/4 kernel selection.

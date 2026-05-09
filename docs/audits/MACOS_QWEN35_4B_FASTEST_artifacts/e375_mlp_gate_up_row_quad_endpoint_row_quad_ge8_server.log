@@ -1,0 +1,51 @@
+
+  ┌─────────────────────────────────────┐
+  │           🔥 K I L N 🔥             │
+  │   inference · training · adapters   │
+  └─────────────────────────────────────┘
+
+  Version: 0.2.13
+  Mode: GPU inference
+  Model: /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  CUDA: not available
+  Listen: http://127.0.0.1:8496
+
+  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
+
+{"timestamp":"2026-05-09T09:38:35.242211Z","level":"INFO","fields":{"message":"Metal available — using Apple Silicon GPU"},"target":"kiln_server::device"}
+{"timestamp":"2026-05-09T09:38:35.260378Z","level":"INFO","fields":{"message":"Loading model from /Users/ericflo/.cache/huggingface/hub/models--Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a (2 shards)"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:38:35.261015Z","level":"INFO","fields":{"message":"Using weight name prefix: \"model.language_model.\""},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:38:35.261153Z","level":"INFO","fields":{"message":"Native MTP head detected; deferring CPU load until first use","mtp_prefix":"mtp."},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:38:35.261161Z","level":"INFO","fields":{"message":"Loaded 4206M parameters (8022 MB) across 32 layers"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-09T09:38:47.444950Z","level":"INFO","fields":{"message":"unified memory detected (Apple Silicon)","total_gb":10.73741824,"source":"apple-silicon-unified"},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446269Z","level":"WARN","fields":{"message":"post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing","estimated_model_gb":9.15668992},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446286Z","level":"INFO","fields":{"message":"memory-aware KV cache sizing","total_vram_gb":10.73741824,"model_gb":9.15668992,"post_load_used_vram_gb":0.0,"sizing_residency_gb":9.15668992,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446292Z","level":"INFO","fields":{"message":"allocating paged KV cache","num_blocks":512,"block_size":16,"kv_dtype":"BF16","fp8_enabled":false},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446421Z","level":"INFO","fields":{"message":"KV cache auto-sizer succeeded on first attempt","inference_fraction":0.7,"num_blocks":512},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446433Z","level":"INFO","fields":{"message":"GPU memory budget","total_vram_gb":10.73741824,"model_gb":9.15668992,"estimated_model_gb":9.15668992,"post_load_used_vram_gb":0.0,"kv_cache_gb":0.268435456,"training_budget_gb":1.312292864,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446438Z","level":"INFO","fields":{"message":"prefix cache budget","max_blocks":128,"max_entries":9,"state_bytes_per_entry":27525120,"max_state_bytes":247726080,"min_register_tokens":64},"target":"kiln_server::state"}
+{"timestamp":"2026-05-09T09:38:47.446459Z","level":"INFO","fields":{"message":"live greedy decode batcher enabled","backend":"metal","max_batch":8,"wait_us":100,"mixed_seq_lens":true},"target":"kiln_server::state"}
+  ✓ Ready on http://127.0.0.1:8496
+
+{"timestamp":"2026-05-09T09:38:47.447305Z","level":"INFO","fields":{"message":"starting background inference prewarm"},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:47.447561Z","level":"INFO","fields":{"message":"tokenizer warmup complete","elapsed_ms":0,"tokens":8},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:47.449179Z","level":"INFO","fields":{"message":"Metal custom kernels precompiled during background prewarm","elapsed_ms":1},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:47.449194Z","level":"INFO","fields":{"message":"Metal custom kernels precompiled during background prewarm","elapsed_ms":0},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:47.775467Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.175208},"target":"kiln_server::api","span":{"duration_ms":0.175208,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.175208,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:48.281460Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.107417},"target":"kiln_server::api","span":{"duration_ms":0.107417,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.107417,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:48.793224Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.153208},"target":"kiln_server::api","span":{"duration_ms":0.153208,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.153208,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:49.304648Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.146041},"target":"kiln_server::api","span":{"duration_ms":0.146041,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.146041,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:49.815543Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.146541},"target":"kiln_server::api","span":{"duration_ms":0.146541,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.146541,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:49.998348Z","level":"INFO","fields":{"message":"background inference prewarm complete","elapsed_ms":2551},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:50.327071Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.308791},"target":"kiln_server::api","span":{"duration_ms":0.308791,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.308791,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.331757Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.213958},"target":"kiln_server::api","span":{"duration_ms":1.213958,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.213958,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.332577Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.617916},"target":"kiln_server::api","span":{"duration_ms":0.617916,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.617916,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.333148Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.566166},"target":"kiln_server::api","span":{"duration_ms":0.566166,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.566166,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.333173Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.4505},"target":"kiln_server::api","span":{"duration_ms":0.4505,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.4505,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.334405Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.028417},"target":"kiln_server::api","span":{"duration_ms":1.028417,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.028417,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.335676Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.644291},"target":"kiln_server::api","span":{"duration_ms":1.644291,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.644291,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.336146Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.598333},"target":"kiln_server::api","span":{"duration_ms":0.598333,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.598333,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:50.338539Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.809167},"target":"kiln_server::api","span":{"duration_ms":0.809167,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":0.809167,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:58.578541Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.134209},"target":"kiln_server::api","span":{"duration_ms":0.134209,"method":"GET","path":"/metrics","status":200,"name":"http_request"},"spans":[{"duration_ms":0.134209,"method":"GET","path":"/metrics","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-09T09:38:58.580755Z","level":"INFO","fields":{"message":"received SIGTERM — initiating graceful shutdown"},"target":"kiln"}
+{"timestamp":"2026-05-09T09:38:59.000810Z","level":"INFO","fields":{"message":"training worker shutting down"},"target":"kiln_server::training_queue"}

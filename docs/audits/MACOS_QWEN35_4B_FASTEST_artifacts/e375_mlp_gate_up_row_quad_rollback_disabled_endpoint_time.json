@@ -1,0 +1,145 @@
+{
+  "case": "rollback_disabled",
+  "prompts": [
+    "Write one short sentence about benchmark topic 0.",
+    "Write one short sentence about benchmark topic 1.",
+    "Write one short sentence about benchmark topic 2.",
+    "Write one short sentence about benchmark topic 3.",
+    "Write one short sentence about benchmark topic 4.",
+    "Write one short sentence about benchmark topic 5.",
+    "Write one short sentence about benchmark topic 6.",
+    "Write one short sentence about benchmark topic 7."
+  ],
+  "request_elapsed_s": 8.729104917030782,
+  "responses": [
+    {
+      "bytes": 2021,
+      "elapsed_s": 8.386446207994595,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 0,
+      "status": 200
+    },
+    {
+      "bytes": 2026,
+      "elapsed_s": 8.068889957969077,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 1,
+      "status": 200
+    },
+    {
+      "bytes": 2016,
+      "elapsed_s": 8.386032290989533,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 2,
+      "status": 200
+    },
+    {
+      "bytes": 2021,
+      "elapsed_s": 8.725473708007485,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 3,
+      "status": 200
+    },
+    {
+      "bytes": 2021,
+      "elapsed_s": 8.385174416936934,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 4,
+      "status": 200
+    },
+    {
+      "bytes": 2016,
+      "elapsed_s": 8.725342833902687,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 5,
+      "status": 200
+    },
+    {
+      "bytes": 2016,
+      "elapsed_s": 8.385106666013598,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 6,
+      "status": 200
+    },
+    {
+      "bytes": 2016,
+      "elapsed_s": 8.724546917015687,
+      "headers": {
+        "access-control-allow-origin": "*",
+        "access-control-expose-headers": "*",
+        "cache-control": "no-cache",
+        "connection": "close",
+        "content-type": "text/event-stream",
+        "date": "Sat, 09 May 2026 09:42:34 GMT",
+        "transfer-encoding": "chunked",
+        "vary": "origin, access-control-request-method, access-control-request-headers"
+      },
+      "index": 7,
+      "status": 200
+    }
+  ],
+  "row_quad_disabled": true
+}

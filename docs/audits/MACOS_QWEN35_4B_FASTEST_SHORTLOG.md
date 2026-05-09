@@ -1379,3 +1379,14 @@
   and release build passed. A no-env Metal n8 endpoint probe logged
   `wait_us=100`, generated `64` tokens, submitted `56` jobs through `9` worker
   batches, observed max batch `8`, and completed in `8.570439s`.
+- 2026-05-09 E375: Accepted Metal MLP gate/up row-quad mode for full decode
+  batches only. The first opt-in threshold at rows `>=4` was rejected because
+  synthetic batch `4` regressed `2175.496 -> 2259.879 us`, despite batch `8`
+  improving. The final gate uses row-quad only at rows `>=8`, leaving batch
+  `1` on the old single-row path and batch `2/3/4` on E364 row-pair. Final
+  synthetic batch `8` improved `3742.525 -> 2599.438 us` (`30.5%`). Focused
+  parity, Metal/Vulkan checks, and release build passed. Same-binary n8
+  endpoint with default wait100 improved final default versus
+  `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD=1` from `8.729105s` to
+  `8.204494s` (`6.0%`) with `64` generated tokens, `56` jobs, `8` worker
+  batches, and max batch `8`.

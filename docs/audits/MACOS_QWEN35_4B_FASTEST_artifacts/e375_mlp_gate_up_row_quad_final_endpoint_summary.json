@@ -1,0 +1,32 @@
+[
+  {
+    "case": "final_default",
+    "request_elapsed_s": 8.20449366606772,
+    "row_quad_disabled": false,
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  {
+    "case": "rollback_disabled",
+    "request_elapsed_s": 8.729104917030782,
+    "row_quad_disabled": true,
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  }
+]
