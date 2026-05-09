@@ -1,0 +1,20 @@
+{
+  "candidate_wall_s": 3.0731466190045467,
+  "gdn_stage:gated_norm:candidate_ms": 43.36700000000001,
+  "gdn_stage:gated_norm:delta_ms": -0.570999999999998,
+  "gdn_stage:gated_norm:rollback_ms": 43.93800000000001,
+  "gdn_stage:gates:candidate_ms": 24.46699999999999,
+  "gdn_stage:gates:delta_ms": -2.9670000000000094,
+  "gdn_stage:gates:rollback_ms": 27.434,
+  "gdn_stage:in_proj:candidate_ms": 113.85700000000001,
+  "gdn_stage:in_proj:delta_ms": -4.6669999999999305,
+  "gdn_stage:in_proj:rollback_ms": 118.52399999999994,
+  "gdn_stage:recurrent:candidate_ms": 119.31899999999997,
+  "gdn_stage:recurrent:delta_ms": -3.6980000000000075,
+  "gdn_stage:recurrent:rollback_ms": 123.01699999999998,
+  "mlp_stage:fused:candidate_ms": 146.84600000000006,
+  "mlp_stage:fused:delta_ms": -3.4989999999999384,
+  "mlp_stage:fused:rollback_ms": 150.345,
+  "rollback_wall_s": 3.0498352330032503,
+  "wall_delta_candidate_minus_rollback_s": 0.02331138600129634
+}

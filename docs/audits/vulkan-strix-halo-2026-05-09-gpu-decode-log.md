@@ -2636,6 +2636,50 @@ Verdict:
   favored the candidate by `116.482ms`.
 - No CUDA or Metal source files changed.
 
+### 2026-05-09 A057: Reject GDN Gated-RMSNorm Single-Submit Path
+
+Hypothesis:
+- A056 left `dispatch_gdn_gated_rms_norm_cached` as three queue submits:
+  combined `x`/`z` upload, compute dispatch, and output readback. A
+  single-submit command buffer that copies `x`/`z`, dispatches the shader, and
+  copies the output into a host-visible staging buffer might reduce the same
+  boundary overhead further.
+
+Temporary change:
+- Added an uncommitted Vulkan-only single-submit path for
+  `dispatch_gdn_gated_rms_norm_cached`.
+- Used rollback env
+  `KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT=1`.
+
+Validation:
+- Candidate passed `cargo fmt --check`.
+- Candidate passed `cargo check -p kiln-vulkan-kernel`.
+- Candidate passed focused gated-norm parity:
+  `cargo test -p kiln-vulkan-kernel gdn_gates_and_gated_rms_norm_match_f32_cpu_reference --test gdn_parity -- --nocapture`.
+- Candidate release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+
+Evidence:
+- Profiled same-binary endpoint A/B, both arms waited for
+  `inference_prewarm_complete=true`, both returned correct texts `"6"`,
+  `"11"`, `"16"`, `"13"` with empty reasoning, and both used the same `7` jobs
+  / `3` batches / `7` rows / max batch `4` shape.
+- Candidate: wall `3.073147s`; live `gdn:gated_norm seq_len=1`
+  `43.367ms` / `96` samples.
+- Rollback with
+  `KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT=1`: wall `3.049835s`;
+  live `gdn:gated_norm seq_len=1` `43.938ms` / `96` samples.
+
+Artifacts:
+- `vulkan-strix-halo-2026-05-09-a057-gdn-gated-norm-single-submit-*`
+
+Verdict:
+- Rejected and removed. The targeted stage delta was only `-0.571ms`, while
+  endpoint wall regressed by `23.311ms`. The extra descriptor/command recording
+  shape is not justified for this small kernel after A056.
+- Keep A056's batched-upload path. Do not retry gated-norm single-submit
+  without a broader backend-boundary or residency change.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
@@ -2654,6 +2698,8 @@ Verdict:
 - Do not wire Vulkan `gdn_decode_gates_recurrent_rmsnorm` into the generic
   forward hook without changing residency/data movement first; A050 regressed
   same-binary no-profile endpoint time (`4.951s` vs rollback `4.055s`).
+- Do not retry GDN gated-RMSNorm single-submit by command-buffer folding alone;
+  A057 measured effectively flat stage time and a slight endpoint regression.
 - After A051, cached f32 uploads are safe for non-F32 tensors. Future Vulkan
   work can rely on `upload_tensor_f32_buffer` matching its contract, but should
   still prefer packed-BF16 paths for large BF16 model weights when available.
