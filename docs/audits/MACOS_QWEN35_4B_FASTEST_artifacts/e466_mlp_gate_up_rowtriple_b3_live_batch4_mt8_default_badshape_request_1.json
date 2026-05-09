@@ -1,0 +1,16 @@
+{
+  "model": "kiln",
+  "stream": true,
+  "temperature": 0,
+  "max_tokens": 8,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Answer in a terse factual style."
+    },
+    {
+      "role": "user",
+      "content": "Give a short phrase about beta."
+    }
+  ]
+}

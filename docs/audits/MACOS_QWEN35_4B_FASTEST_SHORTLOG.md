@@ -2197,3 +2197,16 @@
   evidence. Hottest remaining stages are `mlp:gate_up_fused` `372.896 ms`,
   `mlp:down_proj` `259.515 ms`, `gdn:in_proj` `223.002 ms`, and
   `gdn:out_proj` `95.433 ms`.
+- 2026-05-09 E466: Accepted a Metal MLP gate/up batch-3-only row-triple mode
+  with rollback env `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE=1`. The selector
+  uses it only for `rows == 3`; batch `1` remains serial, batch `2` remains
+  row-pair, and batch `>=5` remains row-quad. Focused parity passed, now
+  including batch `3`. Qwen3.5 synthetic batch `3` improved twice after the
+  possible local-noise warning: `1838.606 us` versus rollback `1970.608 us`,
+  then `1824.246 us` versus `1982.808 us`, with BF16 diffs within tolerance.
+  A first live default probe was discarded because it only reached max batch
+  `1`; the matched four-stream `max_tokens=8` A/B reached max batch `3` in both
+  arms and favored default: `4.591 s` versus rollback `4.882 s`, both `32`
+  server tokens, `28` submitted jobs, `14` worker batches, and `28` rows.
+  Metal/Vulkan model and server checks passed; CUDA remains locally blocked by
+  missing `nvcc`.

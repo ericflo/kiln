@@ -1,0 +1,5 @@
+data: {"id":"chatcmpl-17247d1b-2aa1-43de-889c-0c6be32952fd","object":"chat.completion.chunk","created":1778365145,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-17247d1b-2aa1-43de-889c-0c6be32952fd","object":"chat.completion.chunk","created":1778365145,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

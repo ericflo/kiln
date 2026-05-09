@@ -19942,3 +19942,97 @@ remains second, and `gdn:in_proj` remains third.
 
 Accepted as a no-source-change profile checkpoint. Use it only for post-E464
 hotspot ordering, not for wall-time or source-decision evidence.
+
+## E466 - Accepted Batch-3 Row-Triple MLP Gate/Up
+
+### Hypothesis
+
+E465 kept `mlp:gate_up_fused` as the hottest max-batch-3 live stage. E461
+already rejected lowering the existing MLP gate/up row-quad threshold to batch
+`3`/`4`, but that test still used a four-row branch for batch `3`. A dedicated
+three-row path should avoid the masked fourth row while preserving the accepted
+row-pair and row-quad policies for other batch sizes.
+
+### Candidate
+
+Added `KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE=1` as a narrow rollback guard
+and extended `kiln_mlp_gate_up_bf16` with row-pair modes `3` and `7` for exactly
+three rows. Mode `7` uses aligned `bfloat2` vector loads for adjacent gate/up
+columns when the intermediate size is even; mode `3` is the scalar fallback for
+odd-column or unaligned cases. The host selector chooses row group size `3`
+only when `rows == 3`; batch `1` stays serial, batch `2` stays row-pair, and
+batch `>=5` stays row-quad. The focused MLP gate/up batch parity test now also
+covers batch `3`, and the ignored synthetic bench reports `row_triple` when
+the new mode is selected.
+
+### Results
+
+Focused parity passed:
+
+- `cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture`
+
+Qwen3.5 MLP gate/up synthetic A/B with warmup `5`, iters `20`:
+
+| pass | candidate policy | candidate fused | rollback policy | rollback fused | result |
+| --- | --- | ---: | --- | ---: | ---: |
+| initial | row_triple | `1838.606 us` | row_pair | `1970.608 us` | `6.70%` lower |
+| rerun after possible machine noise | row_triple | `1824.246 us` | row_pair | `1982.808 us` | `8.00%` lower |
+
+All logged batch-3 rows stayed within the existing BF16 tolerance
+(`max_abs_diff=5.960464e-8`, `mean_abs_diff=2.138449e-9`).
+
+The first no-profile live default probe reused the older short-phrase prompt
+shape but two streams stopped early. It produced only `24` stream events,
+`16` server tokens, `14` submitted jobs, `14` worker batches, `14` rows, and
+`max_observed_batch=1`, so it was discarded before running the rollback arm.
+The accepted live A/B used a sequence-continuation prompt, a synchronized client
+barrier, and the same post-prewarm settle delay for both arms.
+
+Matched no-profile live endpoint A/B with four streaming requests,
+`max_tokens=8`:
+
+| arm | elapsed | stream events | server tokens | jobs | worker batches | rows | max batch | result |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| default row-triple | `4.590591 s` | `40` | `32` | `28` | `14` | `28` | `3` | positive |
+| rollback row-pair | `4.882080 s` | `40` | `32` | `28` | `14` | `28` | `3` | baseline |
+
+The candidate was `5.97%` lower wall time with identical server-side batch
+shape.
+
+Validation:
+
+- `cargo fmt --check`: passed
+- `cargo build --release --features metal --bin kiln`: passed with existing warnings
+- `cargo check -p kiln-model --features metal`: passed with existing warnings
+- `cargo check -p kiln-model --features vulkan`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench`: passed with existing warnings
+- `cargo check -p kiln-model --features cuda`: blocked by local missing `nvcc`
+  / CUDA toolkit, matching the known local CUDA environment limitation
+
+### Artifacts
+
+- `e466_mlp_gate_up_rowtriple_b3_fmt.log`
+- `e466_mlp_gate_up_rowtriple_b3_fmt_initial.log`
+- `e466_mlp_gate_up_rowtriple_b3_parity.log`
+- `e466_mlp_gate_up_rowtriple_b3_shapes_default_w5_i20.log`
+- `e466_mlp_gate_up_rowtriple_b3_shapes_disabled_w5_i20.log`
+- `e466_mlp_gate_up_rowtriple_b3_shapes_default_rerun_w5_i20.log`
+- `e466_mlp_gate_up_rowtriple_b3_shapes_disabled_rerun_w5_i20.log`
+- `e466_mlp_gate_up_rowtriple_b3_build.log`
+- `e466_mlp_gate_up_rowtriple_b3_live_batch4_mt8_default_badshape_*`
+- `e466_mlp_gate_up_rowtriple_b3_live_batch4_mt8_default_*`
+- `e466_mlp_gate_up_rowtriple_b3_live_batch4_mt8_disabled_*`
+- `e466_mlp_gate_up_rowtriple_b3_check_metal.log`
+- `e466_mlp_gate_up_rowtriple_b3_check_vulkan.log`
+- `e466_mlp_gate_up_rowtriple_b3_check_server_metal.log`
+- `e466_mlp_gate_up_rowtriple_b3_check_server_vulkan.log`
+- `e466_mlp_gate_up_rowtriple_b3_check_cuda.log`
+- `e466_mlp_gate_up_rowtriple_b3_summary.txt`
+
+### Decision
+
+Accepted. The dedicated batch-3 MLP gate/up row-triple mode is correct,
+repeatedly improves the targeted Qwen3.5 synthetic shape, and improves matched
+max-batch-3 live endpoint latency. Roll back with
+`KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE=1` if needed.

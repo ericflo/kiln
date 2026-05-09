@@ -1,0 +1,35 @@
+E466 accepted Metal MLP gate/up batch-3 row-triple mode
+
+Change:
+- Add KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE=1 rollback guard.
+- Add row_pair_mode 3/7 to kiln_mlp_gate_up_bf16 for exactly three rows.
+- Mode 7 uses bfloat2 gate/up weight vector loads when aligned and intermediate is even; mode 3 keeps scalar odd-column fallback.
+- Select row_group_size=3 only for rows == 3, leaving batch 1 serial, batch 2 row-pair, and batch >=5 row-quad behavior unchanged.
+- Extend focused MLP gate/up batch parity to include batch 3 and update the synthetic bench policy label.
+
+Focused parity:
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture: passed
+
+Qwen3.5 synthetic A/B, warmup=5, iters=20:
+- initial: row_triple batch3 1838.606 us vs row_pair rollback 1970.608 us, 6.70% lower fused time
+- rerun after possible machine noise: row_triple batch3 1824.246 us vs row_pair rollback 1982.808 us, 8.00% lower fused time
+- All logged batch-3 max_abs_diff values were 5.960464e-8 and mean_abs_diff values were 2.138449e-9.
+
+Live endpoint A/B, four streaming requests, max_tokens=8:
+- discarded first default probe: original prompt shape ended two streams early and only reached max batch 1, so it was not used as source-decision evidence
+- default row_triple: elapsed 4.590591 s, statuses 200,200,200,200, stream events 40, server tokens 32, jobs 28, worker batches 14, rows 28, max batch 3
+- rollback row_pair: elapsed 4.882080 s, statuses 200,200,200,200, stream events 40, server tokens 32, jobs 28, worker batches 14, rows 28, max batch 3
+- Candidate was 5.97% lower wall time with identical server-side batch shape.
+
+Validation:
+- cargo fmt --check: passed
+- cargo test -p kiln-model --features metal test_mlp_gate_up_decode_batch_matches_reference -- --nocapture: passed
+- cargo build --release --features metal --bin kiln: passed with existing warnings
+- cargo check -p kiln-model --features metal: passed with existing warnings
+- cargo check -p kiln-model --features vulkan: passed with existing warnings
+- cargo check --locked -p kiln-server --features metal --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check --locked -p kiln-server --features vulkan --bin kiln --bin kiln-bench: passed with existing warnings
+- cargo check -p kiln-model --features cuda: blocked by local missing nvcc/CUDA toolkit
+
+Decision:
+- Accepted. The batch-3 row-triple MLP gate/up mode is correct, repeatedly improves the targeted Qwen3.5 synthetic shape, and improves matched max-batch-3 live endpoint latency.
