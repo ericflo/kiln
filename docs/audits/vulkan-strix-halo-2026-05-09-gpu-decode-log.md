@@ -710,6 +710,40 @@ Verdict:
   fundamentally, likely by changing residency/upload strategy rather than
   replacing Candle gather with Rust-side gather.
 
+### 2026-05-09 A017: Reject Exp2 Online Softmax Variant
+
+Hypothesis:
+- vLLM/CUTLASS attention code often uses base-2 exponentials with an
+  `M_LOG2E` correction factor for softmax scaling.
+- Replacing the A015 shader's `exp(...)` calls with
+  `exp2(... * 1.4426950408889634)` might map to a faster instruction sequence
+  on RADV while preserving output.
+
+Experiment:
+- Added an uncommitted `LOG2_E` constant to `paged_attn_decode_batch.comp`.
+- Changed the online softmax recurrence scales from `exp(delta)` to
+  `exp2(delta * LOG2_E)`.
+- Removed the change after measurement.
+
+Evidence:
+- Focused paged-attention parity passed.
+- Full Vulkan kernel parity passed (`20` tests).
+- `cargo check -p kiln-model --features vulkan` passed.
+- Release build passed:
+  `cargo build --release --features vulkan --bin kiln --bin kiln-bench`.
+- Exp2 sampled batch smoke returned HTTP 200 at `time_total=7.689383s` for the
+  primary `82` prompt / `48` completion token shape.
+- Exp2 longer sampled batch returned HTTP 200 at `time_total=27.282147s` for
+  the `411` prompt / `64` completion token shape.
+- Fresh non-exp2 rollback evidence from A016 was stronger:
+  `time_total=7.670023s` on the primary short shape and
+  `time_total=27.058533s` on the longer shape.
+
+Verdict:
+- Rejected and removed before commit. The exp2 variant is correct but did not
+  beat the current `exp` online softmax shader on the measured sampled batch
+  shapes.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
