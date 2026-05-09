@@ -14707,3 +14707,146 @@ Timing did not hold against the current baseline:
 Rejected before endpoint measurement. The batch-8 decode shape regressed, and
 the smaller-batch results were mixed. Keep the standard `exp` path in the MLP
 gate/up fused kernel.
+
+## 2026-05-09 - E392 current paged serial latency profile refresh
+
+### Purpose
+
+After the LoRA and fused-kernel rejected experiments, refresh the production
+paged serial profile on current `main` before choosing the next source target.
+The run enabled MLP, GDN, and full-attention stage profiling for a
+`prompt_tokens=64`, `max_output_tokens=8`, paged latency-only Qwen3.5-4B
+benchmark.
+
+### Results
+
+The measured second latency run reported:
+
+- Prefill: `758.060542 ms`
+- Mean inter-token latency: `306.382515 ms`
+- P50 / P99 inter-token latency: `317.626000 ms` / `330.499541 ms`
+- Decode throughput: `3.263894 tok/s`
+- Tokens generated: `9`
+
+Filtering the second run to `seq_len=1` decode profile rows showed the largest
+stage totals were still the projection-heavy MLP and GDN paths:
+
+- `gate_up_fused`: `256` calls, `564.942 ms` total, `2.207 ms` average
+- `down_proj`: `256` calls, `322.810 ms` total, `1.261 ms` average
+- `in_proj`: `192` calls, `302.438 ms` total, `1.575 ms` average
+- `out_proj`: `192` calls, `153.318 ms` total, `0.799 ms` average
+- `qkv_proj`: `64` calls, `91.922 ms` total, `1.436 ms` average
+- `gates_recur_gated_norm`: `192` calls, `81.788 ms` total,
+  `0.426 ms` average
+- `qkv_conv_norm`: `192` calls, `68.370 ms` total, `0.356 ms` average
+- `o_proj`: `64` calls, `50.014 ms` total, `0.781 ms` average
+- `decode_attn_contiguous`: `64` calls, `20.861 ms` total,
+  `0.326 ms` average
+- `attn_gate`: `64` calls, `17.337 ms` total, `0.271 ms` average
+
+### Artifact
+
+- `e392_current_paged_latency_profile.log`
+
+### Decision
+
+Accepted as target-selection evidence; no source change. Continue looking for
+small decode projection wins first, especially MLP gate/up/down and GDN
+in/out, and require same-build rollback comparisons for tiny kernel changes.
+
+## 2026-05-09 - E393 accepted Metal MLP gate/up serial vector loads
+
+### Hypothesis
+
+The serial `row_group_size == 1` path in `kiln_mlp_gate_up_bf16` loaded
+adjacent BF16 gate/up weights as separate scalar elements, while the existing
+row-quad path already used adjacent-column `bfloat2` loads. For even
+intermediate dimensions and 4-byte-aligned gate/up buffers, the serial path can
+load the two output columns with one `bfloat2` per weight matrix without
+changing arithmetic.
+
+### Change
+
+Added guarded row-pair mode `6` for Metal MLP gate/up serial decode. The mode:
+
+- runs only when `row_group_size == 1`
+- requires `intermediate % 2 == 0`
+- requires both gate/up buffer byte offsets to be 4-byte aligned
+- can be rolled back with
+  `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD=1`
+- leaves the old scalar mode and existing row-pair/row-quad modes intact
+
+### Results
+
+Focused Metal MLP gate/up parity passed:
+
+- `test_mlp_gate_up_matches_reference`
+- `test_mlp_gate_up_decode_batch_matches_reference`
+
+The same-binary synthetic rollback comparison isolates the affected
+single-row path:
+
+- batch `1` fused, rollback disabled path:
+  `1787.417 us`
+- batch `1` fused, default vector path:
+  `1737.904 us`
+- synthetic batch-1 improvement: `2.77%`
+
+Other synthetic batch sizes are recorded in the artifacts but are not decision
+drivers because this change only changes the `row_group_size == 1` mode.
+
+Paged Qwen3.5-4B serial latency A/B was intentionally repeated because the
+effect is small:
+
+- 17-token decode pair 1: default `161.238779 ms` mean ITL vs rollback
+  `164.312638 ms` (`1.87%` faster)
+- 17-token decode pair 2, counter-ordered: default `164.165547 ms` vs rollback
+  `163.090469 ms` (`0.66%` slower)
+- 65-token decode pair: default `162.775482 ms` vs rollback `163.385445 ms`
+  (`0.37%` faster)
+- aggregate across the three measured second-run summaries: default
+  `162.726603 ms` vs rollback `163.596184 ms` mean ITL (`0.53%` faster)
+
+The latency win is small and partly inside run-to-run noise, but the longer
+decode pair and aggregate did not show a real regression, the synthetic
+single-row target improved, and the change is narrow with an explicit rollback
+environment variable.
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_mlp_gate_up --lib -- --nocapture`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+`cargo check -p kiln-model --features cuda` was attempted and recorded, but
+the local macOS machine cannot run it because `nvcc --version` is unavailable.
+The failure occurs in `cudarc` build-script discovery before compiling the
+touched Metal code.
+
+### Artifact
+
+- `e393_mlp_serial_vector_default_synthetic.log`
+- `e393_mlp_serial_vector_disabled_synthetic.log`
+- `e393_mlp_serial_vector_latency_default.log`
+- `e393_mlp_serial_vector_latency_disabled.log`
+- `e393_mlp_serial_vector_latency_disabled_repeat.log`
+- `e393_mlp_serial_vector_latency_default_repeat.log`
+- `e393_mlp_serial_vector_latency_default_64out.log`
+- `e393_mlp_serial_vector_latency_disabled_64out.log`
+- `e393_mlp_serial_vector_tests.log`
+- `e393_mlp_serial_vector_check_metal.log`
+- `e393_mlp_serial_vector_check_vulkan.log`
+- `e393_mlp_serial_vector_check_cuda.log`
+- `e393_mlp_serial_vector_release_build.log`
+- `e393_mlp_serial_vector_release_kiln_build.log`
+
+### Decision
+
+Accepted. Keep the guarded serial `bfloat2` load path because it improves the
+directly affected synthetic batch-1 kernel, does not regress aggregate
+production paged serial latency in same-build rollback measurements, and has a
+targeted runtime rollback knob.

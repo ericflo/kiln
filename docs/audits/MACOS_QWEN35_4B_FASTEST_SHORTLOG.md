@@ -1534,3 +1534,18 @@
   variant. Synthetic parity stayed within tolerance, but the important batch-8
   shape regressed (`2460.151 -> 2543.807 us`) and smaller batches were mixed.
   Source reverted; keep standard `exp`.
+- 2026-05-09 E392: Refreshed the current paged serial profile with MLP, GDN,
+  and full-attention stage profiling enabled. The measured run reported
+  `306.383 ms` mean ITL and `3.264 tok/s`. Filtered decode stage totals kept
+  MLP/GDN projections at the top: `gate_up_fused` `564.942 ms`, `down_proj`
+  `322.810 ms`, `gdn:in_proj` `302.438 ms`, and `gdn:out_proj`
+  `153.318 ms`. Accepted as target-selection evidence; no source change.
+- 2026-05-09 E393: Accepted a guarded Metal MLP gate/up serial `bfloat2`
+  vector-load path for `row_group_size == 1`, even intermediate dimensions,
+  and 4-byte-aligned gate/up buffers. `KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD=1`
+  rolls back to scalar loads. Focused Metal parity passed. Same-binary
+  synthetic batch-1 improved `1787.417 -> 1737.904 us` (`2.77%`). Paged
+  serial latency was noisy but aggregate same-build rollback A/B favored the
+  default vector path (`162.727 ms` vs `163.596 ms` mean ITL, `0.53%`).
+  Metal/Vulkan checks, release Metal builds, fmt, and diff checks passed; CUDA
+  check was blocked locally by missing `nvcc`.

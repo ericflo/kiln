@@ -35,6 +35,8 @@ const DISABLE_METAL_MLP_GATE_UP_ROW_PAIR: &str = "KILN_DISABLE_METAL_MLP_GATE_UP
 const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD: &str = "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD";
 const DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD: &str =
     "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD";
+const DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD: &str =
+    "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD";
 const DISABLE_METAL_ATTN_GATE_FUSION: &str = "KILN_DISABLE_METAL_ATTN_GATE_FUSION";
 const DISABLE_METAL_FUSED_QKV_PROJ: &str = "KILN_DISABLE_METAL_FUSED_QKV_PROJ";
 const DISABLE_METAL_LORA_DELTA_DECODE: &str = "KILN_DISABLE_METAL_LORA_DELTA_DECODE";
@@ -910,6 +912,10 @@ fn metal_mlp_gate_up_row_quad_disabled() -> bool {
 
 fn metal_mlp_gate_up_row_quad_vector_load_disabled() -> bool {
     env_truthy(DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD)
+}
+
+fn metal_mlp_gate_up_serial_vector_load_disabled() -> bool {
+    env_truthy(DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD)
 }
 
 fn metal_attn_gate_fusion_disabled() -> bool {
@@ -2372,7 +2378,7 @@ kernel void kiln_mlp_gate_up_bf16(
     uint gid [[thread_position_in_grid]]
 ) {
     const uint cols2 = (intermediate + 1) >> 1;
-    if (row_pair_mode == 0) {
+    if (row_pair_mode == 0 || row_pair_mode == 6) {
         const uint total = rows * cols2;
         if (gid >= total) {
             return;
@@ -2387,15 +2393,28 @@ kernel void kiln_mlp_gate_up_bf16(
         float up_acc0 = 0.0f;
         float gate_acc1 = 0.0f;
         float up_acc1 = 0.0f;
-        for (uint i = 0; i < hidden; ++i) {
-            const float xv = static_cast<float>(x[x_base + i]);
-            const uint w_idx0 = i * intermediate + col0;
-            gate_acc0 += xv * static_cast<float>(gate_t[w_idx0]);
-            up_acc0 += xv * static_cast<float>(up_t[w_idx0]);
-            if (has_col1) {
-                const uint w_idx1 = w_idx0 + 1;
-                gate_acc1 += xv * static_cast<float>(gate_t[w_idx1]);
-                up_acc1 += xv * static_cast<float>(up_t[w_idx1]);
+        if (row_pair_mode == 6) {
+            for (uint i = 0; i < hidden; ++i) {
+                const float xv = static_cast<float>(x[x_base + i]);
+                const uint w_idx0 = i * intermediate + col0;
+                const bfloat2 gate_w = *(device const bfloat2*)(gate_t + w_idx0);
+                const bfloat2 up_w = *(device const bfloat2*)(up_t + w_idx0);
+                gate_acc0 += xv * static_cast<float>(gate_w[0]);
+                up_acc0 += xv * static_cast<float>(up_w[0]);
+                gate_acc1 += xv * static_cast<float>(gate_w[1]);
+                up_acc1 += xv * static_cast<float>(up_w[1]);
+            }
+        } else {
+            for (uint i = 0; i < hidden; ++i) {
+                const float xv = static_cast<float>(x[x_base + i]);
+                const uint w_idx0 = i * intermediate + col0;
+                gate_acc0 += xv * static_cast<float>(gate_t[w_idx0]);
+                up_acc0 += xv * static_cast<float>(up_t[w_idx0]);
+                if (has_col1) {
+                    const uint w_idx1 = w_idx0 + 1;
+                    gate_acc1 += xv * static_cast<float>(gate_t[w_idx1]);
+                    up_acc1 += xv * static_cast<float>(up_t[w_idx1]);
+                }
             }
         }
 
@@ -5759,7 +5778,15 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
         let hidden_u32 = hidden as u32;
         let intermediate_u32 = intermediate as u32;
         let row_pair_mode_u32 = if row_group_size == 1 {
-            0
+            if !metal_mlp_gate_up_serial_vector_load_disabled()
+                && intermediate % 2 == 0
+                && gate_buf.offset_in_bytes % 4 == 0
+                && up_buf.offset_in_bytes % 4 == 0
+            {
+                6
+            } else {
+                0
+            }
         } else if row_group_size == 4
             && !metal_mlp_gate_up_row_quad_vector_load_disabled()
             && intermediate % 2 == 0
