@@ -1,0 +1,85 @@
+A098 Rejected GDN Chunk Prep Shared-Prefix Shader
+
+Change tested:
+- Added a temporary Vulkan `gdn_chunk_prep_shared_prefix.comp` shader.
+- The candidate kept the existing `gdn_chunk_prep` bindings and outputs, but
+  used one workgroup per `(batch, head)` chunk to precompute cumulative `g`
+  prefix values in shared memory before writing the prep outputs.
+- Temporary rollback env:
+  `KILN_DISABLE_VULKAN_GDN_CHUNK_PREP_SHARED_PREFIX=1`.
+- The runtime source change was removed after measurement.
+
+Why tested:
+- A097 showed GDN recurrent prefill as the largest remaining prefill bucket.
+- Within recurrent prefill, `chunk_prep` was still material and the existing
+  shader recomputes cumulative decay prefixes many times per chunk.
+- This was a different mechanism than the rejected full-chunk-forward default
+  and transfer-batching attempts.
+
+Correctness / build:
+- `cargo check -p kiln-vulkan-kernel` passed for the temporary candidate.
+- Focused Vulkan parity passed for the temporary candidate:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_chunk_prep_and_scan -- --nocapture`.
+- Release bench build passed for the temporary candidate:
+  `cargo build --release -p kiln-server --bin kiln-bench --features vulkan`.
+- All bench runs stayed on backend `vulkan` and kept token IDs
+  `[271,1206,1423,680,1204,1691,51864,3520,506]`.
+
+No-profile A/B, seed 104:
+- Candidate:
+  - prefill `982.056996ms`
+  - mean ITL `81.06965575ms`
+  - p99 ITL `89.076371ms`
+- Rollback:
+  - prefill `1011.186103ms`
+  - mean ITL `81.962153375ms`
+  - p99 ITL `88.475081ms`
+- This first pair looked favorable to the candidate.
+
+Counter-order no-profile A/B, seed 106:
+- Rollback first:
+  - prefill `970.076344ms`
+  - mean ITL `81.18461225ms`
+  - p99 ITL `89.35079ms`
+- Candidate second:
+  - prefill `961.677754ms`
+  - mean ITL `81.142131875ms`
+  - p99 ITL `90.979412ms`
+- This pair was only a small candidate prefill win and was within the noisy
+  current envelope.
+
+Focused profile A/B, seed 105:
+- Candidate:
+  - prefill `1027.348392ms`
+  - mean ITL `82.036910125ms`
+  - recurrent inner `chunk_prep`: `60.043ms`
+  - recurrent inner `chunk_scan`: `80.667ms`
+  - recurrent inner `matmul_prep`: `68.216ms`
+  - recurrent inner `state_update`: `42.110ms`
+- Rollback:
+  - prefill `927.62567ms`
+  - mean ITL `81.816257ms`
+  - recurrent inner `chunk_prep`: `51.086ms`
+  - recurrent inner `chunk_scan`: `69.796ms`
+  - recurrent inner `matmul_prep`: `56.184ms`
+  - recurrent inner `state_update`: `30.479ms`
+- The focused profile rejected the mechanism: the target bucket itself got
+  worse, and adjacent recurrent stages also worsened.
+
+Decision:
+- Rejected and reverted.
+- Do not retry this one-workgroup-per-head shared-prefix chunk-prep shape
+  without a different scheduling model. The reduced workgroup count appears to
+  lose enough parallelism that saved prefix arithmetic does not translate into
+  a reliable prefill win.
+- Final committed source has no Vulkan, CUDA, or Metal runtime changes from
+  this experiment.
+
+Artifacts:
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-check-kernel.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-parity.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-release-bench-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-candidate*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-rollback*.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a098-gdn-chunk-prep-shared-prefix-profile-*.log`
