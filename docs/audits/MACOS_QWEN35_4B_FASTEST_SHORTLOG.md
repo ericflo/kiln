@@ -1578,3 +1578,12 @@
   `gdn:in_proj` `303.950 ms`, `gdn:out_proj` `151.550 ms`, and
   `full_attn:qkv_proj` `89.475 ms`. Accepted as target-selection evidence; no
   source change.
+- 2026-05-09 E398: Accepted a Metal serial transposed-GEMV tile16 kernel only
+  for the Qwen-shaped MLP down projection `[1,1,9216] x [9216,2560]`, with
+  `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16=1` rolling back to the old
+  tile8 path. Same-binary synthetic down-proj improved `934.852 -> 918.252 us`
+  (`1.8%`). Attention-output shape regressed slightly, so it remains on tile8.
+  Two 65-token paged serial latency pairs favored default tile16; aggregate
+  mean ITL improved `160.631 -> 159.948 ms` (`0.43%`). Metal/Vulkan checks,
+  release Metal builds, fmt, env fallback test, and diff checks passed; CUDA
+  check was blocked locally by missing `nvcc`.

@@ -1,0 +1,36 @@
+   Compiling digest v0.10.7
+   Compiling which v7.0.3
+   Compiling cudarc v0.19.4
+    Checking gemm v0.19.0
+   Compiling kiln-gdn-kernel v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-gdn-kernel)
+   Compiling kiln-flash-attn v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-flash-attn)
+   Compiling kiln-conv1d-kernel v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-conv1d-kernel)
+   Compiling kiln-rmsnorm-kernel v0.2.13 (/Users/ericflo/Development/kiln/crates/kiln-rmsnorm-kernel)
+error: failed to run custom build command for `cudarc v0.19.4`
+
+Caused by:
+  process didn't exit successfully: `/Users/ericflo/Development/kiln/target/debug/build/cudarc-7130438b1cca869b/build-script-build` (exit status: 101)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-env-changed=CUDARC_CUDA_VERSION
+  cargo:rerun-if-env-changed=CUDA_HOME
+  cargo:rerun-if-env-changed=CUDA_PATH
+  cargo:rerun-if-env-changed=CUDA_ROOT
+  cargo:rerun-if-env-changed=CUDA_TOOLKIT_ROOT_DIR
+  cargo:rerun-if-env-changed=CUDNN_LIB
+
+  --- stderr
+
+  thread 'main' (17493832) panicked at /Users/ericflo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cudarc-0.19.4/build.rs:125:13:
+  `nvcc --version` failed.
+  Err(Os { code: 2, kind: NotFound, message: "No such file or directory" })
+  note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+warning: build failed, waiting for other jobs to finish...
+warning: kiln-flash-attn@0.2.13: CUDA not found, kiln-flash-attn will not compile CUDA kernels
+warning: kiln-flash-attn@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-conv1d-kernel@0.2.13: CUDA not found, kiln-conv1d-kernel will not compile CUDA kernels
+warning: kiln-conv1d-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-gdn-kernel@0.2.13: CUDA not found, kiln-gdn-kernel will not compile CUDA kernels
+warning: kiln-gdn-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit
+warning: kiln-rmsnorm-kernel@0.2.13: CUDA not found, kiln-rmsnorm-kernel will not compile CUDA kernels
+warning: kiln-rmsnorm-kernel@0.2.13: Set CUDA_ROOT or CUDA_HOME, or install CUDA toolkit

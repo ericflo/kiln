@@ -15093,3 +15093,95 @@ the largest profiled serial decode stage, followed by MLP down-projection and
 GDN in-projection. Continue prioritizing projection-heavy paths, but avoid
 retreading previously rejected gate/up four-column, fast-exp, threadgroup
 width, and fused-QKV tile4 variants without a materially different mechanism.
+
+## 2026-05-09 - E398 accepted Metal down-proj tile16 GEMV
+
+### Hypothesis
+
+E397 keeps MLP `down_proj` as the second-largest profiled serial decode
+bucket. The current serial transposed cooperative GEMV uses an 8-column
+simdgroup tile by default; E394 showed tile4 was not a general improvement,
+but it did not test a wider tile. A 16-column tile may reduce threadgroup
+overhead enough for the Qwen-shaped MLP down projection without changing the
+more sensitive attention-output and fused-QKV paths.
+
+### Change
+
+Added a Metal `kiln_transposed_coop_gemv16_bf16` kernel and a conservative
+selector that uses it only for BF16 serial projections shaped like Qwen3.5 MLP
+down projection:
+
+- `x=[1,1,9216]`
+- `weight_t=[9216,2560]`
+- default tile remains tile8 for all other serial GEMV shapes
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16=1` rolls back this selector
+  to the previous tile8 path
+- `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8=1` still forces the old tile4
+  fallback and also disables tile16
+
+### Results
+
+Focused transposed-GEMV parity passed with tile4, tile8, and tile16.
+
+Qwen3.5 transposed-GEMV synthetic, same binary:
+
+- `mlp_gate_or_up` proxy: tile8 `1124.494 us`, tile16 `1103.058 us`
+  (`1.9%` faster)
+- `down_proj`: tile8 `934.852 us`, tile16 `918.252 us` (`1.8%` faster)
+- `attn_output`: tile8 `284.475 us`, tile16 `286.469 us` (`0.7%` slower)
+- `attn_qkv_like`: tile8 `473.829 us`, tile16 `457.233 us` (`3.5%` faster),
+  but tile4 remained fastest at `454.608 us`
+
+The production selector is therefore limited to the MLP down-projection shape;
+it does not select tile16 for the attention-output shape that regressed or the
+fused-QKV path covered by E394.
+
+Paged Qwen3.5-4B serial latency A/B, `prompt_tokens=64`,
+`max_output_tokens=64`, one warmup run:
+
+- pair 1: default tile16 `160.590421 ms` mean ITL vs rollback tile8
+  `161.009977 ms` (`0.26%` faster)
+- counter-ordered pair 2: default tile16 `159.304598 ms` mean ITL vs rollback
+  tile8 `160.251133 ms` (`0.59%` faster)
+- aggregate: default tile16 `159.947509 ms` vs rollback tile8
+  `160.630555 ms` mean ITL (`0.43%` faster)
+
+### Validation
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_matches_broadcast_matmul --lib -- --nocapture`
+- `cargo test -p kiln-model --features metal test_transposed_coop_gemv_tile8_env_falls_back_to_tile4 --lib -- --nocapture`
+- `cargo check -p kiln-model --features metal`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo build --release --features metal --bin kiln-bench`
+- `cargo build --release --features metal --bin kiln`
+- `git diff --check`
+
+`cargo check -p kiln-model --features cuda` was attempted and recorded, but
+the local macOS machine cannot run it because `nvcc --version` is unavailable.
+The failure occurs in `cudarc` build-script discovery before compiling the
+touched Metal code.
+
+### Artifact
+
+- `e398_tile16_down_proj_parity.log`
+- `e398_tile16_down_proj_env_test.log`
+- `e398_tile16_down_proj_synthetic.log`
+- `e398_tile16_down_proj_latency_default_64out.log`
+- `e398_tile16_down_proj_latency_disabled_64out.log`
+- `e398_tile16_down_proj_latency_disabled_repeat_64out.log`
+- `e398_tile16_down_proj_latency_default_repeat_64out.log`
+- `e398_tile16_down_proj_fmt_check.log`
+- `e398_tile16_down_proj_check_metal.log`
+- `e398_tile16_down_proj_check_vulkan.log`
+- `e398_tile16_down_proj_check_cuda.log`
+- `e398_tile16_down_proj_release_build.log`
+- `e398_tile16_down_proj_release_kiln_build.log`
+- `e398_tile16_down_proj_git_diff_check.log`
+
+### Decision
+
+Accepted. Keep tile16 only for the Qwen-shaped serial MLP down-projection
+GEMV. The isolated kernel win is small but repeats in same-binary paged latency
+with the targeted rollback knob, while the shape gate avoids the measured
+attention-output regression.
