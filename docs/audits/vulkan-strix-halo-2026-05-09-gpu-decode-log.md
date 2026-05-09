@@ -81,7 +81,8 @@ Evidence:
 Verdict:
 - Keep. Correct GPU-routed Vulkan output is table stakes and the starting point
   for all further throughput claims.
-- Commit: `6bcc114804c0153d7d64d3bd1810feac2cd4ba7d`
+- Commit after rebase onto PR #1002:
+  `717a7de305b83cdefb412d0604a288f3b7d5748b`
   (`fix vulkan gpu decode correctness`).
 
 ### 2026-05-09 A002: Route LoRA Base Projections Through Backend Decode
@@ -108,7 +109,9 @@ Evidence:
 Verdict:
 - Keep. This is a measurable LoRA-path gain without changing CUDA/Metal because
   those backends still decline `linear_decode` through the default `Ok(None)`.
-- Commit: `bd585d3` (`route lora projections through backend decode`).
+- Commit after rebase onto PR #1002:
+  `3066ed45a71a6a88ea1176ef22ebf52a90e0c1b8`
+  (`route lora projections through backend decode`).
 
 ### 2026-05-09 A003: Reject Simple Shader/Transfer Retiles That Do Not Win
 
@@ -162,7 +165,9 @@ Evidence:
 
 Verdict:
 - Keep. This is the largest clean serial gain in this work so far.
-- Commit: `f8820c1` (`route gdn out projection through backend decode`).
+- Commit after rebase onto PR #1002:
+  `6ae731c09ae1291dbe982ffe051cc2d83f99d143`
+  (`route gdn out projection through backend decode`).
 - Raw scratch profile was captured at
   `/tmp/kiln-vulkan-profile-gdn-out-1778292150.log`; the durable summary is
   this entry.
@@ -246,11 +251,98 @@ Verdict:
 - Do not count as a throughput win. The fallback is slower than a real batched
   paged-attention Vulkan implementation should be.
 
+### 2026-05-09 A007: Recheck Existing Vulkan Feature Gates Before New Shader Work
+
+Reason:
+- Before writing new kernels, re-ran the existing Vulkan env-gated paths to see
+  whether any recently landed CUDA or Metal-style work had made an older Vulkan
+  switch worth enabling.
+
+Experiment:
+- Compared the default paged serial path with these toggles:
+  `KILN_DISABLE_VULKAN_FULL_ATTN_QKV=1`,
+  `KILN_ENABLE_VULKAN_GDN_DECODE_FUSED=1`,
+  `KILN_ENABLE_VULKAN_FUSED_CONV1D=1`, both fused GDN and fused conv1d
+  together, and `KILN_DISABLE_VULKAN_MLP_DECODE=1`.
+
+Evidence:
+- All runs preserved the corrected token IDs
+  `[2838,6587,310,5227,1024,75119,220]`.
+- First pass:
+  default `529.6ms` prefill, `184.5ms` mean ITL;
+  disable full-attn QKV `561.9ms`, `175.5ms`;
+  GDN fused `576.1ms`, `178.8ms`;
+  fused conv1d `544.4ms`, `197.3ms`;
+  GDN fused plus conv1d `564.0ms`, `197.1ms`;
+  disable MLP decode `839.7ms`, `209.8ms`.
+- Full-attn QKV reruns were noisy and did not prove a win:
+  default reruns `169.3ms` and `176.5ms` mean ITL; disabled-QKV reruns
+  `171.5ms` and `178.0ms` mean ITL.
+
+Verdict:
+- Keep the default gates.
+- Reject fused conv1d and disabling MLP decode as clear regressions.
+- Do not enable the experimental fused GDN decode path from this evidence.
+- Keep Vulkan full-attn QKV enabled; disabling it is noise at best.
+
+### 2026-05-09 A008: Route Full-Attention Out Projection Through Backend Decode
+
+Problem:
+- After A006, profiling showed full-attention decode layer time was still much
+  higher than the measured score/softmax/value work explained.
+- Added temporary stage profiling around the rowwise full-attention fallback to
+  split KV read, grouped layout, scores, softmax, weighted sum, attention gate,
+  and `o_proj`.
+
+Finding:
+- The full-attention decode fallback bottleneck was `o_proj`, not the grouped
+  attention math.
+- Before the change, short profile totals over decode-only `seq_len=1` stages:
+  `o_proj count=16 total=68.313ms mean=4.270ms`; `decode_scores mean=0.037ms`;
+  `decode_softmax mean=0.007ms`; `decode_weighted_sum mean=0.006ms`;
+  `kv_read mean=0.009ms`.
+
+Change:
+- Routed full-attention output projections through
+  `linear_with_lora_t_backend_decode_if(Some(backend), ...)` so Vulkan can use
+  cached `linear_decode` for `o_proj`.
+- Kept the existing Metal decode GEMV gate argument at the call sites that
+  already used it, and passed `false` in non-decode/prefill call sites.
+- Left the new full-attention stage profiling behind the existing
+  `KILN_PROFILE_FULL_ATTN_STAGES` gate for future audits.
+
+Evidence:
+- After the change, the same short profile shape reported
+  `o_proj count=16 total=5.413ms mean=0.338ms`.
+- Full-attention decode layer profile dropped to
+  `count=24 total=133.027ms mean=5.543ms`.
+- Short profiled run stayed coherent with token IDs `[2838,6587,310]`,
+  prefill `451.9ms`, mean ITL `137.7ms`, `7.3 tok/s`.
+- Unprofiled serial harness stayed coherent with token IDs
+  `[2838,6587,310,5227,1024,75119,220]`, prefill `480.8ms`, mean ITL
+  `135.1ms`, `7.4 tok/s`.
+- Validation gates passed: `rustfmt --edition 2024 --check
+  crates/kiln-model/src/forward.rs`, `git diff --check`,
+  `cargo check -p kiln-model`, `cargo check -p kiln-model --features vulkan`,
+  focused LoRA and GDN tests, Vulkan GDN parity suite, and release Vulkan
+  build.
+- CUDA and Metal feature checks were attempted again. CUDA is still blocked by
+  missing `nvcc`; Metal is still blocked by `objc2` requiring an Apple target.
+
+Verdict:
+- Keep. This is a real serial decode gain: A006's accepted serial anchor was
+  `174.7ms` mean ITL, and A008 measures `135.1ms` with the same tokens.
+- The next serial hotspots are the remaining GDN input projection, MLP fused
+  decode, and full-attention QKV projection work; do not start there until this
+  change is committed and pushed.
+
 ## Current Open Work
 
 - Implement a real Vulkan batched paged full-attention backend if sampled or
   non-uniform continuous batching needs throughput, because A006 is only a
   rowwise availability fallback.
+- Continue profiling the remaining serial decode hotspots after A008: GDN
+  `in_proj`, fused MLP decode, and full-attention QKV projection.
 - Keep updating this log and
   `docs/audits/vulkan-strix-halo-2026-05-09-gpu-decode-shortlog.md` for every
   accepted or rejected optimization experiment.

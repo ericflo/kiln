@@ -5137,7 +5137,9 @@ pub fn gqa_attention(
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -5212,7 +5214,8 @@ pub fn gqa_attention(
     // Output projection
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -5442,7 +5445,9 @@ fn try_flash_attn_paged_decode(
                 let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
-                    linear_with_lora_t_decode(
+                    linear_with_lora_t_backend_decode_if(
+                        Some(backend),
+                        use_metal_decode_gemv,
                         &attn_output,
                         &attn_weights.o_proj_t,
                         lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -5644,7 +5649,9 @@ fn try_flash_attn_paged_decode(
     let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
+            use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6050,7 +6057,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let out = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
-        let out = linear_with_lora_t_decode_if(
+        let out = linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
@@ -6461,7 +6469,9 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6697,9 +6707,21 @@ fn gqa_attention_paged_with_rope_tables(
         } else {
             match fast_read {
                 Some((k, v)) => (k, v),
-                None => paged_cache
-                    .read(full_attn_layer_idx, block_table, total_seq_len)
-                    .context("paged KV cache read failed")?,
+                None => {
+                    let stage_profile =
+                        start_full_attn_stage_profile(profile_device, profile_context)?;
+                    let out = paged_cache
+                        .read(full_attn_layer_idx, block_table, total_seq_len)
+                        .context("paged KV cache read failed")?;
+                    finish_full_attn_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "kv_read",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    out
+                }
             }
         };
         (k, v, total_seq_len)
@@ -6722,7 +6744,9 @@ fn gqa_attention_paged_with_rope_tables(
             }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6756,7 +6780,9 @@ fn gqa_attention_paged_with_rope_tables(
             }
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t(
+                linear_with_lora_t_backend_decode_if(
+                    Some(backend),
+                    false,
                     &attn_output,
                     &attn_weights.o_proj_t,
                     lora_layer.and_then(|l| l.o_proj.as_ref()),
@@ -6805,27 +6831,49 @@ fn gqa_attention_paged_with_rope_tables(
         // K:         [batch, num_kv_heads, kv_len, head_dim]
         //          -> [batch * num_kv_heads, kv_len, head_dim]
         // V:         same as K
-        let q_grouped = q
-            .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
-            .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
-            .contiguous()?;
-        // Unsqueeze K/V to [batch*num_kv_heads, 1, kv_len, head_dim] so that
-        // broadcast_matmul pairs each Q group with its own KV head (dim 0),
-        // broadcasting over the gqa_ratio dim (dim 1).  Without the unsqueeze
-        // the 3-D K would be padded to [1, batch*num_kv_heads, ...] and the
-        // gqa_ratio dim would incorrectly index into different KV heads.
-        let k_flat = k
-            .reshape((batch * num_kv_heads, kv_len, head_dim))?
-            .unsqueeze(1)?
-            .contiguous()?;
-        let v_flat = v
-            .reshape((batch * num_kv_heads, kv_len, head_dim))?
-            .unsqueeze(1)?
-            .contiguous()?;
+        let (q_grouped, k_flat, v_flat) = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let q_grouped = q
+                .reshape((batch, num_kv_heads, gqa_ratio, 1, head_dim))?
+                .reshape((batch * num_kv_heads, gqa_ratio, 1, head_dim))?
+                .contiguous()?;
+            // Unsqueeze K/V to [batch*num_kv_heads, 1, kv_len, head_dim] so that
+            // broadcast_matmul pairs each Q group with its own KV head (dim 0),
+            // broadcasting over the gqa_ratio dim (dim 1).  Without the unsqueeze
+            // the 3-D K would be padded to [1, batch*num_kv_heads, ...] and the
+            // gqa_ratio dim would incorrectly index into different KV heads.
+            let k_flat = k
+                .reshape((batch * num_kv_heads, kv_len, head_dim))?
+                .unsqueeze(1)?
+                .contiguous()?;
+            let v_flat = v
+                .reshape((batch * num_kv_heads, kv_len, head_dim))?
+                .unsqueeze(1)?
+                .contiguous()?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_group_layout",
+                seq_len,
+                stage_profile,
+            )?;
+            (q_grouped, k_flat, v_flat)
+        };
 
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
-        let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
-        let attn_scores = (attn_scores / scale)?;
+        let attn_scores = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
+            let attn_scores = (attn_scores / scale)?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_scores",
+                seq_len,
+                stage_profile,
+            )?;
+            attn_scores
+        };
 
         // Phase C7: reshape grouped scores back to canonical
         // [batch, num_heads, 1, kv_len] for diff against HF.
@@ -6837,7 +6885,18 @@ fn gqa_attention_paged_with_rope_tables(
         }
 
         // No causal mask needed for decode (q_len=1 attends to everything)
-        let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+        let attn_weights_softmax = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let out = cuda_softmax_last_dim(&attn_scores)?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_softmax",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
 
         // Phase C7: reshape grouped probs back to canonical
         // [batch, num_heads, 1, kv_len] for diff against HF.
@@ -6849,15 +6908,26 @@ fn gqa_attention_paged_with_rope_tables(
         }
 
         // Weighted sum: [batch*num_kv_heads, gqa_ratio, 1, head_dim]
-        let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
+        let attn_output = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let attn_output = attn_weights_softmax.broadcast_matmul(&v_flat)?;
 
-        // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
-        //               == [batch, num_heads, 1, head_dim]
-        let attn_output = attn_output
-            .reshape((batch, num_heads, 1, head_dim))?
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape((batch, 1, num_heads * head_dim))?;
+            // Reshape back: -> [batch, num_kv_heads * gqa_ratio, 1, head_dim]
+            //               == [batch, num_heads, 1, head_dim]
+            let attn_output = attn_output
+                .reshape((batch, num_heads, 1, head_dim))?
+                .transpose(1, 2)?
+                .contiguous()?
+                .reshape((batch, 1, num_heads * head_dim))?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "decode_weighted_sum",
+                seq_len,
+                stage_profile,
+            )?;
+            attn_output
+        };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
         }
@@ -6868,8 +6938,19 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_c7_sdpa_tap("attn_out", &attn_output)?;
         }
 
-        let attn_output =
-            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        let attn_output = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            let out =
+                attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
         }
@@ -6878,14 +6959,24 @@ fn gqa_attention_paged_with_rope_tables(
             crate::mtp_debug::capture_b12_gqa_tap("attn_out", &attn_output)?;
         }
         let out = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/o");
-            linear_with_lora_t_decode_if(
+            let out = linear_with_lora_t_backend_decode_if(
+                Some(backend),
                 use_metal_decode_gemv,
                 &attn_output,
                 &attn_weights.o_proj_t,
                 lora_layer.and_then(|l| l.o_proj.as_ref()),
                 lora_scale,
-            )?
+            )?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+                stage_profile,
+            )?;
+            out
         };
         if subop_armed {
             let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
@@ -6946,7 +7037,8 @@ fn gqa_attention_paged_with_rope_tables(
 
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_decode_if(
+        linear_with_lora_t_backend_decode_if(
+            Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
