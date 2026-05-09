@@ -1609,8 +1609,10 @@ impl AppState {
             ))
         });
         let decode_batcher = if DecodeBatcherConfig::enabled_for_device(&device) {
-            let config = DecodeBatcherConfig::from_env_for_device(&device);
+            let backend_name = runner.read().unwrap().backend_name();
+            let config = DecodeBatcherConfig::from_env_for_backend(&device, backend_name);
             tracing::info!(
+                backend = backend_name,
                 max_batch = config.max_batch,
                 wait_us = config.wait.as_micros() as u64,
                 mixed_seq_lens = config.allow_mixed_seq_lens,

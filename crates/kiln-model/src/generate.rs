@@ -290,18 +290,27 @@ impl DecodeBatcherConfig {
         config
     }
 
-    pub fn from_env_for_device(device: &Device) -> Self {
+    pub fn from_env_for_backend(device: &Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
         if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
-            config.allow_mixed_seq_lens = matches!(device, Device::Metal(_));
+            config.allow_mixed_seq_lens =
+                default_decode_batcher_allow_mixed_seq_lens(device, backend_name);
         }
         config
+    }
+
+    pub fn from_env_for_device(device: &Device) -> Self {
+        Self::from_env_for_backend(device, "")
     }
 
     pub fn enabled_for_device(device: &Device) -> bool {
         let _ = device;
         env_flag_enabled("KILN_DECODE_BATCHER", true)
     }
+}
+
+fn default_decode_batcher_allow_mixed_seq_lens(device: &Device, backend_name: &str) -> bool {
+    matches!(device, Device::Metal(_)) || backend_name == "vulkan"
 }
 
 fn env_flag_value(name: &str) -> Option<bool> {
@@ -832,6 +841,10 @@ impl ModelRunner {
             decode_buffer_config: OnceLock::new(),
             backend,
         }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
     }
 
     /// Load a LoRA adapter from a PEFT-compatible directory.
@@ -5635,6 +5648,19 @@ mod tests {
 
         let bytes = serde_json::to_vec(&json).unwrap();
         KilnTokenizer::from_bytes(&bytes).unwrap()
+    }
+
+    #[test]
+    fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
+        let device = Device::Cpu;
+
+        assert!(!default_decode_batcher_allow_mixed_seq_lens(&device, "cpu"));
+        assert!(!default_decode_batcher_allow_mixed_seq_lens(
+            &device, "cuda"
+        ));
+        assert!(default_decode_batcher_allow_mixed_seq_lens(
+            &device, "vulkan"
+        ));
     }
 
     #[cfg(feature = "metal")]

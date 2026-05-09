@@ -1345,6 +1345,66 @@ Verdict:
 - Do not retry row-pair BF16 by direct shader mirroring; it needs a different
   geometry or broader prefill fusion to justify another pass.
 
+### 2026-05-09 A030: Enable Mixed-Sequence Live Decode Batching on Vulkan
+
+Issue:
+- PR #1002 enabled mixed-sequence live decode batching by default for Metal, but
+  Vulkan still defaulted to same-position-only grouping because Candle exposes
+  Vulkan runs through `Device::Cpu`.
+- The Vulkan backend already has a dyn-seqlen paged-attention batch path, and
+  A011 proved that path correct for non-uniform sequence lengths. Leaving the
+  live greedy batcher in same-position mode fragmented streaming workloads into
+  one-row batches.
+
+Implementation:
+- Added `DecodeBatcherConfig::from_env_for_backend(device, backend_name)` and a
+  small default-policy helper.
+- Exposed `ModelRunner::backend_name()` and passed the runtime backend name from
+  server state when spawning the live decode batcher.
+- Default mixed-sequence grouping is now enabled for Metal devices and for
+  runtime backend `"vulkan"`. CPU and CUDA remain off by default unless the
+  caller explicitly sets `KILN_DECODE_BATCH_MIXED_SEQ=1`.
+
+Evidence:
+- Pre-change environment A/B, no batching actor, streaming four concurrent
+  prompts with different prompt lengths and `chat_template_kwargs:
+  {"enable_thinking": false}`:
+  - `KILN_DECODE_BATCH_MIXED_SEQ=1`,
+    `KILN_DECODE_BATCH_WAIT_US=50000`: `12.444s`, `69` submitted rows,
+    `20` batches, max observed batch `4`.
+  - `KILN_DECODE_BATCH_MIXED_SEQ=0`,
+    `KILN_DECODE_BATCH_WAIT_US=50000`: `17.034s`, `69` submitted rows,
+    `69` batches, max observed batch `1`.
+  - With default wait (`0us`), enabled measured `12.921s`, `69` submitted
+    rows, `38` batches, max observed batch `3`; disabled measured `13.470s`,
+    `69` submitted rows, `69` batches, max observed batch `1`.
+- Post-change no-env smoke (`KILN_BATCHING_ENGINE` unset,
+  `KILN_DECODE_BATCH_MIXED_SEQ` unset) logged
+  `backend="vulkan" mixed_seq_lens=true` at startup.
+- The same no-env streaming smoke returned HTTP 200 for all four streams,
+  visible non-empty content, empty `reasoning_content`, and finished with
+  `13.365s` wall time, `68` submitted rows, `38` batches, and max observed
+  batch `3`.
+- The non-streaming route and `KILN_BATCHING_ENGINE=1` actor route bypass this
+  live decode batcher, so their zero decode-batcher counters were not used as
+  evidence for this change.
+
+Validation:
+- `rustfmt --edition 2024 crates/kiln-model/src/generate.rs
+  crates/kiln-server/src/state.rs`
+- `cargo test -p kiln-model
+  test_decode_batcher_default_mixed_seq_lens_backend_policy --lib`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan`
+- `cargo build --release --features vulkan --bin kiln --bin kiln-bench`
+
+Verdict:
+- Keep. This is a backend-aware default change, not a new kernel path. It turns
+  on the already-tested Vulkan dyn-seqlen batch behavior for live streaming
+  requests, improves the measured default no-wait streaming batch shape, and
+  preserves CPU/CUDA defaults plus Metal's existing default.
+- Rollback/override: set `KILN_DECODE_BATCH_MIXED_SEQ=0`.
+
 ## Current Open Work
 
 - Improve the new Vulkan dyn-seqlen paged attention backend by eliminating CPU
