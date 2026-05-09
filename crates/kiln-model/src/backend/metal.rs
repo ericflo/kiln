@@ -5923,8 +5923,8 @@ pub(crate) fn metal_paged_kv_write_token_major_supports(
 }
 
 pub(crate) fn metal_paged_kv_write_token_major_bf16(
-    k_pool: &mut Tensor,
-    v_pool: &mut Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
     slot: usize,
     k: &Tensor,
     v: &Tensor,
@@ -6076,8 +6076,8 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_supports(
 
 #[allow(dead_code)]
 pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
-    k_pool: &mut Tensor,
-    v_pool: &mut Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
     slots: &Tensor,
     k: &Tensor,
     v: &Tensor,
@@ -10825,13 +10825,13 @@ mod tests {
                 .map(|idx| v.narrow(0, idx, 1).and_then(|row| row.contiguous()))
                 .collect::<candle_core::Result<Vec<_>>>()?;
             let rowwise_slots: Vec<usize> = slots_data.iter().map(|&slot| slot as usize).collect();
-            let mut k_pool_row =
+            let k_pool_row =
                 Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let mut v_pool_row =
+            let v_pool_row =
                 Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let mut k_pool_batch =
+            let k_pool_batch =
                 Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-            let mut v_pool_batch =
+            let v_pool_batch =
                 Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
             device.synchronize()?;
 
@@ -10851,16 +10851,16 @@ mod tests {
                     &v_rows[idx],
                 ));
                 metal_paged_kv_write_token_major_bf16(
-                    &mut k_pool_row,
-                    &mut v_pool_row,
+                    &k_pool_row,
+                    &v_pool_row,
                     rowwise_slots[idx],
                     &k_rows[idx],
                     &v_rows[idx],
                 )?;
             }
             metal_paged_kv_write_token_major_batch_bf16(
-                &mut k_pool_batch,
-                &mut v_pool_batch,
+                &k_pool_batch,
+                &v_pool_batch,
                 &slots,
                 &k,
                 &v,
@@ -10877,8 +10877,8 @@ mod tests {
             let rowwise_us = bench_metal_unit_op(&device, warmup, iters, || {
                 for idx in 0..batch {
                     metal_paged_kv_write_token_major_bf16(
-                        &mut k_pool_row,
-                        &mut v_pool_row,
+                        &k_pool_row,
+                        &v_pool_row,
                         rowwise_slots[idx],
                         &k_rows[idx],
                         &v_rows[idx],
@@ -10888,8 +10888,8 @@ mod tests {
             })?;
             let batch_us = bench_metal_unit_op(&device, warmup, iters, || {
                 metal_paged_kv_write_token_major_batch_bf16(
-                    &mut k_pool_batch,
-                    &mut v_pool_batch,
+                    &k_pool_batch,
+                    &v_pool_batch,
                     &slots,
                     &k,
                     &v,
@@ -12754,13 +12754,13 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let v = Tensor::from_slice(&v_data, (1usize, 1usize, heads, head_dim), &device)?
             .to_dtype(DType::BF16)?;
-        let mut k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-        let mut v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
 
         assert!(metal_paged_kv_write_token_major_supports(
             &k_pool, &v_pool, slot, &k, &v
         ));
-        metal_paged_kv_write_token_major_bf16(&mut k_pool, &mut v_pool, slot, &k, &v)?;
+        metal_paged_kv_write_token_major_bf16(&k_pool, &v_pool, slot, &k, &v)?;
 
         let k_written = k_pool.narrow(0, slot, 1)?;
         let v_written = v_pool.narrow(0, slot, 1)?;
@@ -12804,13 +12804,13 @@ mod tests {
             .to_dtype(DType::BF16)?
             .contiguous()?;
         let slots = Tensor::from_slice(&slots_data, batch, &device)?.contiguous()?;
-        let mut k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
-        let mut v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let k_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
+        let v_pool = Tensor::zeros((total_slots, heads, head_dim), DType::BF16, &device)?;
 
         assert!(metal_paged_kv_write_token_major_batch_supports(
             &k_pool, &v_pool, &slots, &k, &v
         ));
-        metal_paged_kv_write_token_major_batch_bf16(&mut k_pool, &mut v_pool, &slots, &k, &v)?;
+        metal_paged_kv_write_token_major_batch_bf16(&k_pool, &v_pool, &slots, &k, &v)?;
         device.synchronize()?;
 
         for (batch_idx, &slot) in slots_data.iter().enumerate() {
