@@ -149,8 +149,6 @@ pub struct CudaGraphRunner {
     adapter_generation: u64,
     /// Whether warmup is complete.
     warmup_done: bool,
-    /// Maximum captured decode graphs retained by this runner.
-    graph_cache_limit: usize,
 }
 
 /// Decode graph runners for concurrent generation streams.
@@ -195,25 +193,13 @@ impl CudaGraphRunners {
         let disable_pool = per_stream_graph_disabled();
         let slot_count = decode_parallelism();
         let slots = if use_runner_pool(runner_enabled, disable_pool, slot_count) {
-            let total_graph_cache_limit = cuda_graph_cache_limit();
             tracing::info!(
                 slots = slot_count,
-                total_graph_cache_limit,
                 "per-stream CUDA graph runner pool enabled"
             );
             CudaGraphSlots::Pool(Arc::new(CudaGraphPool {
                 slots: (0..slot_count)
-                    .map(|slot_idx| {
-                        Mutex::new(CudaGraphRunner::new_with_graph_cache_limit(
-                            device,
-                            enabled,
-                            graph_cache_limit_for_slot(
-                                slot_idx,
-                                slot_count,
-                                total_graph_cache_limit,
-                            ),
-                        ))
-                    })
+                    .map(|_| Mutex::new(CudaGraphRunner::new(device, enabled)))
                     .collect(),
                 leased: (0..slot_count).map(|_| AtomicBool::new(false)).collect(),
             }))
@@ -430,32 +416,9 @@ fn decode_parallelism() -> usize {
         .unwrap_or(8)
 }
 
-fn cuda_graph_cache_limit() -> usize {
-    std::env::var("KILN_CUDA_GRAPH_CACHE_MAX")
-        .ok()
-        .as_deref()
-        .and_then(cuda_graph_cache_limit_value)
-        .unwrap_or(DEFAULT_CUDA_GRAPH_CACHE_MAX)
-}
-
-fn cuda_graph_cache_limit_value(value: &str) -> Option<usize> {
-    value.parse::<usize>().ok()
-}
-
-fn graph_cache_limit_for_slot(slot_idx: usize, slot_count: usize, total_limit: usize) -> usize {
-    if slot_count == 0 {
-        return 0;
-    }
-    let base = total_limit / slot_count;
-    let remainder = total_limit % slot_count;
-    base + usize::from(slot_idx < remainder)
-}
-
 fn use_runner_pool(runner_enabled: bool, disable_pool: bool, slot_count: usize) -> bool {
     runner_enabled && !disable_pool && slot_count > 1
 }
-
-const DEFAULT_CUDA_GRAPH_CACHE_MAX: usize = 8;
 
 fn env_flag_enabled(value: &str) -> bool {
     matches!(value, "1" | "true" | "TRUE" | "yes" | "on")
@@ -468,17 +431,9 @@ fn decode_parallelism_value(value: &str) -> Option<usize> {
 impl CudaGraphRunner {
     /// Create a new graph runner. Enabled only on CUDA devices with the `cuda` feature.
     pub fn new(device: &Device, enabled: bool) -> Self {
-        Self::new_with_graph_cache_limit(device, enabled, cuda_graph_cache_limit())
-    }
-
-    fn new_with_graph_cache_limit(
-        device: &Device,
-        enabled: bool,
-        graph_cache_limit: usize,
-    ) -> Self {
         let actually_enabled = enabled && device.is_cuda();
         if actually_enabled {
-            tracing::info!(graph_cache_limit, "CUDA graphs enabled for decode");
+            tracing::info!("CUDA graphs enabled for decode");
         } else if enabled && !device.is_cuda() {
             tracing::debug!("CUDA graphs requested but no CUDA device, using eager decode");
         }
@@ -488,7 +443,6 @@ impl CudaGraphRunner {
             captured: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
-            graph_cache_limit,
         }
     }
 
@@ -723,10 +677,9 @@ impl CudaGraphRunner {
                 );
             }
 
-            if self.captured.len() >= self.graph_cache_limit {
+            if self.captured.len() >= Self::max_cached_graphs() {
                 tracing::warn!(
                     cached_graphs = self.captured.len(),
-                    graph_cache_limit = self.graph_cache_limit,
                     requested_max_seqlen_k = requested_key.max_seqlen_k,
                     requested_max_blocks_per_seq = requested_key.max_blocks_per_seq,
                     "CUDA graph capture skipped: paged metadata shape cache is full"
@@ -1089,6 +1042,15 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
+    fn max_cached_graphs() -> usize {
+        std::env::var("KILN_CUDA_GRAPH_CACHE_MAX")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(8)
+    }
+
+    #[cfg(feature = "cuda")]
     fn new_token_buffer(device: &Device, token_id: u32) -> Result<Tensor> {
         Tensor::new(&[token_id], device).context("create CUDA graph token buffer")
     }
@@ -1326,34 +1288,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cuda_graph_cache_limit_value_accepts_numeric_values() {
-        assert_eq!(cuda_graph_cache_limit_value("0"), Some(0));
-        assert_eq!(cuda_graph_cache_limit_value("not-a-number"), None);
-        assert_eq!(cuda_graph_cache_limit_value("16"), Some(16));
-    }
-
-    #[test]
-    fn test_graph_cache_limit_distributes_across_slots() {
-        let limits: Vec<usize> = (0..8)
-            .map(|slot_idx| graph_cache_limit_for_slot(slot_idx, 8, 8))
-            .collect();
-        assert_eq!(limits, vec![1, 1, 1, 1, 1, 1, 1, 1]);
-
-        let uneven_limits: Vec<usize> = (0..4)
-            .map(|slot_idx| graph_cache_limit_for_slot(slot_idx, 4, 10))
-            .collect();
-        assert_eq!(uneven_limits, vec![3, 3, 2, 2]);
-    }
-
-    #[test]
-    fn test_graph_cache_limit_allows_zero_for_overflow_slots() {
-        let limits: Vec<usize> = (0..8)
-            .map(|slot_idx| graph_cache_limit_for_slot(slot_idx, 8, 3))
-            .collect();
-        assert_eq!(limits, vec![1, 1, 1, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
     fn test_env_flag_enabled_accepts_kill_switch_values() {
         assert!(env_flag_enabled("1"));
         assert!(env_flag_enabled("true"));
@@ -1433,37 +1367,6 @@ mod tests {
                     assert_eq!(runner.adapter_generation, 1);
                     assert!(!runner.warmup_done);
                 }
-            }
-            CudaGraphSlots::Single(_) => panic!("expected pool"),
-        }
-    }
-
-    #[test]
-    fn test_pool_uses_total_graph_cache_limit_across_slots() {
-        let runners = CudaGraphRunners {
-            enabled: true,
-            slots: CudaGraphSlots::Pool(Arc::new(CudaGraphPool {
-                slots: (0..4)
-                    .map(|slot_idx| {
-                        Mutex::new(CudaGraphRunner::new_with_graph_cache_limit(
-                            &Device::Cpu,
-                            false,
-                            graph_cache_limit_for_slot(slot_idx, 4, 6),
-                        ))
-                    })
-                    .collect(),
-                leased: (0..4).map(|_| AtomicBool::new(false)).collect(),
-            })),
-        };
-
-        match &runners.slots {
-            CudaGraphSlots::Pool(pool) => {
-                let limits: Vec<usize> = pool
-                    .slots
-                    .iter()
-                    .map(|slot| slot.lock().expect("slot lock").graph_cache_limit)
-                    .collect();
-                assert_eq!(limits, vec![2, 2, 1, 1]);
             }
             CudaGraphSlots::Single(_) => panic!("expected pool"),
         }
