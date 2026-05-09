@@ -2184,3 +2184,16 @@
   `4.550 s` versus rollback `4.609 s`, both `32` server tokens, `28`
   submitted jobs, `14` worker batches, and `28` rows. Metal/Vulkan model and
   server checks passed; CUDA remains locally blocked by missing `nvcc`.
+- 2026-05-09 E465: Captured the post-E464 four-stream all-stage live batch
+  profile for the max-batch-3 shape. No source change. An earlier uncommitted
+  pass showed inconsistent subsystem inflation, so it was overwritten with a
+  clean rerun that completed in `4.991 s`, returned four HTTP `200` responses,
+  generated `12` server tokens, submitted `8` decode-batcher jobs, ran `4`
+  worker batches, processed `8` decode rows, and reached
+  `max_observed_batch=3`. Filtered decode rows (`seq_len=1`, excluding prewarm
+  `start_pos=64`) totaled MLP `632.411 ms`, GDN `432.238 ms`, and full
+  attention `170.929 ms`. These totals inflated versus E463, so this profile is
+  retained only as a noisy rank-order checkpoint, not as E464 source-decision
+  evidence. Hottest remaining stages are `mlp:gate_up_fused` `372.896 ms`,
+  `mlp:down_proj` `259.515 ms`, `gdn:in_proj` `223.002 ms`, and
+  `gdn:out_proj` `95.433 ms`.

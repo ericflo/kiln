@@ -19868,3 +19868,77 @@ Validation:
 Accepted. Batch-3 row-triple tile8 is correct, improves all targeted Qwen3.5
 synthetic shapes, and gives a small matched live endpoint win. Roll back with
 `KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8=1` if needed.
+
+## E465 - Post-E464 Four-Stream All-Stage Live Profile
+
+### Hypothesis
+
+After E464 accepted the batch-3 row-triple tile8 transposed-GEMV specialization,
+capture the same four-stream all-stage profile shape used in E463. This should
+refresh the hotspot ranking after the no-profile E464 win, while keeping the
+source unchanged.
+
+### Procedure
+
+Rebuilt the release Metal server and ran four concurrent streaming chat
+requests with `max_tokens=3`, `temperature=0`, the decode batcher enabled, and
+MLP/GDN/full-attention stage profiling enabled. An earlier uncommitted E465
+profile pass hit the same request shape but showed inconsistent subsystem
+inflation, so it was overwritten with this clean rerun. The rerun reached the
+target continuous-batching shape: `8` submitted decode jobs, `4` worker
+batches, `8` decode rows, and `max_observed_batch=3`.
+
+### Results
+
+The clean profile rerun completed with four HTTP `200` responses:
+
+| metric | value |
+| --- | ---: |
+| elapsed | `4.991073 s` |
+| stream token events | `20` |
+| server generated tokens | `12` |
+| submitted decode jobs | `8` |
+| worker batches | `4` |
+| decode rows | `8` |
+| max observed batch | `3` |
+
+Filtered decode rows (`seq_len=1`, excluding prewarm `start_pos=64`) totaled:
+
+| subsystem | E463 post-E462 | E465 post-E464 | delta |
+| --- | ---: | ---: | ---: |
+| MLP | `569.124 ms` | `632.411 ms` | `+63.287 ms` |
+| GDN | `405.952 ms` | `432.238 ms` | `+26.286 ms` |
+| full attention | `147.435 ms` | `170.929 ms` | `+23.494 ms` |
+
+Top filtered stages after E464:
+
+| stage | total | count | avg |
+| --- | ---: | ---: | ---: |
+| `mlp:gate_up_fused` | `372.896 ms` | `128` | `2.913 ms` |
+| `mlp:down_proj` | `259.515 ms` | `128` | `2.027 ms` |
+| `gdn:in_proj` | `223.002 ms` | `96` | `2.323 ms` |
+| `gdn:out_proj` | `95.433 ms` | `96` | `0.994 ms` |
+| `gdn:qkv_conv_norm` | `69.211 ms` | `96` | `0.721 ms` |
+| `gdn:gates_recur_gated_norm` | `44.333 ms` | `96` | `0.462 ms` |
+
+This profile run is not used as E464 acceptance evidence because all subsystem
+totals inflated versus E463, while E464's targeted synthetic A/B and matched
+no-profile live A/B were positive. Treat E465 as a noisy but shape-matched
+rank-order checkpoint: `mlp:gate_up_fused` remains first, `mlp:down_proj`
+remains second, and `gdn:in_proj` remains third.
+
+### Artifacts
+
+- `e465_post_rowtriple_b3_live_batch4_profile_build.log`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_health.json`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_request_*.json`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_response_*.sse`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_time.json`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_metrics.prom`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_server.log`
+- `e465_post_rowtriple_b3_live_batch4_all_profile_summary.txt`
+
+### Decision
+
+Accepted as a no-source-change profile checkpoint. Use it only for post-E464
+hotspot ordering, not for wall-time or source-decision evidence.

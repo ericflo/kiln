@@ -1,0 +1,11 @@
+data: {"id":"chatcmpl-a71f4289-b83d-45f9-857b-a48373f4b0b6","object":"chat.completion.chunk","created":1778364266,"model":"kiln","choices":[{"index":0,"delta":{"role":"assistant"}}]}
+
+data: {"id":"chatcmpl-a71f4289-b83d-45f9-857b-a48373f4b0b6","object":"chat.completion.chunk","created":1778364266,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"נה"}}]}
+
+data: {"id":"chatcmpl-a71f4289-b83d-45f9-857b-a48373f4b0b6","object":"chat.completion.chunk","created":1778364266,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"י"}}]}
+
+data: {"id":"chatcmpl-a71f4289-b83d-45f9-857b-a48373f4b0b6","object":"chat.completion.chunk","created":1778364266,"model":"kiln","choices":[{"index":0,"delta":{"reasoning_content":"ג"}}]}
+
+data: {"id":"chatcmpl-a71f4289-b83d-45f9-857b-a48373f4b0b6","object":"chat.completion.chunk","created":1778364266,"model":"kiln","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+data: [DONE]

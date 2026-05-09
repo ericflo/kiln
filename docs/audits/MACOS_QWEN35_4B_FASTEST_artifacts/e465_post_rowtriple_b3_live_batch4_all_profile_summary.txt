@@ -1,0 +1,57 @@
+E465 post-E464 four-stream all-stage live batch profile summary
+
+Clean rerun; an earlier uncommitted E465 profile pass was overwritten because it showed inconsistent subsystem inflation while preserving the same request shape.
+
+elapsed_s=4.991073
+statuses=200,200,200,200
+stream_token_events_total=20
+kiln_requests_total{status="ok"} 4
+kiln_requests_total{status="error"} 0
+kiln_tokens_generated_total 12
+kiln_decode_batcher_enabled 1
+kiln_decode_batcher_jobs_total{result="submitted"} 8
+kiln_decode_batcher_jobs_total{result="runner_busy"} 0
+kiln_decode_batcher_jobs_total{result="failed"} 0
+kiln_decode_batcher_batches_total 4
+kiln_decode_batcher_rows_total 8
+kiln_decode_batcher_max_observed_batch 3
+
+profile_rows_total=3280
+request_decode_rows_seq1_nonprewarm=1120
+
+By subsystem (seq_len=1, excluding prewarm start_pos=64):
+- mlp: 632.411 ms
+- gdn: 432.238 ms
+- full_attn: 170.929 ms
+
+By decode start_pos:
+- start_pos=29: 828.847 ms
+- start_pos=30: 406.731 ms
+
+Top stages (seq_len=1, excluding prewarm start_pos=64):
+- mlp:gate_up_fused: 372.896 ms count=128 avg=2.913 ms
+- mlp:down_proj: 259.515 ms count=128 avg=2.027 ms
+- gdn:in_proj: 223.002 ms count=96 avg=2.323 ms
+- gdn:out_proj: 95.433 ms count=96 avg=0.994 ms
+- gdn:qkv_conv_norm: 69.211 ms count=96 avg=0.721 ms
+- gdn:gates_recur_gated_norm: 44.333 ms count=96 avg=0.462 ms
+- full_attn:qkv_proj: 42.865 ms count=16 avg=2.679 ms
+- full_attn:qkv_proj_batch: 23.485 ms count=16 avg=1.468 ms
+- full_attn:o_proj: 18.733 ms count=16 avg=1.171 ms
+- full_attn:o_proj_batch: 13.626 ms count=16 avg=0.852 ms
+- full_attn:rope_batch: 12.447 ms count=16 avg=0.778 ms
+- full_attn:kv_write: 12.049 ms count=16 avg=0.753 ms
+- full_attn:decode_attn_contiguous_batch: 6.182 ms count=16 avg=0.386 ms
+- full_attn:decode_attn_contiguous: 5.060 ms count=16 avg=0.316 ms
+- full_attn:qkv_split_batch: 5.053 ms count=16 avg=0.316 ms
+- full_attn:qkv_split: 5.034 ms count=16 avg=0.315 ms
+- full_attn:attn_gate_batch: 4.556 ms count=16 avg=0.285 ms
+- full_attn:kv_write_batch: 4.542 ms count=16 avg=0.284 ms
+- full_attn:qk_norm_batch: 4.479 ms count=16 avg=0.280 ms
+- full_attn:qk_norm: 4.449 ms count=16 avg=0.278 ms
+- full_attn:attn_gate: 4.304 ms count=16 avg=0.269 ms
+- full_attn:rope: 4.009 ms count=16 avg=0.251 ms
+- gdn:gated_norm: 0.247 ms count=96 avg=0.003 ms
+- full_attn:q_transpose: 0.034 ms count=16 avg=0.002 ms
+- full_attn:q_transpose_batch: 0.022 ms count=16 avg=0.001 ms
+- gdn:post_transpose: 0.012 ms count=96 avg=0.000 ms
