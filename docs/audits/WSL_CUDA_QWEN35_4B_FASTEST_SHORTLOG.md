@@ -124,3 +124,21 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-unexpanded-qk-smoke`, final loss
   `1.338575839996338`, `/health` reported the active adapter, and
   adapter-backed chat completed.
+- Accepted CUDA fused RoPE Q/K:
+  CUDA now fuses RoPE over contiguous bf16 Q/K tensors using precomputed f32
+  cos/sin tables for table-backed and tensor-backed model forward paths.
+  Unsupported shapes fall back to the existing Candle path. Rollback:
+  `KILN_DISABLE_FUSED_CUDA_ROTARY_QK=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `40.443`, `40.420`, `40.621` ms averaged
+  `40.495ms` / `24.695 tok/s`; default fused-RoPE runs `37.838`,
+  `38.006`, `38.111` ms averaged `37.985ms` / `26.326 tok/s`, a 6.2%
+  decode ITL win.
+- Fused-RoPE validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-rmsnorm-kernel rotary_qk_parity_qwen_shape --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `cuda-rotary-qk-smoke`, final loss
+  `1.5020499229431152`, `/health` reported the active adapter, and
+  adapter-backed chat completed.

@@ -18,6 +18,8 @@
 //! 4. [`fused_l2_qk_norm_gqa`] — CUDA GDN GQA fast path that normalizes
 //!    unexpanded `[B, T, nk, dk]` Q/K and emits expanded `[B, T, nv, dk]`
 //!    outputs in one launch.
+//! 5. [`fused_rotary_qk`] — decode/paged-attention RoPE(Q,K) for contiguous
+//!    bf16 Q/K tensors using precomputed f32 cos/sin tables.
 //!
 //! # Why
 //!
@@ -126,6 +128,22 @@ unsafe extern "C" {
         hidden: i32,
         q_scale: f32,
         eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_fused_rotary_qk(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        cos: *const f32,
+        sin: *const f32,
+        q_out: *mut core::ffi::c_void,
+        k_out: *mut core::ffi::c_void,
+        batch: i32,
+        seq_len: i32,
+        q_heads: i32,
+        k_heads: i32,
+        head_dim: i32,
+        rotary_dim: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 }
@@ -1065,6 +1083,186 @@ pub fn fused_l2_qk_norm_gqa(
     Ok((q_out, k_out))
 }
 
+/// Whether the fused rotary Q/K kernel is available.
+///
+/// Supports CUDA bf16 contiguous Q/K tensors shaped `[batch, seq, heads,
+/// head_dim]` and f32 contiguous cos/sin tables shaped
+/// `[seq, rotary_dim / 2]`. This matches the table shape produced once per
+/// eager paged forward in `kiln-model::forward`.
+pub fn supports_rotary_qk(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> bool {
+    if !matches!(q.device(), Device::Cuda(_))
+        || !matches!(k.device(), Device::Cuda(_))
+        || !matches!(cos.device(), Device::Cuda(_))
+        || !matches!(sin.device(), Device::Cuda(_))
+        || q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || cos.dtype() != DType::F32
+        || sin.dtype() != DType::F32
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || q.rank() != 4
+        || k.rank() != 4
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+    let qd = q.dims();
+    let kd = k.dims();
+    let batch = qd[0];
+    let seq_len = qd[1];
+    qd[3] == head_dim
+        && kd[0] == batch
+        && kd[1] == seq_len
+        && kd[3] == head_dim
+        && cos.dims() == [seq_len, rotary_dim / 2]
+        && sin.dims() == [seq_len, rotary_dim / 2]
+        && batch <= i32::MAX as usize
+        && seq_len <= i32::MAX as usize
+        && qd[2] <= i32::MAX as usize
+        && kd[2] <= i32::MAX as usize
+        && head_dim <= i32::MAX as usize
+        && rotary_dim <= i32::MAX as usize
+}
+
+/// Run fused RoPE over Q and K.
+///
+/// Semantics match `kiln-model::forward::apply_rope` for the contiguous-half
+/// layout used by Qwen3.5: first half and second half of `rotary_dim` are
+/// rotated together, remaining head dimensions pass through unchanged.
+pub fn fused_rotary_qk(
+    q: &Tensor,
+    k: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<(Tensor, Tensor)> {
+    if !supports_rotary_qk(q, k, cos, sin, head_dim, rotary_dim) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: rotary_qk unsupported shapes q={:?} k={:?} cos={:?} sin={:?} dtypes=({:?},{:?},{:?},{:?}) head_dim={head_dim} rotary_dim={rotary_dim}",
+            q.shape(),
+            k.shape(),
+            cos.shape(),
+            sin.shape(),
+            q.dtype(),
+            k.dtype(),
+            cos.dtype(),
+            sin.dtype()
+        );
+    }
+
+    let q_dims = q.dims();
+    let k_dims = k.dims();
+    let batch = q_dims[0];
+    let seq_len = q_dims[1];
+    let q_heads = q_dims[2];
+    let k_heads = k_dims[2];
+    let device = q.device();
+    let q_out = Tensor::zeros(q_dims, DType::BF16, device)?;
+    let k_out = Tensor::zeros(k_dims, DType::BF16, device)?;
+
+    let q = q.contiguous()?;
+    let k = k.contiguous()?;
+    let cos = cos.contiguous()?;
+    let sin = sin.contiguous()?;
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (cos_storage, cos_layout) = cos.storage_and_layout();
+        let (sin_storage, sin_layout) = sin.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary q must be on CUDA"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary k must be on CUDA"),
+        };
+        let cos_cuda = match &*cos_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary cos must be on CUDA"),
+        };
+        let sin_cuda = match &*sin_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary sin must be on CUDA"),
+        };
+        let qo_cuda = match &*qo_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary q_out must be on CUDA"),
+        };
+        let ko_cuda = match &*ko_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary k_out must be on CUDA"),
+        };
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let q_slice = q_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(q_layout.start_offset()..);
+        let k_slice = k_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(k_layout.start_offset()..);
+        let cos_slice = cos_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(cos_layout.start_offset()..);
+        let sin_slice = sin_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(sin_layout.start_offset()..);
+        let qo_slice = qo_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qo_layout.start_offset()..);
+        let ko_slice = ko_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ko_layout.start_offset()..);
+
+        unsafe {
+            let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+            let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+            let (cos_ptr, _g3) = cos_slice.device_ptr(&stream);
+            let (sin_ptr, _g4) = sin_slice.device_ptr(&stream);
+            let (qo_ptr, _g5) = qo_slice.device_ptr(&stream);
+            let (ko_ptr, _g6) = ko_slice.device_ptr(&stream);
+            let status = kiln_fused_rotary_qk(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                cos_ptr as *const f32,
+                sin_ptr as *const f32,
+                qo_ptr as *mut _,
+                ko_ptr as *mut _,
+                batch as i32,
+                seq_len as i32,
+                q_heads as i32,
+                k_heads as i32,
+                head_dim as i32,
+                rotary_dim as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("kiln_fused_rotary_qk failed with status {status}");
+            }
+        }
+    }
+
+    Ok((q_out, k_out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1086,6 +1284,35 @@ mod tests {
 
     fn try_cuda_device() -> Option<Device> {
         Device::new_cuda(0).ok()
+    }
+
+    fn reference_rope(
+        x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        head_dim: usize,
+        rotary_dim: usize,
+    ) -> Result<Tensor> {
+        let half = rotary_dim / 2;
+        let x_dtype = x.dtype();
+        let x = x.to_dtype(DType::F32)?;
+        let x_rot = x.narrow(candle_core::D::Minus1, 0, rotary_dim)?;
+        let x_pass = if rotary_dim < head_dim {
+            Some(x.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?)
+        } else {
+            None
+        };
+        let x1 = x_rot.narrow(candle_core::D::Minus1, 0, half)?;
+        let x2 = x_rot.narrow(candle_core::D::Minus1, half, half)?;
+        let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+        let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+        let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
+        let r2 = (x1.broadcast_mul(&sin)? + x2.broadcast_mul(&cos)?)?;
+        let out = match x_pass {
+            Some(pass) => Tensor::cat(&[&r1, &r2, &pass], candle_core::D::Minus1)?,
+            None => Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?,
+        };
+        out.to_dtype(x_dtype)
     }
 
     #[test]
@@ -1139,6 +1366,76 @@ mod tests {
             diff < 1e-2,
             "parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
         );
+    }
+
+    #[test]
+    fn rotary_qk_parity_qwen_shape() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 1usize;
+        let seq_len = 2usize;
+        let q_heads = 16usize;
+        let k_heads = 4usize;
+        let head_dim = 256usize;
+        let rotary_dim = 64usize;
+        let half = rotary_dim / 2;
+
+        let q_data: Vec<f32> = (0..batch * seq_len * q_heads * head_dim)
+            .map(|i| ((i as f32 * 0.013).sin() * 0.5) + ((i as f32 * 0.017).cos() * 0.25))
+            .collect();
+        let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
+            .map(|i| ((i as f32 * 0.019).sin() * 0.4) + ((i as f32 * 0.011).cos() * 0.2))
+            .collect();
+        let cos_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).cos())
+            .collect();
+        let sin_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).sin())
+            .collect();
+
+        let q = Tensor::from_vec(q_data, (batch, seq_len, q_heads, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k = Tensor::from_vec(k_data, (batch, seq_len, k_heads, head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let cos = Tensor::from_vec(cos_data, (seq_len, half), &device).unwrap();
+        let sin = Tensor::from_vec(sin_data, (seq_len, half), &device).unwrap();
+
+        assert!(supports_rotary_qk(&q, &k, &cos, &sin, head_dim, rotary_dim));
+        let (q_fused, k_fused) =
+            fused_rotary_qk(&q, &k, &cos, &sin, head_dim, rotary_dim).expect("fused rotary qk");
+        let q_ref = reference_rope(&q, &cos, &sin, head_dim, rotary_dim).unwrap();
+        let k_ref = reference_rope(&k, &cos, &sin, head_dim, rotary_dim).unwrap();
+
+        let q_diff = (&q_ref - &q_fused)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+        let k_diff = (&k_ref - &k_fused)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .max_all()
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap();
+
+        assert_eq!(q_diff, 0.0, "rotary q max_abs_diff={q_diff:e}");
+        assert_eq!(k_diff, 0.0, "rotary k max_abs_diff={k_diff:e}");
     }
 
     #[test]

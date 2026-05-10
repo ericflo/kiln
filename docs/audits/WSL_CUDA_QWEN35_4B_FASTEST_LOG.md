@@ -479,3 +479,54 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="cuda-unexpanded-qk-smoke"`;
 - adapter-backed `/v1/chat/completions` requests completed with and without
   thinking enabled.
+
+## Follow-Up: CUDA Fused RoPE Q/K
+
+The full-attention decode profile after unexpanded GDN Q/K showed RoPE as the
+largest remaining non-GDN stage. CUDA now has a fused RoPE(Q,K) kernel for
+contiguous bf16 Q/K tensors with precomputed f32 cos/sin tables. The model
+forward path uses it for CUDA when Q/K are `[batch, seq, heads, head_dim]` and
+tables are `[seq, rotary_dim / 2]`; unsupported shapes, dtypes, and backends
+fall back to the existing Candle path. This covers the eager table-backed paged
+forward path and the tensor-backed CUDA graph-compatible path without changing
+CPU, Metal, or training fallback semantics.
+
+Rollback:
+
+```text
+KILN_DISABLE_FUSED_CUDA_ROTARY_QK=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_FUSED_CUDA_ROTARY_QK=1` | 40.443, 40.420, 40.621 | 40.495 ms | 24.695 |
+| default fused RoPE(Q,K) | 37.838, 38.006, 38.111 | 37.985 ms | 26.326 |
+
+Average decode ITL improved by 6.2% on this WSL 16 GiB CUDA host.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-rmsnorm-kernel rotary_qk_parity_qwen_shape --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The new CUDA kernel parity test uses Qwen-shaped Q/K head counts and exact BF16
+equality against the existing contiguous-half RoPE reference.
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-rotary-qk-smoke-20260509-1903`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=8912`, `auto_load=true`;
+- job id: `2fadfa06-78cd-4faa-9b60-66a4f0d08594`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.5020499229431152`;
+- `/health` reported `active_adapter="cuda-rotary-qk-smoke"`;
+- adapter-backed `/v1/chat/completions` requests completed with and without
+  thinking enabled.

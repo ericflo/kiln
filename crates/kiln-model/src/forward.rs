@@ -45,6 +45,12 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_fused_rotary_qk_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ROTARY_QK").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -2979,6 +2985,16 @@ pub fn rotary_embedding_from_tensor(
     let cos = freqs.cos()?;
     let sin = freqs.sin()?;
 
+    #[cfg(feature = "cuda")]
+    {
+        if !cuda_fused_rotary_qk_disabled()
+            && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, &cos, &sin, head_dim, rotary_dim)
+        {
+            return kiln_rmsnorm_kernel::fused_rotary_qk(q, k, &cos, &sin, head_dim, rotary_dim)
+                .context("cuda fused rotary qk kernel failed");
+        }
+    }
+
     let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
     let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
 
@@ -3002,6 +3018,16 @@ fn rotary_embedding_from_tables(
     head_dim: usize,
     rotary_dim: usize,
 ) -> Result<(Tensor, Tensor)> {
+    #[cfg(feature = "cuda")]
+    {
+        if !cuda_fused_rotary_qk_disabled()
+            && kiln_rmsnorm_kernel::supports_rotary_qk(q, k, cos, sin, head_dim, rotary_dim)
+        {
+            return kiln_rmsnorm_kernel::fused_rotary_qk(q, k, cos, sin, head_dim, rotary_dim)
+                .context("cuda fused rotary qk kernel failed");
+        }
+    }
+
     #[cfg(feature = "metal")]
     {
         if crate::backend::metal::metal_rotary_embedding_supports(
