@@ -478,3 +478,32 @@ Date: 2026-05-09
   active. The adapter was then unloaded and deleted; a post-smoke kernel scan
   showed no Linux OOM-killer event, the server log had no
   `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+- Accepted mixed-sequence CUDA GDN batcher row-loop gate:
+  forced mixed-sequence live CUDA GDN batches can now enter the existing
+  `cuda_gdn_row_loop_forward` route when all rows are greedy, the paged cache
+  is non-FP8, the backend is CUDA, and
+  `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` is unset. Full-attention-only
+  and non-CUDA mixed-sequence behavior remains gated on uniform positions.
+- Same-binary WSL CUDA live A/B with four unique concurrent streaming requests,
+  `max_tokens=32`, `KILN_DECODE_BATCH_MAX=2`,
+  `KILN_DECODE_BATCH_WAIT_US=50000`,
+  `KILN_DECODE_BATCH_MIXED_SEQ=1`, and stage profiling:
+  rollback old gate took `18.563151s` with 124 rows, 62 batches,
+  `max_observed_batch=2`, and 62 `batched_forward batch=2` profile entries;
+  default mixed-seq row-loop gate took `3.599959s` with the same rows/batches,
+  `max_observed_batch=2`, and 62 `cuda_gdn_row_loop_forward batch=2` profile
+  entries. Both reported zero failed decode-batcher jobs; wall time improved
+  80.6%, or 5.16x.
+- Mixed-seq row-loop gate validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-mixed-gate-smoke-042353`, final loss `1.7761503458023071`, then
+  unload/delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`.
+  A post-smoke kernel scan showed no Linux OOM-killer event, the server log had
+  no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

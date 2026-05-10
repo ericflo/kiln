@@ -1421,3 +1421,59 @@ Live no-env CUDA training smoke on the candidate:
   `{"status":"unloaded"}` and `{"status":"deleted"}`;
 - post-smoke kernel journal scan showed no Linux OOM-killer event, the server
   log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+
+## Follow-Up: Mixed-Sequence CUDA GDN Batches Use Row-Loop Gate
+
+Forced mixed-sequence live CUDA GDN batches now enter the existing
+`cuda_gdn_row_loop_forward` route instead of being excluded by the
+uniform-position gate and falling back to the slow true-batched GDN hidden
+forward. The change only broadens the contiguous-batched gate when all rows are
+greedy, the paged cache is non-FP8, the backend is CUDA, the model has linear
+attention layers, and `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` is not
+set. Full-attention-only and non-CUDA mixed-sequence behavior stays behind the
+existing uniform-position requirement.
+
+Same-binary WSL RTX 4090 Laptop live A/B, four concurrent unique streaming
+requests, `max_tokens=32`, `KILN_DECODE_BATCH_MAX=2`,
+`KILN_DECODE_BATCH_WAIT_US=50000`, `KILN_DECODE_BATCH_MIXED_SEQ=1`,
+`KILN_PROFILE_DECODE_BATCHER_STAGES=1`:
+
+| path | wall seconds | SSE lines | decode rows | batches | max observed batch | profile branch |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| rollback, old mixed-seq gate | 18.563151 | 280 | 124 | 62 | 2 | `batched_forward batch=2` x62 |
+| default, mixed-seq row-loop gate | 3.599959 | 280 | 124 | 62 | 2 | `cuda_gdn_row_loop_forward batch=2` x62 |
+
+For this forced mixed-sequence workload, wall time improved by 80.6%, or 5.16x,
+while preserving the same scheduler-visible batch admission and output volume.
+Both runs reported zero failed decode-batcher jobs.
+
+Representative candidate profile entries:
+
+```text
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=85.962
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=55.811
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=55.751
+```
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=1234`, `auto_load=true`;
+- adapter: `cuda-mixed-gate-smoke-042353`;
+- job id: `73cc4dc3-4de6-44e0-831e-c2feb4a0fe1a`;
+- result: `state=completed`, `final_loss=1.7761503458023071`;
+- `/v1/adapters` reported the trained adapter active after training; unload and
+  delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`;
+- post-smoke kernel journal scan showed no Linux OOM-killer event, the server
+  log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

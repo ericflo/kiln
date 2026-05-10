@@ -2163,24 +2163,30 @@ impl ModelRunner {
 
         let started = std::time::Instant::now();
 
-        // Fast path: when row_count > 1, all rows greedy with a common seq_len,
-        // and the cache is non-FP8, route through the contiguous-batched
-        // primitive. That single forward pass batches GQA across rows and uses
-        // the fused argmax LM head, eliminating the per-row GQA loop and
-        // per-row [1, 1, vocab] LM-head allocations that produce the c=8
-        // throughput collapse documented in
-        // docs/audits/PHASE12_B_PRIME_BATCHING_DIAGNOSIS.md.
+        // Fast path: when row_count > 1, all rows are greedy and the cache is
+        // non-FP8, route compatible rows through the contiguous-batched
+        // primitive. Uniform-position full-attention batches use a single
+        // forward pass with fused argmax. CUDA GDN batches may also enter with
+        // mixed sequence lengths because their implementation row-loops through
+        // the single-row paged greedy path while preserving scheduler-visible
+        // batching.
         let common_seq_len = sequence_lengths[0];
         let positions_uniform = sequence_lengths.iter().all(|&n| n == common_seq_len);
         let all_greedy = params.iter().all(|p| p.temperature == 0.0);
         let cache_is_fp8 = lock_paged_cache(paged_cache)?.is_fp8();
-        let try_contiguous_batched =
-            row_count > 1 && positions_uniform && all_greedy && !cache_is_fp8;
+        let has_linear_layers = self.has_linear_attention_layers();
+        let cuda_gdn_row_loop_candidate = self.backend.name() == "cuda"
+            && has_linear_layers
+            && cuda_gdn_batched_decode_row_loop_enabled();
+        let try_contiguous_batched = row_count > 1
+            && all_greedy
+            && !cache_is_fp8
+            && (positions_uniform || cuda_gdn_row_loop_candidate);
 
         let mut sampled: Option<Vec<TokenId>> = None;
         if try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-            let result = if self.has_linear_attention_layers() {
+            let result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
                 self.decode_next_tokens_paged_contiguous_batch_greedy(
