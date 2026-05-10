@@ -1534,3 +1534,72 @@ Live no-env CUDA training smoke on the candidate:
   delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`;
 - post-smoke kernel journal scan showed no Linux OOM-killer event, the server
   log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+
+## Follow-Up: Short CUDA GDN Prefill Reuses Combined A/B Projection
+
+CUDA GDN prefill can now reuse the existing combined A/B projection for short
+forward-only prompt tiles (`seq_len <= 128`). The previous unrestricted
+experiment was rejected because A/B narrow views made `gdn_gates` materialize
+copies. This version teaches the CUDA gates kernel to read row-strided A/B
+views directly, preserving the separate-matmul path for longer prompt tiles
+where the combined projection measured worse. Training remains on the autograd
+path because both the combined projection and backend gates are used only when
+`x.track_op()` is false. Rollback for the prefill widening is:
+
+```text
+KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ=1
+```
+
+Same-binary WSL RTX 4090 Laptop paged latency A/B, Qwen3.5-4B,
+`KILN_NUM_BLOCKS=512`, `KILN_PREFIX_CACHE_MAX_ENTRIES=1`, `KILN_USE_FLCE=1`,
+`KILN_SPEC_ENABLED=0`, release CUDA build:
+
+| prompt/output | path | prefill ms avg | mean ITL ms avg | decode tok/s avg |
+| --- | --- | ---: | ---: | ---: |
+| p64/o33, 4 pairs | rollback (`KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ=1`) | 69.723 | 26.220 | 38.147 |
+| p64/o33, 4 pairs | default short prefill A/B | 68.621 | 26.145 | 38.250 |
+| p128/o33, 3 pairs (`actual prompt=115`) | rollback | 96.921 | 26.344 | 37.972 |
+| p128/o33, 3 pairs (`actual prompt=115`) | default short prefill A/B | 95.463 | 26.209 | 38.162 |
+| p512/o33, 2 pairs (`actual prompt=494`) | rollback | 341.203 | 26.433 | 37.838 |
+| p512/o33, 2 pairs (`actual prompt=494`) | default thresholded path | 331.671 | 25.943 | 38.547 |
+
+The short-prompt prefill win is 1.102 ms (1.6%) for p64 and 1.458 ms (1.5%)
+for the p128 request shape. The p512 rows are thresholded onto the old path;
+the two-pair spot check stayed noise-level favorable after an unrestricted
+`seq_len >= 1` test showed a longer-prompt regression.
+
+Stage-profile sanity check (`KILN_PROFILE_GDN_STAGES=1`, p64/o17):
+
+| path | prefill ms | GDN in_proj prefill total | GDN gates prefill total |
+| --- | ---: | ---: | ---: |
+| rollback | 73.097927 | 143.778 ms / 48 calls | 1.824 ms / 48 calls |
+| default short prefill A/B | 69.541286 | 125.799 ms / 48 calls | 4.299 ms / 48 calls |
+
+The in-projection stage drops by 17.979 ms across the profiled run. Strided
+gates are still slower than fully-contiguous A/B, but avoid the previous
+materialization blow-up and leave a net prefill win on short prompt tiles.
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-gdn-kernel gates --release --quiet
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=2026`, `auto_load=true`;
+- adapter: `cuda-prefill-ab-smoke-0510`;
+- job id: `36c74244-efae-44b4-bad7-5c26bbfbc20a`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.665740728378296`, `elapsed_secs=9.205527589`;
+- `/v1/adapters` reported the trained adapter active after training; unload and
+  delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`;
+- post-smoke kernel journal scan showed no Linux OOM-killer event, the server
+  log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

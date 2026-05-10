@@ -217,6 +217,15 @@ fn cuda_gdn_ab_in_proj_enabled() -> bool {
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_gdn_prefill_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ").is_err())
+}
+
+#[cfg(feature = "cuda")]
+const CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
+
+#[cfg(feature = "cuda")]
 fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
@@ -5034,8 +5043,11 @@ fn gated_deltanet_forward_decode_if(
                         {
                             if out.is_none()
                                 && cuda_gdn_ab_in_proj_enabled()
+                                && (seq_len == 1
+                                    || (seq_len <= CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS
+                                        && cuda_gdn_prefill_ab_in_proj_enabled()))
                                 && gdn_forward_only_fastpaths
-                                && seq_len == 1
+                                && seq_len >= 1
                                 && x.dtype() == DType::BF16
                                 && in_proj_ab_t.dtype() == DType::BF16
                                 && !in_proj_ab_t.track_op()

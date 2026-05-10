@@ -1718,6 +1718,8 @@ unsafe extern "C" {
         g_out: *mut core::ffi::c_void,
         rows: i32,
         nv: i32,
+        a_row_stride: i32,
+        b_row_stride: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -1730,6 +1732,8 @@ unsafe extern "C" {
         g_out: *mut core::ffi::c_void,
         rows: i32,
         nv: i32,
+        a_row_stride: i32,
+        b_row_stride: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -1742,6 +1746,8 @@ unsafe extern "C" {
         g_out: *mut core::ffi::c_void,
         rows: i32,
         nv: i32,
+        a_row_stride: i32,
+        b_row_stride: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -1918,6 +1924,27 @@ fn gdn_gates_ctx<T>(res: Result<T>, label: &str) -> Result<T> {
     res.map_err(|err| candle_core::Error::Msg(format!("{label}: {err}")))
 }
 
+fn collapsed_row_stride(layout: &Layout, nv: usize) -> Option<usize> {
+    let dims = layout.shape().dims();
+    let stride = layout.stride();
+    if dims.len() != stride.len() || dims.is_empty() || stride.last().copied() != Some(1) {
+        return None;
+    }
+    if dims.len() == 1 {
+        return Some(nv);
+    }
+    let row_stride = stride[dims.len() - 2];
+    if row_stride < nv {
+        return None;
+    }
+    for idx in (0..dims.len() - 2).rev() {
+        if stride[idx] != dims[idx + 1].checked_mul(stride[idx + 1])? {
+            return None;
+        }
+    }
+    Some(row_stride)
+}
+
 pub fn gdn_gates_decline_reason(
     a: &Tensor,
     b: &Tensor,
@@ -2002,8 +2029,26 @@ pub fn gdn_gates(
     let nv = *shape.last().unwrap();
     let rows: usize = shape.iter().take(shape.len() - 1).product();
 
-    let a = gdn_gates_ctx(a.contiguous(), "gdn_gates a contiguous")?;
-    let b = gdn_gates_ctx(b.contiguous(), "gdn_gates b contiguous")?;
+    let a_row_stride = {
+        let (_storage, layout) = a.storage_and_layout();
+        collapsed_row_stride(&layout, nv)
+    };
+    let b_row_stride = {
+        let (_storage, layout) = b.storage_and_layout();
+        collapsed_row_stride(&layout, nv)
+    };
+    let (a, a_row_stride) = match a_row_stride {
+        Some(row_stride) => (a.clone(), row_stride),
+        None => (gdn_gates_ctx(a.contiguous(), "gdn_gates a contiguous")?, nv),
+    };
+    let (b, b_row_stride) = match b_row_stride {
+        Some(row_stride) => (b.clone(), row_stride),
+        None => (gdn_gates_ctx(b.contiguous(), "gdn_gates b contiguous")?, nv),
+    };
+    let a_row_stride = i32::try_from(a_row_stride)
+        .map_err(|_| candle_core::Error::Msg("gdn_gates a row stride exceeds i32".into()))?;
+    let b_row_stride = i32::try_from(b_row_stride)
+        .map_err(|_| candle_core::Error::Msg("gdn_gates b row stride exceeds i32".into()))?;
     let a_log = gdn_gates_ctx(a_log.contiguous(), "gdn_gates a_log contiguous")?;
     let dt_bias = gdn_gates_ctx(dt_bias.contiguous(), "gdn_gates dt_bias contiguous")?;
 
@@ -2100,6 +2145,8 @@ pub fn gdn_gates(
                         g_ptr as *mut _,
                         rows as i32,
                         nv as i32,
+                        a_row_stride,
+                        b_row_stride,
                         raw_stream,
                     )
                 }
@@ -2127,6 +2174,8 @@ pub fn gdn_gates(
                         g_ptr as *mut _,
                         rows as i32,
                         nv as i32,
+                        a_row_stride,
+                        b_row_stride,
                         raw_stream,
                     )
                 }
@@ -2154,6 +2203,8 @@ pub fn gdn_gates(
                         g_ptr as *mut _,
                         rows as i32,
                         nv as i32,
+                        a_row_stride,
+                        b_row_stride,
                         raw_stream,
                     )
                 }
@@ -3063,6 +3114,56 @@ mod tests {
         let k_out = k_normed.to_dtype(dtype)?;
 
         Ok((q_out, k_out))
+    }
+
+    #[test]
+    fn test_cuda_gdn_gates_accepts_row_strided_ab_views() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping strided GDN gates parity test: {err}");
+                return Ok(());
+            }
+        };
+
+        let batch = 2usize;
+        let seq_len = 7usize;
+        let heads = 32usize;
+        let ab = Tensor::from_slice(
+            &patterned_data(batch * seq_len * heads * 2, 0.45, 1.7),
+            (batch, seq_len, heads * 2),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a = ab.narrow(2, 0, heads)?;
+        let b = ab.narrow(2, heads, heads)?;
+        let a_log = Tensor::from_slice(&patterned_data(heads, 0.15, 3.7), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(&patterned_data(heads, 0.2, 4.3), (heads,), &device)?
+            .to_dtype(DType::BF16)?;
+
+        let (beta_strided, g_strided) = gdn_gates(&a, &b, &a_log, &dt_bias)?;
+        let (beta_contig, g_contig) =
+            gdn_gates(&a.contiguous()?, &b.contiguous()?, &a_log, &dt_bias)?;
+
+        let (beta_max, beta_mean) = max_mean_abs_diff(&beta_strided, &beta_contig)?;
+        let (g_max, g_mean) = max_mean_abs_diff(&g_strided, &g_contig)?;
+        eprintln!(
+            "cuda strided gdn_gates vs contiguous: beta max={beta_max:e} mean={beta_mean:e}, g max={g_max:e} mean={g_mean:e}"
+        );
+
+        assert_eq!(
+            beta_max, 0.0,
+            "strided gates beta max_abs_diff={beta_max:e}"
+        );
+        assert_eq!(g_max, 0.0, "strided gates g max_abs_diff={g_max:e}");
+        assert_eq!(
+            beta_mean, 0.0,
+            "strided gates beta mean_abs_diff={beta_mean:e}"
+        );
+        assert_eq!(g_mean, 0.0, "strided gates g mean_abs_diff={g_mean:e}");
+
+        Ok(())
     }
 
     #[test]

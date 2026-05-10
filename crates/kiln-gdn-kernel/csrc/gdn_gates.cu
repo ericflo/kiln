@@ -98,16 +98,20 @@ __global__ void gdn_gates_bf16_kernel(
     const DtBiasT* __restrict__ dt_bias,        // [nv] bf16/f32
     __nv_bfloat16* __restrict__ beta_out,       // [B, T, nv] bf16
     __nv_bfloat16* __restrict__ g_out,          // [B, T, nv] bf16
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     int32_t nv
 ) {
     const int row = blockIdx.x;                    // linearised (B, T) row
     const int tid = threadIdx.x;
     if (tid >= nv) return;
 
-    const int idx = row * nv + tid;
+    const int a_idx = row * a_row_stride + tid;
+    const int b_idx = row * b_row_stride + tid;
+    const int out_idx = row * nv + tid;
 
-    const float a_val  = __bfloat162float(a[idx]);
-    const float b_val  = __bfloat162float(b[idx]);
+    const float a_val  = __bfloat162float(a[a_idx]);
+    const float b_val  = __bfloat162float(b[b_idx]);
     const float A_log_val = param_to_float(A_log[tid]);
     const float dt_bias_val = param_to_float(dt_bias[tid]);
 
@@ -120,8 +124,8 @@ __global__ void gdn_gates_bf16_kernel(
     const float neg_decay = -expf(A_log_val);
     const float g_f = sp * neg_decay;
 
-    beta_out[idx] = __float2bfloat16(beta_f);
-    g_out[idx]    = __float2bfloat16(g_f);
+    beta_out[out_idx] = __float2bfloat16(beta_f);
+    g_out[out_idx]    = __float2bfloat16(g_f);
 }
 
 }  // namespace
@@ -136,10 +140,13 @@ int32_t launch_gdn_gates_bf16(
     void* g_out,
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw
 ) {
     if (rows <= 0 || nv <= 0) return 0;
     if (nv > 256) return 2; // envelope guard
+    if (a_row_stride < nv || b_row_stride < nv) return 2;
 
     cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
 
@@ -161,6 +168,8 @@ int32_t launch_gdn_gates_bf16(
         reinterpret_cast<const DtBiasT*>(dt_bias),
         reinterpret_cast<__nv_bfloat16*>(beta_out),
         reinterpret_cast<__nv_bfloat16*>(g_out),
+        a_row_stride,
+        b_row_stride,
         nv
     );
 
@@ -180,10 +189,13 @@ extern "C" int32_t kiln_gdn_gates_bf16(
     void* g_out,
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw
 ) {
     return launch_gdn_gates_bf16<__nv_bfloat16, __nv_bfloat16>(
-        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv,
+        a_row_stride, b_row_stride, stream_raw);
 }
 
 extern "C" int32_t kiln_gdn_gates_bf16_f32_params(
@@ -195,10 +207,13 @@ extern "C" int32_t kiln_gdn_gates_bf16_f32_params(
     void* g_out,
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw
 ) {
     return launch_gdn_gates_bf16<float, float>(
-        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv,
+        a_row_stride, b_row_stride, stream_raw);
 }
 
 extern "C" int32_t kiln_gdn_gates_bf16_f32_bf16_params(
@@ -210,10 +225,13 @@ extern "C" int32_t kiln_gdn_gates_bf16_f32_bf16_params(
     void* g_out,
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw
 ) {
     return launch_gdn_gates_bf16<float, __nv_bfloat16>(
-        a, b, A_log, dt_bias, beta_out, g_out, rows, nv, stream_raw);
+        a, b, A_log, dt_bias, beta_out, g_out, rows, nv,
+        a_row_stride, b_row_stride, stream_raw);
 }
 
 

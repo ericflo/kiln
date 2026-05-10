@@ -534,3 +534,36 @@ Date: 2026-05-09
   unload/delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`.
   A post-smoke kernel scan showed no Linux OOM-killer event, the server log had
   no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+- Accepted short CUDA GDN prefill A/B projection:
+  CUDA `gdn_gates` now accepts row-strided A/B views, allowing short
+  forward-only prefill tiles (`seq_len <= 128`) to reuse the existing combined
+  A/B projection without the previous gates-materialization blow-up.
+  `KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ=1` restores the old separate
+  prefill A/B matmuls; the broader `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ=1`
+  still disables the combined path entirely.
+- Same-binary WSL CUDA paged latency A/B:
+  p64/o33 improved from `69.723ms` prefill rollback to `68.621ms` default
+  (1.6%), with mean ITL neutral-to-better (`26.220ms` to `26.145ms`).
+  p128/o33 (`actual prompt=115`) improved from `96.921ms` to `95.463ms`
+  (1.5%). p512/o33 (`actual prompt=494`) is thresholded to the old path; the
+  two-pair spot check stayed noise-level favorable after unrestricted
+  `seq_len >= 1` testing showed a longer-prompt regression.
+- Stage profile confirmed the scoped target moved: p64/o17 GDN prefill
+  `in_proj` dropped from `143.778ms` total / `2.9954ms` avg to `125.799ms`
+  total / `2.6208ms` avg across 48 calls. Strided gates increased from
+  `1.824ms` to `4.299ms`, but avoided the prior copy blow-up and left a net
+  short-prefill win.
+- Short prefill A/B validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-gdn-kernel gates --release --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-prefill-ab-smoke-0510`, final loss `1.665740728378296`, then
+  unload/delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`.
+  A post-smoke kernel scan showed no Linux OOM-killer event, the server log had
+  no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

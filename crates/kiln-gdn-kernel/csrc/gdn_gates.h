@@ -32,6 +32,8 @@ int32_t kiln_gdn_gates_bf16(
     void* g_out,          // [rows, nv] bf16
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw      // cudaStream_t (raw)
 );
 
@@ -46,6 +48,8 @@ int32_t kiln_gdn_gates_bf16_f32_params(
     void* g_out,          // [rows, nv] bf16
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw      // cudaStream_t (raw)
 );
 
@@ -60,6 +64,8 @@ int32_t kiln_gdn_gates_bf16_f32_bf16_params(
     void* g_out,          // [rows, nv] bf16
     int32_t rows,
     int32_t nv,
+    int32_t a_row_stride,
+    int32_t b_row_stride,
     void* stream_raw      // cudaStream_t (raw)
 );
 
