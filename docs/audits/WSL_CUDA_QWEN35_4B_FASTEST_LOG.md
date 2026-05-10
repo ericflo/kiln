@@ -1477,3 +1477,60 @@ Live no-env CUDA training smoke on the candidate:
   delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`;
 - post-smoke kernel journal scan showed no Linux OOM-killer event, the server
   log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+
+## Follow-Up: CUDA GDN Prefill Uses Fused Gates Kernel
+
+CUDA now allows the existing `gdn_gates` kernel on forward-only prefill rows
+instead of limiting that backend hook to single-token decode. The kernel
+already accepts arbitrary `[.., nv]` gate tensors and collapses the sigmoid +
+softplus + exp + multiply chain into one launch; training remains on the
+autograd-safe path because `gated_deltanet_forward` only calls backend gates
+when `x.track_op()` is false. Rollback for this prefill-only widening is
+`KILN_DISABLE_CUDA_GDN_PREFILL_GATES=1`.
+
+Same-binary WSL RTX 4090 Laptop paged latency A/B, Qwen3.5-4B,
+`KILN_NUM_BLOCKS=512`, `KILN_PREFIX_CACHE_MAX_ENTRIES=1`, `KILN_USE_FLCE=1`,
+`KILN_SPEC_ENABLED=0`, release CUDA build:
+
+| prompt/output | path | prefill ms avg | mean ITL ms avg | decode tok/s avg |
+| --- | --- | ---: | ---: | ---: |
+| p64/o33, 4 pairs | rollback (`KILN_DISABLE_CUDA_GDN_PREFILL_GATES=1`) | 73.307 | 26.217 | 38.143 |
+| p64/o33, 4 pairs | default fused prefill gates | 69.000 | 26.246 | 38.105 |
+| p512/o33, 3 pairs | rollback (`KILN_DISABLE_CUDA_GDN_PREFILL_GATES=1`) | 336.569 | 26.418 | 37.865 |
+| p512/o33, 3 pairs | default fused prefill gates | 331.758 | 26.088 | 38.334 |
+
+The short prompt prefill win is 4.307 ms (5.9%). The longer prompt prefill win
+is 4.812 ms (1.4%). Decode ITL is noise-level neutral; this change targets
+TTFT/prefill.
+
+Stage-profile sanity check (`KILN_PROFILE_GDN_STAGES=1`, p64/o17):
+
+| path | prefill ms | GDN gates prefill total | GDN gates calls | GDN gates avg |
+| --- | ---: | ---: | ---: | ---: |
+| rollback | 78.071638 | 16.140 ms | 48 | 0.3362 ms |
+| default | 71.298638 | 3.727 ms | 48 | 0.0776 ms |
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-gdn-kernel gates --release --quiet
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=2026`, `auto_load=true`;
+- adapter: `cuda-prefill-gates-smoke-045502`;
+- job id: `b616d7e1-4895-4c11-b533-133f64720d03`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.6567338705062866`, `elapsed_secs=5.19805228`;
+- `/v1/adapters` reported the trained adapter active after training; unload and
+  delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`;
+- post-smoke kernel journal scan showed no Linux OOM-killer event, the server
+  log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

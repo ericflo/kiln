@@ -461,12 +461,12 @@ impl BackendRuntime for CudaBackend {
     ) -> Result<Option<(Tensor, Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
-        if !is_t1_decode {
+        if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
             tracing::debug!(
                 a_shape = ?a.shape(),
                 a_log_dtype = ?a_log.dtype(),
                 dt_bias_dtype = ?dt_bias.dtype(),
-                "CUDA gdn_gates fused path is decode-only; using Candle fallback"
+                "CUDA prefill gdn_gates disabled; using Candle fallback"
             );
             return Ok(None);
         }

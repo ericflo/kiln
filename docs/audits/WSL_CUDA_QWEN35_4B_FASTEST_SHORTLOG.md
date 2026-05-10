@@ -507,3 +507,30 @@ Date: 2026-05-09
   unload/delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`.
   A post-smoke kernel scan showed no Linux OOM-killer event, the server log had
   no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
+- Accepted CUDA GDN prefill fused gates:
+  `CudaBackend::gdn_gates` now allows the existing arbitrary-row CUDA gates
+  kernel on forward-only prefill, while `KILN_DISABLE_CUDA_GDN_PREFILL_GATES=1`
+  restores the old prefill Candle gates path. Training remains on the autograd
+  path because backend gates are only called when `x.track_op()` is false.
+- Same-binary WSL CUDA paged latency A/B: p64/o33 prefill improved from
+  `73.307ms` rollback to `69.000ms` default (5.9%), with mean ITL essentially
+  neutral (`26.217ms` rollback, `26.246ms` default). p512/o33 prefill improved
+  from `336.569ms` rollback to `331.758ms` default (1.4%), with decode neutral
+  to favorable (`26.418ms` rollback, `26.088ms` default).
+- Stage profile confirmed the target moved: p64/o17 GDN prefill gates dropped
+  from `16.140ms` total / `0.3362ms` avg to `3.727ms` total / `0.0776ms` avg
+  across 48 calls.
+- Prefill gates validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-gdn-kernel gates --release --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-prefill-gates-smoke-045502`, final loss `1.6567338705062866`, then
+  unload/delete returned `{"status":"unloaded"}` and `{"status":"deleted"}`.
+  A post-smoke kernel scan showed no Linux OOM-killer event, the server log had
+  no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
