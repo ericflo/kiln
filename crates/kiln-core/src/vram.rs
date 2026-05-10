@@ -28,6 +28,12 @@ pub enum VramSource {
     NvidiaSmi,
     /// Detected via Linux DRM sysfs memory counters.
     LinuxDrmSysfs,
+    /// Detected via Linux DRM sysfs on a unified-memory APU. The reported
+    /// VRAM is a BIOS-configured carveout (often >> physical RAM thanks to
+    /// the GTT heap that pages against system RAM). The corrected budget
+    /// is `min(reported_vram, MemTotal − reserve)` so training sized
+    /// against this value cannot exhaust system RAM.
+    LinuxDrmSysfsUnified,
     /// Detected via `sysctl hw.memsize` on Apple Silicon (unified memory).
     /// GPU-addressable memory is effectively the full physical pool minus a
     /// headroom for the OS and other apps.
@@ -43,6 +49,7 @@ impl std::fmt::Display for VramSource {
         match self {
             VramSource::NvidiaSmi => write!(f, "nvidia-smi"),
             VramSource::LinuxDrmSysfs => write!(f, "linux-drm-sysfs"),
+            VramSource::LinuxDrmSysfsUnified => write!(f, "linux-drm-sysfs-unified"),
             VramSource::AppleSilicon => write!(f, "apple-silicon-unified"),
             VramSource::EnvOverride => write!(f, "KILN_GPU_MEMORY_GB"),
             VramSource::None => write!(f, "none"),
@@ -55,7 +62,11 @@ impl std::fmt::Display for VramSource {
 /// Priority:
 /// 1. `KILN_GPU_MEMORY_GB` env var (user override, always respected).
 /// 2. `nvidia-smi` query (discrete NVIDIA).
-/// 3. Linux DRM sysfs counters (AMD/Intel Vulkan devices).
+/// 3. Linux DRM sysfs counters (AMD/Intel Vulkan devices). On unified-memory
+///    APUs the BIOS carveout reported via DRM can far exceed physical RAM
+///    (GTT pages against system memory), so the reported value is corrected
+///    down to `min(reported_vram, MemTotal − reserve)` to avoid sizing
+///    training as if there were a discrete GPU's worth of memory.
 /// 4. `sysctl hw.memsize` on Apple Silicon (unified memory), with a
 ///    `system_reserve_gb` headroom subtracted so training doesn't compete
 ///    with the OS for the last few GB.
@@ -78,11 +89,8 @@ pub fn detect_vram() -> GpuVramInfo {
     }
 
     #[cfg(target_os = "linux")]
-    if let Some(bytes) = query_linux_drm_total_vram() {
-        return GpuVramInfo {
-            total_bytes: bytes,
-            source: VramSource::LinuxDrmSysfs,
-        };
+    if let Some(info) = detect_linux_drm_vram() {
+        return info;
     }
 
     #[cfg(target_os = "macos")]
@@ -97,6 +105,175 @@ pub fn detect_vram() -> GpuVramInfo {
         total_bytes: 0,
         source: VramSource::None,
     }
+}
+
+/// Linux DRM detection that distinguishes discrete from unified-memory
+/// APUs and corrects the reported VRAM down to a survivable budget on
+/// the latter.
+#[cfg(target_os = "linux")]
+fn detect_linux_drm_vram() -> Option<GpuVramInfo> {
+    detect_linux_drm_vram_at(
+        std::path::Path::new("/sys/class/drm"),
+        std::path::Path::new("/proc/meminfo"),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_drm_vram_at(
+    drm_base: &std::path::Path,
+    meminfo_path: &std::path::Path,
+) -> Option<GpuVramInfo> {
+    let device = collect_linux_drm_device_info_at(drm_base)?;
+    let mem_total = query_meminfo_total_bytes_at(meminfo_path);
+
+    if let Some(mem_total_bytes) = mem_total
+        && is_unified_memory_drm(&device, mem_total_bytes)
+    {
+        let reserve = unified_memory_reserve_bytes(mem_total_bytes);
+        let corrected = device
+            .vram_total
+            .min(mem_total_bytes.saturating_sub(reserve));
+        return Some(GpuVramInfo {
+            total_bytes: corrected,
+            source: VramSource::LinuxDrmSysfsUnified,
+        });
+    }
+
+    Some(GpuVramInfo {
+        total_bytes: device.vram_total,
+        source: VramSource::LinuxDrmSysfs,
+    })
+}
+
+/// Aggregated DRM device info across the primary nodes for a single GPU.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) struct LinuxDrmDeviceInfo {
+    /// Largest `mem_info_vram_total` (or `vis_vram_total`) across nodes, bytes.
+    pub vram_total: u64,
+    /// Largest `mem_info_gtt_total` across nodes, bytes (0 if absent).
+    pub gtt_total: u64,
+    /// PCI vendor ID (e.g. `0x1002` for AMD), 0 if absent.
+    pub vendor: u32,
+    /// PCI class word (e.g. `0x038000`), 0 if absent. Top byte is class code,
+    /// `0x03` is "display controller".
+    pub class: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_drm_device_info_at(base: &std::path::Path) -> Option<LinuxDrmDeviceInfo> {
+    let mut vram_total = 0u64;
+    let mut gtt_total = 0u64;
+    let mut vendor = 0u32;
+    let mut class = 0u32;
+    let mut found_any = false;
+
+    for entry in std::fs::read_dir(base).ok()? {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !is_primary_drm_node(&name) {
+            continue;
+        }
+
+        let device_dir = entry.path().join("device");
+        for field in ["mem_info_vram_total", "mem_info_vis_vram_total"] {
+            if let Some(b) = read_u64_file(&device_dir.join(field)) {
+                vram_total = vram_total.max(b);
+                found_any = true;
+            }
+        }
+        if let Some(b) = read_u64_file(&device_dir.join("mem_info_gtt_total")) {
+            gtt_total = gtt_total.max(b);
+            found_any = true;
+        }
+        if vendor == 0 {
+            if let Some(v) = read_hex_u32_file(&device_dir.join("vendor")) {
+                vendor = v;
+            }
+        }
+        if class == 0 {
+            if let Some(c) = read_hex_u32_file(&device_dir.join("class")) {
+                class = c;
+            }
+        }
+    }
+
+    if !found_any {
+        return None;
+    }
+    Some(LinuxDrmDeviceInfo {
+        vram_total,
+        gtt_total,
+        vendor,
+        class,
+    })
+}
+
+/// True when the DRM-reported VRAM should be treated as a unified-memory
+/// budget (system RAM, not a discrete VRAM pool).
+///
+/// Triggers when either:
+/// - The reported VRAM exceeds physical RAM by more than 25 % (a BIOS
+///   carveout larger than the box can possibly back is the strongest
+///   single signal of unified memory), OR
+/// - The PCI device is a display controller (`class >> 16 == 0x03`)
+///   from AMD (`0x1002`) or Intel (`0x8086`) and exposes a non-trivial
+///   GTT heap (`gtt_total >= 1 GB`). GTT is the unified-memory paging
+///   path; discrete dGPUs expose tiny GTTs (typically under 256 MB)
+///   used only for staging.
+#[cfg(target_os = "linux")]
+fn is_unified_memory_drm(device: &LinuxDrmDeviceInfo, mem_total_bytes: u64) -> bool {
+    if device.vram_total > mem_total_bytes.saturating_mul(5) / 4 {
+        return true;
+    }
+    let class_code = device.class >> 16;
+    let integrated_vendor = matches!(device.vendor, 0x1002 | 0x8086);
+    let display_controller = class_code == 0x03;
+    let trivial_gtt = device.gtt_total < 1024 * 1024 * 1024;
+    if display_controller && integrated_vendor && !trivial_gtt {
+        return true;
+    }
+    false
+}
+
+/// Reserve to subtract from `MemTotal` before declaring the corrected
+/// unified-memory budget.
+///
+/// Matches the Apple Silicon path: `max(6 GB, MemTotal / 4)`. Override
+/// with `KILN_TRAINING_MEMORY_RESERVE_GB` (parsed as f64).
+fn unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
+    if let Ok(val) = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB") {
+        if let Ok(gb) = val.parse::<f64>() {
+            return (gb * 1024.0 * 1024.0 * 1024.0) as u64;
+        }
+    }
+    const MIN_RESERVE_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+    let proportional = mem_total_bytes / 4;
+    proportional.max(MIN_RESERVE_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn query_meminfo_total_bytes_at(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kib: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_hex_u32_file(path: &std::path::Path) -> Option<u32> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let trimmed = raw.trim();
+    let stripped = trimmed.strip_prefix("0x").unwrap_or(trimmed);
+    u32::from_str_radix(stripped, 16).ok()
 }
 
 /// Query currently used GPU VRAM.
@@ -161,18 +338,12 @@ fn query_nvidia_smi_field(field: &str) -> Option<u64> {
     Some(mib * 1024 * 1024)
 }
 
-/// Query total GPU memory from Linux DRM sysfs.
+/// Query currently used GPU memory from Linux DRM sysfs.
 ///
-/// AMDGPU exposes byte-valued `mem_info_vram_total` and
-/// `mem_info_vis_vram_total` files under `/sys/class/drm/{cardN,renderDN}/device`.
+/// AMDGPU exposes byte-valued `mem_info_vram_used` and
+/// `mem_info_vis_vram_used` files under `/sys/class/drm/{cardN,renderDN}/device`.
 /// We use the largest value across render/card nodes so duplicated connector
 /// entries do not add the same GPU multiple times.
-#[cfg(target_os = "linux")]
-fn query_linux_drm_total_vram() -> Option<u64> {
-    query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])
-}
-
-/// Query currently used GPU memory from Linux DRM sysfs.
 #[cfg(target_os = "linux")]
 fn query_linux_drm_used_vram() -> Option<u64> {
     query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
@@ -386,6 +557,146 @@ mod tests {
         );
         assert_eq!(VramSource::EnvOverride.to_string(), "KILN_GPU_MEMORY_GB");
         assert_eq!(VramSource::None.to_string(), "none");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_unified_memory_apu_corrects_oversized_carveout() {
+        // Synthesize the user's hardware: AMD Strix Halo APU. DRM
+        // reports a 103 GB VRAM carveout on a 30 GB host. The corrected
+        // budget must be MemTotal − reserve, not the carveout.
+        let root = std::env::temp_dir().join(format!(
+            "kiln-drm-unified-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("card1/device")).unwrap();
+        std::fs::write(
+            root.join("card1/device/mem_info_vram_total"),
+            "103079215104\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("card1/device/mem_info_gtt_total"),
+            "16629477376\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("card1/device/vendor"), "0x1002\n").unwrap();
+        std::fs::write(root.join("card1/device/class"), "0x038000\n").unwrap();
+
+        let device = collect_linux_drm_device_info_at(&root).unwrap();
+        assert_eq!(device.vram_total, 103_079_215_104);
+        assert_eq!(device.gtt_total, 16_629_477_376);
+        assert_eq!(device.vendor, 0x1002);
+        assert_eq!(device.class, 0x038000);
+
+        // 30 GB host: synthesize a meminfo file so the assertion does
+        // not depend on the actual host's MemTotal.
+        let mem_total = 30u64 * 1024 * 1024 * 1024;
+        let meminfo_path = root.join("meminfo");
+        std::fs::write(
+            &meminfo_path,
+            format!("MemTotal:       {} kB\n", mem_total / 1024),
+        )
+        .unwrap();
+
+        assert!(is_unified_memory_drm(&device, mem_total));
+
+        // KILN_TRAINING_MEMORY_RESERVE_GB may leak from a parent test
+        // process; clear it so the assertion is deterministic. SAFETY:
+        // env mutation is safe under nextest's per-test process isolation.
+        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
+        let reserve = unified_memory_reserve_bytes(mem_total);
+        // Default reserve = max(6 GB, MemTotal/4) = max(6, 7.5) = 7.5 GB.
+        assert_eq!(reserve, mem_total / 4);
+
+        let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
+        assert_eq!(info.source, VramSource::LinuxDrmSysfsUnified);
+        // Corrected = min(carveout, MemTotal − reserve) = MemTotal − reserve.
+        assert_eq!(info.total_bytes, mem_total - reserve);
+        // Sanity-check the order of magnitude — corrected budget must
+        // sit between 14 and 24 GB on a 30 GB box.
+        let gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!((14.0..=24.0).contains(&gb), "corrected budget = {gb} GB");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_discrete_amd_gpu_kept_as_linuxdrmsysfs() {
+        // Discrete AMD card on a small host: 16 GB VRAM, 256 MB GTT,
+        // 32 GB MemTotal. Heuristic must NOT flag this as unified.
+        let root = std::env::temp_dir().join(format!(
+            "kiln-drm-discrete-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("card0/device")).unwrap();
+        std::fs::write(
+            root.join("card0/device/mem_info_vram_total"),
+            "17179869184\n", // 16 GB
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("card0/device/mem_info_gtt_total"),
+            "268435456\n", // 256 MB — typical staging GTT on a discrete card
+        )
+        .unwrap();
+        std::fs::write(root.join("card0/device/vendor"), "0x1002\n").unwrap();
+        std::fs::write(root.join("card0/device/class"), "0x030000\n").unwrap();
+
+        let device = collect_linux_drm_device_info_at(&root).unwrap();
+        let mem_total = 32u64 * 1024 * 1024 * 1024;
+        let meminfo_path = root.join("meminfo");
+        std::fs::write(
+            &meminfo_path,
+            format!("MemTotal:       {} kB\n", mem_total / 1024),
+        )
+        .unwrap();
+        assert!(!is_unified_memory_drm(&device, mem_total));
+
+        let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
+        assert_eq!(info.source, VramSource::LinuxDrmSysfs);
+        assert_eq!(info.total_bytes, 17_179_869_184);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_meminfo_parser() {
+        let path = std::env::temp_dir().join(format!(
+            "kiln-meminfo-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(
+            &path,
+            "MemTotal:       32479448 kB\nMemFree:        27571892 kB\n",
+        )
+        .unwrap();
+        assert_eq!(
+            query_meminfo_total_bytes_at(&path),
+            Some(32_479_448u64 * 1024)
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_unified_memory_reserve_env_override() {
+        // SAFETY: env mutation is safe under nextest's per-test process
+        // isolation; this test must run via `cargo nextest run`.
+        unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "10.0") };
+        let mem_total = 32u64 * 1024 * 1024 * 1024;
+        assert_eq!(
+            unified_memory_reserve_bytes(mem_total),
+            10u64 * 1024 * 1024 * 1024
+        );
+        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
     }
 
     #[cfg(target_os = "linux")]
