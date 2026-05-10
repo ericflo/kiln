@@ -230,6 +230,7 @@ fn run_one(
         output_name: Some(format!("phase10-rmsnorm-T{target_t}-{tag}")),
         auto_load: false,
         checkpoint_interval: None,
+        seed: None,
     };
     let adapter_dir = std::env::temp_dir().join("kiln-phase10-rmsnorm-bench");
     let _ = std::fs::create_dir_all(&adapter_dir);
@@ -269,6 +270,7 @@ fn run_one(
         &adapter_dir,
         &adapter_name,
         Some(progress),
+        None,
     );
     let elapsed = t0.elapsed().as_secs_f64();
     stop.store(true, Ordering::Relaxed);

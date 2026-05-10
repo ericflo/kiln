@@ -4,8 +4,13 @@
 //! loop using candle autograd. Training runs in the same process as inference,
 //! operating on the already-loaded model weights. No Python sidecar needed.
 
+pub mod replay;
 pub mod trainer;
 
+pub use replay::{
+    BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
+    ReplayRecord, RequestRecord,
+};
 pub use trainer::CheckpointConfig;
 
 use serde::{Deserialize, Serialize};
@@ -51,6 +56,11 @@ pub struct SftConfig {
     /// Save adapter weights every N training steps. None = only save at the end.
     #[serde(default)]
     pub checkpoint_interval: Option<usize>,
+    /// Deterministic seed for LoRA init and any RNG-dependent steps. If
+    /// `None`, the trainer generates one and records it in `replay.jsonl`
+    /// so the run is still exactly reproducible.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 fn default_auto_load() -> bool {
@@ -80,6 +90,7 @@ impl Default for SftConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
+            seed: None,
         }
     }
 }
@@ -128,6 +139,11 @@ pub struct GrpoConfig {
     /// Save adapter weights every N training steps. None = only save at the end.
     #[serde(default)]
     pub checkpoint_interval: Option<usize>,
+    /// Deterministic seed for LoRA init and any RNG-dependent steps. If
+    /// `None`, the trainer generates one and records it in `replay.jsonl`
+    /// so the run is still exactly reproducible.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 fn default_grpo_lr() -> f64 {
@@ -152,6 +168,7 @@ impl Default for GrpoConfig {
             output_name: None,
             auto_load: default_auto_load(),
             checkpoint_interval: None,
+            seed: None,
         }
     }
 }

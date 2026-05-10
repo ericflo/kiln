@@ -273,6 +273,7 @@ fn run_one(
         output_name: Some(format!("flce-phaseA-T{target_t}-{tag}")),
         auto_load: false,
         checkpoint_interval: None,
+        seed: None,
     };
     let adapter_dir = std::env::temp_dir().join("kiln-flce-phaseA-validation");
     let _ = std::fs::create_dir_all(&adapter_dir);
@@ -318,6 +319,7 @@ fn run_one(
         &adapter_dir,
         &format!("flce-phaseA-T{target_t}-{tag}"),
         Some(progress_cb),
+        None,
     );
     let step_secs = start.elapsed().as_secs_f64();
 

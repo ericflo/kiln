@@ -22,11 +22,16 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 indicatif = "0.18"
 console = "0.16"
+sha2 = { workspace = true }
+rand = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda"]
 metal = ["kiln-model/metal"]
 
+[[bin]]
+name = "kiln-replay"
+path = "src/bin/kiln-replay.rs"
+
 [dev-dependencies]
 tempfile = { workspace = true }
-rand = { workspace = true }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, Var};
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -22,7 +24,178 @@ use kiln_model::forward::{
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
+use crate::replay::{
+    self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
+    RequestRecord,
+};
 use crate::{ChatMessage, GrpoConfig, GrpoGroup, SftConfig, SftExample};
+
+/// Per-job context the HTTP layer hands the trainer so the training run can
+/// be replayed exactly from its on-disk artifacts.
+///
+/// `request_id` is the same UUID the queue uses for the job; `request_body`
+/// is the verbatim deserialized request the HTTP handler accepted. The
+/// trainer is responsible for resolving the effective seed (using
+/// `config.seed.unwrap_or_else(|| rand::random())` so every run records a
+/// concrete number), opening the parent lineage if `config.base_adapter` is
+/// set, appending the replay record before stepping the optimizer, writing
+/// `lineage.json`, and finally appending the outcome record.
+#[derive(Debug, Clone)]
+pub struct ReplayContext {
+    pub request_id: String,
+    pub kind: ReplayKind,
+    pub request_body: serde_json::Value,
+    pub base_model: BaseModel,
+}
+
+/// Build a default `BaseModel` description for the only model kiln supports.
+///
+/// `id` is fixed to `Qwen/Qwen3.5-4B`; `revision` is left unset; the config
+/// digest is a SHA-256 of the JSON-serialized `ModelConfig` so replay can
+/// detect mismatched architectures even when `id` matches.
+pub fn default_base_model(config: &ModelConfig) -> BaseModel {
+    let digest = serde_json::to_string(config).ok().map(|s| {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("sha256:{:x}", h.finalize())
+    });
+    BaseModel {
+        id: "Qwen/Qwen3.5-4B".to_string(),
+        revision: None,
+        config_digest: digest,
+    }
+}
+
+/// State threaded through a training run so the request can be appended
+/// before the optimizer step and an outcome can be appended afterward.
+struct ReplayState {
+    log: ReplayLog,
+    lineage: Lineage,
+    request_id: String,
+    started_at: std::time::Instant,
+}
+
+/// Open the replay log + lineage for a training run *before* the optimizer
+/// step runs. Returns the effective seed so the trainer can apply it
+/// consistently to RNG sources used during init.
+///
+/// Writes the request record (durable, fsynced) and `lineage.json` before
+/// returning so a crash mid-step still leaves a recoverable trail.
+fn open_replay_state(
+    ctx: &ReplayContext,
+    config_seed: Option<u64>,
+    parent_adapter: Option<&str>,
+    adapter_dir: &Path,
+    adapter_name: &str,
+) -> Result<(ReplayState, u64)> {
+    let seed = config_seed.unwrap_or_else(|| rand::random());
+    let kiln_commit = replay::kiln_commit();
+    let submitted_at = chrono::Utc::now().to_rfc3339();
+    let request = RequestRecord {
+        request_id: ctx.request_id.clone(),
+        kind: ctx.kind,
+        request_body: ctx.request_body.clone(),
+        seed,
+        kiln_commit: kiln_commit.clone(),
+        submitted_at: submitted_at.clone(),
+    };
+
+    let parent_lora = match parent_adapter {
+        Some(name) => {
+            let parent_dir = adapter_dir.join(name);
+            let parent_lineage = replay::read_lineage(&parent_dir).with_context(|| {
+                format!("reading parent lineage at {}", parent_dir.display())
+            })?;
+            Some(ParentLora {
+                name: name.to_string(),
+                replay_hash: parent_lineage.replay_hash,
+            })
+        }
+        None => None,
+    };
+
+    let output_dir = adapter_dir.join(adapter_name);
+    let log = ReplayLog::new(&output_dir)?;
+    log.append_request(&request)?;
+
+    let parent_hash = parent_lora.as_ref().map(|p| p.replay_hash.as_str());
+    let replay_hash = replay::compute_replay_hash(parent_hash, &ctx.base_model, &[&request])?;
+
+    let lineage = Lineage {
+        schema_version: replay::LINEAGE_SCHEMA_VERSION,
+        adapter_name: adapter_name.to_string(),
+        base_model: ctx.base_model.clone(),
+        parent_lora,
+        kiln_commit,
+        created_at: submitted_at,
+        replay_hash,
+    };
+    replay::write_lineage(&output_dir, &lineage)?;
+
+    Ok((
+        ReplayState {
+            log,
+            lineage,
+            request_id: ctx.request_id.clone(),
+            started_at: std::time::Instant::now(),
+        },
+        seed,
+    ))
+}
+
+/// Append an outcome record after the optimizer step finishes (or fails).
+///
+/// `result` is `Ok(final_loss)` on success, `Err(message)` on failure.
+fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Result<()> {
+    let elapsed = state.started_at.elapsed().as_secs_f64();
+    let outcome = match result {
+        Ok(loss) => OutcomeRecord {
+            request_id: state.request_id,
+            status: OutcomeStatus::Completed,
+            final_loss: Some(loss),
+            elapsed_secs: Some(elapsed),
+            error: None,
+        },
+        Err(msg) => OutcomeRecord {
+            request_id: state.request_id,
+            status: OutcomeStatus::Failed,
+            final_loss: None,
+            elapsed_secs: Some(elapsed),
+            error: Some(msg),
+        },
+    };
+    state.log.append_outcome(&outcome)?;
+    let _ = state.lineage; // lineage already written; kept for diagnostics if extended
+    Ok(())
+}
+
+/// Sample a Kaiming-uniform LoRA-A initialization.
+///
+/// When `rng` is `Some`, the values are drawn from the supplied RNG so the
+/// init is byte-deterministic across runs; this is the path used when the
+/// caller passes `seed: Some(_)`. When `rng` is `None`, we fall back to
+/// `Var::rand_f64`, which uses the device-global RNG (seeded earlier with
+/// `device.set_seed` on backends that support it).
+fn kaiming_uniform_a(
+    rng: Option<&mut StdRng>,
+    bound: f64,
+    shape: (usize, usize),
+    dtype: DType,
+    device: &Device,
+) -> Result<Var> {
+    if let Some(rng) = rng {
+        let bound_f32 = bound as f32;
+        let n = shape.0 * shape.1;
+        let data: Vec<f32> = (0..n)
+            .map(|_| rng.random_range(-bound_f32..bound_f32))
+            .collect();
+        let t = Tensor::from_slice(&data, &[shape.0, shape.1], device)?.to_dtype(dtype)?;
+        Var::from_tensor(&t).map_err(Into::into)
+    } else {
+        Var::rand_f64(-bound, bound, shape, dtype, device).map_err(Into::into)
+    }
+}
 
 /// Convert our ChatMessage to the core tokenizer's ChatMessage.
 fn to_core_messages(msgs: &[ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessage> {
@@ -77,6 +250,10 @@ impl TrainableLoraParams {
     /// This matches the standard LoRA initialization:
     /// - A: Kaiming uniform (so the product A*B starts near zero)
     /// - B: zeros (so initial LoRA contribution is zero)
+    ///
+    /// Equivalent to `initialize_seeded(.., None)` — the device-global RNG
+    /// drives A initialization. Tests, benches, and any caller that does not
+    /// need byte-for-byte reproducibility should use this entry point.
     pub fn initialize(
         config: &ModelConfig,
         weights: &GpuWeights,
@@ -84,6 +261,35 @@ impl TrainableLoraParams {
         alpha: f32,
         device: &Device,
     ) -> Result<Self> {
+        Self::initialize_seeded(config, weights, rank, alpha, device, None)
+    }
+
+    /// Like [`initialize`], but uses a deterministic RNG seeded with `seed`
+    /// to draw A. Used by the SFT/GRPO training loops so an adapter
+    /// initialized with the same seed against the same base weights produces
+    /// byte-identical LoRA-A tensors on every run, even on backends like the
+    /// candle CPU device whose `set_seed` is a no-op.
+    ///
+    /// `seed: None` falls back to the device-global RNG (preserves the
+    /// pre-replay behavior).
+    pub fn initialize_seeded(
+        config: &ModelConfig,
+        weights: &GpuWeights,
+        rank: usize,
+        alpha: f32,
+        device: &Device,
+        seed: Option<u64>,
+    ) -> Result<Self> {
+        // Best-effort seed of the device RNG — `Var::zeros` for B does not
+        // need it, and on backends where `set_seed` works (CUDA/Metal) it
+        // pins anything else that uses the device RNG during init. Errors
+        // (e.g. CPU's `set_seed` bail) are swallowed because the seeded
+        // StdRng path below is what actually delivers determinism for A.
+        if let Some(seed) = seed {
+            let _ = device.set_seed(seed);
+        }
+        let mut rng = seed.map(StdRng::seed_from_u64);
+
         let scale = alpha / rank as f32;
         let num_layers = config.num_layers;
         let hidden = config.hidden_size;
@@ -137,8 +343,14 @@ impl TrainableLoraParams {
                 // A: [rank, in_features] — Kaiming uniform
                 // Phase 10: BF16 storage + FP32-accumulate via tensor cores (audit
                 // docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5).
-                let a = Var::rand_f64(-bound, bound, (rank, in_features), DType::BF16, device)
-                    .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
+                let a = kaiming_uniform_a(
+                    rng.as_mut(),
+                    bound,
+                    (rank, in_features),
+                    DType::BF16,
+                    device,
+                )
+                .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
                 let b = Var::zeros((out_features, rank), DType::BF16, device)
@@ -330,6 +542,12 @@ fn make_step_progress(total_steps: usize, label: &str) -> Option<indicatif::Prog
 /// This runs in the calling thread (blocking). The caller should spawn this
 /// on a background thread to avoid blocking inference.
 ///
+/// When `replay_ctx` is `Some`, the trainer writes a `replay.jsonl` request
+/// record (with the resolved seed) and `lineage.json` into the adapter
+/// directory *before* the optimizer step, then appends an outcome record
+/// when training completes or fails. When `None`, no replay artifacts are
+/// written — used by tests and benches that don't need replay.
+///
 /// Returns the path to the saved adapter directory.
 pub fn sft_train(
     examples: &[SftExample],
@@ -340,6 +558,7 @@ pub fn sft_train(
     adapter_dir: &Path,
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
     let device = weights.embed_tokens.device().clone();
     let backend = backend::for_device(&device);
@@ -354,13 +573,31 @@ pub fn sft_train(
         "starting SFT training"
     );
 
+    // Open replay state (writes request record + lineage.json *before* the
+    // optimizer step, so a crash mid-step still leaves a recoverable trail)
+    // and resolve the effective seed.
+    let (replay_state, effective_seed) = match replay_ctx.as_ref() {
+        Some(ctx) => {
+            let (state, seed) = open_replay_state(
+                ctx,
+                config.seed,
+                config.base_adapter.as_deref(),
+                adapter_dir,
+                adapter_name,
+            )?;
+            (Some(state), Some(seed))
+        }
+        None => (None, config.seed),
+    };
+
     // Initialize trainable LoRA parameters
-    let params = TrainableLoraParams::initialize(
+    let params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device,
+        effective_seed,
     )?;
 
     tracing::info!(
@@ -368,154 +605,170 @@ pub fn sft_train(
         "initialized trainable LoRA parameters"
     );
 
-    // Tokenize all examples and build (input_ids, label_mask) pairs.
-    // Labels: we want to train on assistant responses only.
-    let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
-        .iter()
-        .filter_map(|ex| match tokenize_for_training(ex, tokenizer) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::warn!("skipping example: {e}");
-                None
-            }
-        })
-        .collect();
+    // Run the actual training body inside a closure so we can write the
+    // outcome record (success or failure) before returning to the caller.
+    let train_body = || -> Result<(PathBuf, f64)> {
+        // Tokenize all examples and build (input_ids, label_mask) pairs.
+        // Labels: we want to train on assistant responses only.
+        let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
+            .iter()
+            .filter_map(|ex| match tokenize_for_training(ex, tokenizer) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("skipping example: {e}");
+                    None
+                }
+            })
+            .collect();
 
-    if tokenized.is_empty() {
-        anyhow::bail!("no valid training examples after tokenization");
-    }
+        if tokenized.is_empty() {
+            anyhow::bail!("no valid training examples after tokenization");
+        }
 
-    // Configure gradient checkpointing
-    let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
-    let segments = if ckpt_config.enabled {
-        Some(compute_segment_boundaries(
-            model_config.num_layers,
-            ckpt_config.num_segments,
-        ))
-    } else {
-        None
-    };
+        // Configure gradient checkpointing
+        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        let segments = if ckpt_config.enabled {
+            Some(compute_segment_boundaries(
+                model_config.num_layers,
+                ckpt_config.num_segments,
+            ))
+        } else {
+            None
+        };
 
-    if let Some(ref segs) = segments {
-        tracing::info!(
-            num_segments = segs.len(),
-            boundaries = ?segs,
-            "gradient checkpointing enabled"
-        );
-    } else {
-        tracing::info!("gradient checkpointing disabled (KILN_NO_GRAD_CHECKPOINT=1)");
-    }
+        if let Some(ref segs) = segments {
+            tracing::info!(
+                num_segments = segs.len(),
+                boundaries = ?segs,
+                "gradient checkpointing enabled"
+            );
+        } else {
+            tracing::info!("gradient checkpointing disabled (KILN_NO_GRAD_CHECKPOINT=1)");
+        }
 
-    let total_steps = config.epochs * tokenized.len();
-    let mut global_step = 0;
-    let mut last_loss = 0.0;
+        let total_steps = config.epochs * tokenized.len();
+        let mut global_step = 0;
+        let mut last_loss = 0.0;
 
-    let pb = make_step_progress(total_steps, "sft training");
+        let pb = make_step_progress(total_steps, "sft training");
 
-    for epoch in 0..config.epochs {
-        let mut epoch_loss = 0.0;
+        for epoch in 0..config.epochs {
+            let mut epoch_loss = 0.0;
 
-        for (_ex_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
-            let loss_val;
+            for (_ex_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
+                let loss_val;
 
-            if let Some(ref segs) = segments {
-                // Gradient-checkpointed forward/backward
-                let (lv, accumulated_grads) = checkpointed_forward_backward(
-                    &*backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    &params,
-                    label_mask,
-                    segs,
-                    &device,
-                )?;
-                loss_val = lv;
-                sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
-            } else {
-                // Standard (non-checkpointed) forward/backward
-                let (lv, grads) = standard_forward_backward(
-                    &*backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    &params,
-                    label_mask,
-                    &device,
-                )?;
-                loss_val = lv;
-                sgd_step(&params, &grads, config.learning_rate)?;
-            }
+                if let Some(ref segs) = segments {
+                    // Gradient-checkpointed forward/backward
+                    let (lv, accumulated_grads) = checkpointed_forward_backward(
+                        &*backend,
+                        input_ids,
+                        weights,
+                        model_config,
+                        &params,
+                        label_mask,
+                        segs,
+                        &device,
+                    )?;
+                    loss_val = lv;
+                    sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
+                } else {
+                    // Standard (non-checkpointed) forward/backward
+                    let (lv, grads) = standard_forward_backward(
+                        &*backend,
+                        input_ids,
+                        weights,
+                        model_config,
+                        &params,
+                        label_mask,
+                        &device,
+                    )?;
+                    loss_val = lv;
+                    sgd_step(&params, &grads, config.learning_rate)?;
+                }
 
-            epoch_loss += loss_val;
-            last_loss = loss_val;
+                epoch_loss += loss_val;
+                last_loss = loss_val;
 
-            global_step += 1;
+                global_step += 1;
 
-            // Periodic adapter checkpoint
-            if let Some(interval) = config.checkpoint_interval {
-                if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                    let ckpt_dir =
-                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
-                        tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
-                    } else {
-                        tracing::info!(step = global_step, "saved training checkpoint");
+                // Periodic adapter checkpoint
+                if let Some(interval) = config.checkpoint_interval {
+                    if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                        let ckpt_dir =
+                            adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
+                            tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
+                        } else {
+                            tracing::info!(step = global_step, "saved training checkpoint");
+                        }
                     }
+                }
+
+                if let Some(ref cb) = progress_cb {
+                    cb(TrainingProgress {
+                        epoch: epoch + 1,
+                        total_epochs: config.epochs,
+                        step: global_step,
+                        total_steps,
+                        loss: loss_val,
+                        progress: global_step as f32 / total_steps as f32,
+                    });
+                }
+
+                if global_step % 10 == 0 || global_step == total_steps {
+                    tracing::info!(
+                        epoch = epoch + 1,
+                        step = global_step,
+                        total_steps,
+                        loss = format!("{loss_val:.6}"),
+                        "training step"
+                    );
+                }
+
+                if let Some(pb) = &pb {
+                    pb.set_message(format!("{loss_val:.6}"));
+                    pb.inc(1);
                 }
             }
 
-            if let Some(ref cb) = progress_cb {
-                cb(TrainingProgress {
-                    epoch: epoch + 1,
-                    total_epochs: config.epochs,
-                    step: global_step,
-                    total_steps,
-                    loss: loss_val,
-                    progress: global_step as f32 / total_steps as f32,
-                });
-            }
-
-            if global_step % 10 == 0 || global_step == total_steps {
-                tracing::info!(
-                    epoch = epoch + 1,
-                    step = global_step,
-                    total_steps,
-                    loss = format!("{loss_val:.6}"),
-                    "training step"
-                );
-            }
-
-            if let Some(pb) = &pb {
-                pb.set_message(format!("{loss_val:.6}"));
-                pb.inc(1);
-            }
+            let avg_loss = epoch_loss / tokenized.len() as f64;
+            tracing::info!(
+                epoch = epoch + 1,
+                avg_loss = format!("{avg_loss:.6}"),
+                "epoch complete"
+            );
         }
 
-        let avg_loss = epoch_loss / tokenized.len() as f64;
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
+        }
+
+        // Save the trained adapter
+        let output_dir = adapter_dir.join(adapter_name);
+        params.save_peft(&output_dir, model_config.num_layers)?;
+
         tracing::info!(
-            epoch = epoch + 1,
-            avg_loss = format!("{avg_loss:.6}"),
-            "epoch complete"
+            adapter = adapter_name,
+            path = %output_dir.display(),
+            final_loss = format!("{last_loss:.6}"),
+            "SFT training complete"
         );
+
+        Ok((output_dir, last_loss))
+    };
+
+    let result = train_body();
+    if let Some(state) = replay_state {
+        let outcome = match &result {
+            Ok((_, loss)) => Ok(*loss),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        if let Err(e) = close_replay_state(state, outcome) {
+            tracing::warn!(error = %e, "failed to append SFT replay outcome record");
+        }
     }
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
-    // Save the trained adapter
-    let output_dir = adapter_dir.join(adapter_name);
-    params.save_peft(&output_dir, model_config.num_layers)?;
-
-    tracing::info!(
-        adapter = adapter_name,
-        path = %output_dir.display(),
-        final_loss = format!("{last_loss:.6}"),
-        "SFT training complete"
-    );
-
-    Ok(output_dir)
+    result.map(|(dir, _)| dir)
 }
 
 /// Run GRPO training on the provided groups using the already-loaded model.
@@ -536,6 +789,7 @@ pub fn grpo_train(
     adapter_dir: &Path,
     adapter_name: &str,
     progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
 ) -> Result<PathBuf> {
     let device = weights.embed_tokens.device().clone();
     let backend = backend::for_device(&device);
@@ -553,13 +807,30 @@ pub fn grpo_train(
         "starting GRPO training"
     );
 
+    // Open replay state (writes request record + lineage.json *before* the
+    // optimizer step) and resolve the effective seed.
+    let (replay_state, effective_seed) = match replay_ctx.as_ref() {
+        Some(ctx) => {
+            let (state, seed) = open_replay_state(
+                ctx,
+                config.seed,
+                config.base_adapter.as_deref(),
+                adapter_dir,
+                adapter_name,
+            )?;
+            (Some(state), Some(seed))
+        }
+        None => (None, config.seed),
+    };
+
     // Initialize trainable LoRA parameters
-    let params = TrainableLoraParams::initialize(
+    let params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
         config.lora_rank,
         config.lora_alpha,
         &device,
+        effective_seed,
     )?;
 
     tracing::info!(
@@ -567,6 +838,7 @@ pub fn grpo_train(
         "initialized trainable LoRA parameters"
     );
 
+    let train_body = || -> Result<(PathBuf, f64)> {
     // Tokenize all completions: for each group, tokenize prompt + each completion
     let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
         .iter()
@@ -758,7 +1030,20 @@ pub fn grpo_train(
         "GRPO training complete"
     );
 
-    Ok(output_dir)
+        Ok((output_dir, last_loss))
+    };
+
+    let result = train_body();
+    if let Some(state) = replay_state {
+        let outcome = match &result {
+            Ok((_, loss)) => Ok(*loss),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        if let Err(e) = close_replay_state(state, outcome) {
+            tracing::warn!(error = %e, "failed to append GRPO replay outcome record");
+        }
+    }
+    result.map(|(dir, _)| dir)
 }
 
 /// Tokenized data for a single completion within a GRPO group.
@@ -2541,8 +2826,6 @@ mod tests {
         GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
         GpuLinearAttentionWeights,
     };
-    use rand::rngs::StdRng;
-    use rand::{RngExt, SeedableRng};
 
     /// Serializes tests in this binary that mutate process-global env vars
     /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
