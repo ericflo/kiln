@@ -300,3 +300,27 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-kvwrite-smoke-r1`, final loss
   `1.3608112335205078`, `/health` reported the active adapter, no-thinking
   chat returned `kiln amber`, and thinking chat emitted reasoning content.
+- Accepted CUDA default projection-original drop:
+  the training-capable CUDA server load no longer requires manual
+  `KILN_DROP_PROJECTION_ORIGINALS=1`. The old no-env default failed during
+  model load on this 16 GiB WSL RTX 4090 Laptop at layer 30 MLP `up_proj` with
+  `CUDA_ERROR_OUT_OF_MEMORY`; kernel logs showed no Linux OOM-killer event.
+- CUDA now drops large original projection tensors by default and keeps the
+  hot-path transposed caches that inference and SFT already use for shape
+  discovery and forward passes. Rollback/debug override:
+  `KILN_KEEP_PROJECTION_ORIGINALS=1`.
+- Candidate no-env server load reported `post_load_used_vram_gb=10.032775168`,
+  `kv_cache_gb=0.268435456`, `training_budget_gb=6.870269952`, and reached
+  `Ready on http://127.0.0.1:8420`.
+- No-env paged latency bench stayed in the manual-drop envelope:
+  previous manual drop `25.867788ms` / `38.658118 tok/s` / `9497 MB`;
+  default CUDA drop `25.721224ms` / `38.878399 tok/s` / `9497 MB`.
+- Projection-drop validation:
+  `cargo fmt --check`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`;
+  `cargo test -p kiln-train test_lora_initialize_uses_transposed_projection_shapes --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`.
+- Live no-env rank-1 SFT smoke auto-loaded `cuda-default-drop-smoke`, final
+  loss `2.7255642414093018`, `/health` reported the active adapter, and
+  adapter-backed chat returned `Kiln target model`.

@@ -1894,8 +1894,7 @@ struct ProjectionLoadCache {
 
 impl ProjectionLoadCache {
     fn new(device: &Device) -> Result<Self> {
-        let drop_projection_originals =
-            matches!(device, Device::Metal(_)) || drop_projection_originals_enabled();
+        let drop_projection_originals = projection_original_drop_enabled_for_device(device);
         if drop_projection_originals {
             Ok(Self {
                 drop_projection_originals,
@@ -1937,6 +1936,24 @@ fn drop_projection_originals_enabled() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
+}
+
+fn keep_projection_originals_enabled() -> bool {
+    matches!(
+        std::env::var("KILN_KEEP_PROJECTION_ORIGINALS")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
+}
+
+fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
+    !keep_projection_originals_enabled()
+        && (matches!(device, Device::Metal(_) | Device::Cuda(_))
+            || drop_projection_originals_enabled())
 }
 
 fn projection_tensors_for_load(

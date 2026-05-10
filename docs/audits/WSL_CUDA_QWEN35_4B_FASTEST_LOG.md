@@ -976,3 +976,71 @@ Live training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
 - `/health` reported `active_adapter="cuda-kvwrite-smoke-r1"`;
 - adapter-backed no-thinking chat returned `kiln amber`;
 - adapter-backed thinking chat emitted non-empty `reasoning_content`.
+
+## Follow-Up: Default CUDA Projection Original Drop
+
+The training-capable CUDA server load was rechecked after the KV-write work
+with no manual `KILN_DROP_PROJECTION_ORIGINALS=1`. On this 16 GiB WSL RTX 4090
+Laptop, the old CUDA default kept both the original projection tensors and the
+hot-path transposed caches resident and failed before the server became ready:
+
+```text
+Error: layer 30 mlp projection tensors
+
+Caused by:
+    0: up_proj projection tensors
+    1: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")
+```
+
+This was a CUDA allocation OOM during load, not a Linux OOM-killer event; the
+kernel log had no `out of memory` / `killed process` entries.
+
+The fix makes CUDA use the existing transposed-only projection load policy by
+default. LoRA/SFT already initialize projection dimensions from the transposed
+caches, and inference/training forward paths consume those caches, so the
+large original projection tensors are unnecessary residency. Metal already used
+this policy. Rollback/debug override:
+
+```text
+KILN_KEEP_PROJECTION_ORIGINALS=1
+```
+
+Candidate no-env CUDA server load on the same host:
+
+```text
+projection original tensors are dropped after transposed upload
+post_load_used_vram_gb=10.032775168
+model_gb=10.032775168
+kv_cache_gb=0.268435456
+training_budget_gb=6.870269952
+Ready on http://127.0.0.1:8420
+```
+
+The rebuilt no-env paged latency bench stayed in the previous manual-drop
+performance envelope:
+
+| path | prompt | output | mean ITL | decode tok/s | model VRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| previous manual drop baseline | 64 | 33 | 25.867788 ms | 38.658118 | 9497 MB |
+| default CUDA projection drop | 64 | 33 | 25.721224 ms | 38.878399 | 9497 MB |
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_lora_initialize_uses_transposed_projection_shapes --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+```
+
+Live no-env training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=1234`, `auto_load=true`;
+- adapter: `cuda-default-drop-smoke`;
+- job id: `0caee588-6a51-49f0-b1f5-d750025711b3`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=2.7255642414093018`;
+- `/health` reported `active_adapter="cuda-default-drop-smoke"`,
+  `adapters_loaded=1`, and zero queued/active training jobs;
+- adapter-backed no-thinking chat returned `Kiln target model`.
