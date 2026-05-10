@@ -1,0 +1,7 @@
+A126 rejected BF16 fused GDN RMSNorm decode candidate
+candidate_wall_seconds=13.396490
+default_wall_seconds=13.062450
+candidate_wall_regression_pct=2.557
+candidate_correct=true
+default_correct=true
+verdict=reject

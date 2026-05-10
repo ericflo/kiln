@@ -1,0 +1,10 @@
+{
+  "candidate_correct": true,
+  "candidate_speed_delta_pct": -2.493485949157981,
+  "candidate_wall_regression_pct": 2.5572506344117896,
+  "candidate_wall_seconds": 13.396489646009286,
+  "default_correct": true,
+  "default_wall_seconds": 13.062450059005641,
+  "reason": "BF16-to-F32 fused GDN RMSNorm route was correct but slower than same-binary default.",
+  "verdict": "reject"
+}

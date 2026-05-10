@@ -680,3 +680,20 @@ Additional validation after A125:
 - Interpretation: input Q/K/V upload is small; the next credible Vulkan target
   is persistent/resident recurrent state across live decode steps, not another
   per-token state format conversion.
+
+Additional validation after rejected A126:
+
+- Temporarily wired the generic fused gates+recurrent+gated-RMSNorm backend
+  hook back into GDN decode and added an opt-in Vulkan BF16-to-F32 fused route
+  behind `KILN_ENABLE_VULKAN_BF16_FUSED_GDN_DECODE_RMSNORM=1`.
+- Candidate source passed `cargo fmt --check`,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, full Vulkan GDN
+  parity (`35 passed`), and release Vulkan server build.
+- Candidate and same-binary default both confirmed GPU routing and exact
+  correctness: `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- The candidate regressed wall time: opt-in `13.396490s` vs same-binary default
+  `13.062450s` (`-2.557%` for the candidate).
+- Source change was removed after measurement; final source has no A126 runtime
+  changes and CUDA/Metal source paths are untouched.

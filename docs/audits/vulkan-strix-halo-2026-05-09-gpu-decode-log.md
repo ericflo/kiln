@@ -7814,3 +7814,74 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-response_*.sse`
+
+## A126 - Rejected BF16 fused GDN RMSNorm decode candidate
+
+Base commit: `c5a4bdd9 Profile Vulkan GDN recurrent kernel stages`
+
+Purpose:
+
+- Test whether the unused Vulkan fused gates+recurrent+gated-RMSNorm shader
+  could be profitably reintroduced for the current BF16 live decode path.
+- The temporary candidate wired the generic backend
+  `gdn_decode_gates_recurrent_rmsnorm` hook back into the GDN decode forward
+  path and added an opt-in Vulkan route,
+  `KILN_ENABLE_VULKAN_BF16_FUSED_GDN_DECODE_RMSNORM=1`, that cast BF16 live
+  tensors and recurrent state to F32 for the existing F32 fused shader.
+
+Validation while candidate source was present:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`35 passed`)
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Correctness:
+
+- Candidate and same-binary default both confirmed GPU routing:
+  `Mode: GPU inference`, Vulkan available, RADV STRIX_HALO selected, and live
+  greedy decode batcher backend `vulkan`.
+- Candidate and default both returned `8/8` HTTP 200, empty reasoning, and
+  visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Both runs used `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`,
+  `max_tokens=16`, `temperature=0`, streaming chat, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Performance:
+
+- Candidate opt-in wall time: `13.396490s`.
+- Same-binary default wall time: `13.062450s`.
+- Candidate delta: `-2.557%` versus default.
+
+Interpretation:
+
+- The fused shader was correct, but casting BF16 q/k/v/gates/state to F32 and
+  doubling recurrent-state transfer outweighed the saved split-stage work.
+- This matches A125's kernel-stage evidence: direct state movement and tensor
+  materialization dominate; a broader resident-state boundary is still the
+  credible target.
+- Source changes were removed after measurement. Final source has no A126
+  runtime changes, and CUDA/Metal source paths remain untouched.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-response_*.sse`
