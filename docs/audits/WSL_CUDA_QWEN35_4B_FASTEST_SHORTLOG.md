@@ -46,3 +46,19 @@ Date: 2026-05-09
     prompt;
   - `KILN_MTP_ARGMAX_FP32=1` stayed non-parity and measured 2.6259s.
 - No code shipped for those rejected paths; native MTP remains opt-in only.
+- Correction after stream-parity isolation: the bad `Thinking Process!!!!!!!!`
+  output was CUDA graph replay on the server graph-capturable stream, not MTP.
+  Native MTP matched eager/no-graph tokens for the parity prompt.
+- The apparent recent OOM was WSL/CUDA residency pressure and a CUDA allocation
+  OOM when projection originals were retained, not a Linux OOM-killer event.
+  Keep `KILN_DROP_PROJECTION_ORIGINALS=1` for Qwen3.5-4B on 16 GiB VRAM.
+- Accepted safety fix: CUDA graphs are now opt-in by default; enable only with
+  explicit `KILN_CUDA_GRAPHS=true`. Default eager/interleaved decode preserved
+  token parity. Training code and FLCE/checkpointing guards were not changed.
+- Validation:
+  `cargo fmt`;
+  `cargo test -p kiln-server config::tests::test_defaults --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln`;
+  default API parity probe without `KILN_CUDA_GRAPHS`;
+  `cargo test -p kiln-train test_flce_parity_vs_naive_loss --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`.

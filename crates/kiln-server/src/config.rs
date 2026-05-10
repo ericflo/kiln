@@ -358,7 +358,8 @@ impl Default for MemoryConfig {
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
             kv_cache_fp8: false,
-            cuda_graphs: true,
+            // Opt in until graph-capturable stream replay matches eager decode.
+            cuda_graphs: false,
         }
     }
 }
@@ -785,7 +786,7 @@ mod tests {
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
         assert!(!config.memory.kv_cache_fp8);
-        assert!(config.memory.cuda_graphs);
+        assert!(!config.memory.cuda_graphs);
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());

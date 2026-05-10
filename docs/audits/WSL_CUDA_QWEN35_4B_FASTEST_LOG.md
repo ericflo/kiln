@@ -252,3 +252,45 @@ Thinking Process:
 
 Because the continuation changed, native MTP remains opt-in only. The temporary
 auto-default router patch was reverted and no native-MTP default was shipped.
+
+## Follow-Up: CUDA Graph Correctness Correction
+
+The parity failure above was later narrowed to CUDA graph replay on the
+server's graph-capturable CUDA stream, not native MTP. A direct diagnostic with
+the server-style stream showed:
+
+- no-graph eager decode matched the expected reasoning prefix:
+  `Thinking Process:\n\n1.  **Analyze the Request:**`;
+- graph-enabled decode produced the bad `Thinking Process!!!!!!!!` prefix;
+- native MTP matched the eager/no-graph tokens for the same prompt.
+
+The memory failure observed during this investigation was WSL/CUDA residency
+pressure (`dxgkio_make_resident: Ioctl failed: -12`) and a CUDA allocation OOM
+while uploading Qwen3.5-4B when projection originals were retained. It was not
+a Linux OOM-killer event in `journalctl`/`dmesg`. The working 16 GiB server
+profile still requires `KILN_DROP_PROJECTION_ORIGINALS=1`.
+
+Accepted safety fix: make CUDA graphs opt-in by default
+(`MemoryConfig::default().cuda_graphs = false`). `KILN_CUDA_GRAPHS=true` still
+exists for experiments, but the default server path now uses eager/interleaved
+decode until graph-capturable stream replay has a token-parity fix. This leaves
+the training path and its FLCE/checkpointing memory guards unchanged.
+
+Validation after the default change:
+
+```bash
+cargo fmt
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-server config::tests::test_defaults --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo build --quiet --release --features cuda --bin kiln
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-train test_flce_parity_vs_naive_loss --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+```
+
+The default server was started without `KILN_CUDA_GRAPHS` and with the accepted
+16 GiB WSL CUDA memory profile. `/health` reported `blocks_free=512` and
+`training_budget_gb=6.870269952`. The 32-token greedy parity prompt returned
+the expected eager prefix:
+
+```text
+Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A blue cube on a desk.\n    *   Constraint:
+```
