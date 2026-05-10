@@ -45,6 +45,11 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
+fn cuda_direct_paged_decode_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE").is_ok())
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -6340,7 +6345,12 @@ fn try_flash_attn_paged_decode(
     // pool. In that case we can bypass the paged gather path entirely and feed
     // the fused prefill kernel a direct `[1, total_seq_len, kv_heads, head_dim]`
     // narrow of the live K/V window.
-    if !paged_cache.is_fp8() {
+    // CUDA has a native GQA paged-decode kernel. The contiguous branch below
+    // falls back to prefill attention on CUDA, expanding K/V heads and losing
+    // time on the single-request decode path.
+    let use_cuda_direct_paged_decode =
+        backend.name() == "cuda" && !cuda_direct_paged_decode_disabled();
+    if !paged_cache.is_fp8() && !use_cuda_direct_paged_decode {
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {

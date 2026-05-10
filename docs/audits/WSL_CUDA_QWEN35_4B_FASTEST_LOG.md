@@ -797,3 +797,62 @@ On this 16 GiB GPU, a conservative server smoke without
 loading Qwen3.5-4B projection tensors. The accepted live-training smoke uses
 the production memory setting above; training itself completed through the real
 HTTP SFT queue and adapter hot-load path.
+
+## Follow-Up: Route CUDA Single-Request Decode Through Paged FA
+
+The post-RMSNorm profile showed CUDA full-attention decode taking the
+contiguous-slot branch, but CUDA does not implement
+`flash_attn_paged_decode_contiguous`. That branch then fell back to prefill
+FlashAttention, including GQA K/V head expansion. CUDA already has a native
+paged-decode FlashAttention path that consumes the paged KV pool directly, so
+the single-request CUDA route now bypasses the contiguous prefill fallback and
+continues to the paged-decode kernel. Metal keeps its contiguous specialized
+path.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, paged latency bench, 64 prompt tokens,
+33 generated tokens, one warmup run per measurement:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE=1` | 27.112, 27.283, 27.155 | 27.183 ms | 36.787 |
+| default CUDA direct paged decode | 26.774, 26.718, 26.730 | 26.740 ms | 37.397 |
+
+Average decode ITL improved by 1.6% on this WSL 16 GiB CUDA host.
+
+The route profile changed as intended: full-attention decode rows now log
+`decode_attn_paged` instead of `decode_attn_fallback` on CUDA single-request
+paged decode. The candidate profiled run measured 26.7 ms mean ITL
+(`37.5 tok/s`) with the direct paged route.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-cuda-direct-paged-smoke-20260510`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9789`, `auto_load=true`;
+- job id: `9c771f91-ce5f-44e3-9314-cd881a57ca69`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.590428352355957`;
+- `/health` reported `active_adapter="cuda-direct-paged-smoke-r1"`;
+- adapter-backed no-thinking chat returned `kiln silver`;
+- adapter-backed thinking chat emitted non-empty `reasoning_content`.
+
+A debug CUDA-feature model unit test was intentionally aborted during
+validation because it started rebuilding flash-attn with debug `-G` flags, the
+same compile mode that can exhaust memory on this WSL host. The release CUDA
+bench and server smoke above exercised the changed route without that OOM-prone
+debug rebuild.

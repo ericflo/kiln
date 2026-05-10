@@ -236,3 +236,23 @@ Date: 2026-05-09
   `gdn-qk-recur-rmsnorm-smoke-r3`, final loss `1.6381032466888428`,
   `/health` reported the active adapter, no-thinking chat returned
   `kiln copper`, and thinking chat emitted reasoning content.
+- Accepted CUDA direct paged decode routing:
+  single-request CUDA decode now bypasses the contiguous-slot prefill fallback
+  and reaches the native paged FlashAttention decode kernel, avoiding GQA K/V
+  expansion on full-attention decode. Metal keeps its contiguous specialized
+  path. Rollback: `KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `27.112`, `27.283`, `27.155` ms averaged
+  `27.183ms` / `36.787 tok/s`; default direct-paged runs `26.774`,
+  `26.718`, `26.730` ms averaged `26.740ms` / `37.397 tok/s`, a 1.6%
+  decode ITL win.
+- Route profile confirmed CUDA full-attention decode logs
+  `decode_attn_paged` instead of `decode_attn_fallback`; candidate profile
+  measured `26.7ms` mean ITL / `37.5 tok/s`.
+- Direct-paged validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `cuda-direct-paged-smoke-r1`, final loss
+  `1.590428352355957`, `/health` reported the active adapter, no-thinking
+  chat returned `kiln silver`, and thinking chat emitted reasoning content.
