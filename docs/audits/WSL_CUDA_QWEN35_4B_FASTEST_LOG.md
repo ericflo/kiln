@@ -638,3 +638,54 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="cuda-qk-norm-recurrent-smoke"`;
 - adapter-backed `/v1/chat/completions` requests completed with and without
   thinking enabled, including a no-thinking response of `kiln green`.
+
+## Follow-Up: CUDA Fused Attention Output Gate
+
+After folded GDN QK norm + recurrent, the attention output gate remained as
+two Candle ops on CUDA decode: sigmoid over the gate projection followed by an
+elementwise multiply with the attention output. CUDA now has a forward-only
+bf16 kernel for `x * sigmoid(gate)`, selected only for matching contiguous CUDA
+bf16 tensors and only when neither tensor is tracked by Candle autograd.
+Training and unsupported paths stay on the existing differentiable Candle ops.
+
+Rollback:
+
+```text
+KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL=1` | 33.144, 34.127, 33.457 | 33.576 ms | 29.783 |
+| default fused attention gate | 33.064, 33.057, 32.802 | 32.974 ms | 30.327 |
+
+Average decode ITL improved by 1.8% on this WSL 16 GiB CUDA host.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-rmsnorm-kernel sigmoid_mul_parity_qwen_attn_gate_shape --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The new CUDA kernel parity test uses Qwen attention-gate shape `[1, 2, 4096]`
+and checks the fused bf16 result against the existing f32-reference
+sigmoid/multiply path cast back to bf16.
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-attn-sigmoid-mul-smoke-20260510`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9234`, `auto_load=true`;
+- job id: `ed56d6c3-efe1-4102-babf-6f811c911a59`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.5107368230819702`;
+- `/health` reported `active_adapter="attn-sigmoid-mul-smoke-r1"`;
+- adapter-backed `/v1/chat/completions` requests completed with and without
+  thinking enabled, including a no-thinking response of `kiln amber`.

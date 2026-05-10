@@ -57,6 +57,12 @@ fn cuda_fused_mlp_silu_mul_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -490,6 +496,19 @@ fn attention_output_gate_decode_if(
             kiln_nvtx::range!(c"kiln/attn/output_gate_fused");
             return crate::backend::metal::metal_attn_gate_sigmoid_mul_bf16(&attn_output, gate)
                 .context("metal attn gate sigmoid/mul failed");
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        if !cuda_fused_attn_sigmoid_mul_disabled()
+            && !attn_output.track_op()
+            && !gate.track_op()
+            && kiln_rmsnorm_kernel::supports_sigmoid_mul(&attn_output, gate)
+        {
+            kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused");
+            return kiln_rmsnorm_kernel::fused_sigmoid_mul(&attn_output, gate)
+                .context("cuda attn gate sigmoid/mul failed");
         }
     }
 

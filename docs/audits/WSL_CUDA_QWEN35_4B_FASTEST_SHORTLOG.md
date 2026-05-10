@@ -179,3 +179,21 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-qk-norm-recurrent-smoke`, final
   loss `1.5285838842391968`, `/health` reported the active adapter, and
   adapter-backed chat completed.
+- Accepted CUDA fused attention output gate:
+  CUDA now fuses bf16 `x * sigmoid(gate)` for matching contiguous inference
+  tensors after attention. The model route is forward-only and gated off for
+  autograd-tracked tensors, so training keeps the existing Candle path.
+  Rollback: `KILN_DISABLE_FUSED_CUDA_ATTN_SIGMOID_MUL=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `33.144`, `34.127`, `33.457` ms averaged
+  `33.576ms` / `29.783 tok/s`; default fused-attn-gate runs `33.064`,
+  `33.057`, `32.802` ms averaged `32.974ms` / `30.327 tok/s`, a 1.8%
+  decode ITL win.
+- Fused-attn-gate validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-rmsnorm-kernel sigmoid_mul_parity_qwen_attn_gate_shape --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `attn-sigmoid-mul-smoke-r1`, final loss
+  `1.5107368230819702`, `/health` reported the active adapter, and
+  adapter-backed chat completed with and without thinking enabled.
