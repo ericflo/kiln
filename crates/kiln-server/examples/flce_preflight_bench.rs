@@ -183,6 +183,7 @@ fn run_one(
         output_name: Some(format!("flce-preflight-T{target_t}")),
         auto_load: false,
         checkpoint_interval: None,
+        seed: None,
     };
     let adapter_dir = std::env::temp_dir().join("kiln-flce-preflight");
     let _ = std::fs::create_dir_all(&adapter_dir);
@@ -218,6 +219,7 @@ fn run_one(
         tokenizer,
         &adapter_dir,
         &format!("flce-preflight-T{target_t}"),
+        None,
         None,
     );
     let step_secs = start.elapsed().as_secs_f64();

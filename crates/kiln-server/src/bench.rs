@@ -2196,6 +2196,7 @@ fn bench_training(
         output_name: Some("bench-adapter".to_string()),
         auto_load: false,
         checkpoint_interval: None,
+        seed: None,
     };
 
     let adapter_dir = std::env::temp_dir().join("kiln-bench-adapters");
@@ -2218,6 +2219,7 @@ fn bench_training(
         &adapter_dir,
         "bench-adapter",
         progress_cb,
+        None,
     );
     let elapsed = start.elapsed();
 

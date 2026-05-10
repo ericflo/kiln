@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
-use kiln_train::{GrpoRequest, SftRequest, TrainingState};
+use kiln_train::{self, GrpoRequest, SftRequest, TrainingState};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -309,12 +309,22 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     // Apply server-level checkpoint_interval default if not set per-job
     let server_checkpoint_interval = state.checkpoint_interval;
 
+    let base_model = trainer::default_base_model(&state.model_config);
+
     // Run the actual training under GPU write lock
     let result: Result<PathBuf, String> = match entry.job {
         QueuedJob::Sft(mut req) => {
             if req.config.checkpoint_interval.is_none() {
                 req.config.checkpoint_interval = server_checkpoint_interval;
             }
+            let request_body = serde_json::to_value(&req)
+                .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize SftRequest"}));
+            let replay_ctx = trainer::ReplayContext {
+                request_id: job_id.clone(),
+                kind: kiln_train::ReplayKind::Sft,
+                request_body,
+                base_model: base_model.clone(),
+            };
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::sft_train(
@@ -326,6 +336,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &state.adapter_dir,
                 &adapter_name,
                 Some(progress_cb),
+                Some(replay_ctx),
             )
             .map_err(|e| format!("{e:#}"))
         }
@@ -333,6 +344,14 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             if req.config.checkpoint_interval.is_none() {
                 req.config.checkpoint_interval = server_checkpoint_interval;
             }
+            let request_body = serde_json::to_value(&req)
+                .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize GrpoRequest"}));
+            let replay_ctx = trainer::ReplayContext {
+                request_id: job_id.clone(),
+                kind: kiln_train::ReplayKind::Grpo,
+                request_body,
+                base_model: base_model.clone(),
+            };
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             trainer::grpo_train(
@@ -344,6 +363,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &state.adapter_dir,
                 &adapter_name,
                 Some(progress_cb),
+                Some(replay_ctx),
             )
             .map_err(|e| format!("{e:#}"))
         }
