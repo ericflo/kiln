@@ -1,5 +1,19 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.2.15 — 2026-05-10
+
+Aligned cut with kiln-v0.2.15 server. No desktop source changes since
+desktop-v0.2.14; this release re-pins the bundled server payload to the
+latest server cut so installers ship the new CUDA decode fusions and the
+Metal build fix.
+
+### Server payload
+This cut ships with the kiln-v0.2.15 server binary, which adds a round of
+CUDA decode-path fusion (combined QKV / GDN AB projections, fused decode
+QKV prep, fused GDN decode RMSNorm, fused LoRA decode add, fast-path paged
+KV writes, paged-attention decode routing) and fixes the macOS Metal build.
+See [CHANGELOG.md](../CHANGELOG.md) for the full server changelog.
+
 ## desktop-v0.2.14 — 2026-05-10
 
 Coordinated release aligned with kiln-v0.2.14 server. Re-aligns the desktop
