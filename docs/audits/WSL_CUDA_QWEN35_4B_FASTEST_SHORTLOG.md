@@ -371,3 +371,29 @@ Date: 2026-05-09
 - Live no-env rank-1 SFT smoke auto-loaded `cuda-gdn-ab-smoke`, final loss
   `1.1042242050170898`, `/health` reported `training_budget_gb=6.870269952`
   and the active adapter, and adapter-backed chat returned `kiln gdn ab`.
+- Accepted CUDA forced batch-2 GDN row-loop guard:
+  when CUDA GDN decode is explicitly forced above batch 1, the live scheduler
+  now keeps the admitted batch but executes each row through the known-good
+  single-row paged greedy path instead of the slow true batched GDN path.
+  Full-attention-only CUDA models keep true batching, and training is untouched
+  because this route is inference-only. Rollback:
+  `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP=1`.
+- Same-binary WSL CUDA live streaming A/B, four unique concurrent requests,
+  `max_tokens=32`, `KILN_DECODE_BATCH_MAX=2`,
+  `KILN_DECODE_BATCH_WAIT_US=50000`, `KILN_DECODE_BATCH_MIXED_SEQ=1`:
+  rollback true batched GDN took `18.627071s`; default row-loop took
+  `3.832016s`, with `124` rows, `max_observed_batch=2`, and zero failed jobs
+  in both runs. That is a 79.4% wall-time reduction, or 4.86x faster, for the
+  forced batch-2 workload.
+- Profile confirmation emitted
+  `stage=cuda_gdn_row_loop_forward batch=2` for three profiled candidate
+  batches. Validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded `cuda-rowloop-smoke`, final loss
+  `1.6998780965805054`, and the server log reported `SFT training complete`
+  with no `CUDA_ERROR_OUT_OF_MEMORY`.

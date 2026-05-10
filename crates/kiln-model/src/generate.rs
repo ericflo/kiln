@@ -104,6 +104,11 @@ fn profile_decode_batcher_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_DECODE_BATCHER_STAGES"))
 }
 
+fn cuda_gdn_batched_decode_row_loop_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP").is_err())
+}
+
 fn finish_decode_batcher_stage_profile(
     stage: &str,
     batch: usize,
@@ -2525,6 +2530,41 @@ impl ModelRunner {
             finish_decode_batcher_stage_profile("single_forward", batch, stage_start);
             finish_decode_batcher_stage_profile("decode_total", batch, total_start);
             return Ok(vec![token]);
+        }
+
+        if self.backend.name() == "cuda"
+            && has_linear_layers
+            && cuda_gdn_batched_decode_row_loop_enabled()
+        {
+            let stage_start = profile_stages.then(std::time::Instant::now);
+            let mut tokens = Vec::with_capacity(batch);
+            for row in 0..batch {
+                let linear_state = Some(&mut **linear_states.get_mut(row).with_context(|| {
+                    format!("missing linear state for CUDA row-loop decode row {row}")
+                })?);
+                let token = {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    model_forward_paged_next_token_greedy(
+                        &*self.backend,
+                        input_tokens[row],
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_tables[row],
+                        seq_lens[row],
+                        linear_state,
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                    .with_context(|| {
+                        format!("CUDA row-loop greedy decode row {row} forward pass (paged) failed")
+                    })?
+                };
+                tokens.push(token);
+            }
+            finish_decode_batcher_stage_profile("cuda_gdn_row_loop_forward", batch, stage_start);
+            finish_decode_batcher_stage_profile("decode_total", batch, total_start);
+            return Ok(tokens);
         }
 
         let stage_start = profile_stages.then(std::time::Instant::now);

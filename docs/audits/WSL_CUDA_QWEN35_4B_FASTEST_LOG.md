@@ -1165,3 +1165,64 @@ Live no-env server load + training + auto-loaded LoRA smoke on the rebuilt
 - `/health` reported `active_adapter="cuda-gdn-ab-smoke"`,
   `adapters_loaded=3`, and zero queued/active training jobs;
 - adapter-backed chat returned `kiln gdn ab`.
+
+## Follow-Up: Row-Loop Forced CUDA GDN Decode Batches
+
+The default CUDA live decode batcher still caps `max_batch` at 1 unless
+`KILN_DECODE_BATCH_MAX` is explicitly set, because the true batched GDN path is
+much slower on this 16 GiB WSL CUDA host. For forced batch experiments and
+manual overrides, CUDA GDN decode now keeps the scheduler-visible batch but
+executes each row through the same single-row paged greedy path used by the
+default scheduler. Full-attention-only CUDA models still use the true batched
+path.
+
+Training is unaffected: this route lives in the live inference scheduler and
+calls the forward-only greedy decode helper, while SFT still uses the
+autograd-tracked training code path. Rollback:
+
+```text
+KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP=1
+```
+
+Same-binary WSL RTX 4090 Laptop live A/B, four concurrent unique streaming
+requests, `max_tokens=32`, `KILN_DECODE_BATCH_MAX=2`,
+`KILN_DECODE_BATCH_WAIT_US=50000`, `KILN_DECODE_BATCH_MIXED_SEQ=1`, no stage
+profiling:
+
+| path | wall seconds | chunk events | decode rows | batches | max observed batch |
+| --- | ---: | --- | ---: | ---: | ---: |
+| rollback, true CUDA batched GDN path | 18.627071 | 34, 34, 34, 34 | 124 | 62 | 2 |
+| default CUDA GDN row loop | 3.832016 | 34, 34, 34, 34 | 124 | 63 | 2 |
+
+For the forced batch-2 workload, wall time improved by 79.4%, or 4.86x. The
+candidate kept the batcher exercising real batch-2 admission
+(`max_observed_batch=2`) and reported zero failed jobs.
+
+A short profiled candidate run confirmed the intended branch:
+
+```text
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=71.948
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=56.233
+kiln_profile_decode_batcher_stage stage=cuda_gdn_row_loop_forward batch=2 elapsed_ms=55.543
+```
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=1234`, `auto_load=true`;
+- adapter: `cuda-rowloop-smoke`;
+- job id: `ff1fb8b6-2bc1-45cd-aea4-9ca7cc0247e6`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.6998780965805054`;
+- server log reported `SFT training complete` and `auto-loaded trained adapter`;
+- no `CUDA_ERROR_OUT_OF_MEMORY` appeared in the training-smoke server log.
