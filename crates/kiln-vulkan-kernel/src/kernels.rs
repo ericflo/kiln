@@ -5202,7 +5202,6 @@ pub fn run_compute_pipeline(
     workgroup_count: u32,
 ) -> Result<()> {
     let device = vk_device.device();
-    let queue = vk_device.queue();
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         spirv,
         total_bindings,
@@ -5296,14 +5295,7 @@ pub fn run_compute_pipeline(
             .context("failed to end command buffer")?;
     }
 
-    unsafe {
-        device
-            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit")?;
-        device
-            .queue_wait_idle(queue)
-            .context("failed to wait for queue")?;
-    }
+    vk_device.submit_and_wait(cmd, "run_compute_pipeline")?;
 
     // Cleanup
     unsafe {
@@ -5329,7 +5321,6 @@ fn run_two_stage_compute_pipeline(
     second_workgroup_count: u32,
 ) -> Result<()> {
     let device = vk_device.device();
-    let queue = vk_device.queue();
     let (first_set_layout, first_layout, first_pipeline) = vk_device
         .get_or_create_compute_pipeline(
             first_spirv,
@@ -5478,13 +5469,8 @@ fn run_two_stage_compute_pipeline(
             .context("failed to end two-stage command buffer")?;
     }
 
+    vk_device.submit_and_wait(cmd, "run_two_stage_compute_pipeline")?;
     unsafe {
-        device
-            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit two-stage compute dispatch")?;
-        device
-            .queue_wait_idle(queue)
-            .context("failed to wait for two-stage queue")?;
         device
             .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
             .context("failed to reset two-stage transient descriptor pool")?;
@@ -5511,7 +5497,6 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
     second_workgroup_count: u32,
 ) -> Result<Vec<u8>> {
     let device = vk_device.device();
-    let queue = vk_device.queue();
     let host_visible_mt = vk_device.host_visible_mem_type();
     let upload_stage =
         VulkanBuffer::create_host_visible(device, host_visible_mt, upload_data.len() as u64)
@@ -5696,13 +5681,8 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
             .context("failed to end transfer two-stage command buffer")?;
     }
 
+    vk_device.submit_and_wait(cmd, "run_two_stage_compute_pipeline_with_transfer_readback")?;
     unsafe {
-        device
-            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit transfer two-stage compute dispatch")?;
-        device
-            .queue_wait_idle(queue)
-            .context("failed to wait for transfer two-stage queue")?;
         device
             .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
             .context("failed to reset transfer two-stage transient descriptor pool")?;
@@ -5728,7 +5708,6 @@ fn run_two_stage_compute_pipeline_with_transfers(
     second_workgroup_count: u32,
 ) -> Result<Vec<Vec<u8>>> {
     let device = vk_device.device();
-    let queue = vk_device.queue();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     let mut upload_stages = Vec::with_capacity(uploads.len());
@@ -5932,13 +5911,8 @@ fn run_two_stage_compute_pipeline_with_transfers(
             .context("failed to end transfer two-stage command buffer")?;
     }
 
+    vk_device.submit_and_wait(cmd, "run_two_stage_compute_pipeline_with_transfers")?;
     unsafe {
-        device
-            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit transfer two-stage compute dispatch")?;
-        device
-            .queue_wait_idle(queue)
-            .context("failed to wait for transfer two-stage queue")?;
         device
             .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
             .context("failed to reset transfer two-stage transient descriptor pool")?;

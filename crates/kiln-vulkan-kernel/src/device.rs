@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, anyhow};
 use ash::vk;
 use std::collections::HashMap;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -48,6 +49,12 @@ pub struct VulkanDevice {
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
     transient_command_pool: Mutex<vk::CommandPool>,
     transient_descriptor_pool: Mutex<vk::DescriptorPool>,
+    /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
+    /// Once true, subsequent dispatches short-circuit with a clear error
+    /// instead of returning cryptic submit failures forever — the underlying
+    /// `VkDevice` is unrecoverable per the Vulkan spec, so the only fix is
+    /// to restart the kiln server.
+    terminally_lost: AtomicBool,
 }
 
 impl std::fmt::Debug for VulkanDevice {
@@ -154,7 +161,41 @@ impl VulkanDevice {
             .api_version(vk::make_api_version(0, 1, 2, 0))
             .build();
 
-        let instance_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
+        // Optional: enable Vulkan validation layers when KILN_VULKAN_VALIDATION
+        // is set (truthy values: 1, true, on, yes). Useful for diagnosing
+        // OOB descriptor access / shader hangs that trigger driver hard
+        // recoveries (e.g. radv/amdgpu "context is lost" — see
+        // VK_ERROR_DEVICE_LOST handling in submit_and_wait()).
+        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
+        let mut layer_ptrs: Vec<*const i8> = Vec::new();
+        if validation_requested() {
+            let layers = entry
+                .enumerate_instance_layer_properties()
+                .context("failed to enumerate Vulkan instance layers")?;
+            let available = layers.iter().any(|l| {
+                let name = unsafe { CStr::from_ptr(l.layer_name.as_ptr()) };
+                name == validation_layer.as_c_str()
+            });
+            if available {
+                layer_ptrs.push(validation_layer.as_ptr());
+                tracing::info!(
+                    layer = "VK_LAYER_KHRONOS_validation",
+                    "enabling Vulkan validation layer (KILN_VULKAN_VALIDATION set)"
+                );
+            } else {
+                tracing::warn!(
+                    "KILN_VULKAN_VALIDATION set but VK_LAYER_KHRONOS_validation \
+                     is not installed; install the Vulkan SDK / validation \
+                     layer package and try again"
+                );
+            }
+        }
+
+        let mut instance_info_builder = vk::InstanceCreateInfo::builder().application_info(&app_info);
+        if !layer_ptrs.is_empty() {
+            instance_info_builder = instance_info_builder.enabled_layer_names(&layer_ptrs);
+        }
+        let instance_info = instance_info_builder;
 
         let instance = unsafe {
             entry
@@ -278,6 +319,7 @@ impl VulkanDevice {
             pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
+            terminally_lost: AtomicBool::new(false),
         })
     }
 
@@ -522,15 +564,119 @@ impl VulkanDevice {
     }
 
     pub(crate) fn transient_command_pool(&self) -> Result<MutexGuard<'_, vk::CommandPool>> {
+        self.check_alive()?;
         self.transient_command_pool
             .lock()
             .map_err(|_| anyhow!("Vulkan command pool mutex poisoned"))
     }
 
     pub(crate) fn transient_descriptor_pool(&self) -> Result<MutexGuard<'_, vk::DescriptorPool>> {
+        self.check_alive()?;
         self.transient_descriptor_pool
             .lock()
             .map_err(|_| anyhow!("Vulkan descriptor pool mutex poisoned"))
+    }
+
+    /// True once any submit/wait has observed `VK_ERROR_DEVICE_LOST`.
+    /// Subsequent dispatches will fail fast with a clear error rather than
+    /// retry a permanently-dead device.
+    pub fn is_terminally_lost(&self) -> bool {
+        self.terminally_lost.load(Ordering::SeqCst)
+    }
+
+    /// Mark the device as terminally lost. The first transition logs an
+    /// error so the operator sees the event in the server log; subsequent
+    /// calls are no-ops. Public so non-helper submit sites in this crate
+    /// (or downstream) can flag a device-lost after observing it directly.
+    pub fn mark_terminally_lost(&self) {
+        if !self.terminally_lost.swap(true, Ordering::SeqCst) {
+            tracing::error!(
+                device = %self.device_name,
+                vendor = self.vendor_string(),
+                "vulkan device terminally lost (VK_ERROR_DEVICE_LOST). \
+                 The VkDevice is unrecoverable per the Vulkan spec; restart \
+                 the kiln server to recover. Subsequent inference requests \
+                 will return an error until the server is restarted."
+            );
+        }
+    }
+
+    /// Short-circuit error returned by helpers when the device is already
+    /// terminally lost. Centralized so the message stays consistent.
+    pub fn check_alive(&self) -> Result<()> {
+        if self.is_terminally_lost() {
+            anyhow::bail!(
+                "vulkan device terminally lost (VK_ERROR_DEVICE_LOST observed earlier). \
+                 Restart the kiln server to recover. \
+                 To diagnose the original GPU fault, set KILN_VULKAN_VALIDATION=1 \
+                 and reproduce — validation layers will surface OOB descriptor \
+                 access or shader timeouts before the driver hard-recovers."
+            );
+        }
+        Ok(())
+    }
+
+    /// Submit a single command buffer to the compute queue and wait for
+    /// completion, with `VK_ERROR_DEVICE_LOST` detection. On device-lost
+    /// from either the submit or the wait, set the sticky flag and return
+    /// a structured error; the caller must propagate so subsequent
+    /// dispatches short-circuit via `check_alive()`.
+    ///
+    /// `label` is interpolated into the error message and identifies the
+    /// originating dispatch (e.g. "causal_conv1d_prefill cached-weight").
+    pub fn submit_and_wait(&self, cmd: vk::CommandBuffer, label: &str) -> Result<()> {
+        self.check_alive()?;
+        let cmds = [cmd];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&cmds).build();
+        let submit_res = unsafe {
+            self.device
+                .queue_submit(self.queue, &[submit_info], vk::Fence::null())
+        };
+        match submit_res {
+            Ok(()) => {}
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.mark_terminally_lost();
+                anyhow::bail!(self.terminally_lost_message(label, "queue_submit"));
+            }
+            Err(e) => {
+                return Err(anyhow!("vulkan queue_submit failed ({label}): {:?}", e));
+            }
+        }
+        let wait_res = unsafe { self.device.queue_wait_idle(self.queue) };
+        match wait_res {
+            Ok(()) => {}
+            Err(vk::Result::ERROR_DEVICE_LOST) => {
+                self.mark_terminally_lost();
+                anyhow::bail!(self.terminally_lost_message(label, "queue_wait_idle"));
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "vulkan queue_wait_idle failed ({label}): {:?}",
+                    e
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn terminally_lost_message(&self, label: &str, op: &str) -> String {
+        format!(
+            "vulkan device terminally lost during {op} ({label}): \
+             VK_ERROR_DEVICE_LOST. The VkDevice is unrecoverable per the \
+             Vulkan spec; restart the kiln server to recover. Set \
+             KILN_VULKAN_VALIDATION=1 to enable validation layers and \
+             capture the originating fault on the next reproduction."
+        )
+    }
+}
+
+fn validation_requested() -> bool {
+    match std::env::var("KILN_VULKAN_VALIDATION") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "" | "0" | "false" | "off" | "no")
+        }
+        Err(_) => false,
     }
 }
 
@@ -619,5 +765,66 @@ mod tests {
 
         crate::kernels::prewarm_builtin_pipelines(&dev).unwrap();
         drop(dev);
+    }
+
+    #[test]
+    fn test_terminally_lost_flag_short_circuits_dispatch() {
+        // Skips when the host has no Vulkan GPU (e.g. CI without a runner
+        // image that exposes one). The flag itself is a pure AtomicBool, so
+        // the behavior we want to lock down — that mark_terminally_lost()
+        // makes check_alive() and the transient pool accessors return an
+        // error mentioning "terminally lost" — is verifiable on any host
+        // that can construct a VulkanDevice.
+        let Ok(dev) = VulkanDevice::new() else {
+            return;
+        };
+        assert!(!dev.is_terminally_lost(), "fresh device should be alive");
+        assert!(dev.check_alive().is_ok());
+        dev.mark_terminally_lost();
+        assert!(dev.is_terminally_lost());
+        let err = dev.check_alive().unwrap_err().to_string();
+        assert!(
+            err.contains("terminally lost"),
+            "expected check_alive error to mention 'terminally lost', got: {err}"
+        );
+        // transient_command_pool / transient_descriptor_pool must also
+        // short-circuit, otherwise dispatches that go straight through them
+        // would still try to submit to a dead device.
+        assert!(dev.transient_command_pool().is_err());
+        assert!(dev.transient_descriptor_pool().is_err());
+        // Marking again must be idempotent (no panic, flag stays true).
+        dev.mark_terminally_lost();
+        assert!(dev.is_terminally_lost());
+    }
+
+    #[test]
+    fn test_validation_requested_env_parsing() {
+        // Pure parser test, no Vulkan involvement.
+        let cases = [
+            ("", false),
+            ("0", false),
+            ("false", false),
+            ("FALSE", false),
+            ("off", false),
+            ("no", false),
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("on", true),
+        ];
+        for (raw, expected) in cases {
+            // SAFETY: tests in the same module run serially under the
+            // default cargo-test runner; use a fixed env var name here so
+            // we don't collide with the real KILN_VULKAN_VALIDATION at
+            // runtime.
+            unsafe { std::env::set_var("KILN_VULKAN_VALIDATION", raw) };
+            assert_eq!(
+                validation_requested(),
+                expected,
+                "validation_requested({raw:?}) expected {expected}"
+            );
+        }
+        unsafe { std::env::remove_var("KILN_VULKAN_VALIDATION") };
+        assert!(!validation_requested());
     }
 }
