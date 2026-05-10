@@ -4828,7 +4828,7 @@ fn gated_deltanet_forward_decode_if(
                     seq_len,
                     stage_profile,
                 )?;
-                Some((q, k, v, z, false))
+                Some((q, k, v, z, false, false))
             } else {
                 None
             }
@@ -4884,7 +4884,7 @@ fn gated_deltanet_forward_decode_if(
                     seq_len,
                     stage_profile,
                 )?;
-                Some((q, k, v, z, false))
+                Some((q, k, v, z, false, false))
             } else {
                 None
             }
@@ -4895,7 +4895,9 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
-    let (q, k, v, z, qk_expanded) = if let Some(fused) = fused_decode_qkv_conv_norm {
+    let (q, k, v, z, qk_expanded, qk_norm_deferred_to_recurrent) = if let Some(fused) =
+        fused_decode_qkv_conv_norm
+    {
         fused
     } else if let Some(fused) = fused_prefill_qkv_conv_split {
         fused
@@ -5038,13 +5040,28 @@ fn gated_deltanet_forward_decode_if(
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-        let (q, k, qk_expanded) = {
+        let defer_cuda_qk_norm_to_recurrent = {
+            #[cfg(feature = "cuda")]
+            {
+                seq_len == 1
+                    && !capture_b11_taps
+                    && !capture_c41_taps
+                    && fused_decode_unexpanded_qk
+                    && input_dtype == DType::BF16
+                    && backend.supports_gdn_decode_qk_norm_gates_recurrent()
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                false
+            }
+        };
+        let (q, k, qk_expanded, qk_norm_deferred) = {
             #[cfg(feature = "metal")]
             {
                 if use_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, false)
+                    (q, k, false, false)
                 } else if input_dtype == DType::BF16
                     && gqa_ratio > 1
                     && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
@@ -5058,7 +5075,7 @@ fn gated_deltanet_forward_decode_if(
                         1e-6,
                     )
                     .context("metal gdn qk_norm gqa kernel failed")
-                    .map(|(q, k)| (q, k, true))?
+                    .map(|(q, k)| (q, k, true, false))?
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -5080,7 +5097,7 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true)
+                    (q, k, true, false)
                 }
             }
             #[cfg(not(feature = "metal"))]
@@ -5116,12 +5133,15 @@ fn gated_deltanet_forward_decode_if(
                     }
                 };
 
-                if fused_decode_unexpanded_qk {
+                if defer_cuda_qk_norm_to_recurrent {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_deferred");
+                    (q, k, false, true)
+                } else if fused_decode_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, false)
+                    (q, k, false, false)
                 } else if let Some((q, k)) = fused_gqa {
-                    (q, k, true)
+                    (q, k, true, false)
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -5143,7 +5163,7 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true)
+                    (q, k, true, false)
                 }
             }
         };
@@ -5154,7 +5174,7 @@ fn gated_deltanet_forward_decode_if(
             seq_len,
             stage_profile,
         )?;
-        (q, k, v, z, qk_expanded)
+        (q, k, v, z, qk_expanded, qk_norm_deferred)
     };
 
     // Phase B11b taps: `gdn_qk_norm_q` / `gdn_qk_norm_k`. Both are post-L2
@@ -5255,7 +5275,49 @@ fn gated_deltanet_forward_decode_if(
             && !capture_b11_taps
             && !capture_c41_taps
         {
-            if let Some(out) = backend.gdn_decode_gates_recurrent(
+            if qk_norm_deferred_to_recurrent {
+                kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur");
+                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                let out = if let Some(out) = backend.gdn_decode_qk_norm_gates_recurrent(
+                    &q,
+                    &k,
+                    &v,
+                    &a,
+                    &b,
+                    &weights.a_log_gates,
+                    &weights.dt_bias,
+                    recurrent_state,
+                    scale,
+                    1e-6,
+                )? {
+                    out
+                } else {
+                    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    backend
+                        .gdn_decode_gates_recurrent(
+                            &q,
+                            &k,
+                            &v,
+                            &a,
+                            &b,
+                            &weights.a_log_gates,
+                            &weights.dt_bias,
+                            recurrent_state,
+                            &z,
+                            &weights.norm,
+                            config.rms_norm_eps,
+                        )?
+                        .context("CUDA deferred qk_norm fallback recurrent path declined")?
+                };
+                finish_gdn_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "qk_norm_gates_recur",
+                    seq_len,
+                    stage_profile,
+                )?;
+                Some(out)
+            } else if let Some(out) = backend.gdn_decode_gates_recurrent(
                 &q,
                 &k,
                 &v,

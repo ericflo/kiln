@@ -26,6 +26,9 @@ pub struct CudaBackend {
     /// CUDA fused decode supports native GQA Q/K heads; this avoids expanding
     /// Q/K to value_heads before the fused recurrent decode kernel.
     gdn_decode_unexpanded_qk_enabled: bool,
+    /// Fuses GDN decode Q/K L2-normalization into the gates+recurrent kernel,
+    /// avoiding the separate tiny qk_norm launch in the single-token path.
+    gdn_decode_qk_norm_recurrent_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
@@ -46,6 +49,8 @@ impl CudaBackend {
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
         let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
             && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
+        let gdn_decode_qk_norm_recurrent_enabled = gdn_decode_unexpanded_qk_enabled
+            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT").is_err();
         Self {
             device,
             gdn_enabled,
@@ -53,6 +58,7 @@ impl CudaBackend {
             gdn_gated_rms_norm_enabled,
             gdn_decode_fused_enabled,
             gdn_decode_unexpanded_qk_enabled,
+            gdn_decode_qk_norm_recurrent_enabled,
             fused_conv1d_enabled,
         }
     }
@@ -97,6 +103,10 @@ impl BackendRuntime for CudaBackend {
 
     fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
         self.gdn_decode_unexpanded_qk_enabled
+    }
+
+    fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
+        self.gdn_decode_qk_norm_recurrent_enabled
     }
 
     fn flash_attn_prefill(
@@ -318,6 +328,55 @@ impl BackendRuntime for CudaBackend {
             q, k, v, a, b, a_log, dt_bias, state, z, weight, eps as f32,
         )
         .context("gdn_decode_gates_recurrent kernel failed")?;
+        Ok(Some(out))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qk_norm_gates_recurrent(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        a_log: &Tensor,
+        dt_bias: &Tensor,
+        state: &mut Tensor,
+        q_scale: f64,
+        qk_eps: f64,
+    ) -> Result<Option<Tensor>> {
+        if !self.gdn_decode_qk_norm_recurrent_enabled {
+            return Ok(None);
+        }
+        if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports(
+            q, k, v, a, b, a_log, dt_bias, state,
+        ) {
+            tracing::debug!(
+                q_shape = ?q.shape(), q_dtype = ?q.dtype(),
+                k_shape = ?k.shape(), k_dtype = ?k.dtype(),
+                v_shape = ?v.shape(), v_dtype = ?v.dtype(),
+                a_shape = ?a.shape(), a_dtype = ?a.dtype(),
+                b_shape = ?b.shape(), b_dtype = ?b.dtype(),
+                a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
+                dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
+                state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
+                "CUDA gdn_decode_qk_norm_gates_recurrent declined; using split qk_norm path"
+            );
+            return Ok(None);
+        }
+        let out = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent(
+            q,
+            k,
+            v,
+            a,
+            b,
+            a_log,
+            dt_bias,
+            state,
+            q_scale as f32,
+            qk_eps as f32,
+        )
+        .context("gdn_decode_qk_norm_gates_recurrent kernel failed")?;
         Ok(Some(out))
     }
 

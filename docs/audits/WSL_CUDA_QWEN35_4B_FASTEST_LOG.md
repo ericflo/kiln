@@ -580,3 +580,61 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="cuda-mlp-silu-mul-smoke"`;
 - adapter-backed `/v1/chat/completions` requests completed with and without
   thinking enabled, including a no-thinking response of `kiln blue`.
+
+## Follow-Up: CUDA Fold GDN QK Norm Into Decode Recurrent
+
+After fused MLP SiLU multiply, the largest exposed GDN decode stage was
+`qk_norm`. On CUDA decode, the causal-conv update produces raw F32 Q/K, the
+split path L2-normalizes them, casts normalized Q/K to bf16, and then feeds
+the fused gates+recurrent kernel. CUDA now has a fused single-token GDN path
+that accepts raw F32 or bf16 unexpanded Q/K, performs the same L2
+normalization and bf16 epilogue inside the gates+recurrent kernel, and skips
+the separate tiny qk_norm launch and intermediate Q/K tensors. Gated RMSNorm
+remains separate; this deliberately avoids repeating the previously rejected
+recurrent+gated-RMSNorm fusion.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT=1` | 37.062, 37.194, 36.972 | 37.076 ms | 26.972 |
+| default folded GDN QK norm + recurrent | 33.430, 33.378, 33.468 | 33.425 ms | 29.918 |
+
+Average decode ITL improved by 9.8% on this WSL 16 GiB CUDA host.
+
+A short profile confirmed the mechanism: `gdn_stage qk_norm` at `seq_len=1`
+dropped from the previous post-MLP profile's `52.523ms` aggregate to
+`0.139ms`, with the new `qk_norm_gates_recur` stage accounting for
+`10.633ms` aggregate under profiling overhead.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-gdn-kernel test_cuda_decode --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The GDN kernel tests cover the existing bf16 decode gates+recurrent path, the
+unexpanded-Q/K path, and the new F32-Q/K folded qk_norm+gates+recurrent path
+against the split normalization/recurrent reference.
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-qk-norm-recurrent-smoke-20260509`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9234`, `auto_load=true`;
+- job id: `722a161d-35e6-4ba1-85ea-46240af21dd0`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.5285838842391968`;
+- `/health` reported `active_adapter="cuda-qk-norm-recurrent-smoke"`;
+- adapter-backed `/v1/chat/completions` requests completed with and without
+  thinking enabled, including a no-thinking response of `kiln green`.

@@ -160,3 +160,22 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-mlp-silu-mul-smoke`, final loss
   `1.603104591369629`, `/health` reported the active adapter, and
   adapter-backed chat completed.
+- Accepted CUDA folded GDN QK norm + decode recurrent:
+  CUDA decode now accepts raw F32/bf16 unexpanded GDN Q/K, performs the same
+  L2-normalize + bf16 epilogue inside the fused gates+recurrent kernel, and
+  skips the separate qk_norm launch/intermediate tensors. Gated RMSNorm stays
+  separate. Rollback:
+  `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `37.062`, `37.194`, `36.972` ms averaged
+  `37.076ms` / `26.972 tok/s`; default folded-QK/recurrent runs `33.430`,
+  `33.378`, `33.468` ms averaged `33.425ms` / `29.918 tok/s`, a 9.8%
+  decode ITL win.
+- Folded-QK/recurrent validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-gdn-kernel test_cuda_decode --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `cuda-qk-norm-recurrent-smoke`, final
+  loss `1.5285838842391968`, `/health` reported the active adapter, and
+  adapter-backed chat completed.

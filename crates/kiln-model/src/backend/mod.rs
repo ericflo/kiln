@@ -166,6 +166,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_decode_qk_norm_gates_recurrent(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
@@ -417,6 +421,30 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _z: &Tensor,
         _weight: &Tensor,
         _eps: f64,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    /// Fused native-MTP GDN decode Q/K L2-normalization + gates + recurrent
+    /// update.
+    ///
+    /// Narrow CUDA decode path for `seq_len == 1` bf16 tensors. It accepts raw
+    /// unexpanded Q/K heads, applies the same bf16 qk_norm epilogue as the split
+    /// path, returns `[B, 1, value_heads, dv]` before gated RMSNorm, and mutates
+    /// `state` in place.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qk_norm_gates_recurrent(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _a_log: &Tensor,
+        _dt_bias: &Tensor,
+        _state: &mut Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
     ) -> Result<Option<Tensor>> {
         Ok(None)
     }

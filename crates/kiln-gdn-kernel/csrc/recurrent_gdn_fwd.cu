@@ -153,6 +153,35 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + expf(-x));
 }
 
+__device__ __forceinline__ float warp_reduce_sum(float v) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        v += __shfl_xor_sync(0xffffffffu, v, offset);
+    }
+    return v;
+}
+
+__device__ __forceinline__ float block_reduce_sum_128(float v, float *smem) {
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+
+    v = warp_reduce_sum(v);
+    if (lane == 0) {
+        smem[warp] = v;
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        float w = lane < 4 ? smem[lane] : 0.0f;
+        w = warp_reduce_sum(w);
+        if (lane == 0) {
+            smem[0] = w;
+        }
+    }
+    __syncthreads();
+    return smem[0];
+}
+
 __device__ __forceinline__ float to_f32(float x) {
     return x;
 }
@@ -230,6 +259,90 @@ __global__ void gdn_decode_gates_recurrent_rmsnorm_bf16_kernel(
 
     out[v_base + tid] = f32_to_bf16(y);
 
+}
+
+template <typename QKType, typename VType>
+__global__ void gdn_decode_qk_norm_gates_recurrent_bf16_kernel(
+    const QKType *__restrict__ q,               // [B, 1, q_heads, dk], raw pre-L2-norm
+    const QKType *__restrict__ k,               // [B, 1, q_heads, dk], raw pre-L2-norm
+    const VType *__restrict__ v,                // [B, 1, value_heads, dv]
+    const __nv_bfloat16 *__restrict__ a,        // [B, 1, value_heads]
+    const __nv_bfloat16 *__restrict__ b,        // [B, 1, value_heads]
+    const __nv_bfloat16 *__restrict__ a_log,    // [value_heads]
+    const __nv_bfloat16 *__restrict__ dt_bias,  // [value_heads]
+    __nv_bfloat16 *__restrict__ state,          // [B, value_heads, dk, dv]
+    __nv_bfloat16 *__restrict__ out,            // [B, 1, value_heads, dv]
+    int q_heads,
+    int value_heads,
+    float q_scale,
+    float qk_eps
+) {
+    __shared__ float q_smem[128];
+    __shared__ float k_smem[128];
+    __shared__ float reduce_smem[4];
+    __shared__ float scalars[4];  // [decay, beta, inv_q, inv_k]
+
+    const int bh = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (tid >= 128) return;
+
+    const int batch_idx = bh / value_heads;
+    const int head_idx = bh - batch_idx * value_heads;
+    const int q_group = value_heads / q_heads;
+    const int q_head_idx = head_idx / q_group;
+
+    const size_t qk_base = ((size_t)batch_idx * q_heads + q_head_idx) * 128;
+    const size_t v_base = ((size_t)batch_idx * value_heads + head_idx) * 128;
+    const size_t gate_idx = (size_t)batch_idx * value_heads + head_idx;
+    const size_t state_base = (size_t)bh * 128 * 128;
+
+    const float q_raw = to_f32(q[qk_base + tid]);
+    const float k_raw = to_f32(k[qk_base + tid]);
+    q_smem[tid] = q_raw;
+    k_smem[tid] = k_raw;
+
+    const float q_sum = block_reduce_sum_128(q_raw * q_raw, reduce_smem);
+    const float k_sum = block_reduce_sum_128(k_raw * k_raw, reduce_smem);
+
+    if (tid == 0) {
+        const float beta = stable_sigmoid(bf16_to_f32(b[gate_idx]));
+        const float g = -expf(bf16_to_f32(a_log[head_idx]))
+            * stable_softplus(bf16_to_f32(a[gate_idx]) + bf16_to_f32(dt_bias[head_idx]));
+        scalars[0] = expf(bf16_to_f32(f32_to_bf16(g)));
+        scalars[1] = bf16_to_f32(f32_to_bf16(beta));
+        scalars[2] = q_scale * rsqrtf(q_sum + qk_eps);
+        scalars[3] = rsqrtf(k_sum + qk_eps);
+    }
+    __syncthreads();
+
+    // Match the existing two-step path: qk_norm writes bf16, then recurrent
+    // reads bf16 back as f32.
+    q_smem[tid] = bf16_to_f32(f32_to_bf16(q_smem[tid] * scalars[2]));
+    k_smem[tid] = bf16_to_f32(f32_to_bf16(k_smem[tid] * scalars[3]));
+    __syncthreads();
+
+    const float decay = scalars[0];
+    const float beta_t = scalars[1];
+
+    float s_local[128];
+    float v_pred = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) {
+        const float d = decay * bf16_to_f32(state[state_base + (size_t)i * 128 + tid]);
+        s_local[i] = d;
+        v_pred += k_smem[i] * d;
+    }
+
+    const float delta = beta_t * (to_f32(v[v_base + tid]) - v_pred);
+    float y = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 128; ++i) {
+        const float new_s = s_local[i] + k_smem[i] * delta;
+        state[state_base + (size_t)i * 128 + tid] = f32_to_bf16(new_s);
+        y += q_smem[i] * new_s;
+    }
+
+    out[v_base + tid] = f32_to_bf16(y);
 }
 
 } // namespace
@@ -386,6 +499,186 @@ extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_gates_recurrent_bf16(
         q_heads,
         value_heads,
         eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return (int)err;
+    return 0;
+}
+
+extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    void *stream
+) {
+    if (batch <= 0 || q_heads <= 0 || value_heads <= 0) return -1;
+    if (dk != 128 || dv != 128) return -2;
+    if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    gdn_decode_qk_norm_gates_recurrent_bf16_kernel<__nv_bfloat16, float><<<batch * value_heads, 128, 0, s>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q),
+        reinterpret_cast<const __nv_bfloat16 *>(k),
+        reinterpret_cast<const float *>(v),
+        reinterpret_cast<const __nv_bfloat16 *>(a),
+        reinterpret_cast<const __nv_bfloat16 *>(b),
+        reinterpret_cast<const __nv_bfloat16 *>(a_log),
+        reinterpret_cast<const __nv_bfloat16 *>(dt_bias),
+        reinterpret_cast<__nv_bfloat16 *>(state),
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        q_heads,
+        value_heads,
+        q_scale,
+        qk_eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return (int)err;
+    return 0;
+}
+
+extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    void *stream
+) {
+    if (batch <= 0 || q_heads <= 0 || value_heads <= 0) return -1;
+    if (dk != 128 || dv != 128) return -2;
+    if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    gdn_decode_qk_norm_gates_recurrent_bf16_kernel<float, float><<<batch * value_heads, 128, 0, s>>>(
+        reinterpret_cast<const float *>(q),
+        reinterpret_cast<const float *>(k),
+        reinterpret_cast<const float *>(v),
+        reinterpret_cast<const __nv_bfloat16 *>(a),
+        reinterpret_cast<const __nv_bfloat16 *>(b),
+        reinterpret_cast<const __nv_bfloat16 *>(a_log),
+        reinterpret_cast<const __nv_bfloat16 *>(dt_bias),
+        reinterpret_cast<__nv_bfloat16 *>(state),
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        q_heads,
+        value_heads,
+        q_scale,
+        qk_eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return (int)err;
+    return 0;
+}
+
+extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    void *stream
+) {
+    if (batch <= 0 || q_heads <= 0 || value_heads <= 0) return -1;
+    if (dk != 128 || dv != 128) return -2;
+    if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    gdn_decode_qk_norm_gates_recurrent_bf16_kernel<float, __nv_bfloat16><<<batch * value_heads, 128, 0, s>>>(
+        reinterpret_cast<const float *>(q),
+        reinterpret_cast<const float *>(k),
+        reinterpret_cast<const __nv_bfloat16 *>(v),
+        reinterpret_cast<const __nv_bfloat16 *>(a),
+        reinterpret_cast<const __nv_bfloat16 *>(b),
+        reinterpret_cast<const __nv_bfloat16 *>(a_log),
+        reinterpret_cast<const __nv_bfloat16 *>(dt_bias),
+        reinterpret_cast<__nv_bfloat16 *>(state),
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        q_heads,
+        value_heads,
+        q_scale,
+        qk_eps
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return (int)err;
+    return 0;
+}
+
+extern "C" kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    void *stream
+) {
+    if (batch <= 0 || q_heads <= 0 || value_heads <= 0) return -1;
+    if (dk != 128 || dv != 128) return -2;
+    if (value_heads < q_heads || (value_heads % q_heads) != 0) return -3;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    gdn_decode_qk_norm_gates_recurrent_bf16_kernel<__nv_bfloat16, __nv_bfloat16><<<batch * value_heads, 128, 0, s>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(q),
+        reinterpret_cast<const __nv_bfloat16 *>(k),
+        reinterpret_cast<const __nv_bfloat16 *>(v),
+        reinterpret_cast<const __nv_bfloat16 *>(a),
+        reinterpret_cast<const __nv_bfloat16 *>(b),
+        reinterpret_cast<const __nv_bfloat16 *>(a_log),
+        reinterpret_cast<const __nv_bfloat16 *>(dt_bias),
+        reinterpret_cast<__nv_bfloat16 *>(state),
+        reinterpret_cast<__nv_bfloat16 *>(out),
+        q_heads,
+        value_heads,
+        q_scale,
+        qk_eps
     );
 
     cudaError_t err = cudaGetLastError();
