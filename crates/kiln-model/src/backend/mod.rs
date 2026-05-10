@@ -58,6 +58,9 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+#[cfg(feature = "vulkan")]
+pub mod vulkan_linear_op;
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
