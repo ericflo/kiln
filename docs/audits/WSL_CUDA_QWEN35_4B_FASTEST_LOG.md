@@ -426,3 +426,56 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
   `final_loss=0.9538126587867737`;
 - `/health` reported `active_adapter="cuda-batcher-guard-smoke"`;
 - an adapter-backed `/v1/chat/completions` request completed.
+
+## Follow-Up: CUDA GDN Decode Unexpanded Q/K
+
+CUDA's fused GDN decode gates+recurrent kernel already accepts native GQA
+Q/K heads (`q_heads <= value_heads`) and maps each value head back to its Q/K
+group inside the kernel. The model forward path now keeps Q/K unexpanded for
+the single-token CUDA fused decode path and only expands them if the backend
+declines and the split recurrent fallback is needed. This removes the
+GDN-decode Q/K GQA expansion from the hot path without changing prefill,
+fallback, debug-tap, or training sequence paths.
+
+Rollback:
+
+```text
+KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK=1` | 41.064, 40.990, 41.042 | 41.032 ms | 24.371 |
+| default unexpanded Q/K | 40.236, 40.418, 40.495 | 40.383 ms | 24.763 |
+
+Average decode ITL improved by 1.6% on this WSL 16 GiB CUDA host. Prefill
+stayed flat, as expected, because the new path is gated to `seq_len == 1`.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-gdn-kernel test_cuda_decode_gates_recurrent --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-model test_causal_conv1d_update_matches_fallback --lib --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The `kiln-model` filter compiled the crate but matched zero tests in this
+checkout. The CUDA kernel test now includes an explicit unexpanded-Q/K parity
+case against the expanded split recurrent path.
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-unexpanded-qk-smoke`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=7890`, `auto_load=true`;
+- job id: `fb0ed096-45cf-4617-b969-7b3d3423e804`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.338575839996338`;
+- `/health` reported `active_adapter="cuda-unexpanded-qk-smoke"`;
+- adapter-backed `/v1/chat/completions` requests completed with and without
+  thinking enabled.

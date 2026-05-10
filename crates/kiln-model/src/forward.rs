@@ -4702,10 +4702,19 @@ fn gated_deltanet_forward_decode_if(
         && !capture_b11_taps
         && !capture_c41_taps
         && backend.supports_gdn_recurrent_prefill_native_head_last();
+    let fused_decode_unexpanded_qk = input_dtype == DType::BF16
+        && seq_len == 1
+        && dk == 128
+        && gqa_ratio > 1
+        && !capture_b11_taps
+        && !capture_c41_taps
+        && backend.supports_gdn_decode_gates_recurrent_unexpanded_qk();
+    #[cfg(feature = "metal")]
+    let use_unexpanded_qk = recurrent_unexpanded_qk || fused_decode_unexpanded_qk;
     let fused_decode_qkv_conv_norm = {
         #[cfg(feature = "metal")]
         {
-            if recurrent_unexpanded_qk
+            if use_unexpanded_qk
                 && !capture_b11_taps
                 && !capture_c41_taps
                 && crate::backend::metal::metal_gdn_decode_qkv_conv_norm_supports(
@@ -4955,7 +4964,7 @@ fn gated_deltanet_forward_decode_if(
         let (q, k, qk_expanded) = {
             #[cfg(feature = "metal")]
             {
-                if recurrent_unexpanded_qk {
+                if use_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                     (q, k, false)
@@ -5003,7 +5012,8 @@ fn gated_deltanet_forward_decode_if(
                     #[cfg(feature = "cuda")]
                     {
                         let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-                        if !disabled
+                        if !fused_decode_unexpanded_qk
+                            && !disabled
                             && input_dtype == DType::BF16
                             && gqa_ratio > 1
                             && kiln_rmsnorm_kernel::supports_l2_qk_norm_gqa(&q, &k, nv)
@@ -5029,7 +5039,11 @@ fn gated_deltanet_forward_decode_if(
                     }
                 };
 
-                if let Some((q, k)) = fused_gqa {
+                if fused_decode_unexpanded_qk {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
+                    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    (q, k, false)
+                } else if let Some((q, k)) = fused_gqa {
                     (q, k, true)
                 } else {
                     let (q, k) = {
@@ -5331,6 +5345,25 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
+    let expanded_qk_for_split = |q: Tensor, k: Tensor| -> Result<(Tensor, Tensor)> {
+        if qk_expanded {
+            Ok((q, k))
+        } else {
+            kiln_nvtx::range!(c"kiln/gdn/head_expand_recur_fallback");
+            let q = q
+                .unsqueeze(3)?
+                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .contiguous()?
+                .reshape((batch, seq_len, nv, dk))?;
+            let k = k
+                .unsqueeze(3)?
+                .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                .contiguous()?
+                .reshape((batch, seq_len, nv, dk))?;
+            Ok((q, k))
+        }
+    };
+
     let (attn_out, attn_out_head_last, attn_out_already_gated_norm) = if let Some(attn_out) =
         fused_decode_gates_recurrent_rmsnorm
     {
@@ -5390,7 +5423,7 @@ fn gated_deltanet_forward_decode_if(
         }
 
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-        let recurrent_result = if let Some(attn_out) = if recurrent_unexpanded_qk {
+        let native_recurrent_result = if recurrent_unexpanded_qk {
             let v_recur = v.to_dtype(input_dtype)?;
             gdn_recurrent_prefill_native_head_last(
                 backend,
@@ -5403,9 +5436,13 @@ fn gated_deltanet_forward_decode_if(
             )?
         } else {
             None
-        } {
+        };
+
+        let recurrent_result = if let Some(attn_out) = native_recurrent_result {
             (attn_out, true, false) // [B, T, nv, dv], contiguous
         } else {
+            let (q, k) = expanded_qk_for_split(q, k)?;
+
             // Cast v back to input_dtype so the recurrence stays in bf16. The
             // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
             // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below

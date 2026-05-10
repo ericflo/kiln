@@ -23,6 +23,9 @@ pub struct CudaBackend {
     /// Experimental fused native-MTP decode GDN gates + recurrent update.
     /// Opt-in only until output parity is proven.
     gdn_decode_fused_enabled: bool,
+    /// CUDA fused decode supports native GQA Q/K heads; this avoids expanding
+    /// Q/K to value_heads before the fused recurrent decode kernel.
+    gdn_decode_unexpanded_qk_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
@@ -41,12 +44,15 @@ impl CudaBackend {
         let gdn_decode_fused_enabled = gdn_gates_enabled
             && gdn_gated_rms_norm_enabled
             && std::env::var("KILN_DISABLE_FUSED_GDN_DECODE").is_err();
+        let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
+            && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
         Self {
             device,
             gdn_enabled,
             gdn_gates_enabled,
             gdn_gated_rms_norm_enabled,
             gdn_decode_fused_enabled,
+            gdn_decode_unexpanded_qk_enabled,
             fused_conv1d_enabled,
         }
     }
@@ -87,6 +93,10 @@ impl BackendRuntime for CudaBackend {
 
     fn supports_gdn_full_chunk_forward(&self) -> bool {
         self.gdn_enabled
+    }
+
+    fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
+        self.gdn_decode_unexpanded_qk_enabled
     }
 
     fn flash_attn_prefill(

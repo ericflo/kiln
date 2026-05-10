@@ -104,3 +104,23 @@ Date: 2026-05-09
   default parity prompt on the candidate;
   live rank-1 SFT smoke auto-loaded `cuda-batcher-guard-smoke`, final loss
   `0.9538126587867737`, and adapter-backed chat completed.
+- Accepted CUDA GDN decode unexpanded Q/K:
+  the CUDA fused decode gates+recurrent path now keeps Q/K at native GQA head
+  count for `seq_len == 1`, expanding only if the fused backend declines and
+  the split fallback runs. Rollback:
+  `KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `41.064`, `40.990`, `41.042` ms averaged
+  `41.032ms` / `24.371 tok/s`; default unexpanded-Q/K runs `40.236`,
+  `40.418`, `40.495` ms averaged `40.383ms` / `24.763 tok/s`, a 1.6%
+  decode ITL win.
+- Unexpanded-Q/K validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-gdn-kernel test_cuda_decode_gates_recurrent --quiet`;
+  `cargo test -p kiln-model test_causal_conv1d_update_matches_fallback --lib --quiet`
+  compiled the model crate with zero matching tests;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `cuda-unexpanded-qk-smoke`, final loss
+  `1.338575839996338`, `/health` reported the active adapter, and
+  adapter-backed chat completed.

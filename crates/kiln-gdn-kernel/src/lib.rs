@@ -2291,4 +2291,160 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_cuda_decode_gates_recurrent_accepts_unexpanded_qk() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping unexpanded Q/K decode parity test: {err}");
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let q_heads = 8usize;
+        let value_heads = 32usize;
+        let gqa_ratio = value_heads / q_heads;
+        let dk = 128usize;
+        let dv = 128usize;
+
+        let q = Tensor::from_slice(
+            &patterned_data(batch * seq_len * q_heads * dk, 0.35, 0.1),
+            (batch, seq_len, q_heads, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(
+            &patterned_data(batch * seq_len * q_heads * dk, 0.25, 0.7),
+            (batch, seq_len, q_heads, dk),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads * dv, 0.5, 1.3),
+            (batch, seq_len, value_heads, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads, 0.4, 2.1),
+            (batch, seq_len, value_heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let b = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads, 0.6, 2.9),
+            (batch, seq_len, value_heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(
+            &patterned_data(value_heads, 0.15, 3.7),
+            (value_heads,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(
+            &patterned_data(value_heads, 0.2, 4.3),
+            (value_heads,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads * dv, 0.45, 4.9),
+            (batch, seq_len, value_heads, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
+            .to_dtype(DType::BF16)?;
+        let state = Tensor::from_slice(
+            &patterned_data(batch * value_heads * dk * dv, 0.08, 6.1),
+            (batch, value_heads, dk, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        let q_expanded = q
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, q_heads, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, value_heads, dk))?;
+        let k_expanded = k
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, q_heads, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, value_heads, dk))?;
+
+        let (beta, g) = gdn_gates(&a, &b, &a_log, &dt_bias)?;
+        let q_split = q_expanded.squeeze(1)?.contiguous()?;
+        let k_split = k_expanded.squeeze(1)?.contiguous()?;
+        let v_split = v.squeeze(1)?.contiguous()?;
+        let beta_split = beta.squeeze(1)?.contiguous()?;
+        let g_split = g.squeeze(1)?.contiguous()?;
+        let mut state_split = state.copy()?;
+        let out_split = gdn_recurrent_forward(
+            &q_split,
+            &k_split,
+            &v_split,
+            &beta_split,
+            &g_split,
+            &mut state_split,
+        )?
+        .unsqueeze(1)?;
+
+        let mut state_fused = state.copy()?;
+        assert!(gdn_decode_gates_recurrent_supports(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state_fused,
+            &z,
+            &weight
+        ));
+        let out_fused = gdn_decode_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_fused,
+            &z,
+            &weight,
+            1e-6,
+        )?;
+
+        let (out_max, out_mean) = max_mean_abs_diff(&out_fused, &out_split)?;
+        let (state_max, state_mean) = max_mean_abs_diff(&state_fused, &state_split)?;
+        eprintln!(
+            "cuda decode unexpanded Q/K vs expanded split: out max={out_max:e} mean={out_mean:e}, state max={state_max:e} mean={state_mean:e}"
+        );
+
+        assert!(
+            out_max == 0.0,
+            "fused unexpanded decode output max_abs_diff={out_max:e}"
+        );
+        assert!(
+            out_mean == 0.0,
+            "fused unexpanded decode output mean_abs_diff={out_mean:e}"
+        );
+        assert!(
+            state_max == 0.0,
+            "fused unexpanded decode state max_abs_diff={state_max:e}"
+        );
+        assert!(
+            state_mean == 0.0,
+            "fused unexpanded decode state mean_abs_diff={state_mean:e}"
+        );
+
+        Ok(())
+    }
 }

@@ -162,6 +162,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
+        false
+    }
+
     /// FlashAttention-2 forward for prefill (no KV cache, seq_len > 1).
     ///
     /// `q`, `k`, `v`: `[batch, seq_len, num_heads, head_dim]` bf16 contiguous.
