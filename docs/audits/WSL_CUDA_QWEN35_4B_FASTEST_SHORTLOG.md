@@ -197,3 +197,17 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `attn-sigmoid-mul-smoke-r1`, final loss
   `1.5107368230819702`, `/health` reported the active adapter, and
   adapter-backed chat completed with and without thinking enabled.
+- Accepted training-safety follow-up: forward-only GDN backend fast paths now
+  decline Candle autograd-tracked tensors, so CUDA/Metal/Vulkan inference keeps
+  the fast kernels while training uses differentiable Candle ops through GDN QK
+  norm, gated RMSNorm, causal conv, gate/decay, and recurrent/chunk paths.
+- This follow-up makes no throughput claim. Release CUDA latency sanity check
+  stayed in range: mean ITL runs `33.356`, `33.696`, `33.287` ms averaged
+  `33.446ms` / `29.899 tok/s`.
+- GDN autograd guard validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `gdn-autograd-guard-smoke-r1`, final loss
+  `1.5467936992645264`, `/health` reported the active adapter, no-thinking
+  chat returned `kiln violet`, and thinking chat emitted reasoning content.

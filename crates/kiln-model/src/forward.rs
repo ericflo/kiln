@@ -161,6 +161,10 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
     Ok((x * sig)?)
 }
 
+fn any_tensor_tracks_op(tensors: &[&Tensor]) -> bool {
+    tensors.iter().any(|tensor| tensor.track_op())
+}
+
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -3791,9 +3795,14 @@ fn l2_normalize(x: &Tensor) -> Result<Tensor> {
 }
 
 fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result<(Tensor, Tensor)> {
+    #[cfg(any(feature = "metal", feature = "cuda"))]
+    let fused_forward_only_allowed = !any_tensor_tracks_op(&[q, k]);
     #[cfg(feature = "metal")]
     {
-        if input_dtype == DType::BF16 && crate::backend::metal::metal_gdn_qk_norm_supports(q, k) {
+        if fused_forward_only_allowed
+            && input_dtype == DType::BF16
+            && crate::backend::metal::metal_gdn_qk_norm_supports(q, k)
+        {
             return crate::backend::metal::metal_gdn_qk_norm_f32_bf16(q, k, scale as f32, 1e-6)
                 .context("metal gdn qk_norm kernel failed");
         }
@@ -3802,7 +3811,10 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     #[cfg(feature = "cuda")]
     {
         let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
-        if !disabled && input_dtype == DType::BF16 && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k)
+        if !disabled
+            && fused_forward_only_allowed
+            && input_dtype == DType::BF16
+            && kiln_rmsnorm_kernel::supports_l2_qk_norm(q, k)
         {
             return kiln_rmsnorm_kernel::fused_l2_qk_norm(q, k, scale as f32, 1e-6)
                 .context("fused_l2_qk_norm kernel failed");
@@ -3841,7 +3853,7 @@ fn gated_rms_norm(
     weight: &Tensor,
     eps: f64,
 ) -> Result<Tensor> {
-    if backend.supports_gdn_gated_rms_norm() {
+    if !any_tensor_tracks_op(&[x, z, weight]) && backend.supports_gdn_gated_rms_norm() {
         if let Some(out) = backend.gdn_gated_rms_norm(x, z, weight, eps)? {
             return Ok(out);
         }
@@ -4049,7 +4061,10 @@ fn compute_w_chunk(
 ) -> Result<Tensor> {
     // The kernel envelope is C <= 128; callers enforce this precondition so
     // we never pay for a backend call we know will decline.
-    if c <= 128 && backend.supports_gdn_forward_substitution() {
+    if c <= 128
+        && !any_tensor_tracks_op(&[a_strict, v_prime, beta_c])
+        && backend.supports_gdn_forward_substitution()
+    {
         kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
         if let Some(out) = backend.gdn_forward_substitution(a_strict, v_prime, beta_c)? {
             return Ok(out);
@@ -4203,6 +4218,7 @@ fn gdn_chunkwise_recurrence(
     // per (B,H).
     if seq_len == 1 {
         let use_backend_recurrent_step = state.dtype() == dtype
+            && !any_tensor_tracks_op(&[q, k, v, beta, g, state])
             && backend.supports_gdn_recurrent_step()
             && (dtype == DType::BF16
                 || (dtype == DType::F32
@@ -4331,7 +4347,13 @@ fn gdn_chunkwise_recurrence(
             stage_profile,
         )?;
 
-        if !is_tail && c == 64 && backend.supports_gdn_full_chunk_forward() && dtype == DType::BF16
+        if !is_tail
+            && c == 64
+            && !any_tensor_tracks_op(&[
+                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
+            ])
+            && backend.supports_gdn_full_chunk_forward()
+            && dtype == DType::BF16
         {
             let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let out_chunk = backend.gdn_full_chunk_forward(
@@ -4368,7 +4390,10 @@ fn gdn_chunkwise_recurrence(
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
-            let prep_out = if backend.supports_gdn_chunk_prep() && dtype == DType::BF16 {
+            let prep_out = if !any_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s])
+                && backend.supports_gdn_chunk_prep()
+                && dtype == DType::BF16
+            {
                 backend.gdn_chunk_prep(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?
             } else {
                 None
@@ -4468,7 +4493,16 @@ fn gdn_chunkwise_recurrence(
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (out_chunk, w_weighted) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
-            if backend.supports_gdn_chunk_scan() && dtype == DType::BF16 {
+            if !any_tensor_tracks_op(&[
+                &a_strict,
+                &b_mask,
+                &v_prime,
+                &q_s_scaled,
+                &beta_c,
+                &decay_last_col,
+            ]) && backend.supports_gdn_chunk_scan()
+                && dtype == DType::BF16
+            {
                 match backend.gdn_chunk_scan(
                     &a_strict,
                     &b_mask,
@@ -4554,6 +4588,7 @@ fn gdn_recurrent_prefill_head_last(
     if seq_len <= 1
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
+        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_recurrent_prefill_head_last()
     {
         return Ok(None);
@@ -4574,6 +4609,7 @@ fn gdn_recurrent_prefill_native_head_last(
     if seq_len == 0
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
+        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_recurrent_prefill_native_head_last()
     {
         return Ok(None);
@@ -4603,6 +4639,7 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
         || seq_len % chunk_size != 0
         || dtype != DType::BF16
         || state.dtype() != DType::BF16
+        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_full_chunk_forward_head_last()
     {
         return Ok(None);
@@ -4831,19 +4868,22 @@ fn gated_deltanet_forward_decode_if(
     let v_dim = config.linear_v_dim();
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
+    let gdn_forward_only_fastpaths = !x.track_op();
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let (mixed_qkv, z, a, b, prefill_ab_for_gates) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
-        if let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
-            x,
-            &weights.in_proj_qkv_t,
-            &weights.in_proj_z_t,
-            &weights.in_proj_a_t,
-            &weights.in_proj_b_t,
-        )? {
+        if gdn_forward_only_fastpaths
+            && let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
+                x,
+                &weights.in_proj_qkv_t,
+                &weights.in_proj_z_t,
+                &weights.in_proj_a_t,
+                &weights.in_proj_b_t,
+            )?
+        {
             (mixed_qkv, z, a, b, None::<Tensor>)
         } else {
             let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
@@ -4852,11 +4892,13 @@ fn gated_deltanet_forward_decode_if(
                 #[cfg(feature = "metal")]
                 {
                     if let Some(in_proj_ab_t) = weights.in_proj_ab_t.as_ref() {
-                        if crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports(
-                            x,
-                            in_proj_ab_t,
-                            nv,
-                        ) {
+                        if gdn_forward_only_fastpaths
+                            && crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports(
+                                x,
+                                in_proj_ab_t,
+                                nv,
+                            )
+                        {
                             let (ab, a, b) =
                                 crate::backend::metal::metal_gdn_prefill_ab_in_proj_bf16(
                                     x,
@@ -4911,6 +4953,7 @@ fn gated_deltanet_forward_decode_if(
 
     let scale = 1.0 / (dk as f64).sqrt();
     let recurrent_unexpanded_qk = input_dtype == DType::BF16
+        && gdn_forward_only_fastpaths
         && seq_len >= 1
         && seq_len <= GDN_RECURRENT_PREFILL_MAX_TOKENS
         && dk == 128
@@ -4919,6 +4962,7 @@ fn gated_deltanet_forward_decode_if(
         && !capture_c41_taps
         && backend.supports_gdn_recurrent_prefill_native_head_last();
     let fused_decode_unexpanded_qk = input_dtype == DType::BF16
+        && gdn_forward_only_fastpaths
         && seq_len == 1
         && dk == 128
         && gqa_ratio > 1
@@ -4931,6 +4975,7 @@ fn gated_deltanet_forward_decode_if(
         #[cfg(feature = "metal")]
         {
             if use_unexpanded_qk
+                && gdn_forward_only_fastpaths
                 && !capture_b11_taps
                 && !capture_c41_taps
                 && crate::backend::metal::metal_gdn_decode_qkv_conv_norm_supports(
@@ -4983,6 +5028,7 @@ fn gated_deltanet_forward_decode_if(
         {
             if fused_decode_qkv_conv_norm.is_none()
                 && recurrent_unexpanded_qk
+                && gdn_forward_only_fastpaths
                 && seq_len > 1
                 && !capture_b11_taps
                 && !capture_c41_taps
@@ -5064,7 +5110,10 @@ fn gated_deltanet_forward_decode_if(
                 kiln_nvtx::range!(c"kiln/gdn/conv/layout");
                 mixed_qkv.transpose(1, 2)?.contiguous()?
             };
-            let post_silu = if seq_len == 1 && backend.supports_causal_conv1d_update() {
+            let post_silu = if seq_len == 1
+                && gdn_forward_only_fastpaths
+                && backend.supports_causal_conv1d_update()
+            {
                 let conv_update = {
                     kiln_nvtx::range!(c"kiln/gdn/conv/update");
                     backend.causal_conv1d_update(
@@ -5088,7 +5137,7 @@ fn gated_deltanet_forward_decode_if(
                     }
                 }
             } else if seq_len > 1 {
-                if backend.supports_causal_conv1d_prefill() {
+                if gdn_forward_only_fastpaths && backend.supports_causal_conv1d_prefill() {
                     let conv_prefill = {
                         kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
                         backend.causal_conv1d_prefill(
@@ -5189,6 +5238,7 @@ fn gated_deltanet_forward_decode_if(
             #[cfg(feature = "cuda")]
             {
                 seq_len == 1
+                    && gdn_forward_only_fastpaths
                     && !capture_b11_taps
                     && !capture_c41_taps
                     && fused_decode_unexpanded_qk
@@ -5201,6 +5251,7 @@ fn gated_deltanet_forward_decode_if(
             }
         };
         let defer_native_qk_norm_to_recurrent = seq_len == 1
+            && gdn_forward_only_fastpaths
             && !capture_b11_taps
             && !capture_c41_taps
             && recurrent_unexpanded_qk
@@ -5214,6 +5265,7 @@ fn gated_deltanet_forward_decode_if(
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                     (q, k, false, false, false)
                 } else if input_dtype == DType::BF16
+                    && gdn_forward_only_fastpaths
                     && gqa_ratio > 1
                     && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
                 {
@@ -5258,6 +5310,7 @@ fn gated_deltanet_forward_decode_if(
                     {
                         let disabled = std::env::var("KILN_DISABLE_FUSED_L2_QK_NORM").is_ok();
                         if !fused_decode_unexpanded_qk
+                            && gdn_forward_only_fastpaths
                             && !disabled
                             && input_dtype == DType::BF16
                             && gqa_ratio > 1
@@ -5433,6 +5486,7 @@ fn gated_deltanet_forward_decode_if(
 
     let fused_decode_gates_recurrent = {
         if fused_decode_gates_recurrent_rmsnorm.is_none()
+            && gdn_forward_only_fastpaths
             && seq_len == 1
             && !capture_b11_taps
             && !capture_c41_taps
@@ -5687,7 +5741,7 @@ fn gated_deltanet_forward_decode_if(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (beta, g) = {
             kiln_nvtx::range!(c"kiln/gdn/gates");
-            if use_fused_gdn_gates && backend.supports_gdn_gates() {
+            if gdn_forward_only_fastpaths && use_fused_gdn_gates && backend.supports_gdn_gates() {
                 if let Some((beta, g)) = backend
                     .gdn_gates(&a, &b, &weights.a_log_gates, &weights.dt_bias)
                     .context("gdn decode gates fused backend")?

@@ -689,3 +689,40 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="attn-sigmoid-mul-smoke-r1"`;
 - adapter-backed `/v1/chat/completions` requests completed with and without
   thinking enabled, including a no-thinking response of `kiln amber`.
+
+## Safety Follow-Up: Autograd Guard GDN Fast Paths
+
+After reviewing the live-training requirement, the forward-only GDN backend
+paths now explicitly decline tensors that participate in Candle autograd.
+Untracked inference tensors still use the CUDA/Metal/Vulkan fast kernels, while
+tracked training tensors route through the differentiable Candle expressions for
+GDN QK norm, gated RMSNorm, causal conv, gate/decay, and recurrent/chunk paths.
+
+This is a training-correctness follow-up, not a throughput claim. A release CUDA
+latency sanity check on the same WSL RTX 4090 Laptop host stayed within the
+previous post-attention-gate range:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| guarded autograd candidate | 33.356, 33.696, 33.287 | 33.446 ms | 29.899 |
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-gdn-autograd-guard-smoke-20260510`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9345`, `auto_load=true`;
+- job id: `946d3867-9955-4889-83cc-d85581e8c0f6`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.5467936992645264`;
+- `/health` reported `active_adapter="gdn-autograd-guard-smoke-r1"`;
+- adapter-backed no-thinking chat returned `kiln violet`;
+- adapter-backed thinking chat emitted non-empty `reasoning_content`.
