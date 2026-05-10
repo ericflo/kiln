@@ -863,3 +863,41 @@ Additional validation after rejected A133-A135:
 - Final source removes the trial. Post-removal `cargo fmt --check` and
   `cargo check -p kiln-vulkan-kernel` passed. CUDA and Metal source paths were
   untouched.
+
+Additional validation after A136:
+
+- Current-main post-release smoke on `345759e4` rebuilt the release Vulkan
+  server and reran eight concurrent streaming chat requests with
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Correctness remained exact on GPU/Vulkan: `8/8` HTTP 200, empty reasoning,
+  visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, `128`
+  tokens, `120` submitted jobs, `41` worker batches, max batch `3`, no failed
+  or runner-busy jobs.
+- Fresh profile confirmed the current largest buckets are still
+  batcher/MLP/prefill-side work rather than a CUDA attention-gate-style target.
+
+Additional validation after A137-A139:
+
+- Existing-config sweep with max batch `8` showed Vulkan `wait5000` improves
+  the eight-stream shape: `12.770253s`, `16` worker batches, max batch `8`,
+  versus wait0 `14.484329s`, `30` worker batches, max batch `7`
+  (`+11.834%`). Wait100 was noise (`+0.230%`).
+- Single-request cost for wait5000 was measured separately:
+  `2.433375s` versus wait0 `2.339719s` (`-4.003%`) for the same 16-token
+  continuation.
+- Kept a Vulkan-only default change:
+  `default_decode_batcher_wait(..., "vulkan") = 5000us`. CPU/CUDA remain
+  `0us`; Metal remains `100us`; explicit `KILN_DECODE_BATCH_WAIT_US` still
+  overrides.
+- Validation passed: `cargo fmt --check`, targeted backend-policy unit test,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, and release
+  Vulkan server build.
+- A139 post-change endpoint run used no explicit wait/max env and proved the
+  default was active: server log `backend="vulkan"`, `max_batch=8`,
+  `wait_us=5000`; exact output, `120` jobs, `16` worker batches, max batch
+  `8`, no failures.
+- Best-effort CUDA/Metal checks are unchanged host blocks: CUDA fails before
+  project typecheck because `nvcc` is missing; Metal fails because `objc2`
+  requires an Apple target.

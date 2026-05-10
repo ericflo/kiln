@@ -1,0 +1,101 @@
+Profile totals parsed from vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-server.log
+
+Top stage totals:
+  8952.120 ms  count=   39  mean= 229.542  decode_batcher:stage=worker_total:batch=3
+  8951.897 ms  count=   39  mean= 229.536  decode_batcher:stage=runner_call:batch=3
+  8951.557 ms  count=   39  mean= 229.527  decode_batcher:stage=decode_total:batch=3
+  8724.586 ms  count=   39  mean= 223.707  decode_batcher:stage=batched_forward:batch=3
+  6532.873 ms  count=  256  mean=  25.519  mlp:stage=fused:seq_len=56
+  6513.097 ms  count=  256  mean=  25.442  vulkan_mlp:stage=total:batch=56
+  6464.096 ms  count=  256  mean=  25.250  vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=56
+  4563.104 ms  count=   64  mean=  71.298  full_attn:stage=qkv_proj:seq_len=56
+  4101.980 ms  count=  192  mean=  21.364  gdn:stage=in_proj:seq_len=56
+  4082.532 ms  count=  192  mean=  21.263  vulkan_gdn_in_proj:stage=total:batch=56
+  3865.578 ms  count=  192  mean=  20.133  gdn:stage=conv:seq_len=56
+  3847.964 ms  count=  192  mean=  20.041  gdn:stage=gated_norm:seq_len=56
+  3769.152 ms  count=  192  mean=  19.631  gdn:stage=out_proj:seq_len=56
+  3655.960 ms  count=  192  mean=  19.041  gdn:stage=gates:seq_len=56
+  3050.927 ms  count=  192  mean=  15.890  vulkan_gdn_in_proj:stage=pipeline_descriptor_setup:batch=56
+  3024.147 ms  count= 1008  mean=   3.000  gdn:stage=recurrent:seq_len=1
+  1940.253 ms  count=  192  mean=  10.105  gdn:stage=recurrent:seq_len=56
+  1601.473 ms  count= 1344  mean=   1.192  mlp:stage=fused:seq_len=1
+  1448.731 ms  count= 1248  mean=   1.161  vulkan_mlp:stage=total:batch=3
+  1435.451 ms  count=   64  mean=  22.429  full_attn:stage=o_proj:seq_len=56
+  1365.556 ms  count= 1248  mean=   1.094  vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=3
+  1101.067 ms  count= 1008  mean=   1.092  gdn:stage=in_proj:seq_len=1
+   967.586 ms  count=  936  mean=   1.034  vulkan_gdn_in_proj:stage=total:batch=3
+   912.051 ms  count=  936  mean=   0.974  vulkan_gdn_recurrent:stage=record_submit_wait:batch=3
+   858.463 ms  count=  936  mean=   0.917  vulkan_gdn_in_proj:stage=record_submit_wait:batch=3
+   801.057 ms  count=  192  mean=   4.172  vulkan_gdn_in_proj:stage=record_submit_wait:batch=56
+   694.237 ms  count=  936  mean=   0.742  vulkan_gdn_recurrent:stage=make_state_staging:batch=3
+   436.363 ms  count=  936  mean=   0.466  vulkan_gdn_recurrent:stage=read_state:batch=3
+   386.240 ms  count=  936  mean=   0.413  vulkan_gdn_recurrent:stage=extract_state:batch=3
+   376.138 ms  count= 1008  mean=   0.373  gdn:stage=out_proj:seq_len=1
+   349.469 ms  count=  320  mean=   1.092  full_attn:stage=qkv_proj_batch:seq_len=1
+   342.887 ms  count=    1  mean= 342.887  decode_batcher:stage=worker_total:batch=1
+   342.871 ms  count=    1  mean= 342.871  decode_batcher:stage=runner_call:batch=1
+   342.867 ms  count=    1  mean= 342.867  decode_batcher:stage=decode_total:batch=1
+   342.864 ms  count=    1  mean= 342.864  decode_batcher:stage=single_forward:batch=1
+   315.247 ms  count= 1008  mean=   0.313  gdn:stage=gates:seq_len=1
+   298.540 ms  count=  320  mean=   0.933  full_attn:stage=decode_attn_contiguous_batch:seq_len=1
+   288.377 ms  count= 1008  mean=   0.286  gdn:stage=conv:seq_len=1
+   280.808 ms  count= 1008  mean=   0.279  gdn:stage=gated_norm:seq_len=1
+   228.938 ms  count=   32  mean=   7.154  mlp:stage=fused:seq_len=64
+   227.804 ms  count=   32  mean=   7.119  vulkan_mlp:stage=total:batch=64
+   223.484 ms  count=   32  mean=   6.984  vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=64
+   218.935 ms  count=   39  mean=   5.614  decode_batcher:stage=batch_state_assemble:batch=3
+   214.104 ms  count=   24  mean=   8.921  gdn:stage=recurrent:seq_len=64
+   197.728 ms  count=  936  mean=   0.211  vulkan_gdn_recurrent:stage=create_tensors:batch=3
+   152.609 ms  count=    1  mean= 152.609  decode_batcher:stage=worker_total:batch=2
+   152.603 ms  count=    1  mean= 152.603  decode_batcher:stage=runner_call:batch=2
+   152.595 ms  count=    1  mean= 152.595  decode_batcher:stage=decode_total:batch=2
+   149.420 ms  count=    1  mean= 149.420  decode_batcher:stage=batched_forward:batch=2
+   129.349 ms  count=  192  mean=   0.674  gdn:stage=qk_norm:seq_len=56
+   124.654 ms  count=   24  mean=   5.194  gdn:stage=conv:seq_len=64
+   121.195 ms  count=   24  mean=   5.050  gdn:stage=in_proj:seq_len=64
+   120.038 ms  count=   24  mean=   5.002  vulkan_gdn_in_proj:stage=total:batch=64
+   117.750 ms  count=  320  mean=   0.368  full_attn:stage=o_proj_batch:seq_len=1
+   104.619 ms  count=  192  mean=   0.545  gdn:stage=qkv_split:seq_len=56
+   101.479 ms  count=   24  mean=   4.228  vulkan_gdn_in_proj:stage=record_submit_wait:batch=64
+    97.077 ms  count=    8  mean=  12.135  full_attn:stage=qkv_proj:seq_len=64
+    90.894 ms  count=  936  mean=   0.097  vulkan_gdn_recurrent:stage=make_input_staging:batch=3
+    82.646 ms  count=  192  mean=   0.430  vulkan_gdn_in_proj:stage=read_host_visible:batch=56
+    82.365 ms  count=   64  mean=   1.287  vulkan_mlp:stage=total:batch=1
+    79.938 ms  count=   48  mean=   1.665  vulkan_gdn_in_proj:stage=total:batch=1
+    78.525 ms  count=   64  mean=   1.227  vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=1
+    57.254 ms  count=   24  mean=   2.386  gdn:stage=out_proj:seq_len=64
+    54.153 ms  count=   48  mean=   1.128  vulkan_gdn_in_proj:stage=pipeline_descriptor_setup:batch=1
+    50.600 ms  count=   64  mean=   0.791  full_attn:stage=prefill_scores:seq_len=56
+    50.350 ms  count=   64  mean=   0.787  full_attn:stage=rope:seq_len=56
+    40.045 ms  count=   64  mean=   0.626  full_attn:stage=qk_norm:seq_len=56
+    36.330 ms  count=  192  mean=   0.189  vulkan_gdn_in_proj:stage=create_x_stage_write:batch=56
+    36.158 ms  count=   32  mean=   1.130  vulkan_mlp:stage=total:batch=2
+    34.654 ms  count=   48  mean=   0.722  vulkan_gdn_recurrent:stage=pipeline_descriptor_setup:batch=1
+    33.995 ms  count=   32  mean=   1.062  vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=2
+    33.860 ms  count=   64  mean=   0.529  full_attn:stage=attn_gate:seq_len=56
+    32.916 ms  count= 1008  mean=   0.033  gdn:stage=qk_norm:seq_len=1
+    32.118 ms  count=   24  mean=   1.338  gdn:stage=gated_norm:seq_len=64
+    31.703 ms  count=  192  mean=   0.165  vulkan_gdn_in_proj:stage=create_out_buffers:batch=56
+    29.596 ms  count=   64  mean=   0.462  full_attn:stage=prefill_weighted_sum:seq_len=56
+    24.478 ms  count=  192  mean=   0.127  vulkan_gdn_in_proj:stage=create_tensors:batch=56
+    23.922 ms  count=    8  mean=   2.990  full_attn:stage=o_proj:seq_len=64
+    23.029 ms  count=  320  mean=   0.072  full_attn:stage=rope_batch:seq_len=1
+    22.870 ms  count=  936  mean=   0.024  vulkan_gdn_recurrent:stage=create_output_buffers:batch=3
+
+Kernel family totals by batch:
+ 35806.070 ms  decode_batcher:batch=3
+ 13010.432 ms  vulkan_mlp:batch=56
+  8117.178 ms  vulkan_gdn_in_proj:batch=56
+  2846.153 ms  vulkan_mlp:batch=3
+  2759.608 ms  vulkan_gdn_recurrent:batch=3
+  1892.493 ms  vulkan_gdn_in_proj:batch=3
+  1371.490 ms  decode_batcher:batch=1
+   610.391 ms  decode_batcher:batch=2
+   454.018 ms  vulkan_mlp:batch=64
+   238.367 ms  vulkan_gdn_in_proj:batch=64
+   162.243 ms  vulkan_mlp:batch=1
+   157.093 ms  vulkan_gdn_in_proj:batch=1
+    75.370 ms  vulkan_gdn_recurrent:batch=1
+    71.183 ms  vulkan_mlp:batch=2
+    42.812 ms  vulkan_gdn_in_proj:batch=2
+    27.251 ms  vulkan_gdn_recurrent:batch=2

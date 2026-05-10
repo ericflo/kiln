@@ -8472,3 +8472,137 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-response_*.sse`
+
+## A136 - Current-main GPU correctness refresh after release rebase
+
+Base commit: `345759e4 release: bump server + desktop to 0.2.14 aligned cut (#1017)`
+
+Purpose:
+
+- Reconfirm the current Vulkan path after rebasing onto the release bump and
+  rebuilding the release server.
+- Use the real template configuration requested by the caller:
+  `chat_template_kwargs: {"enable_thinking": false}`. No literal `/no_think`
+  text marker is used.
+
+Evidence:
+
+- `cargo build --release -p kiln-server --bin kiln --features vulkan` passed
+  before the endpoint run.
+- Eight concurrent streaming chat requests, `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_MAX=3`, `KILN_DECODE_BATCH_WAIT_US=5000`, full stage
+  profiling enabled, prewarm complete.
+- Correctness: `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Routing: startup banner reported `Mode: GPU inference`; logs reported
+  `Vulkan available`, selected
+  `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, and enabled the live decode
+  batcher with backend `vulkan`.
+- Metrics: `128` generated tokens, `120` submitted jobs, `41` worker batches,
+  `120` rows, max observed batch `3`, no failed or runner-busy jobs.
+- Wall: `13.643932s`.
+- Fresh profile top buckets remained dominated by batcher/MLP/prefill-side
+  work: batch-3 worker/decode totals around `8952ms`, batched forward
+  `8724.586ms`, prefill MLP batch-56 `6513.097ms` kernel total, full-attn QKV
+  seq-56 `4563.104ms`, GDN in-proj seq-56 `4082.532ms`, and live recurrent
+  seq-1 `3024.147ms`.
+
+Decision:
+
+- Current main remains GPU/Vulkan-routed and exact-correct. This is the new
+  post-release sanity anchor before further Vulkan perf work.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-profile-totals.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a136-current-main-gpu-correctness-response_*.sse`
+
+## A137-A139 - Keep Vulkan default decode-batcher wait at 5000us
+
+Base commit for measurement: `345759e4`.
+
+Problem:
+
+- With Vulkan `max_batch=8` but zero default wait, the live batcher often
+  executes more partial decode batches for concurrent streams. A136 and A131
+  were using an explicit `5000us` wait for benchmarking, but production Vulkan
+  default still inherited zero wait from CPU/CUDA.
+
+No-source measurements:
+
+- A137 swept the existing runtime configuration with eight concurrent
+  streaming chat requests, no profiling, prewarm complete, max batch `8`, and
+  identical prompts across arms.
+- All three A137 arms were exact-correct and GPU/Vulkan-routed:
+  - `max8-wait0`: `14.484329s`, `30` worker batches, max observed batch `7`.
+  - `max8-wait100`: `14.450979s`, `29` worker batches, max observed batch `7`
+    (`+0.230%` versus wait0).
+  - `max8-wait5000`: `12.770253s`, `16` worker batches, max observed batch
+    `8` (`+11.834%` versus wait0).
+- A138 measured the single-request tradeoff:
+  - `single-max8-wait0`: `2.339719s`, `15` jobs, `15` worker batches.
+  - `single-max8-wait5000`: `2.433375s`, `15` jobs, `15` worker batches
+    (`-4.003%` versus wait0).
+
+Change:
+
+- Change only `default_decode_batcher_wait(..., "vulkan")` to `5000us`.
+- CPU and CUDA remain `0us`; Metal remains `100us`.
+- Explicit `KILN_DECODE_BATCH_WAIT_US` still overrides the backend default.
+- Updated `test_decode_batcher_default_wait_backend_policy`.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model test_decode_batcher_default_wait_backend_policy --lib -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA check remains host-blocked before project typecheck:
+  `cudarc` cannot run `nvcc --version`.
+- Best-effort Metal check remains host-blocked before project typecheck:
+  `objc2` requires an Apple target.
+
+Post-change endpoint validation:
+
+- A139 ran with no `KILN_DECODE_BATCH_WAIT_US` and no
+  `KILN_DECODE_BATCH_MAX`, proving the new Vulkan defaults were used.
+- Server log: live greedy decode batcher `backend="vulkan"`, `max_batch=8`,
+  `wait_us=5000`.
+- Correctness: `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Routing: `Mode: GPU inference`, `Vulkan available`, Strix Halo selected.
+- Metrics: `128` generated tokens, `120` submitted jobs, `16` worker batches,
+  `120` rows, max observed batch `8`, no failed or runner-busy jobs.
+- Wall: `13.295897s`.
+
+Decision:
+
+- Keep the Vulkan-only default wait change. It is a routing/scheduler default
+  change, not a CUDA/Metal kernel change, and it materially improves the
+  targeted concurrent GPU decode shape while preserving exact output.
+- Residual tradeoff: single-request 16-token smoke regressed about `4%`. Keep
+  `KILN_DECODE_BATCH_WAIT_US=0` as the documented low-latency override.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a137-vulkan-batcher-wait-sweep-*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a138-vulkan-batcher-single-wait-cost-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a138-vulkan-batcher-single-wait-cost-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a138-vulkan-batcher-single-wait-cost-*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-validation-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-validation-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-validation-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-validation-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a139-vulkan-default-wait5000-check-metal.log`

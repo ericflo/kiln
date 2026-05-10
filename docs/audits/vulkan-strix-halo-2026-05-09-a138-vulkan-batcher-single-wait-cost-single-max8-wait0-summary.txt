@@ -1,0 +1,1 @@
+single-max8-wait0: wall=2.339719s correct=True metrics={'requests_ok': 1.0, 'tokens_generated': 16.0, 'submitted_jobs': 15.0, 'worker_batches': 15.0, 'batcher_rows': 15.0, 'failed_jobs': 0.0, 'runner_busy_jobs': 0.0, 'max_observed_batch': 1.0}

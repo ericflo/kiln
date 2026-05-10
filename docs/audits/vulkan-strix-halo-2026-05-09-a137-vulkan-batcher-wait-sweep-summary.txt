@@ -1,0 +1,5 @@
+A137 Vulkan batcher wait sweep commit=345759e4
+- max8-wait0: wall=14.484329s slowest=14.467432s correct=True metrics={'requests_ok': 8.0, 'requests_error': 0.0, 'tokens_generated': 128.0, 'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'worker_batches': 30.0, 'batcher_rows': 120.0, 'max_observed_batch': 7.0}
+- max8-wait100: wall=14.450979s slowest=14.441068s correct=True metrics={'requests_ok': 8.0, 'requests_error': 0.0, 'tokens_generated': 128.0, 'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'worker_batches': 29.0, 'batcher_rows': 120.0, 'max_observed_batch': 7.0}
+- max8-wait5000: wall=12.770253s slowest=12.759996s correct=True metrics={'requests_ok': 8.0, 'requests_error': 0.0, 'tokens_generated': 128.0, 'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'worker_batches': 16.0, 'batcher_rows': 120.0, 'max_observed_batch': 8.0}
+Deltas vs wait0 (% positive faster): {'max8-wait0': 0.0, 'max8-wait100': 0.23024783742904809, 'max8-wait5000': 11.834002354589494}

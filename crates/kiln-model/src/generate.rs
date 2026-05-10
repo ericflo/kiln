@@ -313,7 +313,8 @@ enum StreamTokenDisposition {
 /// than rowwise scheduling. Set `KILN_DECODE_BATCHER=0` to force the legacy
 /// direct rowwise path, `KILN_DECODE_BATCH_WAIT_US` to override the admission
 /// delay, or `KILN_DECODE_BATCH_MAX` to force a backend batch size for A/B
-/// testing.
+/// testing. Vulkan defaults to a longer wait because same-position peers tend
+/// to arrive just outside a short polling window after independent prefills.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
@@ -393,6 +394,8 @@ fn default_decode_batcher_allow_mixed_seq_lens(device: &Device, backend_name: &s
 fn default_decode_batcher_wait(device: &Device, backend_name: &str) -> std::time::Duration {
     if matches!(device, Device::Metal(_)) || backend_name == "metal" {
         std::time::Duration::from_micros(100)
+    } else if backend_name == "vulkan" {
+        std::time::Duration::from_micros(5_000)
     } else {
         std::time::Duration::ZERO
     }
@@ -5930,7 +5933,7 @@ mod tests {
         );
         assert_eq!(
             default_decode_batcher_wait(&device, "vulkan"),
-            std::time::Duration::ZERO
+            std::time::Duration::from_micros(5_000)
         );
         assert_eq!(
             default_decode_batcher_wait(&device, "metal"),

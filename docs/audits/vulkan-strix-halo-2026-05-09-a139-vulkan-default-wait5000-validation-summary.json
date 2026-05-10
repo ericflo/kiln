@@ -1,0 +1,97 @@
+{
+  "commit": "345759e4",
+  "label": "vulkan-default-wait5000-validation",
+  "wall_sec": 13.295896613009972,
+  "slowest_request_sec": 13.290470139007084,
+  "correct": true,
+  "expected_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 13.290470139007084,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 13.28927192100673,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 13.290102409009705,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 13.289131943995017,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_sec": 13.28930300999491,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_sec": 13.289175083002192,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_sec": 12.85560519399587,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_sec": 13.287848469000892,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    }
+  ],
+  "metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "worker_batches": 16.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 8.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true,
+    "default_wait_us_5000": true,
+    "default_max_batch_8": true,
+    "version_0_2_14": true
+  },
+  "env_extra": {
+    "KILN_PREFIX_CACHE_ENABLED": "false"
+  }
+}

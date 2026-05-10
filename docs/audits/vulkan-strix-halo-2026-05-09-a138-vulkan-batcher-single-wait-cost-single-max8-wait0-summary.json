@@ -1,0 +1,30 @@
+{
+  "commit": "345759e4",
+  "label": "single-max8-wait0",
+  "wall_sec": 2.3397193659911864,
+  "correct": true,
+  "status": 200,
+  "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "reasoning": "",
+  "finish_reason": "length",
+  "metrics": {
+    "requests_ok": 1.0,
+    "tokens_generated": 16.0,
+    "submitted_jobs": 15.0,
+    "worker_batches": 15.0,
+    "batcher_rows": 15.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "max_observed_batch": 1.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "env_extra": {
+    "KILN_DECODE_BATCH_MAX": "8",
+    "KILN_DECODE_BATCH_WAIT_US": "0"
+  }
+}

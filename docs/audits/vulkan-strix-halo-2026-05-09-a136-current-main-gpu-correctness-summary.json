@@ -1,0 +1,106 @@
+{
+  "commit": "345759e4",
+  "label": "current-main-gpu-correctness",
+  "wall_sec": 13.643932495004265,
+  "slowest_request_sec": 13.626586387006682,
+  "correct": true,
+  "expected_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 11.206840933009516,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 13.626586387006682,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 13.25280683299934,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 13.467701330999262,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_sec": 13.625912842006073,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_sec": 13.467863688012585,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_sec": 13.250689388994942,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_sec": 13.250237749001826,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    }
+  ],
+  "metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true,
+    "version_0_2_14": true
+  },
+  "env_extra": {
+    "KILN_DECODE_BATCH_MAX": "3",
+    "KILN_DECODE_BATCH_WAIT_US": "5000",
+    "KILN_MODEL_PATH": "Qwen3.5-4B",
+    "KILN_PREFIX_CACHE_ENABLED": "false",
+    "KILN_PROFILE_DECODE_BATCHER_STAGES": "1",
+    "KILN_PROFILE_FULL_ATTN_STAGES": "1",
+    "KILN_PROFILE_GDN_STAGES": "1",
+    "KILN_PROFILE_MLP_STAGES": "1",
+    "KILN_PROFILE_PAGED_LAYERS": "1",
+    "KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES": "1",
+    "KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES": "1",
+    "KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES": "1"
+  }
+}
