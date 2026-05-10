@@ -61,8 +61,14 @@ pub struct VulkanBackend {
     /// Cached packed-bf16 device-local buffers for immutable CPU weights used
     /// by Vulkan transposed linear decode paths.
     bf16_packed_weight_cache: Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Vulkan device (owned, not from candle-core)
-    vulkan_device: Option<Box<kiln_vulkan_kernel::VulkanDevice>>,
+    /// Vulkan device (owned, not from candle-core).
+    ///
+    /// `Arc` rather than `Box` so a `CustomOp1` impl that wants to dispatch
+    /// a Vulkan kernel from inside `cpu_fwd` can capture a refcounted
+    /// handle to the device — the candle CustomOp trait requires the op
+    /// state to be `'static + Send + Sync`, which a borrow off `&self`
+    /// can never satisfy.
+    vulkan_device: Option<Arc<kiln_vulkan_kernel::VulkanDevice>>,
 }
 
 thread_local! {
@@ -188,7 +194,7 @@ impl VulkanBackend {
                     device = dev.device_name(),
                     "Vulkan device initialized"
                 );
-                Some(Box::new(dev))
+                Some(Arc::new(dev))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Vulkan device initialization failed, falling back to CPU");
