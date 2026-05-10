@@ -1048,7 +1048,21 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        // Persist size/position/maximized/etc. across launches, but NOT
+        // visibility. Otherwise tauri-plugin-window-state restores `visible:
+        // true` on every window the user happened to have open at last quit,
+        // so a user with Settings/Dashboard/Logs open ends up with 3-4 windows
+        // popping on every launch — even though tauri.conf.json says
+        // `visible: false`. Kiln Desktop is a tray app: windows should only
+        // open when the user explicitly invokes a tray menu item.
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        & !tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
