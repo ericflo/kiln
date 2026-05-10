@@ -1507,20 +1507,25 @@ fn analytic_sft_tail_grad_pre_final_norm(
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
 
-/// Read `KILN_USE_FLCE` env var. When set (`1`, `true`, `yes`), SFT training
-/// takes the Fused Linear Cross-Entropy path: the LM head matmul is fused
-/// into a chunked log-sum-exp + gather reduction so the `[T, V]` logits
-/// tensor is never materialized. Required to keep long-context SFT
-/// (T >= 8192) under the A6000 VRAM budget on Qwen3.5-4B (V=151936).
+/// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
+/// Fused Linear Cross-Entropy path: the LM head matmul is fused into a
+/// chunked log-sum-exp + gather reduction so the `[T, V]` logits tensor
+/// is never materialized. With Qwen3.5-4B (V=248320) this saves ~1 GB
+/// per 1k tokens forward and a similar amount in the backward graph —
+/// the difference between fitting and OOM on a 30 GB host (Vulkan
+/// stores autograd tensors in CPU RAM, so the saving applies to system
+/// RAM, not just GPU VRAM).
 ///
-/// Default: disabled. Opt-in while the path is being validated.
+/// Default: enabled. Set `KILN_USE_FLCE=0` (or `false`/`no`) to opt back
+/// into the naive `model_forward_head` + `cross_entropy_loss` path —
+/// useful for parity debugging only.
 fn use_flce() -> bool {
     std::env::var("KILN_USE_FLCE")
         .map(|v| {
             let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
+            !(v == "0" || v == "false" || v == "no")
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// SGD update: param = param - lr * grad
@@ -3391,13 +3396,15 @@ mod tests {
 
         // Step 1: monolithic baseline (env explicitly cleared so the path
         // takes the original branch even if a parent test process leaked a
-        // KILN_STREAMING_PREFILL=1 setting).
+        // KILN_STREAMING_PREFILL=1 setting). FLCE is explicitly disabled —
+        // the global default is on, but this baseline asserts parity on the
+        // naive `cross_entropy_loss` branch.
         // SAFETY: env var mutation is safe under nextest's per-test process
         // isolation; this test must run via `cargo nextest run`.
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_USE_FLCE");
+            std::env::set_var("KILN_USE_FLCE", "0");
         }
         let (loss_mono, grads_mono) = checkpointed_forward_backward(
             &*backend,
@@ -3596,13 +3603,15 @@ mod tests {
         // the ground-truth baseline. Clear streaming env vars defensively
         // even though nextest gives per-test process isolation, so a
         // parent test process leaking KILN_STREAMING_PREFILL=1 doesn't
-        // silently invalidate the baseline.
+        // silently invalidate the baseline. FLCE is explicitly disabled —
+        // the global default is on, but this baseline asserts parity on
+        // the naive `cross_entropy_loss` branch.
         // SAFETY: env mutation is safe under nextest's per-test process
         // isolation; this test must run via `cargo nextest run`.
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::remove_var("KILN_USE_FLCE");
+            std::env::set_var("KILN_USE_FLCE", "0");
         }
         let (loss_std, grad_store_std) = standard_forward_backward(
             &*backend,
