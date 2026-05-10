@@ -425,3 +425,32 @@ Date: 2026-05-09
   and the server log reported `SFT training complete` with no
   `CUDA_ERROR_OUT_OF_MEMORY`. A post-smoke kernel scan showed no new Linux
   OOM-killer or WSL/DXG residency error, and GPU memory returned to `71 MiB`.
+- Accepted CUDA empty output allocations for fully overwritten custom kernels:
+  RMSNorm, L2 QK norm, GQA L2 QK norm, rotary Q/K, and decode QKV prep now use
+  `Tensor::empty` for CUDA outputs when enabled, avoiding the extra zero-fill
+  before kernels that overwrite every element. Rollback:
+  `KILN_DISABLE_CUDA_EMPTY_KERNEL_OUTPUTS=1`.
+- Token parity on `prompt_tokens=64`, `max_output_tokens=33` matched rollback
+  for the first 32 generated token ids.
+- Same-binary WSL CUDA paged latency A/B on `prompt_tokens=64`,
+  `max_output_tokens=33`: rollback mean ITL runs `26.548371`, `26.752817`,
+  `26.917567` ms averaged `26.739585ms` / `37.398932 tok/s`; default empty
+  output runs `26.367942`, `26.222591`, `26.306814` ms averaged
+  `26.299116ms` / `38.024288 tok/s`, a 1.6% decode ITL win.
+- Longer decode repeat on `prompt_tokens=64`, `max_output_tokens=129`:
+  rollback averaged `23.893290ms` / `41.854684 tok/s`; default empty outputs
+  averaged `23.520915ms` / `42.515354 tok/s`, a 1.6% decode ITL win.
+- Empty-output validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-rmsnorm-kernel --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-empty-output-smoke-0905`, final loss `1.2110248804092407`, and
+  `/health` reported `training_budget_gb=6.434062336` with the adapter active.
+  The server log reported `SFT training complete` and `auto-loaded trained
+  adapter`; a post-smoke kernel scan showed no new Linux OOM-killer or WSL/DXG
+  residency error, and GPU memory returned to `71 MiB`.

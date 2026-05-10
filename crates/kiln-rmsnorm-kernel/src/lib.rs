@@ -78,6 +78,7 @@ use candle_core::{
     cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
+use std::sync::OnceLock;
 
 unsafe extern "C" {
     fn kiln_fused_rmsnorm(
@@ -210,6 +211,11 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+fn cuda_empty_kernel_outputs_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_EMPTY_KERNEL_OUTPUTS").is_err())
+}
+
 /// Whether the fused RMSNorm kernel is available on the given tensor.
 ///
 /// The kernel only supports CUDA + bf16 + contiguous + hidden <= 8192.
@@ -276,7 +282,11 @@ pub fn fused_rmsnorm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     let x = x.contiguous()?;
     let weight = weight.contiguous()?;
 
-    let out = Tensor::zeros(x_dims.as_slice(), DType::BF16, device)?;
+    let out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(x_dims.as_slice(), DType::BF16, device)? }
+    } else {
+        Tensor::zeros(x_dims.as_slice(), DType::BF16, device)?
+    };
 
     {
         let (x_storage, x_layout) = x.storage_and_layout();
@@ -912,8 +922,16 @@ pub fn fused_l2_qk_norm(
 
     let rows: usize = dims[..dims.len() - 1].iter().product();
 
-    let q_out = Tensor::zeros(dims.as_slice(), DType::BF16, device)?;
-    let k_out = Tensor::zeros(dims.as_slice(), DType::BF16, device)?;
+    let q_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(dims.as_slice(), DType::BF16, device)? }
+    } else {
+        Tensor::zeros(dims.as_slice(), DType::BF16, device)?
+    };
+    let k_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(dims.as_slice(), DType::BF16, device)? }
+    } else {
+        Tensor::zeros(dims.as_slice(), DType::BF16, device)?
+    };
 
     if rows == 0 {
         return Ok((q_out, k_out));
@@ -1067,8 +1085,16 @@ pub fn fused_l2_qk_norm_gqa(
     let device = q.device();
     let out_dims = [batch, seq, nv, dk];
 
-    let q_out = Tensor::zeros(&out_dims, DType::BF16, device)?;
-    let k_out = Tensor::zeros(&out_dims, DType::BF16, device)?;
+    let q_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(&out_dims, DType::BF16, device)? }
+    } else {
+        Tensor::zeros(&out_dims, DType::BF16, device)?
+    };
+    let k_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(&out_dims, DType::BF16, device)? }
+    } else {
+        Tensor::zeros(&out_dims, DType::BF16, device)?
+    };
 
     if rows == 0 {
         return Ok((q_out, k_out));
@@ -1231,8 +1257,16 @@ pub fn fused_rotary_qk(
     let q_heads = q_dims[2];
     let k_heads = k_dims[2];
     let device = q.device();
-    let q_out = Tensor::zeros(q_dims, DType::BF16, device)?;
-    let k_out = Tensor::zeros(k_dims, DType::BF16, device)?;
+    let q_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(q_dims, DType::BF16, device)? }
+    } else {
+        Tensor::zeros(q_dims, DType::BF16, device)?
+    };
+    let k_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(k_dims, DType::BF16, device)? }
+    } else {
+        Tensor::zeros(k_dims, DType::BF16, device)?
+    };
 
     let q = q.contiguous()?;
     let k = k.contiguous()?;
@@ -1456,14 +1490,22 @@ pub fn fused_attn_decode_qkv_prep(
 
     let batch = q_raw.dims()[0];
     let device = q_raw.device();
-    let q_out = Tensor::zeros((batch, 1, q_heads, head_dim), DType::BF16, device)?;
-    let k_out = Tensor::zeros((batch, 1, k_heads, head_dim), DType::BF16, device)?;
+    let q_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty((batch, 1, q_heads, head_dim), DType::BF16, device)? }
+    } else {
+        Tensor::zeros((batch, 1, q_heads, head_dim), DType::BF16, device)?
+    };
+    let k_out = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty((batch, 1, k_heads, head_dim), DType::BF16, device)? }
+    } else {
+        Tensor::zeros((batch, 1, k_heads, head_dim), DType::BF16, device)?
+    };
     let gate_out = if has_gate {
-        Some(Tensor::zeros(
-            (batch, 1, q_heads * head_dim),
-            DType::BF16,
-            device,
-        )?)
+        Some(if cuda_empty_kernel_outputs_enabled() {
+            unsafe { Tensor::empty((batch, 1, q_heads * head_dim), DType::BF16, device)? }
+        } else {
+            Tensor::zeros((batch, 1, q_heads * head_dim), DType::BF16, device)?
+        })
     } else {
         None
     };

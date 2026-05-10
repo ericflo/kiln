@@ -1286,3 +1286,87 @@ Live no-env CUDA training smoke on the candidate:
 - server log reported `SFT training complete` and `auto-loaded trained adapter`;
 - no Linux OOM-killer, `CUDA_ERROR_OUT_OF_MEMORY`, or new WSL/DXG residency
   error appeared after the smoke; GPU memory returned to `71 MiB` used.
+
+## Follow-Up: CUDA Empty Outputs For Overwriting Kernels
+
+Several hot custom CUDA wrappers allocated their destination tensors with
+`Tensor::zeros` even though the launched kernels overwrite every output element
+before the tensor is observed. The CUDA paths for RMSNorm, L2 QK norm, GQA L2 QK
+norm, rotary Q/K, and decode QKV prep now allocate those outputs with
+`Tensor::empty` by default. This removes the redundant zero-fill/memset from the
+decode hot path while keeping a process-start rollback switch:
+
+```text
+KILN_DISABLE_CUDA_EMPTY_KERNEL_OUTPUTS=1
+```
+
+Token parity matched rollback on the standard WSL CUDA latency prompt
+(`prompt_tokens=64`, `max_output_tokens=33`) for the first 32 generated token
+ids:
+
+```text
+[271, 1206, 1423, 680, 1204, 1691, 51864, 3520,
+ 506, 279, 19719, 6, 2981, 11, 567, 1118,
+ 1144, 310, 7995, 1204, 1599, 18237, 1292, 682,
+ 2047, 1238, 11834, 321, 26912, 52480, 1283, 13]
+```
+
+Same-binary WSL CUDA paged latency A/B, `prompt_tokens=64`,
+`max_output_tokens=33`, `KILN_NUM_BLOCKS=512`,
+`KILN_PREFIX_CACHE_MAX_ENTRIES=1`, `KILN_USE_FLCE=1`,
+`KILN_SPEC_ENABLED=0`:
+
+| path | prefill runs | mean ITL runs | avg mean ITL | avg decode tok/s |
+| --- | --- | --- | ---: | ---: |
+| rollback zero outputs | 73.467, 73.466, 72.267 ms | 26.548, 26.753, 26.918 ms | 26.739585 ms | 37.398932 tok/s |
+| default empty outputs | 75.188, 73.411, 74.321 ms | 26.368, 26.223, 26.307 ms | 26.299116 ms | 38.024288 tok/s |
+
+That is a 1.6% average decode ITL win on the short serial latency workload.
+Prefill was within noise and slightly worse in this sample, so the accepted
+gain is the repeated decode improvement.
+
+Longer decode repeat, same environment with `max_output_tokens=129`:
+
+| path | prefill runs | mean ITL runs | avg mean ITL | avg decode tok/s |
+| --- | --- | --- | ---: | ---: |
+| rollback zero outputs | 57.276, 63.016 ms | 24.056, 23.731 ms | 23.893290 ms | 41.854684 tok/s |
+| default empty outputs | 56.954, 55.044 ms | 23.519, 23.523 ms | 23.520915 ms | 42.515354 tok/s |
+
+The longer decode repeat also shows a 1.6% average decode ITL win.
+
+Profiled `prompt_tokens=64`, `max_output_tokens=8` spot check showed the
+expected target-stage movement in full-attention Q/K/RoPE prep:
+
+| path | `decode.full.qkv_split_qk_norm_rope` total | avg |
+| --- | ---: | ---: |
+| rollback zero outputs | 3.888 ms / 128 calls | 0.030375 ms |
+| default empty outputs | 2.126 ms / 128 calls | 0.016609 ms |
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-rmsnorm-kernel --quiet
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- load reported `post_load_used_vram_gb=10.468982784`,
+  `kv_cache_gb=0.268435456`, `training_budget_gb=6.434062336`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=7301`, `auto_load=true`;
+- adapter: `cuda-empty-output-smoke-0905`;
+- job id: `45505315-9cc3-4a73-8a89-742baabe0203`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.2110248804092407`;
+- `/health` reported `active_adapter="cuda-empty-output-smoke-0905"`,
+  `adapters_loaded=1`, `training_budget_gb=6.434062336`, and zero
+  queued/active training jobs;
+- server log reported `SFT training complete` and `auto-loaded trained
+  adapter`;
+- no Linux OOM-killer, `CUDA_ERROR_OUT_OF_MEMORY`, or new WSL/DXG residency
+  error appeared after the smoke; GPU memory returned to `71 MiB` used.
