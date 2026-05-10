@@ -917,3 +917,62 @@ Live training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
 - `/health` reported `active_adapter="attn-qkv-prep-smoke-r1"`;
 - adapter-backed no-thinking chat returned non-empty content;
 - adapter-backed thinking chat emitted non-empty `reasoning_content`.
+
+## Follow-Up: Fast-Path CUDA Token-Major KV Write
+
+The post-QKV-prep profile still showed full-attention decode paying a small but
+steady `kv_write` cost. CUDA graph replay already had a fused token-major
+bf16 paged K/V write kernel that writes K and V together from a device slot
+pointer. Normal single-request decode now uses the same CUDA kernel shape with
+a host slot value, replacing the two generic Candle `slice_set` writes for
+bf16 token-major single-token writes.
+
+This is an inference-only cache write fast path. Training still uses the
+existing differentiable training forward path; the live SFT smoke below runs
+through the production HTTP training queue and adapter hot-load path.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, paged latency bench, 64 prompt tokens,
+33 generated tokens, one warmup run per measurement, no stage profiling:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR=1` | 26.279893, 26.081714, 25.957450 | 26.106352 ms | 38.305843 |
+| default CUDA token-major KV write | 26.656393, 25.908104, 25.270606 | 25.945034 ms | 38.561360 |
+
+Average decode ITL improved by 0.6% on this WSL 16 GiB CUDA host. The win is
+small at the whole-token level but the targeted profile moved as intended:
+`kv_write` for decode `seq_len=1` dropped from 9.159 ms total to 5.398 ms
+total across 512 full-attention layer-token rows (`0.017889 ms` to
+`0.010543 ms` mean), a 41.1% reduction in that stage.
+
+Validation:
+
+```bash
+cargo fmt --check
+CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+CARGO_BUILD_JOBS=1 cargo test -p kiln-model write_token_major_native --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The CUDA release build was intentionally serialized with `CARGO_BUILD_JOBS=1`;
+no debug CUDA-feature test was run, avoiding the OOM-prone flash-attn debug
+rebuild mode.
+
+Live training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-kvwrite-smoke-20260510`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9903`, `auto_load=true`;
+- job id: `997650ec-2ac6-41e5-a025-a80a46691ab9`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.3608112335205078`;
+- `/health` reported `active_adapter="cuda-kvwrite-smoke-r1"`;
+- adapter-backed no-thinking chat returned `kiln amber`;
+- adapter-backed thinking chat emitted non-empty `reasoning_content`.

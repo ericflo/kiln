@@ -115,6 +115,17 @@ kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_slot(
     void *stream
 );
 
+kiln_flash_status_t kiln_paged_kv_write_token_major_bf16(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    unsigned int slot,
+    int num_kv_heads,
+    int head_dim,
+    void *stream
+);
+
 // Flash Attention Backward Pass
 //
 // All pointer arguments must be CUDA device pointers.

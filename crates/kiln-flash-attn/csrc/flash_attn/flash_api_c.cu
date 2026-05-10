@@ -452,6 +452,23 @@ __global__ void kiln_paged_kv_write_token_major_bf16_slot_kernel(
     v_pool[dst] = v[idx];
 }
 
+__global__ void kiln_paged_kv_write_token_major_bf16_kernel(
+    __nv_bfloat16 *k_pool,
+    __nv_bfloat16 *v_pool,
+    const __nv_bfloat16 *k,
+    const __nv_bfloat16 *v,
+    unsigned int slot,
+    int num_kv_heads,
+    int head_dim)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = num_kv_heads * head_dim;
+    if (idx >= total) return;
+    int dst = int(slot) * total + idx;
+    k_pool[dst] = k[idx];
+    v_pool[dst] = v[idx];
+}
+
 extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_slot(
     void *k_pool,
     void *v_pool,
@@ -468,6 +485,33 @@ extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16_slot(
     int blocks = (total + threads - 1) / threads;
     cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
     kiln_paged_kv_write_token_major_bf16_slot_kernel<<<blocks, threads, 0, cuda_stream>>>(
+        static_cast<__nv_bfloat16 *>(k_pool),
+        static_cast<__nv_bfloat16 *>(v_pool),
+        static_cast<const __nv_bfloat16 *>(k),
+        static_cast<const __nv_bfloat16 *>(v),
+        slot,
+        num_kv_heads,
+        head_dim);
+    cudaError_t err = cudaGetLastError();
+    return err == cudaSuccess ? 0 : -2;
+}
+
+extern "C" kiln_flash_status_t kiln_paged_kv_write_token_major_bf16(
+    void *k_pool,
+    void *v_pool,
+    const void *k,
+    const void *v,
+    unsigned int slot,
+    int num_kv_heads,
+    int head_dim,
+    void *stream)
+{
+    if (num_kv_heads <= 0 || head_dim <= 0) return -1;
+    int total = num_kv_heads * head_dim;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
+    kiln_paged_kv_write_token_major_bf16_kernel<<<blocks, threads, 0, cuda_stream>>>(
         static_cast<__nv_bfloat16 *>(k_pool),
         static_cast<__nv_bfloat16 *>(v_pool),
         static_cast<const __nv_bfloat16 *>(k),

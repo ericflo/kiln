@@ -8,6 +8,8 @@
 //! Supports optional FP8 (E4M3FN) quantization for ~2x memory savings.
 
 use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
@@ -15,6 +17,13 @@ use candle_core::{DType, Device, Tensor};
 use kiln_core::block::BlockTable;
 
 use crate::fp8;
+
+#[cfg(feature = "cuda")]
+fn cuda_paged_kv_write_token_major_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED
+        .get_or_init(|| std::env::var_os("KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR").is_some())
+}
 
 /// Paged KV cache that stores K/V in block-organized pool tensors.
 ///
@@ -259,6 +268,22 @@ impl PagedKvCache {
                 .ok_or_else(|| {
                     anyhow::anyhow!("no slot for position {start_pos} in block table")
                 })?;
+            #[cfg(feature = "cuda")]
+            {
+                if !cuda_paged_kv_write_token_major_disabled()
+                    && k.dtype() == DType::BF16
+                    && v.dtype() == DType::BF16
+                    && k_pool.dtype() == DType::BF16
+                    && v_pool.dtype() == DType::BF16
+                    && matches!(k_pool.device(), Device::Cuda(_))
+                    && matches!(v_pool.device(), Device::Cuda(_))
+                    && matches!(k.device(), Device::Cuda(_))
+                    && matches!(v.device(), Device::Cuda(_))
+                {
+                    kiln_flash_attn::paged_kv_write_token_major_bf16(k_pool, v_pool, k, v, slot)?;
+                    return Ok(true);
+                }
+            }
             #[cfg(feature = "metal")]
             {
                 if crate::backend::metal::metal_paged_kv_write_token_major_supports(
@@ -342,14 +367,20 @@ impl PagedKvCache {
         else {
             anyhow::bail!("batched token-major KV write slot lookup failed");
         };
-        let mut slots_data = Vec::with_capacity(batch);
-        let mut slots_fit_u32 = true;
-        for slot in slots {
-            match u32::try_from(slot) {
-                Ok(slot) => slots_data.push(slot),
-                Err(_) => slots_fit_u32 = false,
+        #[cfg(feature = "metal")]
+        let (slots_data, slots_fit_u32) = {
+            let mut slots_data = Vec::with_capacity(batch);
+            let mut slots_fit_u32 = true;
+            for slot in slots.iter().copied() {
+                match u32::try_from(slot) {
+                    Ok(slot) => slots_data.push(slot),
+                    Err(_) => slots_fit_u32 = false,
+                }
             }
-        }
+            (slots_data, slots_fit_u32)
+        };
+        #[cfg(not(feature = "metal"))]
+        let _ = slots;
 
         #[cfg(feature = "metal")]
         if slots_fit_u32 {

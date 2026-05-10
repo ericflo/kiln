@@ -278,3 +278,25 @@ Date: 2026-05-09
   `1.6304359436035156`, `/health` reported the active adapter, no-thinking
   chat returned non-empty content, and thinking chat emitted reasoning
   content.
+- Accepted CUDA token-major KV write fast path:
+  normal single-request bf16 CUDA decode now writes token-major paged K/V with
+  one CUDA kernel using a host slot value, replacing the two generic Candle
+  `slice_set` writes. CUDA graph replay keeps its existing device-slot variant.
+  Rollback: `KILN_DISABLE_CUDA_PAGED_KV_WRITE_TOKEN_MAJOR=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `26.279893`, `26.081714`, `25.957450` ms averaged
+  `26.106352ms` / `38.305843 tok/s`; default CUDA KV-write runs
+  `26.656393`, `25.908104`, `25.270606` ms averaged `25.945034ms` /
+  `38.561360 tok/s`, a 0.6% decode ITL win.
+- Targeted profile confirmed decode `kv_write` dropped from `9.159ms` total to
+  `5.398ms` total across `512` full-attention layer-token rows, a 41.1%
+  reduction in that stage.
+- KV-write validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo test -p kiln-model write_token_major_native --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live rank-1 SFT smoke auto-loaded `cuda-kvwrite-smoke-r1`, final loss
+  `1.3608112335205078`, `/health` reported the active adapter, no-thinking
+  chat returned `kiln amber`, and thinking chat emitted reasoning content.

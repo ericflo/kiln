@@ -80,6 +80,17 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_paged_kv_write_token_major_bf16(
+        k_pool: *mut core::ffi::c_void,
+        v_pool: *mut core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        slot: u32,
+        num_kv_heads: i32,
+        head_dim: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_flash_attn_bwd(
         dout: *const core::ffi::c_void,
         q: *const core::ffi::c_void,
@@ -964,6 +975,105 @@ pub fn flash_attn_paged_decode_dyn_seqlen(
     }
 
     Ok(out.clone())
+}
+
+/// Write one token-major bf16 K/V row into a paged KV pool using a host slot.
+pub fn paged_kv_write_token_major_bf16(
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    slot: usize,
+) -> Result<()> {
+    let (total_slots, num_kv_heads, head_dim) = k_pool.dims3()?;
+    if v_pool.dims3()? != k_pool.dims3()? {
+        candle_core::bail!("paged_kv_write_token_major_bf16 k/v pool dims mismatch");
+    }
+    if k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || k_pool.dtype() != DType::BF16
+        || v_pool.dtype() != DType::BF16
+    {
+        candle_core::bail!("paged_kv_write_token_major_bf16 requires bf16 tensors");
+    }
+    if slot >= total_slots {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16 slot {slot} out of range {total_slots}"
+        );
+    }
+    let expected = num_kv_heads * head_dim;
+    if k.elem_count() != expected || v.elem_count() != expected {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16 requires one token row of {expected} elements, got {} and {}",
+            k.elem_count(),
+            v.elem_count()
+        );
+    }
+    let Ok(slot_u32) = u32::try_from(slot) else {
+        candle_core::bail!("paged_kv_write_token_major_bf16 slot {slot} exceeds u32");
+    };
+    let Ok(num_kv_heads_i32) = i32::try_from(num_kv_heads) else {
+        candle_core::bail!(
+            "paged_kv_write_token_major_bf16 num_kv_heads {num_kv_heads} exceeds i32"
+        );
+    };
+    let Ok(head_dim_i32) = i32::try_from(head_dim) else {
+        candle_core::bail!("paged_kv_write_token_major_bf16 head_dim {head_dim} exceeds i32");
+    };
+
+    let k = k.contiguous()?;
+    let v = v.contiguous()?;
+    let (k_storage, k_layout) = k.storage_and_layout();
+    let (v_storage, v_layout) = v.storage_and_layout();
+    let (kp_storage, kp_layout) = k_pool.storage_and_layout();
+    let (vp_storage, vp_layout) = v_pool.storage_and_layout();
+
+    macro_rules! cuda {
+        ($s:expr, $name:expr) => {
+            match &*$s {
+                candle_core::Storage::Cuda(c) => c,
+                _ => candle_core::bail!(concat!($name, " must be a CUDA tensor")),
+            }
+        };
+    }
+    let k_cuda = cuda!(k_storage, "k");
+    let v_cuda = cuda!(v_storage, "v");
+    let kp_cuda = cuda!(kp_storage, "k_pool");
+    let vp_cuda = cuda!(vp_storage, "v_pool");
+    let stream = k_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let k_slice = k_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(k_layout.start_offset()..);
+    let v_slice = v_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(v_layout.start_offset()..);
+    let kp_slice = kp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(kp_layout.start_offset()..);
+    let vp_slice = vp_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(vp_layout.start_offset()..);
+    unsafe {
+        let (k_ptr, _g1) = k_slice.device_ptr(&stream);
+        let (v_ptr, _g2) = v_slice.device_ptr(&stream);
+        let (kp_ptr, _g3) = kp_slice.device_ptr(&stream);
+        let (vp_ptr, _g4) = vp_slice.device_ptr(&stream);
+        let status = kiln_paged_kv_write_token_major_bf16(
+            kp_ptr as *mut _,
+            vp_ptr as *mut _,
+            k_ptr as *const _,
+            v_ptr as *const _,
+            slot_u32,
+            num_kv_heads_i32,
+            head_dim_i32,
+            raw_stream,
+        );
+        if status != 0 {
+            candle_core::bail!("kiln_paged_kv_write_token_major_bf16 failed with status {status}");
+        }
+    }
+    Ok(())
 }
 
 /// Write one token-major bf16 K/V row into a paged KV pool using a graph-stable
