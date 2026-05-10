@@ -20,6 +20,8 @@
 //!    outputs in one launch.
 //! 5. [`fused_rotary_qk`] — decode/paged-attention RoPE(Q,K) for contiguous
 //!    bf16 Q/K tensors using precomputed f32 cos/sin tables.
+//! 6. [`fused_mlp_silu_mul`] — fused bf16 `silu(gate) * up` for Qwen3.5
+//!    SwiGLU MLPs.
 //!
 //! # Why
 //!
@@ -144,6 +146,14 @@ unsafe extern "C" {
         k_heads: i32,
         head_dim: i32,
         rotary_dim: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_fused_mlp_silu_mul_bf16(
+        gate: *const core::ffi::c_void,
+        up: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        elems: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 }
@@ -1263,6 +1273,95 @@ pub fn fused_rotary_qk(
     Ok((q_out, k_out))
 }
 
+/// Whether the fused MLP `silu(gate) * up` kernel is available.
+///
+/// Supports matching CUDA bf16 contiguous tensors. The operation is
+/// forward-only; callers that need autograd should keep using the Candle path.
+pub fn supports_mlp_silu_mul(gate: &Tensor, up: &Tensor) -> bool {
+    matches!(gate.device(), Device::Cuda(_))
+        && matches!(up.device(), Device::Cuda(_))
+        && gate.dtype() == DType::BF16
+        && up.dtype() == DType::BF16
+        && gate.is_contiguous()
+        && up.is_contiguous()
+        && gate.dims() == up.dims()
+        && gate.elem_count() <= i64::MAX as usize
+}
+
+/// Run fused bf16 `silu(gate) * up`.
+///
+/// This matches the CUDA-safe SiLU used in `kiln-model::forward`:
+/// `gate / (1 + exp(-gate))`, multiplied by `up`, and cast to bf16.
+pub fn fused_mlp_silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    if !supports_mlp_silu_mul(gate, up) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: mlp_silu_mul unsupported shapes gate={:?} up={:?} dtypes=({:?},{:?})",
+            gate.shape(),
+            up.shape(),
+            gate.dtype(),
+            up.dtype()
+        );
+    }
+
+    let gate = gate.contiguous()?;
+    let up = up.contiguous()?;
+    let out = unsafe { Tensor::empty(gate.dims(), DType::BF16, gate.device())? };
+    let elems = gate.elem_count();
+    if elems == 0 {
+        return Ok(out);
+    }
+
+    {
+        let (gate_storage, gate_layout) = gate.storage_and_layout();
+        let (up_storage, up_layout) = up.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let gate_cuda = match &*gate_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: mlp_silu_mul gate must be on CUDA"),
+        };
+        let up_cuda = match &*up_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: mlp_silu_mul up must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: mlp_silu_mul out must be on CUDA"),
+        };
+
+        let stream = gate_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let gate_slice = gate_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(gate_layout.start_offset()..);
+        let up_slice = up_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(up_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (gate_ptr, _g1) = gate_slice.device_ptr(&stream);
+            let (up_ptr, _g2) = up_slice.device_ptr(&stream);
+            let (out_ptr, _g3) = out_slice.device_ptr(&stream);
+            let status = kiln_fused_mlp_silu_mul_bf16(
+                gate_ptr as *const _,
+                up_ptr as *const _,
+                out_ptr as *mut _,
+                elems as i64,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("kiln_fused_mlp_silu_mul_bf16 failed with status {status}");
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1313,6 +1412,15 @@ mod tests {
             None => Tensor::cat(&[&r1, &r2], candle_core::D::Minus1)?,
         };
         out.to_dtype(x_dtype)
+    }
+
+    fn reference_mlp_silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        let dtype = gate.dtype();
+        let gate = gate.to_dtype(DType::F32)?;
+        let up = up.to_dtype(DType::F32)?;
+        let denom = (gate.neg()?.exp()? + 1.0)?;
+        let silu = (&gate * denom.recip()?)?;
+        (silu * up)?.to_dtype(dtype)
     }
 
     #[test]
@@ -1436,6 +1544,43 @@ mod tests {
 
         assert_eq!(q_diff, 0.0, "rotary q max_abs_diff={q_diff:e}");
         assert_eq!(k_diff, 0.0, "rotary k max_abs_diff={k_diff:e}");
+    }
+
+    #[test]
+    fn mlp_silu_mul_parity_qwen_shape() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 1usize;
+        let seq_len = 2usize;
+        let intermediate = 9728usize;
+        let total = batch * seq_len * intermediate;
+        let mut gate_raw = Vec::with_capacity(total);
+        let mut up_raw = Vec::with_capacity(total);
+        fill_pseudo_random(&mut gate_raw, total, 0x3141_5926, 3.0);
+        fill_pseudo_random(&mut up_raw, total, 0x2718_2818, 2.0);
+
+        let gate = Tensor::from_vec(gate_raw, (batch, seq_len, intermediate), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let up = Tensor::from_vec(up_raw, (batch, seq_len, intermediate), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        assert!(supports_mlp_silu_mul(&gate, &up));
+        let reference = reference_mlp_silu_mul(&gate, &up).unwrap();
+        let fused = fused_mlp_silu_mul(&gate, &up).expect("fused mlp silu mul");
+        assert_eq!(fused.dims(), &[batch, seq_len, intermediate]);
+
+        let diff = max_abs_diff(&reference, &fused);
+        assert!(
+            diff < 1e-2,
+            "MLP silu*mul parity failed: max_abs_diff={diff} exceeds 1e-2 tolerance"
+        );
     }
 
     #[test]

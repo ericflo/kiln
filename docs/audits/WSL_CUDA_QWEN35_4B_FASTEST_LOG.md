@@ -530,3 +530,53 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="cuda-rotary-qk-smoke"`;
 - adapter-backed `/v1/chat/completions` requests completed with and without
   thinking enabled.
+
+## Follow-Up: CUDA Fused MLP SiLU Multiply
+
+After fused RoPE(Q,K), the decode profile still showed the MLP middle as two
+separate Candle operations: `gate_silu` and `hidden_mul`. CUDA now has a
+forward-only bf16 kernel for `silu(gate) * up`, selected only for matching
+contiguous CUDA bf16 tensors and only when the tensors are not tracking
+autograd. Training and other unsupported paths stay on the existing Candle
+ops, preserving gradient semantics.
+
+Rollback:
+
+```text
+KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL=1` | 37.928, 37.956, 38.354 | 38.080 ms | 26.261 |
+| default fused MLP SiLU multiply | 37.030, 36.920, 36.982 | 36.977 ms | 27.044 |
+
+Average decode ITL improved by 2.9% on this WSL 16 GiB CUDA host.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-rmsnorm-kernel mlp_silu_mul_parity_qwen_shape --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The new CUDA kernel parity test uses Qwen-shaped MLP intermediate width and
+checks the fused bf16 result against the existing f32-reference SiLU/multiply
+path cast back to bf16.
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-mlp-silu-mul-smoke-20260509`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9123`, `auto_load=true`;
+- job id: `992b70ec-0491-42ee-94fa-e3dc7afa8f72`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.603104591369629`;
+- `/health` reported `active_adapter="cuda-mlp-silu-mul-smoke"`;
+- adapter-backed `/v1/chat/completions` requests completed with and without
+  thinking enabled, including a no-thinking response of `kiln blue`.

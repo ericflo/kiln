@@ -142,3 +142,21 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-rotary-qk-smoke`, final loss
   `1.5020499229431152`, `/health` reported the active adapter, and
   adapter-backed chat completed.
+- Accepted CUDA fused MLP SiLU multiply:
+  CUDA now fuses bf16 `silu(gate) * up` for matching contiguous inference
+  tensors in the SwiGLU MLP middle. The model route is forward-only and gated
+  off for autograd-tracked tensors, so training keeps the existing Candle path.
+  Rollback: `KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `37.928`, `37.956`, `38.354` ms averaged
+  `38.080ms` / `26.261 tok/s`; default fused-MLP runs `37.030`,
+  `36.920`, `36.982` ms averaged `36.977ms` / `27.044 tok/s`, a 2.9%
+  decode ITL win.
+- Fused-MLP validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-rmsnorm-kernel mlp_silu_mul_parity_qwen_shape --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `cuda-mlp-silu-mul-smoke`, final loss
+  `1.603104591369629`, `/health` reported the active adapter, and
+  adapter-backed chat completed.

@@ -51,6 +51,12 @@ fn cuda_fused_rotary_qk_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ROTARY_QK").is_ok())
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_fused_mlp_silu_mul_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
+}
+
 thread_local! {
     static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
@@ -3326,27 +3332,72 @@ fn swiglu_ffn_impl(
         }
         #[cfg(not(feature = "metal"))]
         {
-            // SiLU activation: x * sigmoid(x)
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-            let gate = cuda_silu(&gate)?;
-            finish_mlp_stage_profile(
-                profile_device,
-                profile_context,
-                "gate_silu",
-                seq_len,
-                stage_profile,
-            )?;
-            // Element-wise multiply
-            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
-            let hidden = (gate * up)?;
-            finish_mlp_stage_profile(
-                profile_device,
-                profile_context,
-                "hidden_mul",
-                seq_len,
-                stage_profile,
-            )?;
-            hidden
+            #[cfg(feature = "cuda")]
+            {
+                if !cuda_fused_mlp_silu_mul_disabled()
+                    && !gate.track_op()
+                    && !up.track_op()
+                    && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
+                {
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let hidden = kiln_rmsnorm_kernel::fused_mlp_silu_mul(&gate, &up)
+                        .context("cuda fused mlp silu*mul kernel failed")?;
+                    finish_mlp_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "gate_silu_hidden_mul",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    hidden
+                } else {
+                    // SiLU activation: x * sigmoid(x)
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let gate = cuda_silu(&gate)?;
+                    finish_mlp_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "gate_silu",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    // Element-wise multiply
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let hidden = (gate * up)?;
+                    finish_mlp_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "hidden_mul",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    hidden
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                // SiLU activation: x * sigmoid(x)
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let gate = cuda_silu(&gate)?;
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gate_silu",
+                    seq_len,
+                    stage_profile,
+                )?;
+                // Element-wise multiply
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let hidden = (gate * up)?;
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "hidden_mul",
+                    seq_len,
+                    stage_profile,
+                )?;
+                hidden
+            }
         }
     };
     // hidden @ down_proj_t -> [batch, seq_len, hidden_size]
