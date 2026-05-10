@@ -64,6 +64,34 @@ fn fast_batched_linear_state_scatter_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_err())
 }
 
+fn env_truthy_for_profile(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
+        })
+        .unwrap_or(false)
+}
+
+fn profile_decode_batcher_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_DECODE_BATCHER_STAGES"))
+}
+
+fn finish_decode_batcher_stage_profile(
+    stage: &str,
+    batch: usize,
+    start: Option<std::time::Instant>,
+) {
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_profile_decode_batcher_stage stage={stage} batch={batch} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
 /// Holds loaded model weights and tokenizer, provides text generation.
 pub struct ModelRunner {
     pub weights: GpuWeights,
@@ -660,12 +688,17 @@ fn decode_batch_jobs_with_runner(
     paged_cache: &PagedKvCache,
     jobs: &mut [DecodeBatchJob],
 ) -> Result<Vec<TokenId>> {
+    let profile_stages = profile_decode_batcher_stages_enabled();
+    let total_start = profile_stages.then(std::time::Instant::now);
+    let stage_start = profile_stages.then(std::time::Instant::now);
     let input_tokens: Vec<TokenId> = jobs.iter().map(|job| job.input_token).collect();
     let seq_lens: Vec<usize> = jobs.iter().map(|job| job.seq_len).collect();
     let block_tables: Vec<BlockTable> = jobs.iter().map(|job| job.block_table.clone()).collect();
     let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+    finish_decode_batcher_stage_profile("job_metadata", jobs.len(), stage_start);
 
-    if runner.has_linear_attention_layers() {
+    let stage_start = profile_stages.then(std::time::Instant::now);
+    let tokens = if runner.has_linear_attention_layers() {
         let mut linear_states: Vec<&mut LinearAttentionState> =
             jobs.iter_mut().map(|job| &mut job.linear_state).collect();
         runner.decode_next_tokens_paged_contiguous_batch_greedy(
@@ -684,7 +717,10 @@ fn decode_batch_jobs_with_runner(
             &seq_lens,
             &mut no_linear_states,
         )
-    }
+    };
+    finish_decode_batcher_stage_profile("runner_call", jobs.len(), stage_start);
+    finish_decode_batcher_stage_profile("worker_total", jobs.len(), total_start);
+    tokens
 }
 
 struct SharedBlockReservation<'a> {
@@ -2322,6 +2358,8 @@ impl ModelRunner {
         linear_states: &mut [&mut LinearAttentionState],
     ) -> Result<Vec<TokenId>> {
         let batch = input_tokens.len();
+        let profile_stages = profile_decode_batcher_stages_enabled();
+        let total_start = profile_stages.then(std::time::Instant::now);
         anyhow::ensure!(batch > 0, "batched decode requires at least one row");
         anyhow::ensure!(
             block_tables.len() == batch && seq_lens.len() == batch,
@@ -2342,6 +2380,7 @@ impl ModelRunner {
         }
 
         if batch == 1 {
+            let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state = if has_linear_layers {
                 Some(&mut *linear_states[0])
@@ -2361,9 +2400,12 @@ impl ModelRunner {
                 None,
             )
             .context("single-row greedy decode forward pass (paged) failed")?;
+            finish_decode_batcher_stage_profile("single_forward", batch, stage_start);
+            finish_decode_batcher_stage_profile("decode_total", batch, total_start);
             return Ok(vec![token]);
         }
 
+        let stage_start = profile_stages.then(std::time::Instant::now);
         let mut batch_state = if has_linear_layers {
             let state_refs: Vec<&LinearAttentionState> =
                 linear_states.iter().map(|state| &**state).collect();
@@ -2371,7 +2413,9 @@ impl ModelRunner {
         } else {
             None
         };
+        finish_decode_batcher_stage_profile("batch_state_assemble", batch, stage_start);
 
+        let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             model_forward_paged_decode_contiguous_batch_greedy(
@@ -2387,14 +2431,23 @@ impl ModelRunner {
             )
             .context("batched greedy decode forward pass (paged) failed")?
         };
+        finish_decode_batcher_stage_profile("batched_forward", batch, stage_start);
 
         if let Some(state) = batch_state.as_ref() {
+            let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
                 state.scatter_batch_rows_replace(linear_states)?;
+                finish_decode_batcher_stage_profile(
+                    "batch_state_scatter_replace",
+                    batch,
+                    stage_start,
+                );
             } else {
                 state.scatter_batch_rows(linear_states)?;
+                finish_decode_batcher_stage_profile("batch_state_scatter_copy", batch, stage_start);
             }
         }
+        finish_decode_batcher_stage_profile("decode_total", batch, total_start);
 
         Ok(tokens)
     }

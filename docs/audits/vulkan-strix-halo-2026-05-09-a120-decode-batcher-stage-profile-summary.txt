@@ -1,0 +1,120 @@
+# A120 Decode Batcher Stage Profile
+
+Date: 2026-05-09
+
+Scope:
+
+- Add default-off decode-batcher stage profiling under
+  `KILN_PROFILE_DECODE_BATCHER_STAGES=1`.
+- Measure scheduler-side decode-batcher costs after A118's fast
+  linear-state scatter.
+- No Vulkan, CUDA, or Metal kernel behavior changes.
+
+Implementation:
+
+- `decode_batch_jobs_with_runner` now emits optional `job_metadata`,
+  `runner_call`, and `worker_total` timings.
+- `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy` now emits
+  optional timings for single-row forward, batched state assembly, batched
+  forward, fast or copy scatter, and total decode time.
+- The profiler is off by default and treats unset, empty, `0`, `false`,
+  `off`, and `no` as disabled.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib -- --nocapture`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
+- Best-effort Metal feature check remains host-blocked because `objc2`
+  requires an Apple target.
+
+Server:
+
+- Build command:
+  `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Server command used `KILN_MODEL_PATH=Qwen3.5-4B`,
+  `KILN_PORT=18641`, `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and
+  `KILN_PROFILE_DECODE_BATCHER_STAGES=1`.
+- The server log showed background inference prewarm completion before
+  measurement.
+- Health readiness was captured with the current `checks[].pass` shape.
+
+Correctness:
+
+- The valid probe used eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, and `chat_template_kwargs: {"enable_thinking": false}`.
+- All 8 requests returned HTTP 200.
+- All 8 visible texts exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- All 8 reasoning streams were empty.
+- Metrics delta:
+  - `requests_ok=8`
+  - `requests_error=0`
+  - `tokens_generated=128`
+  - `jobs_submitted=120`
+  - `runner_busy_jobs=0`
+  - `jobs_failed=0`
+  - `worker_batches=41`
+  - `batcher_rows=120`
+  - `max_batch_after=3`
+- Wall time was `15.082519s`.
+
+Stage Profile Summary:
+
+- Valid decode-batcher stage range in the server log: lines `61..345`.
+- Worker batches by size:
+  - Batch 3: `39`
+  - Batch 2: `1`
+  - Batch 1: `1`
+  - Total rows: `120`
+- Batch-3 stage totals:
+  - `batch_state_assemble`: `372.297ms` across `39` calls,
+    mean `9.546ms`.
+  - `batched_forward`: `9711.218ms` across `39` calls,
+    mean `249.006ms`.
+  - `batch_state_scatter_replace`: `3.576ms` across `39` calls,
+    mean `0.092ms`.
+  - `decode_total`: `10089.406ms` across `39` calls,
+    mean `258.703ms`.
+- All multi-row stage totals:
+  - `batch_state_assemble`: `378.341ms` across `40` calls,
+    mean `9.459ms`.
+  - `batched_forward`: `9883.476ms` across `40` calls,
+    mean `247.087ms`.
+  - `batch_state_scatter_replace`: `3.630ms` across `40` calls,
+    mean `0.091ms`.
+- Across all `41` worker batches, `worker_total` was `10598.308ms`,
+  mean `258.495ms`.
+- `job_metadata` was negligible at `0.041ms` total across `41` calls.
+
+Interpretation:
+
+- The live Vulkan path is still GPU-routed and correct for the exact
+  eight-stream batch-3 shape.
+- A118's replacement scatter leaves only `3.630ms` total measured scatter work
+  in this probe; it is no longer a useful immediate target.
+- Batched state assembly is measurable at about `378ms`, but batch-3
+  `batched_forward` dominates at about `9.7s`.
+- The next Vulkan optimization should stay focused on GDN recurrent
+  residency/layout or a broader model/batcher boundary change rather than
+  micro-optimizing scheduler metadata or adding another direct Metal row-tile
+  port.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-response_*.sse`

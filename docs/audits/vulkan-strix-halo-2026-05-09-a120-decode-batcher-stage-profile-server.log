@@ -1,0 +1,348 @@
+
+  ┌─────────────────────────────────────┐
+  │           🔥 K I L N 🔥             │
+  │   inference · training · adapters   │
+  └─────────────────────────────────────┘
+
+  Version: 0.2.13
+  Mode: GPU inference
+  Model: Qwen3.5-4B
+  CUDA: not available
+  Listen: http://127.0.0.1:18641
+
+  Endpoints: /ui, /v1/chat/completions, /v1/train/sft, /health, /metrics
+
+{"timestamp":"2026-05-10T00:19:01.601910Z","level":"INFO","fields":{"message":"Vulkan available — using Vulkan GPU (AMD/Intel)"},"target":"kiln_server::device"}
+{"timestamp":"2026-05-10T00:19:01.602470Z","level":"INFO","fields":{"message":"Loading model from Qwen3.5-4B (2 shards)"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-10T00:19:01.603453Z","level":"INFO","fields":{"message":"Using weight name prefix: \"model.language_model.\""},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-10T00:19:01.603550Z","level":"INFO","fields":{"message":"Native MTP head detected; deferring CPU load until first use","mtp_prefix":"mtp."},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-10T00:19:01.603557Z","level":"INFO","fields":{"message":"Loaded 4206M parameters (8022 MB) across 32 layers"},"target":"kiln_model::loader"}
+{"timestamp":"2026-05-10T00:19:15.270249Z","level":"INFO","fields":{"message":"selected first Vulkan device","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-10T00:19:15.270345Z","level":"INFO","fields":{"message":"selected Vulkan host-visible staging memory type","memory_type":5,"cached":true},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-10T00:19:15.281459Z","level":"INFO","fields":{"message":"Vulkan compute pipelines prewarmed","elapsed_ms":10},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-10T00:19:15.281468Z","level":"INFO","fields":{"message":"Vulkan device initialized","vendor":"AMD","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-10T00:19:15.287182Z","level":"WARN","fields":{"message":"post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing","estimated_model_gb":9.15668992},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287191Z","level":"INFO","fields":{"message":"memory-aware KV cache sizing","total_vram_gb":103.079215104,"model_gb":9.15668992,"post_load_used_vram_gb":0.0,"sizing_residency_gb":9.15668992,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287194Z","level":"INFO","fields":{"message":"allocating paged KV cache","num_blocks":125400,"block_size":16,"kv_dtype":"BF16","fp8_enabled":false},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287251Z","level":"INFO","fields":{"message":"KV cache auto-sizer succeeded on first attempt","inference_fraction":0.7,"num_blocks":125400},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287309Z","level":"INFO","fields":{"message":"GPU memory budget","total_vram_gb":103.079215104,"model_gb":9.15668992,"estimated_model_gb":9.15668992,"post_load_used_vram_gb":0.0,"kv_cache_gb":65.7457152,"training_budget_gb":28.176809984,"inference_fraction":0.7},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287311Z","level":"INFO","fields":{"message":"prefix cache budget","max_blocks":0,"max_entries":1,"state_bytes_per_entry":52690944,"max_state_bytes":52690944,"min_register_tokens":64},"target":"kiln_server::state"}
+{"timestamp":"2026-05-10T00:19:15.287318Z","level":"INFO","fields":{"message":"live greedy decode batcher enabled","backend":"vulkan","max_batch":3,"wait_us":5000,"mixed_seq_lens":true},"target":"kiln_server::state"}
+  ✓ Ready on http://127.0.0.1:18641
+
+{"timestamp":"2026-05-10T00:19:15.321292Z","level":"INFO","fields":{"message":"starting background inference prewarm"},"target":"kiln"}
+{"timestamp":"2026-05-10T00:19:15.321619Z","level":"INFO","fields":{"message":"tokenizer warmup complete","elapsed_ms":0,"tokens":8},"target":"kiln"}
+{"timestamp":"2026-05-10T00:19:15.323300Z","level":"INFO","fields":{"message":"selected first Vulkan device","device":"AMD Radeon 8060S Graphics (RADV STRIX_HALO)"},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-10T00:19:15.323318Z","level":"INFO","fields":{"message":"selected Vulkan host-visible staging memory type","memory_type":5,"cached":true},"target":"kiln_vulkan_kernel::device"}
+{"timestamp":"2026-05-10T00:19:15.325006Z","level":"INFO","fields":{"message":"Vulkan shader and pipeline verification complete"},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-10T00:19:15.325554Z","level":"INFO","fields":{"message":"Vulkan custom kernels precompiled during background prewarm","elapsed_ms":4},"target":"kiln"}
+{"timestamp":"2026-05-10T00:19:15.553964Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.396229},"target":"kiln_server::api","span":{"duration_ms":0.396229,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.396229,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:16.555206Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.12474599999999998},"target":"kiln_server::api","span":{"duration_ms":0.12474599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.12474599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:17.556436Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.13766599999999998},"target":"kiln_server::api","span":{"duration_ms":0.13766599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.13766599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:18.557503Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.12873600000000002},"target":"kiln_server::api","span":{"duration_ms":0.12873600000000002,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.12873600000000002,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:19.558645Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.14580600000000002},"target":"kiln_server::api","span":{"duration_ms":0.14580600000000002,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.14580600000000002,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:20.559750Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.140556},"target":"kiln_server::api","span":{"duration_ms":0.140556,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.140556,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:21.560970Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.172716},"target":"kiln_server::api","span":{"duration_ms":0.172716,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.172716,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:22.562148Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.13055599999999998},"target":"kiln_server::api","span":{"duration_ms":0.13055599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.13055599999999998,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:23.563325Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.142926},"target":"kiln_server::api","span":{"duration_ms":0.142926,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.142926,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:24.201635Z","level":"INFO","fields":{"message":"Vulkan decode weight cache prewarmed","weights":96,"f32_cache_mb":8640,"bf16_packed_weights":249,"bf16_packed_cache_mb":8020,"elapsed_ms":8876},"target":"kiln_model::backend::vulkan"}
+{"timestamp":"2026-05-10T00:19:24.564487Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.113207},"target":"kiln_server::api","span":{"duration_ms":0.113207,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.113207,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:25.347333Z","level":"INFO","fields":{"message":"background inference prewarm complete","elapsed_ms":10025},"target":"kiln"}
+{"timestamp":"2026-05-10T00:19:25.565737Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.135346},"target":"kiln_server::api","span":{"duration_ms":0.135346,"method":"GET","path":"/health","status":200,"name":"http_request"},"spans":[{"duration_ms":0.135346,"method":"GET","path":"/health","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:29.632476Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.08094799999999999},"target":"kiln_server::api","span":{"duration_ms":0.08094799999999999,"method":"GET","path":"/metrics","status":200,"name":"http_request"},"spans":[{"duration_ms":0.08094799999999999,"method":"GET","path":"/metrics","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852960Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.8005390000000001},"target":"kiln_server::api","span":{"duration_ms":1.800539,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.800539,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852964Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.7108320000000001},"target":"kiln_server::api","span":{"duration_ms":1.710832,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.710832,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852970Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.736151},"target":"kiln_server::api","span":{"duration_ms":1.736151,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.736151,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852965Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.352582},"target":"kiln_server::api","span":{"duration_ms":1.352582,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.352582,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852971Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":2.0150430000000004},"target":"kiln_server::api","span":{"duration_ms":2.0150430000000004,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":2.0150430000000004,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852967Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.5444460000000002},"target":"kiln_server::api","span":{"duration_ms":1.5444460000000002,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.5444460000000002,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852964Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":1.653893},"target":"kiln_server::api","span":{"duration_ms":1.653893,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":1.653893,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:19:55.852978Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":2.0165119999999996},"target":"kiln_server::api","span":{"duration_ms":2.0165119999999996,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"},"spans":[{"duration_ms":2.0165119999999996,"method":"POST","path":"/v1/chat/completions","status":200,"name":"http_request"}]}
+kiln_profile_decode_batcher_stage stage=job_metadata batch=1 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=single_forward batch=1 elapsed_ms=329.809
+kiln_profile_decode_batcher_stage stage=decode_total batch=1 elapsed_ms=329.850
+kiln_profile_decode_batcher_stage stage=runner_call batch=1 elapsed_ms=329.857
+kiln_profile_decode_batcher_stage stage=worker_total batch=1 elapsed_ms=329.894
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=15.814
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=255.428
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.189
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=271.488
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=271.498
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=271.504
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=14.590
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=272.096
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.147
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=286.894
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=286.905
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=286.912
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=17.473
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=254.178
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.102
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=271.821
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=271.828
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=271.841
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=12.833
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=237.551
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.076
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=250.521
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=250.528
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=250.533
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.855
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=257.304
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.102
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=266.317
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=266.329
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=266.334
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.970
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=248.660
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.074
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=257.751
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=257.758
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=257.771
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.552
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=255.222
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.079
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=263.899
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=263.906
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=263.914
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.194
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=244.161
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.098
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=253.500
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=253.507
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=253.511
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.347
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=246.600
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.074
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=256.065
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=256.072
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=256.077
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.133
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=251.607
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.114
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=260.922
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=260.930
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=260.934
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.440
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=252.794
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.081
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=262.362
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=262.369
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=262.374
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.049
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=239.516
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.084
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=248.700
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=248.709
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=248.715
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.150
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=244.576
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.079
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=253.866
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=253.875
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=253.881
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.531
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=252.583
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.080
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=261.242
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=261.250
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=261.254
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.640
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=241.867
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.084
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=250.641
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=250.650
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=250.655
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.695
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=232.798
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.084
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=241.630
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=241.637
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=241.642
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.214
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=244.413
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.083
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=253.760
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=253.768
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=253.773
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.928
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=256.092
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.075
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=265.151
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=265.157
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=265.164
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.883
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=255.738
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.081
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=264.771
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=264.781
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=264.786
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.299
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=234.244
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.087
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=243.708
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=243.717
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=243.724
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.342
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=243.170
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.079
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=252.650
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=252.661
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=252.667
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.567
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=258.094
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.087
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=266.837
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=266.847
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=266.853
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.747
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=246.393
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.083
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=255.284
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=255.293
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=255.299
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.649
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=239.068
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.122
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=247.917
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=247.929
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=247.935
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.579
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=240.554
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.090
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=249.293
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=249.300
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=249.306
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.590
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=256.402
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.099
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=265.163
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=265.171
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=265.176
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.885
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=249.929
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.105
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=259.003
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=259.016
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=259.022
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.758
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=241.273
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.088
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=250.165
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=250.173
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=250.179
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.028
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=247.835
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.086
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=256.987
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=256.995
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=257.000
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.601
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=249.958
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.092
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=258.729
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=258.738
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=258.743
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.726
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=253.716
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.095
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=262.598
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=262.608
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=262.613
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.120
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=253.208
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.103
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=262.485
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=262.499
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=262.505
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.785
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=250.991
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.094
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=259.931
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=259.939
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=259.944
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.647
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=258.048
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.082
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=266.848
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=266.858
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=266.863
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.876
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=243.074
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.078
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=252.076
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=252.085
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=252.090
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.061
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=250.984
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.085
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=260.180
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=260.188
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=260.196
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.612
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=253.633
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.079
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=262.389
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=262.396
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=262.402
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=9.608
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=253.425
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.084
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=263.180
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=263.190
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=263.197
+kiln_profile_decode_batcher_stage stage=job_metadata batch=3 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=3 elapsed_ms=8.526
+kiln_profile_decode_batcher_stage stage=batched_forward batch=3 elapsed_ms=244.035
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=3 elapsed_ms=0.072
+kiln_profile_decode_batcher_stage stage=decode_total batch=3 elapsed_ms=252.682
+kiln_profile_decode_batcher_stage stage=runner_call batch=3 elapsed_ms=252.689
+kiln_profile_decode_batcher_stage stage=worker_total batch=3 elapsed_ms=252.693
+kiln_profile_decode_batcher_stage stage=job_metadata batch=2 elapsed_ms=0.001
+kiln_profile_decode_batcher_stage stage=batch_state_assemble batch=2 elapsed_ms=6.044
+kiln_profile_decode_batcher_stage stage=batched_forward batch=2 elapsed_ms=172.258
+kiln_profile_decode_batcher_stage stage=batch_state_scatter_replace batch=2 elapsed_ms=0.054
+kiln_profile_decode_batcher_stage stage=decode_total batch=2 elapsed_ms=178.418
+kiln_profile_decode_batcher_stage stage=runner_call batch=2 elapsed_ms=178.425
+kiln_profile_decode_batcher_stage stage=worker_total batch=2 elapsed_ms=178.432
+{"timestamp":"2026-05-10T00:21:48.075930Z","level":"INFO","fields":{"message":"response","status":200,"duration_ms":0.111947},"target":"kiln_server::api","span":{"duration_ms":0.111947,"method":"GET","path":"/metrics","status":200,"name":"http_request"},"spans":[{"duration_ms":0.111947,"method":"GET","path":"/metrics","status":200,"name":"http_request"}]}
+{"timestamp":"2026-05-10T00:21:51.630978Z","level":"INFO","fields":{"message":"received SIGTERM — initiating graceful shutdown"},"target":"kiln"}
+{"timestamp":"2026-05-10T00:21:51.688154Z","level":"INFO","fields":{"message":"training worker shutting down"},"target":"kiln_server::training_queue"}
