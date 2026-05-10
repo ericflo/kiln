@@ -330,6 +330,21 @@ impl ApiError {
         }
     }
 
+    /// 413 returned when the training preflight estimator concludes
+    /// the submitted job's working set won't fit in the available
+    /// memory budget. The detailed numbers (estimate, available,
+    /// breakdown) live in `message`; the static `hint` lists the
+    /// knobs the caller can turn down.
+    pub fn training_will_not_fit(detailed_message: String) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "training_will_not_fit",
+            message: detailed_message,
+            hint: "Lower the per-step memory by raising KILN_GRAD_CHECKPOINT_SEGMENTS, shrinking lora_rank, sending fewer/shorter examples, or — only if your host can spare RAM — overriding KILN_TRAINING_MEMORY_RESERVE_GB.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

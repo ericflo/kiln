@@ -11,4 +11,5 @@ pub mod logging;
 pub mod metrics;
 pub mod recent_requests;
 pub mod state;
+pub mod training_preflight;
 pub mod training_queue;

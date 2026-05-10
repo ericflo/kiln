@@ -17,7 +17,47 @@ use std::sync::atomic::Ordering;
 use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
+use crate::training_preflight::{
+    self, available_for_training_bytes, estimate_step_working_set, format_oom_message,
+};
 use crate::training_queue::{QueueEntry, QueuedJob};
+
+/// Estimate the per-step working set against the corrected memory
+/// budget, and reject the submission with HTTP 413 if it cannot fit.
+///
+/// `max_seq_len` is approximated upstream by the request-specific
+/// helper (`approximate_max_seq_len_sft` / `_grpo`) so this helper
+/// stays SFT/GRPO-agnostic.
+fn enforce_training_preflight(
+    state: &AppState,
+    max_seq_len: usize,
+    lora_rank: usize,
+) -> Result<(), ApiError> {
+    if max_seq_len == 0 {
+        return Ok(());
+    }
+    let vram = kiln_core::vram::detect_vram();
+    let available = available_for_training_bytes(&vram);
+    if available == u64::MAX {
+        // No memory signal at all — let the trainer be the line of
+        // defense. Better than rejecting every submission on machines
+        // where detection is misconfigured.
+        return Ok(());
+    }
+    let num_segments = kiln_train::CheckpointConfig::from_env(state.model_config.num_layers)
+        .num_segments;
+    let estimate = estimate_step_working_set(
+        &state.model_config,
+        max_seq_len,
+        lora_rank,
+        num_segments,
+    );
+    if estimate.total_bytes > available {
+        let msg = format_oom_message(&estimate, available, lora_rank, num_segments);
+        return Err(ApiError::training_will_not_fit(msg));
+    }
+    Ok(())
+}
 
 /// Response for queue listing.
 #[derive(serde::Serialize)]
@@ -82,6 +122,15 @@ async fn submit_sft(
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
     }
+
+    // Working-set preflight: refuse jobs that won't fit in the
+    // corrected memory budget. Better than OOM-killing the server
+    // partway through the first step.
+    let max_seq_len = training_preflight::approximate_max_seq_len_sft(
+        &req.examples,
+        Some(state.tokenizer.as_ref()),
+    );
+    enforce_training_preflight(&state, max_seq_len, req.config.lora_rank)?;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
@@ -163,6 +212,13 @@ async fn submit_grpo(
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
     }
+
+    // Working-set preflight (see submit_sft for rationale).
+    let max_seq_len = training_preflight::approximate_max_seq_len_grpo(
+        &req.groups,
+        Some(state.tokenizer.as_ref()),
+    );
+    enforce_training_preflight(&state, max_seq_len, req.config.lora_rank)?;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
