@@ -1,5 +1,32 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.2.14 — 2026-05-10
+
+Coordinated release aligned with kiln-v0.2.14 server. Re-aligns the desktop
+version number with the server after the server-only v0.2.3 → v0.2.13 sprint.
+
+### Added
+- ui: redesign the Tauri shell with the kiln amber design system — refreshed
+  dashboard, settings, logs, and about windows to match the new server UI
+  v1 visual identity (#1010).
+- onboarding: first-run help links surface the canonical kiln docs / quickstart
+  from the dashboard (#935).
+
+### Fixed
+- tray: stop restoring window visibility across launches. The
+  `tauri-plugin-window-state` defaults persisted the `VISIBLE` flag, so a user
+  who had Settings, Dashboard, and/or Logs open at last quit ended up with
+  3-4 windows popping on every launch — even though the windows are declared
+  `visible: false` in `tauri.conf.json`. Kiln Desktop is a tray-first app:
+  windows now only open when you explicitly invoke a tray menu item (#1016).
+
+### Server payload
+This cut ships with the kiln-v0.2.14 server binary, which includes the new
+Vulkan inference backend, Phase 12 batched paged decode, deterministic
+replayable LoRA storage, the embedded server-UI v1 overhaul, and Windows CUDA
+redist DLL bundling. See [CHANGELOG.md](../CHANGELOG.md) for the full server
+changelog.
+
 ## desktop-v0.2.2 — 2026-04-25
 
 Coordinated release aligned with kiln-v0.2.2 server. No desktop-side

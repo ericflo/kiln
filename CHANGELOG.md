@@ -1,5 +1,81 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.14 — 2026-05-10
+
+This is a large release covering ~325 commits since v0.2.13: a new Vulkan
+backend, an embedded server-UI overhaul, replayable LoRA storage, the Phase 12
+batched-decode hot path, and continued CUDA / Metal kernel fusion.
+
+### Added
+- vulkan: bring up a Vulkan inference backend covering GDN (recurrent, conv1d,
+  in-projection, gated norm, QK norm), MLP (gate/up/down), batched gemv, and
+  paged decode. Ships with f32 + bf16 paths, rowpair / rowquad batched gemv
+  variants, batched chunk transfers, fused-submit conv1d prefill (now on by
+  default), and chained MLP dispatches. BF16 GDN state and device-local
+  recurrent batch state cut readback overhead and keep state resident on-device.
+- training: deterministic replayable LoRA storage with parent lineage so a
+  trained adapter records the exact replay set + parent chain it descended from.
+  Storage is content-addressed and reproducible across machines (#1015).
+- server UI: total visual overhaul of the embedded server dashboard — clearer
+  status, request feed, training, and adapter panels; live regions for
+  accessibility; mobile-friendly forms; sample training payloads; CLI/REST
+  cross-links from every panel (#1009, #1013).
+- windows: Windows CUDA release zips now bundle the CUDA 12.4 redist DLLs
+  (cudart, cublas, cublasLt, cuRAND, nvrtc) so users without the CUDA Toolkit
+  installed no longer hit `cublas64_12.dll was not found` on launch (#726).
+
+### Performance
+- phase 12 batched paged decode: per-stream graph replay, per-request
+  `KvWriteSlot` to eliminate the prefill mutex contention that bottlenecked
+  multi-stream decode, FA-2 varlen paged decode for batched (c>1) decode, and
+  batched paged decode API surface (#762, #968, #995, #996, #998, #1000, #1002,
+  #1008).
+- cuda fusion: fold GDN QK-norm into the recurrent kernel, fuse RoPE with QK,
+  fuse MLP SiLU and multiply, fuse attention-gate sigmoid+multiply, BF16 GDN
+  state, inference-only RMSNorm fast path, projection-original memory
+  compaction, rate-limited graph cache-full warnings.
+- metal: full SDPA prefill, GDN in-proj rowpair / rowquad / serial-x2 fast
+  paths, MLP gate/up rowquad gemv, batched gemv rowpair / rowquad / row-triple
+  variants for batch sizes ≥3 / ≥4 / ≥5, LoRA delta paths covering rank-4 /
+  rank-8 / serial-decode and all positive ranks, plus high-rank LoRA bench
+  coverage and qkv LoRA-linear bench coverage.
+- vulkan perf: enable GDN in-proj rowpair-batch3, GDN rowpair-batch3 chunk
+  transfers, fused-submit conv1d prefill (now default), chained MLP dispatches,
+  device-local recurrent batch state, BF16 inference state, skip the final GDN
+  state readback. f32 GDN recurrent step routing, bf16 hybrid MLP gate/up/down,
+  and gdn-recurrent kernel-stage profiling support.
+- scheduler / decode batcher: reduce batched linear-state scatter copies, route
+  through unexpanded GDN decode QK on both CUDA and Vulkan.
+
+### Fixed
+- compatibility: guard GDN fast paths from autograd tensors so training and
+  inference share the same kernel surface without aliasing autograd graph
+  state.
+- compatibility: disable CUDA graphs by default on WSL CUDA and guard the CUDA
+  decode batching default (and revert PR #1008's LM-head guard regression).
+- ui smoke: `docs/site` + server UI v1 overhaul follow-up — fix CI smoke checks
+  that broke against the new dashboard markup (#1013).
+- adapters: fix CLI adapter API routes (#774); fix adapter API docs examples
+  (#947); align training submission payload shapes (#739).
+- quickstart / cli: friendly error when the kiln server is unreachable (#972);
+  fix README quickstart timeout anchor (#896); fix quickstart training-status
+  command (#765); fix GRPO CLI file help (#738); device init now uses `?`
+  instead of a missing `anyhow::Context` import (#734).
+
+### Documentation
+- onboarding: cold-reader pass through README, QUICKSTART, and CLI help —
+  surface the kiln health probe before the chat curl, surface model-weights
+  download before the Docker block, deduplicate Desktop App install tables
+  between README and QUICKSTART, surface BENCHMARKS.md from README nav,
+  cross-link architecture and GRPO guides, drop legacy prefill notes, and
+  collapse the QUICKSTART reader map / prerequisites / KV-cache OOM section
+  (#964–#989, plus #969–#977).
+- ui: explain decode and scheduler metrics for cold readers via tooltips
+  (#971); persistent UI header help links (#798); accessible training tabs
+  (#782) and live regions for dashboard panels (#783).
+- governance: scrub stale publicity changelog entries and remove launch
+  announcement surfaces (#718, #719).
+
 ## kiln-v0.2.13 — 2026-05-02
 
 ### Observability
