@@ -19,6 +19,7 @@ use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
     self, available_for_training_bytes, estimate_step_working_set, format_oom_message,
+    WeightResidency,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -46,11 +47,19 @@ fn enforce_training_preflight(
     }
     let num_segments = kiln_train::CheckpointConfig::from_env(state.model_config.num_layers)
         .num_segments;
+    // Until the resident registry (Phase 1.2-1.4) lands, weights on
+    // Vulkan APUs live in BOTH candle CPU storage and VulkanBuffer
+    // caches — same physical RAM on unified memory. The estimator
+    // must reflect that or the preflight will accept payloads that
+    // ultimately exhaust the host. Once Phase 1.2 is deployed,
+    // switch this to WeightResidency::SingleCopy.
+    let residency = WeightResidency::for_vram_source(vram.source);
     let estimate = estimate_step_working_set(
         &state.model_config,
         max_seq_len,
         lora_rank,
         num_segments,
+        residency,
     );
     if estimate.total_bytes > available {
         let msg = format_oom_message(&estimate, available, lora_rank, num_segments);

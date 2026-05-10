@@ -9,9 +9,58 @@
 //! Used by [`crate::api::training::submit_sft`] and `submit_grpo`.
 
 use kiln_core::config::{DType, ModelConfig};
-use kiln_core::vram::GpuVramInfo;
+use kiln_core::vram::{GpuVramInfo, VramSource};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_train::{GrpoGroup, SftExample};
+
+/// What the trainer can rely on being deduplicated across CPU and GPU.
+///
+/// On Vulkan today (Phase 0) every base weight lives BOTH as a candle
+/// CPU tensor AND as one or two `VulkanBuffer` mirrors on the device.
+/// On a unified-memory APU those mirrors are backed by the same
+/// physical RAM, so the working set must count weights as if they
+/// were resident twice over. After Phase 1.2-1.4 lands the resident
+/// registry, the candle storage is stubbed and weights live in
+/// exactly one place — the preflight then drops the multiplier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightResidency {
+    /// CUDA / Metal / dGPU paths where candle owns the weights and the
+    /// device backend doesn't keep parallel copies.
+    SingleCopy,
+    /// Vulkan without the resident registry: weights live in candle CPU
+    /// storage AND in `VulkanBuffer` caches simultaneously.
+    DualResidentCpuAndVulkan,
+}
+
+impl WeightResidency {
+    /// What multiplier to apply to base weight bytes when computing the
+    /// working-set estimate.
+    fn weight_multiplier(self) -> u64 {
+        match self {
+            // 1x for the candle copy + ~1x for the cached VulkanBuffer.
+            // Add a small headroom (0.25x) for the bf16-packed cache that
+            // is computed alongside the f32 cache for many weights.
+            Self::DualResidentCpuAndVulkan => 2,
+            Self::SingleCopy => 1,
+        }
+    }
+
+    /// Inferred from the corrected VRAM source: if detection labelled
+    /// the device as a unified-memory APU, weights are dual-resident
+    /// today.
+    pub fn for_vram_source(source: VramSource) -> Self {
+        match source {
+            VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon => {
+                Self::DualResidentCpuAndVulkan
+            }
+            // Discrete: candle keeps weights in CPU RAM but the GPU's
+            // separate VRAM pool is its own memory; only the CPU copy
+            // counts against the same budget the trainer estimates
+            // against on the host. SingleCopy is honest there.
+            _ => Self::SingleCopy,
+        }
+    }
+}
 
 /// One line item in the working-set breakdown. Surfaced in the 413
 /// response body so users can see which contribution dominates and
@@ -140,14 +189,24 @@ fn lora_param_and_grad_bytes(cfg: &ModelConfig, lora_rank: usize) -> u64 {
 }
 
 /// Closed-form working-set estimate for one training step.
+///
+/// `residency` controls how many copies of the base weights to count.
+/// Until the Phase 1 resident registry is deployed, callers on Vulkan
+/// must pass `WeightResidency::DualResidentCpuAndVulkan` so the host
+/// RAM pressure from both the candle CPU mirror and the device-side
+/// `VulkanBuffer` caches is reflected. After Phase 1 lands and the
+/// candle storage is stubbed, callers switch to `SingleCopy`.
 pub fn estimate_step_working_set(
     cfg: &ModelConfig,
     max_seq_len: usize,
     lora_rank: usize,
     num_segments: usize,
+    residency: WeightResidency,
 ) -> WorkingSet {
+    let base_weights =
+        approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier());
     let bd = Breakdown {
-        base_weights: approximate_base_weight_bytes(cfg),
+        base_weights,
         per_segment_activations: per_segment_activation_bytes(cfg, max_seq_len, num_segments),
         boundary_states: boundary_state_bytes(cfg, max_seq_len, num_segments),
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, max_seq_len),
@@ -162,12 +221,26 @@ pub fn estimate_step_working_set(
 }
 
 /// How much of the corrected VRAM budget is available for a training
-/// step right now: budget − KV-cache reservation − safety reserve.
+/// step right now.
 ///
-/// Phase 0: KV cache is hard to query without consulting the running
-/// allocator, so we reserve a fraction of the budget. The per-job
-/// preflight then compares its estimate against the remainder.
+/// On unified-memory APUs this consults `/proc/meminfo` MemAvailable
+/// at submission time so the preflight reflects what's actually free
+/// — the static VRAM number is the absolute ceiling but inference
+/// has typically already eaten KV cache + Vulkan weight caches +
+/// candle CPU storage from that pool by the time training is
+/// submitted.
+///
+/// Discrete GPUs and the no-detection path keep the static behavior:
+/// reserve a fraction of the budget for inference, return the rest.
 pub fn available_for_training_bytes(vram: &GpuVramInfo) -> u64 {
+    available_for_training_bytes_with_meminfo(vram, query_linux_mem_available_bytes())
+}
+
+#[doc(hidden)]
+pub fn available_for_training_bytes_with_meminfo(
+    vram: &GpuVramInfo,
+    mem_available_bytes: Option<u64>,
+) -> u64 {
     if vram.total_bytes == 0 {
         // No detection — refuse to claim any budget. Caller should treat
         // this as "skip the check" rather than "reject everything",
@@ -175,12 +248,50 @@ pub fn available_for_training_bytes(vram: &GpuVramInfo) -> u64 {
         // when we have no budget signal at all.
         return u64::MAX;
     }
-    // Reserve up to 1/3 of the budget for inference (KV cache + the
-    // running scheduler), capped at 6 GB so that on a small APU the
-    // training preflight doesn't lose the entire usable budget.
+
+    // Unified memory: training and inference share the same physical
+    // pool, so MemAvailable_now is the truth. Cap by the corrected
+    // VRAM budget so a misconfigured host can't somehow report more
+    // available than the GPU can address.
+    if matches!(
+        vram.source,
+        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
+    ) {
+        if let Some(mem_avail) = mem_available_bytes {
+            let live = mem_avail.saturating_sub(SAFETY_MARGIN_BYTES);
+            return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
+        }
+        // No /proc/meminfo (non-Linux Apple Silicon, or read failed):
+        // fall through to the conservative static path.
+    }
+
+    // Discrete-GPU / unknown path: reserve a fraction of the budget
+    // for inference (KV cache + the running scheduler), capped at
+    // 6 GB so that on a small device the training preflight doesn't
+    // lose the entire usable budget.
     let inference_reserve = (vram.total_bytes / 3).min(6 * BYTES_PER_GB);
     let after_inference = vram.total_bytes.saturating_sub(inference_reserve);
     after_inference.saturating_sub(SAFETY_MARGIN_BYTES)
+}
+
+#[cfg(target_os = "linux")]
+fn query_linux_mem_available_bytes() -> Option<u64> {
+    let raw = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kib: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn query_linux_mem_available_bytes() -> Option<u64> {
+    None
 }
 
 /// Best-effort token count estimate for one example without paying
@@ -300,8 +411,8 @@ mod tests {
     #[test]
     fn estimator_grows_with_seq_len() {
         let cfg = qwen_4b();
-        let small = estimate_step_working_set(&cfg, 256, 16, 4);
-        let large = estimate_step_working_set(&cfg, 4096, 16, 4);
+        let small = estimate_step_working_set(&cfg, 256, 16, 4, WeightResidency::SingleCopy);
+        let large = estimate_step_working_set(&cfg, 4096, 16, 4, WeightResidency::SingleCopy);
         assert!(
             large.total_bytes > small.total_bytes,
             "expected larger T to grow estimate; small={} large={}",
@@ -313,8 +424,8 @@ mod tests {
     #[test]
     fn estimator_shrinks_with_more_segments() {
         let cfg = qwen_4b();
-        let few = estimate_step_working_set(&cfg, 1500, 16, 4);
-        let many = estimate_step_working_set(&cfg, 1500, 16, 16);
+        let few = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
+        let many = estimate_step_working_set(&cfg, 1500, 16, 16, WeightResidency::SingleCopy);
         assert!(
             many.breakdown.per_segment_activations < few.breakdown.per_segment_activations,
             "more segments must reduce per-segment activation footprint"
@@ -327,7 +438,7 @@ mod tests {
         // should sit in single-digit-to-low-tens GB. A wildly different
         // number means a coefficient regression in one of the helpers.
         let cfg = qwen_4b();
-        let est = estimate_step_working_set(&cfg, 1500, 16, 4);
+        let est = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
         let gb = est.total_bytes as f64 / BYTES_PER_GB as f64;
         assert!(
             (8.0..=80.0).contains(&gb),
@@ -336,18 +447,92 @@ mod tests {
     }
 
     #[test]
+    fn dual_residency_doubles_base_weight_contribution() {
+        let cfg = qwen_4b();
+        let single = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
+        let dual =
+            estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::DualResidentCpuAndVulkan);
+        assert_eq!(dual.breakdown.base_weights, single.breakdown.base_weights * 2);
+        assert!(dual.total_bytes > single.total_bytes);
+    }
+
+    #[test]
+    fn weight_residency_is_dual_for_unified_memory() {
+        assert_eq!(
+            WeightResidency::for_vram_source(VramSource::LinuxDrmSysfsUnified),
+            WeightResidency::DualResidentCpuAndVulkan
+        );
+        assert_eq!(
+            WeightResidency::for_vram_source(VramSource::AppleSilicon),
+            WeightResidency::DualResidentCpuAndVulkan
+        );
+        assert_eq!(
+            WeightResidency::for_vram_source(VramSource::NvidiaSmi),
+            WeightResidency::SingleCopy
+        );
+        assert_eq!(
+            WeightResidency::for_vram_source(VramSource::LinuxDrmSysfs),
+            WeightResidency::SingleCopy
+        );
+    }
+
+    /// Regression test for the 2026-05-10 host crash. The validation
+    /// run against /tmp/sft-data.jsonl (4 examples × ~2.5K tokens
+    /// each) on this Strix Halo APU was accepted by the preflight,
+    /// then took down the host mid-step. After the WeightResidency
+    /// + MemAvailable fixes the same payload must be rejected.
+    #[test]
+    fn preflight_rejects_repro_payload_on_strix_halo() {
+        let cfg = qwen_4b();
+        // Mirror the actual Strix Halo signal observed at startup:
+        // total_vram_gb = 24.94 (the corrected unified-memory budget)
+        let vram = GpuVramInfo {
+            total_bytes: 24_944_216_064,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        // After model load + KV cache + Vulkan weight caches the
+        // observed MemAvailable on the actual hardware was around
+        // 8-9 GB. Use 8 GB as a representative submission-time
+        // value.
+        let mem_available = 8 * BYTES_PER_GB;
+        let avail = available_for_training_bytes_with_meminfo(&vram, Some(mem_available));
+        // 4 examples × ~2.5K tokens, default rank 16, num_segments 8
+        // (recommended_checkpoint_segments at the corrected budget).
+        let est = estimate_step_working_set(
+            &cfg,
+            2500,
+            16,
+            8,
+            WeightResidency::DualResidentCpuAndVulkan,
+        );
+        assert!(
+            est.total_bytes > avail,
+            "preflight must reject the 2026-05-10 repro payload; \
+             got estimate={} ({:.2} GB), avail={} ({:.2} GB)",
+            est.total_bytes,
+            est.total_bytes as f64 / BYTES_PER_GB as f64,
+            avail,
+            avail as f64 / BYTES_PER_GB as f64,
+        );
+    }
+
+    #[test]
     fn preflight_rejects_oversized_payload_on_30gb_host() {
-        // The reproducer that motivated the plan: Qwen3.5-4B,
-        // long-context SFT, 4-segment checkpointing on a 30 GB host
-        // (corrected to ~22 GB after reserve). With a high seq len
-        // the estimate should exceed available_for_training_bytes.
+        // Long-context payload on the same 30 GB unified host: must
+        // overflow even more dramatically than the repro.
         let cfg = qwen_4b();
         let vram = GpuVramInfo {
             total_bytes: 22 * BYTES_PER_GB,
             source: VramSource::LinuxDrmSysfsUnified,
         };
-        let avail = available_for_training_bytes(&vram);
-        let est = estimate_step_working_set(&cfg, 8192, 16, 4);
+        let avail = available_for_training_bytes_with_meminfo(&vram, Some(8 * BYTES_PER_GB));
+        let est = estimate_step_working_set(
+            &cfg,
+            8192,
+            16,
+            4,
+            WeightResidency::DualResidentCpuAndVulkan,
+        );
         assert!(
             est.total_bytes > avail,
             "expected 8K-token Qwen3.5-4B step to overflow 22 GB unified budget; \
@@ -358,31 +543,22 @@ mod tests {
     }
 
     #[test]
-    fn preflight_accepts_small_payload_on_30gb_host() {
+    fn preflight_still_accepts_on_a_big_dgpu() {
+        // Discrete A6000-class card (48 GB VRAM) with a small payload:
+        // SingleCopy residency, generous available, must accept.
         let cfg = qwen_4b();
-        let vram = GpuVramInfo {
-            total_bytes: 22 * BYTES_PER_GB,
-            source: VramSource::LinuxDrmSysfsUnified,
-        };
-        let avail = available_for_training_bytes(&vram);
-        let est = estimate_step_working_set(&cfg, 256, 8, 8);
-        // The base weight contribution alone is large (~16 GB Qwen3.5-4B
-        // BF16 with embedding + LM head counted twice). The Phase 0
-        // estimator is conservative on purpose; this assertion just
-        // checks the small payload sits closer to the limit than the
-        // 8K version.
-        let large = estimate_step_working_set(&cfg, 8192, 16, 4);
-        assert!(est.total_bytes < large.total_bytes);
-        // And that something fits at all on a 100 GB host so the
-        // accept path is exercised somewhere.
         let big_vram = GpuVramInfo {
-            total_bytes: 100 * BYTES_PER_GB,
+            total_bytes: 48 * BYTES_PER_GB,
             source: VramSource::NvidiaSmi,
         };
-        let big_avail = available_for_training_bytes(&big_vram);
-        assert!(est.total_bytes < big_avail);
-        // Suppress unused warning when assertion compiles in release.
-        let _ = avail;
+        let big_avail = available_for_training_bytes_with_meminfo(&big_vram, None);
+        let est = estimate_step_working_set(&cfg, 256, 8, 8, WeightResidency::SingleCopy);
+        assert!(
+            est.total_bytes < big_avail,
+            "small payload on 48 GB dGPU must fit; estimate={} avail={}",
+            est.total_bytes,
+            big_avail
+        );
     }
 
     #[test]
@@ -391,15 +567,36 @@ mod tests {
             total_bytes: 0,
             source: VramSource::None,
         };
-        // u64::MAX signals "skip the check" — preflight should not
-        // refuse jobs when we have no budget signal.
         assert_eq!(available_for_training_bytes(&none), u64::MAX);
+    }
+
+    #[test]
+    fn unified_memory_uses_meminfo_when_present() {
+        let vram = GpuVramInfo {
+            total_bytes: 25 * BYTES_PER_GB,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        // 8 GB free at submission time, capped by VRAM ceiling.
+        let avail = available_for_training_bytes_with_meminfo(&vram, Some(8 * BYTES_PER_GB));
+        let expected = 8u64 * BYTES_PER_GB - SAFETY_MARGIN_BYTES;
+        assert_eq!(avail, expected);
+    }
+
+    #[test]
+    fn unified_memory_caps_meminfo_at_vram_ceiling() {
+        let vram = GpuVramInfo {
+            total_bytes: 10 * BYTES_PER_GB,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        // 50 GB MemAvailable on a 10 GB ceiling — cap to ceiling.
+        let avail = available_for_training_bytes_with_meminfo(&vram, Some(50 * BYTES_PER_GB));
+        assert_eq!(avail, 10u64 * BYTES_PER_GB - SAFETY_MARGIN_BYTES);
     }
 
     #[test]
     fn format_oom_message_includes_actionable_knobs() {
         let cfg = qwen_4b();
-        let est = estimate_step_working_set(&cfg, 8192, 16, 4);
+        let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy);
         let msg = format_oom_message(&est, 8 * BYTES_PER_GB, 16, 4);
         assert!(msg.contains("KILN_GRAD_CHECKPOINT_SEGMENTS"));
         assert!(msg.contains("lora_rank"));
