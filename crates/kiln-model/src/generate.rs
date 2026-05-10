@@ -979,10 +979,10 @@ impl ModelRunner {
 
     /// Create a new ModelRunner from pre-loaded weights, tokenizer, and config.
     ///
-    /// CUDA graphs for decode are enabled by default on CUDA devices.
-    /// Pass `cuda_graphs: false` to disable.
+    /// Create a runner with the production default: CUDA graphs disabled.
+    /// Pass `cuda_graphs: true` to [`Self::new_with_options`] to opt in.
     pub fn new(weights: GpuWeights, tokenizer: KilnTokenizer, config: ModelConfig) -> Self {
-        Self::new_with_options(weights, tokenizer, config, true)
+        Self::new_with_options(weights, tokenizer, config, false)
     }
 
     /// Create a new ModelRunner with explicit CUDA graph control.

@@ -454,3 +454,27 @@ Date: 2026-05-09
   The server log reported `SFT training complete` and `auto-loaded trained
   adapter`; a post-smoke kernel scan showed no new Linux OOM-killer or WSL/DXG
   residency error, and GPU memory returned to `71 MiB`.
+- Accepted direct `ModelRunner::new` CUDA graph default alignment:
+  `ModelRunner::new` now constructs runners with CUDA graphs disabled, matching
+  the production server default. Explicit graph experiments remain available
+  through `ModelRunner::new_with_options(..., true)`.
+- Same-binary WSL CUDA `kiln-bench` direct runner sweep on `prompt_tokens=64`,
+  `max_output_tokens=33`: graph-enabled default averaged `29.6374`, `29.7530`,
+  `29.8214`, `29.7961 tok/s` for batch `1/4/8/16` and `33.0421ms` latency
+  ITL; no-graph default averaged `29.7338`, `29.9410`, `29.9987`,
+  `29.7895 tok/s` and `33.0020ms` latency ITL. This is a small win for batch
+  `1/4/8`, neutral for batch `16`, and aligns direct callers with production.
+- ModelRunner default validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-model cuda_graph --lib --quiet`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-modelrunner-nograph-smoke-040042`, final loss `3.018186330795288`,
+  and `/health` reported `training_budget_gb=6.434062336` with the adapter
+  active. The adapter was then unloaded and deleted; a post-smoke kernel scan
+  showed no Linux OOM-killer event, the server log had no
+  `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.

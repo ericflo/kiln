@@ -1370,3 +1370,54 @@ Live no-env CUDA training smoke on the candidate:
   adapter`;
 - no Linux OOM-killer, `CUDA_ERROR_OUT_OF_MEMORY`, or new WSL/DXG residency
   error appeared after the smoke; GPU memory returned to `71 MiB` used.
+
+## Follow-Up: ModelRunner Default Mirrors Production CUDA Graph Policy
+
+`ModelRunner::new` now uses the production default of CUDA graphs disabled.
+Callers that want graph capture can still opt in with
+`ModelRunner::new_with_options(..., true)`. This aligns direct runner users
+such as `kiln-bench` and real-model integration callers with the server config
+default (`MemoryConfig::default().cuda_graphs = false`) instead of silently
+constructing a graph-enabled runner outside the server.
+
+Same-binary WSL CUDA throughput sweep, `prompt_tokens=64`,
+`max_output_tokens=33`, `KILN_NUM_BLOCKS=512`,
+`KILN_PREFIX_CACHE_MAX_ENTRIES=1`, `KILN_USE_FLCE=1`,
+`KILN_SPEC_ENABLED=0`:
+
+| path | batch=1 tok/s | batch=4 tok/s | batch=8 tok/s | batch=16 tok/s | latency mean ITL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| graph-enabled `ModelRunner::new` | 29.6374 | 29.7530 | 29.8214 | 29.7961 | 33.0421 ms |
+| production-default no-graph `ModelRunner::new` | 29.7338 | 29.9410 | 29.9987 | 29.7895 | 33.0020 ms |
+
+The no-graph default was slightly faster for batch 1/4/8 direct runner
+throughput, neutral for batch 16, and neutral/slightly better for direct serial
+latency. The operational win is also correctness of defaults: server users and
+direct runner users no longer get different CUDA graph policy unless they ask
+for it explicitly.
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+cargo test -p kiln-model cuda_graph --lib --quiet
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- `/health` after load reported `post_load_used_vram_gb=10.468982784`,
+  `kv_cache_gb=0.268435456`, `training_budget_gb=6.434062336`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=4242`, `auto_load=true`;
+- adapter: `cuda-modelrunner-nograph-smoke-040042`;
+- job id: `cd64c6e9-d880-49b6-91ee-e8e7cbc17aca`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=3.018186330795288`, `elapsed_secs=8.034271371`;
+- `/health` reported the trained adapter active, then unload/delete returned
+  `{"status":"unloaded"}` and `{"status":"deleted"}`;
+- post-smoke kernel journal scan showed no Linux OOM-killer event, the server
+  log had no `CUDA_ERROR_OUT_OF_MEMORY`, and GPU memory returned to `71 MiB`.
