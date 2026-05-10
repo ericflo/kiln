@@ -57,6 +57,12 @@ fn cuda_fused_rotary_qk_disabled() -> bool {
 }
 
 #[cfg(feature = "cuda")]
+fn cuda_fused_attn_decode_qkv_prep_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok())
+}
+
+#[cfg(feature = "cuda")]
 fn cuda_fused_mlp_silu_mul_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
@@ -7210,7 +7216,7 @@ fn gqa_attention_paged_with_rope_tables(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let (q_raw, k, v) = {
+    let (q_raw, k_raw, v) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
         let out = full_attn_qkv_proj_decode_if(
@@ -7234,7 +7240,7 @@ fn gqa_attention_paged_with_rope_tables(
     // the gate half when `attn_output_gate` is on, so its trailing dim is 2H.
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_q_proj_raw", &q_raw);
-        let _ = crate::mtp_debug::capture_subop("post_k_proj", &k);
+        let _ = crate::mtp_debug::capture_subop("post_k_proj", &k_raw);
         let _ = crate::mtp_debug::capture_subop("post_v_proj", &v);
     }
     // Phase B9 H3 alias: pre_gated_attn_split is the q_raw tensor before the
@@ -7248,125 +7254,202 @@ fn gqa_attention_paged_with_rope_tables(
     // layer 31 is executing with B12 capture armed.
     if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("q_proj", &q_raw)?;
-        crate::mtp_debug::capture_b12_gqa_tap("k_proj", &k)?;
+        crate::mtp_debug::capture_b12_gqa_tap("k_proj", &k_raw)?;
         crate::mtp_debug::capture_b12_gqa_tap("v_proj", &v)?;
     }
 
-    let (q, gate) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        kiln_nvtx::range!(c"kiln/proj/qkv_split");
-        let out = if attn_output_gate {
-            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
-            let q = q_raw.narrow(3, 0, head_dim)?;
-            let gate = q_raw.narrow(3, head_dim, head_dim)?;
-            let gate = gate
-                .contiguous()?
-                .reshape(((), seq_len, num_heads * head_dim))?;
-            (q.contiguous()?, Some(gate))
-        } else {
-            let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
-            (q, None)
-        };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qkv_split",
-            seq_len,
-            stage_profile,
-        )?;
-        out
-    };
-    // After the gate split, q is the rotation target.
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
-    }
-    // Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
-        if let Some(ref g) = gate {
-            let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
-            // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
-            let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
+    let fused_qkv_prep: Option<(Tensor, Tensor, Option<Tensor>)> = {
+        #[cfg(feature = "cuda")]
+        {
+            if seq_len == 1
+                && !cuda_fused_attn_decode_qkv_prep_disabled()
+                && !subop_armed
+                && !b12_layer_31
+                && !any_tensor_tracks_op(&[
+                    &q_raw,
+                    &k_raw,
+                    &attn_weights.q_norm,
+                    &attn_weights.k_norm,
+                ])
+            {
+                if let Some((cos, sin)) = rope_tables {
+                    if kiln_rmsnorm_kernel::supports_attn_decode_qkv_prep(
+                        &q_raw,
+                        &k_raw,
+                        &attn_weights.q_norm,
+                        &attn_weights.k_norm,
+                        cos,
+                        sin,
+                        num_heads,
+                        num_kv_heads,
+                        head_dim,
+                        rotary_dim,
+                        attn_output_gate,
+                    ) {
+                        let stage_profile =
+                            start_full_attn_stage_profile(profile_device, profile_context)?;
+                        kiln_nvtx::range!(c"kiln/attn/qkv_prep_cuda_fused");
+                        let out = kiln_rmsnorm_kernel::fused_attn_decode_qkv_prep(
+                            &q_raw,
+                            &k_raw,
+                            &attn_weights.q_norm,
+                            &attn_weights.k_norm,
+                            cos,
+                            sin,
+                            num_heads,
+                            num_kv_heads,
+                            head_dim,
+                            rotary_dim,
+                            attn_output_gate,
+                            rms_norm_eps as f32,
+                        )
+                        .context("cuda fused attn decode qkv prep failed")?;
+                        finish_full_attn_stage_profile(
+                            profile_device,
+                            profile_context,
+                            "qkv_split_qk_norm_rope",
+                            seq_len,
+                            stage_profile,
+                        )?;
+                        Some(out)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         }
-    }
-
-    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
-
-    // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
-    // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
-    // post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
-        let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
-    }
-
-    // QK-norm
-    let (q, k) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        kiln_nvtx::range!(c"kiln/attn/qk_norm");
-        let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
-        let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
-        let out = (q, k);
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "qk_norm",
-            seq_len,
-            stage_profile,
-        )?;
-        out
+        #[cfg(not(feature = "cuda"))]
+        {
+            None
+        }
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
-        let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
-    }
-    // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
-        let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
-    }
-    // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
-    // RMSNorm, pre-RoPE. Shape [B, T, num_heads, head_dim] /
-    // [B, T, num_kv_heads, head_dim].
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("qk_norm_q", &q)?;
-        crate::mtp_debug::capture_b12_gqa_tap("qk_norm_k", &k)?;
-    }
 
-    // RoPE — only rotate first rotary_dim dimensions
-    // Use the GPU tensor variant so positions remain at a stable GPU address
-    // (critical for CUDA graph replay correctness)
-    let (q, k) = {
-        let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        kiln_nvtx::range!(c"kiln/attn/rope");
-        let out = if let Some((cos, sin)) = rope_tables {
-            rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
-        } else {
-            rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+    let (q, k, gate) = if let Some((q, k, gate)) = fused_qkv_prep {
+        (q, k, gate)
+    } else {
+        let (q, gate) = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            kiln_nvtx::range!(c"kiln/proj/qkv_split");
+            let out = if attn_output_gate {
+                let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+                let q = q_raw.narrow(3, 0, head_dim)?;
+                let gate = q_raw.narrow(3, head_dim, head_dim)?;
+                let gate = gate
+                    .contiguous()?
+                    .reshape(((), seq_len, num_heads * head_dim))?;
+                (q.contiguous()?, Some(gate))
+            } else {
+                let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+                (q, None)
+            };
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "qkv_split",
+                seq_len,
+                stage_profile,
+            )?;
+            out
         };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "rope",
-            seq_len,
-            stage_profile,
-        )?;
-        out
+        // After the gate split, q is the rotation target.
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_q_split", &q);
+        }
+        // Phase B9 H3 alias: post_gated_attn_split_value mirrors post_q_split.
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_value", &q);
+            if let Some(ref g) = gate {
+                let _ = crate::mtp_debug::capture_subop("post_gate_split", g);
+                // Phase B9 H3 alias: post_gated_attn_split_gate mirrors post_gate_split.
+                let _ = crate::mtp_debug::capture_subop("post_gated_attn_split_gate", g);
+            }
+        }
+
+        let k = k_raw.reshape(((), seq_len, num_kv_heads, head_dim))?;
+
+        // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
+        // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
+        // post_q_split; pre_qk_norm_k is genuinely new (post_k_proj is pre-reshape).
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("pre_qk_norm_q", &q);
+            let _ = crate::mtp_debug::capture_subop("pre_qk_norm_k", &k);
+        }
+
+        // QK-norm
+        let (q, k) = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            kiln_nvtx::range!(c"kiln/attn/qk_norm");
+            let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+            let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+            let out = (q, k);
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "qk_norm",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_q_norm", &q);
+            let _ = crate::mtp_debug::capture_subop("post_k_norm", &k);
+        }
+        // Phase B9 H2 aliases: post_qk_norm_{q,k} mirror post_{q,k}_norm.
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_qk_norm_q", &q);
+            let _ = crate::mtp_debug::capture_subop("post_qk_norm_k", &k);
+        }
+        // Phase B12 layer-31 GQA taps: qk_norm_q / qk_norm_k. Post per-head
+        // RMSNorm, pre-RoPE. Shape [B, T, num_heads, head_dim] /
+        // [B, T, num_kv_heads, head_dim].
+        if b12_layer_31 {
+            crate::mtp_debug::capture_b12_gqa_tap("qk_norm_q", &q)?;
+            crate::mtp_debug::capture_b12_gqa_tap("qk_norm_k", &k)?;
+        }
+
+        // RoPE — only rotate first rotary_dim dimensions
+        // Use the GPU tensor variant so positions remain at a stable GPU address
+        // (critical for CUDA graph replay correctness)
+        let (q, k) = {
+            let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
+            kiln_nvtx::range!(c"kiln/attn/rope");
+            let out = if let Some((cos, sin)) = rope_tables {
+                rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
+            } else {
+                rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+            };
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "rope",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
+        if subop_armed {
+            let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
+            let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
+        }
+        // Phase B12 layer-31 GQA taps: rope_q / rope_k. Post-RoPE, pre-transpose.
+        // These are intermediates that HF can only expose via a forward hook on
+        // the attention module's q_proj/k_proj output + manual re-run of the
+        // rotary function in the comparator — the Python dump script emits a
+        // NOTE rather than failing when these HF taps are absent.
+        if b12_layer_31 {
+            crate::mtp_debug::capture_b12_gqa_tap("rope_q", &q)?;
+            crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
+        }
+
+        (q, k, gate)
     };
-    if subop_armed {
-        let _ = crate::mtp_debug::capture_subop("post_q_rope", &q);
-        let _ = crate::mtp_debug::capture_subop("post_k_rope", &k);
-    }
-    // Phase B12 layer-31 GQA taps: rope_q / rope_k. Post-RoPE, pre-transpose.
-    // These are intermediates that HF can only expose via a forward hook on
-    // the attention module's q_proj/k_proj output + manual re-run of the
-    // rotary function in the comparator — the Python dump script emits a
-    // NOTE rather than failing when these HF taps are absent.
-    if b12_layer_31 {
-        crate::mtp_debug::capture_b12_gqa_tap("rope_q", &q)?;
-        crate::mtp_debug::capture_b12_gqa_tap("rope_k", &k)?;
-    }
+
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
 
     // Keep the cache-native token-major K/V views for paged writes. Attention
     // still wants head-major tensors, but the cache pool stores

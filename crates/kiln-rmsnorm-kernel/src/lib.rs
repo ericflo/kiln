@@ -151,6 +151,26 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
+        q_raw: *const core::ffi::c_void,
+        k_raw: *const core::ffi::c_void,
+        q_weight: *const core::ffi::c_void,
+        k_weight: *const core::ffi::c_void,
+        cos: *const f32,
+        sin: *const f32,
+        q_out: *mut core::ffi::c_void,
+        k_out: *mut core::ffi::c_void,
+        gate_out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        k_heads: i32,
+        head_dim: i32,
+        rotary_dim: i32,
+        has_gate: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_fused_mlp_silu_mul_bf16(
         gate: *const core::ffi::c_void,
         up: *const core::ffi::c_void,
@@ -1283,6 +1303,298 @@ pub fn fused_rotary_qk(
     Ok((q_out, k_out))
 }
 
+/// Whether the fused single-token decode QKV-prep kernel is available.
+///
+/// Supports post-projection CUDA bf16 tensors for a decode step:
+/// `q_raw=[batch, 1, q_heads * head_dim * (has_gate ? 2 : 1)]`,
+/// `k_raw=[batch, 1, k_heads * head_dim]`, bf16 norm weights
+/// `[head_dim]`, and f32 RoPE tables `[1, rotary_dim / 2]`.
+pub fn supports_attn_decode_qkv_prep(
+    q_raw: &Tensor,
+    k_raw: &Tensor,
+    q_weight: &Tensor,
+    k_weight: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    q_heads: usize,
+    k_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    has_gate: bool,
+) -> bool {
+    if !matches!(q_raw.device(), Device::Cuda(_))
+        || !matches!(k_raw.device(), Device::Cuda(_))
+        || !matches!(q_weight.device(), Device::Cuda(_))
+        || !matches!(k_weight.device(), Device::Cuda(_))
+        || !matches!(cos.device(), Device::Cuda(_))
+        || !matches!(sin.device(), Device::Cuda(_))
+        || q_raw.dtype() != DType::BF16
+        || k_raw.dtype() != DType::BF16
+        || q_weight.dtype() != DType::BF16
+        || k_weight.dtype() != DType::BF16
+        || cos.dtype() != DType::F32
+        || sin.dtype() != DType::F32
+        || !q_raw.is_contiguous()
+        || !k_raw.is_contiguous()
+        || !q_weight.is_contiguous()
+        || !k_weight.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || q_raw.rank() != 3
+        || k_raw.rank() != 3
+        || q_heads == 0
+        || k_heads == 0
+        || head_dim == 0
+        || head_dim > 8192
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+
+    let qd = q_raw.dims();
+    let kd = k_raw.dims();
+    let batch = qd[0];
+    let Some(q_base) = q_heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(q_inner) = (if has_gate {
+        q_base.checked_mul(2)
+    } else {
+        Some(q_base)
+    }) else {
+        return false;
+    };
+    let Some(k_inner) = k_heads.checked_mul(head_dim) else {
+        return false;
+    };
+    let Some(total_heads) = q_heads.checked_add(k_heads) else {
+        return false;
+    };
+    let Some(total_rows) = batch.checked_mul(total_heads) else {
+        return false;
+    };
+    qd[1] == 1
+        && kd[0] == batch
+        && kd[1] == 1
+        && qd[2] == q_inner
+        && kd[2] == k_inner
+        && q_weight.dims() == [head_dim]
+        && k_weight.dims() == [head_dim]
+        && cos.dims() == [1, rotary_dim / 2]
+        && sin.dims() == [1, rotary_dim / 2]
+        && batch <= i32::MAX as usize
+        && total_rows <= i32::MAX as usize
+        && q_heads <= i32::MAX as usize
+        && k_heads <= i32::MAX as usize
+        && head_dim <= i32::MAX as usize
+        && rotary_dim <= i32::MAX as usize
+}
+
+/// Fuse decode-time Q/gate split, Q/K RMSNorm, and Q/K RoPE.
+///
+/// This is forward-only and intended for inference decode. It preserves the
+/// existing numerical sequence by bf16-rounding the RMSNorm output before the
+/// RoPE arithmetic.
+pub fn fused_attn_decode_qkv_prep(
+    q_raw: &Tensor,
+    k_raw: &Tensor,
+    q_weight: &Tensor,
+    k_weight: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    q_heads: usize,
+    k_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    has_gate: bool,
+    eps: f32,
+) -> Result<(Tensor, Tensor, Option<Tensor>)> {
+    if !supports_attn_decode_qkv_prep(
+        q_raw, k_raw, q_weight, k_weight, cos, sin, q_heads, k_heads, head_dim, rotary_dim,
+        has_gate,
+    ) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: attn_decode_qkv_prep unsupported shapes q_raw={:?} k_raw={:?} q_weight={:?} k_weight={:?} cos={:?} sin={:?} dtypes=({:?},{:?},{:?},{:?},{:?},{:?}) heads=({q_heads},{k_heads}) head_dim={head_dim} rotary_dim={rotary_dim} has_gate={has_gate}",
+            q_raw.shape(),
+            k_raw.shape(),
+            q_weight.shape(),
+            k_weight.shape(),
+            cos.shape(),
+            sin.shape(),
+            q_raw.dtype(),
+            k_raw.dtype(),
+            q_weight.dtype(),
+            k_weight.dtype(),
+            cos.dtype(),
+            sin.dtype()
+        );
+    }
+
+    let batch = q_raw.dims()[0];
+    let device = q_raw.device();
+    let q_out = Tensor::zeros((batch, 1, q_heads, head_dim), DType::BF16, device)?;
+    let k_out = Tensor::zeros((batch, 1, k_heads, head_dim), DType::BF16, device)?;
+    let gate_out = if has_gate {
+        Some(Tensor::zeros(
+            (batch, 1, q_heads * head_dim),
+            DType::BF16,
+            device,
+        )?)
+    } else {
+        None
+    };
+
+    let q_raw = q_raw.contiguous()?;
+    let k_raw = k_raw.contiguous()?;
+    let q_weight = q_weight.contiguous()?;
+    let k_weight = k_weight.contiguous()?;
+    let cos = cos.contiguous()?;
+    let sin = sin.contiguous()?;
+
+    {
+        let (qr_storage, qr_layout) = q_raw.storage_and_layout();
+        let (kr_storage, kr_layout) = k_raw.storage_and_layout();
+        let (qw_storage, qw_layout) = q_weight.storage_and_layout();
+        let (kw_storage, kw_layout) = k_weight.storage_and_layout();
+        let (cos_storage, cos_layout) = cos.storage_and_layout();
+        let (sin_storage, sin_layout) = sin.storage_and_layout();
+        let (qo_storage, qo_layout) = q_out.storage_and_layout();
+        let (ko_storage, ko_layout) = k_out.storage_and_layout();
+
+        let qr_cuda = match &*qr_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: q_raw must be on CUDA"),
+        };
+        let kr_cuda = match &*kr_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: k_raw must be on CUDA"),
+        };
+        let qw_cuda = match &*qw_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: q_weight must be on CUDA"),
+        };
+        let kw_cuda = match &*kw_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: k_weight must be on CUDA"),
+        };
+        let cos_cuda = match &*cos_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: cos must be on CUDA"),
+        };
+        let sin_cuda = match &*sin_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: sin must be on CUDA"),
+        };
+        let qo_cuda = match &*qo_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: q_out must be on CUDA"),
+        };
+        let ko_cuda = match &*ko_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: k_out must be on CUDA"),
+        };
+
+        let stream = qr_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let qr_slice = qr_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qr_layout.start_offset()..);
+        let kr_slice = kr_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kr_layout.start_offset()..);
+        let qw_slice = qw_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qw_layout.start_offset()..);
+        let kw_slice = kw_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(kw_layout.start_offset()..);
+        let cos_slice = cos_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(cos_layout.start_offset()..);
+        let sin_slice = sin_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(sin_layout.start_offset()..);
+        let qo_slice = qo_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(qo_layout.start_offset()..);
+        let ko_slice = ko_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(ko_layout.start_offset()..);
+
+        unsafe {
+            let (qr_ptr, _g1) = qr_slice.device_ptr(&stream);
+            let (kr_ptr, _g2) = kr_slice.device_ptr(&stream);
+            let (qw_ptr, _g3) = qw_slice.device_ptr(&stream);
+            let (kw_ptr, _g4) = kw_slice.device_ptr(&stream);
+            let (cos_ptr, _g5) = cos_slice.device_ptr(&stream);
+            let (sin_ptr, _g6) = sin_slice.device_ptr(&stream);
+            let (qo_ptr, _g7) = qo_slice.device_ptr(&stream);
+            let (ko_ptr, _g8) = ko_slice.device_ptr(&stream);
+
+            let status = if let Some(gate_out) = gate_out.as_ref() {
+                let (go_storage, go_layout) = gate_out.storage_and_layout();
+                let go_cuda = match &*go_storage {
+                    candle_core::Storage::Cuda(c) => c,
+                    _ => candle_core::bail!("kiln-rmsnorm-kernel: gate_out must be on CUDA"),
+                };
+                let go_slice = go_cuda
+                    .as_cuda_slice::<bf16>()?
+                    .slice(go_layout.start_offset()..);
+                let (go_ptr, _g9) = go_slice.device_ptr(&stream);
+                kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
+                    qr_ptr as *const _,
+                    kr_ptr as *const _,
+                    qw_ptr as *const _,
+                    kw_ptr as *const _,
+                    cos_ptr as *const f32,
+                    sin_ptr as *const f32,
+                    qo_ptr as *mut _,
+                    ko_ptr as *mut _,
+                    go_ptr as *mut _,
+                    batch as i32,
+                    q_heads as i32,
+                    k_heads as i32,
+                    head_dim as i32,
+                    rotary_dim as i32,
+                    1,
+                    eps,
+                    raw_stream,
+                )
+            } else {
+                kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
+                    qr_ptr as *const _,
+                    kr_ptr as *const _,
+                    qw_ptr as *const _,
+                    kw_ptr as *const _,
+                    cos_ptr as *const f32,
+                    sin_ptr as *const f32,
+                    qo_ptr as *mut _,
+                    ko_ptr as *mut _,
+                    core::ptr::null_mut(),
+                    batch as i32,
+                    q_heads as i32,
+                    k_heads as i32,
+                    head_dim as i32,
+                    rotary_dim as i32,
+                    0,
+                    eps,
+                    raw_stream,
+                )
+            };
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_attn_decode_qkv_split_qk_norm_rope_bf16 failed with status {status}"
+                );
+            }
+        }
+    }
+
+    Ok((q_out, k_out, gate_out))
+}
+
 /// Whether the fused MLP `silu(gate) * up` kernel is available.
 ///
 /// Supports matching CUDA bf16 contiguous tensors. The operation is
@@ -1644,6 +1956,117 @@ mod tests {
 
         assert_eq!(q_diff, 0.0, "rotary q max_abs_diff={q_diff:e}");
         assert_eq!(k_diff, 0.0, "rotary k max_abs_diff={k_diff:e}");
+    }
+
+    #[test]
+    fn attn_decode_qkv_prep_parity_qwen_shape() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let q_heads = 16usize;
+        let k_heads = 4usize;
+        let head_dim = 256usize;
+        let rotary_dim = 64usize;
+        let half = rotary_dim / 2;
+        let eps = 1e-6f64;
+
+        let mut q_raw_data = Vec::with_capacity(batch * seq_len * q_heads * head_dim * 2);
+        let mut k_raw_data = Vec::with_capacity(batch * seq_len * k_heads * head_dim);
+        let mut q_weight_data = Vec::with_capacity(head_dim);
+        let mut k_weight_data = Vec::with_capacity(head_dim);
+        fill_pseudo_random(
+            &mut q_raw_data,
+            batch * seq_len * q_heads * head_dim * 2,
+            0x1020_3040,
+            0.75,
+        );
+        fill_pseudo_random(
+            &mut k_raw_data,
+            batch * seq_len * k_heads * head_dim,
+            0x5060_7080,
+            0.65,
+        );
+        fill_pseudo_random(&mut q_weight_data, head_dim, 0x90ab_cdef, 0.1);
+        fill_pseudo_random(&mut k_weight_data, head_dim, 0x1357_2468, 0.1);
+
+        let cos_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).cos())
+            .collect();
+        let sin_data: Vec<f32> = (0..seq_len * half)
+            .map(|i| (i as f32 * 0.007).sin())
+            .collect();
+
+        let q_raw = Tensor::from_vec(
+            q_raw_data,
+            (batch, seq_len, q_heads * head_dim * 2),
+            &device,
+        )
+        .unwrap()
+        .to_dtype(DType::BF16)
+        .unwrap();
+        let k_raw = Tensor::from_vec(k_raw_data, (batch, seq_len, k_heads * head_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let q_weight = Tensor::from_vec(q_weight_data, (head_dim,), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let k_weight = Tensor::from_vec(k_weight_data, (head_dim,), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let cos = Tensor::from_vec(cos_data, (seq_len, half), &device).unwrap();
+        let sin = Tensor::from_vec(sin_data, (seq_len, half), &device).unwrap();
+
+        let q_raw4 = q_raw
+            .reshape((batch, seq_len, q_heads, head_dim * 2))
+            .unwrap();
+        let q_pre = q_raw4.narrow(3, 0, head_dim).unwrap().contiguous().unwrap();
+        let gate_ref = q_raw4
+            .narrow(3, head_dim, head_dim)
+            .unwrap()
+            .contiguous()
+            .unwrap()
+            .reshape((batch, seq_len, q_heads * head_dim))
+            .unwrap();
+        let k_pre = k_raw.reshape((batch, seq_len, k_heads, head_dim)).unwrap();
+        let q_norm = reference_rms_norm(&q_pre, &q_weight, eps).unwrap();
+        let k_norm = reference_rms_norm(&k_pre, &k_weight, eps).unwrap();
+        let q_ref = reference_rope(&q_norm, &cos, &sin, head_dim, rotary_dim).unwrap();
+        let k_ref = reference_rope(&k_norm, &cos, &sin, head_dim, rotary_dim).unwrap();
+
+        assert!(supports_attn_decode_qkv_prep(
+            &q_raw, &k_raw, &q_weight, &k_weight, &cos, &sin, q_heads, k_heads, head_dim,
+            rotary_dim, true
+        ));
+        let (q_fused, k_fused, gate_fused) = fused_attn_decode_qkv_prep(
+            &q_raw, &k_raw, &q_weight, &k_weight, &cos, &sin, q_heads, k_heads, head_dim,
+            rotary_dim, true, eps as f32,
+        )
+        .expect("fused attn decode qkv prep");
+
+        assert_eq!(q_fused.dims(), &[batch, seq_len, q_heads, head_dim]);
+        assert_eq!(k_fused.dims(), &[batch, seq_len, k_heads, head_dim]);
+        let gate_fused = gate_fused.expect("gate output");
+        assert_eq!(gate_fused.dims(), &[batch, seq_len, q_heads * head_dim]);
+
+        let q_diff = max_abs_diff(&q_ref, &q_fused);
+        let k_diff = max_abs_diff(&k_ref, &k_fused);
+        let gate_diff = max_abs_diff(&gate_ref, &gate_fused);
+        assert!(
+            q_diff < 1e-2,
+            "attn q prep parity failed: max_abs_diff={q_diff:e}"
+        );
+        assert!(
+            k_diff < 1e-2,
+            "attn k prep parity failed: max_abs_diff={k_diff:e}"
+        );
+        assert_eq!(gate_diff, 0.0, "gate copy max_abs_diff={gate_diff:e}");
     }
 
     #[test]

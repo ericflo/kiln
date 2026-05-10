@@ -856,3 +856,64 @@ validation because it started rebuilding flash-attn with debug `-G` flags, the
 same compile mode that can exhaust memory on this WSL host. The release CUDA
 bench and server smoke above exercised the changed route without that OOM-prone
 debug rebuild.
+
+## Follow-Up: Fuse CUDA Decode QKV Prep
+
+The post-direct-paged profile showed each full-attention decode layer still
+paying separate Candle work for Q/gate split, Q/K RMSNorm, and RoPE. CUDA
+single-token paged decode now fuses those steps into one forward-only kernel
+for untracked inference tensors with RoPE tables:
+
+- split `q_raw` into Q and optional attention output gate;
+- RMSNorm Q and K with Qwen3.5's `(1 + weight)` convention;
+- bf16-round the norm output before RoPE, matching the existing op order;
+- apply contiguous-half RoPE to Q/K;
+- copy the raw gate half to the existing `[B, 1, hidden]` layout.
+
+Training and debug capture paths keep the existing differentiable Candle
+sequence because the fused route requires untracked tensors and is disabled
+when MTP/B12 sub-op taps are armed.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, paged latency bench, 64 prompt tokens,
+33 generated tokens, one warmup run per measurement, no stage profiling:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP=1` | 26.692654, 26.683835, 26.654270 | 26.676920 ms | 37.485602 |
+| default fused CUDA QKV prep | 25.850827, 25.849904, 25.991987 | 25.897573 ms | 38.613914 |
+
+Average decode ITL improved by 2.9% on this WSL 16 GiB CUDA host.
+
+The route profile changed as intended: decode stage rows now log
+`qkv_split_qk_norm_rope` instead of separate decode `qkv_split`, `qk_norm`, and
+`rope` rows. The candidate profiled run measured 26.2 ms mean ITL
+(`38.2 tok/s`) and the fused decode prep stage totaled 16.803 ms across
+512 layer-token rows (`0.0328 ms` mean).
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-rmsnorm-kernel attn_decode_qkv_prep_parity_qwen_shape --quiet
+CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-attn-qkv-prep-smoke-20260510`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9891`, `auto_load=true`;
+- job id: `14163761-e760-4c03-856d-568a2ad06057`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.6304359436035156`;
+- `/health` reported `active_adapter="attn-qkv-prep-smoke-r1"`;
+- adapter-backed no-thinking chat returned non-empty content;
+- adapter-backed thinking chat emitted non-empty `reasoning_content`.

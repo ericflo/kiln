@@ -256,3 +256,25 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-direct-paged-smoke-r1`, final loss
   `1.590428352355957`, `/health` reported the active adapter, no-thinking
   chat returned `kiln silver`, and thinking chat emitted reasoning content.
+- Accepted CUDA fused decode QKV prep:
+  single-token paged CUDA decode now fuses Q/gate split, Q/K RMSNorm, and
+  RoPE into one forward-only kernel for untracked inference tensors with
+  RoPE tables. Training and debug tap captures keep the existing Candle path.
+  Rollback: `KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `26.692654`, `26.683835`, `26.654270` ms averaged
+  `26.676920ms` / `37.485602 tok/s`; default fused-QKV-prep runs
+  `25.850827`, `25.849904`, `25.991987` ms averaged `25.897573ms` /
+  `38.613914 tok/s`, a 2.9% decode ITL win.
+- Route profile confirmed decode logs `qkv_split_qk_norm_rope` instead of
+  separate decode `qkv_split`, `qk_norm`, and `rope` rows; the fused stage
+  totaled `16.803ms` across `512` layer-token rows.
+- Fused-QKV-prep validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-rmsnorm-kernel attn_decode_qkv_prep_parity_qwen_shape --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Live rank-1 SFT smoke auto-loaded `attn-qkv-prep-smoke-r1`, final loss
+  `1.6304359436035156`, `/health` reported the active adapter, no-thinking
+  chat returned non-empty content, and thinking chat emitted reasoning
+  content.

@@ -45,6 +45,7 @@ fn main() {
     build.file(csrc_dir.join("fused_rmsnorm_bwd.cu"));
     build.file(csrc_dir.join("fused_l2_qk_norm.cu"));
     build.file(csrc_dir.join("fused_rotary_qk.cu"));
+    build.file(csrc_dir.join("fused_attn_qkv_prep.cu"));
     build.file(csrc_dir.join("fused_mlp_silu_mul.cu"));
     build.file(csrc_dir.join("fused_sigmoid_mul.cu"));
 
