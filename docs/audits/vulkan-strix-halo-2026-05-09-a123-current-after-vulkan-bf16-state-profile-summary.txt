@@ -1,0 +1,117 @@
+A123 current-after-Vulkan-BF16-state profile summary
+
+Date: 2026-05-09
+Host: Strix Halo / RADV STRIX_HALO
+Commit profiled: b9d4da97 Use BF16 GDN state for Vulkan inference
+
+Purpose
+-------
+
+Capture a post-A122 live GPU profile before the next Vulkan optimization.
+A122 made Vulkan inference initialize GDN recurrent state in the model dtype
+for BF16/FP16 models. This run verifies that the current Vulkan path is still
+correct on GPU and identifies the next decode bottleneck.
+
+Server/run configuration
+------------------------
+
+- Model: Qwen3.5-4B
+- Backend: Vulkan
+- Device selected by server: AMD Radeon 8060S Graphics (RADV STRIX_HALO)
+- `KILN_PREFIX_CACHE_ENABLED=false`
+- `KILN_DECODE_BATCH_WAIT_US=5000`
+- `KILN_DECODE_BATCH_MAX=3`
+- Prompt count: 8 concurrent streaming chat requests
+- Request shape: `max_tokens=16`, `temperature=0`
+- Template config:
+  `chat_template_kwargs: {"enable_thinking": false}`
+
+Profile flags
+-------------
+
+- `KILN_PROFILE_DECODE_BATCHER_STAGES=1`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`
+- `KILN_PROFILE_MLP_STAGES=1`
+- `KILN_PROFILE_FULL_ATTN_STAGES=1`
+- `KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES=1`
+- `KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES=1`
+
+Correctness
+-----------
+
+- Server log confirmed `Mode: GPU inference`.
+- Server log confirmed Vulkan GPU selection and live greedy decode batcher
+  with `backend="vulkan"`, `max_batch=3`, and `wait_us=5000`.
+- All requests returned HTTP 200.
+- All reasoning streams were empty.
+- Every visible response exactly matched:
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics delta matched the expected decode-batcher shape:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `jobs_failed=0`, `runner_busy_jobs=0`,
+  `worker_batches=41`, `batcher_rows=120`, max batch `3`.
+
+Wall time
+---------
+
+- Total wall time: `13.712758s`.
+- Slowest individual request: `13.699149s`.
+
+Top profile rows
+----------------
+
+- `decode_batcher:worker_total:batch=3`: total `8924.754ms`,
+  count `39`, mean `228.840ms`.
+- `decode_batcher:runner_call:batch=3`: total `8924.543ms`,
+  count `39`, mean `228.834ms`.
+- `decode_batcher:decode_total:batch=3`: total `8924.222ms`,
+  count `39`, mean `228.826ms`.
+- `decode_batcher:batched_forward:batch=3`: total `8713.708ms`,
+  count `39`, mean `223.428ms`.
+- Prefill MLP at batch/seq `57`: `mlp:fused` total `5024.999ms`,
+  `vulkan_mlp:total` total `5011.555ms`.
+- Prefill GDN in-proj at batch/seq `57`: `gdn:in_proj` total
+  `3316.681ms`, `vulkan_gdn_in_proj:total` total `3299.437ms`.
+- Decode GDN recurrent: `gdn:recurrent:seq_len=1` total `2990.035ms`,
+  count `1008`, mean `2.966ms`.
+- Decode GDN recurrent backend step:
+  `gdn_inner:single_token_backend_step:batch=3:seq_len=1:chunk_len=1`
+  total `2876.746ms`, count `936`, mean `3.073ms`.
+- Decode MLP: `mlp:fused:seq_len=1` total `1581.845ms`,
+  count `1344`, mean `1.177ms`.
+- Decode Vulkan MLP batch 3: `vulkan_mlp:total:batch=3` total
+  `1443.470ms`, count `1248`, mean `1.157ms`.
+- Decode GDN in-proj: `gdn:in_proj:seq_len=1` total `1083.047ms`,
+  count `1008`, mean `1.074ms`.
+- Decode Vulkan GDN in-proj batch 3: `vulkan_gdn_in_proj:total:batch=3`
+  total `975.610ms`, count `936`, mean `1.042ms`.
+- Decode Vulkan GDN in-proj submit/wait:
+  `vulkan_gdn_in_proj:record_submit_wait:batch=3` total `863.448ms`.
+- Decode state assembly:
+  `decode_batcher:batch_state_assemble:batch=3` total `205.143ms`.
+
+Interpretation
+--------------
+
+- A122 is a valid correctness baseline for GPU Vulkan inference.
+- The next live decode target is still GDN recurrent at batch 3. It is the
+  largest profiled decode component after the enclosing batcher/forward rows.
+- Scheduler state assembly is visible but comparatively small in this run, so
+  it is not the next primary target.
+- GDN in-proj submit/wait remains a secondary target, but recurrent state
+  transfer/layout is the more direct next candidate.
+- Prefill is dominated by large batch/sequence MLP and GDN in-proj rows; that
+  is a separate path from the live batch-3 decode bottleneck.
+
+Artifacts
+---------
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-response_*.sse`

@@ -1,0 +1,485 @@
+{
+  "all_count": 218,
+  "top": [
+    {
+      "count": 39,
+      "key": "decode_batcher:stage=worker_total:batch=3",
+      "mean_ms": 228.83984615384617,
+      "total_ms": 8924.754
+    },
+    {
+      "count": 39,
+      "key": "decode_batcher:stage=runner_call:batch=3",
+      "mean_ms": 228.8344358974359,
+      "total_ms": 8924.543
+    },
+    {
+      "count": 39,
+      "key": "decode_batcher:stage=decode_total:batch=3",
+      "mean_ms": 228.82620512820512,
+      "total_ms": 8924.222
+    },
+    {
+      "count": 39,
+      "key": "decode_batcher:stage=batched_forward:batch=3",
+      "mean_ms": 223.42841025641027,
+      "total_ms": 8713.708
+    },
+    {
+      "count": 192,
+      "key": "mlp:stage=fused:seq_len=57",
+      "mean_ms": 26.171869791666662,
+      "total_ms": 5024.998999999999
+    },
+    {
+      "count": 192,
+      "key": "vulkan_mlp:stage=total:batch=57",
+      "mean_ms": 26.10184895833334,
+      "total_ms": 5011.555000000001
+    },
+    {
+      "count": 192,
+      "key": "vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=57",
+      "mean_ms": 25.909755208333323,
+      "total_ms": 4974.672999999998
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=in_proj:seq_len=57",
+      "mean_ms": 23.03250694444443,
+      "total_ms": 3316.680999999998
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj:stage=total:batch=57",
+      "mean_ms": 22.91275694444444,
+      "total_ms": 3299.436999999999
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=recurrent:seq_len=1",
+      "mean_ms": 2.9663045634920597,
+      "total_ms": 2990.034999999996
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=gated_norm:seq_len=57",
+      "mean_ms": 20.0313611111111,
+      "total_ms": 2884.5159999999983
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=gates:seq_len=57",
+      "mean_ms": 20.015472222222233,
+      "total_ms": 2882.2280000000014
+    },
+    {
+      "count": 936,
+      "key": "gdn_inner:stage=single_token_backend_step:batch=3:seq_len=1:chunk_len=1",
+      "mean_ms": 3.073446581196579,
+      "total_ms": 2876.745999999998
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=out_proj:seq_len=57",
+      "mean_ms": 19.811125000000008,
+      "total_ms": 2852.802000000001
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=conv:seq_len=57",
+      "mean_ms": 19.491256944444455,
+      "total_ms": 2806.7410000000013
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj:stage=pipeline_descriptor_setup:batch=57",
+      "mean_ms": 17.524659722222214,
+      "total_ms": 2523.550999999999
+    },
+    {
+      "count": 1344,
+      "key": "mlp:stage=fused:seq_len=1",
+      "mean_ms": 1.176968005952381,
+      "total_ms": 1581.845
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp:stage=total:batch=3",
+      "mean_ms": 1.1566266025641003,
+      "total_ms": 1443.4699999999973
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=recurrent:seq_len=57",
+      "mean_ms": 9.948812500000006,
+      "total_ms": 1432.6290000000008
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=3",
+      "mean_ms": 1.0898461538461537,
+      "total_ms": 1360.128
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=in_proj:seq_len=1",
+      "mean_ms": 1.0744513888888876,
+      "total_ms": 1083.0469999999987
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj:stage=total:batch=3",
+      "mean_ms": 1.0423183760683752,
+      "total_ms": 975.6099999999991
+    },
+    {
+      "count": 32,
+      "key": "mlp:stage=fused:seq_len=59",
+      "mean_ms": 28.778062499999997,
+      "total_ms": 920.8979999999999
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=total:batch=59",
+      "mean_ms": 28.711843749999996,
+      "total_ms": 918.7789999999999
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=59",
+      "mean_ms": 28.50065625,
+      "total_ms": 912.021
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj:stage=record_submit_wait:batch=3",
+      "mean_ms": 0.9224871794871801,
+      "total_ms": 863.4480000000005
+    },
+    {
+      "count": 32,
+      "key": "mlp:stage=fused:seq_len=58",
+      "mean_ms": 25.16109375000001,
+      "total_ms": 805.1550000000003
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=total:batch=58",
+      "mean_ms": 25.09178125,
+      "total_ms": 802.937
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=58",
+      "mean_ms": 24.890624999999996,
+      "total_ms": 796.4999999999999
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj:stage=record_submit_wait:batch=57",
+      "mean_ms": 4.210333333333335,
+      "total_ms": 606.2880000000001
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=in_proj:seq_len=59",
+      "mean_ms": 22.196875000000002,
+      "total_ms": 532.725
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=total:batch=59",
+      "mean_ms": 22.05741666666667,
+      "total_ms": 529.378
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=gated_norm:seq_len=58",
+      "mean_ms": 21.055291666666662,
+      "total_ms": 505.3269999999999
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=out_proj:seq_len=59",
+      "mean_ms": 20.348249999999997,
+      "total_ms": 488.35799999999995
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=in_proj:seq_len=58",
+      "mean_ms": 20.34625000000001,
+      "total_ms": 488.3100000000002
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=total:batch=58",
+      "mean_ms": 20.219375000000003,
+      "total_ms": 485.26500000000004
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=gates:seq_len=58",
+      "mean_ms": 19.742624999999997,
+      "total_ms": 473.8229999999999
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=gates:seq_len=59",
+      "mean_ms": 18.904541666666667,
+      "total_ms": 453.709
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=out_proj:seq_len=58",
+      "mean_ms": 18.736125,
+      "total_ms": 449.66700000000003
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=conv:seq_len=58",
+      "mean_ms": 18.57995833333333,
+      "total_ms": 445.9189999999999
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=conv:seq_len=59",
+      "mean_ms": 18.075625000000002,
+      "total_ms": 433.81500000000005
+    },
+    {
+      "count": 144,
+      "key": "gdn_inner:stage=chunk_scan:batch=1:seq_len=57:chunk_len=57",
+      "mean_ms": 2.971993055555555,
+      "total_ms": 427.9669999999999
+    },
+    {
+      "count": 144,
+      "key": "gdn_inner:stage=matmul_prep:batch=1:seq_len=57:chunk_len=57",
+      "mean_ms": 2.844243055555555,
+      "total_ms": 409.5709999999999
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=pipeline_descriptor_setup:batch=59",
+      "mean_ms": 16.721958333333337,
+      "total_ms": 401.32700000000006
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=gated_norm:seq_len=59",
+      "mean_ms": 16.14429166666667,
+      "total_ms": 387.4630000000001
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=pipeline_descriptor_setup:batch=58",
+      "mean_ms": 14.909083333333333,
+      "total_ms": 357.818
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=out_proj:seq_len=1",
+      "mean_ms": 0.34314880952380883,
+      "total_ms": 345.8939999999993
+    },
+    {
+      "count": 144,
+      "key": "gdn_inner:stage=chunk_prep:batch=1:seq_len=57:chunk_len=57",
+      "mean_ms": 2.0525763888888893,
+      "total_ms": 295.5710000000001
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=conv:seq_len=1",
+      "mean_ms": 0.288274801587301,
+      "total_ms": 290.5809999999994
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=gated_norm:seq_len=1",
+      "mean_ms": 0.28078075396825414,
+      "total_ms": 283.02700000000016
+    },
+    {
+      "count": 1008,
+      "key": "gdn:stage=gates:seq_len=1",
+      "mean_ms": 0.2797033730158734,
+      "total_ms": 281.9410000000004
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=recurrent:seq_len=59",
+      "mean_ms": 10.207291666666668,
+      "total_ms": 244.97500000000002
+    },
+    {
+      "count": 144,
+      "key": "gdn_inner:stage=state_update:batch=1:seq_len=57:chunk_len=57",
+      "mean_ms": 1.6852013888888888,
+      "total_ms": 242.66899999999998
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=recurrent:seq_len=58",
+      "mean_ms": 10.104583333333334,
+      "total_ms": 242.51000000000002
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=recurrent:seq_len=64",
+      "mean_ms": 9.918208333333332,
+      "total_ms": 238.03699999999998
+    },
+    {
+      "count": 32,
+      "key": "mlp:stage=fused:seq_len=64",
+      "mean_ms": 7.14784375,
+      "total_ms": 228.731
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=total:batch=64",
+      "mean_ms": 7.11009375,
+      "total_ms": 227.523
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp:stage=chained_transfer_dispatch_readback:batch=64",
+      "mean_ms": 6.952312499999999,
+      "total_ms": 222.47399999999996
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=worker_total:batch=1",
+      "mean_ms": 206.833,
+      "total_ms": 206.833
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=runner_call:batch=1",
+      "mean_ms": 206.824,
+      "total_ms": 206.824
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=decode_total:batch=1",
+      "mean_ms": 206.821,
+      "total_ms": 206.821
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=single_forward:batch=1",
+      "mean_ms": 206.817,
+      "total_ms": 206.817
+    },
+    {
+      "count": 39,
+      "key": "decode_batcher:stage=batch_state_assemble:batch=3",
+      "mean_ms": 5.260076923076924,
+      "total_ms": 205.14300000000003
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=worker_total:batch=2",
+      "mean_ms": 159.406,
+      "total_ms": 159.406
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=runner_call:batch=2",
+      "mean_ms": 159.4,
+      "total_ms": 159.4
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=decode_total:batch=2",
+      "mean_ms": 159.393,
+      "total_ms": 159.393
+    },
+    {
+      "count": 1,
+      "key": "decode_batcher:stage=batched_forward:batch=2",
+      "mean_ms": 155.731,
+      "total_ms": 155.731
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=conv:seq_len=64",
+      "mean_ms": 5.592791666666667,
+      "total_ms": 134.227
+    },
+    {
+      "count": 24,
+      "key": "gdn:stage=in_proj:seq_len=64",
+      "mean_ms": 5.196958333333334,
+      "total_ms": 124.72700000000002
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=total:batch=64",
+      "mean_ms": 5.1466666666666665,
+      "total_ms": 123.52
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=record_submit_wait:batch=59",
+      "mean_ms": 4.25025,
+      "total_ms": 102.00600000000001
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=qk_norm:seq_len=57",
+      "mean_ms": 0.7072569444444448,
+      "total_ms": 101.84500000000004
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=record_submit_wait:batch=64",
+      "mean_ms": 4.202749999999999,
+      "total_ms": 100.86599999999999
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj:stage=record_submit_wait:batch=58",
+      "mean_ms": 4.162916666666667,
+      "total_ms": 99.91000000000001
+    },
+    {
+      "count": 144,
+      "key": "gdn:stage=qkv_split:seq_len=57",
+      "mean_ms": 0.6150000000000002,
+      "total_ms": 88.56000000000003
+    },
+    {
+      "count": 24,
+      "key": "gdn_inner:stage=chunk_scan:batch=1:seq_len=59:chunk_len=59",
+      "mean_ms": 3.1547500000000013,
+      "total_ms": 75.71400000000003
+    },
+    {
+      "count": 24,
+      "key": "gdn_inner:stage=chunk_scan:batch=1:seq_len=64:chunk_len=64",
+      "mean_ms": 3.119916666666667,
+      "total_ms": 74.87800000000001
+    },
+    {
+      "count": 24,
+      "key": "gdn_inner:stage=chunk_scan:batch=1:seq_len=58:chunk_len=58",
+      "mean_ms": 3.112333333333332,
+      "total_ms": 74.69599999999997
+    },
+    {
+      "count": 24,
+      "key": "gdn_inner:stage=matmul_prep:batch=1:seq_len=64:chunk_len=64",
+      "mean_ms": 2.9150000000000005,
+      "total_ms": 69.96000000000001
+    },
+    {
+      "count": 24,
+      "key": "gdn_inner:stage=matmul_prep:batch=1:seq_len=59:chunk_len=59",
+      "mean_ms": 2.826083333333333,
+      "total_ms": 67.826
+    }
+  ]
+}

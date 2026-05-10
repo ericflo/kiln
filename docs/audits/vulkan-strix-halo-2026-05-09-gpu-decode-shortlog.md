@@ -619,3 +619,23 @@ Additional validation after A122:
   vs rollback `15.103752s` (`+9.068%`), pair 2 rollback `15.948654s` vs
   candidate `15.937455s` (`+0.070%`). Two-pair average was candidate
   `14.835795s` vs rollback `15.526203s` (`+4.447%`).
+
+Additional validation after A123:
+
+- Profiled current `main` at `b9d4da97` after A122 with decode batcher, GDN,
+  recurrent-inner, MLP, attention, Vulkan MLP, and Vulkan GDN in-proj profile
+  flags enabled.
+- Live server confirmed GPU routing (`Mode: GPU inference`, RADV STRIX_HALO
+  selected, batcher backend `vulkan`) and kept exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, and
+  identical decode-batcher metrics (`128` generated tokens, `120` submitted
+  jobs, `41` worker batches, max batch `3`).
+- Wall time was `13.712758s`.
+- The largest live decode target remains batch-3 GDN recurrent:
+  `gdn:recurrent:seq_len=1` total `2990.035ms`, and
+  `gdn_inner:single_token_backend_step:batch=3:seq_len=1:chunk_len=1` total
+  `2876.746ms`.
+- Decode state assembly was only `205.143ms` total in this run, so the next
+  primary target should be recurrent state transfer/layout rather than
+  scheduler assembly.

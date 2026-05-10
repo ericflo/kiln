@@ -7548,6 +7548,100 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-response_*.sse`
 
+## A123 - Current profile after Vulkan BF16 inference state
+
+Commit profiled: `b9d4da97 Use BF16 GDN state for Vulkan inference`
+
+Purpose:
+
+- Capture a clean post-A122 profile before starting the next Vulkan
+  optimization.
+- Verify the live server still routes the model through Vulkan GPU inference
+  and emits correct, non-empty visible text with `chat_template_kwargs` rather
+  than prompt text hacks.
+
+Run configuration:
+
+- Model: `Qwen3.5-4B`
+- Backend: Vulkan, selected device
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`.
+- `KILN_PREFIX_CACHE_ENABLED=false`
+- `KILN_DECODE_BATCH_WAIT_US=5000`
+- `KILN_DECODE_BATCH_MAX=3`
+- Eight concurrent streaming chat requests.
+- Request shape: `max_tokens=16`, `temperature=0`,
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Profiling enabled for decode batcher stages, GDN stages, GDN recurrent inner
+  stages, MLP stages, full attention stages, Vulkan MLP kernel stages, and
+  Vulkan GDN in-proj kernel stages.
+
+Correctness:
+
+- Server log confirmed `Mode: GPU inference`.
+- Server log confirmed Vulkan GPU selection and the live greedy decode batcher
+  with `backend="vulkan"`.
+- All requests returned HTTP 200.
+- All reasoning streams were empty.
+- Every visible response exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics matched the expected decode-batcher shape: `128` generated tokens,
+  `120` submitted jobs, `41` worker batches, `120` batcher rows, max batch `3`,
+  and no request or batcher errors.
+
+Wall time:
+
+- Total wall time: `13.712758s`.
+- Slowest individual request: `13.699149s`.
+
+Profile highlights:
+
+- Enclosing live decode rows:
+  - `decode_batcher:worker_total:batch=3`: total `8924.754ms`, count `39`,
+    mean `228.840ms`.
+  - `decode_batcher:batched_forward:batch=3`: total `8713.708ms`, count `39`,
+    mean `223.428ms`.
+- Decode GDN recurrent:
+  - `gdn:recurrent:seq_len=1`: total `2990.035ms`, count `1008`,
+    mean `2.966ms`.
+  - `gdn_inner:single_token_backend_step:batch=3:seq_len=1:chunk_len=1`:
+    total `2876.746ms`, count `936`, mean `3.073ms`.
+- Decode MLP:
+  - `mlp:fused:seq_len=1`: total `1581.845ms`, count `1344`,
+    mean `1.177ms`.
+  - `vulkan_mlp:total:batch=3`: total `1443.470ms`, count `1248`,
+    mean `1.157ms`.
+- Decode GDN in-proj:
+  - `gdn:in_proj:seq_len=1`: total `1083.047ms`, count `1008`,
+    mean `1.074ms`.
+  - `vulkan_gdn_in_proj:total:batch=3`: total `975.610ms`, count `936`,
+    mean `1.042ms`.
+  - `vulkan_gdn_in_proj:record_submit_wait:batch=3`: total `863.448ms`.
+- Decode state assembly:
+  - `decode_batcher:batch_state_assemble:batch=3`: total `205.143ms`.
+- Prefill side of this eight-request profile was dominated by large
+  batch/sequence MLP and GDN in-proj rows, especially batch/seq `57`.
+
+Interpretation:
+
+- A122 remains a valid correctness baseline for GPU Vulkan inference.
+- The next live decode target is still GDN recurrent at batch 3.
+- State assembly is no longer large enough to be the first follow-up target in
+  this profile.
+- GDN in-proj submit/wait remains a secondary target, but recurrent
+  state-transfer/layout work is the more direct next candidate.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a123-current-after-vulkan-bf16-state-profile-response_*.sse`
+
 Artifacts:
 
 - `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-summary.txt`
