@@ -7659,3 +7659,74 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-response_*.sse`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-response_*.sse`
+
+## A124 - Rejected GDN recurrent packed BF16 state candidate
+
+Base commit: `83e5ab03 Profile Vulkan after BF16 inference state`
+
+Purpose:
+
+- Test whether a Vulkan-only packed BF16 mutable recurrent-state layout reduces
+  live batch-3 GDN recurrent cost enough to matter.
+- The candidate packed state as two BF16 values per u32 in column-major
+  `[B,H,dv,ceil(dk/2)]` order so each parallel recurrent shader workgroup owned
+  one output column.
+- Rollback env while the candidate was present:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_BF16_STATE_PACKING=1`.
+
+Validation while candidate was present:
+
+- Focused BF16 parallel recurrent parity passed.
+- Rollback-env focused BF16 parity passed.
+- Existing f32 parallel recurrent parity passed.
+- Full Vulkan GDN parity passed (`36 passed`).
+- `cargo fmt --check`, `cargo check -p kiln-vulkan-kernel`,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, and
+  release Vulkan server build passed.
+
+Correctness:
+
+- All four live A/B arms confirmed GPU routing: `Mode: GPU inference`, Vulkan
+  available, RADV STRIX_HALO selected, and live greedy decode batcher backend
+  `vulkan`.
+- Every arm returned `8/8` HTTP 200, empty reasoning, and visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm had identical metrics: `128` generated tokens, `120` submitted
+  jobs, `41` worker batches, `120` batcher rows, max batch `3`, and no request
+  or batcher errors.
+
+Performance:
+
+- Pair 1, candidate first: candidate `13.626650s`, rollback `13.731983s`,
+  candidate delta `+0.767%`.
+- Pair 2, rollback first: rollback `13.885340s`, candidate `16.862532s`,
+  candidate delta `-17.656%`.
+- Two-pair averages: candidate `15.244591s`, rollback `13.808662s`,
+  candidate delta `-10.399%`.
+
+Interpretation:
+
+- Correctness was clean, but the candidate regressed wall time.
+- The likely mechanism is that per-token CPU packing/unpacking and shader
+  bit-packing overhead outweighed the smaller state buffer transfer.
+- Source changes were removed after measurement; final source has no A124
+  runtime changes. CUDA/Metal source paths remained untouched.
+- This direct upload/readback packed-state approach should not be revived
+  without a broader resident-state design that avoids repeated CPU layout
+  conversion.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-response_*.sse`

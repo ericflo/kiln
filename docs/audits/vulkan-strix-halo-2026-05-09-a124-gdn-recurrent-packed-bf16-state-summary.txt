@@ -1,0 +1,112 @@
+A124 GDN recurrent packed BF16 state candidate summary
+
+Date: 2026-05-09
+Host: Strix Halo / RADV STRIX_HALO
+Base commit: 83e5ab03 Profile Vulkan after BF16 inference state
+Disposition: rejected; source change removed after measurement
+
+Purpose
+-------
+
+Test whether packing Vulkan GDN recurrent BF16 state as two BF16 values per
+u32 in a column-major `[B,H,dv,ceil(dk/2)]` layout improves live batch-3
+decode by reducing recurrent state upload/readback size. The candidate was
+Vulkan-only and had a rollback flag:
+`KILN_DISABLE_VULKAN_GDN_RECURRENT_BF16_STATE_PACKING=1`.
+
+Candidate shape
+---------------
+
+- Added a parallel recurrent shader variant for BF16 mutable state.
+- Kept q/k/v/beta/g uploads as f32 bytes.
+- Packed recurrent state column-major by output column so each workgroup owned
+  one `(b,h,d)` column and wrote whole packed words.
+- Forced device-local state for the packed path.
+- Unpacked readback into the normal row-major BF16 `[B,H,dk,dv]` tensor.
+- Added focused BF16 parallel-reduce parity coverage while the candidate was
+  present.
+
+Local validation while candidate was present
+--------------------------------------------
+
+- `cargo fmt`
+- `cargo test -p kiln-vulkan-kernel gdn_recurrent_step_parallel_reduce_matches_bf16_cpu_reference --test gdn_parity -- --nocapture`
+- `KILN_DISABLE_VULKAN_GDN_RECURRENT_BF16_STATE_PACKING=1 cargo test -p kiln-vulkan-kernel gdn_recurrent_step_parallel_reduce_matches_bf16_cpu_reference --test gdn_parity -- --nocapture`
+- `cargo test -p kiln-vulkan-kernel gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference --test gdn_parity -- --nocapture`
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`36 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Live A/B configuration
+----------------------
+
+- Same release binary for all arms.
+- Model: Qwen3.5-4B
+- Backend: Vulkan
+- `KILN_PREFIX_CACHE_ENABLED=false`
+- `KILN_DECODE_BATCH_WAIT_US=5000`
+- `KILN_DECODE_BATCH_MAX=3`
+- Candidate arms used default candidate behavior.
+- Rollback arms used
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_BF16_STATE_PACKING=1`.
+- Eight concurrent streaming chat requests per arm.
+- Request shape: `max_tokens=16`, `temperature=0`
+- Template config:
+  `chat_template_kwargs: {"enable_thinking": false}`
+
+Correctness
+-----------
+
+- All four arms confirmed GPU routing:
+  `Mode: GPU inference`, Vulkan available, RADV STRIX_HALO selected, and live
+  greedy decode batcher backend `vulkan`.
+- All four arms returned `8/8` HTTP 200.
+- All four arms emitted empty reasoning streams.
+- Every visible response exactly matched:
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every measured arm had identical decode-batcher metrics: `128` generated
+  tokens, `120` submitted jobs, `41` worker batches, `120` batcher rows, max
+  batch `3`, and no request or batcher errors.
+
+Performance
+-----------
+
+- Pair 1, candidate first: candidate `13.626650s`, rollback `13.731983s`,
+  candidate delta `+0.767%`.
+- Pair 2, rollback first: rollback `13.885340s`, candidate `16.862532s`,
+  candidate delta `-17.656%`.
+- Two-pair averages: candidate `15.244591s`, rollback `13.808662s`,
+  candidate delta `-10.399%`.
+
+Interpretation
+--------------
+
+- Correctness was clean, including visible text and real template-config
+  handling.
+- The candidate did not earn its complexity. Any state-transfer savings were
+  outweighed by CPU-side packing/unpacking, shader bit packing, layout
+  conversion, or run-to-run variance.
+- Source changes were removed after measurement. Current source has no A124
+  runtime changes, and CUDA/Metal source paths remain untouched.
+- Do not revive this direct packed-state upload/readback approach without a
+  broader resident-state design that avoids per-token CPU packing and
+  unpacking.
+
+Artifacts
+---------
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-response_*.sse`

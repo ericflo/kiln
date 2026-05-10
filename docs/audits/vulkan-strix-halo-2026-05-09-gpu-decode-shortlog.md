@@ -639,3 +639,23 @@ Additional validation after A123:
 - Decode state assembly was only `205.143ms` total in this run, so the next
   primary target should be recurrent state transfer/layout rather than
   scheduler assembly.
+
+Additional validation after rejected A124:
+
+- Temporarily tested a Vulkan-only packed BF16 mutable recurrent-state layout
+  for the parallel GDN recurrent shader, with rollback env
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_BF16_STATE_PACKING=1`.
+- Temporary candidate passed focused BF16 parallel recurrent parity, focused
+  rollback parity, existing f32 parallel parity, full Vulkan GDN parity
+  (`36 passed`), Vulkan model/server checks, and release Vulkan server build.
+- Four live A/B arms confirmed GPU routing and exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, and
+  identical decode-batcher metrics (`128` generated tokens, `120` submitted
+  jobs, `41` worker batches, max batch `3`).
+- The candidate regressed wall time: pair 1 candidate `13.626650s` vs rollback
+  `13.731983s` (`+0.767%`), pair 2 rollback `13.885340s` vs candidate
+  `16.862532s` (`-17.656%`). Two-pair average was candidate `15.244591s` vs
+  rollback `13.808662s` (`-10.399%`).
+- Source change was removed after measurement; final source has no A124 runtime
+  changes and CUDA/Metal source paths are untouched.
