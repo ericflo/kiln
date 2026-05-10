@@ -1221,6 +1221,50 @@ impl LinearAttentionState {
         Ok(())
     }
 
+    /// Replace one-row destination tensors from this batched state.
+    ///
+    /// This avoids the extra `restore_from` copies in [`Self::scatter_batch_rows`]
+    /// for scheduler-owned batch decode rows, where CUDA graph pointer stability
+    /// is not required because batch-size > 1 graph replay is not used.
+    pub fn scatter_batch_rows_replace(&self, destinations: &mut [&mut Self]) -> Result<()> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            destinations.len() == batch,
+            "LinearAttentionState::scatter_batch_rows_replace destination count mismatch ({} vs {})",
+            destinations.len(),
+            batch
+        );
+
+        for (row_idx, dst) in destinations.iter_mut().enumerate() {
+            anyhow::ensure!(
+                dst.recurrent_states.len() == self.recurrent_states.len(),
+                "LinearAttentionState::scatter_batch_rows_replace recurrent layer count mismatch for row {row_idx} ({} vs {})",
+                dst.recurrent_states.len(),
+                self.recurrent_states.len()
+            );
+            anyhow::ensure!(
+                dst.conv_states.len() == self.conv_states.len(),
+                "LinearAttentionState::scatter_batch_rows_replace conv layer count mismatch for row {row_idx} ({} vs {})",
+                dst.conv_states.len(),
+                self.conv_states.len()
+            );
+
+            for (dst_tensor, src_tensor) in dst
+                .recurrent_states
+                .iter_mut()
+                .zip(self.recurrent_states.iter())
+            {
+                *dst_tensor = src_tensor.narrow(0, row_idx, 1)?.contiguous()?;
+            }
+            for (dst_tensor, src_tensor) in dst.conv_states.iter_mut().zip(self.conv_states.iter())
+            {
+                *dst_tensor = src_tensor.narrow(0, row_idx, 1)?.contiguous()?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Capture the current GDN recurrent + conv state into a fresh shadow
     /// `LinearAttentionState`. Used by speculative decoding to preserve the
     /// base model's O(1) GDN state before advancing into a draft: if any
@@ -14158,6 +14202,40 @@ mod tests {
 
         let mut one_destination = [&mut dst0];
         assert!(batched.scatter_batch_rows(&mut one_destination).is_err());
+
+        let mut replace_dst0 = LinearAttentionState::new(&config, &device)?;
+        let mut replace_dst1 = LinearAttentionState::new(&config, &device)?;
+        {
+            let mut destinations = [&mut replace_dst0, &mut replace_dst1];
+            batched.scatter_batch_rows_replace(&mut destinations)?;
+        }
+        assert_eq!(
+            replace_dst0.recurrent_states[0]
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            row0.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            replace_dst1.recurrent_states[0]
+                .flatten_all()?
+                .to_vec1::<f32>()?,
+            row1.recurrent_states[0].flatten_all()?.to_vec1::<f32>()?
+        );
+        assert_eq!(
+            replace_dst0.conv_states[0].to_vec3::<f32>()?,
+            row0.conv_states[0].to_vec3::<f32>()?
+        );
+        assert_eq!(
+            replace_dst1.conv_states[0].to_vec3::<f32>()?,
+            row1.conv_states[0].to_vec3::<f32>()?
+        );
+
+        let mut one_replace_destination = [&mut replace_dst0];
+        assert!(
+            batched
+                .scatter_batch_rows_replace(&mut one_replace_destination)
+                .is_err()
+        );
 
         Ok(())
     }

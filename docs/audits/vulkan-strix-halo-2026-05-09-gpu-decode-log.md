@@ -7132,3 +7132,89 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-comparison-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-default-parallel-summary.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a117-recurrent-parallel-policy-b3-rerun-rollback-serial-reduce-summary.json`
+
+### 2026-05-09 A118: Fast Batched Linear-State Scatter
+
+Scope:
+
+- Shared model scheduler/state change, measured on Vulkan live batch 3.
+- Added `LinearAttentionState::scatter_batch_rows_replace`, which narrows each
+  row out of the batch state once and assigns the resulting tensors directly to
+  scheduler-owned row states.
+- The old `LinearAttentionState::scatter_batch_rows` remains unchanged for
+  pointer-stable restore/copy semantics.
+- `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy` uses the
+  replace scatter only for the already-batched path.
+- Rollback:
+  `KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER=1`.
+
+Rationale:
+
+- The old batched decode scatter path first split every row with
+  `narrow(...).contiguous()`, then called `restore_from`, which copied each
+  recurrent and conv tensor again.
+- For Qwen3.5-4B live batch 3, that extra scheduler-side copy happens across
+  every GDN layer after every batched decode step.
+- Batch-size > 1 CUDA graph replay is not used in this path, so these
+  scheduler-owned row states do not need the destination tensor handles
+  preserved.
+
+Validation:
+
+- `cargo fmt --check` passed.
+- `cargo test -p kiln-model test_linear_attention_state_batch_row_assembly_and_scatter -- --nocapture`
+  passed.
+- `cargo check -p kiln-model --features vulkan` passed with existing warnings.
+- `cargo check -p kiln-server --features vulkan --bin kiln` passed with
+  existing warnings.
+- Release Vulkan server build passed:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-release-server-build.log`.
+- CUDA feature check remains host-blocked before project typecheck because
+  `nvcc` is unavailable:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-check-cuda.log`.
+- Metal feature check remains host-blocked on Linux because `objc2` requires an
+  Apple target:
+  `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-check-metal.log`.
+
+Live endpoint A/B:
+
+- Shape: eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`.
+- Every arm used `chat_template_kwargs: {"enable_thinking": false}`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and
+  `KILN_PREFIX_CACHE_ENABLED=0`.
+- Every arm returned 8/8 HTTP 200 responses with exact visible text:
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm had identical counters:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `runner_busy_jobs=0`, `jobs_failed=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+
+Wall-time evidence:
+
+- Pair 1:
+  - Candidate fast scatter: `17.459837s`.
+  - Rollback copy scatter: `18.725596s`.
+  - Candidate win: `7.25%`.
+- Reversed pair:
+  - Rollback copy scatter: `18.833060s`.
+  - Candidate fast scatter: `17.982479s`.
+  - Candidate win: `4.73%`.
+- Aggregate:
+  - Candidate average: `17.721158s`.
+  - Rollback average: `18.779328s`.
+  - Candidate speedup: `5.97%`.
+
+Decision:
+
+- Accepted.
+- This reduces scheduler-side state movement without changing GDN math, Vulkan
+  kernels, CUDA kernels, or Metal kernels.
+- Batch-1 decode remains on the existing path; pointer-stable
+  `scatter_batch_rows` remains available.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-comparison-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-final2-comparison-summary.json`

@@ -58,6 +58,12 @@ fn check_cancelled(cancel: Option<&CancelHandle>) -> Result<()> {
     Ok(())
 }
 
+fn fast_batched_linear_state_scatter_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_err())
+}
+
 /// Holds loaded model weights and tokenizer, provides text generation.
 pub struct ModelRunner {
     pub weights: GpuWeights,
@@ -2383,7 +2389,11 @@ impl ModelRunner {
         };
 
         if let Some(state) = batch_state.as_ref() {
-            state.scatter_batch_rows(linear_states)?;
+            if fast_batched_linear_state_scatter_enabled() {
+                state.scatter_batch_rows_replace(linear_states)?;
+            } else {
+                state.scatter_batch_rows(linear_states)?;
+            }
         }
 
         Ok(tokens)

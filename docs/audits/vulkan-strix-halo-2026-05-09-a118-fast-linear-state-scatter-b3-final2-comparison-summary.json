@@ -1,0 +1,223 @@
+{
+  "arms": [
+    {
+      "all_expected_text": true,
+      "arm": "rollback-copy-scatter",
+      "case": "vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-final2-rollback-copy-scatter",
+      "env_extra": {
+        "KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER": "1"
+      },
+      "http_ok": 8,
+      "metrics_after": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "metrics_before": {
+        "batcher_rows": 0.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 0.0,
+        "max_batch": 0.0,
+        "requests_error": 0.0,
+        "requests_ok": 0.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 0.0,
+        "worker_batches": 0.0
+      },
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "results": [
+        {
+          "elapsed_s": 18.31674515400664,
+          "error": null,
+          "events": 18,
+          "index": 0,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 18.6180214240012,
+          "error": null,
+          "events": 18,
+          "index": 1,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.71865402700496,
+          "error": null,
+          "events": 18,
+          "index": 2,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.7186152790091,
+          "error": null,
+          "events": 18,
+          "index": 3,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 18.617857528995955,
+          "error": null,
+          "events": 18,
+          "index": 4,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 18.82152355799917,
+          "error": null,
+          "events": 18,
+          "index": 5,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 18.01730744598899,
+          "error": null,
+          "events": 18,
+          "index": 6,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 18.820878643004107,
+          "error": null,
+          "events": 18,
+          "index": 7,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        }
+      ],
+      "wall_s": 18.83306049600651
+    },
+    {
+      "all_expected_text": true,
+      "arm": "candidate-fast-scatter",
+      "case": "vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-final2-candidate-fast-scatter",
+      "env_extra": {},
+      "http_ok": 8,
+      "metrics_after": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "metrics_before": {
+        "batcher_rows": 0.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 0.0,
+        "max_batch": 0.0,
+        "requests_error": 0.0,
+        "requests_ok": 0.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 0.0,
+        "worker_batches": 0.0
+      },
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch": 3.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "results": [
+        {
+          "elapsed_s": 16.379223932002787,
+          "error": null,
+          "events": 18,
+          "index": 0,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 16.105608476995258,
+          "error": null,
+          "events": 18,
+          "index": 1,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.97306212800322,
+          "error": null,
+          "events": 18,
+          "index": 2,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.756886800998473,
+          "error": null,
+          "events": 18,
+          "index": 3,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.971679872993263,
+          "error": null,
+          "events": 18,
+          "index": 4,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.755536306009162,
+          "error": null,
+          "events": 18,
+          "index": 5,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.755335401001503,
+          "error": null,
+          "events": 18,
+          "index": 6,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        },
+        {
+          "elapsed_s": 17.199755681998795,
+          "error": null,
+          "events": 18,
+          "index": 7,
+          "status": 200,
+          "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+        }
+      ],
+      "wall_s": 17.982479065991356
+    }
+  ],
+  "speedup_candidate_vs_rollback": 0.04730056556127349
+}

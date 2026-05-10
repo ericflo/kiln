@@ -1,0 +1,19 @@
+{
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "max_tokens": 16,
+  "messages": [
+    {
+      "content": "Continue sequences tersely and do not end early.",
+      "role": "system"
+    },
+    {
+      "content": "Continue this comma-separated number sequence for a118 vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-candidate-fast-scatter request delta: one, two, three, four, five, six, seven,",
+      "role": "user"
+    }
+  ],
+  "model": "kiln",
+  "stream": true,
+  "temperature": 0
+}

@@ -1,0 +1,110 @@
+{
+  "all_expected_text": true,
+  "arm": "rollback-copy-scatter",
+  "case": "vulkan-strix-halo-2026-05-09-a118-fast-linear-state-scatter-b3-rollback-copy-scatter",
+  "env_extra": {
+    "KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER": "1"
+  },
+  "http_ok": 8,
+  "metrics_after": {
+    "batcher_rows": 120.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 120.0,
+    "max_batch": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 128.0,
+    "worker_batches": 41.0
+  },
+  "metrics_before": {
+    "batcher_rows": 0.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 0.0,
+    "max_batch": 0.0,
+    "requests_error": 0.0,
+    "requests_ok": 0.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 0.0,
+    "worker_batches": 0.0
+  },
+  "metrics_delta": {
+    "batcher_rows": 120.0,
+    "jobs_failed": 0.0,
+    "jobs_submitted": 120.0,
+    "max_batch": 3.0,
+    "max_batch_after": 3.0,
+    "requests_error": 0.0,
+    "requests_ok": 8.0,
+    "runner_busy_jobs": 0.0,
+    "tokens_generated": 128.0,
+    "worker_batches": 41.0
+  },
+  "results": [
+    {
+      "elapsed_s": 17.597829115009517,
+      "error": null,
+      "events": 18,
+      "index": 0,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.493588535988238,
+      "error": null,
+      "events": 18,
+      "index": 1,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.4226654410013,
+      "error": null,
+      "events": 18,
+      "index": 2,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.717394117993535,
+      "error": null,
+      "events": 18,
+      "index": 3,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.492657719005365,
+      "error": null,
+      "events": 18,
+      "index": 4,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.715770527996938,
+      "error": null,
+      "events": 18,
+      "index": 5,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 18.193511200996,
+      "error": null,
+      "events": 18,
+      "index": 6,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    },
+    {
+      "elapsed_s": 16.70743271399988,
+      "error": null,
+      "events": 18,
+      "index": 7,
+      "status": 200,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+    }
+  ],
+  "wall_s": 18.72559554698819
+}
