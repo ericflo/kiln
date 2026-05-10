@@ -1,0 +1,94 @@
+{
+  "commit": "f35f20fc",
+  "label": "rollback-first-disable-dedicated-pool-fence",
+  "wall_sec": 15.223206933995243,
+  "slowest_request_sec": 15.206431989005068,
+  "correct": true,
+  "expected_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 15.206431989005068,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 15.0502255600004,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 15.050194351002574,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 14.566936556002474,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_sec": 15.205356380000012,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_sec": 15.049328855995554,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_sec": 14.849758334006765,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_sec": 12.593483643999207,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    }
+  ],
+  "metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "env_extra": {
+    "KILN_DISABLE_VULKAN_MLP_PREFILL_DEDICATED_POOL_FENCE": "1"
+  }
+}

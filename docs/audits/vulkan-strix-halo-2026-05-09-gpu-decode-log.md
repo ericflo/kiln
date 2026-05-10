@@ -8225,3 +8225,250 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-response_*.sse`
+
+## A131 - Current post-Q/K norm Vulkan profile refresh
+
+Base commit: `f35f20fc Relax Vulkan QK norm state parity tolerance`
+
+Purpose:
+
+- Re-establish a source-free, profile-heavy Vulkan baseline after the kept A130
+  Q/K norm recurrent folding and the follow-up CI tolerance fixes.
+- Confirm again that live output is visibly correct on the GPU path before
+  starting any further performance work.
+- Use the real template configuration path,
+  `chat_template_kwargs: {"enable_thinking": false}`, rather than prompt text
+  hacks.
+
+Validation:
+
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Eight concurrent streaming chat requests, distinct prompts `alpha` through
+  `hotel`, `max_tokens=16`, `temperature=0`,
+  `KILN_PREFIX_CACHE_ENABLED=false`, `KILN_DECODE_BATCHER=1`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and decode/GDN
+  /MLP/Vulkan kernel stage profile flags enabled.
+
+Correctness:
+
+- `8/8` HTTP 200.
+- Empty reasoning for every stream.
+- Visible text for every stream exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics: `128` generated tokens, `120` submitted jobs, `41` worker batches,
+  `120` rows, max batch `3`, no failed jobs, no runner-busy jobs.
+- Routing evidence: server log reported GPU inference and Vulkan availability,
+  and decode-batcher metrics reported backend `vulkan`. The A131 summary parser
+  did not match the Strix Halo string, so this entry does not claim
+  shader-name or exact device-string evidence.
+
+Performance:
+
+- Wall time: `13.579863s`.
+- Slowest request: `13.543472s`.
+- Highest-profile buckets:
+  - `decode_batcher_stage:worker_total:batch=3`:
+    `8886.954ms` total, `39` calls, `227.871ms` mean.
+  - `decode_batcher_stage:decode_total:batch=3`:
+    `8886.405ms` total, `39` calls, `227.857ms` mean.
+  - `decode_batcher_stage:batched_forward:batch=3`:
+    `8671.160ms` total, `39` calls, `222.337ms` mean.
+  - `mlp_stage:fused:seq=56`: `4700.662ms` total, `192` calls,
+    `24.483ms` mean.
+  - `full_attn_stage:qkv_proj:seq=56`: `3514.737ms` total, `48` calls,
+    `73.224ms` mean.
+  - `gdn_stage:out_proj:seq=56`: `3103.977ms` total, `144` calls,
+    `21.555ms` mean.
+  - `gdn_stage:recurrent:seq=1`: `3049.501ms` total, `1008` calls,
+    `3.025ms` mean.
+  - `gdn_recurrent_inner_stage:single_token_backend_step:seq=1:batch=3`:
+    `2916.864ms` total, `936` calls, `3.116ms` mean.
+  - `gdn_stage:in_proj:seq=56`: `2737.869ms` total, `144` calls,
+    `19.013ms` mean.
+  - `vulkan_gdn_in_proj_kernel_stage:pipeline_descriptor_setup:batch=56`:
+    `1955.461ms` total, `144` calls, `13.580ms` mean.
+
+Interpretation:
+
+- The output remains exact and non-empty on the GPU live-batcher path.
+- The dominant work is still the batch-3 decode forward path plus large
+  concurrent prompt-prefill buckets.
+- The CUDA attention-gate sigmoid/multiply fusion is not an obvious direct
+  Vulkan port for this workload. Prior Vulkan profiles put `attn_gate` well
+  under the main decode buckets, so adding a separate Vulkan upload/dispatch
+  /readback hook for that operation is unlikely to pay off without adjacent
+  fusion.
+- The highest-confidence next targets are recurrent state movement,
+  decode-stage boundaries, and the profiled prompt-side Vulkan setup/queue
+  serialization.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a131-current-after-qk-norm-profile-response_*.sse`
+
+## A132 - Reject disabling Vulkan GDN in-proj single-submit
+
+Base commit: `f35f20fc Relax Vulkan QK norm state parity tolerance`
+
+Purpose:
+
+- Test a narrow hypothesis from A131: the profiled
+  `vulkan_gdn_in_proj_kernel_stage:pipeline_descriptor_setup:batch=56` bucket
+  may partly reflect single-submit descriptor/command-pool lock hold time
+  during concurrent prompt prefill.
+- Use the existing rollback-style env
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1` as a source-free A/B
+  before making any lower-level queue or pool changes.
+
+Validation:
+
+- Same release Vulkan server binary as A131.
+- Same eight concurrent streaming prompts and
+  `chat_template_kwargs: {"enable_thinking": false}` request shape as A131.
+- Candidate arm: `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1`.
+- Default arm: current source defaults.
+
+Correctness:
+
+- Candidate and default both reported GPU inference, Vulkan availability, Strix
+  Halo routing, and decode-batcher backend `vulkan`.
+- Candidate and default both returned `8/8` HTTP 200, empty reasoning, and
+  visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics were identical in both arms: `128` generated tokens, `120`
+  submitted jobs, `41` worker batches, `120` rows, max batch `3`, no failed
+  or runner-busy jobs.
+
+Performance:
+
+- Candidate disabled single-submit: `13.789825s`.
+- Default: `13.739309s`.
+- Candidate delta: `-0.368%`.
+
+Interpretation:
+
+- Reject. The current GDN in-proj single-submit path is not the source of a
+  simple win for this concurrent prompt shape.
+- Keep the current default. Any future fix for prompt-side setup/queue
+  serialization needs a broader design than reverting to the older multi-submit
+  GDN in-proj route.
+- No CUDA or Metal source paths were changed.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-candidate-disable-single-submit-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-candidate-disable-single-submit-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-rollback-default-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-rollback-default-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a132-gdn-inproj-single-submit-toggle-*-response_*.sse`
+
+## A133-A135 - Reject Vulkan MLP prefill dedicated-pool fence trial
+
+Base commit: `f35f20fc Relax Vulkan QK norm state parity tolerance`
+
+Purpose:
+
+- Test whether A131's large prefill MLP bucket is partly inflated by shared
+  Vulkan transient descriptor/command-pool serialization.
+- Candidate source changed only `crates/kiln-vulkan-kernel/src/kernels.rs`.
+  For MLP chained transfer+gate/up+down dispatches with `batch >= 8`, it used
+  per-call descriptor and command pools and submitted with a fence wait instead
+  of holding the shared transient pool guards through `queue_wait_idle`.
+- Batch `< 8` kept the existing path to avoid perturbing the live batch-3
+  decode shape.
+- Rollback while present:
+  `KILN_DISABLE_VULKAN_MLP_PREFILL_DEDICATED_POOL_FENCE=1`.
+
+Validation While Candidate Was Present:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Focused MLP parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity mlp_decode -- --nocapture`
+  (`4 passed`)
+- Full Vulkan GDN parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity`
+  (`38 passed`)
+- `git diff --check`
+
+Endpoint Evidence:
+
+- All A133-A135 arms used eight concurrent streaming chat requests, prewarm
+  complete, `KILN_PREFIX_CACHE_ENABLED=false`, live greedy decode batching,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`,
+  `temperature=0`, `max_tokens=16`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- A133 and A134 were exact-correct and appeared to favor the candidate:
+  - A133: candidate `15.954124s`, rollback `18.696341s`, delta `+14.667%`.
+  - A134 reverse order: candidate `13.614202s`, rollback `15.223207s`,
+    delta `+10.569%`.
+- Those first two pairs included arm labels in the user prompt text, which made
+  prompt lengths differ between candidate and rollback. They are retained only
+  as diagnostic artifacts and were not used as the keep/reject decision.
+- A135 reran the same source with identical user prompts in both arms. Both
+  arms were GPU/Vulkan routed and exact-correct:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, `128`
+  generated tokens, `120` submitted jobs, `41` worker batches, `120` rows, max
+  batch `3`, no failed jobs, and no runner-busy jobs.
+- A135 rejected the candidate: candidate `15.439641s`, rollback
+  `15.199161s`, delta `-1.582%`.
+
+Decision:
+
+- Reject and remove. The fair identical-prompt measurement did not support the
+  dedicated-pool/fence MLP prefill path.
+- Final source has no A133-A135 runtime changes.
+- Post-removal validation passed: `cargo fmt --check` and
+  `cargo check -p kiln-vulkan-kernel`.
+- CUDA and Metal source paths were untouched throughout the trial.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a134-mlp-prefill-dedicated-pool-fence-repeat-*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a135-mlp-prefill-dedicated-pool-fence-identical-prompts-*-response_*.sse`

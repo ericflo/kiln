@@ -796,3 +796,70 @@ Additional validation after A130:
   state diff vs `1e-3`). Follow-up tolerances are `1e-3` output and `1e-2`
   state for this BF16-scale normalization parity guard; existing recurrent
   tests still cover the recurrent update itself more tightly.
+
+Additional validation after A131:
+
+- Profile-only refresh on `f35f20fc` after the kept A130 Q/K norm folding
+  change. The run used eight concurrent streaming chat requests with
+  `chat_template_kwargs: {"enable_thinking": false}`, prewarm complete,
+  `KILN_PREFIX_CACHE_ENABLED=false`, live greedy decode batching, wait `5000us`,
+  max batch `3`, and full decode/GDN/MLP/Vulkan kernel stage profiling.
+- Correctness remained exact: `8/8` HTTP 200, empty reasoning, visible text
+  exactly `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`,
+  `128` generated tokens, `120` submitted jobs, `41` worker batches, max batch
+  `3`, no failed or runner-busy jobs.
+- Routing evidence showed `Mode: GPU inference`, Vulkan availability, and
+  decode-batcher backend `vulkan`. The summary parser did not match the Strix
+  Halo string in this run, so the durable conclusion is GPU/Vulkan live-batcher
+  routing rather than shader-name evidence.
+- Wall was `13.579863s`. Top profile buckets were batch-3 worker/decode total
+  (`8886.954ms`/`8886.405ms`), batched forward (`8671.160ms`), prefill MLP
+  batch-56 (`4700.662ms`), full-attn QKV seq-56 (`3514.737ms`), GDN out-proj
+  seq-56 (`3103.977ms`), live recurrent seq-1 (`3049.501ms`), and GDN
+  in-proj seq-56 (`2737.869ms`).
+- Interpretation: the next useful targets remain recurrent state movement,
+  decode-stage boundary costs, and prefill-side Vulkan serialization. The
+  recent CUDA attention-gate sigmoid/multiply fusion is not an obvious Vulkan
+  target because prior Vulkan profiles put `attn_gate` in the sub-millisecond
+  range for this workload.
+
+Additional validation after rejected A132:
+
+- Existing-toggle A/B tested whether disabling Vulkan GDN in-proj
+  single-submit helps the concurrent prompt shape:
+  `KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT=1` versus current default.
+- Candidate and default were both GPU/Vulkan routed and exact-correct with
+  identical counters: `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, `120`
+  submitted jobs, `41` worker batches, max batch `3`.
+- Candidate was slower: disabled single-submit `13.789825s` versus default
+  `13.739309s`, delta `-0.368%`.
+- Decision: reject changing the default. The suspected descriptor/pool
+  serialization in profiled prefill is not fixed by simply disabling the
+  existing single-submit GDN in-proj route.
+
+Additional validation after rejected A133-A135:
+
+- Trialed a Vulkan-only MLP prefill-sized path for the chained
+  transfer+gate/up+down helper: for `batch >= 8`, use per-call descriptor and
+  command pools plus a fence wait instead of holding the shared transient pool
+  guards through `queue_wait_idle`. Rollback while present:
+  `KILN_DISABLE_VULKAN_MLP_PREFILL_DEDICATED_POOL_FENCE=1`.
+- Candidate source passed `cargo fmt --check`,
+  `cargo check -p kiln-vulkan-kernel`, focused MLP parity (`4 passed`), full
+  Vulkan GDN parity (`38 passed`), Vulkan model/server checks, release Vulkan
+  server build, and `git diff --check`.
+- A133 and A134 both stayed exact-correct on GPU/Vulkan with identical batcher
+  counters and appeared to favor the candidate, but those runs included
+  arm-label text in the user prompt, so prompt lengths differed between arms.
+  They are retained as diagnostic artifacts only.
+- The decision-quality A135 rerun used identical prompts in both arms. Both
+  arms were exact-correct with `8/8` HTTP 200, empty reasoning, visible text
+  exactly `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`,
+  `120` submitted jobs, `41` worker batches, max batch `3`, and GPU/Vulkan
+  routing.
+- A135 rejected the candidate: default candidate `15.439641s` versus rollback
+  `15.199161s`, delta `-1.582%`.
+- Final source removes the trial. Post-removal `cargo fmt --check` and
+  `cargo check -p kiln-vulkan-kernel` passed. CUDA and Metal source paths were
+  untouched.

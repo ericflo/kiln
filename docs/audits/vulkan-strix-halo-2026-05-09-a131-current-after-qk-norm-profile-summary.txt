@@ -1,0 +1,28 @@
+A131 current Vulkan profile after A130 qk-norm recurrent
+commit=f35f20fc
+wall_sec=13.579863
+slowest_request_sec=13.543472
+correct=True
+routing={'mode_gpu_inference': True, 'vulkan_available': True, 'strix_halo_selected': False, 'decode_batcher_backend_vulkan': True}
+metrics={'requests_ok': 8.0, 'requests_error': 0.0, 'tokens_generated': 128.0, 'submitted_jobs': 120.0, 'failed_jobs': 0.0, 'runner_busy_jobs': 0.0, 'worker_batches': 41.0, 'batcher_rows': 120.0, 'max_observed_batch': 3.0}
+top_profile:
+- decode_batcher_stage:worker_total:batch=3 total_ms=8886.954 count=39 mean_ms=227.871
+- decode_batcher_stage:runner_call:batch=3 total_ms=8886.747 count=39 mean_ms=227.865
+- decode_batcher_stage:decode_total:batch=3 total_ms=8886.405 count=39 mean_ms=227.857
+- decode_batcher_stage:batched_forward:batch=3 total_ms=8671.160 count=39 mean_ms=222.337
+- mlp_stage:fused:seq=56 total_ms=4700.662 count=192 mean_ms=24.483
+- vulkan_mlp_kernel_stage:total:batch=56 total_ms=4685.286 count=192 mean_ms=24.403
+- vulkan_mlp_kernel_stage:chained_transfer_dispatch_readback:batch=56 total_ms=4649.234 count=192 mean_ms=24.215
+- full_attn_stage:qkv_proj:seq=56 total_ms=3514.737 count=48 mean_ms=73.224
+- gdn_stage:out_proj:seq=56 total_ms=3103.977 count=144 mean_ms=21.555
+- gdn_stage:recurrent:seq=1 total_ms=3049.501 count=1008 mean_ms=3.025
+- gdn_stage:gated_norm:seq=56 total_ms=2965.384 count=144 mean_ms=20.593
+- gdn_recurrent_inner_stage:single_token_backend_step:seq=1:batch=3 total_ms=2916.864 count=936 mean_ms=3.116
+- gdn_stage:gates:seq=56 total_ms=2901.834 count=144 mean_ms=20.152
+- gdn_stage:in_proj:seq=56 total_ms=2737.869 count=144 mean_ms=19.013
+- vulkan_gdn_in_proj_kernel_stage:total:batch=56 total_ms=2721.916 count=144 mean_ms=18.902
+- gdn_stage:conv:seq=56 total_ms=2720.139 count=144 mean_ms=18.890
+- vulkan_gdn_in_proj_kernel_stage:pipeline_descriptor_setup:batch=56 total_ms=1955.461 count=144 mean_ms=13.580
+- mlp_stage:fused:seq=1 total_ms=1571.042 count=1344 mean_ms=1.169
+- vulkan_mlp_kernel_stage:total:batch=3 total_ms=1444.306 count=1248 mean_ms=1.157
+- gdn_stage:recurrent:seq=56 total_ms=1408.828 count=144 mean_ms=9.784

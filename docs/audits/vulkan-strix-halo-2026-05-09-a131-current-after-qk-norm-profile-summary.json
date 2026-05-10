@@ -1,0 +1,332 @@
+{
+  "commit": "f35f20fc",
+  "wall_sec": 13.57986279000761,
+  "slowest_request_sec": 13.543471785989823,
+  "correct": true,
+  "expected_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 13.383029581993469,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 12.711449435999384,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 13.382218906001071,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 12.937550990987802,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_sec": 13.543471785989823,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_sec": 12.261908436004887,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_sec": 12.709569601996918,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_sec": 13.542186603997834,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    }
+  ],
+  "metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": false,
+    "decode_batcher_backend_vulkan": true
+  },
+  "top_profile": [
+    {
+      "stage": "decode_batcher_stage:worker_total:batch=3",
+      "total_ms": 8886.954000000003,
+      "count": 39,
+      "mean_ms": 227.87061538461546
+    },
+    {
+      "stage": "decode_batcher_stage:runner_call:batch=3",
+      "total_ms": 8886.747000000001,
+      "count": 39,
+      "mean_ms": 227.8653076923077
+    },
+    {
+      "stage": "decode_batcher_stage:decode_total:batch=3",
+      "total_ms": 8886.404999999999,
+      "count": 39,
+      "mean_ms": 227.85653846153843
+    },
+    {
+      "stage": "decode_batcher_stage:batched_forward:batch=3",
+      "total_ms": 8671.16,
+      "count": 39,
+      "mean_ms": 222.33743589743588
+    },
+    {
+      "stage": "mlp_stage:fused:seq=56",
+      "total_ms": 4700.662,
+      "count": 192,
+      "mean_ms": 24.482614583333334
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:total:batch=56",
+      "total_ms": 4685.286000000002,
+      "count": 192,
+      "mean_ms": 24.40253125000001
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:chained_transfer_dispatch_readback:batch=56",
+      "total_ms": 4649.234000000002,
+      "count": 192,
+      "mean_ms": 24.214760416666678
+    },
+    {
+      "stage": "full_attn_stage:qkv_proj:seq=56",
+      "total_ms": 3514.7369999999996,
+      "count": 48,
+      "mean_ms": 73.2236875
+    },
+    {
+      "stage": "gdn_stage:out_proj:seq=56",
+      "total_ms": 3103.977,
+      "count": 144,
+      "mean_ms": 21.555395833333332
+    },
+    {
+      "stage": "gdn_stage:recurrent:seq=1",
+      "total_ms": 3049.500999999998,
+      "count": 1008,
+      "mean_ms": 3.025298611111109
+    },
+    {
+      "stage": "gdn_stage:gated_norm:seq=56",
+      "total_ms": 2965.3839999999996,
+      "count": 144,
+      "mean_ms": 20.59294444444444
+    },
+    {
+      "stage": "gdn_recurrent_inner_stage:single_token_backend_step:seq=1:batch=3",
+      "total_ms": 2916.863999999996,
+      "count": 936,
+      "mean_ms": 3.116307692307688
+    },
+    {
+      "stage": "gdn_stage:gates:seq=56",
+      "total_ms": 2901.833999999999,
+      "count": 144,
+      "mean_ms": 20.151624999999992
+    },
+    {
+      "stage": "gdn_stage:in_proj:seq=56",
+      "total_ms": 2737.8689999999997,
+      "count": 144,
+      "mean_ms": 19.012979166666664
+    },
+    {
+      "stage": "vulkan_gdn_in_proj_kernel_stage:total:batch=56",
+      "total_ms": 2721.916000000001,
+      "count": 144,
+      "mean_ms": 18.90219444444445
+    },
+    {
+      "stage": "gdn_stage:conv:seq=56",
+      "total_ms": 2720.139,
+      "count": 144,
+      "mean_ms": 18.889854166666666
+    },
+    {
+      "stage": "vulkan_gdn_in_proj_kernel_stage:pipeline_descriptor_setup:batch=56",
+      "total_ms": 1955.461,
+      "count": 144,
+      "mean_ms": 13.579590277777777
+    },
+    {
+      "stage": "mlp_stage:fused:seq=1",
+      "total_ms": 1571.041999999998,
+      "count": 1344,
+      "mean_ms": 1.1689300595238081
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:total:batch=3",
+      "total_ms": 1444.305999999997,
+      "count": 1248,
+      "mean_ms": 1.157296474358972
+    },
+    {
+      "stage": "gdn_stage:recurrent:seq=56",
+      "total_ms": 1408.8280000000002,
+      "count": 144,
+      "mean_ms": 9.78352777777778
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:chained_transfer_dispatch_readback:batch=3",
+      "total_ms": 1361.331999999999,
+      "count": 1248,
+      "mean_ms": 1.0908108974358965
+    },
+    {
+      "stage": "full_attn_stage:o_proj:seq=56",
+      "total_ms": 1141.392,
+      "count": 48,
+      "mean_ms": 23.779
+    },
+    {
+      "stage": "gdn_stage:in_proj:seq=1",
+      "total_ms": 1064.110999999999,
+      "count": 1008,
+      "mean_ms": 1.0556656746031736
+    },
+    {
+      "stage": "vulkan_gdn_in_proj_kernel_stage:total:batch=3",
+      "total_ms": 967.7250000000006,
+      "count": 936,
+      "mean_ms": 1.0338942307692314
+    },
+    {
+      "stage": "vulkan_gdn_recurrent_kernel_stage:record_submit_wait:batch=3",
+      "total_ms": 918.5780000000002,
+      "count": 936,
+      "mean_ms": 0.9813867521367523
+    },
+    {
+      "stage": "vulkan_gdn_in_proj_kernel_stage:record_submit_wait:batch=3",
+      "total_ms": 858.5019999999988,
+      "count": 936,
+      "mean_ms": 0.9172029914529902
+    },
+    {
+      "stage": "mlp_stage:fused:seq=58",
+      "total_ms": 814.7700000000001,
+      "count": 32,
+      "mean_ms": 25.461562500000003
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:total:batch=58",
+      "total_ms": 812.7410000000003,
+      "count": 32,
+      "mean_ms": 25.39815625000001
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:chained_transfer_dispatch_readback:batch=58",
+      "total_ms": 806.2090000000002,
+      "count": 32,
+      "mean_ms": 25.194031250000005
+    },
+    {
+      "stage": "mlp_stage:fused:seq=57",
+      "total_ms": 746.955,
+      "count": 32,
+      "mean_ms": 23.34234375
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:total:batch=57",
+      "total_ms": 744.7629999999999,
+      "count": 32,
+      "mean_ms": 23.273843749999997
+    },
+    {
+      "stage": "vulkan_mlp_kernel_stage:chained_transfer_dispatch_readback:batch=57",
+      "total_ms": 739.0679999999998,
+      "count": 32,
+      "mean_ms": 23.095874999999992
+    },
+    {
+      "stage": "full_attn_stage:qkv_proj:seq=57",
+      "total_ms": 721.371,
+      "count": 8,
+      "mean_ms": 90.171375
+    },
+    {
+      "stage": "vulkan_gdn_recurrent_kernel_stage:make_state_staging:batch=3",
+      "total_ms": 710.6830000000011,
+      "count": 936,
+      "mean_ms": 0.7592767094017107
+    },
+    {
+      "stage": "vulkan_gdn_in_proj_kernel_stage:record_submit_wait:batch=56",
+      "total_ms": 603.4660000000003,
+      "count": 144,
+      "mean_ms": 4.190736111111113
+    },
+    {
+      "stage": "full_attn_stage:qkv_proj:seq=58",
+      "total_ms": 565.026,
+      "count": 8,
+      "mean_ms": 70.62825
+    },
+    {
+      "stage": "gdn_stage:gates:seq=57",
+      "total_ms": 482.784,
+      "count": 24,
+      "mean_ms": 20.116
+    },
+    {
+      "stage": "gdn_stage:gated_norm:seq=57",
+      "total_ms": 473.767,
+      "count": 24,
+      "mean_ms": 19.740291666666668
+    },
+    {
+      "stage": "gdn_stage:conv:seq=57",
+      "total_ms": 471.3959999999999,
+      "count": 24,
+      "mean_ms": 19.641499999999997
+    },
+    {
+      "stage": "gdn_stage:out_proj:seq=58",
+      "total_ms": 466.193,
+      "count": 24,
+      "mean_ms": 19.42470833333333
+    }
+  ]
+}

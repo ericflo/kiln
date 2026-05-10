@@ -1,0 +1,41 @@
+{
+  "status": "ok",
+  "version": "0.2.13",
+  "uptime_seconds": 16,
+  "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+  "backend": "model",
+  "active_adapter": null,
+  "adapters_loaded": 0,
+  "scheduler": {
+    "waiting": 0,
+    "running": 0,
+    "blocks_used": 0,
+    "blocks_free": 125400,
+    "blocks_total": 125400
+  },
+  "gpu_memory": {
+    "total_vram_gb": 103.079215104,
+    "model_gb": 9.15668992,
+    "kv_cache_gb": 65.7457152,
+    "training_budget_gb": 28.176809984,
+    "inference_memory_fraction": 0.7
+  },
+  "training": {
+    "active_job": null,
+    "queued": 0
+  },
+  "checks": [
+    {
+      "name": "model_loaded",
+      "pass": true
+    },
+    {
+      "name": "scheduler_responsive",
+      "pass": true
+    },
+    {
+      "name": "inference_prewarm_complete",
+      "pass": true
+    }
+  ]
+}

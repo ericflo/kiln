@@ -1,0 +1,92 @@
+{
+  "commit": "f35f20fc",
+  "label": "candidate-default",
+  "wall_sec": 15.43964079998841,
+  "slowest_request_sec": 15.40233915099816,
+  "correct": true,
+  "expected_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "index": 0,
+      "status": 200,
+      "elapsed_sec": 15.249447573005455,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 1,
+      "status": 200,
+      "elapsed_sec": 14.47888008299924,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 2,
+      "status": 200,
+      "elapsed_sec": 14.774224627995864,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 3,
+      "status": 200,
+      "elapsed_sec": 14.181256908006617,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 4,
+      "status": 200,
+      "elapsed_sec": 15.40233915099816,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 5,
+      "status": 200,
+      "elapsed_sec": 15.247834961002809,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 6,
+      "status": 200,
+      "elapsed_sec": 15.40140314900782,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    },
+    {
+      "index": 7,
+      "status": 200,
+      "elapsed_sec": 13.308511573006399,
+      "text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "reasoning": "",
+      "finish_reason": "length"
+    }
+  ],
+  "metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "env_extra": {}
+}

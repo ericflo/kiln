@@ -1,0 +1,18 @@
+{
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "max_tokens": 16,
+  "temperature": 0,
+  "stream": true,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Continue sequences tersely and do not end early."
+    },
+    {
+      "role": "user",
+      "content": "Continue this comma-separated number sequence for a133 vulkan-strix-halo-2026-05-09-a133-mlp-prefill-dedicated-pool-fence-rollback-disable-dedicated-pool-fence request foxtrot: one, two, three, four, five, six, seven,"
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+label=rollback-disable-dedicated-pool-fence
+commit=f35f20fc
+wall_sec=18.696341
+slowest_request_sec=18.688911
+correct=True
+metrics={'requests_ok': 8.0, 'requests_error': 0.0, 'tokens_generated': 128.0, 'submitted_jobs': 120.0, 'failed_jobs': 0.0, 'runner_busy_jobs': 0.0, 'worker_batches': 41.0, 'batcher_rows': 120.0, 'max_observed_batch': 3.0}
+routing={'mode_gpu_inference': True, 'vulkan_available': True, 'strix_halo_selected': True, 'decode_batcher_backend_vulkan': True}

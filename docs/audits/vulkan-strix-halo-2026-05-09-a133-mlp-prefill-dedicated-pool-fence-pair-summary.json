@@ -1,0 +1,41 @@
+{
+  "candidate_wall_sec": 15.954123582007014,
+  "rollback_wall_sec": 18.696341249000398,
+  "candidate_speed_delta_pct": 14.6671352992126,
+  "candidate_correct": true,
+  "rollback_correct": true,
+  "candidate_metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "rollback_metrics": {
+    "requests_ok": 8.0,
+    "requests_error": 0.0,
+    "tokens_generated": 128.0,
+    "submitted_jobs": 120.0,
+    "failed_jobs": 0.0,
+    "runner_busy_jobs": 0.0,
+    "worker_batches": 41.0,
+    "batcher_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "candidate_routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "rollback_routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  }
+}
