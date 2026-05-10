@@ -344,8 +344,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             if req.config.checkpoint_interval.is_none() {
                 req.config.checkpoint_interval = server_checkpoint_interval;
             }
-            let request_body = serde_json::to_value(&req)
-                .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize GrpoRequest"}));
+            let request_body = serde_json::to_value(&req).unwrap_or_else(
+                |_| serde_json::json!({"error": "failed to serialize GrpoRequest"}),
+            );
             let replay_ctx = trainer::ReplayContext {
                 request_id: job_id.clone(),
                 kind: kiln_train::ReplayKind::Grpo,

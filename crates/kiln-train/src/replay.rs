@@ -672,7 +672,10 @@ mod tests {
         let resolver = |name: &str| tmp.path().join(name);
         let err = verify_chain_integrity(&child_dir, resolver).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("parent_lora.replay_hash mismatch"), "got: {msg}");
+        assert!(
+            msg.contains("parent_lora.replay_hash mismatch"),
+            "got: {msg}"
+        );
     }
 
     #[test]

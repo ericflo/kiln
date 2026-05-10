@@ -104,9 +104,8 @@ fn open_replay_state(
     let parent_lora = match parent_adapter {
         Some(name) => {
             let parent_dir = adapter_dir.join(name);
-            let parent_lineage = replay::read_lineage(&parent_dir).with_context(|| {
-                format!("reading parent lineage at {}", parent_dir.display())
-            })?;
+            let parent_lineage = replay::read_lineage(&parent_dir)
+                .with_context(|| format!("reading parent lineage at {}", parent_dir.display()))?;
             Some(ParentLora {
                 name: name.to_string(),
                 replay_hash: parent_lineage.replay_hash,
@@ -839,196 +838,197 @@ pub fn grpo_train(
     );
 
     let train_body = || -> Result<(PathBuf, f64)> {
-    // Tokenize all completions: for each group, tokenize prompt + each completion
-    let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
-        .iter()
-        .filter_map(|group| match tokenize_grpo_group(group, tokenizer) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                tracing::warn!("skipping GRPO group: {e}");
-                None
-            }
-        })
-        .collect();
+        // Tokenize all completions: for each group, tokenize prompt + each completion
+        let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
+            .iter()
+            .filter_map(|group| match tokenize_grpo_group(group, tokenizer) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("skipping GRPO group: {e}");
+                    None
+                }
+            })
+            .collect();
 
-    if tokenized_groups.is_empty() {
-        anyhow::bail!("no valid GRPO groups after tokenization");
-    }
-
-    // Configure gradient checkpointing (same as SFT)
-    let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
-    let segments = if ckpt_config.enabled {
-        Some(compute_segment_boundaries(
-            model_config.num_layers,
-            ckpt_config.num_segments,
-        ))
-    } else {
-        None
-    };
-
-    if let Some(ref segs) = segments {
-        tracing::info!(
-            num_segments = segs.len(),
-            boundaries = ?segs,
-            "GRPO gradient checkpointing enabled"
-        );
-    } else {
-        tracing::info!("GRPO gradient checkpointing disabled");
-    }
-
-    let total_steps = tokenized_groups.len();
-    let mut global_step = 0;
-    let mut last_loss = 0.0;
-
-    let pb = make_step_progress(total_steps, "grpo training");
-
-    for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
-        // Compute advantages from rewards (normalize within group)
-        let advantages = compute_advantages(&tgroup.rewards);
-
-        // For each completion: compute policy log-probs and reference log-probs
-        let mut group_loss_sum = 0.0;
-        let num_completions = tgroup.completions.len();
-
-        for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
-            // Step 1: Reference forward pass (NO LoRA, NO gradient tracking)
-            // This is cheap memory-wise since nothing is tracked.
-            let ref_log_probs = {
-                let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
-                let ref_logits = model_forward(
-                    &*backend,
-                    &comp.input_ids,
-                    weights,
-                    model_config,
-                    None,
-                    Some(&mut ref_linear_state),
-                    None, // no LoRA = reference model
-                )
-                .context("GRPO reference forward pass")?;
-                token_log_probs(&ref_logits, &comp.input_ids, &comp.completion_mask, &device)?
-                    .detach()
-            };
-
-            // Step 2: Policy forward pass + GRPO loss + backward
-            let advantage = advantages[comp_idx];
-            let loss_val;
-
-            if let Some(ref segs) = segments {
-                // Gradient-checkpointed GRPO step
-                let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
-                    &*backend,
-                    &comp.input_ids,
-                    weights,
-                    model_config,
-                    &params,
-                    &comp.completion_mask,
-                    &ref_log_probs,
-                    advantage,
-                    config.clip_epsilon,
-                    config.kl_coeff,
-                    segs,
-                    &device,
-                )?;
-                loss_val = lv;
-                sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
-            } else {
-                // Standard (non-checkpointed) GRPO step
-                let lora_weights = params.as_lora_weights();
-                let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-                let policy_logits = model_forward(
-                    &*backend,
-                    &comp.input_ids,
-                    weights,
-                    model_config,
-                    None,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("GRPO policy forward pass")?;
-
-                let policy_log_probs = token_log_probs(
-                    &policy_logits,
-                    &comp.input_ids,
-                    &comp.completion_mask,
-                    &device,
-                )?;
-
-                let loss = grpo_loss(
-                    &policy_log_probs,
-                    &ref_log_probs,
-                    advantage,
-                    config.clip_epsilon,
-                    config.kl_coeff,
-                    &device,
-                )?;
-                loss_val = loss.to_scalar::<f32>()? as f64;
-
-                let grads = loss.backward().context("GRPO backward pass")?;
-                sgd_step(&params, &grads, config.learning_rate)?;
-            }
-
-            group_loss_sum += loss_val;
+        if tokenized_groups.is_empty() {
+            anyhow::bail!("no valid GRPO groups after tokenization");
         }
 
-        let avg_group_loss = if num_completions > 0 {
-            group_loss_sum / num_completions as f64
+        // Configure gradient checkpointing (same as SFT)
+        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        let segments = if ckpt_config.enabled {
+            Some(compute_segment_boundaries(
+                model_config.num_layers,
+                ckpt_config.num_segments,
+            ))
         } else {
-            0.0
+            None
         };
-        last_loss = avg_group_loss;
-        global_step += 1;
 
-        // Periodic adapter checkpoint
-        if let Some(interval) = config.checkpoint_interval {
-            if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
-                    tracing::warn!(step = global_step, error = %e, "failed to save GRPO training checkpoint");
+        if let Some(ref segs) = segments {
+            tracing::info!(
+                num_segments = segs.len(),
+                boundaries = ?segs,
+                "GRPO gradient checkpointing enabled"
+            );
+        } else {
+            tracing::info!("GRPO gradient checkpointing disabled");
+        }
+
+        let total_steps = tokenized_groups.len();
+        let mut global_step = 0;
+        let mut last_loss = 0.0;
+
+        let pb = make_step_progress(total_steps, "grpo training");
+
+        for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
+            // Compute advantages from rewards (normalize within group)
+            let advantages = compute_advantages(&tgroup.rewards);
+
+            // For each completion: compute policy log-probs and reference log-probs
+            let mut group_loss_sum = 0.0;
+            let num_completions = tgroup.completions.len();
+
+            for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+                // Step 1: Reference forward pass (NO LoRA, NO gradient tracking)
+                // This is cheap memory-wise since nothing is tracked.
+                let ref_log_probs = {
+                    let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
+                    let ref_logits = model_forward(
+                        &*backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        None,
+                        Some(&mut ref_linear_state),
+                        None, // no LoRA = reference model
+                    )
+                    .context("GRPO reference forward pass")?;
+                    token_log_probs(&ref_logits, &comp.input_ids, &comp.completion_mask, &device)?
+                        .detach()
+                };
+
+                // Step 2: Policy forward pass + GRPO loss + backward
+                let advantage = advantages[comp_idx];
+                let loss_val;
+
+                if let Some(ref segs) = segments {
+                    // Gradient-checkpointed GRPO step
+                    let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
+                        &*backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        &params,
+                        &comp.completion_mask,
+                        &ref_log_probs,
+                        advantage,
+                        config.clip_epsilon,
+                        config.kl_coeff,
+                        segs,
+                        &device,
+                    )?;
+                    loss_val = lv;
+                    sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
                 } else {
-                    tracing::info!(step = global_step, "saved GRPO training checkpoint");
+                    // Standard (non-checkpointed) GRPO step
+                    let lora_weights = params.as_lora_weights();
+                    let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+                    let policy_logits = model_forward(
+                        &*backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        None,
+                        Some(&mut linear_state),
+                        Some(&lora_weights),
+                    )
+                    .context("GRPO policy forward pass")?;
+
+                    let policy_log_probs = token_log_probs(
+                        &policy_logits,
+                        &comp.input_ids,
+                        &comp.completion_mask,
+                        &device,
+                    )?;
+
+                    let loss = grpo_loss(
+                        &policy_log_probs,
+                        &ref_log_probs,
+                        advantage,
+                        config.clip_epsilon,
+                        config.kl_coeff,
+                        &device,
+                    )?;
+                    loss_val = loss.to_scalar::<f32>()? as f64;
+
+                    let grads = loss.backward().context("GRPO backward pass")?;
+                    sgd_step(&params, &grads, config.learning_rate)?;
+                }
+
+                group_loss_sum += loss_val;
+            }
+
+            let avg_group_loss = if num_completions > 0 {
+                group_loss_sum / num_completions as f64
+            } else {
+                0.0
+            };
+            last_loss = avg_group_loss;
+            global_step += 1;
+
+            // Periodic adapter checkpoint
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
+                        tracing::warn!(step = global_step, error = %e, "failed to save GRPO training checkpoint");
+                    } else {
+                        tracing::info!(step = global_step, "saved GRPO training checkpoint");
+                    }
                 }
             }
+
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: 1,
+                    total_epochs: 1,
+                    step: global_step,
+                    total_steps,
+                    loss: avg_group_loss,
+                    progress: global_step as f32 / total_steps as f32,
+                });
+            }
+
+            tracing::info!(
+                group = group_idx + 1,
+                total_groups = total_steps,
+                num_completions,
+                loss = format!("{avg_group_loss:.6}"),
+                "GRPO group step"
+            );
+
+            if let Some(pb) = &pb {
+                pb.set_message(format!("{avg_group_loss:.6}"));
+                pb.inc(1);
+            }
         }
 
-        if let Some(ref cb) = progress_cb {
-            cb(TrainingProgress {
-                epoch: 1,
-                total_epochs: 1,
-                step: global_step,
-                total_steps,
-                loss: avg_group_loss,
-                progress: global_step as f32 / total_steps as f32,
-            });
+        if let Some(pb) = pb {
+            pb.finish_and_clear();
         }
+
+        // Save the trained adapter
+        let output_dir = adapter_dir.join(adapter_name);
+        params.save_peft(&output_dir, model_config.num_layers)?;
 
         tracing::info!(
-            group = group_idx + 1,
-            total_groups = total_steps,
-            num_completions,
-            loss = format!("{avg_group_loss:.6}"),
-            "GRPO group step"
+            adapter = adapter_name,
+            path = %output_dir.display(),
+            final_loss = format!("{last_loss:.6}"),
+            "GRPO training complete"
         );
-
-        if let Some(pb) = &pb {
-            pb.set_message(format!("{avg_group_loss:.6}"));
-            pb.inc(1);
-        }
-    }
-
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
-    // Save the trained adapter
-    let output_dir = adapter_dir.join(adapter_name);
-    params.save_peft(&output_dir, model_config.num_layers)?;
-
-    tracing::info!(
-        adapter = adapter_name,
-        path = %output_dir.display(),
-        final_loss = format!("{last_loss:.6}"),
-        "GRPO training complete"
-    );
 
         Ok((output_dir, last_loss))
     };
