@@ -719,8 +719,13 @@ fn bench_latency(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
+    let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
+        config,
+        1,
+        device,
+        Some(backend.name()),
+    )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -872,8 +877,13 @@ fn bench_latency_paged(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
+    let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
+        config,
+        1,
+        device,
+        Some(backend.name()),
+    )?;
 
     // Build a block table that maps logical block i -> physical block i (sequential).
     let mut block_table = BlockTable::new();
@@ -1433,8 +1443,13 @@ fn bench_latency_skiplayer(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
+    let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
+        config,
+        1,
+        device,
+        Some(backend.name()),
+    )?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
 
@@ -1642,8 +1657,13 @@ fn bench_latency_paged_skiplayer(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
+    let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
+        config,
+        1,
+        device,
+        Some(backend.name()),
+    )?;
 
     let mut block_table = BlockTable::new();
     for i in 0..num_blocks as u32 {
@@ -1918,8 +1938,13 @@ fn bench_latency_paged_mtp(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
+    let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
+        config,
+        1,
+        device,
+        Some(backend.name()),
+    )?;
 
     let mut base_block_table = BlockTable::new();
     let mut mtp_block_table = BlockTable::new();

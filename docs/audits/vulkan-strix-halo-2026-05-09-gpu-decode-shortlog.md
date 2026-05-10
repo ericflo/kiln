@@ -595,3 +595,27 @@ Additional validation after A121:
   `15.975298s` (`-3.200%`). Two-pair average was only `+0.745%` for the
   candidate, so A120's GDN recurrent residency/layout target remains the
   primary optimization direction.
+
+Additional validation after A122:
+
+- Mirrored CUDA commit `87cbee4a` for Vulkan by adding a backend-name-aware
+  inference linear-state constructor. Explicit `"vulkan"` now uses BF16/F16
+  recurrent state for BF16/FP16 models even though Candle's device is CPU;
+  default/named CPU remains F32.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE=1`.
+- Live generation and server bench paths pass `backend.name()` into inference
+  state creation. CUDA/Metal policy is unchanged.
+- Focused model tests, Vulkan model/server checks, and release Vulkan server
+  build passed. Best-effort CUDA/Metal checks remain environment-blocked on
+  this Linux host (`nvcc` missing; `objc2` requires Apple target).
+- Four live arms confirmed GPU routing (`Mode: GPU inference`, Vulkan
+  available, RADV STRIX_HALO selected, batcher backend `vulkan`) and kept exact
+  correctness: `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, and
+  identical metrics (`128` generated tokens, `120` submitted jobs, `41`
+  worker batches, max batch `3`).
+- Live wall-time was positive but still noisy: pair 1 candidate `13.734135s`
+  vs rollback `15.103752s` (`+9.068%`), pair 2 rollback `15.948654s` vs
+  candidate `15.937455s` (`+0.070%`). Two-pair average was candidate
+  `14.835795s` vs rollback `15.526203s` (`+4.447%`).

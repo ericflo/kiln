@@ -1074,9 +1074,10 @@ impl LinearAttentionState {
 
     /// Create fresh inference state for all linear attention layers.
     ///
-    /// CUDA/Metal inference uses the same dtype as the model weights so decode
-    /// does not cast every GDN recurrent state into and back out of the hot
-    /// kernel dtype on every token. `new` keeps the training/test default.
+    /// CUDA/Metal inference and explicitly named Vulkan inference use the same
+    /// dtype as the model weights so decode does not cast every GDN recurrent
+    /// state into and back out of the hot kernel dtype on every token. `new`
+    /// keeps the training/test default.
     pub fn new_for_inference(
         config: &kiln_core::config::ModelConfig,
         device: &Device,
@@ -1090,11 +1091,23 @@ impl LinearAttentionState {
         batch: usize,
         device: &Device,
     ) -> Result<Self> {
+        Self::new_with_batch_for_inference_backend(config, batch, device, None)
+    }
+
+    /// Create fresh inference state for `batch` decode rows, allowing callers
+    /// whose accelerator is not represented by Candle's `Device` enum to name
+    /// the backend explicitly.
+    pub fn new_with_batch_for_inference_backend(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+        backend_name: Option<&str>,
+    ) -> Result<Self> {
         Self::new_with_batch_and_recurrent_dtype(
             config,
             batch,
             device,
-            Self::inference_recurrent_dtype(config, device),
+            Self::inference_recurrent_dtype(config, device, backend_name),
         )
     }
 
@@ -1124,9 +1137,12 @@ impl LinearAttentionState {
     fn inference_recurrent_dtype(
         config: &kiln_core::config::ModelConfig,
         device: &Device,
+        backend_name: Option<&str>,
     ) -> DType {
         let cuda_bf16_state_disabled =
             std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_ok();
+        let vulkan_bf16_state_disabled =
+            std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_ok();
         match (device, config.dtype) {
             (Device::Cuda(_), _) if cuda_bf16_state_disabled => {
                 Self::training_recurrent_dtype(config, device)
@@ -1135,6 +1151,16 @@ impl LinearAttentionState {
             | (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
             (Device::Cuda(_), kiln_core::config::DType::FP16)
             | (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
+            (_, kiln_core::config::DType::BF16)
+                if backend_name == Some("vulkan") && !vulkan_bf16_state_disabled =>
+            {
+                DType::BF16
+            }
+            (_, kiln_core::config::DType::FP16)
+                if backend_name == Some("vulkan") && !vulkan_bf16_state_disabled =>
+            {
+                DType::F16
+            }
             _ => DType::F32,
         }
     }
@@ -14400,6 +14426,48 @@ mod tests {
             &[1, config.linear_qkv_dim(), 3]
         );
         assert_eq!(split[0].conv_states[0].dtype(), DType::F32);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_attention_state_vulkan_inference_backend_uses_model_dtype() -> Result<()> {
+        let device = Device::Cpu;
+        let mut config = make_test_config(2, 1, 4, 8);
+
+        let default_cpu = LinearAttentionState::new_with_batch_for_inference(&config, 2, &device)?;
+        assert_eq!(default_cpu.recurrent_states[0].dims(), &[2, 2, 4, 4]);
+        assert_eq!(default_cpu.recurrent_states[0].dtype(), DType::F32);
+        assert_eq!(default_cpu.conv_states[0].dtype(), DType::F32);
+
+        let named_cpu = LinearAttentionState::new_with_batch_for_inference_backend(
+            &config,
+            2,
+            &device,
+            Some("cpu"),
+        )?;
+        assert_eq!(named_cpu.recurrent_states[0].dtype(), DType::F32);
+        assert_eq!(named_cpu.conv_states[0].dtype(), DType::F32);
+
+        let vulkan = LinearAttentionState::new_with_batch_for_inference_backend(
+            &config,
+            2,
+            &device,
+            Some("vulkan"),
+        )?;
+        assert_eq!(vulkan.recurrent_states[0].dims(), &[2, 2, 4, 4]);
+        assert_eq!(vulkan.recurrent_states[0].dtype(), DType::BF16);
+        assert_eq!(vulkan.conv_states[0].dtype(), DType::F32);
+
+        config.dtype = kiln_core::config::DType::FP16;
+        let vulkan_fp16 = LinearAttentionState::new_with_batch_for_inference_backend(
+            &config,
+            2,
+            &device,
+            Some("vulkan"),
+        )?;
+        assert_eq!(vulkan_fp16.recurrent_states[0].dtype(), DType::F16);
+        assert_eq!(vulkan_fp16.conv_states[0].dtype(), DType::F32);
 
         Ok(())
     }

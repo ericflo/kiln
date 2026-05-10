@@ -1077,7 +1077,12 @@ impl ModelRunner {
     /// Create a new linear attention state for GDN layers.
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
         let device = self.weights.embed_tokens.device();
-        LinearAttentionState::new_for_inference(&self.config, device)
+        LinearAttentionState::new_with_batch_for_inference_backend(
+            &self.config,
+            1,
+            device,
+            Some(self.backend.name()),
+        )
     }
 
     fn has_linear_attention_layers(&self) -> bool {

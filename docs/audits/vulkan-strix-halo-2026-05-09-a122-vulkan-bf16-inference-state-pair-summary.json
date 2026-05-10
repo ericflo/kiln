@@ -1,0 +1,68 @@
+{
+  "all_arms_reasoning_empty": true,
+  "all_arms_status_200": true,
+  "all_arms_visible_text_expected": true,
+  "arms": {
+    "candidate": {
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "wall_seconds": 13.73413540898764
+    },
+    "candidate2": {
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "wall_seconds": 15.937455182996928
+    },
+    "rollback": {
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "wall_seconds": 15.103752234994317
+    },
+    "rollback2": {
+      "metrics_delta": {
+        "batcher_rows": 120.0,
+        "jobs_failed": 0.0,
+        "jobs_submitted": 120.0,
+        "max_batch_after": 3.0,
+        "requests_error": 0.0,
+        "requests_ok": 8.0,
+        "runner_busy_jobs": 0.0,
+        "tokens_generated": 128.0,
+        "worker_batches": 41.0
+      },
+      "wall_seconds": 15.94865437799308
+    }
+  },
+  "candidate_average_percent_faster": 4.4467278759170785,
+  "candidate_average_seconds": 14.835795295992284,
+  "pair1_candidate_percent_faster": 9.068056762963659,
+  "pair2_candidate_percent_faster": 0.07022031282843148,
+  "rollback_average_seconds": 15.526203306493699
+}

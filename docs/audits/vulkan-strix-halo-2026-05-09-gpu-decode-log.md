@@ -7468,6 +7468,86 @@ Interpretation:
   `chat_template_kwargs`, and focused tests confirm literal `/no_think` prompt
   text is not treated as a control flag.
 
+### 2026-05-09 A122: Vulkan BF16 Inference State
+
+Scope:
+
+- Mirrored the recent CUDA inference-state optimization for Vulkan. CUDA commit
+  `87cbee4a` keeps GDN recurrent state in the model dtype during inference so
+  decode avoids per-token recurrent-state casts around the hot GDN path.
+- Vulkan uses Candle `Device::Cpu` for the host tensors while dispatching its
+  own Vulkan backend, so the old CUDA/Metal device-based inference-state policy
+  left Vulkan recurrent state as F32.
+- Added `LinearAttentionState::new_with_batch_for_inference_backend`, allowing
+  live generation and bench paths to pass `backend.name()`.
+- Explicit `"vulkan"` inference uses BF16/F16 recurrent state for BF16/FP16
+  models. Default/named CPU remains F32.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE=1`.
+- CUDA and Metal policy is unchanged. CUDA still honors
+  `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE=1`.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model linear_attention_state --lib -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
+- Best-effort Metal feature check remains host-blocked because `objc2`
+  requires an Apple target.
+
+Correctness:
+
+- All four measured arms ran in `Mode: GPU inference`, reported
+  `Vulkan available - using Vulkan GPU (AMD/Intel)`, selected
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`, and enabled the live greedy
+  decode batcher with `backend="vulkan"`.
+- Valid probes used eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, and `chat_template_kwargs: {"enable_thinking": false}`.
+- All four measured arms returned 8/8 HTTP 200.
+- All four measured arms emitted empty reasoning streams.
+- Every response's visible text exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every measured arm had identical metrics: `128` generated tokens, `120`
+  submitted jobs, `41` worker batches, `120` batcher rows, max batch `3`, and
+  no request or batcher errors.
+
+Performance:
+
+- Pair 1, candidate first: candidate `13.734135s`, rollback `15.103752s`,
+  candidate delta `+9.068%`.
+- Pair 2, rollback first: rollback `15.948654s`, candidate `15.937455s`,
+  candidate delta `+0.070%`.
+- Two-pair averages: candidate `14.835795s`, rollback `15.526203s`,
+  candidate delta `+4.447%`.
+
+Interpretation:
+
+- Correctness and GPU routing are clean.
+- The wall-time signal is positive but noisy; this is a small recurrent-state
+  dtype-cast cleanup, not a major throughput anchor.
+- The next larger target remains A120's direction: GDN recurrent
+  residency/layout or a broader model/batcher boundary improvement.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-response_*.sse`
+
 Artifacts:
 
 - `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-summary.txt`

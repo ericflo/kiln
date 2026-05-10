@@ -1,0 +1,122 @@
+# A122 Vulkan BF16 Inference State
+
+Date: 2026-05-09
+
+Scope:
+
+- Mirror the recent CUDA inference-state optimization for Vulkan. CUDA commit
+  `87cbee4a` keeps GDN recurrent state in the model dtype during inference so
+  decode does not cast state into and back out of the hot kernel dtype on every
+  token.
+- Vulkan uses Candle `Device::Cpu` for the host tensors while dispatching its
+  own Vulkan backend, so the previous CUDA/Metal device-based policy left
+  Vulkan recurrent state as F32.
+- Add a backend-name-aware inference-state constructor. Explicitly named
+  Vulkan inference uses BF16/F16 recurrent state for BF16/FP16 models, while
+  default CPU inference remains F32.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE=1`.
+- CUDA and Metal policy is unchanged. CUDA still honors
+  `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE=1`; Metal still uses model dtype
+  for BF16/FP16 inference state.
+
+Implementation:
+
+- `LinearAttentionState::new_with_batch_for_inference_backend` accepts an
+  optional backend name for accelerator paths not represented by Candle's
+  `Device` enum.
+- `ModelRunner::new_linear_state` now passes `self.backend.name()`, allowing
+  live Vulkan decode to select BF16 recurrent state.
+- Server bench paths construct the runtime backend before creating inference
+  linear state, so benchmark paths use the same recurrent-state policy as live
+  generation.
+- Added a CPU-only unit test proving default/named CPU stays F32 while explicit
+  `"vulkan"` selects BF16 and F16 recurrent state.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo test -p kiln-model linear_attention_state --lib -- --nocapture`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
+- Best-effort Metal feature check remains host-blocked because `objc2`
+  requires an Apple target.
+
+Live Server Setup:
+
+- Candidate and rollback servers used `KILN_MODEL_PATH=Qwen3.5-4B`,
+  `KILN_PREFIX_CACHE_ENABLED=false`, `KILN_DECODE_BATCH_WAIT_US=5000`, and
+  `KILN_DECODE_BATCH_MAX=3`.
+- Rollback servers additionally used
+  `KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE=1`.
+- All four arms reported `Mode: GPU inference`, `Vulkan available - using
+  Vulkan GPU (AMD/Intel)`, selected
+  `AMD Radeon 8060S Graphics (RADV STRIX_HALO)`, and enabled the live greedy
+  decode batcher with `backend="vulkan"`, `max_batch=3`, and `wait_us=5000`.
+- Probes used eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Correctness:
+
+- All four measured arms returned 8/8 HTTP 200.
+- All four measured arms emitted empty reasoning streams.
+- Every response's visible text exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every measured arm had identical decode-batcher metrics:
+  - `requests_ok=8`
+  - `requests_error=0`
+  - `tokens_generated=128`
+  - `jobs_submitted=120`
+  - `runner_busy_jobs=0`
+  - `jobs_failed=0`
+  - `worker_batches=41`
+  - `batcher_rows=120`
+  - `max_batch_after=3`
+
+Performance:
+
+- Pair 1, candidate first:
+  - Candidate: `13.734135s`
+  - Rollback: `15.103752s`
+  - Candidate delta: `+9.068%`
+- Pair 2, rollback first:
+  - Rollback: `15.948654s`
+  - Candidate: `15.937455s`
+  - Candidate delta: `+0.070%`
+- Two-pair averages:
+  - Candidate average: `14.835795s`
+  - Rollback average: `15.526203s`
+  - Candidate delta: `+4.447%`
+
+Interpretation:
+
+- Correctness and batching counters are clean, and all runs were confirmed on
+  the Vulkan GPU path.
+- The wall-time signal is positive but still noisy: pair 1 is a real win, pair
+  2 is essentially even. This should be treated as a small hot-path cleanup
+  that removes avoidable recurrent-state dtype casts, not as the next major
+  throughput anchor.
+- The next larger target is still the A120 direction: GDN recurrent
+  residency/layout or a broader model/batcher boundary improvement.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a122-vulkan-bf16-inference-state-rollback*-response_*.sse`
