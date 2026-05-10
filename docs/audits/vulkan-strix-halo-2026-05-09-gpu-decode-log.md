@@ -7502,6 +7502,11 @@ Validation:
 - Metal local checking remains blocked before Rust type-checking on this Linux
   host: `cargo check -p kiln-model --features metal` fails because `objc2`
   requires an Apple target.
+- Initial GitHub Vulkan CI on `0bbd053c` failed only the new focused
+  fused-vs-split parity test because the output tolerance was too tight for
+  the CI Vulkan driver: max abs diff `0.0008239746` versus `5e-4`. A follow-up
+  widened that output tolerance to `1e-3`, matching the existing state
+  tolerance and the BF16-scale comparison used here.
 - Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
 - Best-effort Metal feature check remains host-blocked because `objc2`
   requires an Apple target.

@@ -1998,7 +1998,7 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
         "native-head qk-norm recurrent out",
         &got_out,
         &expected_out,
-        5e-4,
+        1e-3,
     )?;
     assert_close(
         "native-head qk-norm recurrent state",

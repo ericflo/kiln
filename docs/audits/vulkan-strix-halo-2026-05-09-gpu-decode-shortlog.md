@@ -790,3 +790,7 @@ Additional validation after A130:
   no-op defaults for the new trait hook, so their source paths remain
   unchanged. Local CUDA/Metal checks remain host-blocked (`nvcc` missing;
   `objc2` requires an Apple target).
+- CI follow-up: first Vulkan CI run on `0bbd053c` failed only because the new
+  focused fused-vs-split output tolerance was `5e-4` and CI observed max diff
+  `0.0008239746`; the follow-up widens the output tolerance to `1e-3`, matching
+  the existing state tolerance for this BF16-scale parity check.
