@@ -83,3 +83,24 @@ Date: 2026-05-09
   one rank-1 SFT example auto-loaded `bf16-state-smoke`, final loss
   `1.0715702772140503`, `/health` reported the active adapter, and an
   adapter-backed chat request completed.
+- Accepted CUDA live decode-batcher guard:
+  CUDA now defaults the live streaming decode batcher to `max_batch=1` unless
+  `KILN_DECODE_BATCH_MAX` is explicitly set. This prevents
+  `KILN_DECODE_BATCH_WAIT_US` from accidentally coalescing rows onto the known
+  slow CUDA batch-2 GDN path while preserving forced A/B testing.
+- Current WSL CUDA measurements:
+  wait-zero c=2 streaming 64-token rounds averaged `5.4148s`, metrics
+  `submitted=393 batches=393 rows=393 max_observed_batch=1`;
+  pre-guard wait-100 completed rounds averaged `17.9588s` and a short profile
+  confirmed `max_observed_batch=2`;
+  candidate wait-100 rounds averaged `5.3672s`, metrics
+  `submitted=393 batches=393 rows=393 max_observed_batch=1`, a 3.35x wall-time
+  recovery versus pre-guard wait-100.
+- Guard validation:
+  `cargo fmt`;
+  `cargo test -p kiln-model decode_batcher_default_ --lib --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  default parity prompt on the candidate;
+  live rank-1 SFT smoke auto-loaded `cuda-batcher-guard-smoke`, final loss
+  `0.9538126587867737`, and adapter-backed chat completed.

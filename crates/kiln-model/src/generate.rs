@@ -288,9 +288,12 @@ enum StreamTokenDisposition {
 /// Configuration for the live greedy decode rendezvous worker.
 ///
 /// The worker is enabled by default. Metal uses a small default admission delay
-/// to collect compatible peers; other backends drain immediately available
-/// decode rows. Set `KILN_DECODE_BATCHER=0` to force the legacy direct rowwise
-/// path, or `KILN_DECODE_BATCH_WAIT_US` to override the admission delay.
+/// to collect compatible peers; CUDA drains immediately and defaults to one row
+/// per worker pass because the current coalesced CUDA GDN decode path is slower
+/// than rowwise scheduling. Set `KILN_DECODE_BATCHER=0` to force the legacy
+/// direct rowwise path, `KILN_DECODE_BATCH_WAIT_US` to override the admission
+/// delay, or `KILN_DECODE_BATCH_MAX` to force a backend batch size for A/B
+/// testing.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
     /// Maximum compatible rows to execute in one decode forward pass.
@@ -332,6 +335,9 @@ impl DecodeBatcherConfig {
 
     pub fn from_env_for_backend(device: &Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
+        if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
+            config.max_batch = default_decode_batcher_max_batch(device, backend_name);
+        }
         if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
             config.wait = default_decode_batcher_wait(device, backend_name);
         }
@@ -349,6 +355,14 @@ impl DecodeBatcherConfig {
     pub fn enabled_for_device(device: &Device) -> bool {
         let _ = device;
         env_flag_enabled("KILN_DECODE_BATCHER", true)
+    }
+}
+
+fn default_decode_batcher_max_batch(device: &Device, backend_name: &str) -> usize {
+    if matches!(device, Device::Cuda(_)) || backend_name == "cuda" {
+        1
+    } else {
+        DecodeBatcherConfig::default().max_batch
     }
 }
 
@@ -5768,6 +5782,16 @@ mod tests {
         assert!(default_decode_batcher_allow_mixed_seq_lens(
             &device, "vulkan"
         ));
+    }
+
+    #[test]
+    fn test_decode_batcher_default_max_batch_backend_policy() {
+        let device = Device::Cpu;
+
+        assert_eq!(default_decode_batcher_max_batch(&device, "cpu"), 8);
+        assert_eq!(default_decode_batcher_max_batch(&device, "cuda"), 1);
+        assert_eq!(default_decode_batcher_max_batch(&device, "vulkan"), 8);
+        assert_eq!(default_decode_batcher_max_batch(&device, "metal"), 8);
     }
 
     #[test]

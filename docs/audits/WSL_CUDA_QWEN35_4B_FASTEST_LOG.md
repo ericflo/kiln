@@ -364,3 +364,65 @@ Live training + LoRA inference smoke on the candidate binary:
 - `/health` reported `active_adapter="bf16-state-smoke"`;
 - a LoRA-backed `/v1/chat/completions` request completed with the active
   adapter.
+
+## Follow-Up: Guard CUDA Live Decode Batching
+
+Current CUDA live streaming batching was remeasured after the BF16 inference
+state change. With the default wait-zero policy, two concurrent 64-token
+streaming requests still drain as one-row worker passes:
+
+```text
+KILN_DECODE_BATCH_WAIT_US=0
+round walls: 5.4340s, 5.4869s, 5.3235s
+metrics: submitted=393 batches=393 rows=393 max_observed_batch=1
+```
+
+Forcing a small admission delay still coalesces rows onto the slow CUDA
+batch-2 GDN decode path. Two completed `KILN_DECODE_BATCH_WAIT_US=100`
+64-token rounds took `18.1668s` and `17.7507s` before the sweep was stopped.
+A short profiled wait-100 run confirmed `max_observed_batch=2`.
+
+Accepted policy fix: CUDA now defaults the live decode batcher's backend
+`max_batch` to 1 unless `KILN_DECODE_BATCH_MAX` is explicitly set. This keeps
+the current fast rowwise scheduling even when an operator sets
+`KILN_DECODE_BATCH_WAIT_US`, while still allowing forced A/B testing via
+`KILN_DECODE_BATCH_MAX=2` or higher.
+
+Candidate live WSL CUDA recheck with `KILN_DECODE_BATCH_WAIT_US=100` and no
+explicit max override:
+
+```text
+round walls: 5.3862s, 5.3810s, 5.3344s
+metrics: submitted=393 batches=393 rows=393 max_observed_batch=1
+```
+
+That is a 3.35x wall-time recovery versus the completed pre-guard wait-100
+rounds (`17.9588s` average -> `5.3672s` average) and matches the default
+wait-zero throughput envelope.
+
+Validation:
+
+```bash
+cargo fmt
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-model decode_batcher_default_ --lib --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo build --quiet --release --features cuda --bin kiln
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+```
+
+The 32-token greedy parity prompt on the candidate still returned the expected
+eager prefix:
+
+```text
+Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A blue cube on a desk.\n    *   Co
+```
+
+Live training + auto-loaded LoRA smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-cuda-batcher-guard-smoke`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=6789`, `auto_load=true`;
+- job id: `b76ac6a9-c65a-48fd-9856-af92355467be`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=0.9538126587867737`;
+- `/health` reported `active_adapter="cuda-batcher-guard-smoke"`;
+- an adapter-backed `/v1/chat/completions` request completed.
