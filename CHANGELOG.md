@@ -1,5 +1,35 @@
 # Kiln Server Changelog
 
+## kiln-v0.2.15 — 2026-05-10
+
+A short follow-up cut covering 15 commits since v0.2.14, focused on CUDA
+decode-path fusion and a macOS Metal build fix. No desktop source changes;
+the aligned desktop release simply re-pins to the new server payload.
+
+### Changed
+- cuda: combine full-attention QKV projections into a single GEMM at decode
+  time, mirroring the GDN AB combine in v0.2.14.
+- cuda: combine GDN AB projections at prefill (extending the decode-time
+  fusion) and use the combined projection on short prompts.
+- cuda: enable GDN prefill gates by default and route mixed GDN batches
+  through the row loop, with the row-loop forced path generalized for batched
+  GDN.
+- cuda: fast-path paged KV cache writes and route CUDA decode through paged
+  attention end-to-end.
+- cuda: fuse decode QKV prep, fuse GDN decode RMSNorm, and fuse the LoRA
+  decode add (new `kiln-rmsnorm-kernel/csrc/fused_lora_add.cu`) so single-token
+  decode dispatches fewer kernels per layer.
+- cuda: use empty CUDA outputs for overwrite kernels and align the default
+  ModelRunner CUDA graph behavior.
+- training: default CUDA projection drop on for the training fit path so
+  training memory residency tracks the inference path.
+
+### Fixed
+- macos: pass `backend=None` to `add_lora_delta_to_base` from the
+  metal-feature-gated decode path so `cargo build --features metal` compiles
+  again. The CUDA LoRA decode add fuse landed in this cut added a `backend`
+  parameter and missed the Metal call site (#1019).
+
 ## kiln-v0.2.14 — 2026-05-10
 
 This is a large release covering ~325 commits since v0.2.13: a new Vulkan

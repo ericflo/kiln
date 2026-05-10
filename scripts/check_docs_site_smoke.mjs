@@ -768,7 +768,7 @@ function validateLandingDesktopVersionSplitCue() {
   const desktopInstallCopy = desktopInstallMatch[1];
   const requiredTerms = [
     'separate GitHub release tags/version numbers',
-    'desktop-v0.2.14',
+    'desktop-v0.2.15',
     'latest <code>kiln-v*</code>',
   ];
   for (const term of requiredTerms) {
@@ -785,7 +785,7 @@ function validateQuickstartDesktopVersionSplitCue() {
 
   const desktopInstallCopy = desktopInstallMatch[1];
   const requiredTerms = [
-    'desktop-v0.2.14',
+    'desktop-v0.2.15',
     'Desktop',
     'server',
     'release',

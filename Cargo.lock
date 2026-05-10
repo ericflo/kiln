@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-conv1d-kernel"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "candle-core",
  "cc",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-core"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "chrono",
  "minijinja",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-flash-attn"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "candle-core",
  "cc",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-flce-kernel"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -1775,7 +1775,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-gdn-kernel"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -1786,7 +1786,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-marlin-gemm"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "candle-core",
  "cc",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-model"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -1826,11 +1826,11 @@ dependencies = [
 
 [[package]]
 name = "kiln-nvtx"
-version = "0.2.14"
+version = "0.2.15"
 
 [[package]]
 name = "kiln-rmsnorm-kernel"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "candle-core",
  "cc",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-scheduler"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "kiln-core",
  "thiserror 2.0.18",
@@ -1848,7 +1848,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-server"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -1884,7 +1884,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-train"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -1908,7 +1908,7 @@ dependencies = [
 
 [[package]]
 name = "kiln-vulkan-kernel"
-version = "0.2.14"
+version = "0.2.15"
 dependencies = [
  "anyhow",
  "ash",
