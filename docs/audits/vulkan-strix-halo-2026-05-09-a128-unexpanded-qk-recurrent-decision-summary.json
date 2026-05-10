@@ -1,0 +1,29 @@
+{
+  "all_arms_correct": true,
+  "candidate_avg_speed_delta_percent": 0.9938737283492483,
+  "candidate_avg_wall_delta_percent": -0.9840930857078933,
+  "candidate_avg_wall_seconds": 13.480530793996877,
+  "candidate_walls_seconds": [
+    13.43001527999877,
+    13.531046307994984
+  ],
+  "metrics_after_summary": {
+    "decode_batcher_batches_total": 41.0,
+    "decode_batcher_enabled": 1.0,
+    "decode_batcher_jobs_failed": 0.0,
+    "decode_batcher_jobs_runner_busy": 0.0,
+    "decode_batcher_jobs_submitted": 120.0,
+    "decode_batcher_max_observed_batch": 3.0,
+    "decode_batcher_rows_total": 120.0,
+    "tokens_generated_total": 128.0
+  },
+  "metrics_identical": true,
+  "notes": "Small/noisy Vulkan-only win; kept because source scope is narrow, parity-covered, and rollback guarded. Persistent recurrent-state residency remains the primary target.",
+  "rollback_avg_wall_seconds": 13.614510248000443,
+  "rollback_env": "KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK=1",
+  "rollback_walls_seconds": [
+    13.349094935998437,
+    13.879925560002448
+  ],
+  "verdict": "keep"
+}

@@ -1827,6 +1827,99 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
 }
 
 #[test]
+fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, q_heads, gqa_ratio, dk, dv) = (2usize, 2usize, 3usize, 64usize, 5usize);
+    let heads = q_heads * gqa_ratio;
+    let q = cpu_f32(
+        (0..batch * q_heads * dk)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.011)
+            .collect(),
+        (batch, 1, q_heads, dk),
+    )?;
+    let k = cpu_f32(
+        (0..batch * q_heads * dk)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * -0.009)
+            .collect(),
+        (batch, 1, q_heads, dk),
+    )?;
+    let v = cpu_f32(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.013)
+            .collect(),
+        (batch, 1, heads, dv),
+    )?;
+    let beta = cpu_f32(
+        (0..batch * heads)
+            .map(|i| 0.21 + (i as f32) * 0.031)
+            .collect(),
+        (batch, 1, heads),
+    )?;
+    let g = cpu_f32(
+        (0..batch * heads)
+            .map(|i| -0.03 - (i as f32) * 0.017)
+            .collect(),
+        (batch, 1, heads),
+    )?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let q_expanded = q
+        .squeeze(1)?
+        .unsqueeze(2)?
+        .expand(&[batch, q_heads, gqa_ratio, dk])?
+        .contiguous()?
+        .reshape((batch, heads, dk))?;
+    let k_expanded = k
+        .squeeze(1)?
+        .unsqueeze(2)?
+        .expand(&[batch, q_heads, gqa_ratio, dk])?
+        .contiguous()?
+        .reshape((batch, heads, dk))?;
+    let v_expanded = v.squeeze(1)?.contiguous()?;
+    let beta_expanded = beta.squeeze(1)?.contiguous()?;
+    let g_expanded = g.squeeze(1)?.contiguous()?;
+
+    let (expected_out, expected_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+        &vk,
+        &q_expanded,
+        &k_expanded,
+        &v_expanded,
+        &beta_expanded,
+        &g_expanded,
+        &state,
+    )
+    .context("dispatch_gdn_recurrent_step expanded reference")?;
+    let (got_out, got_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("dispatch_gdn_recurrent_step_native_head_last_with_options")?;
+
+    assert_close(
+        "native-head recurrent out",
+        &got_out,
+        &expected_out.unsqueeze(1)?,
+        5e-4,
+    )?;
+    assert_close(
+        "native-head recurrent state",
+        &got_state.context("native-head state readback")?,
+        &expected_state,
+        1e-3,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

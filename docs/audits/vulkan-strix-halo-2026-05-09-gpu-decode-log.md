@@ -7958,3 +7958,84 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-response_*.sse`
+
+## A128 - Keep Vulkan unexpanded Q/K recurrent decode
+
+Base commit: `07b94924 Document rejected Vulkan BF16 tensor I/O trial`
+
+Purpose:
+
+- Port the small CUDA-inspired idea from `cd99d726` to Vulkan's split
+  recurrent decode path: avoid expanding GQA Q/K from query heads to value
+  heads before the recurrent kernel.
+- The Vulkan recurrent shaders now accept a `q_heads` push constant. Existing
+  expanded callers pass `q_heads == heads`; the new native-head path maps each
+  value head to `h / (heads / q_heads)`.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK=1`.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_native_head_last_matches_expanded_reference -- --nocapture`
+- Full Vulkan GDN parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`36 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- `git diff --check`
+
+Correctness:
+
+- Four live A/B arms confirmed GPU routing via server logs/health: Vulkan
+  selected `AMD Radeon 8060S Graphics (RADV_STRIX_HALO)`, live greedy decode
+  batcher enabled, and `Mode: GPU inference`.
+- Every arm returned `8/8` HTTP 200, empty reasoning, and visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm used `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`,
+  `max_tokens=16`, `temperature=0`, streaming chat, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Batcher counters were identical in all arms: `128` generated tokens,
+  `120` submitted jobs, `41` worker batches, `120` rows, max batch `3`, no
+  runner-busy or failed jobs.
+
+Performance:
+
+- Pair 1, candidate first: candidate `13.430015s`, rollback `13.349095s`,
+  candidate delta `-0.603%`.
+- Pair 2, rollback first: rollback `13.879926s`, candidate `13.531046s`,
+  candidate delta `+2.578%`.
+- Two-pair averages: candidate `13.480531s`, rollback `13.614510s`,
+  candidate delta `+0.994%`.
+
+Interpretation:
+
+- This is a small/noisy Vulkan-only keep, not the larger recurrent-state
+  residency fix. It removes avoidable Q/K host expansion and upload for decode,
+  but A125 still shows recurrent-state movement dominates the live batch path.
+- The change is tightly scoped to Vulkan recurrent shaders/dispatch and has a
+  direct rollback guard. CUDA and Metal source paths are untouched.
+- Next primary target remains request/batcher-owned recurrent-state residency
+  across live decode steps, with safe materialization on fallback, cohort
+  changes, prefix snapshots, or request completion.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-decision-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-pair2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-candidate2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-rollback2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-response_*.sse`

@@ -263,8 +263,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
-        ("gdn_recurrent_prefill", 7, 20),
-        ("gdn_recurrent_step_parallel", 7, 20),
+        ("gdn_recurrent_prefill", 7, 24),
+        ("gdn_recurrent_step_parallel", 7, 24),
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
@@ -6175,6 +6175,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             &spirv,
             batch,
             heads,
+            heads,
             dk,
             dv,
             parallel_reduce,
@@ -6229,9 +6230,16 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     let out_size = (batch * heads * dv * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
 
-    // Push constants: batch, heads, seq_len, dk, dv. seq_len is always 1 for
-    // this single-token kernel; the field is kept to avoid changing SPIR-V ABI.
-    let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
+    // Push constants: batch, value heads, seq_len, dk, dv, q/k heads. seq_len
+    // is always 1 for this single-token kernel.
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        heads as u32,
+        1,
+        dk as u32,
+        dv as u32,
+        heads as u32,
+    ];
 
     // Workgroup count: total elements / 256
     let total = batch * heads * dv;
@@ -6395,7 +6403,14 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)?;
 
-    let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        heads as u32,
+        1,
+        dk as u32,
+        dv as u32,
+        heads as u32,
+    ];
     let total = batch * heads * dv;
     let workgroup_count = total.div_ceil(256) as u32;
     let dispatch_counts = if parallel_reduce {
@@ -6575,6 +6590,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
     spirv: &[u8],
     batch: usize,
     heads: usize,
+    q_heads: usize,
     dk: usize,
     dv: usize,
     parallel_reduce: bool,
@@ -6659,7 +6675,14 @@ fn dispatch_gdn_recurrent_step_single_submit(
         stage_profile,
     );
 
-    let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        heads as u32,
+        1,
+        dk as u32,
+        dv as u32,
+        q_heads as u32,
+    ];
     let total = batch * heads * dv;
     let workgroup_count = total.div_ceil(256) as u32;
     let dispatch_counts = if parallel_reduce {
@@ -6911,6 +6934,105 @@ fn dispatch_gdn_recurrent_step_single_submit(
         stage_profile,
     );
     Ok((out_tensor, state_tensor))
+}
+
+/// Dispatch a single-token recurrent step with unexpanded GQA Q/K heads.
+///
+/// `q` and `k` are `[batch, 1, q_heads, dk]`; `v`, `beta`, and `g` use value
+/// heads (`[batch, 1, heads, ...]`). The shader maps each value head to its
+/// source Q/K head with `h / (heads / q_heads)`, matching the regular GQA
+/// expansion used by the portable path without materializing the repeated Q/K
+/// tensors on the host.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_native_head_last_with_options(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
+    let (k_batch, k_seq_len, k_heads, k_dk) = k.dims4()?;
+    let (v_batch, v_seq_len, heads, dv) = v.dims4()?;
+    let (beta_batch, beta_seq_len, beta_heads) = beta.dims3()?;
+    let (g_batch, g_seq_len, g_heads) = g.dims3()?;
+    let (state_batch, state_heads, state_dk, state_dv) = state.dims4()?;
+
+    anyhow::ensure!(seq_len == 1, "native-head recurrent expects seq_len=1");
+    anyhow::ensure!(
+        (k_batch, k_seq_len, k_heads, k_dk) == (batch, seq_len, q_heads, dk),
+        "native-head recurrent k shape mismatch"
+    );
+    anyhow::ensure!(
+        (v_batch, v_seq_len) == (batch, seq_len),
+        "native-head recurrent v batch/seq mismatch"
+    );
+    anyhow::ensure!(
+        (beta_batch, beta_seq_len, beta_heads) == (batch, seq_len, heads),
+        "native-head recurrent beta shape mismatch"
+    );
+    anyhow::ensure!(
+        (g_batch, g_seq_len, g_heads) == (batch, seq_len, heads),
+        "native-head recurrent g shape mismatch"
+    );
+    anyhow::ensure!(
+        (state_batch, state_heads, state_dk, state_dv) == (batch, heads, dk, dv),
+        "native-head recurrent state shape mismatch"
+    );
+    anyhow::ensure!(
+        q_heads > 0,
+        "native-head recurrent q_heads must be positive"
+    );
+    anyhow::ensure!(
+        heads % q_heads == 0,
+        "native-head recurrent heads {heads} must be divisible by q_heads {q_heads}"
+    );
+
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let beta_data = extract_tensor_bytes(beta)?.0;
+    let g_data = extract_tensor_bytes(g)?.0;
+    let state_data = extract_tensor_bytes(state)?.0;
+
+    let parallel_reduce = use_gdn_recurrent_parallel_reduce(dk, dv);
+    let glsl_path = if parallel_reduce {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_step_parallel.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_prefill.comp"
+        )
+    };
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+
+    let (out, state) = dispatch_gdn_recurrent_step_single_submit(
+        vk_device,
+        q,
+        state,
+        &q_data,
+        &k_data,
+        &v_data,
+        &beta_data,
+        &g_data,
+        &state_data,
+        &spirv,
+        batch,
+        heads,
+        q_heads,
+        dk,
+        dv,
+        parallel_reduce,
+        skip_state_readback,
+        false,
+    )?;
+    Ok((out.unsqueeze(1)?, state))
 }
 
 // ---------------------------------------------------------------------------

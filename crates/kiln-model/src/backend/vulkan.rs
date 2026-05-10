@@ -38,6 +38,7 @@ pub struct VulkanBackend {
     conv1d_prefill_single_submit_enabled: bool,
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
+    gdn_recurrent_unexpanded_qk_enabled: bool,
     linear_decode_enabled: bool,
     linear_argmax_batch_enabled: bool,
     full_attn_qkv_enabled: bool,
@@ -139,6 +140,8 @@ impl VulkanBackend {
         // in `gdn_decode_gates_recurrent_rmsnorm`; this env gates bs=1 only.
         let gdn_decode_fused_enabled =
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED").is_ok();
+        let gdn_recurrent_unexpanded_qk_enabled = gdn_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK").is_err();
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
         let bf16_packed_linear_weights_enabled = linear_decode_enabled
             && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS").is_err();
@@ -205,6 +208,7 @@ impl VulkanBackend {
             conv1d_prefill_single_submit_enabled,
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
+            gdn_recurrent_unexpanded_qk_enabled,
             linear_decode_enabled,
             linear_argmax_batch_enabled,
             full_attn_qkv_enabled,
@@ -555,6 +559,10 @@ impl BackendRuntime for VulkanBackend {
 
     fn supports_gdn_recurrent_step(&self) -> bool {
         self.has_vulkan() && self.gdn_enabled
+    }
+
+    fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
+        self.has_vulkan() && self.gdn_recurrent_unexpanded_qk_enabled
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1558,6 +1566,94 @@ impl BackendRuntime for VulkanBackend {
             vk_device, a_strict, v_prime, beta,
         )
         .context("gdn_forward_substitution kernel failed")?;
+        Ok(Some(out))
+    }
+
+    fn gdn_recurrent_prefill_native_head_last(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        if !self.has_vulkan()
+            || !self.gdn_recurrent_unexpanded_qk_enabled
+            || !matches!(q.dtype(), DType::BF16 | DType::F32)
+        {
+            return Ok(None);
+        }
+        if !matches!(q.device(), Device::Cpu)
+            || !matches!(k.device(), Device::Cpu)
+            || !matches!(v.device(), Device::Cpu)
+            || !matches!(beta.device(), Device::Cpu)
+            || !matches!(g.device(), Device::Cpu)
+            || !matches!(state.device(), Device::Cpu)
+        {
+            return Ok(None);
+        }
+        let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
+            return Ok(None);
+        };
+        let Ok((k_batch, k_seq_len, k_heads, k_dk)) = k.dims4() else {
+            return Ok(None);
+        };
+        let Ok((v_batch, v_seq_len, heads, dv)) = v.dims4() else {
+            return Ok(None);
+        };
+        let Ok((beta_batch, beta_seq_len, beta_heads)) = beta.dims3() else {
+            return Ok(None);
+        };
+        let Ok((g_batch, g_seq_len, g_heads)) = g.dims3() else {
+            return Ok(None);
+        };
+        let Ok((state_batch, state_heads, state_dk, state_dv)) = state.dims4() else {
+            return Ok(None);
+        };
+        if seq_len != 1
+            || k_batch != batch
+            || k_seq_len != seq_len
+            || k_heads != q_heads
+            || k_dk != dk
+            || v_batch != batch
+            || v_seq_len != seq_len
+            || beta_batch != batch
+            || beta_seq_len != seq_len
+            || beta_heads != heads
+            || g_batch != batch
+            || g_seq_len != seq_len
+            || g_heads != heads
+            || state_batch != batch
+            || state_heads != heads
+            || state_dk != dk
+            || state_dv != dv
+            || q_heads == 0
+            || heads % q_heads != 0
+        {
+            return Ok(None);
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+        let (out, new_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+                vk_device,
+                q,
+                k,
+                v,
+                beta,
+                g,
+                state,
+                skip_state_readback,
+            )
+            .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
+        if let Some(new_state) = new_state {
+            *state = new_state;
+        }
         Ok(Some(out))
     }
 

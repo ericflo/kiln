@@ -23,6 +23,7 @@ layout(push_constant) uniform Parameters {
     uint seq_len;
     uint dk;
     uint dv;
+    uint q_heads;
 };
 
 layout(binding = 0) readonly buffer QBuf { float data_q[]; };
@@ -42,7 +43,8 @@ void main() {
     uint lane = gl_LocalInvocationID.x;
 
     uint bh = b * heads + h;
-    uint q_off = bh * dk;
+    uint qh = q_heads == heads ? h : h / (heads / q_heads);
+    uint q_off = (b * q_heads + qh) * dk;
     uint k_off = q_off;
     uint v_off = bh * dv;
     uint state_off = bh * dk * dv;

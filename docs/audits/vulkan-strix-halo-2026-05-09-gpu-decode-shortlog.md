@@ -716,3 +716,25 @@ Additional validation after rejected A127:
   vs rollback `13.589919s` (`-0.927%` for the candidate).
 - Source change was removed after measurement; final source has no A127 runtime
   changes and CUDA/Metal source paths are untouched.
+
+Additional validation after A128:
+
+- Added a Vulkan-only native-head recurrent decode path that avoids expanding
+  GQA Q/K to value-head count before the recurrent shader. Rollback:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK=1`.
+- Existing expanded callers still pass `q_heads == heads`; the new path maps
+  value heads to Q/K heads in the shader.
+- Validation passed: `cargo fmt --check`,
+  `cargo check -p kiln-vulkan-kernel`, focused native-head parity, full Vulkan
+  GDN parity (`36 passed`), `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, release Vulkan
+  server build, and `git diff --check`.
+- Four live A/B arms all confirmed GPU routing and exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, with
+  identical decode-batcher counters (`128` tokens, `120` submitted jobs,
+  `41` worker batches, max batch `3`).
+- Two-pair wall-time averages kept the candidate by a small/noisy margin:
+  candidate `13.480531s` vs rollback `13.614510s` (`+0.994%` speed delta).
+- CUDA and Metal source paths are untouched. This is not the broader
+  recurrent-state residency fix; that remains the next primary target.

@@ -1,0 +1,12 @@
+candidate_pair1 13.430015s
+rollback_pair1 13.349095s
+rollback_pair2 13.879926s
+candidate_pair2 13.531046s
+candidate_avg 13.480531s
+rollback_avg 13.614510s
+candidate_avg_speed_delta_percent 0.994
+candidate_avg_wall_delta_percent -0.984
+all_arms_correct True
+metrics_identical True
+verdict keep
+rollback_env KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK=1

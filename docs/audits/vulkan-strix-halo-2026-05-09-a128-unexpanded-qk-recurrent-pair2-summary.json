@@ -1,0 +1,28 @@
+{
+  "candidate2_correct": true,
+  "candidate2_metrics_after_summary": {
+    "decode_batcher_batches_total": 41.0,
+    "decode_batcher_enabled": 1.0,
+    "decode_batcher_jobs_failed": 0.0,
+    "decode_batcher_jobs_runner_busy": 0.0,
+    "decode_batcher_jobs_submitted": 120.0,
+    "decode_batcher_max_observed_batch": 3.0,
+    "decode_batcher_rows_total": 120.0,
+    "tokens_generated_total": 128.0
+  },
+  "candidate2_speed_delta_percent": 2.5783612299170366,
+  "candidate2_wall_delta_percent": -2.513552760058191,
+  "candidate2_wall_seconds": 13.531046307994984,
+  "rollback2_correct": true,
+  "rollback2_metrics_after_summary": {
+    "decode_batcher_batches_total": 41.0,
+    "decode_batcher_enabled": 1.0,
+    "decode_batcher_jobs_failed": 0.0,
+    "decode_batcher_jobs_runner_busy": 0.0,
+    "decode_batcher_jobs_submitted": 120.0,
+    "decode_batcher_max_observed_batch": 3.0,
+    "decode_batcher_rows_total": 120.0,
+    "tokens_generated_total": 128.0
+  },
+  "rollback2_wall_seconds": 13.879925560002448
+}
