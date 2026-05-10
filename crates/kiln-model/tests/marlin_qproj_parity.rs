@@ -138,6 +138,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         q_proj_t: q_proj_t.clone(),
         k_proj_t: q_proj_t.clone(),
         v_proj_t: q_proj_t.clone(),
+        qkv_proj_t: None,
         o_proj_t: q_proj_t.clone(),
         q_proj_marlin: None, // KILN_W4A16 unset path
     };
@@ -151,6 +152,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         q_proj_t: q_proj_t.clone(),
         k_proj_t: q_proj_t.clone(),
         v_proj_t: q_proj_t.clone(),
+        qkv_proj_t: None,
         o_proj_t: q_proj_t.clone(),
         q_proj_marlin: Some(packed), // KILN_W4A16 set path
     };

@@ -2963,6 +2963,7 @@ mod tests {
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
+                    qkv_proj_t: None,
                     o_proj_t,
                     q_proj_marlin: None,
                 })

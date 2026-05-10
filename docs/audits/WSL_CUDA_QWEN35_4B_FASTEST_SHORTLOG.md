@@ -397,3 +397,31 @@ Date: 2026-05-09
 - Live no-env rank-1 SFT smoke auto-loaded `cuda-rowloop-smoke`, final loss
   `1.6998780965805054`, and the server log reported `SFT training complete`
   with no `CUDA_ERROR_OUT_OF_MEMORY`.
+- Accepted CUDA full-attention Q/K/V projection combine:
+  CUDA model load now caches an optional `[hidden, q_raw + k + v]` transpose
+  for full-attention layers, and untracked single-token BF16 CUDA decode uses
+  one combined Q/K/V matmul plus views instead of three projection matmuls.
+  Training remains on the separate differentiable path because the route
+  requires `!x.track_op()` and no LoRA/Marlin/MTP debug path. Rollback:
+  `KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ=1`.
+- Same-binary profiled WSL CUDA paged latency A/B:
+  rollback `qkv_proj` totaled `45.349ms` across `544` calls
+  (`0.083362ms` avg), while default combined Q/K/V totaled `24.835ms`
+  (`0.045653ms` avg), a 45.2% reduction in the target stage. Both reported
+  `9913 MB` model VRAM.
+- Unprofiled repeated runs on `prompt_tokens=64`, `max_output_tokens=33`:
+  rollback mean ITL `26.4`, `27.3`, `27.4` ms averaged `27.033ms`;
+  default combined Q/K/V `26.6`, `26.5`, `26.4` ms averaged `26.500ms`,
+  a 2.0% decode ITL win.
+- Q/K/V combine validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded
+  `cuda-fullattn-qkv-smoke-011048`, final loss `1.6919400691986084`,
+  and the server log reported `SFT training complete` with no
+  `CUDA_ERROR_OUT_OF_MEMORY`. A post-smoke kernel scan showed no new Linux
+  OOM-killer or WSL/DXG residency error, and GPU memory returned to `71 MiB`.

@@ -1226,3 +1226,63 @@ Live no-env CUDA training smoke on the candidate:
   `final_loss=1.6998780965805054`;
 - server log reported `SFT training complete` and `auto-loaded trained adapter`;
 - no `CUDA_ERROR_OUT_OF_MEMORY` appeared in the training-smoke server log.
+
+## Follow-Up: CUDA Full-Attention Q/K/V Projection Combine
+
+CUDA model load now caches an optional combined full-attention
+`[hidden, q_raw + k + v]` transpose and forward-only single-token CUDA decode
+uses one Q/K/V matmul plus views instead of three projection matmuls. The route
+requires untracked BF16 CUDA tensors and no LoRA/Marlin/MTP debug path, so SFT
+and other autograd-tracked training paths still use the separate differentiable
+projections.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ=1
+```
+
+Same-binary WSL CUDA paged latency A/B, `prompt_tokens=64`,
+`max_output_tokens=33`, `KILN_NUM_BLOCKS=512`,
+`KILN_PREFIX_CACHE_MAX_ENTRIES=1`, `KILN_USE_FLCE=1`,
+`KILN_SPEC_ENABLED=0`, with full-attention stage profiling:
+
+| path | model VRAM | steady mean ITL | `qkv_proj` total | `qkv_proj` avg |
+| --- | ---: | ---: | ---: | ---: |
+| rollback | 9913 MB | 26.4 ms | 45.349 ms / 544 calls | 0.083362 ms |
+| default combined Q/K/V | 9913 MB | 26.3 ms | 24.835 ms / 544 calls | 0.045653 ms |
+
+The target `qkv_proj` stage dropped by 45.2% in the profiled run.
+
+Unprofiled repeated runs on the same workload:
+
+| path | mean ITL runs | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback | 26.4, 27.3, 27.4 ms | 27.033 ms | 37.03 tok/s |
+| default combined Q/K/V | 26.6, 26.5, 26.4 ms | 26.500 ms | 37.73 tok/s |
+
+That is a 2.0% average decode ITL win in this small serial latency workload.
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+cargo test -p kiln-model test_decode_batcher_default_max_batch_backend_policy --lib --quiet
+cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env CUDA training smoke on the candidate:
+
+- load reported `post_load_used_vram_gb=10.468982784`,
+  `kv_cache_gb=0.268435456`, `training_budget_gb=6.434062336`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=6100`, `auto_load=true`;
+- adapter: `cuda-fullattn-qkv-smoke-011048`;
+- job id: `85e7ab0e-bfc8-4a08-8e2b-a89d0be5ebf7`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.6919400691986084`;
+- server log reported `SFT training complete` and `auto-loaded trained adapter`;
+- no Linux OOM-killer, `CUDA_ERROR_OUT_OF_MEMORY`, or new WSL/DXG residency
+  error appeared after the smoke; GPU memory returned to `71 MiB` used.

@@ -5809,6 +5809,7 @@ mod tests {
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
+                    qkv_proj_t: None,
                     o_proj_t,
                     q_proj_marlin: None,
                 })
@@ -6019,6 +6020,7 @@ mod tests {
                     q_proj_t: q_proj.t()?.contiguous()?,
                     k_proj_t: k_proj.t()?.contiguous()?,
                     v_proj_t: v_proj.t()?.contiguous()?,
+                    qkv_proj_t: None,
                     o_proj_t: o_proj.t()?.contiguous()?,
                     q_proj,
                     k_proj,

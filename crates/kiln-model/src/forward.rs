@@ -216,6 +216,12 @@ fn cuda_gdn_ab_in_proj_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_AB_IN_PROJ").is_err())
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
+}
+
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
@@ -586,6 +592,36 @@ fn full_attn_qkv_proj_decode_if(
         && !crate::mtp_debug::is_mtp_fp32_head_armed()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
     {
+        #[cfg(feature = "cuda")]
+        {
+            if cuda_full_attn_qkv_in_proj_enabled()
+                && !x.track_op()
+                && x.dtype() == DType::BF16
+                && matches!(x.device(), Device::Cuda(_))
+            {
+                if let Some(qkv_proj_t) = attn_weights.qkv_proj_t.as_ref() {
+                    if let Ok((_, seq_len, hidden)) = x.dims3() {
+                        let q_dim = attn_weights.q_proj_t.dim(1)?;
+                        let k_dim = attn_weights.k_proj_t.dim(1)?;
+                        let v_dim = attn_weights.v_proj_t.dim(1)?;
+                        if seq_len == 1
+                            && qkv_proj_t.dtype() == DType::BF16
+                            && !qkv_proj_t.track_op()
+                            && matches!(qkv_proj_t.device(), Device::Cuda(_))
+                            && qkv_proj_t.is_contiguous()
+                            && qkv_proj_t.dims() == [hidden, q_dim + k_dim + v_dim]
+                        {
+                            let qkv = broadcast_matmul_cpu_compatible(x, qkv_proj_t)
+                                .context("cuda full-attn combined Q/K/V projection matmul")?;
+                            let q_raw = qkv.narrow(2, 0, q_dim)?;
+                            let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+                            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+                            return Ok((q_raw, k_raw, v));
+                        }
+                    }
+                }
+            }
+        }
         if let Some(out) = backend.full_attn_qkv_decode(
             x,
             &attn_weights.q_proj_t,
@@ -948,6 +984,7 @@ fn upload_mtp_gpu_weights(
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
+                    qkv_proj_t: None,
                     o_proj_t,
                     q_proj_marlin: None,
                 })
@@ -1048,6 +1085,11 @@ pub struct GpuFullAttentionWeights {
     pub q_proj_t: Tensor,
     pub k_proj_t: Tensor,
     pub v_proj_t: Tensor,
+    /// Optional cached `[hidden, q_raw + k + v]` transpose for CUDA decode.
+    /// This combines the full-attention Q/K/V projections into one matmul on
+    /// forward-only single-token fast paths without disturbing the separate
+    /// transposes used by training, LoRA, Marlin, and debug captures.
+    pub qkv_proj_t: Option<Tensor>,
     pub o_proj_t: Tensor,
     /// Optional Marlin W4A16-packed q_proj. Populated at load time when the
     /// `KILN_W4A16=1` env var is set on a CUDA build whose q_proj shape fits
@@ -2437,6 +2479,27 @@ impl GpuWeights {
                     let (k_proj, k_proj_t) = attn_proj.next().context(ctx("k_proj missing"))?;
                     let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
                     let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
+                    let qkv_proj_t = {
+                        #[cfg(feature = "cuda")]
+                        {
+                            if matches!(device, Device::Cuda(_)) {
+                                Some(
+                                    Tensor::cat(
+                                        &[&q_proj_t, &k_proj_t, &v_proj_t],
+                                        candle_core::D::Minus1,
+                                    )?
+                                    .contiguous()
+                                    .context(ctx("qkv_proj_t contiguous"))?,
+                                )
+                            } else {
+                                None
+                            }
+                        }
+                        #[cfg(not(feature = "cuda"))]
+                        {
+                            None
+                        }
+                    };
                     // KILN_W4A16=1 opt-in: queue q_proj for the post-loop
                     // Marlin batch pack. The packed weight (and the BF16
                     // drop) are installed after the layer loop via
@@ -2462,6 +2525,7 @@ impl GpuWeights {
                             q_proj_t,
                             k_proj_t,
                             v_proj_t,
+                            qkv_proj_t,
                             o_proj_t,
                             q_proj_marlin: None,
                         }),
@@ -12349,6 +12413,7 @@ mod tests {
             q_proj_t,
             k_proj_t,
             v_proj_t,
+            qkv_proj_t: None,
             o_proj_t,
             q_proj_marlin: None,
         })
@@ -12391,6 +12456,7 @@ mod tests {
             q_proj_t: q_proj.t()?.contiguous()?,
             k_proj_t: k_proj.t()?.contiguous()?,
             v_proj_t: v_proj.t()?.contiguous()?,
+            qkv_proj_t: None,
             o_proj_t: o_proj.t()?.contiguous()?,
             q_proj,
             k_proj,
@@ -12488,6 +12554,7 @@ mod tests {
                     q_proj_t: q_proj.t()?.contiguous()?,
                     k_proj_t: k_proj.t()?.contiguous()?,
                     v_proj_t: v_proj.t()?.contiguous()?,
+                    qkv_proj_t: None,
                     o_proj_t: o_proj.t()?.contiguous()?,
                     q_proj,
                     k_proj,
@@ -13929,6 +13996,7 @@ mod tests {
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
+                    qkv_proj_t: None,
                     o_proj_t,
                     q_proj_marlin: None,
                 }),
@@ -14345,6 +14413,7 @@ mod tests {
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
+                    qkv_proj_t: None,
                     o_proj_t,
                     q_proj_marlin: None,
                 })
