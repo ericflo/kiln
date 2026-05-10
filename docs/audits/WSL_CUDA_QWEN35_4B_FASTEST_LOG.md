@@ -294,3 +294,15 @@ the expected eager prefix:
 ```text
 Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A blue cube on a desk.\n    *   Constraint:
 ```
+
+Post-push live training smoke on the same pushed HEAD:
+
+- temporary adapter dir: `/tmp/kiln-adapters-smoke-a4f0decb`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=1234`, `auto_load=false`;
+- job id: `421d2e58-6604-42c0-bca7-4120a43ccd83`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=0.9267818927764893`;
+- training logs confirmed `gradient checkpointing enabled` with 32 one-layer
+  segments and `fused_path="OFF"` for the RMSNorm training gate on the 16 GiB
+  GPU.

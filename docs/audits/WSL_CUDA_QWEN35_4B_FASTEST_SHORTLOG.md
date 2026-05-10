@@ -62,3 +62,7 @@ Date: 2026-05-09
   default API parity probe without `KILN_CUDA_GRAPHS`;
   `cargo test -p kiln-train test_flce_parity_vs_naive_loss --quiet`;
   `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`.
+- Post-push live SFT smoke on pushed HEAD completed:
+  one rank-1 example, `epochs=1`, `seed=1234`, final loss
+  `0.9267818927764893`; logs confirmed 32 checkpoint segments and
+  `fused_path="OFF"` for the small-GPU RMSNorm training gate.
