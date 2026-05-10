@@ -440,7 +440,7 @@ fn linear_with_lora_t_decode(
         {
             let base = crate::backend::metal::metal_transposed_coop_gemv_bf16(x, weight_t)
                 .context("metal transposed coop GEMV failed");
-            return add_lora_delta_to_base(base?, x, lora, lora_scale)
+            return add_lora_delta_to_base(None, base?, x, lora, lora_scale)
                 .context("metal transposed coop GEMV LoRA delta failed");
         }
     }
