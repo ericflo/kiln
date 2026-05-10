@@ -47,6 +47,12 @@ fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
 }
 
+fn profile_vulkan_gdn_recurrent_kernel_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn finish_vulkan_mlp_kernel_stage_profile(
     stage: &str,
@@ -91,6 +97,27 @@ fn finish_vulkan_gdn_in_proj_kernel_stage_profile(
     };
     eprintln!(
         "kiln_profile_vulkan_gdn_in_proj_kernel_stage stage={stage} batch={batch} hidden={hidden} qkv_dim={qkv_dim} z_dim={z_dim} a_dim={a_dim} b_dim={b_dim} packed_bf16_weights={packed_bf16_weights} pair_qkv_z={pair_qkv_z} row_group_size={row_group_size} single_submit={single_submit} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_vulkan_gdn_recurrent_kernel_stage_profile(
+    stage: &str,
+    batch: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
+    parallel_reduce: bool,
+    single_submit: bool,
+    skip_state_readback: bool,
+    start: Option<Instant>,
+) {
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_profile_vulkan_gdn_recurrent_kernel_stage stage={stage} batch={batch} heads={heads} dk={dk} dv={dv} parallel_reduce={parallel_reduce} single_submit={single_submit} skip_state_readback={skip_state_readback} elapsed_ms={:.3}",
         start.elapsed().as_secs_f64() * 1000.0
     );
 }
@@ -6069,12 +6096,13 @@ pub fn dispatch_gdn_recurrent_step_with_options(
     let host_visible_mt = vk_device.host_visible_mem_type();
 
     // Extract input data
+    let profile_kernel_stages = profile_vulkan_gdn_recurrent_kernel_stages_enabled();
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let q_data = extract_tensor_bytes(q)?.0;
     let k_data = extract_tensor_bytes(k)?.0;
     let v_data = extract_tensor_bytes(v)?.0;
     let beta_data = extract_tensor_bytes(beta)?.0;
     let g_data = extract_tensor_bytes(g)?.0;
-    let state_data = extract_tensor_bytes(state)?.0;
 
     // Parse shape [B, H, dk/dv].
     let dims = q.dims();
@@ -6084,6 +6112,31 @@ pub fn dispatch_gdn_recurrent_step_with_options(
 
     let single_submit = gdn_recurrent_single_submit_enabled();
     let parallel_reduce = single_submit && use_gdn_recurrent_parallel_reduce(dk, dv);
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "extract_inputs",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        single_submit,
+        skip_state_readback,
+        stage_profile,
+    );
+    let stage_profile = profile_kernel_stages.then(Instant::now);
+    let state_data = extract_tensor_bytes(state)?.0;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "extract_state",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        single_submit,
+        skip_state_readback,
+        stage_profile,
+    );
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let glsl_path = if parallel_reduce {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6096,6 +6149,17 @@ pub fn dispatch_gdn_recurrent_step_with_options(
         )
     };
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "compile_shader",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        single_submit,
+        skip_state_readback,
+        stage_profile,
+    );
 
     if single_submit {
         return dispatch_gdn_recurrent_step_single_submit(
@@ -6115,6 +6179,7 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             dv,
             parallel_reduce,
             skip_state_readback,
+            profile_kernel_stages,
         );
     }
 
@@ -6514,6 +6579,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
     dv: usize,
     parallel_reduce: bool,
     skip_state_readback: bool,
+    profile_kernel_stages: bool,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -6529,12 +6595,25 @@ fn dispatch_gdn_recurrent_step_single_submit(
         Ok((device_buf, staging))
     };
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let (q_buf, q_stage) = make_device_and_staging(q_data)?;
     let (k_buf, k_stage) = make_device_and_staging(k_data)?;
     let (v_buf, v_stage) = make_device_and_staging(v_data)?;
     let (beta_buf, beta_stage) = make_device_and_staging(beta_data)?;
     let (g_buf, g_stage) = make_device_and_staging(g_data)?;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "make_input_staging",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let host_visible_state = gdn_recurrent_use_host_visible_state(batch);
     let state_buf = if host_visible_state {
         let buf =
@@ -6552,10 +6631,33 @@ fn dispatch_gdn_recurrent_step_single_submit(
         VulkanBuffer::write_host_visible(device, &staging, state_data)?;
         Some(staging)
     };
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "make_state_staging",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let out_size = (batch * heads * dv * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)?;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "create_output_buffers",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
     let push_constants: [u32; 5] = [batch as u32, heads as u32, 1, dk as u32, dv as u32];
     let total = batch * heads * dv;
@@ -6575,6 +6677,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
         out_buf.handle(),
     ];
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         spirv,
         all_handles.len(),
@@ -6611,7 +6714,19 @@ fn dispatch_gdn_recurrent_step_single_submit(
     unsafe {
         device.update_descriptor_sets(&descriptor_writes, &[]);
     }
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "pipeline_descriptor_setup",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let cmd_pool = vk_device.transient_command_pool()?;
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
     let command_buffers =
@@ -6727,8 +6842,32 @@ fn dispatch_gdn_recurrent_step_single_submit(
             .context("failed to reset transient descriptor pool")?;
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "record_submit_wait",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "read_output",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let state_data = if skip_state_readback {
         None
     } else if host_visible_state {
@@ -6741,13 +6880,36 @@ fn dispatch_gdn_recurrent_step_single_submit(
                 .expect("state staging exists when state is device-local"),
         )?)
     };
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "read_state",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
 
+    let stage_profile = profile_kernel_stages.then(Instant::now);
     let out_shape = vec![batch, heads, dv];
     let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
     let state_tensor = state_data
         .as_ref()
         .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
         .transpose()?;
+    finish_vulkan_gdn_recurrent_kernel_stage_profile(
+        "create_tensors",
+        batch,
+        heads,
+        dk,
+        dv,
+        parallel_reduce,
+        true,
+        skip_state_readback,
+        stage_profile,
+    );
     Ok((out_tensor, state_tensor))
 }
 

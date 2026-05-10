@@ -1,0 +1,113 @@
+A125 GDN recurrent kernel stage profile summary
+
+Date: 2026-05-09
+Host: Strix Halo / RADV STRIX_HALO
+Base commit: b851433f Document rejected Vulkan BF16 state packing
+
+Purpose
+-------
+
+Add profile-only instrumentation for the Vulkan GDN recurrent kernel path and
+capture a live profile that splits the batch-3 recurrent step into CPU
+extraction, staging, dispatch/wait, readback, and tensor materialization.
+
+Source change
+-------------
+
+- Added `KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES=1`.
+- The flag logs `kiln_profile_vulkan_gdn_recurrent_kernel_stage` rows from
+  `dispatch_gdn_recurrent_step_with_options` and the default single-submit
+  recurrent path.
+- The instrumentation is disabled by default and Vulkan-only.
+- CUDA and Metal source paths are untouched.
+
+Validation
+----------
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`35 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Live profile configuration
+--------------------------
+
+- Model: Qwen3.5-4B
+- Backend: Vulkan
+- `KILN_PREFIX_CACHE_ENABLED=false`
+- `KILN_DECODE_BATCH_WAIT_US=5000`
+- `KILN_DECODE_BATCH_MAX=3`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`
+- `KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES=1`
+- Eight concurrent streaming chat requests.
+- Request shape: `max_tokens=16`, `temperature=0`
+- Template config:
+  `chat_template_kwargs: {"enable_thinking": false}`
+
+Correctness
+-----------
+
+- Server log confirmed `Mode: GPU inference`.
+- Server log confirmed Vulkan GPU selection and live greedy decode batcher
+  backend `vulkan`.
+- All requests returned HTTP 200.
+- All reasoning streams were empty.
+- Every visible response exactly matched:
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics matched the expected decode-batcher shape:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `jobs_failed=0`, `runner_busy_jobs=0`,
+  `worker_batches=41`, `batcher_rows=120`, max batch `3`.
+- Wall time with profile logging was `13.654032s`.
+
+Top batch-3 recurrent kernel stages
+-----------------------------------
+
+These rows are for `batch=3`, `heads=32`, `dk=128`, `dv=128`,
+`parallel_reduce=true`, `single_submit=true`, and `skip_state_readback=false`.
+
+- `record_submit_wait`: total `903.843ms`, count `936`,
+  mean `0.966ms`.
+- `make_state_staging`: total `691.358ms`, count `936`,
+  mean `0.739ms`.
+- `read_state`: total `485.890ms`, count `936`, mean `0.519ms`.
+- `extract_state`: total `374.544ms`, count `936`, mean `0.400ms`.
+- `create_tensors`: total `198.909ms`, count `936`, mean `0.213ms`.
+- `make_input_staging`: total `91.693ms`, count `936`, mean `0.098ms`.
+- `create_output_buffers`: total `25.053ms`, count `936`,
+  mean `0.027ms`.
+- `read_output`: total `8.663ms`, count `936`, mean `0.009ms`.
+- `extract_inputs`: total `7.560ms`, count `936`, mean `0.008ms`.
+
+Interpretation
+--------------
+
+- The batch-3 recurrent bottleneck is not only shader dispatch. CPU-side state
+  extraction/staging/readback/tensor rebuild is comparable to the dispatch/wait
+  total.
+- A124's direct packed-state upload/readback regressed because it still did
+  per-token CPU layout conversion. A125 confirms that a useful follow-up needs
+  to avoid the repeated host boundary, not just change the transfer format.
+- The next credible Vulkan target is persistent/resident recurrent state across
+  live decode steps or another design that keeps updated per-layer GDN state
+  device-resident between tokens while preserving row ownership and scatter
+  correctness.
+- Smaller Q/K upload reductions inspired by the CUDA unexpanded-QK work are
+  less likely to move live batch-3 throughput because input extraction/staging
+  is small compared with recurrent state handling.
+
+Artifacts
+---------
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-gdn-recurrent-kernel-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-response_*.sse`

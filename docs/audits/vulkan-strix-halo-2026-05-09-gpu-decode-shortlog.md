@@ -659,3 +659,24 @@ Additional validation after rejected A124:
   rollback `13.808662s` (`-10.399%`).
 - Source change was removed after measurement; final source has no A124 runtime
   changes and CUDA/Metal source paths are untouched.
+
+Additional validation after A125:
+
+- Added profile-only Vulkan recurrent kernel-stage logging behind
+  `KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES=1`; CUDA/Metal source paths
+  are untouched.
+- Vulkan kernel parity (`35 passed`), Vulkan model/server checks, and release
+  Vulkan server build passed.
+- Live profiled run confirmed GPU routing and exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, and
+  identical decode-batcher metrics (`128` generated tokens, `120` submitted
+  jobs, `41` worker batches, max batch `3`). Wall time with profile logging was
+  `13.654032s`.
+- Batch-3 recurrent kernel-stage totals: `record_submit_wait` `903.843ms`,
+  `make_state_staging` `691.358ms`, `read_state` `485.890ms`,
+  `extract_state` `374.544ms`, `create_tensors` `198.909ms`,
+  `make_input_staging` `91.693ms`, and `read_output` only `8.663ms`.
+- Interpretation: input Q/K/V upload is small; the next credible Vulkan target
+  is persistent/resident recurrent state across live decode steps, not another
+  per-token state format conversion.

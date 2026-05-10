@@ -7730,3 +7730,87 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-candidate*-response_*.sse`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a124-gdn-recurrent-packed-bf16-state-rollback*-response_*.sse`
+
+## A125 - Vulkan GDN recurrent kernel stage profile
+
+Base commit: `b851433f Document rejected Vulkan BF16 state packing`
+
+Source change:
+
+- Added profile-only Vulkan recurrent kernel-stage logging behind
+  `KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES=1`.
+- Logged stages cover input extraction, state extraction, input/state staging,
+  output buffer creation, pipeline/descriptor setup, record/submit/wait,
+  output readback, state readback, and output/state tensor creation.
+- The flag is disabled by default. CUDA and Metal source paths are untouched.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`35 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Live profile:
+
+- Model: `Qwen3.5-4B`
+- Backend: Vulkan, RADV STRIX_HALO.
+- `KILN_PREFIX_CACHE_ENABLED=false`
+- `KILN_DECODE_BATCH_WAIT_US=5000`
+- `KILN_DECODE_BATCH_MAX=3`
+- `KILN_PROFILE_GDN_STAGES=1`
+- `KILN_PROFILE_GDN_RECURRENT_INNER_STAGES=1`
+- `KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES=1`
+- Eight concurrent streaming chat requests, `max_tokens=16`,
+  `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Correctness:
+
+- Server log confirmed `Mode: GPU inference`, Vulkan GPU selection, and live
+  greedy decode batcher backend `vulkan`.
+- All requests returned HTTP 200.
+- All reasoning streams were empty.
+- Every visible response exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Metrics matched the expected decode-batcher shape: `128` generated tokens,
+  `120` submitted jobs, `41` worker batches, `120` batcher rows, max batch `3`,
+  and no request or batcher errors.
+- Wall time with profile logging was `13.654032s`.
+
+Batch-3 recurrent kernel-stage profile:
+
+- `record_submit_wait`: total `903.843ms`, count `936`, mean `0.966ms`.
+- `make_state_staging`: total `691.358ms`, count `936`, mean `0.739ms`.
+- `read_state`: total `485.890ms`, count `936`, mean `0.519ms`.
+- `extract_state`: total `374.544ms`, count `936`, mean `0.400ms`.
+- `create_tensors`: total `198.909ms`, count `936`, mean `0.213ms`.
+- `make_input_staging`: total `91.693ms`, count `936`, mean `0.098ms`.
+- `create_output_buffers`: total `25.053ms`, count `936`, mean `0.027ms`.
+- `read_output`: total `8.663ms`, count `936`, mean `0.009ms`.
+- `extract_inputs`: total `7.560ms`, count `936`, mean `0.008ms`.
+
+Interpretation:
+
+- Recurrent state movement and CPU tensor conversion dominate alongside
+  dispatch/wait. The input tensors are small by comparison.
+- A124's packed-state regression is consistent with this: changing transfer
+  format without eliminating per-token host conversion is not enough.
+- The next credible Vulkan target is persistent/resident recurrent state across
+  live decode steps, or an equivalent design that avoids upload/readback of
+  every layer's GDN state on every non-final token.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-gdn-recurrent-kernel-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a125-gdn-recurrent-kernel-stage-profile-response_*.sse`
