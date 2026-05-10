@@ -1,0 +1,139 @@
+{
+  "all_reasoning_empty": true,
+  "all_status_200": true,
+  "all_visible_text_expected": true,
+  "arm": "candidate",
+  "expected_visible_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "health": {
+    "active_adapter": null,
+    "adapters_loaded": 0,
+    "backend": "model",
+    "checks": [
+      {
+        "name": "model_loaded",
+        "pass": true
+      },
+      {
+        "name": "scheduler_responsive",
+        "pass": true
+      },
+      {
+        "name": "inference_prewarm_complete",
+        "pass": true
+      }
+    ],
+    "gpu_memory": {
+      "inference_memory_fraction": 0.7,
+      "kv_cache_gb": 65.7457152,
+      "model_gb": 9.15668992,
+      "total_vram_gb": 103.079215104,
+      "training_budget_gb": 28.176809984
+    },
+    "model": "qwen3.5-4b-kiln (32L, 16H, 4KV)",
+    "scheduler": {
+      "blocks_free": 125400,
+      "blocks_total": 125400,
+      "blocks_used": 0,
+      "running": 0,
+      "waiting": 0
+    },
+    "status": "ok",
+    "training": {
+      "active_job": null,
+      "queued": 0
+    },
+    "uptime_seconds": 11,
+    "version": "0.2.13"
+  },
+  "results": [
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.39081486100622,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 0,
+      "label": "alpha",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 13.275140483005089,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 1,
+      "label": "bravo",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 13.274542379003833,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 2,
+      "label": "charlie",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.617034962997423,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 3,
+      "label": "delta",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.389811818007729,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 4,
+      "label": "echo",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 13.43107624600816,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 5,
+      "label": "foxtrot",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.171170321002137,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 6,
+      "label": "golf",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 13.430867941002361,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 7,
+      "label": "hotel",
+      "reasoning_content": "",
+      "status": 200
+    }
+  ],
+  "wall_seconds": 13.435717779997503
+}

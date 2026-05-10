@@ -1,0 +1,8 @@
+{
+  "candidate_correct": true,
+  "candidate_speed_delta_pct": 0.41402665571177444,
+  "candidate_wall_delta_pct": -0.41231954289746575,
+  "candidate_wall_seconds": 13.435717779997503,
+  "rollback_correct": true,
+  "rollback_wall_seconds": 13.491345232992899
+}

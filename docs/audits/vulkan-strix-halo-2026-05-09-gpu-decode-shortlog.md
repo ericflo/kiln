@@ -697,3 +697,22 @@ Additional validation after rejected A126:
   `13.062450s` (`-2.557%` for the candidate).
 - Source change was removed after measurement; final source has no A126 runtime
   changes and CUDA/Metal source paths are untouched.
+
+Additional validation after rejected A127:
+
+- Temporarily changed Vulkan-only tensor I/O helpers to convert BF16 tensors
+  directly through Rust vectors instead of building intermediate Candle F32
+  tensors. Rollback env while present:
+  `KILN_DISABLE_VULKAN_FAST_BF16_TENSOR_IO=1`.
+- Candidate source passed `cargo fmt --check`,
+  `cargo check -p kiln-vulkan-kernel`, full Vulkan GDN parity (`35 passed`),
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, and release
+  Vulkan server build.
+- Four live A/B arms all confirmed GPU routing and exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Two-pair wall-time averages rejected the candidate: candidate `13.717110s`
+  vs rollback `13.589919s` (`-0.927%` for the candidate).
+- Source change was removed after measurement; final source has no A127 runtime
+  changes and CUDA/Metal source paths are untouched.

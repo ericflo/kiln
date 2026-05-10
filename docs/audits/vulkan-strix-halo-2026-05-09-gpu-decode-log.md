@@ -7885,3 +7885,76 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-candidate-response_*.sse`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a126-bf16-fused-gdn-rmsnorm-default-response_*.sse`
+
+## A127 - Rejected fast BF16 tensor I/O candidate
+
+Base commit: `18cca572 Document rejected Vulkan fused GDN BF16 trial`
+
+Purpose:
+
+- Test whether avoiding intermediate Candle F32 tensors in Vulkan BF16 tensor
+  upload/readback helpers reduces recurrent-state extraction/materialization
+  overhead.
+- The temporary candidate changed Vulkan-only helpers so BF16 CPU tensors were
+  read as `Vec<bf16>` and expanded directly into F32 upload bytes, and F32
+  readback bytes were rounded directly into `Vec<bf16>` before building the
+  CPU tensor.
+- Rollback env while the candidate was present:
+  `KILN_DISABLE_VULKAN_FAST_BF16_TENSOR_IO=1`.
+
+Validation while candidate source was present:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`35 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Correctness:
+
+- All four live A/B arms confirmed GPU routing: `Mode: GPU inference`, Vulkan
+  available, RADV STRIX_HALO selected, and live greedy decode batcher backend
+  `vulkan`.
+- Every arm returned `8/8` HTTP 200, empty reasoning, and visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every arm used `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`,
+  `max_tokens=16`, `temperature=0`, streaming chat, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+
+Performance:
+
+- Pair 1, candidate first: candidate `13.435718s`, rollback `13.491345s`,
+  candidate delta `+0.414%`.
+- Pair 2, rollback first: rollback `13.688492s`, candidate `13.998502s`,
+  candidate delta `-2.215%`.
+- Two-pair averages: candidate `13.717110s`, rollback `13.589919s`,
+  candidate delta `-0.927%`.
+
+Interpretation:
+
+- Correctness was clean, but the average was slower.
+- Direct Rust vector conversion did not beat Candle's BF16/F32 conversion path
+  in the live recurrent-state loop; avoiding host conversion entirely remains
+  the more credible target.
+- Source changes were removed after measurement. Final source has no A127
+  runtime changes, and CUDA/Metal source paths remain untouched.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-decision-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-pair2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-candidate2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-rollback2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a127-fast-bf16-tensor-io-*-response_*.sse`

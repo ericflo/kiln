@@ -1,0 +1,9 @@
+A127 rejected fast BF16 tensor I/O candidate
+candidate_wall_seconds=13.435718,13.998502
+rollback_wall_seconds=13.491345,13.688492
+candidate_avg_wall_seconds=13.717110
+rollback_avg_wall_seconds=13.589919
+candidate_speed_delta_pct_avg=-0.927
+candidate_wall_regression_pct_avg=0.936
+all_runs_correct=true
+verdict=reject

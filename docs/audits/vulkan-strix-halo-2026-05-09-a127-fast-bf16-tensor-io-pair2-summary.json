@@ -1,0 +1,11 @@
+{
+  "candidate_speed_delta_pct_avg": -0.927245916512276,
+  "candidate_wall_seconds_avg": 13.717110124998726,
+  "rollback_wall_seconds_avg": 13.589918781501183,
+  "runs": {
+    "candidate": 13.435717779997503,
+    "candidate2": 13.998502469999949,
+    "rollback": 13.491345232992899,
+    "rollback2": 13.688492330009467
+  }
+}
