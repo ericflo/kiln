@@ -37,6 +37,12 @@ pub fn select_device_with_options(cuda_graphs: bool) -> Result<Device> {
         // availability ourselves. The Vulkan backend manages its own vk::Device.
         if kiln_model::backend::vulkan::vulkan_is_available() {
             tracing::info!("Vulkan available — using Vulkan GPU (AMD/Intel)");
+            // Tell the rest of the process (forward.rs, trainer.rs) that
+            // Vulkan is active even though the candle device reports as
+            // Device::Cpu. Lets `projection_original_drop_enabled_for_device`
+            // and similar guards fire without having to thread a backend
+            // handle through every call site.
+            kiln_model::backend::mark_vulkan_active();
             return Ok(Device::Cpu); // Vulkan backend manages its own device
         }
     }

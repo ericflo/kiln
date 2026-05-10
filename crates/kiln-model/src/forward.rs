@@ -2020,6 +2020,7 @@ fn keep_projection_originals_enabled() -> bool {
 fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
     !keep_projection_originals_enabled()
         && (matches!(device, Device::Metal(_) | Device::Cuda(_))
+            || crate::backend::vulkan_active()
             || drop_projection_originals_enabled())
 }
 

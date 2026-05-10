@@ -20,6 +20,32 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Process-global flag set when Vulkan is the active backend.
+///
+/// candle-core has no `Device::Vulkan`, so call sites in `forward.rs` and
+/// `trainer.rs` see `Device::Cpu` even when the real compute lives on a
+/// `vk::Device`. They use this flag to choose Vulkan-aware behavior
+/// (e.g., always dropping the per-projection candle CPU originals after
+/// upload, since on Vulkan they would double the system-RAM footprint
+/// of every weight) without having to thread a `BackendRuntime` handle
+/// through every helper.
+static VULKAN_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Mark that the Vulkan backend has been selected for this process.
+///
+/// Idempotent. Safe to call from device-selection paths and from
+/// `for_device`'s Vulkan arm so the flag is set even when tests skip
+/// the server-level device selection.
+pub fn mark_vulkan_active() {
+    VULKAN_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Returns true once `mark_vulkan_active()` has been called in this process.
+pub fn vulkan_active() -> bool {
+    VULKAN_ACTIVE.load(Ordering::Relaxed)
+}
 
 pub mod cpu;
 
@@ -781,6 +807,7 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
             #[cfg(feature = "vulkan")]
             {
                 if vulkan::vulkan_is_available() {
+                    mark_vulkan_active();
                     return Arc::new(vulkan::VulkanBackend::new(device.clone()));
                 }
             }
