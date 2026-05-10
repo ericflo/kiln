@@ -1033,7 +1033,38 @@ pub struct LinearAttentionState {
 impl LinearAttentionState {
     /// Create fresh zero-initialized state for all linear attention layers.
     pub fn new(config: &kiln_core::config::ModelConfig, device: &Device) -> Result<Self> {
-        Self::new_with_batch(config, 1, device)
+        Self::new_with_batch_and_recurrent_dtype(
+            config,
+            1,
+            device,
+            Self::training_recurrent_dtype(config, device),
+        )
+    }
+
+    /// Create fresh inference state for all linear attention layers.
+    ///
+    /// CUDA/Metal inference uses the same dtype as the model weights so decode
+    /// does not cast every GDN recurrent state into and back out of the hot
+    /// kernel dtype on every token. `new` keeps the training/test default.
+    pub fn new_for_inference(
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::new_with_batch_for_inference(config, 1, device)
+    }
+
+    /// Create fresh inference state for `batch` independent decode rows.
+    pub fn new_with_batch_for_inference(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+    ) -> Result<Self> {
+        Self::new_with_batch_and_recurrent_dtype(
+            config,
+            batch,
+            device,
+            Self::inference_recurrent_dtype(config, device),
+        )
     }
 
     /// Create fresh zero-initialized state for all linear attention layers and
@@ -1043,6 +1074,46 @@ impl LinearAttentionState {
         batch: usize,
         device: &Device,
     ) -> Result<Self> {
+        Self::new_with_batch_and_recurrent_dtype(
+            config,
+            batch,
+            device,
+            Self::training_recurrent_dtype(config, device),
+        )
+    }
+
+    fn training_recurrent_dtype(config: &kiln_core::config::ModelConfig, device: &Device) -> DType {
+        match (device, config.dtype) {
+            (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
+            (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
+            _ => DType::F32,
+        }
+    }
+
+    fn inference_recurrent_dtype(
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> DType {
+        let cuda_bf16_state_disabled =
+            std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_ok();
+        match (device, config.dtype) {
+            (Device::Cuda(_), _) if cuda_bf16_state_disabled => {
+                Self::training_recurrent_dtype(config, device)
+            }
+            (Device::Cuda(_), kiln_core::config::DType::BF16)
+            | (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
+            (Device::Cuda(_), kiln_core::config::DType::FP16)
+            | (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
+            _ => DType::F32,
+        }
+    }
+
+    fn new_with_batch_and_recurrent_dtype(
+        config: &kiln_core::config::ModelConfig,
+        batch: usize,
+        device: &Device,
+        recurrent_dtype: DType,
+    ) -> Result<Self> {
         anyhow::ensure!(batch > 0, "LinearAttentionState batch must be positive");
         let num_linear_layers = config.num_layers - config.num_full_attention_layers;
         let nv = config.linear_num_value_heads;
@@ -1050,11 +1121,6 @@ impl LinearAttentionState {
         let dv = config.linear_value_head_dim;
         let conv_dim = config.linear_qkv_dim();
         let k_minus_1 = config.linear_conv_kernel_dim.saturating_sub(1);
-        let recurrent_dtype = match (device, config.dtype) {
-            (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
-            (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
-            _ => DType::F32,
-        };
 
         let mut recurrent_states = Vec::with_capacity(num_linear_layers);
         let mut conv_states = Vec::with_capacity(num_linear_layers);

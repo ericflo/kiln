@@ -719,7 +719,7 @@ fn bench_latency(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -872,7 +872,7 @@ fn bench_latency_paged(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
 
     // Build a block table that maps logical block i -> physical block i (sequential).
@@ -1433,7 +1433,7 @@ fn bench_latency_skiplayer(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
 
     let eos_token_ids = tokenizer.eos_token_ids();
@@ -1642,7 +1642,7 @@ fn bench_latency_paged_skiplayer(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
 
     let mut block_table = BlockTable::new();
@@ -1918,7 +1918,7 @@ fn bench_latency_paged_mtp(
         dtype,
         device,
     )?;
-    let mut linear_state = LinearAttentionState::new(config, device)?;
+    let mut linear_state = LinearAttentionState::new_for_inference(config, device)?;
     let backend = runtime_backend_for_bench(device, weights)?;
 
     let mut base_block_table = BlockTable::new();

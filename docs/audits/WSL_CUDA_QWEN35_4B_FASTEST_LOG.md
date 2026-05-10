@@ -306,3 +306,61 @@ Post-push live training smoke on the same pushed HEAD:
 - training logs confirmed `gradient checkpointing enabled` with 32 one-layer
   segments and `fused_path="OFF"` for the RMSNorm training gate on the 16 GiB
   GPU.
+
+## Follow-Up: CUDA BF16 Inference GDN State
+
+Default CUDA inference now creates `LinearAttentionState` recurrent tensors in
+the model dtype for BF16/FP16 inference. The training/test constructor remains
+unchanged. This removes the per-token GDN decode cast cycle where each of the
+24 GDN layers converted recurrent state F32 -> BF16 for the fused decode kernel
+and then BF16 -> F32 after the layer. Since the BF16 kernel already quantizes
+the state update each step, keeping inference state BF16 removes overhead
+without changing the effective decode precision.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_BF16_INFERENCE_STATE=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, default CUDA graphs still off, 64-token
+greedy chat completions:
+
+| path | warmed seconds | completion tok/s |
+| --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE=1` | 2.7920 | 22.92 |
+| default BF16 inference state | 2.6879 | 23.81 |
+
+Raw warmed timings:
+
+```text
+rollback: 2.730052, 2.746741, 2.719610, 2.836108, 2.927611
+default:  2.694294, 2.683983, 2.681245, 2.699614, 2.680242
+```
+
+The 32-token greedy parity prompt still returned the expected eager prefix:
+
+```text
+Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Topic: A blue cube on a desk.\n    *   Constraint:
+```
+
+Validation:
+
+```bash
+cargo fmt
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-model linear_attention_state --lib --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_TERM_COLOR=never cargo build --quiet --release --features cuda --bin kiln
+```
+
+Live training + LoRA inference smoke on the candidate binary:
+
+- temporary adapter dir: `/tmp/kiln-adapters-bf16state-smoke`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=5678`, `auto_load=true`;
+- job id: `37e08d7f-daff-4682-bd21-050b1d476f31`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.0715702772140503`;
+- `/health` reported `active_adapter="bf16-state-smoke"`;
+- a LoRA-backed `/v1/chat/completions` request completed with the active
+  adapter.

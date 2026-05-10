@@ -66,3 +66,20 @@ Date: 2026-05-09
   one rank-1 example, `epochs=1`, `seed=1234`, final loss
   `0.9267818927764893`; logs confirmed 32 checkpoint segments and
   `fused_path="OFF"` for the small-GPU RMSNorm training gate.
+- Accepted CUDA BF16 inference GDN state:
+  `ModelRunner` and inference benches now create recurrent state in model dtype
+  on CUDA/Metal inference while leaving the training/test constructor
+  unchanged. Rollback: `KILN_DISABLE_CUDA_BF16_INFERENCE_STATE=1`.
+- Same-binary WSL CUDA A/B, 64-token greedy completions:
+  rollback warmed `2.7920s` (22.92 tok/s) vs default `2.6879s`
+  (23.81 tok/s), a 3.7% latency win. The 32-token parity prompt kept the
+  expected `Thinking Process:\n\n1.  **Analyze the Request:**` prefix.
+- BF16-state validation:
+  `cargo fmt`;
+  `cargo test -p kiln-model linear_attention_state --lib --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln`.
+- Live training + LoRA inference smoke on the candidate binary completed:
+  one rank-1 SFT example auto-loaded `bf16-state-smoke`, final loss
+  `1.0715702772140503`, `/health` reported the active adapter, and an
+  adapter-backed chat request completed.
