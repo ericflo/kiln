@@ -738,3 +738,31 @@ Additional validation after A128:
   candidate `13.480531s` vs rollback `13.614510s` (`+0.994%` speed delta).
 - CUDA and Metal source paths are untouched. This is not the broader
   recurrent-state residency fix; that remains the next primary target.
+
+Additional validation after rejected A129:
+
+- Implemented a Vulkan-only resident recurrent-state candidate that can keep
+  native-head GDN recurrent state in device-local buffers across live decode
+  batcher steps, with row-to-batch assembly and batch-to-row scatter.
+- Validation passed: `cargo fmt --check`,
+  `cargo check -p kiln-vulkan-kernel`, focused resident native-head parity,
+  full Vulkan GDN parity (`37 passed`),
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, and release
+  Vulkan server build.
+- After rebasing onto `aafffa40 Fold CUDA GDN QK norm into recurrent`,
+  reran diff/fmt checks, default CPU model/server checks, Vulkan
+  model/server checks, full Vulkan GDN parity (`37 passed`), and release
+  Vulkan server build. CUDA local checking is blocked before Rust
+  type-checking because this host has no `nvcc`.
+- Corrected live A/B used eight distinct prompts to avoid deterministic cache
+  collapse. Both candidate and rollback were GPU-routed, HTTP 200 for all
+  streams, empty-reasoning, exact visible text, and real batcher shape:
+  `120` jobs, `41` batches, `120` rows, max batch `3`.
+- Performance regressed: candidate `30.643539s`, rollback `27.510624s`,
+  delta `-10.224%`.
+- Decision: keep the code path opt-in only via
+  `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`; final default routing
+  remains rollback/non-resident. The kept scaffolding preserves non-blocking
+  runner-busy fallback and avoids dropping batch resident buffers before row
+  scatter succeeds.

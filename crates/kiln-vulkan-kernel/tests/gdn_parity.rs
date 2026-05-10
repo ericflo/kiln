@@ -1920,6 +1920,145 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
 }
 
 #[test]
+fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, q_heads, gqa_ratio, dk, dv) = (2usize, 2usize, 3usize, 64usize, 5usize);
+    let heads = q_heads * gqa_ratio;
+    let make_q = |scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * q_heads * dk)
+                .map(|i| ((i as f32 % 19.0) - 9.0) * scale)
+                .collect(),
+            (batch, 1, q_heads, dk),
+        )
+    };
+    let make_k = |scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * q_heads * dk)
+                .map(|i| ((i as f32 % 23.0) - 11.0) * scale)
+                .collect(),
+            (batch, 1, q_heads, dk),
+        )
+    };
+    let make_v = |scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * heads * dv)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * scale)
+                .collect(),
+            (batch, 1, heads, dv),
+        )
+    };
+    let make_beta = |base: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * heads)
+                .map(|i| base + (i as f32) * 0.031)
+                .collect(),
+            (batch, 1, heads),
+        )
+    };
+    let make_g = |base: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..batch * heads)
+                .map(|i| base - (i as f32) * 0.017)
+                .collect(),
+            (batch, 1, heads),
+        )
+    };
+    let state0 = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let q1 = make_q(0.011)?;
+    let k1 = make_k(-0.009)?;
+    let v1 = make_v(0.013)?;
+    let beta1 = make_beta(0.21)?;
+    let g1 = make_g(-0.03)?;
+    let q2 = make_q(-0.007)?;
+    let k2 = make_k(0.015)?;
+    let v2 = make_v(-0.019)?;
+    let beta2 = make_beta(0.17)?;
+    let g2 = make_g(-0.02)?;
+
+    let (expected_out1, expected_state1) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state0, false,
+        )
+        .context("native-head readback step 1")?;
+    let expected_state1 = expected_state1.context("native-head readback state 1")?;
+    let (expected_out2, expected_state2) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &expected_state1,
+            false,
+        )
+        .context("native-head readback step 2")?;
+    let expected_state2 = expected_state2.context("native-head readback state 2")?;
+
+    let (resident_out1, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
+            &vk, &q1, &k1, &v1, &beta1, &g1, &state0, None,
+        )
+        .context("native-head resident step 1")?;
+    let (resident_out2, resident_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
+            &vk,
+            &q2,
+            &k2,
+            &v2,
+            &beta2,
+            &g2,
+            &state0,
+            Some(resident_state),
+        )
+        .context("native-head resident step 2")?;
+    let resident_state_data = kiln_vulkan_kernel::VulkanBuffer::read_back(
+        vk.device(),
+        vk.host_visible_mem_type(),
+        vk.queue(),
+        vk.queue_family_index(),
+        &resident_state,
+    )
+    .context("read back resident native-head state")?;
+    let resident_state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &resident_state_data,
+        state0.dims(),
+        state0.dtype(),
+    )?;
+
+    assert_close(
+        "resident native-head out step1",
+        &resident_out1,
+        &expected_out1,
+        5e-4,
+    )?;
+    assert_close(
+        "resident native-head out step2",
+        &resident_out2,
+        &expected_out2,
+        5e-4,
+    )?;
+    assert_close(
+        "resident native-head state step2",
+        &resident_state,
+        &expected_state2,
+        1e-3,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

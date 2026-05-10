@@ -1,0 +1,26 @@
+{
+  "candidate_wall_sec": 30.643538999996963,
+  "rollback_wall_sec": 27.51062448300945,
+  "candidate_speed_delta_pct": -10.223735962702685,
+  "candidate_correct": true,
+  "rollback_correct": true,
+  "candidate_metrics": {
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "executed_batches": 41.0,
+    "executed_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "rollback_metrics": {
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "executed_batches": 41.0,
+    "executed_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "decision": "reject for default routing; final source keeps the resident row/batch path opt-in behind KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1",
+  "candidate_summary": "vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-candidate-summary.json",
+  "rollback_summary": "vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-rollback-summary.json"
+}

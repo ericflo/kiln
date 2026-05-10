@@ -8039,3 +8039,97 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a128-unexpanded-qk-recurrent-*-response_*.sse`
+
+## A129 - Rejected default Vulkan resident recurrent batcher state
+
+Initial base commit: `9d50f3a4 Use unexpanded Vulkan GDN recurrent QK`
+Landing base after user-requested rebase: `aafffa40 Fold CUDA GDN QK norm into recurrent`
+
+Purpose:
+
+- Wire the existing Vulkan resident recurrent-state idea into the live decode
+  ownership path instead of only keeping a backend-local primitive.
+- The candidate added Vulkan row/batch resident-state buffer copies so the
+  decode batcher can assemble per-request resident rows into each transient
+  batch recurrent tensor and scatter the updated batch buffer back to
+  per-request resident rows after the forward pass.
+- It also added a native-head resident recurrent dispatch matching A128's
+  unexpanded Q/K path, plus safe materialization hooks for mixed resident/non-
+  resident rows and runner-busy/error fallback.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused resident native-head parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_native_head_last_resident_state_matches_readback_path -- --nocapture`
+- Full Vulkan GDN parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity -- --nocapture`
+  (`37 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- After rebasing onto `aafffa40`, reran `git diff --check`,
+  `cargo fmt --check`, JSON validation for the pair summary,
+  `cargo check -p kiln-vulkan-kernel`, focused resident native-head parity,
+  full Vulkan GDN parity (`37 passed`), `cargo check -p kiln-model`,
+  `cargo check -p kiln-server --bin kiln`,
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`, and
+  `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Local CUDA feature checking is blocked on this host before Rust type-checking:
+  `cargo check -p kiln-model --features cuda` fails in `cudarc` and
+  `candle-kernels` build scripts because `nvcc` is not installed.
+
+Correctness:
+
+- Candidate and rollback both confirmed GPU routing in server logs: `Mode: GPU
+  inference`, Vulkan available, RADV STRIX_HALO selected, and live greedy
+  decode batcher backend `vulkan`.
+- Corrected live A/B used eight distinct prompts (`alpha` through `hotel`) to
+  avoid deterministic request-cache collapse, with
+  `KILN_PREFIX_CACHE_ENABLED=false`, `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_DECODE_BATCH_MAX=3`, `max_tokens=16`, `temperature=0`, streaming chat,
+  and `chat_template_kwargs: {"enable_thinking": false}`.
+- Candidate and rollback both returned `8/8` HTTP 200, empty reasoning, and
+  visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Batcher counters matched A128's real live-batch shape in both arms: `120`
+  submitted jobs, `41` worker batches, `120` rows, max batch `3`, no
+  runner-busy or failed jobs.
+
+Performance:
+
+- Candidate resident row/batch state: `30.643539s`.
+- Rollback (`KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1`): `27.510624s`.
+- Candidate delta: `-10.224%` versus rollback.
+
+Interpretation:
+
+- The resident row/batch state path is correct, but it is slower at the
+  current live Strix Halo batch shape. The extra GPU row-to-batch and
+  batch-to-row buffer copies cost more than the saved recurrent-state
+  readback/upload.
+- Final source does not leave this default-on. The resident row/batch path is
+  retained only as an opt-in experiment behind
+  `KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1` for future lower-level
+  fusion work.
+- The kept opt-in scaffolding preserves the existing non-blocking
+  runner-busy fallback by using the batcher worker's cloned backend handle for
+  any resident-state materialization, and it keeps batch resident buffers
+  cached until row scatter succeeds.
+- CUDA and Metal source paths remain behind no-op backend trait defaults; their
+  implementations were not changed.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-response_*.sse`

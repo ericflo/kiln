@@ -1,0 +1,10 @@
+A129 Vulkan resident recurrent batcher candidate
+candidate_wall_sec=30.643539
+rollback_wall_sec=27.510624
+candidate_speed_delta_pct=-10.224
+candidate_correct=True
+rollback_correct=True
+candidate_metrics={'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'executed_batches': 41.0, 'executed_rows': 120.0, 'max_observed_batch': 3.0}
+rollback_metrics={'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'executed_batches': 41.0, 'executed_rows': 120.0, 'max_observed_batch': 3.0}
+expected_text=eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,
+decision=rejected for default routing; final source keeps the resident row/batch path opt-in behind KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE=1

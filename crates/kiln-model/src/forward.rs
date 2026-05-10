@@ -1400,6 +1400,126 @@ impl LinearAttentionState {
         Ok(())
     }
 
+    /// Assemble backend-resident recurrent row buffers into this batched state.
+    ///
+    /// The CPU tensors still carry the same shapes/dtypes as the portable
+    /// path, but a backend may bind device-resident state buffers to their
+    /// tensor IDs so the decode recurrent kernel can avoid re-uploading stale
+    /// CPU state.
+    pub fn assemble_gdn_recurrent_resident_batch_rows(
+        &self,
+        backend: &dyn BackendRuntime,
+        rows: &[&Self],
+    ) -> Result<bool> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            rows.len() == batch,
+            "LinearAttentionState::assemble_gdn_recurrent_resident_batch_rows row count mismatch ({} vs {})",
+            rows.len(),
+            batch
+        );
+        let mut assembled_any = false;
+        for layer_idx in 0..self.recurrent_states.len() {
+            let row_tensors: Vec<&Tensor> = rows
+                .iter()
+                .map(|row| &row.recurrent_states[layer_idx])
+                .collect();
+            assembled_any |= backend.assemble_gdn_recurrent_resident_batch_rows(
+                &row_tensors,
+                &self.recurrent_states[layer_idx],
+            )?;
+        }
+        Ok(assembled_any)
+    }
+
+    /// Replace one-row destination tensors, preserving backend-resident
+    /// recurrent state when the backend owns a fresher batch buffer.
+    pub fn scatter_batch_rows_replace_with_backend(
+        &self,
+        backend: &dyn BackendRuntime,
+        destinations: &mut [&mut Self],
+    ) -> Result<()> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            destinations.len() == batch,
+            "LinearAttentionState::scatter_batch_rows_replace_with_backend destination count mismatch ({} vs {})",
+            destinations.len(),
+            batch
+        );
+
+        for (row_idx, dst) in destinations.iter_mut().enumerate() {
+            anyhow::ensure!(
+                dst.recurrent_states.len() == self.recurrent_states.len(),
+                "LinearAttentionState::scatter_batch_rows_replace_with_backend recurrent layer count mismatch for row {row_idx} ({} vs {})",
+                dst.recurrent_states.len(),
+                self.recurrent_states.len()
+            );
+            anyhow::ensure!(
+                dst.conv_states.len() == self.conv_states.len(),
+                "LinearAttentionState::scatter_batch_rows_replace_with_backend conv layer count mismatch for row {row_idx} ({} vs {})",
+                dst.conv_states.len(),
+                self.conv_states.len()
+            );
+        }
+
+        for layer_idx in 0..self.recurrent_states.len() {
+            let mut dst_tensors: Vec<&mut Tensor> = destinations
+                .iter_mut()
+                .map(|dst| &mut dst.recurrent_states[layer_idx])
+                .collect();
+            if !backend.scatter_gdn_recurrent_resident_batch_rows(
+                &self.recurrent_states[layer_idx],
+                &mut dst_tensors,
+            )? {
+                for (row_idx, dst_tensor) in dst_tensors.into_iter().enumerate() {
+                    *dst_tensor = self.recurrent_states[layer_idx]
+                        .narrow(0, row_idx, 1)?
+                        .contiguous()?;
+                }
+            }
+        }
+
+        for layer_idx in 0..self.conv_states.len() {
+            for (row_idx, dst) in destinations.iter_mut().enumerate() {
+                dst.conv_states[layer_idx] = self.conv_states[layer_idx]
+                    .narrow(0, row_idx, 1)?
+                    .contiguous()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn materialize_gdn_recurrent_resident_states(
+        &mut self,
+        backend: &dyn BackendRuntime,
+    ) -> Result<()> {
+        for state in &mut self.recurrent_states {
+            backend.materialize_gdn_recurrent_resident_state(state)?;
+        }
+        Ok(())
+    }
+
+    pub fn evict_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) {
+        for state in &self.recurrent_states {
+            backend.evict_gdn_recurrent_resident_state(state);
+        }
+    }
+
+    pub fn has_any_gdn_recurrent_resident_state(&self, backend: &dyn BackendRuntime) -> bool {
+        self.recurrent_states
+            .iter()
+            .any(|state| backend.has_gdn_recurrent_resident_state(state))
+    }
+
+    pub fn has_all_gdn_recurrent_resident_states(&self, backend: &dyn BackendRuntime) -> bool {
+        !self.recurrent_states.is_empty()
+            && self
+                .recurrent_states
+                .iter()
+                .all(|state| backend.has_gdn_recurrent_resident_state(state))
+    }
+
     /// Capture the current GDN recurrent + conv state into a fresh shadow
     /// `LinearAttentionState`. Used by speculative decoding to preserve the
     /// base model's O(1) GDN state before advancing into a draft: if any

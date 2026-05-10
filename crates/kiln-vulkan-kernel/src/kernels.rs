@@ -6080,6 +6080,183 @@ pub fn dispatch_gdn_recurrent_step(
     Ok((out, state))
 }
 
+pub fn copy_gdn_recurrent_state_rows_to_batch(
+    vk_device: &VulkanDevice,
+    rows: &[Arc<VulkanBuffer>],
+) -> Result<Arc<VulkanBuffer>> {
+    anyhow::ensure!(
+        !rows.is_empty(),
+        "copy_gdn_recurrent_state_rows_to_batch requires at least one row"
+    );
+    let row_size = rows[0].size();
+    anyhow::ensure!(
+        row_size > 0,
+        "copy_gdn_recurrent_state_rows_to_batch row size must be non-zero"
+    );
+    for (idx, row) in rows.iter().enumerate() {
+        anyhow::ensure!(
+            row.size() == row_size,
+            "copy_gdn_recurrent_state_rows_to_batch row {idx} size {} != row 0 size {row_size}",
+            row.size()
+        );
+    }
+
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let batch_buf = Arc::new(VulkanBuffer::create_device_local(
+        device,
+        device_local_mt,
+        row_size * rows.len() as u64,
+    )?);
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate recurrent row-to-batch copy command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin recurrent row-to-batch copy command buffer")?;
+        for (row_idx, row) in rows.iter().enumerate() {
+            device.cmd_copy_buffer(
+                cmd,
+                row.handle(),
+                batch_buf.handle(),
+                &[vk::BufferCopy::builder()
+                    .src_offset(0)
+                    .dst_offset(row_size * row_idx as u64)
+                    .size(row_size)
+                    .build()],
+            );
+        }
+        let copy_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[copy_barrier],
+            &[],
+            &[],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end recurrent row-to-batch copy command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit recurrent row-to-batch copy")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for recurrent row-to-batch copy")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    Ok(batch_buf)
+}
+
+pub fn split_gdn_recurrent_state_batch_rows(
+    vk_device: &VulkanDevice,
+    batch_buffer: &VulkanBuffer,
+    batch: usize,
+) -> Result<Vec<Arc<VulkanBuffer>>> {
+    anyhow::ensure!(
+        batch > 0,
+        "split_gdn_recurrent_state_batch_rows requires a non-zero batch"
+    );
+    anyhow::ensure!(
+        batch_buffer.size() % batch as u64 == 0,
+        "split_gdn_recurrent_state_batch_rows buffer size {} is not divisible by batch {batch}",
+        batch_buffer.size()
+    );
+    let row_size = batch_buffer.size() / batch as u64;
+    anyhow::ensure!(
+        row_size > 0,
+        "split_gdn_recurrent_state_batch_rows row size must be non-zero"
+    );
+
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let mut rows = Vec::with_capacity(batch);
+    for _ in 0..batch {
+        rows.push(Arc::new(VulkanBuffer::create_device_local(
+            device,
+            device_local_mt,
+            row_size,
+        )?));
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate recurrent batch-to-row copy command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin recurrent batch-to-row copy command buffer")?;
+        let pre_copy_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[pre_copy_barrier],
+            &[],
+            &[],
+        );
+        for (row_idx, row) in rows.iter().enumerate() {
+            device.cmd_copy_buffer(
+                cmd,
+                batch_buffer.handle(),
+                row.handle(),
+                &[vk::BufferCopy::builder()
+                    .src_offset(row_size * row_idx as u64)
+                    .dst_offset(0)
+                    .size(row_size)
+                    .build()],
+            );
+        }
+        let post_copy_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[post_copy_barrier],
+            &[],
+            &[],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end recurrent batch-to-row copy command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit recurrent batch-to-row copy")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for recurrent batch-to-row copy")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    Ok(rows)
+}
+
 pub fn dispatch_gdn_recurrent_step_with_options(
     vk_device: &VulkanDevice,
     q: &Tensor,
@@ -6574,6 +6751,304 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     let out_shape = vec![batch, heads, dv];
     let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
     Ok((out_tensor, state_buf))
+}
+
+/// Dispatch a native-head single-token recurrent step while keeping `state`
+/// resident. `q`/`k` are `[batch, 1, q_heads, dk]`; value-side tensors and
+/// state use `heads`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    resident_state: Option<Arc<VulkanBuffer>>,
+) -> Result<(Tensor, Arc<VulkanBuffer>)> {
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
+    let (k_batch, k_seq_len, k_heads, k_dk) = k.dims4()?;
+    let (v_batch, v_seq_len, heads, dv) = v.dims4()?;
+    let (beta_batch, beta_seq_len, beta_heads) = beta.dims3()?;
+    let (g_batch, g_seq_len, g_heads) = g.dims3()?;
+    let (state_batch, state_heads, state_dk, state_dv) = state.dims4()?;
+
+    anyhow::ensure!(
+        seq_len == 1,
+        "native-head resident recurrent expects seq_len=1"
+    );
+    anyhow::ensure!(
+        (k_batch, k_seq_len, k_heads, k_dk) == (batch, seq_len, q_heads, dk),
+        "native-head resident recurrent k shape mismatch"
+    );
+    anyhow::ensure!(
+        (v_batch, v_seq_len) == (batch, seq_len),
+        "native-head resident recurrent v batch/seq mismatch"
+    );
+    anyhow::ensure!(
+        (beta_batch, beta_seq_len, beta_heads) == (batch, seq_len, heads),
+        "native-head resident recurrent beta shape mismatch"
+    );
+    anyhow::ensure!(
+        (g_batch, g_seq_len, g_heads) == (batch, seq_len, heads),
+        "native-head resident recurrent g shape mismatch"
+    );
+    anyhow::ensure!(
+        (state_batch, state_heads, state_dk, state_dv) == (batch, heads, dk, dv),
+        "native-head resident recurrent state shape mismatch"
+    );
+    anyhow::ensure!(
+        q_heads > 0,
+        "native-head resident recurrent q_heads must be positive"
+    );
+    anyhow::ensure!(
+        heads % q_heads == 0,
+        "native-head resident recurrent heads {heads} must be divisible by q_heads {q_heads}"
+    );
+
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let beta_data = extract_tensor_bytes(beta)?.0;
+    let g_data = extract_tensor_bytes(g)?.0;
+    let state_data = if resident_state.is_none() {
+        Some(extract_tensor_bytes(state)?.0)
+    } else {
+        None
+    };
+
+    let parallel_reduce = use_gdn_recurrent_parallel_reduce(dk, dv);
+    let glsl_path = if parallel_reduce {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_step_parallel.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_prefill.comp"
+        )
+    };
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+
+    let make_device_and_staging = |data: &[u8]| -> Result<(VulkanBuffer, VulkanBuffer)> {
+        let device_buf =
+            VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)?;
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)?;
+        VulkanBuffer::write_host_visible(device, &staging, data)?;
+        Ok((device_buf, staging))
+    };
+
+    let (q_buf, q_stage) = make_device_and_staging(&q_data)?;
+    let (k_buf, k_stage) = make_device_and_staging(&k_data)?;
+    let (v_buf, v_stage) = make_device_and_staging(&v_data)?;
+    let (beta_buf, beta_stage) = make_device_and_staging(&beta_data)?;
+    let (g_buf, g_stage) = make_device_and_staging(&g_data)?;
+
+    let state_buf = match resident_state {
+        Some(buffer) => buffer,
+        None => {
+            let data = state_data
+                .as_ref()
+                .expect("state data exists when resident state is absent");
+            Arc::new(VulkanBuffer::create_device_local(
+                device,
+                device_local_mt,
+                data.len() as u64,
+            )?)
+        }
+    };
+    let state_stage = if let Some(data) = &state_data {
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)?;
+        VulkanBuffer::write_host_visible(device, &staging, data)?;
+        Some(staging)
+    } else {
+        None
+    };
+
+    let out_size = (batch * heads * dv * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
+    let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, out_size)?;
+
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        heads as u32,
+        1,
+        dk as u32,
+        dv as u32,
+        q_heads as u32,
+    ];
+    let total = batch * heads * dv;
+    let workgroup_count = total.div_ceil(256) as u32;
+    let dispatch_counts = if parallel_reduce {
+        (batch as u32, heads as u32, dv as u32)
+    } else {
+        (workgroup_count, 1, 1)
+    };
+    let all_handles = vec![
+        q_buf.handle(),
+        k_buf.handle(),
+        v_buf.handle(),
+        beta_buf.handle(),
+        g_buf.handle(),
+        state_buf.handle(),
+        out_buf.handle(),
+    ];
+
+    let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
+        &spirv,
+        all_handles.len(),
+        (push_constants.len() * 4) as u32,
+    )?;
+    let set_layouts = vec![set_layout];
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate descriptor sets")?[0]
+    };
+
+    let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
+        .iter()
+        .map(|&h| {
+            vk::DescriptorBufferInfo::builder()
+                .buffer(h)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build()
+        })
+        .collect();
+    let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
+        .iter()
+        .enumerate()
+        .map(|(i, info)| make_write_descriptor_set_buf(descriptor_set, i as u32, info))
+        .collect();
+    unsafe {
+        device.update_descriptor_sets(&descriptor_writes, &[]);
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin command buffer")?;
+
+        for (src, dst, size) in [
+            (&q_stage, &q_buf, q_data.len() as u64),
+            (&k_stage, &k_buf, k_data.len() as u64),
+            (&v_stage, &v_buf, v_data.len() as u64),
+            (&beta_stage, &beta_buf, beta_data.len() as u64),
+            (&g_stage, &g_buf, g_data.len() as u64),
+        ] {
+            device.cmd_copy_buffer(
+                cmd,
+                src.handle(),
+                dst.handle(),
+                &[vk::BufferCopy::builder().size(size).build()],
+            );
+        }
+        if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
+            device.cmd_copy_buffer(
+                cmd,
+                state_stage.handle(),
+                state_buf.handle(),
+                &[vk::BufferCopy::builder()
+                    .size(state_data.len() as u64)
+                    .build()],
+            );
+        }
+
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            layout,
+            0,
+            &[descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(&push_constants),
+        );
+        device.cmd_dispatch(cmd, dispatch_counts.0, dispatch_counts.1, dispatch_counts.2);
+
+        let compute_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[compute_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            out_buf.handle(),
+            out_stage.handle(),
+            &[vk::BufferCopy::builder().size(out_size).build()],
+        );
+
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end command buffer")?;
+        device
+            .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+            .context("failed to submit native-head gdn recurrent resident-state dispatch")?;
+        device
+            .queue_wait_idle(queue)
+            .context("failed to wait for native-head gdn recurrent resident-state dispatch")?;
+
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
+    let out_shape = vec![batch, heads, dv];
+    let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
+    Ok((out_tensor.unsqueeze(1)?, state_buf))
 }
 
 #[allow(clippy::too_many_arguments)]

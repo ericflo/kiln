@@ -138,6 +138,28 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    fn evict_gdn_recurrent_resident_state(&self, _state: &Tensor) {}
+
+    fn has_gdn_recurrent_resident_state(&self, _state: &Tensor) -> bool {
+        false
+    }
+
+    fn assemble_gdn_recurrent_resident_batch_rows(
+        &self,
+        _rows: &[&Tensor],
+        _batch: &Tensor,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn scatter_gdn_recurrent_resident_batch_rows(
+        &self,
+        _batch: &Tensor,
+        _destinations: &mut [&mut Tensor],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }

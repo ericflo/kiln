@@ -1,0 +1,19 @@
+{
+  "model": "kiln",
+  "messages": [
+    {
+      "role": "system",
+      "content": "Continue sequences tersely and do not end early."
+    },
+    {
+      "role": "user",
+      "content": "Continue this comma-separated number sequence for a129 rollback request bravo: one, two, three, four, five, six, seven,"
+    }
+  ],
+  "max_tokens": 16,
+  "temperature": 0,
+  "stream": true,
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
+}

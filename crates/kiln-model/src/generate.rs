@@ -70,6 +70,26 @@ fn skip_final_gdn_state_readback_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK").is_err())
 }
 
+struct GdnRecurrentResidentStateScope<'a> {
+    backend: &'a dyn BackendRuntime,
+    active: bool,
+}
+
+impl<'a> GdnRecurrentResidentStateScope<'a> {
+    fn new(backend: &'a dyn BackendRuntime) -> Self {
+        let active = backend.enter_gdn_recurrent_resident_state_scope();
+        Self { backend, active }
+    }
+}
+
+impl Drop for GdnRecurrentResidentStateScope<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.backend.exit_gdn_recurrent_resident_state_scope();
+        }
+    }
+}
+
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -456,6 +476,11 @@ impl DecodeBatcher {
         config: DecodeBatcherConfig,
     ) -> Result<Arc<Self>> {
         let (sender, receiver) = mpsc::channel();
+        let backend = runner_lock
+            .read()
+            .map_err(|err| anyhow::anyhow!("failed to acquire model runner for batcher: {err}"))?
+            .backend
+            .clone();
         let counters = Arc::new(DecodeBatcherCounters {
             submitted_jobs: AtomicUsize::new(0),
             executed_batches: AtomicUsize::new(0),
@@ -471,6 +496,7 @@ impl DecodeBatcher {
                 run_decode_batcher_worker(
                     runner_lock,
                     paged_cache,
+                    backend,
                     receiver,
                     config,
                     counters_for_worker,
@@ -556,9 +582,21 @@ fn take_linear_attention_state(state: &mut LinearAttentionState) -> LinearAttent
     )
 }
 
+fn materialize_decode_job_resident_states(
+    backend: &dyn BackendRuntime,
+    jobs: &mut [DecodeBatchJob],
+) -> Result<()> {
+    for job in jobs {
+        job.linear_state
+            .materialize_gdn_recurrent_resident_states(backend)?;
+    }
+    Ok(())
+}
+
 fn run_decode_batcher_worker(
     runner_lock: Arc<std::sync::RwLock<ModelRunner>>,
     paged_cache: Arc<PagedKvCache>,
+    backend: Arc<dyn BackendRuntime>,
     receiver: mpsc::Receiver<DecodeBatchJob>,
     config: DecodeBatcherConfig,
     counters: Arc<DecodeBatcherCounters>,
@@ -613,13 +651,20 @@ fn run_decode_batcher_worker(
         counters
             .executed_rows
             .fetch_add(jobs.len(), Ordering::Relaxed);
-        process_decode_batch_jobs(&runner_lock, paged_cache.as_ref(), jobs, &counters);
+        process_decode_batch_jobs(
+            &runner_lock,
+            paged_cache.as_ref(),
+            &*backend,
+            jobs,
+            &counters,
+        );
     }
 }
 
 fn process_decode_batch_jobs(
     runner_lock: &std::sync::RwLock<ModelRunner>,
     paged_cache: &PagedKvCache,
+    fallback_backend: &dyn BackendRuntime,
     mut jobs: Vec<DecodeBatchJob>,
     counters: &DecodeBatcherCounters,
 ) {
@@ -629,6 +674,21 @@ fn process_decode_batch_jobs(
             counters
                 .runner_busy_jobs
                 .fetch_add(jobs.len(), Ordering::Relaxed);
+            if let Err(err) = materialize_decode_job_resident_states(fallback_backend, &mut jobs) {
+                let message = format!(
+                    "failed to materialize resident GDN state before runner-busy fallback: {err:#}"
+                );
+                counters
+                    .failed_jobs
+                    .fetch_add(jobs.len(), Ordering::Relaxed);
+                for job in jobs {
+                    let _ = job.response.send(DecodeBatchReply::Failed {
+                        error: message.clone(),
+                        linear_state: job.linear_state,
+                    });
+                }
+                return;
+            }
             for job in jobs {
                 let _ = job.response.send(DecodeBatchReply::RunnerBusy {
                     linear_state: job.linear_state,
@@ -637,7 +697,19 @@ fn process_decode_batch_jobs(
             return;
         }
         Err(std::sync::TryLockError::Poisoned(err)) => {
-            let message = format!("failed to acquire runner read lock in decode batcher: {err}");
+            let mut message =
+                format!("failed to acquire runner read lock in decode batcher: {err}");
+            if let Err(materialize_err) =
+                materialize_decode_job_resident_states(fallback_backend, &mut jobs)
+            {
+                tracing::warn!(
+                    error = %materialize_err,
+                    "failed to materialize resident GDN state after poisoned runner lock"
+                );
+                message = format!(
+                    "{message}; also failed to materialize resident GDN state: {materialize_err:#}"
+                );
+            }
             counters
                 .failed_jobs
                 .fetch_add(jobs.len(), Ordering::Relaxed);
@@ -651,6 +723,7 @@ fn process_decode_batch_jobs(
         }
     };
 
+    let backend = &*runner_guard.backend;
     let tokens = match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs) {
         Ok(tokens) => Ok(tokens),
         Err(err) if jobs.len() > 1 => {
@@ -685,6 +758,10 @@ fn process_decode_batch_jobs(
     match tokens {
         Ok(tokens) => {
             for (job, token) in jobs.into_iter().zip(tokens.into_iter()) {
+                if job.skip_gdn_state_readback {
+                    job.linear_state
+                        .evict_gdn_recurrent_resident_states(backend);
+                }
                 let _ = job.response.send(DecodeBatchReply::Decoded {
                     token,
                     linear_state: job.linear_state,
@@ -693,6 +770,13 @@ fn process_decode_batch_jobs(
         }
         Err(err) => {
             let message = format!("{err:#}");
+            if let Err(materialize_err) = materialize_decode_job_resident_states(backend, &mut jobs)
+            {
+                tracing::warn!(
+                    error = %materialize_err,
+                    "failed to materialize resident GDN state after decode batch error"
+                );
+            }
             counters
                 .failed_jobs
                 .fetch_add(jobs.len(), Ordering::Relaxed);
@@ -2391,6 +2475,7 @@ impl ModelRunner {
         seq_lens: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
     ) -> Result<Vec<TokenId>> {
+        let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         let profile_stages = profile_decode_batcher_stages_enabled();
         let total_start = profile_stages.then(std::time::Instant::now);
@@ -2440,10 +2525,33 @@ impl ModelRunner {
         }
 
         let stage_start = profile_stages.then(std::time::Instant::now);
+        if has_linear_layers {
+            let any_resident = linear_states
+                .iter()
+                .any(|state| state.has_any_gdn_recurrent_resident_state(&*self.backend));
+            let all_resident = any_resident
+                && linear_states
+                    .iter()
+                    .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
+            if any_resident && !all_resident {
+                for state in linear_states.iter_mut() {
+                    state.materialize_gdn_recurrent_resident_states(&*self.backend)?;
+                }
+            }
+        }
+
+        let all_rows_resident = has_linear_layers
+            && linear_states
+                .iter()
+                .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
         let mut batch_state = if has_linear_layers {
             let state_refs: Vec<&LinearAttentionState> =
                 linear_states.iter().map(|state| &**state).collect();
-            Some(LinearAttentionState::from_batch_rows(&state_refs)?)
+            let state = LinearAttentionState::from_batch_rows(&state_refs)?;
+            if all_rows_resident {
+                state.assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
+            }
+            Some(state)
         } else {
             None
         };
@@ -2470,7 +2578,7 @@ impl ModelRunner {
         if let Some(state) = batch_state.as_ref() {
             let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
-                state.scatter_batch_rows_replace(linear_states)?;
+                state.scatter_batch_rows_replace_with_backend(&*self.backend, linear_states)?;
                 finish_decode_batcher_stage_profile(
                     "batch_state_scatter_replace",
                     batch,
@@ -2497,13 +2605,14 @@ impl ModelRunner {
         step_seed: Option<u64>,
         skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
+        let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let _skip_scope =
             crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
         if params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            return model_forward_paged_next_token_greedy(
+            let token = model_forward_paged_next_token_greedy(
                 &*self.backend,
                 input_token,
                 &self.weights,
@@ -2515,7 +2624,11 @@ impl ModelRunner {
                 self.active_lora.as_ref(),
                 None,
             )
-            .context("greedy decode forward pass (paged) failed");
+            .context("greedy decode forward pass (paged) failed")?;
+            if skip_gdn_state_readback {
+                linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
+            }
+            return Ok(token);
         }
 
         let logits = {
@@ -2535,7 +2648,7 @@ impl ModelRunner {
             .context("decode forward pass (paged) failed")?
         };
 
-        if params.is_effectively_greedy() {
+        let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
         } else {
             sample_with_params(
@@ -2545,7 +2658,11 @@ impl ModelRunner {
                 params.top_k,
                 step_seed,
             )
+        }?;
+        if skip_gdn_state_readback {
+            linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
         }
+        Ok(token)
     }
 
     fn decode_next_token_paged_interleaved_or_batched(

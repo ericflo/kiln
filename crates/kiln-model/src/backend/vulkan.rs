@@ -83,11 +83,7 @@ fn fused_gdn_resident_state_enabled() -> bool {
 
 fn enter_recurrent_state_resident_scope() {
     RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
-        let previous = depth.get();
-        if previous == 0 {
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().clear());
-        }
-        depth.set(previous + 1);
+        depth.set(depth.get() + 1);
     });
 }
 
@@ -99,9 +95,6 @@ fn exit_recurrent_state_resident_scope() {
         }
         let next = previous - 1;
         depth.set(next);
-        if next == 0 {
-            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().clear());
-        }
     });
 }
 
@@ -167,7 +160,11 @@ impl VulkanBackend {
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
         let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
+        // Device-resident recurrent state is correct but regressed the live
+        // Strix Halo batcher A/B in A129 because row/batch buffer copies cost
+        // more than the saved readback/upload at the current batch shape.
         let recurrent_state_residency_enabled = gdn_enabled
+            && std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok()
             && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_err();
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
@@ -608,6 +605,139 @@ impl BackendRuntime for VulkanBackend {
             state.dtype(),
         )?;
         Ok(())
+    }
+
+    fn evict_gdn_recurrent_resident_state(&self, state: &Tensor) {
+        if !self.recurrent_state_residency_enabled {
+            return;
+        }
+        let state_id = state.id();
+        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+            cache.borrow_mut().remove(&state_id);
+        });
+    }
+
+    fn has_gdn_recurrent_resident_state(&self, state: &Tensor) -> bool {
+        if !self.recurrent_state_residency_enabled {
+            return false;
+        }
+        let state_id = state.id();
+        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&state_id))
+    }
+
+    fn assemble_gdn_recurrent_resident_batch_rows(
+        &self,
+        rows: &[&Tensor],
+        batch: &Tensor,
+    ) -> Result<bool> {
+        if !self.recurrent_state_residency_enabled
+            || !recurrent_state_resident_scope_active()
+            || !self.has_vulkan()
+            || rows.is_empty()
+        {
+            return Ok(false);
+        }
+        let Ok((batch_rows, heads, dk, dv)) = batch.dims4() else {
+            return Ok(false);
+        };
+        if rows.len() != batch_rows {
+            return Ok(false);
+        }
+        for row in rows {
+            let Ok((row_batch, row_heads, row_dk, row_dv)) = row.dims4() else {
+                return Ok(false);
+            };
+            if (row_batch, row_heads, row_dk, row_dv) != (1, heads, dk, dv)
+                || row.dtype() != batch.dtype()
+                || !matches!(row.device(), Device::Cpu)
+            {
+                return Ok(false);
+            }
+        }
+
+        let row_buffers = RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+            let cache = cache.borrow();
+            rows.iter()
+                .map(|row| cache.get(&row.id()).cloned())
+                .collect::<Option<Vec<_>>>()
+        });
+        let Some(row_buffers) = row_buffers else {
+            return Ok(false);
+        };
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let batch_buffer = kiln_vulkan_kernel::kernels::copy_gdn_recurrent_state_rows_to_batch(
+            vk_device,
+            &row_buffers,
+        )
+        .context("failed to assemble resident GDN recurrent batch rows")?;
+        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+            cache.borrow_mut().insert(batch.id(), batch_buffer);
+        });
+        Ok(true)
+    }
+
+    fn scatter_gdn_recurrent_resident_batch_rows(
+        &self,
+        batch: &Tensor,
+        destinations: &mut [&mut Tensor],
+    ) -> Result<bool> {
+        if !self.recurrent_state_residency_enabled
+            || !recurrent_state_resident_scope_active()
+            || !self.has_vulkan()
+            || destinations.is_empty()
+        {
+            return Ok(false);
+        }
+        let Ok((batch_rows, heads, dk, dv)) = batch.dims4() else {
+            return Ok(false);
+        };
+        if destinations.len() != batch_rows {
+            return Ok(false);
+        }
+        let batch_buffer =
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&batch.id()).cloned());
+        let Some(batch_buffer) = batch_buffer else {
+            return Ok(false);
+        };
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let row_buffers = kiln_vulkan_kernel::kernels::split_gdn_recurrent_state_batch_rows(
+            vk_device,
+            &batch_buffer,
+            batch_rows,
+        )
+        .context("failed to scatter resident GDN recurrent batch rows")?;
+
+        for (row_idx, (dst, row_buffer)) in destinations
+            .iter_mut()
+            .zip(row_buffers.into_iter())
+            .enumerate()
+        {
+            let old_id = dst.id();
+            let placeholder = batch.narrow(0, row_idx, 1)?.contiguous()?;
+            if placeholder.dtype() != batch.dtype()
+                || placeholder.dims() != [1, heads, dk, dv]
+                || !matches!(placeholder.device(), Device::Cpu)
+            {
+                return Ok(false);
+            }
+            **dst = placeholder;
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                cache.remove(&old_id);
+                cache.insert(dst.id(), row_buffer);
+            });
+        }
+        RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+            cache.borrow_mut().remove(&batch.id());
+        });
+
+        Ok(true)
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {
@@ -1638,6 +1768,30 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        if self.recurrent_state_residency_enabled
+            && recurrent_state_resident_scope_active()
+            && state.dtype() == q.dtype()
+        {
+            let state_id = state.id();
+            let resident_state =
+                RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
+            let (out, resident_state) =
+                kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state(
+                    vk_device,
+                    q,
+                    k,
+                    v,
+                    beta,
+                    g,
+                    state,
+                    resident_state,
+                )
+                .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
+            RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
+                cache.borrow_mut().insert(state_id, resident_state);
+            });
+            return Ok(Some(out));
+        }
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
         let (out, new_state) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
