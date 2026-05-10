@@ -1,0 +1,92 @@
+# A119 Current Vulkan Live Profile After Fast Linear-State Scatter
+
+Date: 2026-05-09
+
+Scope:
+
+- No source change.
+- Rebuilt the release Vulkan server on `main` after A118
+  (`197286ce reduce batched linear state scatter copies`).
+- Refresh live batch-3 correctness/profile evidence before selecting the next
+  optimization target.
+- CUDA and Metal source paths were untouched.
+
+Server:
+
+- Build command:
+  `cargo build --release -p kiln-server --bin kiln --features vulkan`.
+- Server command used `KILN_MODEL_PATH=Qwen3.5-4B`,
+  `KILN_PORT=18640`, `KILN_PREFIX_CACHE_ENABLED=false`,
+  `KILN_DECODE_BATCH_WAIT_US=5000`, `KILN_DECODE_BATCH_MAX=3`, and the
+  paged-layer/GDN/MLP/full-attention/Vulkan kernel profile flags.
+- The server log showed Vulkan initialization, Vulkan decode-weight prewarm,
+  and background inference prewarm completion before measurement.
+- The health waiter initially used the stale `checks[].status` shape; the
+  current health API reports `checks[].pass`. Manual health capture confirmed
+  `model_loaded`, `scheduler_responsive`, and `inference_prewarm_complete`.
+
+Correctness:
+
+- The valid probe used eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, and `chat_template_kwargs: {"enable_thinking": false}`.
+- All 8 requests returned HTTP 200.
+- All 8 visible texts exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- All 8 reasoning streams were empty.
+- Metrics delta:
+  - `requests_ok=8`
+  - `requests_error=0`
+  - `tokens_generated=128`
+  - `jobs_submitted=120`
+  - `runner_busy_jobs=0`
+  - `jobs_failed=0`
+  - `worker_batches=41`
+  - `batcher_rows=120`
+  - `max_batch_after=3`
+- Wall time was `15.597403s`.
+
+Profile Summary:
+
+- Valid profile range in the server log: lines `2007..44398`.
+- Top live decode `seq_len=1` totals:
+  - GDN recurrent: `4552.681ms` across `984` calls.
+  - MLP fused: `1560.486ms` across `1312` calls.
+  - GDN in-proj: `1091.727ms` across `984` calls.
+  - GDN gated norm: `1032.909ms` across `984` calls.
+  - GDN out-proj: `377.401ms` across `984` calls.
+- Batch-3 GDN recurrent backend step:
+  - `4401.754ms` across `936` calls, mean `4.702729ms`.
+- Batch-3 Vulkan MLP kernel:
+  - Total `1433.528ms` across `1248` calls, mean `1.148660ms`.
+  - Chained transfer/dispatch/readback `1351.572ms`, mean `1.082990ms`.
+- Batch-3 Vulkan GDN in-proj kernel:
+  - Total `969.091ms` across `936` calls, mean `1.035354ms`.
+  - Record/submit/wait `859.671ms`, mean `0.918452ms`.
+
+Interpretation:
+
+- A118's source change remains correct on the live GPU-routed Vulkan path.
+- The refreshed wall time is lower than the pre-A118 A114 profile
+  (`15.597403s` vs `16.682668s`) under the same distinct eight-stream shape.
+- The visible output concern remains resolved when callers use the real
+  template config instead of prompt-text control tags.
+- The dominant decode target is still the batch-3 GDN recurrent backend step.
+- Direct Metal row-triple-style ports have already been rejected for Vulkan
+  MLP/generic-linear batch-3 work; the next recurrent work should target
+  state residency/layout or a broader boundary change.
+- The prefill side is now dominated by large-row MLP/GDN work, including
+  large-batch GDN in-proj descriptor/setup cost, but that is separate from the
+  live decode batch-3 recurrent bottleneck.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-profile-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a119-current-after-fast-scatter-profile-response_*.sse`

@@ -1,0 +1,97 @@
+{
+  "all_reasoning_empty": true,
+  "all_status_200": true,
+  "all_visible_text_expected": true,
+  "expected_visible_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+  "results": [
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.105979040003149,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 0,
+      "label": "alpha",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.375268246003543,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 1,
+      "label": "bravo",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.591978418000508,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 2,
+      "label": "charlie",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.889464040010353,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 3,
+      "label": "delta",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.374597974994686,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 4,
+      "label": "echo",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.590163688000757,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 5,
+      "label": "foxtrot",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 15.373420036994503,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 6,
+      "label": "golf",
+      "reasoning_content": "",
+      "status": 200
+    },
+    {
+      "content": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,",
+      "elapsed_seconds": 12.619347795000067,
+      "error": null,
+      "events": 18,
+      "finish_reason": "length",
+      "index": 7,
+      "label": "hotel",
+      "reasoning_content": "",
+      "status": 200
+    }
+  ],
+  "wall_seconds": 15.5974027379998
+}

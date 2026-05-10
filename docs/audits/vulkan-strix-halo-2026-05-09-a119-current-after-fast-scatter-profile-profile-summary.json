@@ -1,0 +1,620 @@
+{
+  "correctness": {
+    "all_reasoning_empty": true,
+    "all_status_200": true,
+    "all_visible_text_expected": true,
+    "expected_visible_text": "eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"
+  },
+  "max_batch_after": 3.0,
+  "metric_deltas": {
+    "kiln_decode_batcher_batches_total{}": 41.0,
+    "kiln_decode_batcher_jobs_total{'result': 'failed'}": 0.0,
+    "kiln_decode_batcher_jobs_total{'result': 'runner_busy'}": 0.0,
+    "kiln_decode_batcher_jobs_total{'result': 'submitted'}": 120.0,
+    "kiln_decode_batcher_rows_total{}": 120.0,
+    "kiln_requests_total{'status': 'error'}": 0.0,
+    "kiln_requests_total{'status': 'ok'}": 8.0,
+    "kiln_tokens_generated_total{}": 128.0
+  },
+  "profile_line_range": [
+    2007,
+    44398
+  ],
+  "top_kernel_totals": [
+    {
+      "count": 192,
+      "key": "vulkan_mlp_kernel:stage=total batch=60 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 24.945865,
+      "total_ms": 4789.606
+    },
+    {
+      "count": 192,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=60 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 24.742057,
+      "total_ms": 4750.475
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 22.821306,
+      "total_ms": 3286.268
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=pipeline_descriptor_setup batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 16.962639,
+      "total_ms": 2442.62
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp_kernel:stage=total batch=3 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.14866,
+      "total_ms": 1433.528
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=3 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.08299,
+      "total_ms": 1351.572
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=3 packed_bf16_weights=true pair_qkv_z=true row_group_size=2 single_submit=true",
+      "mean_ms": 1.035354,
+      "total_ms": 969.091
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=3 packed_bf16_weights=true pair_qkv_z=true row_group_size=2 single_submit=true",
+      "mean_ms": 0.918452,
+      "total_ms": 859.671
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=total batch=61 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 26.122469,
+      "total_ms": 835.919
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=61 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 25.942719,
+      "total_ms": 830.167
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=total batch=62 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 25.414938,
+      "total_ms": 813.278
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=62 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 25.161781,
+      "total_ms": 805.177
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 4.224181,
+      "total_ms": 608.282
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=61 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 22.492708,
+      "total_ms": 539.825
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=62 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 22.470042,
+      "total_ms": 539.281
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=pipeline_descriptor_setup batch=61 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 16.57775,
+      "total_ms": 397.866
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=pipeline_descriptor_setup batch=62 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 16.265208,
+      "total_ms": 390.365
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=read_host_visible batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 0.731583,
+      "total_ms": 105.348
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=61 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 4.292333,
+      "total_ms": 103.016
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=62 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 4.233042,
+      "total_ms": 101.593
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=1 packed_bf16_weights=true pair_qkv_z=false row_group_size=1 single_submit=true",
+      "mean_ms": 2.798208,
+      "total_ms": 67.157
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=total batch=1 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.729687,
+      "total_ms": 55.35
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=pipeline_descriptor_setup batch=1 packed_bf16_weights=true pair_qkv_z=false row_group_size=1 single_submit=true",
+      "mean_ms": 2.247208,
+      "total_ms": 53.933
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=1 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.673375,
+      "total_ms": 53.548
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=total batch=2 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.166812,
+      "total_ms": 37.338
+    },
+    {
+      "count": 32,
+      "key": "vulkan_mlp_kernel:stage=chained_transfer_dispatch_readback batch=2 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 1.112344,
+      "total_ms": 35.595
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=create_x_stage_write batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 0.208917,
+      "total_ms": 30.084
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=create_out_buffers batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 0.205354,
+      "total_ms": 29.571
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=read_host_visible batch=62 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 1.016,
+      "total_ms": 24.384
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj_kernel:stage=create_x_stage_write batch=3 packed_bf16_weights=true pair_qkv_z=true row_group_size=2 single_submit=true",
+      "mean_ms": 0.024895,
+      "total_ms": 23.302
+    },
+    {
+      "count": 144,
+      "key": "vulkan_gdn_in_proj_kernel:stage=create_tensors batch=60 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 0.159076,
+      "total_ms": 22.907
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=total batch=2 packed_bf16_weights=true pair_qkv_z=true row_group_size=1 single_submit=true",
+      "mean_ms": 0.934542,
+      "total_ms": 22.429
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=2 packed_bf16_weights=true pair_qkv_z=true row_group_size=1 single_submit=true",
+      "mean_ms": 0.775833,
+      "total_ms": 18.62
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=read_host_visible batch=61 packed_bf16_weights=true pair_qkv_z=true row_group_size=4 single_submit=true",
+      "mean_ms": 0.759708,
+      "total_ms": 18.233
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj_kernel:stage=create_out_buffers batch=3 packed_bf16_weights=true pair_qkv_z=true row_group_size=2 single_submit=true",
+      "mean_ms": 0.019406,
+      "total_ms": 18.164
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp_kernel:stage=create_work_buffers batch=3 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 0.013799,
+      "total_ms": 17.221
+    },
+    {
+      "count": 936,
+      "key": "vulkan_gdn_in_proj_kernel:stage=read_host_visible batch=3 packed_bf16_weights=true pair_qkv_z=true row_group_size=2 single_submit=true",
+      "mean_ms": 0.014918,
+      "total_ms": 13.963
+    },
+    {
+      "count": 24,
+      "key": "vulkan_gdn_in_proj_kernel:stage=record_submit_wait batch=1 packed_bf16_weights=true pair_qkv_z=false row_group_size=1 single_submit=true",
+      "mean_ms": 0.436833,
+      "total_ms": 10.484
+    },
+    {
+      "count": 1248,
+      "key": "vulkan_mlp_kernel:stage=create_x_buffer batch=3 bf16_weights=true down_bf16_weights=true rows2=false gate_up_rows4=false down_rows4=false down_rows2=false",
+      "mean_ms": 0.006647,
+      "total_ms": 8.296
+    },
+    {
+      "count": 192,
+      "key": "vulkan_mlp_kernel:stage=extract_x batch=60 bf16_weights=true down_bf16_weights=false rows2=false gate_up_rows4=true down_rows4=true down_rows2=false",
+      "mean_ms": 0.042245,
+      "total_ms": 8.111
+    }
+  ],
+  "top_paged_layer_totals": [
+    {
+      "count": 144,
+      "key": "paged_layer:linear seq_len=60",
+      "mean_ms": 143.047792,
+      "total_ms": 20598.882
+    },
+    {
+      "count": 48,
+      "key": "paged_layer:full seq_len=60",
+      "mean_ms": 131.4095,
+      "total_ms": 6307.656
+    },
+    {
+      "count": 24,
+      "key": "paged_layer:linear seq_len=61",
+      "mean_ms": 151.395542,
+      "total_ms": 3633.493
+    },
+    {
+      "count": 24,
+      "key": "paged_layer:linear seq_len=62",
+      "mean_ms": 150.451958,
+      "total_ms": 3610.847
+    },
+    {
+      "count": 8,
+      "key": "paged_layer:full seq_len=61",
+      "mean_ms": 121.791375,
+      "total_ms": 974.331
+    },
+    {
+      "count": 8,
+      "key": "paged_layer:full seq_len=62",
+      "mean_ms": 120.624875,
+      "total_ms": 964.999
+    },
+    {
+      "count": 24,
+      "key": "paged_layer:linear seq_len=1",
+      "mean_ms": 12.799167,
+      "total_ms": 307.18
+    },
+    {
+      "count": 8,
+      "key": "paged_layer:full seq_len=1",
+      "mean_ms": 1.84525,
+      "total_ms": 14.762
+    }
+  ],
+  "top_recurrent_inner_totals": [
+    {
+      "count": 936,
+      "key": "gdn_recurrent_inner:single_token_backend_step batch=3 seq_len=1",
+      "mean_ms": 4.702729,
+      "total_ms": 4401.754
+    },
+    {
+      "count": 144,
+      "key": "gdn_recurrent_inner:matmul_prep batch=1 seq_len=60",
+      "mean_ms": 5.508972,
+      "total_ms": 793.292
+    },
+    {
+      "count": 144,
+      "key": "gdn_recurrent_inner:chunk_scan batch=1 seq_len=60",
+      "mean_ms": 3.400951,
+      "total_ms": 489.737
+    },
+    {
+      "count": 144,
+      "key": "gdn_recurrent_inner:chunk_prep batch=1 seq_len=60",
+      "mean_ms": 2.422361,
+      "total_ms": 348.82
+    },
+    {
+      "count": 144,
+      "key": "gdn_recurrent_inner:state_update batch=1 seq_len=60",
+      "mean_ms": 2.158618,
+      "total_ms": 310.841
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:matmul_prep batch=1 seq_len=62",
+      "mean_ms": 6.567625,
+      "total_ms": 157.623
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:matmul_prep batch=1 seq_len=61",
+      "mean_ms": 6.136958,
+      "total_ms": 147.287
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:chunk_scan batch=1 seq_len=62",
+      "mean_ms": 3.684708,
+      "total_ms": 88.433
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:chunk_scan batch=1 seq_len=61",
+      "mean_ms": 3.606,
+      "total_ms": 86.544
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:single_token_backend_step batch=2 seq_len=1",
+      "mean_ms": 3.130625,
+      "total_ms": 75.135
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:chunk_prep batch=1 seq_len=62",
+      "mean_ms": 2.665792,
+      "total_ms": 63.979
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:chunk_prep batch=1 seq_len=61",
+      "mean_ms": 2.519417,
+      "total_ms": 60.466
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:single_token_backend_step batch=1 seq_len=1",
+      "mean_ms": 2.300583,
+      "total_ms": 55.214
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:state_update batch=1 seq_len=61",
+      "mean_ms": 2.23725,
+      "total_ms": 53.694
+    },
+    {
+      "count": 144,
+      "key": "gdn_recurrent_inner:slice_inputs batch=1 seq_len=60",
+      "mean_ms": 0.369375,
+      "total_ms": 53.19
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:state_update batch=1 seq_len=62",
+      "mean_ms": 2.047042,
+      "total_ms": 49.129
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:slice_inputs batch=1 seq_len=62",
+      "mean_ms": 0.417458,
+      "total_ms": 10.019
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:slice_inputs batch=1 seq_len=61",
+      "mean_ms": 0.345625,
+      "total_ms": 8.295
+    },
+    {
+      "count": 936,
+      "key": "gdn_recurrent_inner:single_token_precopy batch=3 seq_len=1",
+      "mean_ms": 0.00115,
+      "total_ms": 1.076
+    },
+    {
+      "count": 24,
+      "key": "gdn_recurrent_inner:single_token_precopy batch=1 seq_len=1",
+      "mean_ms": 0.001,
+      "total_ms": 0.024
+    }
+  ],
+  "top_stage_totals": [
+    {
+      "count": 192,
+      "key": "mlp:fused seq_len=60",
+      "mean_ms": 25.025906,
+      "total_ms": 4804.974
+    },
+    {
+      "count": 984,
+      "key": "gdn:recurrent seq_len=1",
+      "mean_ms": 4.626708,
+      "total_ms": 4552.681
+    },
+    {
+      "count": 48,
+      "key": "full_attn:qkv_proj seq_len=60",
+      "mean_ms": 71.458479,
+      "total_ms": 3430.007
+    },
+    {
+      "count": 144,
+      "key": "gdn:in_proj seq_len=60",
+      "mean_ms": 22.926271,
+      "total_ms": 3301.383
+    },
+    {
+      "count": 144,
+      "key": "gdn:gates seq_len=60",
+      "mean_ms": 21.061583,
+      "total_ms": 3032.868
+    },
+    {
+      "count": 144,
+      "key": "gdn:gated_norm seq_len=60",
+      "mean_ms": 20.273215,
+      "total_ms": 2919.343
+    },
+    {
+      "count": 144,
+      "key": "gdn:out_proj seq_len=60",
+      "mean_ms": 19.647222,
+      "total_ms": 2829.2
+    },
+    {
+      "count": 144,
+      "key": "gdn:conv seq_len=60",
+      "mean_ms": 19.260313,
+      "total_ms": 2773.485
+    },
+    {
+      "count": 144,
+      "key": "gdn:recurrent seq_len=60",
+      "mean_ms": 13.940368,
+      "total_ms": 2007.413
+    },
+    {
+      "count": 1312,
+      "key": "mlp:fused seq_len=1",
+      "mean_ms": 1.189395,
+      "total_ms": 1560.486
+    },
+    {
+      "count": 48,
+      "key": "full_attn:o_proj seq_len=60",
+      "mean_ms": 24.875479,
+      "total_ms": 1194.023
+    },
+    {
+      "count": 984,
+      "key": "gdn:in_proj seq_len=1",
+      "mean_ms": 1.109479,
+      "total_ms": 1091.727
+    },
+    {
+      "count": 984,
+      "key": "gdn:gated_norm seq_len=1",
+      "mean_ms": 1.049704,
+      "total_ms": 1032.909
+    },
+    {
+      "count": 32,
+      "key": "mlp:fused seq_len=61",
+      "mean_ms": 26.197312,
+      "total_ms": 838.314
+    },
+    {
+      "count": 32,
+      "key": "mlp:fused seq_len=62",
+      "mean_ms": 25.492938,
+      "total_ms": 815.774
+    },
+    {
+      "count": 8,
+      "key": "full_attn:qkv_proj seq_len=61",
+      "mean_ms": 75.515625,
+      "total_ms": 604.125
+    },
+    {
+      "count": 24,
+      "key": "gdn:gated_norm seq_len=62",
+      "mean_ms": 24.033083,
+      "total_ms": 576.794
+    },
+    {
+      "count": 8,
+      "key": "full_attn:qkv_proj seq_len=62",
+      "mean_ms": 68.003625,
+      "total_ms": 544.029
+    },
+    {
+      "count": 24,
+      "key": "gdn:in_proj seq_len=62",
+      "mean_ms": 22.623292,
+      "total_ms": 542.959
+    },
+    {
+      "count": 24,
+      "key": "gdn:in_proj seq_len=61",
+      "mean_ms": 22.594625,
+      "total_ms": 542.271
+    },
+    {
+      "count": 24,
+      "key": "gdn:out_proj seq_len=61",
+      "mean_ms": 22.434208,
+      "total_ms": 538.421
+    },
+    {
+      "count": 24,
+      "key": "gdn:conv seq_len=62",
+      "mean_ms": 22.299625,
+      "total_ms": 535.191
+    },
+    {
+      "count": 24,
+      "key": "gdn:gates seq_len=62",
+      "mean_ms": 21.329292,
+      "total_ms": 511.903
+    },
+    {
+      "count": 24,
+      "key": "gdn:conv seq_len=61",
+      "mean_ms": 21.210125,
+      "total_ms": 509.043
+    },
+    {
+      "count": 24,
+      "key": "gdn:gated_norm seq_len=61",
+      "mean_ms": 21.00025,
+      "total_ms": 504.006
+    },
+    {
+      "count": 24,
+      "key": "gdn:gates seq_len=61",
+      "mean_ms": 19.432,
+      "total_ms": 466.368
+    },
+    {
+      "count": 24,
+      "key": "gdn:out_proj seq_len=62",
+      "mean_ms": 17.487458,
+      "total_ms": 419.699
+    },
+    {
+      "count": 984,
+      "key": "gdn:out_proj seq_len=1",
+      "mean_ms": 0.383538,
+      "total_ms": 377.401
+    },
+    {
+      "count": 24,
+      "key": "gdn:recurrent seq_len=62",
+      "mean_ms": 15.46375,
+      "total_ms": 371.13
+    },
+    {
+      "count": 24,
+      "key": "gdn:recurrent seq_len=61",
+      "mean_ms": 14.924042,
+      "total_ms": 358.177
+    }
+  ],
+  "wall_seconds": 15.5974027379998
+}
