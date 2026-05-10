@@ -570,3 +570,28 @@ Additional validation after rejected A112:
   longer probe.
 - Source change was removed after measurement; final source has no A112 runtime
   changes and CUDA/Metal source paths are untouched.
+
+Additional validation after A121:
+
+- Added a conservative Vulkan-only final-step skip for GDN recurrent state
+  readback when `max_tokens` makes the updated state dead. Rollback env:
+  `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK=1`.
+- Decode-batcher skip is all-or-nothing per worker batch; mixed final/non-final
+  batches still read state back normally.
+- Focused Vulkan kernel parity confirms the skip path returns no updated state
+  and preserves output tensor values.
+- Vulkan model/server checks, focused decode-batcher policy test, focused
+  Qwen `chat_template_kwargs`/literal `/no_think` tests, and release Vulkan
+  server build passed.
+- Best-effort CUDA/Metal checks remain environment-blocked on this Linux host
+  (`nvcc` missing; `objc2` requires Apple target).
+- Four live arms kept exact correctness:
+  `8/8` HTTP 200, empty reasoning, visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`, and
+  identical metrics (`128` generated tokens, `120` submitted jobs, `41`
+  worker batches, max batch `3`).
+- Live wall-time was noisy: pair 1 candidate `14.888116s` vs rollback
+  `15.629317s` (`+4.978%`), pair 2 rollback `15.464120s` vs candidate
+  `15.975298s` (`-3.200%`). Two-pair average was only `+0.745%` for the
+  candidate, so A120's GDN recurrent residency/layout target remains the
+  primary optimization direction.

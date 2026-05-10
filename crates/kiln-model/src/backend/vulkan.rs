@@ -1605,11 +1605,22 @@ impl BackendRuntime for VulkanBackend {
             return Ok(Some(out));
         }
 
-        let (out, new_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
-            vk_device, q, k, v, beta, g, state,
-        )
-        .context("gdn_recurrent_step kernel failed")?;
-        *state = new_state;
+        let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+        let (out, new_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+                vk_device,
+                q,
+                k,
+                v,
+                beta,
+                g,
+                state,
+                skip_state_readback,
+            )
+            .context("gdn_recurrent_step kernel failed")?;
+        if let Some(new_state) = new_state {
+            *state = new_state;
+        }
         Ok(Some(out))
     }
 

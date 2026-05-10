@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use candle_core::backend::BackendDevice;
 use candle_core::{DType, Device, Tensor};
+use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 
 use crate::backend::BackendRuntime;
@@ -44,9 +45,39 @@ fn fused_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok())
 }
 
+thread_local! {
+    static VULKAN_SKIP_GDN_STATE_READBACK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
 #[allow(dead_code)]
 pub(crate) fn vulkan_skip_gdn_state_readback_active() -> bool {
-    false
+    VULKAN_SKIP_GDN_STATE_READBACK_DEPTH.with(|depth| depth.get() > 0)
+}
+
+pub(crate) struct VulkanSkipGdnStateReadbackScope {
+    active: bool,
+}
+
+impl VulkanSkipGdnStateReadbackScope {
+    pub(crate) fn new(active: bool) -> Self {
+        if active {
+            VULKAN_SKIP_GDN_STATE_READBACK_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        }
+        Self { active }
+    }
+}
+
+impl Drop for VulkanSkipGdnStateReadbackScope {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        VULKAN_SKIP_GDN_STATE_READBACK_DEPTH.with(|depth| {
+            let previous = depth.get();
+            debug_assert!(previous > 0);
+            depth.set(previous.saturating_sub(1));
+        });
+    }
 }
 
 /// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`

@@ -1827,6 +1827,59 @@ fn gdn_recurrent_step_parallel_reduce_matches_f32_cpu_reference() -> Result<()> 
 }
 
 #[test]
+fn gdn_recurrent_step_can_skip_state_readback() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, heads, dk, dv) = (2usize, 2usize, 8usize, 4usize);
+    let q = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.031)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let k = cpu_f32(
+        (0..batch * heads * dk)
+            .map(|i| ((i as f32 % 7.0) - 3.0) * 0.037)
+            .collect(),
+        (batch, heads, dk),
+    )?;
+    let v = cpu_f32(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * 0.023)
+            .collect(),
+        (batch, heads, dv),
+    )?;
+    let beta = cpu_f32(vec![0.42, 0.57, 0.33, 0.61], (batch, heads))?;
+    let g = cpu_f32(vec![-0.09, -0.14, -0.07, -0.19], (batch, heads))?;
+    let state = cpu_f32(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let (expected_out, _expected_state) = kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step(
+        &vk, &q, &k, &v, &beta, &g, &state,
+    )
+    .context("dispatch_gdn_recurrent_step reference")?;
+    let (got_out, got_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, true,
+        )
+        .context("dispatch_gdn_recurrent_step skip state readback")?;
+
+    assert!(
+        got_state.is_none(),
+        "skip-state-readback path should not materialize updated state"
+    );
+    assert_close("recurrent skip-readback out", &got_out, &expected_out, 1e-4)?;
+    Ok(())
+}
+
+#[test]
 fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

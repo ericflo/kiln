@@ -64,6 +64,12 @@ fn fast_batched_linear_state_scatter_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_err())
 }
 
+fn skip_final_gdn_state_readback_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK").is_err())
+}
+
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -406,6 +412,7 @@ struct DecodeBatchJob {
     seq_len: usize,
     block_table: BlockTable,
     linear_state: LinearAttentionState,
+    skip_gdn_state_readback: bool,
     response: mpsc::Sender<DecodeBatchReply>,
 }
 
@@ -481,6 +488,7 @@ impl DecodeBatcher {
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
+        skip_gdn_state_readback: bool,
     ) -> Result<DecodeBatcherDecode> {
         let (response_tx, response_rx) = mpsc::channel();
         let owned_state = take_linear_attention_state(linear_state);
@@ -489,6 +497,7 @@ impl DecodeBatcher {
             seq_len,
             block_table: block_table.clone(),
             linear_state: owned_state,
+            skip_gdn_state_readback,
             response: response_tx,
         };
         if let Err(err) = self.sender.send(job) {
@@ -695,9 +704,12 @@ fn decode_batch_jobs_with_runner(
     let seq_lens: Vec<usize> = jobs.iter().map(|job| job.seq_len).collect();
     let block_tables: Vec<BlockTable> = jobs.iter().map(|job| job.block_table.clone()).collect();
     let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+    let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+        && jobs.iter().all(|job| job.skip_gdn_state_readback);
     finish_decode_batcher_stage_profile("job_metadata", jobs.len(), stage_start);
 
     let stage_start = profile_stages.then(std::time::Instant::now);
+    let _skip_scope = crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
     let tokens = if runner.has_linear_attention_layers() {
         let mut linear_states: Vec<&mut LinearAttentionState> =
             jobs.iter_mut().map(|job| &mut job.linear_state).collect();
@@ -2315,6 +2327,8 @@ impl ModelRunner {
                 break;
             }
 
+            let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+                && generated_tokens.len() + 1 >= params.max_tokens;
             next_token = self.decode_next_token_paged_interleaved(
                 params,
                 next_token,
@@ -2323,6 +2337,7 @@ impl ModelRunner {
                 seq_len,
                 linear_state,
                 step_seed,
+                skip_gdn_state_readback,
             )?;
             seq_len += 1;
         }
@@ -2461,7 +2476,10 @@ impl ModelRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
+        skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
+        let _skip_scope =
+            crate::forward::VulkanSkipGdnStateReadbackScope::new(skip_gdn_state_readback);
         if params.is_effectively_greedy()
             && matches!(self.backend.device(), candle_core::Device::Metal(_))
         {
@@ -2521,6 +2539,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
         decode_batcher: Option<&DecodeBatcher>,
+        skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
         if params.is_effectively_greedy()
             && let Some(batcher) = decode_batcher
@@ -2530,6 +2549,7 @@ impl ModelRunner {
                 block_table,
                 seq_len,
                 linear_state,
+                skip_gdn_state_readback,
             )? {
                 DecodeBatcherDecode::Decoded(token) => return Ok(token),
                 DecodeBatcherDecode::RunnerBusy => {}
@@ -2544,6 +2564,7 @@ impl ModelRunner {
             seq_len,
             linear_state,
             step_seed,
+            skip_gdn_state_readback,
         )
     }
 
@@ -2715,6 +2736,8 @@ impl ModelRunner {
                 break;
             }
 
+            let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+                && generated_tokens.len() + 1 >= params.max_tokens;
             next_token = self.decode_next_token_paged_interleaved(
                 params,
                 next_token,
@@ -2723,6 +2746,7 @@ impl ModelRunner {
                 seq_len,
                 &mut linear_state,
                 step_seed,
+                skip_gdn_state_readback,
             )?;
             seq_len += 1;
         }
@@ -5110,6 +5134,8 @@ impl ModelRunner {
                 break;
             }
 
+            let skip_gdn_state_readback = skip_final_gdn_state_readback_enabled()
+                && generated_tokens.len() + 1 >= params.max_tokens;
             next_token = self.decode_next_token_paged_interleaved_or_batched(
                 params,
                 next_token,
@@ -5119,6 +5145,7 @@ impl ModelRunner {
                 linear_state,
                 step_seed,
                 decode_batcher,
+                skip_gdn_state_readback,
             )?;
             seq_len += 1;
         }
@@ -6058,6 +6085,7 @@ mod tests {
                         &block_table,
                         start_pos,
                         &mut linear_state,
+                        false,
                     )? {
                         DecodeBatcherDecode::Decoded(next) => Ok(next),
                         DecodeBatcherDecode::RunnerBusy => {
@@ -6229,6 +6257,7 @@ mod tests {
                     &block_table,
                     seq_len,
                     &mut linear_state,
+                    false,
                 )? {
                     DecodeBatcherDecode::Decoded(next) => Ok(next),
                     DecodeBatcherDecode::RunnerBusy => {

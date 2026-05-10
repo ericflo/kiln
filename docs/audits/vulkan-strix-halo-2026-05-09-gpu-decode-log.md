@@ -7404,3 +7404,84 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-check-metal.log`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a120-decode-batcher-stage-profile-response_*.sse`
+
+### 2026-05-09 A121: Skip Final GDN State Readback
+
+Scope:
+
+- Skip Vulkan GDN recurrent state readback on a decode step only when the
+  updated recurrent state is known to be dead because the request is about to
+  finish at `max_tokens`.
+- Decode-batcher use is conservative: the skip scope is entered only when all
+  jobs in the worker batch are final. Mixed final/non-final batches still read
+  state back normally.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK=1`.
+- CUDA and Metal kernel paths are unchanged. The generic generation plumbing
+  creates a scope, but only the Vulkan backend consults it.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_can_skip_state_readback -- --nocapture`
+- `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib -- --nocapture`
+- `cargo test -p kiln-server qwen35_ --lib -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
+- Best-effort Metal feature check remains host-blocked because `objc2`
+  requires an Apple target.
+
+Correctness:
+
+- Valid probes used eight distinct streaming chat prompts, `max_tokens=16`,
+  `temperature=0`, and `chat_template_kwargs: {"enable_thinking": false}`.
+- All four measured arms returned 8/8 HTTP 200.
+- All four measured arms emitted empty reasoning streams.
+- Every response's visible text exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every measured arm had identical decode-batcher metrics:
+  `requests_ok=8`, `requests_error=0`, `tokens_generated=128`,
+  `jobs_submitted=120`, `runner_busy_jobs=0`, `jobs_failed=0`,
+  `worker_batches=41`, `batcher_rows=120`, and `max_batch_after=3`.
+
+Performance:
+
+- Pair 1, candidate first: candidate `14.888116s`, rollback `15.629317s`,
+  candidate delta `+4.978%`.
+- Pair 2, rollback first: rollback `15.464120s`, candidate `15.975298s`,
+  candidate delta `-3.200%`.
+- Two-pair averages: candidate `15.431707s`, rollback `15.546719s`,
+  candidate delta `+0.745%`.
+
+Interpretation:
+
+- The correctness and batching counters are clean.
+- The live wall-time result is not a strong endpoint performance signal; order
+  effects/noise dominate the two A/B pairs.
+- This is a narrow dead-work elimination with a rollback env, not a material
+  throughput anchor. A120's profile remains the better guide: focus next on
+  GDN recurrent residency/layout or the broader model/batcher boundary.
+- The current `main` path already uses caller-supplied
+  `chat_template_kwargs`, and focused tests confirm literal `/no_think` prompt
+  text is not treated as a control flag.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-pair2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-response_*.sse`

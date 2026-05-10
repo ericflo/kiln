@@ -6047,6 +6047,22 @@ pub fn dispatch_gdn_recurrent_step(
     g: &Tensor,
     state: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
+    let (out, state) =
+        dispatch_gdn_recurrent_step_with_options(vk_device, q, k, v, beta, g, state, false)?;
+    let state = state.context("gdn recurrent state was unexpectedly skipped")?;
+    Ok((out, state))
+}
+
+pub fn dispatch_gdn_recurrent_step_with_options(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -6098,6 +6114,7 @@ pub fn dispatch_gdn_recurrent_step(
             dk,
             dv,
             parallel_reduce,
+            skip_state_readback,
         );
     }
 
@@ -6187,17 +6204,19 @@ pub fn dispatch_gdn_recurrent_step(
             *command_pool,
             &out_buf,
         )?;
-        let state_data = if host_visible_state {
-            VulkanBuffer::read_host_visible(device, &state_buf)
+        let state_data = if skip_state_readback {
+            None
+        } else if host_visible_state {
+            Some(VulkanBuffer::read_host_visible(device, &state_buf)?)
         } else {
-            VulkanBuffer::read_back_with_command_pool(
+            Some(VulkanBuffer::read_back_with_command_pool(
                 device,
                 host_visible_mt,
                 queue,
                 *command_pool,
                 &state_buf,
-            )
-        }?;
+            )?)
+        };
         (out_data, state_data)
     };
 
@@ -6212,7 +6231,10 @@ pub fn dispatch_gdn_recurrent_step(
 
     let out_shape = vec![batch, heads, dv];
     let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-    let state_tensor = create_tensor_from_data(&state_data, state.dims().as_ref(), state.dtype())?;
+    let state_tensor = state_data
+        .as_ref()
+        .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
+        .transpose()?;
     Ok((out_tensor, state_tensor))
 }
 
@@ -6491,7 +6513,8 @@ fn dispatch_gdn_recurrent_step_single_submit(
     dk: usize,
     dv: usize,
     parallel_reduce: bool,
-) -> Result<(Tensor, Tensor)> {
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -6678,7 +6701,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
             out_stage.handle(),
             &[vk::BufferCopy::builder().size(out_size).build()],
         );
-        if let Some(state_stage) = &state_stage {
+        if !skip_state_readback && let Some(state_stage) = &state_stage {
             device.cmd_copy_buffer(
                 cmd,
                 state_buf.handle(),
@@ -6706,20 +6729,25 @@ fn dispatch_gdn_recurrent_step_single_submit(
     }
 
     let out_data = VulkanBuffer::read_host_visible(device, &out_stage)?;
-    let state_data = if host_visible_state {
-        VulkanBuffer::read_host_visible(device, &state_buf)
+    let state_data = if skip_state_readback {
+        None
+    } else if host_visible_state {
+        Some(VulkanBuffer::read_host_visible(device, &state_buf)?)
     } else {
-        VulkanBuffer::read_host_visible(
+        Some(VulkanBuffer::read_host_visible(
             device,
             state_stage
                 .as_ref()
                 .expect("state staging exists when state is device-local"),
-        )
-    }?;
+        )?)
+    };
 
     let out_shape = vec![batch, heads, dv];
     let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
-    let state_tensor = create_tensor_from_data(&state_data, state.dims().as_ref(), state.dtype())?;
+    let state_tensor = state_data
+        .as_ref()
+        .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
+        .transpose()?;
     Ok((out_tensor, state_tensor))
 }
 

@@ -1,0 +1,124 @@
+# A121 Skip Final GDN State Readback
+
+Date: 2026-05-09
+
+Scope:
+
+- Skip Vulkan GDN recurrent state readback on a decode step only when the
+  updated recurrent state is known to be dead because the request is about to
+  finish at `max_tokens`.
+- Decode-batcher use is conservative: the skip scope is entered only when all
+  jobs in the worker batch are final. Mixed final/non-final batches still read
+  state back normally.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK=1`.
+- CUDA and Metal kernel paths are unchanged. The generic generation plumbing
+  creates a scope, but only the Vulkan backend consults it.
+
+Implementation:
+
+- `forward.rs` now has a thread-local Vulkan skip scope.
+- `generate.rs` marks the next decode step as skip-eligible when
+  `generated_tokens.len() + 1 >= params.max_tokens` and plumbs that flag
+  through direct and batched greedy decode.
+- `backend/vulkan.rs` passes the active skip flag into the non-resident GDN
+  recurrent-step dispatch and leaves the caller's state unchanged when the
+  dispatch returns no updated state.
+- `kiln-vulkan-kernel::dispatch_gdn_recurrent_step_with_options` returns
+  `Option<Tensor>` for state and skips the state staging/readback work when
+  requested. The existing `dispatch_gdn_recurrent_step` wrapper preserves the
+  old API.
+- Added `gdn_recurrent_step_can_skip_state_readback` to verify the skip path
+  returns no state while preserving the output tensor.
+
+Validation:
+
+- `cargo fmt --check`
+- `cargo check -p kiln-vulkan-kernel`
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo test -p kiln-vulkan-kernel --test gdn_parity gdn_recurrent_step_can_skip_state_readback -- --nocapture`
+- `cargo test -p kiln-model test_decode_batcher_default_mixed_seq_lens_backend_policy --lib -- --nocapture`
+- `cargo test -p kiln-server qwen35_ --lib -- --nocapture`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
+- Best-effort Metal feature check remains host-blocked because `objc2`
+  requires an Apple target.
+
+Template correctness note:
+
+- The current `main` path already uses caller-supplied
+  `chat_template_kwargs`, including Qwen's `enable_thinking=false`.
+- The focused server test slice confirms literal `/no_think` prompt text is
+  not treated as a control flag.
+
+Live Server Setup:
+
+- Candidate server command used `KILN_MODEL_PATH=Qwen3.5-4B`,
+  `KILN_PREFIX_CACHE_ENABLED=false`, `KILN_DECODE_BATCH_WAIT_US=5000`, and
+  `KILN_DECODE_BATCH_MAX=3`.
+- Rollback server command used the same settings plus
+  `KILN_DISABLE_VULKAN_SKIP_FINAL_GDN_STATE_READBACK=1`.
+- The valid probes used eight distinct streaming chat prompts,
+  `max_tokens=16`, `temperature=0`, and
+  `chat_template_kwargs: {"enable_thinking": false}`.
+- Health readiness was captured with the current `checks[].pass` shape.
+
+Correctness:
+
+- All four measured arms returned 8/8 HTTP 200.
+- All four measured arms emitted empty reasoning streams.
+- Every response's visible text exactly matched
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Every measured arm had identical decode-batcher metrics:
+  - `requests_ok=8`
+  - `requests_error=0`
+  - `tokens_generated=128`
+  - `jobs_submitted=120`
+  - `runner_busy_jobs=0`
+  - `jobs_failed=0`
+  - `worker_batches=41`
+  - `batcher_rows=120`
+  - `max_batch_after=3`
+
+Performance:
+
+- Pair 1, candidate first:
+  - Candidate: `14.888116s`
+  - Rollback: `15.629317s`
+  - Candidate delta: `+4.978%`
+- Pair 2, rollback first:
+  - Rollback: `15.464120s`
+  - Candidate: `15.975298s`
+  - Candidate delta: `-3.200%`
+- Two-pair averages:
+  - Candidate average: `15.431707s`
+  - Rollback average: `15.546719s`
+  - Candidate delta: `+0.745%`
+
+Interpretation:
+
+- The correctness and batching counters are clean.
+- The live wall-time result is not a strong endpoint performance signal; order
+  effects/noise dominate the two A/B pairs.
+- This is a narrow dead-work elimination with a rollback env, not a material
+  throughput anchor. A120's profile remains the better guide: focus next on
+  GDN recurrent residency/layout or the broader model/batcher boundary.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-release-server-build.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-check-cuda.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-check-metal.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-pair2-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-metrics-*.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-candidate*-response_*.sse`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a121-skip-final-gdn-state-readback-rollback*-response_*.sse`
