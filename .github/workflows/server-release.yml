@@ -297,7 +297,7 @@ jobs:
       - name: Install Vulkan shader tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y glslc
+          sudo apt-get install -y glslang-tools
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
