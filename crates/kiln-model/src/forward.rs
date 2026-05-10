@@ -4948,7 +4948,7 @@ fn gated_deltanet_forward_decode_if(
                     seq_len,
                     stage_profile,
                 )?;
-                Some((q, k, v, z, false, false))
+                Some((q, k, v, z, false, false, false))
             } else {
                 None
             }
@@ -5004,7 +5004,7 @@ fn gated_deltanet_forward_decode_if(
                     seq_len,
                     stage_profile,
                 )?;
-                Some((q, k, v, z, false, false))
+                Some((q, k, v, z, false, false, false))
             } else {
                 None
             }
@@ -5015,9 +5015,15 @@ fn gated_deltanet_forward_decode_if(
         }
     };
 
-    let (q, k, v, z, qk_expanded, qk_norm_deferred_to_recurrent) = if let Some(fused) =
-        fused_decode_qkv_conv_norm
-    {
+    let (
+        q,
+        k,
+        v,
+        z,
+        qk_expanded,
+        qk_norm_deferred_to_recurrent,
+        qk_norm_deferred_to_native_recurrent,
+    ) = if let Some(fused) = fused_decode_qkv_conv_norm {
         fused
     } else if let Some(fused) = fused_prefill_qkv_conv_split {
         fused
@@ -5175,13 +5181,19 @@ fn gated_deltanet_forward_decode_if(
                 false
             }
         };
-        let (q, k, qk_expanded, qk_norm_deferred) = {
+        let defer_native_qk_norm_to_recurrent = seq_len == 1
+            && !capture_b11_taps
+            && !capture_c41_taps
+            && recurrent_unexpanded_qk
+            && input_dtype == DType::BF16
+            && backend.supports_gdn_recurrent_qk_norm_prefill_native_head_last();
+        let (q, k, qk_expanded, qk_norm_deferred, qk_norm_deferred_to_native_recurrent) = {
             #[cfg(feature = "metal")]
             {
                 if use_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, false, false)
+                    (q, k, false, false, false)
                 } else if input_dtype == DType::BF16
                     && gqa_ratio > 1
                     && crate::backend::metal::metal_gdn_qk_norm_gqa_supports(&q, &k, nv)
@@ -5195,7 +5207,7 @@ fn gated_deltanet_forward_decode_if(
                         1e-6,
                     )
                     .context("metal gdn qk_norm gqa kernel failed")
-                    .map(|(q, k)| (q, k, true, false))?
+                    .map(|(q, k)| (q, k, true, false, false))?
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -5217,7 +5229,7 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true, false)
+                    (q, k, true, false, false)
                 }
             }
             #[cfg(not(feature = "metal"))]
@@ -5255,13 +5267,16 @@ fn gated_deltanet_forward_decode_if(
 
                 if defer_cuda_qk_norm_to_recurrent {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_deferred");
-                    (q, k, false, true)
+                    (q, k, false, true, false)
+                } else if defer_native_qk_norm_to_recurrent {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_deferred_native");
+                    (q, k, false, false, true)
                 } else if fused_decode_unexpanded_qk {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, false, false)
+                    (q, k, false, false, false)
                 } else if let Some((q, k)) = fused_gqa {
-                    (q, k, true, false)
+                    (q, k, true, false, false)
                 } else {
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
@@ -5283,7 +5298,7 @@ fn gated_deltanet_forward_decode_if(
                     };
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
-                    (q, k, true, false)
+                    (q, k, true, false, false)
                 }
             }
         };
@@ -5294,7 +5309,15 @@ fn gated_deltanet_forward_decode_if(
             seq_len,
             stage_profile,
         )?;
-        (q, k, v, z, qk_expanded, qk_norm_deferred)
+        (
+            q,
+            k,
+            v,
+            z,
+            qk_expanded,
+            qk_norm_deferred,
+            qk_norm_deferred_to_native_recurrent,
+        )
     };
 
     // Phase B11b taps: `gdn_qk_norm_q` / `gdn_qk_norm_k`. Both are post-L2
@@ -5682,7 +5705,39 @@ fn gated_deltanet_forward_decode_if(
         }
 
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-        let native_recurrent_result = if recurrent_unexpanded_qk {
+        let native_recurrent_result = if qk_norm_deferred_to_native_recurrent {
+            let v_recur = v.to_dtype(input_dtype)?;
+            match backend.gdn_recurrent_qk_norm_prefill_native_head_last(
+                &q,
+                &k,
+                &v_recur,
+                &beta,
+                &g,
+                recurrent_state,
+                scale,
+                1e-6,
+            )? {
+                Some(attn_out) => Some(attn_out),
+                None => {
+                    let (q_norm, k_norm) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+                    let Some(attn_out) = gdn_recurrent_prefill_native_head_last(
+                        backend,
+                        &q_norm,
+                        &k_norm,
+                        &v_recur,
+                        &beta,
+                        &g,
+                        recurrent_state,
+                    )?
+                    else {
+                        anyhow::bail!(
+                            "backend declined GDN qk-norm recurrent fallback after qk_norm deferral"
+                        );
+                    };
+                    Some(attn_out)
+                }
+            }
+        } else if recurrent_unexpanded_qk {
             let v_recur = v.to_dtype(input_dtype)?;
             gdn_recurrent_prefill_native_head_last(
                 backend,

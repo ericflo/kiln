@@ -1,0 +1,115 @@
+// GDN single-token recurrent step with raw native-head Q/K L2 normalization.
+//
+// q, k:  [B, 1, q_heads, dk] raw pre-L2-norm values
+// v:     [B, 1, heads, dv]
+// beta:  [B, 1, heads]
+// g:     [B, 1, heads]
+// state: [B, heads, dk, dv]
+// out:   [B, heads, dv]
+//
+// The shader matches the split path's bf16 epilogue: normalized Q/K are rounded
+// to bf16 before the recurrent update consumes them.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint seq_len;
+    uint dk;
+    uint dv;
+    uint q_heads;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) readonly buffer BetaBuf { float data_beta[]; };
+layout(binding = 4) readonly buffer GBuf { float data_g[]; };
+layout(binding = 5) buffer StateBuf { float data_state[]; };
+layout(binding = 6) writeonly buffer OutBuf { float data_out[]; };
+
+shared float q_smem[256];
+shared float k_smem[256];
+shared float q_reduce[256];
+shared float k_reduce[256];
+
+float bf16_round(float x) {
+    uint bits = floatBitsToUint(x);
+    uint lsb = (bits >> 16) & 1u;
+    bits += 0x7fffu + lsb;
+    bits &= 0xffff0000u;
+    return uintBitsToFloat(bits);
+}
+
+void main() {
+    uint b = gl_WorkGroupID.x;
+    uint h = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (b >= batch || h >= heads || seq_len != 1 || dk > 256 || dv > 256) {
+        return;
+    }
+
+    uint bh = b * heads + h;
+    uint qh = q_heads == heads ? h : h / (heads / q_heads);
+    uint q_off = (b * q_heads + qh) * dk;
+    uint k_off = q_off;
+
+    float q_raw = 0.0;
+    float k_raw = 0.0;
+    if (tid < dk) {
+        q_raw = data_q[q_off + tid];
+        k_raw = data_k[k_off + tid];
+    }
+    q_smem[tid] = q_raw;
+    k_smem[tid] = k_raw;
+    q_reduce[tid] = q_raw * q_raw;
+    k_reduce[tid] = k_raw * k_raw;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            q_reduce[tid] += q_reduce[tid + stride];
+            k_reduce[tid] += k_reduce[tid + stride];
+        }
+        barrier();
+    }
+
+    if (tid < dk) {
+        float q_scale = inversesqrt(float(dk));
+        float inv_q = q_scale * inversesqrt(q_reduce[0] + 0.000001);
+        float inv_k = inversesqrt(k_reduce[0] + 0.000001);
+        q_smem[tid] = bf16_round(q_smem[tid] * inv_q);
+        k_smem[tid] = bf16_round(k_smem[tid] * inv_k);
+    }
+    barrier();
+
+    if (tid >= dv) {
+        return;
+    }
+
+    uint d = tid;
+    uint v_off = bh * dv;
+    uint state_off = bh * dk * dv;
+    float beta_val = data_beta[bh];
+    float decay = exp(data_g[bh]);
+
+    float v_pred = 0.0;
+    for (uint i = 0; i < dk; i++) {
+        float s = data_state[state_off + i * dv + d];
+        v_pred += k_smem[i] * (decay * s);
+    }
+
+    float delta = beta_val * (data_v[v_off + d] - v_pred);
+    float out_acc = 0.0;
+    for (uint i = 0; i < dk; i++) {
+        uint state_idx = state_off + i * dv + d;
+        float new_s = decay * data_state[state_idx] + k_smem[i] * delta;
+        data_state[state_idx] = new_s;
+        out_acc += q_smem[i] * new_s;
+    }
+
+    data_out[bh * dv + d] = out_acc;
+}

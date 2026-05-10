@@ -7493,7 +7493,15 @@ Validation:
 - `cargo test -p kiln-model linear_attention_state --lib -- --nocapture`
 - `cargo check -p kiln-model --features vulkan`
 - `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo check -p kiln-model`
+- `cargo check -p kiln-server --bin kiln`
 - `cargo build --release -p kiln-server --bin kiln --features vulkan`
+- CUDA local checking remains blocked before Rust type-checking on this Linux
+  host: `cargo check -p kiln-model --features cuda` fails because `nvcc` is
+  not installed.
+- Metal local checking remains blocked before Rust type-checking on this Linux
+  host: `cargo check -p kiln-model --features metal` fails because `objc2`
+  requires an Apple target.
 - Best-effort CUDA feature check remains host-blocked by missing `nvcc`.
 - Best-effort Metal feature check remains host-blocked because `objc2`
   requires an Apple target.
@@ -8133,3 +8141,80 @@ Artifacts:
 - `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-metrics-after.prom`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-request_*.json`
 - `docs/audits/vulkan-strix-halo-2026-05-09-a129-resident-recurrent-batcher-*-response_*.sse`
+
+## A130 - Keep Vulkan recurrent Q/K norm folding
+
+Base commit: `ad3d3ed0 Add opt-in Vulkan resident GDN state trial`
+
+Purpose:
+
+- Carry the recent CUDA idea from `aafffa40 Fold CUDA GDN QK norm into
+  recurrent` over to Vulkan's accepted A128 native-head recurrent path.
+- For single-token BF16 decode on Vulkan, skip the separate Rust/Candle GDN
+  Q/K L2-normalization tensors and let a new native-head recurrent shader
+  normalize Q/K and apply the recurrent update in one dispatch.
+- This is deliberately narrower than the rejected A126 fused
+  gates+recurrent+gated-RMSNorm attempt: gates and gated RMSNorm stay on the
+  current paths.
+- Rollback env:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1`.
+
+Validation:
+
+- `cargo fmt --check`
+- `git diff --check`
+- `cargo check -p kiln-vulkan-kernel`
+- Focused parity:
+  `cargo test -p kiln-vulkan-kernel gdn_recurrent_qk_norm_native_head_last_matches_split_path -- --nocapture`
+- Full Vulkan GDN parity:
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity`
+  (`38 passed`)
+- `cargo check -p kiln-model --features vulkan`
+- `cargo check -p kiln-server --features vulkan --bin kiln`
+- `cargo build --release -p kiln-server --bin kiln --features vulkan`
+
+Correctness:
+
+- Candidate and rollback both confirmed GPU routing in server logs: `Mode: GPU
+  inference`, Vulkan available, RADV STRIX_HALO selected, and live greedy
+  decode batcher backend `vulkan`.
+- The live A/B used eight distinct prompts (`alpha` through `hotel`) with
+  `KILN_PREFIX_CACHE_ENABLED=false`, `KILN_DECODE_BATCH_WAIT_US=5000`,
+  `KILN_DECODE_BATCH_MAX=3`, `max_tokens=16`, `temperature=0`, streaming chat,
+  and `chat_template_kwargs: {"enable_thinking": false}`.
+- Candidate and rollback both returned `8/8` HTTP 200, empty reasoning, and
+  visible text exactly
+  `"eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,"`.
+- Batcher counters were identical in both arms: `120` submitted jobs,
+  `41` worker batches, `120` rows, max batch `3`, no runner-busy or failed
+  jobs.
+
+Performance:
+
+- Candidate default recurrent Q/K norm folding: `13.479247s`.
+- Rollback (`KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1`): `14.283490s`.
+- Candidate delta: `+5.631%` versus rollback.
+
+Interpretation:
+
+- Keep default-on. The change removes a separate Q/K norm step and associated
+  tensor movement in the live batch-3 decode path while preserving exact
+  visible-text correctness.
+- Server logs do not emit individual shader names at normal info level, so the
+  routing proof is GPU/Vulkan/Strix-Halo/decode-batcher evidence plus the
+  focused shader parity test.
+- CUDA and Metal backends inherit no-op trait defaults for the new hook, so
+  their routing is unchanged by this Vulkan-only implementation.
+
+Artifacts:
+
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-summary.txt`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-pair-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-candidate-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-rollback-summary.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-server.log`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-health-ready.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-metrics-before.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-metrics-after.prom`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-request_*.json`
+- `docs/audits/vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-*-response_*.sse`

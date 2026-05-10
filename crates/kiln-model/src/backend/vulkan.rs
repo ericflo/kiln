@@ -39,6 +39,7 @@ pub struct VulkanBackend {
     gdn_forward_sub_enabled: bool,
     gdn_decode_fused_enabled: bool,
     gdn_recurrent_unexpanded_qk_enabled: bool,
+    gdn_recurrent_qk_norm_unexpanded_enabled: bool,
     linear_decode_enabled: bool,
     linear_argmax_batch_enabled: bool,
     full_attn_qkv_enabled: bool,
@@ -135,6 +136,8 @@ impl VulkanBackend {
             gdn_enabled && std::env::var("KILN_ENABLE_VULKAN_GDN_DECODE_FUSED").is_ok();
         let gdn_recurrent_unexpanded_qk_enabled = gdn_enabled
             && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK").is_err();
+        let gdn_recurrent_qk_norm_unexpanded_enabled = gdn_recurrent_unexpanded_qk_enabled
+            && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM").is_err();
         let linear_decode_enabled = std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE").is_err();
         let bf16_packed_linear_weights_enabled = linear_decode_enabled
             && std::env::var("KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS").is_err();
@@ -206,6 +209,7 @@ impl VulkanBackend {
             gdn_forward_sub_enabled,
             gdn_decode_fused_enabled,
             gdn_recurrent_unexpanded_qk_enabled,
+            gdn_recurrent_qk_norm_unexpanded_enabled,
             linear_decode_enabled,
             linear_argmax_batch_enabled,
             full_attn_qkv_enabled,
@@ -560,6 +564,10 @@ impl BackendRuntime for VulkanBackend {
 
     fn supports_gdn_recurrent_prefill_native_head_last(&self) -> bool {
         self.has_vulkan() && self.gdn_recurrent_unexpanded_qk_enabled
+    }
+
+    fn supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
+        self.has_vulkan() && self.gdn_recurrent_qk_norm_unexpanded_enabled
     }
 
     fn enter_gdn_recurrent_resident_state_scope(&self) -> bool {
@@ -1805,6 +1813,62 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
+        if let Some(new_state) = new_state {
+            *state = new_state;
+        }
+        Ok(Some(out))
+    }
+
+    fn gdn_recurrent_qk_norm_prefill_native_head_last(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        beta: &Tensor,
+        g: &Tensor,
+        state: &mut Tensor,
+        q_scale: f64,
+        qk_eps: f64,
+    ) -> Result<Option<Tensor>> {
+        if !self.has_vulkan()
+            || !self.gdn_recurrent_qk_norm_unexpanded_enabled
+            || !matches!(q.dtype(), DType::F32 | DType::BF16)
+        {
+            return Ok(None);
+        }
+        if !matches!(q.device(), Device::Cpu)
+            || !matches!(k.device(), Device::Cpu)
+            || !matches!(v.device(), Device::Cpu)
+            || !matches!(beta.device(), Device::Cpu)
+            || !matches!(g.device(), Device::Cpu)
+            || !matches!(state.device(), Device::Cpu)
+        {
+            return Ok(None);
+        }
+        let Ok((_, _, _, dk)) = q.dims4() else {
+            return Ok(None);
+        };
+        let expected_scale = 1.0 / (dk as f64).sqrt();
+        if (q_scale - expected_scale).abs() > 1e-6 || (qk_eps - 1e-6).abs() > 1e-12 {
+            return Ok(None);
+        }
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+        let (out, new_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
+                vk_device,
+                q,
+                k,
+                v,
+                beta,
+                g,
+                state,
+                skip_state_readback,
+            )
+            .context("gdn_recurrent_qk_norm native-head Vulkan kernel failed")?;
         if let Some(new_state) = new_state {
             *state = new_state;
         }

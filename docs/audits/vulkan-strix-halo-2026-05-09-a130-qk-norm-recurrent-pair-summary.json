@@ -1,0 +1,38 @@
+{
+  "candidate_wall_sec": 13.479246678994969,
+  "rollback_wall_sec": 14.283489506997284,
+  "candidate_speed_delta_pct": 5.6305766711161755,
+  "candidate_correct": true,
+  "rollback_correct": true,
+  "candidate_metrics": {
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "executed_batches": 41.0,
+    "executed_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "rollback_metrics": {
+    "submitted_jobs": 120.0,
+    "runner_busy_jobs": 0.0,
+    "failed_jobs": 0.0,
+    "executed_batches": 41.0,
+    "executed_rows": 120.0,
+    "max_observed_batch": 3.0
+  },
+  "candidate_routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "rollback_routing": {
+    "mode_gpu_inference": true,
+    "vulkan_available": true,
+    "strix_halo_selected": true,
+    "decode_batcher_backend_vulkan": true
+  },
+  "decision": "accept default-on Vulkan recurrent Q/K norm folding with rollback KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1",
+  "candidate_summary": "vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-candidate-summary.json",
+  "rollback_summary": "vulkan-strix-halo-2026-05-09-a130-qk-norm-recurrent-rollback-summary.json"
+}

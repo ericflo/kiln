@@ -265,6 +265,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("causal_conv1d_state_advance", 2, 16),
         ("gdn_recurrent_prefill", 7, 24),
         ("gdn_recurrent_step_parallel", 7, 24),
+        ("gdn_recurrent_qk_norm_step", 7, 24),
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
@@ -6358,6 +6359,8 @@ pub fn dispatch_gdn_recurrent_step_with_options(
             parallel_reduce,
             skip_state_readback,
             profile_kernel_stages,
+            q.dtype(),
+            None,
         );
     }
 
@@ -7054,7 +7057,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gdn_recurrent_step_single_submit(
     vk_device: &VulkanDevice,
-    q: &Tensor,
+    _q: &Tensor,
     state: &Tensor,
     q_data: &[u8],
     k_data: &[u8],
@@ -7071,6 +7074,8 @@ fn dispatch_gdn_recurrent_step_single_submit(
     parallel_reduce: bool,
     skip_state_readback: bool,
     profile_kernel_stages: bool,
+    output_dtype: DType,
+    dispatch_counts_override: Option<(u32, u32, u32)>,
 ) -> Result<(Tensor, Option<Tensor>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -7165,6 +7170,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
     } else {
         (workgroup_count, 1, 1)
     };
+    let dispatch_counts = dispatch_counts_override.unwrap_or(dispatch_counts);
     let all_handles = vec![
         q_buf.handle(),
         k_buf.handle(),
@@ -7392,7 +7398,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
 
     let stage_profile = profile_kernel_stages.then(Instant::now);
     let out_shape = vec![batch, heads, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, q.dtype())?;
+    let out_tensor = create_tensor_from_data(&out_data, &out_shape, output_dtype)?;
     let state_tensor = state_data
         .as_ref()
         .map(|state_data| create_tensor_from_data(state_data, state.dims().as_ref(), state.dtype()))
@@ -7506,6 +7512,102 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_with_options(
         parallel_reduce,
         skip_state_readback,
         false,
+        q.dtype(),
+        None,
+    )?;
+    Ok((out.unsqueeze(1)?, state))
+}
+
+/// Dispatch a single-token recurrent step with unexpanded raw GQA Q/K heads,
+/// folding the split path's Q/K L2 normalization into the recurrent shader.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let (batch, seq_len, q_heads, dk) = q.dims4()?;
+    let (k_batch, k_seq_len, k_heads, k_dk) = k.dims4()?;
+    let (v_batch, v_seq_len, heads, dv) = v.dims4()?;
+    let (beta_batch, beta_seq_len, beta_heads) = beta.dims3()?;
+    let (g_batch, g_seq_len, g_heads) = g.dims3()?;
+    let (state_batch, state_heads, state_dk, state_dv) = state.dims4()?;
+
+    anyhow::ensure!(
+        seq_len == 1,
+        "native-head qk-norm recurrent expects seq_len=1"
+    );
+    anyhow::ensure!(
+        (k_batch, k_seq_len, k_heads, k_dk) == (batch, seq_len, q_heads, dk),
+        "native-head qk-norm recurrent k shape mismatch"
+    );
+    anyhow::ensure!(
+        (v_batch, v_seq_len) == (batch, seq_len),
+        "native-head qk-norm recurrent v batch/seq mismatch"
+    );
+    anyhow::ensure!(
+        (beta_batch, beta_seq_len, beta_heads) == (batch, seq_len, heads),
+        "native-head qk-norm recurrent beta shape mismatch"
+    );
+    anyhow::ensure!(
+        (g_batch, g_seq_len, g_heads) == (batch, seq_len, heads),
+        "native-head qk-norm recurrent g shape mismatch"
+    );
+    anyhow::ensure!(
+        (state_batch, state_heads, state_dk, state_dv) == (batch, heads, dk, dv),
+        "native-head qk-norm recurrent state shape mismatch"
+    );
+    anyhow::ensure!(
+        q_heads > 0,
+        "native-head qk-norm recurrent q_heads must be positive"
+    );
+    anyhow::ensure!(
+        heads % q_heads == 0,
+        "native-head qk-norm recurrent heads {heads} must be divisible by q_heads {q_heads}"
+    );
+    anyhow::ensure!(
+        dk <= 256 && dv <= 256,
+        "native-head qk-norm recurrent supports dk/dv <= 256, got dk={dk} dv={dv}"
+    );
+
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k)?.0;
+    let v_data = extract_tensor_bytes(v)?.0;
+    let beta_data = extract_tensor_bytes(beta)?.0;
+    let g_data = extract_tensor_bytes(g)?.0;
+    let state_data = extract_tensor_bytes(state)?.0;
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_recurrent_qk_norm_step.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let (out, state) = dispatch_gdn_recurrent_step_single_submit(
+        vk_device,
+        q,
+        state,
+        &q_data,
+        &k_data,
+        &v_data,
+        &beta_data,
+        &g_data,
+        &state_data,
+        &spirv,
+        batch,
+        heads,
+        q_heads,
+        dk,
+        dv,
+        false,
+        skip_state_readback,
+        false,
+        state.dtype(),
+        Some((batch as u32, heads as u32, 1)),
     )?;
     Ok((out.unsqueeze(1)?, state))
 }

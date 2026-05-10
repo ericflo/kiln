@@ -1,0 +1,18 @@
+{
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "max_tokens": 16,
+  "temperature": 0,
+  "stream": true,
+  "messages": [
+    {
+      "role": "system",
+      "content": "Continue sequences tersely and do not end early."
+    },
+    {
+      "role": "user",
+      "content": "Continue this comma-separated number sequence for a130 candidate request delta: one, two, three, four, five, six, seven,"
+    }
+  ]
+}

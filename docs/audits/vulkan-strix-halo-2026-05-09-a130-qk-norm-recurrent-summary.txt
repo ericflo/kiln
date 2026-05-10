@@ -1,0 +1,12 @@
+A130 Vulkan recurrent Q/K norm candidate
+candidate_wall_sec=13.479247
+rollback_wall_sec=14.283490
+candidate_speed_delta_pct=5.631
+candidate_correct=True
+rollback_correct=True
+candidate_metrics={'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'executed_batches': 41.0, 'executed_rows': 120.0, 'max_observed_batch': 3.0}
+rollback_metrics={'submitted_jobs': 120.0, 'runner_busy_jobs': 0.0, 'failed_jobs': 0.0, 'executed_batches': 41.0, 'executed_rows': 120.0, 'max_observed_batch': 3.0}
+candidate_routing={'mode_gpu_inference': True, 'vulkan_available': True, 'strix_halo_selected': True, 'decode_batcher_backend_vulkan': True}
+rollback_routing={'mode_gpu_inference': True, 'vulkan_available': True, 'strix_halo_selected': True, 'decode_batcher_backend_vulkan': True}
+expected_text=eight, nine, ten, eleven, twelve, thirteen, fourteen, fifteen,
+decision=accepted default-on Vulkan recurrent Q/K norm folding; rollback via KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1

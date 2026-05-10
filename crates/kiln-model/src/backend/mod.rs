@@ -184,6 +184,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    fn supports_gdn_recurrent_qk_norm_prefill_native_head_last(&self) -> bool {
+        false
+    }
+
     fn supports_gdn_decode_gates_recurrent_unexpanded_qk(&self) -> bool {
         false
     }
@@ -419,6 +423,21 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         _beta: &Tensor,
         _g: &Tensor,
         _state: &mut Tensor,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_recurrent_qk_norm_prefill_native_head_last(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _beta: &Tensor,
+        _g: &Tensor,
+        _state: &mut Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
     ) -> Result<Option<Tensor>> {
         Ok(None)
     }

@@ -766,3 +766,27 @@ Additional validation after rejected A129:
   remains rollback/non-resident. The kept scaffolding preserves non-blocking
   runner-busy fallback and avoids dropping batch resident buffers before row
   scatter succeeds.
+
+Additional validation after A130:
+
+- Added a Vulkan-only native-head recurrent shader that folds Q/K L2 norm into
+  the recurrent update for single-token BF16 decode. Rollback:
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1`.
+- Validation passed: `cargo fmt --check`, `git diff --check`,
+  `cargo check -p kiln-vulkan-kernel`, focused fused-vs-split Q/K norm parity,
+  full Vulkan GDN parity (`38 passed`),
+  `cargo check -p kiln-model --features vulkan`,
+  `cargo check -p kiln-server --features vulkan --bin kiln`,
+  `cargo check -p kiln-model`, `cargo check -p kiln-server --bin kiln`, and
+  release Vulkan server build.
+- Live A/B waited for background inference prewarm, used real
+  `chat_template_kwargs: {"enable_thinking": false}`, and confirmed GPU
+  routing in both arms. Candidate and rollback both returned `8/8` HTTP 200,
+  empty reasoning, exact visible text, and identical batcher counters:
+  `120` jobs, `41` batches, `120` rows, max batch `3`.
+- Candidate won: `13.479247s` vs rollback `14.283490s`, delta `+5.631%`.
+- Decision: keep default-on with rollback env
+  `KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM=1`. CUDA and Metal backends keep
+  no-op defaults for the new trait hook, so their source paths remain
+  unchanged. Local CUDA/Metal checks remain host-blocked (`nvcc` missing;
+  `objc2` requires an Apple target).

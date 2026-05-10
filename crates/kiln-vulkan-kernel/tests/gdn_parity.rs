@@ -1920,6 +1920,96 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
 }
 
 #[test]
+fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, q_heads, gqa_ratio, dk, dv) = (2usize, 2usize, 3usize, 64usize, 5usize);
+    let heads = q_heads * gqa_ratio;
+    let q = cpu_f32(
+        (0..batch * q_heads * dk)
+            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.011)
+            .collect(),
+        (batch, 1, q_heads, dk),
+    )?;
+    let k = cpu_f32(
+        (0..batch * q_heads * dk)
+            .map(|i| ((i as f32 % 23.0) - 11.0) * -0.009)
+            .collect(),
+        (batch, 1, q_heads, dk),
+    )?;
+    let v = cpu_bf16(
+        (0..batch * heads * dv)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.013)
+            .collect(),
+        (batch, 1, heads, dv),
+    )?;
+    let beta = cpu_bf16(
+        (0..batch * heads)
+            .map(|i| 0.21 + (i as f32) * 0.031)
+            .collect(),
+        (batch, 1, heads),
+    )?;
+    let g = cpu_bf16(
+        (0..batch * heads)
+            .map(|i| -0.03 - (i as f32) * 0.017)
+            .collect(),
+        (batch, 1, heads),
+    )?;
+    let state = cpu_bf16(
+        (0..batch * heads * dk * dv)
+            .map(|i| ((i as f32 % 29.0) - 14.0) * 0.004)
+            .collect(),
+        (batch, heads, dk, dv),
+    )?;
+
+    let q_sq = q
+        .to_dtype(DType::F32)?
+        .sqr()?
+        .sum_keepdim(candle_core::D::Minus1)?;
+    let k_sq = k
+        .to_dtype(DType::F32)?
+        .sqr()?
+        .sum_keepdim(candle_core::D::Minus1)?;
+    let q_norm = (q
+        .to_dtype(DType::F32)?
+        .broadcast_div(&(q_sq + 1e-6)?.sqrt()?)?
+        * (1.0 / (dk as f64).sqrt()))?
+    .to_dtype(DType::BF16)?;
+    let k_norm = k
+        .to_dtype(DType::F32)?
+        .broadcast_div(&(k_sq + 1e-6)?.sqrt()?)?
+        .to_dtype(DType::BF16)?;
+
+    let (expected_out, expected_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+            &vk, &q_norm, &k_norm, &v, &beta, &g, &state, false,
+        )
+        .context("native-head split qk_norm recurrent")?;
+    let (got_out, got_state) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options(
+            &vk, &q, &k, &v, &beta, &g, &state, false,
+        )
+        .context("native-head fused qk_norm recurrent")?;
+
+    assert_close(
+        "native-head qk-norm recurrent out",
+        &got_out,
+        &expected_out,
+        5e-4,
+    )?;
+    assert_close(
+        "native-head qk-norm recurrent state",
+        &got_state.context("native-head qk-norm state readback")?,
+        &expected_state.context("native-head split state readback")?,
+        1e-3,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
