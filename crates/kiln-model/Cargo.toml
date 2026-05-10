@@ -46,7 +46,7 @@ nvtx = ["kiln-nvtx/nvtx"]
 # shaders compiled to SPIR-V at build time. candle-core has no native Vulkan
 # device, so the Vulkan backend manages its own vk::Device and copies tensor
 # data through the CPU path at kernel boundaries.
-vulkan = ["dep:kiln-vulkan-kernel"]
+vulkan = ["dep:kiln-vulkan-kernel", "kiln-core/vulkan"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

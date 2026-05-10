@@ -1746,6 +1746,7 @@ name = "kiln-core"
 version = "0.2.15"
 dependencies = [
  "chrono",
+ "kiln-vulkan-kernel",
  "minijinja",
  "minijinja-contrib",
  "serde",
