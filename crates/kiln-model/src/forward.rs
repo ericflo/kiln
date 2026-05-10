@@ -210,6 +210,12 @@ fn profile_mlp_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_MLP_STAGES"))
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_gdn_ab_in_proj_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_AB_IN_PROJ").is_err())
+}
+
 fn weighted_lm_head_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| env_truthy_for_profile("KILN_DISABLE_WEIGHTED_LM_HEAD_PREP"))
@@ -1072,8 +1078,8 @@ pub struct GpuLinearAttentionWeights {
     pub in_proj_z_t: Tensor,
     pub in_proj_a_t: Tensor,
     pub in_proj_b_t: Tensor,
-    /// Metal-only cached `[hidden, 2 * nv]` transpose that combines the small
-    /// prefill A/B projections into one matmul. Other backends leave this empty.
+    /// Optional cached `[hidden, 2 * nv]` transpose that combines the small
+    /// prefill/decode A/B projections into one matmul on backend fast paths.
     pub in_proj_ab_t: Option<Tensor>,
     pub out_proj_t: Tensor,
 }
@@ -2512,9 +2518,18 @@ impl GpuWeights {
                     let (in_proj_b, in_proj_b_t) =
                         attn_proj.next().context(ctx("in_proj_b missing"))?;
                     let in_proj_ab_t = {
-                        #[cfg(feature = "metal")]
+                        #[cfg(any(feature = "cuda", feature = "metal"))]
                         {
-                            if matches!(device, Device::Metal(_)) {
+                            let mut should_cache = false;
+                            #[cfg(feature = "cuda")]
+                            {
+                                should_cache |= matches!(device, Device::Cuda(_));
+                            }
+                            #[cfg(feature = "metal")]
+                            {
+                                should_cache |= matches!(device, Device::Metal(_));
+                            }
+                            if should_cache {
                                 Some(
                                     Tensor::cat(
                                         &[&in_proj_a_t, &in_proj_b_t],
@@ -2527,7 +2542,7 @@ impl GpuWeights {
                                 None
                             }
                         }
-                        #[cfg(not(feature = "metal"))]
+                        #[cfg(not(any(feature = "cuda", feature = "metal")))]
                         {
                             None
                         }
@@ -4927,32 +4942,55 @@ fn gated_deltanet_forward_decode_if(
             let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
             let z = broadcast_matmul_cpu_compatible(x, &weights.in_proj_z_t)?; // [B, T, v_dim]
             let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
-                #[cfg(feature = "metal")]
+                #[cfg(any(feature = "cuda", feature = "metal"))]
                 {
+                    let mut out = None;
                     if let Some(in_proj_ab_t) = weights.in_proj_ab_t.as_ref() {
-                        if gdn_forward_only_fastpaths
-                            && crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports(
-                                x,
-                                in_proj_ab_t,
-                                nv,
-                            )
+                        #[cfg(feature = "metal")]
                         {
-                            let (ab, a, b) =
-                                crate::backend::metal::metal_gdn_prefill_ab_in_proj_bf16(
+                            if out.is_none()
+                                && gdn_forward_only_fastpaths
+                                && crate::backend::metal::metal_gdn_prefill_ab_in_proj_supports(
                                     x,
                                     in_proj_ab_t,
                                     nv,
                                 )
-                                .context("metal gdn prefill A/B in-proj")?;
-                            Some((ab, a, b))
-                        } else {
-                            None
+                            {
+                                let (ab, a, b) =
+                                    crate::backend::metal::metal_gdn_prefill_ab_in_proj_bf16(
+                                        x,
+                                        in_proj_ab_t,
+                                        nv,
+                                    )
+                                    .context("metal gdn prefill A/B in-proj")?;
+                                out = Some((ab, a, b));
+                            }
                         }
-                    } else {
-                        None
+                        #[cfg(feature = "cuda")]
+                        {
+                            if out.is_none()
+                                && cuda_gdn_ab_in_proj_enabled()
+                                && gdn_forward_only_fastpaths
+                                && seq_len == 1
+                                && x.dtype() == DType::BF16
+                                && in_proj_ab_t.dtype() == DType::BF16
+                                && !in_proj_ab_t.track_op()
+                                && matches!(x.device(), Device::Cuda(_))
+                                && matches!(in_proj_ab_t.device(), Device::Cuda(_))
+                                && in_proj_ab_t.is_contiguous()
+                                && in_proj_ab_t.dims() == [x.dim(2)?, 2 * nv]
+                            {
+                                let ab = broadcast_matmul_cpu_compatible(x, in_proj_ab_t)
+                                    .context("cuda gdn combined A/B in-proj matmul")?;
+                                let a = ab.narrow(2, 0, nv)?;
+                                let b = ab.narrow(2, nv, nv)?;
+                                out = Some((ab, a, b));
+                            }
+                        }
                     }
+                    out
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(any(feature = "cuda", feature = "metal")))]
                 {
                     None
                 }

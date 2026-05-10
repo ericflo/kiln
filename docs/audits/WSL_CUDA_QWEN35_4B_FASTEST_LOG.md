@@ -1105,3 +1105,63 @@ Live SFT smoke on the candidate server:
 - `/health` reported `active_adapter="cuda-lora-add-smoke"`,
   `adapters_loaded=2`, and zero queued/active training jobs;
 - adapter-backed chat returned `kiln lora`.
+
+## Follow-Up: Combine CUDA GDN Decode A/B Projections
+
+The post-LoRA current profile showed GDN `in_proj` as the largest remaining
+single-token decode stage. The large QKV and Z projections still use the
+existing cuBLAS-backed matmul path, but the two tiny `A` and `B` gate
+projections were separate 32-column matmuls per GDN layer. CUDA model load now
+caches the existing combined `[hidden, 2 * nv]` A/B transpose and untracked
+single-token CUDA inference computes both with one matmul plus two views.
+
+Training remains on the previous separate-matmul path because the combined
+CUDA route requires `!x.track_op()`. Rollback:
+
+```text
+KILN_DISABLE_CUDA_GDN_AB_IN_PROJ=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, paged latency bench, 64 prompt tokens,
+33 generated tokens, one warmup run per measurement, no stage profiling:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ=1` | 26.627227, 26.017787, 26.481529 | 26.375514 ms | 37.917653 |
+| default combined CUDA GDN A/B | 26.224632, 26.096284, 26.034409 | 26.118442 ms | 38.287475 |
+
+Average decode ITL improved by 1.0% on this WSL 16 GiB CUDA host. A post-build
+sanity run stayed in range at 26.062018 ms / 38.370014 tok/s.
+
+The targeted stage profile moved as intended:
+
+| path | GDN `in_proj` total | rows | mean per row |
+| --- | ---: | ---: | ---: |
+| rollback | 246.444 ms | 1632 | 0.151007 ms |
+| default combined A/B | 204.744 ms | 1632 | 0.125456 ms |
+
+That is a 16.9% reduction in the targeted stage.
+
+Validation:
+
+```bash
+cargo fmt --check
+git diff --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live no-env server load + training + auto-loaded LoRA smoke on the rebuilt
+0.2.14 binary:
+
+- load reported `post_load_used_vram_gb=10.032775168`,
+  `kv_cache_gb=0.268435456`, `training_budget_gb=6.870269952`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=5100`, `auto_load=true`;
+- adapter: `cuda-gdn-ab-smoke`;
+- job id: `7b00d2fe-0e36-4705-9697-3764dc15ea0f`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.1042242050170898`;
+- `/health` reported `active_adapter="cuda-gdn-ab-smoke"`,
+  `adapters_loaded=3`, and zero queued/active training jobs;
+- adapter-backed chat returned `kiln gdn ab`.

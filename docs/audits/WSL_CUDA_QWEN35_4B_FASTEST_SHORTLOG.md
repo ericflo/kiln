@@ -348,3 +348,26 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `cuda-lora-add-smoke`, final loss
   `1.3705849647521973`, `/health` reported the active adapter, and
   adapter-backed chat returned `kiln lora`.
+- Accepted CUDA GDN A/B projection combine:
+  CUDA model load now caches the combined `[hidden, 2 * nv]` GDN A/B transpose,
+  and untracked single-token CUDA inference uses one A/B matmul plus two views
+  instead of two tiny 32-column matmuls per GDN layer. Training stays on the
+  previous separate path because the route requires `!x.track_op()`. Rollback:
+  `KILN_DISABLE_CUDA_GDN_AB_IN_PROJ=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `26.627227`, `26.017787`, `26.481529` ms averaged
+  `26.375514ms` / `37.917653 tok/s`; default combined A/B runs `26.224632`,
+  `26.096284`, `26.034409` ms averaged `26.118442ms` / `38.287475 tok/s`,
+  a 1.0% decode ITL win.
+- Targeted profile confirmed GDN `in_proj` dropped from `246.444ms` total to
+  `204.744ms` total across `1632` profiled rows, a 16.9% reduction in that
+  stage. Post-build candidate sanity measured `26.062018ms` / `38.370014 tok/s`.
+- GDN A/B combine validation:
+  `cargo fmt --check`;
+  `git diff --check`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live no-env rank-1 SFT smoke auto-loaded `cuda-gdn-ab-smoke`, final loss
+  `1.1042242050170898`, `/health` reported `training_budget_gb=6.870269952`
+  and the active adapter, and adapter-backed chat returned `kiln gdn ab`.
