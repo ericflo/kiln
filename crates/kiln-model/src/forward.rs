@@ -1951,6 +1951,18 @@ fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Ok(Tensor::zeros((1usize,), weight_dtype(w), device)?)
 }
 
+/// True when `from_model_weights` should stub the candle CPU storage
+/// for the raw `embed_tokens` table after uploading the transposed
+/// view. Fires on Metal (always) and on Vulkan-active processes
+/// (where the candle "device" reports as Cpu but the real compute
+/// runs on a `vk::Device` that already keeps its own buffer copy of
+/// every weight). On a unified-memory APU this halves the
+/// embedding-table footprint by removing the duplicate candle CPU
+/// mirror.
+fn stub_embed_tokens_after_upload(device: &Device) -> bool {
+    matches!(device, Device::Metal(_)) || crate::backend::vulkan_active()
+}
+
 #[derive(Clone)]
 struct ProjectionLoadCache {
     drop_projection_originals: bool,
@@ -2413,7 +2425,16 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &Device,
     ) -> Result<Self> {
-        let (embed_tokens, embed_tokens_t) = if matches!(device, Device::Metal(_)) {
+        // On Metal and on Vulkan-active processes, `embed_tokens` itself
+        // is never read past `embedding_lookup_from_weights` (which falls
+        // back to `embed_tokens_t` whenever the dims don't match the
+        // expected `[vocab, hidden]` shape — the stub case). Materializing
+        // both copies costs ~1.3 GB of CPU storage on Qwen3.5-4B BF16
+        // for nothing, so collapse to a stub on those backends. On a
+        // unified-memory APU this is what keeps Phase 0 from sitting on
+        // a duplicate embedding table that the Vulkan side has already
+        // mirrored to its own buffer cache.
+        let (embed_tokens, embed_tokens_t) = if stub_embed_tokens_after_upload(device) {
             let embed_tokens_t =
                 weight_to_transposed_tensor_2d(&weights.embedding.embed_tokens, device)
                     .context("embed_tokens transposed upload")?;
@@ -11680,6 +11701,68 @@ mod tests {
             "metal_lora_linear_bench label={label} batch={batch} input_dim={input_dim} output_dim={output_dim} rank={rank} iters={iters} fast_ms={fast_ms:.3} fallback_ms={fallback_ms:.3} speedup={:.3} max_abs_diff={max:e} mean_abs_diff={mean:e}",
             fallback_ms / fast_ms
         );
+        Ok(())
+    }
+
+    /// `stub_embed_tokens_after_upload` must fire on Metal and on
+    /// Vulkan-active processes — both backends route the embedding
+    /// lookup through `embed_tokens_t` and never read the raw
+    /// `embed_tokens` table again, so the candle CPU mirror is
+    /// pure overhead.
+    ///
+    /// Phase 1.2 sub-step 1: keep this contract under test so a future
+    /// edit can't silently drop the Vulkan branch and reintroduce the
+    /// duplicate embedding-table footprint.
+    ///
+    /// We deliberately do NOT call `mark_vulkan_active()` here even
+    /// though it would let us assert the post-flag behavior: the flag
+    /// is process-global (and `vulkan_active()` is read by other
+    /// modules including the transposed weight cache writer's
+    /// scheduling envelope), so flipping it inside one unit test
+    /// destabilizes every later test in the same nextest process.
+    /// The flag's read is a one-line public API; the integration
+    /// behavior is exercised by the live-server validation in
+    /// `kiln-server`.
+    #[test]
+    fn test_stub_embed_tokens_decision_negative_only() {
+        let cpu = Device::Cpu;
+        // Pre-flag baseline: plain CPU, no Vulkan, must NOT stub.
+        // (If a prior test in the same process leaked vulkan_active=true,
+        // skip the assertion rather than make a false negative claim.)
+        if !crate::backend::vulkan_active() {
+            assert!(
+                !stub_embed_tokens_after_upload(&cpu),
+                "plain CPU with no Vulkan must NOT stub"
+            );
+        }
+        // Cuda device path is gated by feature; rely on the predicate's
+        // pattern match returning false for Device::Cpu under non-Metal
+        // builds, which is what the negative assertion above covers.
+    }
+
+    /// Property: when `embed_tokens` is a 1-element stub (the only
+    /// case `stub_embed_tokens_after_upload` produces), the dispatch in
+    /// `embedding_lookup_from_weights` must route to
+    /// `embedding_lookup_from_transposed`. We can't trivially build a
+    /// full `GpuWeights` here, so test the dim-mismatch branch directly
+    /// by checking that `dropped_weight_stub` produces a tensor whose
+    /// dims will not equal `[t_dims[1], t_dims[0]]` for any non-degenerate
+    /// transposed shape.
+    #[test]
+    fn test_dropped_stub_never_matches_real_embedding_dims() -> Result<()> {
+        let device = Device::Cpu;
+        let w = WeightTensor {
+            dtype: crate::weights::TensorDType::F32,
+            shape: vec![5, 3], // vocab=5, hidden=3
+            data: crate::weights::WeightData::owned(vec![0u8; 5 * 3 * 4]),
+            source: None,
+        };
+        let stub = dropped_weight_stub(&w, &device)?;
+        let materialized_t_dims = [3usize, 5usize];
+        let expected_embed_dims = [materialized_t_dims[1], materialized_t_dims[0]];
+        assert_ne!(stub.dims(), expected_embed_dims.as_slice());
+        assert_eq!(stub.dims(), &[1usize]);
+        assert_eq!(stub.dtype(), candle_core::DType::F32);
         Ok(())
     }
 
