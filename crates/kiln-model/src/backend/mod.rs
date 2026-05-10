@@ -490,6 +490,32 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Fused native-MTP GDN decode Q/K L2-normalization + gates + recurrent
+    /// update + gated RMSNorm.
+    ///
+    /// Narrow CUDA decode path for `seq_len == 1` bf16/F32 tensors. It returns
+    /// `[B, 1, value_heads, dv]` after gated RMSNorm and mutates `state` in
+    /// place.
+    #[allow(clippy::too_many_arguments)]
+    fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+        &self,
+        _q: &Tensor,
+        _k: &Tensor,
+        _v: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _a_log: &Tensor,
+        _dt_bias: &Tensor,
+        _state: &mut Tensor,
+        _z: &Tensor,
+        _weight: &Tensor,
+        _q_scale: f64,
+        _qk_eps: f64,
+        _rms_eps: f64,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Fused native-MTP GDN decode gates + recurrent update + gated RMSNorm.
     ///
     /// Narrow decode path for `seq_len == 1`. Returns `[B, 1, value_heads, dv]`

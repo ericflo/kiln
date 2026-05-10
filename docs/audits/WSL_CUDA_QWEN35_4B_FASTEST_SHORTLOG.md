@@ -211,3 +211,28 @@ Date: 2026-05-09
 - Live rank-1 SFT smoke auto-loaded `gdn-autograd-guard-smoke-r1`, final loss
   `1.5467936992645264`, `/health` reported the active adapter, no-thinking
   chat returned `kiln violet`, and thinking chat emitted reasoning content.
+- Accepted CUDA folded GDN QK norm + recurrent + gated RMSNorm:
+  CUDA decode now accepts raw F32/bf16 unexpanded GDN Q/K plus V, computes
+  Q/K normalization, gates, recurrent update, and gated RMSNorm in one
+  single-token kernel. The model route is still forward-only and only reached
+  through the existing `gdn_forward_only_fastpaths` guard, so training keeps
+  the differentiable Candle path. Rollback:
+  `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM=1`.
+- Same-binary WSL CUDA paged latency A/B:
+  rollback mean ITL runs `33.4`, `33.3`, `33.2` ms averaged `33.3ms` /
+  `30.03 tok/s`; default fused-QK/recurrent/RMSNorm runs `26.0`, `26.1`,
+  `26.2` ms averaged `26.1ms` / `38.31 tok/s`, a 21.6% decode ITL win.
+- Short profile confirmed decode selects `qk_norm_gates_recur_gated_norm`;
+  the split `qk_norm_gates_recur` stage disappeared and `gated_norm` fell to
+  reshape-level timing.
+- Fused-QK/recurrent/RMSNorm validation:
+  `cargo fmt`;
+  `cargo test -p kiln-gdn-kernel test_cuda_decode_qk_norm_gates_recurrent_rmsnorm_matches_split_path -- --nocapture`;
+  `cargo test -p kiln-gdn-kernel test_cuda_decode_qk_norm_gates_recurrent_matches_split_path --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`.
+- Post-rebase live rank-1 SFT smoke on the rebuilt 0.2.14 binary used
+  `KILN_DROP_PROJECTION_ORIGINALS=1` on this 16 GiB GPU, auto-loaded
+  `gdn-qk-recur-rmsnorm-smoke-r3`, final loss `1.6381032466888428`,
+  `/health` reported the active adapter, no-thinking chat returned
+  `kiln copper`, and thinking chat emitted reasoning content.

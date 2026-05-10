@@ -172,6 +172,98 @@ kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
     void *stream
 );
 
+kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    float rms_eps,
+    void *stream
+);
+
+kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    float rms_eps,
+    void *stream
+);
+
+kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    float rms_eps,
+    void *stream
+);
+
+kiln_gdn_recurrent_status_t kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
+    const void *q,
+    const void *k,
+    const void *v,
+    const void *a,
+    const void *b,
+    const void *a_log,
+    const void *dt_bias,
+    void *state,
+    const void *z,
+    const void *weight,
+    void *out,
+    int batch,
+    int q_heads,
+    int value_heads,
+    int dk,
+    int dv,
+    float q_scale,
+    float qk_eps,
+    float rms_eps,
+    void *stream
+);
+
 #ifdef __cplusplus
 }
 #endif

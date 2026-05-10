@@ -5431,57 +5431,86 @@ fn gated_deltanet_forward_decode_if(
     }
 
     let fused_decode_gates_recurrent_rmsnorm = {
-        #[cfg(feature = "metal")]
-        {
-            if recurrent_unexpanded_qk
-                && seq_len == 1
-                && !capture_b11_taps
-                && !capture_c41_taps
-                && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
-                    &q,
-                    &k,
-                    &v,
-                    &a,
-                    &b,
-                    &weights.a_log,
-                    &weights.dt_bias,
-                    recurrent_state,
-                    &z,
-                    &weights.norm,
-                )
+        let mut fused = {
+            #[cfg(feature = "metal")]
             {
-                kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
-                let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-                let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
-                    &q,
-                    &k,
-                    &v,
-                    &a,
-                    &b,
-                    &weights.a_log,
-                    &weights.dt_bias,
-                    recurrent_state,
-                    &z,
-                    &weights.norm,
-                    config.rms_norm_eps as f32,
-                )
-                .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?;
-                finish_gdn_stage_profile(
-                    profile_device,
-                    profile_context,
-                    "gates_recur_gated_norm",
-                    seq_len,
-                    stage_profile,
-                )?;
-                Some(out)
-            } else {
+                if recurrent_unexpanded_qk
+                    && seq_len == 1
+                    && !capture_b11_taps
+                    && !capture_c41_taps
+                    && crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_supports(
+                        &q,
+                        &k,
+                        &v,
+                        &a,
+                        &b,
+                        &weights.a_log,
+                        &weights.dt_bias,
+                        recurrent_state,
+                        &z,
+                        &weights.norm,
+                    )
+                {
+                    kiln_nvtx::range!(c"kiln/gdn/gates_recur_gated_norm");
+                    let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+                    let out = crate::backend::metal::metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
+                        &q,
+                        &k,
+                        &v,
+                        &a,
+                        &b,
+                        &weights.a_log,
+                        &weights.dt_bias,
+                        recurrent_state,
+                        &z,
+                        &weights.norm,
+                        config.rms_norm_eps as f32,
+                    )
+                    .context("metal gdn decode gates+recurrent+gated-rmsnorm kernel failed")?;
+                    finish_gdn_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "gates_recur_gated_norm",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    Some(out)
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(feature = "metal"))]
+            {
                 None
             }
+        };
+        if fused.is_none() && qk_norm_deferred_to_recurrent {
+            kiln_nvtx::range!(c"kiln/gdn/qk_norm_gates_recur_gated_norm");
+            let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
+            fused = backend.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+                &q,
+                &k,
+                &v,
+                &a,
+                &b,
+                &weights.a_log_gates,
+                &weights.dt_bias,
+                recurrent_state,
+                &z,
+                &weights.norm,
+                scale,
+                1e-6,
+                config.rms_norm_eps,
+            )?;
+            finish_gdn_stage_profile(
+                profile_device,
+                profile_context,
+                "qk_norm_gates_recur_gated_norm",
+                seq_len,
+                stage_profile,
+            )?;
         }
-        #[cfg(not(feature = "metal"))]
-        {
-            None
-        }
+        fused
     };
 
     let fused_decode_gates_recurrent = {

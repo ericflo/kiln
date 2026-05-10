@@ -726,3 +726,74 @@ Live training + auto-loaded LoRA smoke on the candidate binary:
 - `/health` reported `active_adapter="gdn-autograd-guard-smoke-r1"`;
 - adapter-backed no-thinking chat returned `kiln violet`;
 - adapter-backed thinking chat emitted non-empty `reasoning_content`.
+
+## Follow-Up: CUDA Fold GDN QK Norm Into Decode Recurrent RMSNorm
+
+After the autograd guard, the CUDA decode path still paid a separate gated
+RMSNorm stage after the folded QK-norm + gates + recurrent kernel. CUDA now has
+a single-token GDN kernel that accepts raw F32/bf16 unexpanded Q/K and F32/bf16
+V, applies the same Q/K L2-normalization and bf16 epilogue as the split path,
+computes gates and the recurrent state update, then applies gated RMSNorm with
+the production F32 norm weight. The selected output is already post-gated
+RMSNorm, so the later `gated_norm` stage only handles the existing reshape/cast
+bookkeeping.
+
+The route is inference-only: it is reached only when the existing
+`gdn_forward_only_fastpaths` / deferred-QK decode guard is true. Autograd-tracked
+training tensors keep the differentiable Candle path from the previous safety
+follow-up.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM=1
+```
+
+Same-binary WSL RTX 4090 Laptop A/B, CUDA graphs unset, paged latency bench,
+64 prompt tokens, 65 measured decode tokens:
+
+| path | mean ITL runs (ms) | avg mean ITL | avg decode tok/s |
+| --- | --- | ---: | ---: |
+| rollback, `KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM=1` | 33.4, 33.3, 33.2 | 33.3 ms | 30.03 |
+| default fused GDN QK norm + recurrent + RMSNorm | 26.0, 26.1, 26.2 | 26.1 ms | 38.31 |
+
+Average decode ITL improved by 21.6% on this WSL 16 GiB CUDA host.
+
+A short profile confirmed the intended dispatch:
+`qk_norm_gates_recur_gated_norm` appears on the decode path, the split
+`qk_norm_gates_recur` stage no longer appears for decode, and the later
+`gated_norm` profile rows are reshape-level only, around `0.001ms`.
+
+Validation:
+
+```bash
+cargo fmt
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-gdn-kernel test_cuda_decode_qk_norm_gates_recurrent_rmsnorm_matches_split_path -- --nocapture
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-gdn-kernel test_cuda_decode_qk_norm_gates_recurrent_matches_split_path --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+The new GDN kernel parity test uses production-style F32 Q/K, F32 V, BF16
+gates/state, BF16 `z`, and F32 RMSNorm weight, checking both output and mutated
+state against the split folded-QK/recurrent plus Candle gated-RMSNorm reference.
+
+Post-rebase live training + auto-loaded LoRA smoke on the rebuilt 0.2.14
+candidate binary:
+
+- temporary adapter dir:
+  `/tmp/kiln-adapters-gdn-qk-recur-rmsnorm-smoke-20260510-postrebase`;
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `seed=9678`, `auto_load=true`;
+- job id: `5afa48e1-1c7d-432b-8fad-d6f8b0a143a4`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.6381032466888428`;
+- `/health` reported `active_adapter="gdn-qk-recur-rmsnorm-smoke-r3"`;
+- adapter-backed no-thinking chat returned `kiln copper`;
+- adapter-backed thinking chat emitted non-empty `reasoning_content`.
+
+On this 16 GiB GPU, a conservative server smoke without
+`KILN_DROP_PROJECTION_ORIGINALS=1` still hits a CUDA allocation OOM while
+loading Qwen3.5-4B projection tensors. The accepted live-training smoke uses
+the production memory setting above; training itself completed through the real
+HTTP SFT queue and adapter hot-load path.

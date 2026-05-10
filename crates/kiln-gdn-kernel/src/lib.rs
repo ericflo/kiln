@@ -214,6 +214,98 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        q_scale: f32,
+        qk_eps: f32,
+        rms_eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        q_scale: f32,
+        qk_eps: f32,
+        rms_eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        q_scale: f32,
+        qk_eps: f32,
+        rms_eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
+        q: *const core::ffi::c_void,
+        k: *const core::ffi::c_void,
+        v: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        b: *const core::ffi::c_void,
+        a_log: *const core::ffi::c_void,
+        dt_bias: *const core::ffi::c_void,
+        state: *mut core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        q_heads: i32,
+        value_heads: i32,
+        dk: i32,
+        dv: i32,
+        q_scale: f32,
+        qk_eps: f32,
+        rms_eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_gdn_chunk_prep(
         g: *const core::ffi::c_void,
         v: *const core::ffi::c_void,
@@ -1236,6 +1328,361 @@ pub fn gdn_decode_qk_norm_gates_recurrent(
             if status != 0 {
                 candle_core::bail!(
                     "kiln_gdn_decode_qk_norm_gates_recurrent_bf16 failed with status {status}"
+                );
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+) -> bool {
+    if !gdn_decode_qk_norm_gates_recurrent_supports(q, k, v, a, b, a_log, dt_bias, state) {
+        return false;
+    }
+    let Ok((batch, seq_len, _, _)) = q.dims4() else {
+        return false;
+    };
+    let Ok((_, _, value_heads, dv)) = v.dims4() else {
+        return false;
+    };
+    z.dtype() == DType::BF16
+        && weight.dtype() == DType::F32
+        && z.dims() == [batch, seq_len, value_heads, dv]
+        && weight.dims() == [dv]
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &mut Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    q_scale: f32,
+    qk_eps: f32,
+    rms_eps: f32,
+) -> Result<Tensor> {
+    if !gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports(
+        q, k, v, a, b, a_log, dt_bias, state, z, weight,
+    ) {
+        candle_core::bail!(
+            "kiln-gdn-kernel: gdn_decode_qk_norm_gates_recurrent_rmsnorm envelope violation"
+        );
+    }
+
+    let device = q.device();
+    let (batch, _, q_heads, dk) = q.dims4()?;
+    let (_, _, value_heads, dv) = v.dims4()?;
+
+    let q = gdn_gates_ctx(
+        q.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm q contiguous",
+    )?;
+    let k = gdn_gates_ctx(
+        k.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm k contiguous",
+    )?;
+    let v = gdn_gates_ctx(
+        v.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm v contiguous",
+    )?;
+    let a = gdn_gates_ctx(
+        a.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm a contiguous",
+    )?;
+    let b = gdn_gates_ctx(
+        b.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm b contiguous",
+    )?;
+    let a_log = gdn_gates_ctx(
+        a_log.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm a_log contiguous",
+    )?;
+    let dt_bias = gdn_gates_ctx(
+        dt_bias.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm dt_bias contiguous",
+    )?;
+    let z = gdn_gates_ctx(
+        z.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm z contiguous",
+    )?;
+    let weight = gdn_gates_ctx(
+        weight.contiguous(),
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm weight contiguous",
+    )?;
+    let out = match next_decode_gates_recurrent_output((batch, 1, value_heads, dv), device)? {
+        Some(out) => out,
+        None => gdn_gates_ctx(
+            Tensor::zeros((batch, 1, value_heads, dv), DType::BF16, device),
+            "gdn_decode_qk_norm_gates_recurrent_rmsnorm out zeros",
+        )?,
+    };
+
+    {
+        let (q_storage, q_layout) = q.storage_and_layout();
+        let (k_storage, k_layout) = k.storage_and_layout();
+        let (v_storage, v_layout) = v.storage_and_layout();
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (al_storage, al_layout) = a_log.storage_and_layout();
+        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let (z_storage, z_layout) = z.storage_and_layout();
+        let (w_storage, w_layout) = weight.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let q_cuda = match &*q_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: q must be on CUDA"),
+        };
+        let k_cuda = match &*k_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: k must be on CUDA"),
+        };
+        let v_cuda = match &*v_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: v must be on CUDA"),
+        };
+        let a_cuda = match &*a_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: a must be on CUDA"),
+        };
+        let b_cuda = match &*b_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: b must be on CUDA"),
+        };
+        let al_cuda = match &*al_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: a_log must be on CUDA"),
+        };
+        let dt_cuda = match &*dt_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: dt_bias must be on CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: state must be on CUDA"),
+        };
+        let z_cuda = match &*z_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: z must be on CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: weight must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-gdn-kernel: out must be on CUDA"),
+        };
+
+        let stream = q_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let al_slice = al_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(al_layout.start_offset()..);
+        let dt_slice = dt_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(dt_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(s_layout.start_offset()..);
+        let z_slice = z_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(z_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(w_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (a_ptr, _g4) = a_slice.device_ptr(&stream);
+            let (b_ptr, _g5) = b_slice.device_ptr(&stream);
+            let (al_ptr, _g6) = al_slice.device_ptr(&stream);
+            let (dt_ptr, _g7) = dt_slice.device_ptr(&stream);
+            let (s_ptr, _g8) = s_slice.device_ptr(&stream);
+            let (z_ptr, _g9) = z_slice.device_ptr(&stream);
+            let (w_ptr, _g10) = w_slice.device_ptr(&stream);
+            let (out_ptr, _g11) = out_slice.device_ptr(&stream);
+
+            let status = match (q.dtype(), v.dtype()) {
+                (DType::BF16, DType::BF16) => {
+                    let q_slice = q_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(q_layout.start_offset()..);
+                    let k_slice = k_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(k_layout.start_offset()..);
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(v_layout.start_offset()..);
+                    let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+                    let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        z_ptr as *const _,
+                        w_ptr as *const _,
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        q_scale,
+                        qk_eps,
+                        rms_eps,
+                        raw_stream,
+                    )
+                }
+                (DType::BF16, DType::F32) => {
+                    let q_slice = q_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(q_layout.start_offset()..);
+                    let k_slice = k_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(k_layout.start_offset()..);
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(v_layout.start_offset()..);
+                    let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+                    let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        z_ptr as *const _,
+                        w_ptr as *const _,
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        q_scale,
+                        qk_eps,
+                        rms_eps,
+                        raw_stream,
+                    )
+                }
+                (DType::F32, DType::F32) => {
+                    let q_slice = q_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(q_layout.start_offset()..);
+                    let k_slice = k_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(k_layout.start_offset()..);
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(v_layout.start_offset()..);
+                    let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+                    let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        z_ptr as *const _,
+                        w_ptr as *const _,
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        q_scale,
+                        qk_eps,
+                        rms_eps,
+                        raw_stream,
+                    )
+                }
+                (DType::F32, DType::BF16) => {
+                    let q_slice = q_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(q_layout.start_offset()..);
+                    let k_slice = k_cuda
+                        .as_cuda_slice::<f32>()?
+                        .slice(k_layout.start_offset()..);
+                    let v_slice = v_cuda
+                        .as_cuda_slice::<bf16>()?
+                        .slice(v_layout.start_offset()..);
+                    let (q_ptr, _g1) = q_slice.device_ptr(&stream);
+                    let (k_ptr, _g2) = k_slice.device_ptr(&stream);
+                    let (v_ptr, _g3) = v_slice.device_ptr(&stream);
+                    kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
+                        q_ptr as *const _,
+                        k_ptr as *const _,
+                        v_ptr as *const _,
+                        a_ptr as *const _,
+                        b_ptr as *const _,
+                        al_ptr as *const _,
+                        dt_ptr as *const _,
+                        s_ptr as *mut _,
+                        z_ptr as *const _,
+                        w_ptr as *const _,
+                        out_ptr as *mut _,
+                        batch as i32,
+                        q_heads as i32,
+                        value_heads as i32,
+                        dk as i32,
+                        dv as i32,
+                        q_scale,
+                        qk_eps,
+                        rms_eps,
+                        raw_stream,
+                    )
+                }
+                (q_dtype, v_dtype) => candle_core::bail!(
+                    "kiln-gdn-kernel: unsupported fused decode+rmsnorm q/v dtypes {q_dtype:?}/{v_dtype:?}"
+                ),
+            };
+            if status != 0 {
+                candle_core::bail!(
+                    "kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16 failed with status {status}"
                 );
             }
         }
@@ -2674,8 +3121,7 @@ mod tests {
             &device,
         )?
         .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
-            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?;
         let state = Tensor::from_slice(
             &patterned_data(batch * heads * dk * dv, 0.08, 6.1),
             (batch, heads, dk, dv),
@@ -2807,8 +3253,7 @@ mod tests {
             &device,
         )?
         .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
-            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?;
         let state = Tensor::from_slice(
             &patterned_data(batch * value_heads * dk * dv, 0.08, 6.1),
             (batch, value_heads, dk, dv),
@@ -2961,8 +3406,7 @@ mod tests {
             &device,
         )?
         .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?
-            .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?;
         let state = Tensor::from_slice(
             &patterned_data(batch * value_heads * dk * dv, 0.08, 6.1),
             (batch, value_heads, dk, dv),
@@ -3033,6 +3477,162 @@ mod tests {
         assert!(
             state_mean < 2e-3,
             "fused qk_norm decode state mean_abs_diff={state_mean:e}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cuda_decode_qk_norm_gates_recurrent_rmsnorm_matches_split_path() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping qk_norm+decode recurrent+rmsnorm parity test: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let batch = 1usize;
+        let seq_len = 1usize;
+        let q_heads = 8usize;
+        let value_heads = 32usize;
+        let dk = 128usize;
+        let dv = 128usize;
+        let q_scale = 1.0 / (dk as f64).sqrt();
+
+        let q = Tensor::from_slice(
+            &patterned_data(batch * seq_len * q_heads * dk, 0.35, 0.1),
+            (batch, seq_len, q_heads, dk),
+            &device,
+        )?;
+        let k = Tensor::from_slice(
+            &patterned_data(batch * seq_len * q_heads * dk, 0.25, 0.7),
+            (batch, seq_len, q_heads, dk),
+            &device,
+        )?;
+        let v = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads * dv, 0.5, 1.3),
+            (batch, seq_len, value_heads, dv),
+            &device,
+        )?;
+        let a = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads, 0.4, 2.1),
+            (batch, seq_len, value_heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let b = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads, 0.6, 2.9),
+            (batch, seq_len, value_heads),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let a_log = Tensor::from_slice(
+            &patterned_data(value_heads, 0.15, 3.7),
+            (value_heads,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let dt_bias = Tensor::from_slice(
+            &patterned_data(value_heads, 0.2, 4.3),
+            (value_heads,),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let z = Tensor::from_slice(
+            &patterned_data(batch * seq_len * value_heads * dv, 0.45, 4.9),
+            (batch, seq_len, value_heads, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&patterned_data(dv, 0.3, 5.5), (dv,), &device)?;
+        let state = Tensor::from_slice(
+            &patterned_data(batch * value_heads * dk * dv, 0.08, 6.1),
+            (batch, value_heads, dk, dv),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+
+        let mut state_split = state.copy()?;
+        let out_recur_split = gdn_decode_qk_norm_gates_recurrent(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_split,
+            q_scale as f32,
+            1e-6,
+        )?;
+        let out_recur_split_f32 = out_recur_split.to_dtype(DType::F32)?;
+        let z_f32 = z.to_dtype(DType::F32)?;
+        let variance = out_recur_split_f32
+            .sqr()?
+            .mean_keepdim(candle_core::D::Minus1)?;
+        let rms_inv = (variance + 1e-6)?.sqrt()?.recip()?;
+        let normed = out_recur_split_f32
+            .broadcast_mul(&rms_inv)?
+            .broadcast_mul(&weight)?;
+        let gate = {
+            let sig = (z_f32.neg()?.exp()? + 1.0)?.recip()?;
+            (z_f32 * sig)?
+        };
+        let out_split = (normed * gate)?.to_dtype(DType::BF16)?;
+
+        let mut state_fused = state.copy()?;
+        assert!(gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &state_fused,
+            &z,
+            &weight,
+        ));
+        let out_fused = gdn_decode_qk_norm_gates_recurrent_rmsnorm(
+            &q,
+            &k,
+            &v,
+            &a,
+            &b,
+            &a_log,
+            &dt_bias,
+            &mut state_fused,
+            &z,
+            &weight,
+            q_scale as f32,
+            1e-6,
+            1e-6,
+        )?;
+
+        let (out_max, out_mean) = max_mean_abs_diff(&out_fused, &out_split)?;
+        let (state_max, state_mean) = max_mean_abs_diff(&state_fused, &state_split)?;
+        eprintln!(
+            "cuda decode qk_norm+gates+recurrent+rmsnorm vs split: out max={out_max:e} mean={out_mean:e}, state max={state_max:e} mean={state_mean:e}"
+        );
+
+        assert!(
+            out_max < 2e-2,
+            "fused qk_norm recurrent+rmsnorm output max_abs_diff={out_max:e}"
+        );
+        assert!(
+            out_mean < 2e-3,
+            "fused qk_norm recurrent+rmsnorm output mean_abs_diff={out_mean:e}"
+        );
+        assert!(
+            state_max < 2e-2,
+            "fused qk_norm recurrent+rmsnorm state max_abs_diff={state_max:e}"
+        );
+        assert!(
+            state_mean < 2e-3,
+            "fused qk_norm recurrent+rmsnorm state mean_abs_diff={state_mean:e}"
         );
 
         Ok(())
