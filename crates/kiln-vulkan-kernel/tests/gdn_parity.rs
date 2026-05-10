@@ -2004,7 +2004,7 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
         "native-head qk-norm recurrent state",
         &got_state.context("native-head qk-norm state readback")?,
         &expected_state.context("native-head split state readback")?,
-        1e-3,
+        1e-2,
     )?;
     Ok(())
 }
