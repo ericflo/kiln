@@ -324,3 +324,27 @@ Date: 2026-05-09
 - Live no-env rank-1 SFT smoke auto-loaded `cuda-default-drop-smoke`, final
   loss `2.7255642414093018`, `/health` reported the active adapter, and
   adapter-backed chat returned `Kiln target model`.
+- Accepted CUDA LoRA decode delta/add fast path:
+  single-token BF16 CUDA decode now computes LoRA `x @ A.t()` into F32 scratch
+  and adds `scale * hidden @ B.t()` to the base projection with custom kernels.
+  The backend declines any autograd-tracked tensor, so SFT keeps the
+  differentiable Candle path. Rollback:
+  `KILN_DISABLE_CUDA_LORA_DECODE_ADD=1`.
+- Recent memory-pressure check showed no Linux OOM-killer entry; kernel logs
+  showed WSL/DXG `dxgkio_make_resident: -12`, consistent with CUDA residency
+  allocation pressure. No `kiln serve` process was still running, and GPU
+  memory was idle at `71 MiB` used of `16376 MiB`.
+- Same-binary live adapter-backed chat A/B:
+  rollback warmed runs averaged `0.729129s` / `27.43 tok/s`; default fused
+  LoRA decode add measured `0.675411s` / `29.61 tok/s`, a 7.4% wall-time win
+  and 8.0% throughput win.
+- LoRA decode-add validation:
+  `cargo fmt --check`;
+  `cargo test -p kiln-rmsnorm-kernel lora_decode_add_parity_cuda --quiet`;
+  `cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --quiet`;
+  `cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet`;
+  `cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench`
+  with `CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89`.
+- Live rank-1 SFT smoke auto-loaded `cuda-lora-add-smoke`, final loss
+  `1.3705849647521973`, `/health` reported the active adapter, and
+  adapter-backed chat returned `kiln lora`.

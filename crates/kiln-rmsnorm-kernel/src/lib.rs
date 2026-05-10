@@ -186,6 +186,28 @@ unsafe extern "C" {
         elems: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_lora_decode_hidden_bf16(
+        x: *const core::ffi::c_void,
+        a: *const core::ffi::c_void,
+        hidden: *mut f32,
+        batch: i32,
+        in_dim: i32,
+        rank: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_lora_decode_add_bf16(
+        base: *const core::ffi::c_void,
+        hidden: *const f32,
+        b: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        scale: f32,
+        batch: i32,
+        out_dim: i32,
+        rank: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Whether the fused RMSNorm kernel is available on the given tensor.
@@ -1766,6 +1788,180 @@ pub fn fused_sigmoid_mul(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
     Ok(out)
 }
 
+/// Whether the fused forward-only LoRA delta/add decode kernels support this shape.
+///
+/// Supports BF16 CUDA tensors for single-token decode rows:
+/// `base=[batch,1,out]`, `x=[batch,1,in]`, `a=[rank,in]`, `b=[out,rank]`.
+/// Callers that need autograd must decline before invoking this helper.
+pub fn supports_lora_decode_add(base: &Tensor, x: &Tensor, a: &Tensor, b: &Tensor) -> bool {
+    let Ok((batch, one, out_dim)) = base.dims3() else {
+        return false;
+    };
+    let Ok((x_batch, x_one, in_dim)) = x.dims3() else {
+        return false;
+    };
+    let Ok((rank, a_in_dim)) = a.dims2() else {
+        return false;
+    };
+    let Ok((b_out_dim, b_rank)) = b.dims2() else {
+        return false;
+    };
+    matches!(base.device(), Device::Cuda(_))
+        && matches!(x.device(), Device::Cuda(_))
+        && matches!(a.device(), Device::Cuda(_))
+        && matches!(b.device(), Device::Cuda(_))
+        && base.dtype() == DType::BF16
+        && x.dtype() == DType::BF16
+        && a.dtype() == DType::BF16
+        && b.dtype() == DType::BF16
+        && base.is_contiguous()
+        && x.is_contiguous()
+        && a.is_contiguous()
+        && b.is_contiguous()
+        && batch == x_batch
+        && one == 1
+        && x_one == 1
+        && rank == b_rank
+        && in_dim == a_in_dim
+        && out_dim == b_out_dim
+        && batch > 0
+        && in_dim > 0
+        && out_dim > 0
+        && rank > 0
+        && rank <= 64
+        && batch <= i32::MAX as usize
+        && in_dim <= i32::MAX as usize
+        && out_dim <= i32::MAX as usize
+        && rank <= i32::MAX as usize
+}
+
+/// Run fused forward-only LoRA delta/add for decode.
+pub fn lora_decode_add(
+    base: &Tensor,
+    x: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    if !supports_lora_decode_add(base, x, a, b) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: lora_decode_add unsupported base={:?} x={:?} a={:?} b={:?} dtypes=({:?},{:?},{:?},{:?})",
+            base.shape(),
+            x.shape(),
+            a.shape(),
+            b.shape(),
+            base.dtype(),
+            x.dtype(),
+            a.dtype(),
+            b.dtype()
+        );
+    }
+
+    let (batch, _, out_dim) = base.dims3()?;
+    let (_, _, in_dim) = x.dims3()?;
+    let (rank, _) = a.dims2()?;
+    let base = base.contiguous()?;
+    let x = x.contiguous()?;
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
+    let hidden = unsafe { Tensor::empty((batch, rank), DType::F32, base.device())? };
+    let out = unsafe { Tensor::empty(base.dims(), DType::BF16, base.device())? };
+
+    {
+        let (base_storage, base_layout) = base.storage_and_layout();
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let (a_storage, a_layout) = a.storage_and_layout();
+        let (b_storage, b_layout) = b.storage_and_layout();
+        let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let base_cuda = match &*base_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora base must be on CUDA"),
+        };
+        let x_cuda = match &*x_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora x must be on CUDA"),
+        };
+        let a_cuda = match &*a_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora A must be on CUDA"),
+        };
+        let b_cuda = match &*b_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora B must be on CUDA"),
+        };
+        let hidden_cuda = match &*hidden_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora hidden must be on CUDA"),
+        };
+        let out_cuda = match &*out_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: lora out must be on CUDA"),
+        };
+
+        let stream = base_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        let base_slice = base_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(base_layout.start_offset()..);
+        let x_slice = x_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(x_layout.start_offset()..);
+        let a_slice = a_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(a_layout.start_offset()..);
+        let b_slice = b_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(b_layout.start_offset()..);
+        let hidden_slice = hidden_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(hidden_layout.start_offset()..);
+        let out_slice = out_cuda
+            .as_cuda_slice::<bf16>()?
+            .slice(out_layout.start_offset()..);
+
+        unsafe {
+            let (x_ptr, _g1) = x_slice.device_ptr(&stream);
+            let (a_ptr, _g2) = a_slice.device_ptr(&stream);
+            let (hidden_ptr, _g3) = hidden_slice.device_ptr(&stream);
+            let status = kiln_lora_decode_hidden_bf16(
+                x_ptr as *const _,
+                a_ptr as *const _,
+                hidden_ptr as *mut f32,
+                batch as i32,
+                in_dim as i32,
+                rank as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("kiln_lora_decode_hidden_bf16 failed with status {status}");
+            }
+
+            let (base_ptr, _g4) = base_slice.device_ptr(&stream);
+            let (b_ptr, _g5) = b_slice.device_ptr(&stream);
+            let (out_ptr, _g6) = out_slice.device_ptr(&stream);
+            let status = kiln_lora_decode_add_bf16(
+                base_ptr as *const _,
+                hidden_ptr as *const f32,
+                b_ptr as *const _,
+                out_ptr as *mut _,
+                scale,
+                batch as i32,
+                out_dim as i32,
+                rank as i32,
+                raw_stream,
+            );
+            if status != 0 {
+                candle_core::bail!("kiln_lora_decode_add_bf16 failed with status {status}");
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2824,6 +3020,61 @@ mod tests {
         assert!(
             gw_diff < 1e-2,
             "CUDA grad_w parity failed: max_abs_diff={gw_diff} (tol=1e-2)"
+        );
+    }
+
+    #[test]
+    fn lora_decode_add_parity_cuda() {
+        let Some(device) = try_cuda_device() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+
+        let batch = 2usize;
+        let in_dim = 96usize;
+        let out_dim = 128usize;
+        let rank = 4usize;
+        let scale = 0.375f32;
+        let mut state: u32 = 0x51f1_0a0a;
+        let mut next = |mul: f32| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (((state >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0) * mul
+        };
+        let base_raw: Vec<f32> = (0..batch * out_dim).map(|_| next(0.2)).collect();
+        let x_raw: Vec<f32> = (0..batch * in_dim).map(|_| next(0.2)).collect();
+        let a_raw: Vec<f32> = (0..rank * in_dim).map(|_| next(0.05)).collect();
+        let b_raw: Vec<f32> = (0..out_dim * rank).map(|_| next(0.05)).collect();
+
+        let base = Tensor::from_vec(base_raw, (batch, 1, out_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let x = Tensor::from_vec(x_raw, (batch, 1, in_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let a = Tensor::from_vec(a_raw, (rank, in_dim), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b = Tensor::from_vec(b_raw, (out_dim, rank), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+        assert!(supports_lora_decode_add(&base, &x, &a, &b));
+        let hidden = x.broadcast_matmul(&a.t().unwrap()).unwrap();
+        let delta = hidden.broadcast_matmul(&b.t().unwrap()).unwrap();
+        let delta = (delta * scale as f64)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let reference = (base.clone() + delta).unwrap();
+        let fused = lora_decode_add(&base, &x, &a, &b, scale).unwrap();
+        let diff = max_abs_diff(&reference, &fused);
+        assert!(
+            diff < 2e-2,
+            "CUDA lora_decode_add parity failed: max_abs_diff={diff} (tol=2e-2)"
         );
     }
 

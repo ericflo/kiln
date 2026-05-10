@@ -1044,3 +1044,64 @@ Live no-env training + auto-loaded LoRA smoke on the rebuilt 0.2.14 binary:
 - `/health` reported `active_adapter="cuda-default-drop-smoke"`,
   `adapters_loaded=1`, and zero queued/active training jobs;
 - adapter-backed no-thinking chat returned `Kiln target model`.
+
+## Follow-Up: Fuse CUDA LoRA Decode Delta/Add
+
+After restoring the training-capable no-env load, adapter-backed decode still
+paid the generic small-matmul chain for every LoRA projection. CUDA single-token
+BF16 decode now has a forward-only LoRA delta/add helper:
+
+- compute `hidden = x @ A.t()` into a small F32 scratch tensor;
+- compute `base + scale * hidden @ B.t()` directly into BF16 output;
+- support contiguous `base=[batch,1,out]`, `x=[batch,1,in]`,
+  `A=[rank,in]`, `B=[out,rank]`, rank `1..=64`;
+- decline if `base`, `x`, `A`, or `B` is tracked by Candle autograd, so SFT
+  and other training paths keep the existing differentiable Candle route.
+
+Rollback:
+
+```text
+KILN_DISABLE_CUDA_LORA_DECODE_ADD=1
+```
+
+Recent memory-pressure check after this work showed no active server and idle
+GPU memory (`71 MiB` used of `16376 MiB`). Kernel logs for the recent event had
+no Linux OOM-killer entry; they showed WSL/DXG
+`dxgkio_make_resident: Ioctl failed: -12`, consistent with CUDA residency
+allocation pressure rather than the kernel selecting and killing a process.
+
+Same-binary WSL RTX 4090 Laptop A/B, live adapter-backed chat, six 20-token
+requests per run, first request excluded, `KILN_SPEC_ENABLED=0` and prefix
+cache capped to one entry:
+
+| path | warmed wall seconds | completion tok/s |
+| --- | ---: | ---: |
+| rollback, run 1, `KILN_DISABLE_CUDA_LORA_DECODE_ADD=1` | 0.728483 | 27.454305 |
+| default fused LoRA delta/add | 0.675411 | 29.611591 |
+| rollback, run 2, reverse-order recheck | 0.729775 | 27.405692 |
+
+Against the average rollback result, the default fused path improved warmed
+adapter-backed wall time by 7.4% and completion throughput by 8.0%. Responses
+remained coherent on the tested count-to-ten prompt.
+
+Validation:
+
+```bash
+cargo fmt --check
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-rmsnorm-kernel lora_decode_add_parity_cuda --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo test -p kiln-model test_backend_linear_decode_adds_lora_delta --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 cargo test -p kiln-train test_checkpointed_loss_matches_standard --quiet
+PATH="$HOME/.cargo/bin:/usr/local/cuda-12.4/bin:$PATH" LD_LIBRARY_PATH="/usr/local/cuda-12.4/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}" CARGO_BUILD_JOBS=1 KILN_CUDA_ARCHS=89 cargo build --quiet --release --features cuda --bin kiln --bin kiln-bench
+```
+
+Live SFT smoke on the candidate server:
+
+- request: one SFT example, `epochs=1`, `lora_rank=1`, `lora_alpha=2.0`,
+  `learning_rate=0.0001`, `seed=4321`, `auto_load=true`;
+- adapter: `cuda-lora-add-smoke`;
+- job id: `333d0112-55ca-42c0-bb4c-54ce88b1ee8f`;
+- result: `state=completed`, `progress=1.0`,
+  `final_loss=1.3705849647521973`;
+- `/health` reported `active_adapter="cuda-lora-add-smoke"`,
+  `adapters_loaded=2`, and zero queued/active training jobs;
+- adapter-backed chat returned `kiln lora`.

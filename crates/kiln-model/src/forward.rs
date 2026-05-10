@@ -428,6 +428,7 @@ fn linear_with_lora_t_decode(
 }
 
 fn add_lora_delta_to_base(
+    backend: Option<&dyn BackendRuntime>,
     base: Tensor,
     x: &Tensor,
     lora: Option<&LoraProjectionWeights>,
@@ -436,6 +437,11 @@ fn add_lora_delta_to_base(
     let Some(proj) = lora else {
         return Ok(base);
     };
+    if let Some(backend) = backend {
+        if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
+            return Ok(out);
+        }
+    }
     #[cfg(feature = "metal")]
     {
         if crate::backend::metal::metal_lora_add_decode_supports(&base, x, &proj.a, &proj.b) {
@@ -478,10 +484,14 @@ fn linear_with_lora_t_backend_decode_if(
 ) -> Result<Tensor> {
     if let Some(backend) = backend {
         if let Some(base) = backend.linear_decode(x, weight_t)? {
-            return add_lora_delta_to_base(base, x, lora, lora_scale);
+            return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
         }
     }
-    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, lora, lora_scale)
+    if lora.is_some() {
+        let base = linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, None, 0.0)?;
+        return add_lora_delta_to_base(backend, base, x, lora, lora_scale);
+    }
+    linear_with_lora_t_decode_if(use_metal_decode_gemv, x, weight_t, None, 0.0)
 }
 
 #[cfg(feature = "metal")]

@@ -48,6 +48,7 @@ fn main() {
     build.file(csrc_dir.join("fused_attn_qkv_prep.cu"));
     build.file(csrc_dir.join("fused_mlp_silu_mul.cu"));
     build.file(csrc_dir.join("fused_sigmoid_mul.cu"));
+    build.file(csrc_dir.join("fused_lora_add.cu"));
 
     build.compile("kiln_rmsnorm_kernel");
 

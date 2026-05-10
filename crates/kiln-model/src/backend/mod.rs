@@ -595,6 +595,23 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Forward-only LoRA delta/add for decode.
+    ///
+    /// `base` is the already-computed base projection output, `x` is the
+    /// projection input, and `a`/`b` are PEFT LoRA matrices. Backends must
+    /// return `Ok(None)` for tracked tensors; training needs the differentiable
+    /// Candle path.
+    fn lora_decode_add(
+        &self,
+        _base: &Tensor,
+        _x: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _scale: f32,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Warm backend-resident decode weights after model load.
     ///
     /// CPU/CUDA/Metal either keep model tensors resident through Candle or

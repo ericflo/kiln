@@ -36,6 +36,9 @@ pub struct CudaBackend {
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
+    /// Forward-only CUDA LoRA delta/add for decode. Training declines because
+    /// tracked LoRA tensors need autograd.
+    lora_decode_add_enabled: bool,
 }
 
 impl CudaBackend {
@@ -56,6 +59,7 @@ impl CudaBackend {
             && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT").is_err();
         let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
             && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
+        let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
         Self {
             device,
             gdn_enabled,
@@ -66,6 +70,7 @@ impl CudaBackend {
             gdn_decode_qk_norm_recurrent_enabled,
             gdn_decode_qk_norm_recurrent_rmsnorm_enabled,
             fused_conv1d_enabled,
+            lora_decode_add_enabled,
         }
     }
 }
@@ -487,6 +492,28 @@ impl BackendRuntime for CudaBackend {
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
         self.gdn_gated_rms_norm_enabled
+    }
+
+    fn lora_decode_add(
+        &self,
+        base: &Tensor,
+        x: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        scale: f32,
+    ) -> Result<Option<Tensor>> {
+        if !self.lora_decode_add_enabled
+            || base.track_op()
+            || x.track_op()
+            || a.track_op()
+            || b.track_op()
+            || !kiln_rmsnorm_kernel::supports_lora_decode_add(base, x, a, b)
+        {
+            return Ok(None);
+        }
+        let out = kiln_rmsnorm_kernel::lora_decode_add(base, x, a, b, scale)
+            .context("cuda lora_decode_add kernel failed")?;
+        Ok(Some(out))
     }
 
     fn gdn_gated_rms_norm(
