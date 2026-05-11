@@ -2878,6 +2878,8 @@ fn checkpointed_grpo_forward_backward(
 
     let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
     boundary_states.push(embed_hidden.detach());
+    // Phase 3.1 hook — same lifecycle as in checkpointed_forward_backward.
+    backend.register_resident_activation(boundary_states.last().unwrap())?;
 
     {
         let mut current = boundary_states[0].clone();
@@ -2895,6 +2897,7 @@ fn checkpointed_grpo_forward_backward(
                 Some(&lora_weights),
             )?;
             boundary_states.push(current.detach());
+            backend.register_resident_activation(boundary_states.last().unwrap())?;
             current = boundary_states.last().unwrap().clone();
         }
     }
@@ -2962,6 +2965,11 @@ fn checkpointed_grpo_forward_backward(
         // Backward — only the current segment's LoRA Vars contribute gradients
         let grads = loss.backward().context("GRPO checkpointed backward pass")?;
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
+    }
+
+    // Phase 3.1 hook — same lifecycle as the SFT path.
+    for boundary in &boundary_states {
+        backend.evict_resident_activation(boundary);
     }
 
     let avg_loss = total_loss / num_segments as f64;
