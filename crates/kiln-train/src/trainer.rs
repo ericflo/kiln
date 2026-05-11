@@ -2569,6 +2569,14 @@ fn checkpointed_forward_backward(
 
     let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
     boundary_states.push(embed_hidden.detach());
+    // Phase 3.1 hook: register the embedding boundary as
+    // resident-on-device. The default impl is a no-op (CPU/Metal/CUDA
+    // backends ignore the call); on Vulkan it copies the bytes into
+    // a `RESIDENT_ACTIVATION_REGISTRY` entry keyed by `tensor.id()`.
+    // Phase 3.2 will use these entries to skip the candle-CPU
+    // recompute-input upload — for now the calls just exercise the
+    // lifecycle and provide telemetry for the upcoming wiring work.
+    backend.register_resident_activation(boundary_states.last().unwrap())?;
 
     {
         let mut current = boundary_states[0].clone();
@@ -2586,6 +2594,7 @@ fn checkpointed_forward_backward(
                 Some(&lora_weights),
             )?;
             boundary_states.push(current.detach());
+            backend.register_resident_activation(boundary_states.last().unwrap())?;
             current = boundary_states.last().unwrap().clone();
         }
     }
@@ -2728,6 +2737,17 @@ fn checkpointed_forward_backward(
         // Backward — only the current segment's LoRA Vars contribute gradients
         let grads = loss.backward().context("checkpointed backward pass")?;
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
+    }
+
+    // Phase 3.1 hook: evict every boundary-state registry entry now
+    // that the recompute+backward pass has completed and the segment
+    // outputs are no longer needed. On Vulkan this releases the
+    // RESIDENT_ACTIVATION_REGISTRY's Arc<VulkanBuffer> refcount; on
+    // CPU/Metal/CUDA this is a no-op. Done unconditionally so a
+    // future Phase 3.2 wiring change can rely on the registry being
+    // empty between training steps.
+    for boundary in &boundary_states {
+        backend.evict_resident_activation(boundary);
     }
 
     // Average loss across segments. In both monolithic and tiled paths the
