@@ -609,6 +609,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_unified_memory_apu_corrects_oversized_carveout() {
+        // Hold the shared env-mutation lock so concurrent
+        // `set_var(KILN_TRAINING_MEMORY_RESERVE_GB)` from
+        // `test_unified_memory_reserve_env_override` doesn't race
+        // with this test's reads of the same env var via
+        // `unified_memory_reserve_bytes`.
+        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
         // Synthesize the user's hardware: AMD Strix Halo APU. DRM
         // reports a 103 GB VRAM carveout on a 30 GB host. The corrected
         // budget must be MemTotal − reserve, not the carveout.
@@ -735,6 +741,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_unified_memory_reserve_env_override() {
+        // Hold the shared env-mutation lock — see
+        // test_unified_memory_apu_corrects_oversized_carveout.
+        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
         // SAFETY: env mutation is safe under nextest's per-test process
         // isolation; this test must run via `cargo nextest run`.
         unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "10.0") };

@@ -54,17 +54,25 @@ pub fn env_tristate(name: &str) -> Option<bool> {
     }
 }
 
+/// Shared mutex for tests in any module of `kiln-core` that mutate
+/// process-global env vars via `std::env::set_var` / `remove_var`.
+/// Hold it for the lifetime of the test so neighboring tests that
+/// READ env vars (e.g. `vram::detect_vram` reading
+/// `KILN_GPU_MEMORY_GB`) see consistent values.
+///
+/// Exposed `pub` (gated to `cfg(test)`) so tests in sibling modules
+/// (vram, etc.) can use the same lock instead of inventing their own
+/// — using DIFFERENT mutexes wouldn't actually serialise anything.
+#[cfg(test)]
+pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `std::env::set_var` is unsafe because other threads might be
-    /// reading env vars at the same time. Even with unique var names
-    /// per test, neighboring tests in this binary (e.g. `detect_vram`
-    /// reading `KILN_GPU_MEMORY_GB`) can race against any env::set_var
-    /// call. Hold this mutex for the duration of any env-mutating
-    /// test so reads in other tests see consistent values.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Local alias to the shared `TEST_ENV_LOCK` — kept for readability
+    /// inside this module's tests.
+    static ENV_LOCK: &std::sync::Mutex<()> = &TEST_ENV_LOCK;
 
     #[test]
     fn truthy_values() {
