@@ -51,6 +51,26 @@ impl LoraLayerWeights {
     pub fn has_mlp_gate_up(&self) -> bool {
         self.gate_proj.is_some() || self.up_proj.is_some()
     }
+
+    /// Iterate over every present `LoraProjectionWeights` in this
+    /// layer, calling `f` with each. Order matches
+    /// `DEFAULT_TARGET_MODULES` (q, k, v, o, gate, up, down).
+    pub fn for_each_projection<F: FnMut(&LoraProjectionWeights)>(&self, mut f: F) {
+        for proj in [
+            self.q_proj.as_ref(),
+            self.k_proj.as_ref(),
+            self.v_proj.as_ref(),
+            self.o_proj.as_ref(),
+            self.gate_proj.as_ref(),
+            self.up_proj.as_ref(),
+            self.down_proj.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            f(proj);
+        }
+    }
 }
 
 /// Complete LoRA adapter weights for all layers.
@@ -63,6 +83,58 @@ pub struct LoraWeights {
     pub alpha: f32,
     /// Precomputed scale = alpha / rank.
     pub scale: f32,
+}
+
+impl LoraWeights {
+    /// Phase 4.1: register every LoRA A and B tensor in the backend's
+    /// resident activation registry. After this, the inference path's
+    /// `add_lora_delta_to_base` will dispatch through
+    /// `lora_delta_resident` (on-device LoRA matmul) instead of
+    /// candle CPU `compute_lora_delta`.
+    ///
+    /// Caller invokes this once after [`Self::load`], typically at
+    /// adapter-load time. No-op on backends without registry support.
+    /// Inverse: [`Self::evict_from_backend`] for cleanup.
+    pub fn register_with_backend(
+        &self,
+        backend: &dyn crate::backend::BackendRuntime,
+    ) -> anyhow::Result<()> {
+        if !backend.supports_resident_activation() {
+            return Ok(());
+        }
+        for layer in &self.layers {
+            let mut maybe_err: Option<anyhow::Error> = None;
+            layer.for_each_projection(|proj| {
+                if maybe_err.is_some() {
+                    return;
+                }
+                if let Err(e) = backend.register_resident_activation(&proj.a) {
+                    maybe_err = Some(e);
+                    return;
+                }
+                if let Err(e) = backend.register_resident_activation(&proj.b) {
+                    maybe_err = Some(e);
+                }
+            });
+            if let Some(e) = maybe_err {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`Self::register_with_backend`].
+    pub fn evict_from_backend(&self, backend: &dyn crate::backend::BackendRuntime) {
+        if !backend.supports_resident_activation() {
+            return;
+        }
+        for layer in &self.layers {
+            layer.for_each_projection(|proj| {
+                backend.evict_resident_activation(&proj.a);
+                backend.evict_resident_activation(&proj.b);
+            });
+        }
+    }
 }
 
 impl LoraWeights {

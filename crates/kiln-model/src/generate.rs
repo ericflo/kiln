@@ -1032,6 +1032,21 @@ impl ModelRunner {
         let num_layers = self.config.num_layers;
         let lora =
             LoraWeights::load(path, num_layers, &device).context("failed to load LoRA adapter")?;
+        // Phase 4.1: register the adapter's LoRA tensors in the
+        // backend's resident activation registry so the inference
+        // path's `add_lora_delta_to_base` dispatches through
+        // `lora_delta_resident` (on-device LoRA matmul) instead of
+        // candle CPU `compute_lora_delta`. No-op on backends without
+        // registry support.
+        if let Err(e) = lora.register_with_backend(&*self.backend) {
+            tracing::warn!(error = %e, "failed to register LoRA adapter with backend; \
+                falling back to candle CPU LoRA delta path");
+        }
+        // If a previous adapter is loaded, evict it first so the
+        // registry doesn't accumulate stale entries.
+        if let Some(prev) = self.active_lora.take() {
+            prev.evict_from_backend(&*self.backend);
+        }
         self.active_lora = Some(lora);
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
@@ -1041,7 +1056,11 @@ impl ModelRunner {
 
     /// Unload the currently active LoRA adapter, reverting to base model.
     pub fn unload_adapter(&mut self) {
-        self.active_lora = None;
+        if let Some(prev) = self.active_lora.take() {
+            // Phase 4.1: evict the now-removed adapter's LoRA Vars
+            // from the resident registry so they don't leak.
+            prev.evict_from_backend(&*self.backend);
+        }
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
         }
