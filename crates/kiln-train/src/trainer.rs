@@ -661,7 +661,7 @@ pub fn sft_train(
             for (_ex_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
                 let loss_val;
 
-                let flce_provider = build_flce_provider(&backend);
+                let flce_provider = build_flce_provider(&backend, label_mask, model_config);
                 if let Some(ref segs) = segments {
                     // Gradient-checkpointed forward/backward
                     let (lv, accumulated_grads) = checkpointed_forward_backward(
@@ -1572,42 +1572,58 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance AND
-/// the FLCE-on-Vulkan path is explicitly enabled.
+/// Build a provider when the supplied backend is a Vulkan instance and
+/// the payload shape predicts a net speedup from chunked dispatch.
 ///
-/// Default off because the per-chunk Vulkan dispatch overhead
-/// (upload x + record dispatch + readback) is constant-cost per chunk
-/// while the matmul compute scales with active-row count. Hardware
-/// measurement on Strix Halo at T=244 (~30 active rows × 61 vocab
-/// chunks):
+/// The per-chunk Vulkan dispatch overhead (upload x + record dispatch +
+/// readback) is constant-cost per chunk while the matmul compute scales
+/// with `active_count × hidden × chunk_len`. Hardware measurement on
+/// Strix Halo at T=244 (~30 active rows × 61 vocab chunks of 4096) put
+/// the crossover where chunked Vulkan FLCE becomes a win at roughly
+/// `active_count × num_chunks >= 50_000` — below that, the per-chunk
+/// dispatch overhead dominates the matmul savings.
 ///
-///   - Without FLCE provider: ~111 s wall
-///   - With FLCE provider (offset kernel):  ~127 s wall (+15 s)
-///
-/// The crossover where the FLCE provider becomes a net win sits around
-/// T=1500-2500. Until a heuristic auto-enables based on payload shape,
-/// the provider is opt-in via `KILN_VULKAN_FLCE=1`.
+/// `KILN_VULKAN_FLCE=1` forces the provider on; `KILN_VULKAN_FLCE=0`
+/// forces it off; otherwise the auto-heuristic decides based on
+/// `label_mask` and the model's vocab.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
+    label_mask: &[bool],
+    model_config: &ModelConfig,
 ) -> Option<FlceProvider> {
     if backend.name() != "vulkan" {
         return None;
     }
-    let opt_in = matches!(
-        std::env::var("KILN_VULKAN_FLCE")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("1") | Some("true") | Some("yes")
-    );
-    if !opt_in {
-        return None;
+    let env_setting = std::env::var("KILN_VULKAN_FLCE").ok();
+    let env_lower = env_setting
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    match env_lower.as_deref() {
+        Some("1") | Some("true") | Some("yes") => {
+            return Some(std::sync::Arc::new(BackendFlceProvider {
+                backend: backend.clone(),
+            }));
+        }
+        Some("0") | Some("false") | Some("no") => return None,
+        _ => {}
     }
-    Some(std::sync::Arc::new(BackendFlceProvider {
-        backend: backend.clone(),
-    }))
+    // Auto-heuristic: enable when expected dispatch work is large
+    // enough to amortize the per-chunk overhead.
+    let active_count = if label_mask.len() >= 2 {
+        label_mask[1..].iter().filter(|&&m| m).count()
+    } else {
+        0
+    };
+    let num_chunks = model_config.vocab_size.div_ceil(DEFAULT_CHUNK_SIZE);
+    const AUTO_THRESHOLD: usize = 50_000;
+    if active_count.saturating_mul(num_chunks) >= AUTO_THRESHOLD {
+        Some(std::sync::Arc::new(BackendFlceProvider {
+            backend: backend.clone(),
+        }))
+    } else {
+        None
+    }
 }
 
 /// SGD update: param = param - lr * grad
