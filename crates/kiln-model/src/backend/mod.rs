@@ -206,6 +206,19 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// No-op default.
     fn evict_resident_activation(&self, _tensor: &Tensor) {}
 
+    /// Re-upload the tensor's current bytes into its registry buffer
+    /// (if registered). Caller invokes this when the candle CPU
+    /// storage has been mutated outside of the registry — e.g. after
+    /// the candle-CPU SGD step writes a new value to a registered
+    /// LoRA Var. Without this, `lora_delta_resident` and friends
+    /// would keep reading the original init bytes from the buffer.
+    ///
+    /// No-op default; backends without a registry have nothing to
+    /// keep in sync.
+    fn update_resident_activation(&self, _tensor: &Tensor) -> Result<()> {
+        Ok(())
+    }
+
     /// True when the given tensor has been registered as
     /// resident-on-device. Used by routing code to decide between the
     /// resident fast path and the legacy CPU-roundtrip path. False by

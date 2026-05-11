@@ -731,7 +731,7 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
+                    sgd_step_from_map(&*backend, &params, &accumulated_grads, config.learning_rate)?;
                 } else {
                     // Standard (non-checkpointed) forward/backward
                     let (lv, grads) = standard_forward_backward(
@@ -745,7 +745,7 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    sgd_step(&params, &grads, config.learning_rate)?;
+                    sgd_step(&*backend, &params, &grads, config.learning_rate)?;
                 }
 
                 epoch_loss += loss_val;
@@ -996,7 +996,7 @@ pub fn grpo_train(
                         &device,
                     )?;
                     loss_val = lv;
-                    sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
+                    sgd_step_from_map(&*backend, &params, &accumulated_grads, config.learning_rate)?;
                 } else {
                     // Standard (non-checkpointed) GRPO step
                     let lora_weights = params.as_lora_weights();
@@ -1030,7 +1030,7 @@ pub fn grpo_train(
                     loss_val = loss.to_scalar::<f32>()? as f64;
 
                     let grads = loss.backward().context("GRPO backward pass")?;
-                    sgd_step(&params, &grads, config.learning_rate)?;
+                    sgd_step(&*backend, &params, &grads, config.learning_rate)?;
                 }
 
                 group_loss_sum += loss_val;
@@ -1729,14 +1729,25 @@ fn segment_input_via_registry_or_clone(
 
 /// SGD update: param = param - lr * grad
 fn sgd_step(
+    backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
     grads: &candle_core::backprop::GradStore,
     lr: f64,
 ) -> Result<()> {
+    let resident_activation = backend.supports_resident_activation();
     for var in params.all_vars() {
         if let Some(grad) = grads.get(var.as_tensor()) {
             let updated = (var.as_tensor() - (grad * lr)?)?;
             var.set(&updated)?;
+            // Phase 4.1: keep the registry buffer in sync with the
+            // freshly-updated CPU storage so `lora_delta_resident`
+            // reads current values on the next forward pass.
+            // Without this the registry would forever hold the init
+            // bytes from `register_with_backend` and training
+            // wouldn't actually do anything visible to the forward.
+            if resident_activation {
+                backend.update_resident_activation(var.as_tensor())?;
+            }
         }
     }
     Ok(())
@@ -1764,15 +1775,20 @@ fn accumulate_grads(
 
 /// SGD update from accumulated gradient map (not GradStore).
 fn sgd_step_from_map(
+    backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
     grads: &HashMap<candle_core::TensorId, Tensor>,
     lr: f64,
 ) -> Result<()> {
+    let resident_activation = backend.supports_resident_activation();
     for var in params.all_vars() {
         let id = var.as_tensor().id();
         if let Some(grad) = grads.get(&id) {
             let updated = (var.as_tensor() - (grad * lr)?)?;
             var.set(&updated)?;
+            if resident_activation {
+                backend.update_resident_activation(var.as_tensor())?;
+            }
         }
     }
     Ok(())
@@ -4242,7 +4258,7 @@ mod tests {
                 device,
                 None,
             )?;
-            sgd_step_from_map(&params, &grads, lr)?;
+            sgd_step_from_map(&*backend, &params, &grads, lr)?;
             losses.push(loss_val);
             if step > 0 {
                 assert!(

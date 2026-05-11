@@ -777,6 +777,44 @@ impl BackendRuntime for VulkanBackend {
         });
     }
 
+    fn update_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(());
+        };
+        let id = tensor.id();
+        let buffer = RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().get(&id).cloned());
+        let Some(buffer) = buffer else {
+            // Not registered — caller probably skipped the registration
+            // path. No-op.
+            return Ok(());
+        };
+        // Same encoding choice as register_resident_activation.
+        let bytes = if tensor.dtype() == DType::BF16 {
+            kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub(tensor)?.0
+        } else {
+            kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0
+        };
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            bytes.len() as u64 == buffer.size(),
+            "update_resident_activation: tensor bytes ({}) != buffer size ({})",
+            bytes.len(),
+            buffer.size(),
+        );
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &buffer,
+            &bytes,
+        )
+        .context("update_resident_activation: re-upload bytes")?;
+        Ok(())
+    }
+
     fn has_resident_activation(&self, tensor: &Tensor) -> bool {
         let id = tensor.id();
         RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id))
