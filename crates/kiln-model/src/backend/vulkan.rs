@@ -2823,7 +2823,8 @@ mod tests {
     }
 
     /// dispatch_sgd_step must return false (caller falls back to CPU)
-    /// when the operands aren't both resident.
+    /// when the operands aren't both resident — exercises all four
+    /// (resident? × resident?) combinations.
     #[test]
     fn dispatch_sgd_step_falls_back_when_not_resident() -> Result<()> {
         let backend = VulkanBackend::new(Device::Cpu);
@@ -2834,13 +2835,15 @@ mod tests {
         let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
         let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;
         // Neither registered — fall back.
-        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
-        assert!(!dispatched);
-        // Only param registered — still falls back.
+        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        // Only param registered — fall back (grad missing).
         backend.register_resident_activation(&p)?;
-        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
-        assert!(!dispatched);
+        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        // Only grad registered — fall back (param missing).
         backend.evict_resident_activation(&p);
+        backend.register_resident_activation(&g)?;
+        assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
+        backend.evict_resident_activation(&g);
         Ok(())
     }
 
