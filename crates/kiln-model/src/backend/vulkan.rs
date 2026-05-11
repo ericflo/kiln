@@ -1623,6 +1623,31 @@ impl BackendRuntime for VulkanBackend {
             )
             .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?
         } else {
+            // One-shot trace so the operator can see when FLCE chunks
+            // are themselves being sub-chunked. Combined with the
+            // VulkanLinearOp chunking traces, gives a complete picture
+            // of which paths are exceeding the safety ceiling.
+            static FIRST_OFFSET_SUBCHUNK_LOGGED: std::sync::OnceLock<()> =
+                std::sync::OnceLock::new();
+            FIRST_OFFSET_SUBCHUNK_LOGGED.get_or_init(|| {
+                let total_gflop = (2u64
+                    .saturating_mul(row_count as u64)
+                    .saturating_mul(hidden_x as u64)
+                    .saturating_mul(chunk_len as u64))
+                    as f64
+                    / 1.0e9;
+                let sub_count = chunk_len.div_ceil(sub_chunk_len);
+                tracing::info!(
+                    row_count,
+                    hidden_x,
+                    chunk_len,
+                    full_out_dim,
+                    total_gflop,
+                    sub_chunk_len,
+                    sub_count,
+                    "linear_prefill_apply_offset first sub-chunked dispatch"
+                );
+            });
             // Walk chunk_len in sub_chunk_len-sized strides; concat
             // outputs along the last axis. Same kernel/buffer per
             // sub-dispatch, just different `chunk_start` offsets and
