@@ -729,6 +729,20 @@ impl BackendRuntime for VulkanBackend {
         )
         .context("register_resident_activation: upload bytes")?;
         let buffer = Arc::new(buffer);
+        // One-shot trace so the operator can confirm the activation
+        // residency lifecycle is engaging during training without
+        // per-call log spam. The first registration is the most
+        // informative — usually the embedding boundary at the
+        // start of checkpointed_forward_backward.
+        static FIRST_REGISTERED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_REGISTERED_LOGGED.get_or_init(|| {
+            tracing::info!(
+                tensor_dims = ?tensor.dims(),
+                tensor_dtype = ?tensor.dtype(),
+                bytes = bytes.len(),
+                "VulkanBackend::register_resident_activation first call"
+            );
+        });
         RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
             cache.borrow_mut().insert(id, buffer);
         });
