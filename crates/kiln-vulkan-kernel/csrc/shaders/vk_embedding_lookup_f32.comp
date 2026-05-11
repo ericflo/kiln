@@ -1,0 +1,37 @@
+// Embedding lookup: gather rows of a [vocab, hidden] weight by token ids.
+//
+// in_ids: [num_tokens] u32 token ids
+// in_w  : [vocab, hidden] F32
+// out   : [num_tokens, hidden] F32
+//
+// One thread per output element.
+// Push constants: [num_tokens, hidden, vocab]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_tokens;
+    uint hidden;
+    uint vocab;
+};
+
+layout(binding = 0) readonly  buffer IdsBuf  { uint  data_ids[]; };
+layout(binding = 1) readonly  buffer WBuf    { float data_w[]; };
+layout(binding = 2) writeonly buffer OutBuf  { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = num_tokens * hidden;
+    if (linear >= total) return;
+    uint d = linear % hidden;
+    uint t = linear / hidden;
+    uint id = data_ids[t];
+    if (id >= vocab) {
+        data_out[linear] = 0.0;
+        return;
+    }
+    data_out[linear] = data_w[id * hidden + d];
+}

@@ -1,0 +1,70 @@
+// RoPE forward (rotary position embedding) for F32.
+//
+// Input shape:  [rows, num_heads, head_dim]
+// Cos/sin table: [rows, rotary_dim/2]  (precomputed, shared across heads)
+// rotary_dim <= head_dim. Only the first rotary_dim of each head is rotated;
+// the remainder is copied through.
+//
+// Per pair (i, i+rd/2) within the rotary block:
+//   x0' = x0 * cos[r, i] - x1 * sin[r, i]
+//   x1' = x0 * sin[r, i] + x1 * cos[r, i]
+//
+// Push constants: [rows, num_heads, head_dim, rotary_dim]
+// Bindings: in (readonly), cos (readonly), sin (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint num_heads;
+    uint head_dim;
+    uint rotary_dim;
+};
+
+layout(binding = 0) readonly  buffer InBuf   { float data_in[]; };
+layout(binding = 1) readonly  buffer CosBuf  { float data_cos[]; };
+layout(binding = 2) readonly  buffer SinBuf  { float data_sin[]; };
+layout(binding = 3) writeonly buffer OutBuf  { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = rows * num_heads * head_dim;
+    if (linear >= total) return;
+
+    uint d = linear % head_dim;
+    uint h_and_r = linear / head_dim;
+    uint h = h_and_r % num_heads;
+    uint r = h_and_r / num_heads;
+
+    if (d >= rotary_dim) {
+        data_out[linear] = data_in[linear];
+        return;
+    }
+
+    uint half_r = rotary_dim / 2u;
+    uint pair_index;
+    bool is_low_half;
+    if (d < half_r) {
+        pair_index = d;
+        is_low_half = true;
+    } else {
+        pair_index = d - half_r;
+        is_low_half = false;
+    }
+
+    uint base_h = (r * num_heads + h) * head_dim;
+    float low  = data_in[base_h + pair_index];
+    float high = data_in[base_h + pair_index + half_r];
+
+    float c = data_cos[r * half_r + pair_index];
+    float s = data_sin[r * half_r + pair_index];
+
+    if (is_low_half) {
+        data_out[linear] = low * c - high * s;
+    } else {
+        data_out[linear] = low * s + high * c;
+    }
+}

@@ -1,0 +1,47 @@
+// Element-wise binary op (F32): out[i] = a[i] OP b[i]
+//
+// Same-shape inputs only. The autograd accumulator and most
+// vk-native training ops use same-shape elementwise; broadcasting
+// is staged via an explicit `vk_broadcast_*` op when needed.
+//
+// op_code:
+//   0 = add  (a + b)
+//   1 = sub  (a - b)
+//   2 = mul  (a * b)
+//   3 = div  (a / b)
+//
+// Push constants: [n_elements, op_code]
+// Bindings: a (readonly), b (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint op_code;
+};
+
+layout(binding = 0) readonly buffer ABuf  { float data_a[]; };
+layout(binding = 1) readonly buffer BBuf  { float data_b[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_elements) return;
+    float a = data_a[idx];
+    float b = data_b[idx];
+    float r;
+    if (op_code == 0u) {
+        r = a + b;
+    } else if (op_code == 1u) {
+        r = a - b;
+    } else if (op_code == 2u) {
+        r = a * b;
+    } else {
+        // op_code == 3 (div)
+        r = a / b;
+    }
+    data_out[idx] = r;
+}

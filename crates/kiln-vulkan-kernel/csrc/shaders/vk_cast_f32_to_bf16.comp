@@ -1,0 +1,46 @@
+// Cast F32 → BF16 with banker's rounding.
+//
+// BF16 storage convention: contiguous u16 sequence, viewed as u32[]
+// with 2 BF16 lanes per word (low 16 = even index, high 16 = odd
+// index). Matches `adamw_step_bf16.comp` and the resident-activation
+// registry.
+//
+// One thread per output u32 word (handles 2 F32 inputs).
+//
+// Push constants: [n_elements]  (logical bf16 element count)
+// Bindings:
+//   0: in  (readonly, F32)
+//   1: out (writeonly, u32-packed BF16)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { uint  data_out[]; };
+
+uint f32_to_bf16(float v) {
+    uint b = floatBitsToUint(v);
+    // Banker's-rounding-aware: bias = 0x7fff + lsb-of-truncated
+    uint rounded = b + 0x7fffu + ((b >> 16) & 1u);
+    return rounded >> 16;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint total_words = (n_elements + 1u) / 2u;
+    if (word_idx >= total_words) return;
+
+    uint base = word_idx * 2u;
+    uint lo = f32_to_bf16(data_in[base]) & 0xffffu;
+    uint hi = 0u;
+    if (base + 1u < n_elements) {
+        hi = f32_to_bf16(data_in[base + 1u]) & 0xffffu;
+    }
+    data_out[word_idx] = (hi << 16) | lo;
+}

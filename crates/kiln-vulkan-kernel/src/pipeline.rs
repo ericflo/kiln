@@ -150,6 +150,56 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("sdpa_prefill_f32", SPIR_V_SDPA_PREFILL_F32),
     ("sgd_step_f32", SPIR_V_SGD_STEP_F32),
     ("sgd_step_bf16", SPIR_V_SGD_STEP_BF16),
+    ("adamw_step_f32", SPIR_V_ADAMW_STEP_F32),
+    ("adamw_step_bf16", SPIR_V_ADAMW_STEP_BF16),
+    // vk-native training shaders (Phase A)
+    (
+        "vk_elementwise_binary_f32",
+        SPIR_V_VK_ELEMENTWISE_BINARY_F32,
+    ),
+    ("vk_fill_f32", SPIR_V_VK_FILL_F32),
+    ("vk_reduce_sum_f32", SPIR_V_VK_REDUCE_SUM_F32),
+    ("vk_broadcast_scalar_f32", SPIR_V_VK_BROADCAST_SCALAR_F32),
+    ("vk_cast_f32_to_bf16", SPIR_V_VK_CAST_F32_TO_BF16),
+    ("vk_cast_bf16_to_f32", SPIR_V_VK_CAST_BF16_TO_F32),
+    ("vk_transpose_2d_f32", SPIR_V_VK_TRANSPOSE_2D_F32),
+    ("vk_matmul_f32", SPIR_V_VK_MATMUL_F32),
+    ("vk_softmax_lastdim_f32", SPIR_V_VK_SOFTMAX_LASTDIM_F32),
+    (
+        "vk_softmax_lastdim_bwd_f32",
+        SPIR_V_VK_SOFTMAX_LASTDIM_BWD_F32,
+    ),
+    ("vk_silu_f32", SPIR_V_VK_SILU_F32),
+    ("vk_silu_bwd_f32", SPIR_V_VK_SILU_BWD_F32),
+    ("vk_rope_f32", SPIR_V_VK_ROPE_F32),
+    ("vk_rope_bwd_f32", SPIR_V_VK_ROPE_BWD_F32),
+    ("vk_causal_mask_add_f32", SPIR_V_VK_CAUSAL_MASK_ADD_F32),
+    ("vk_scale_inplace_f32", SPIR_V_VK_SCALE_INPLACE_F32),
+    ("vk_matmul_batched_f32", SPIR_V_VK_MATMUL_BATCHED_F32),
+    ("vk_transpose_3d_f32", SPIR_V_VK_TRANSPOSE_3D_F32),
+    ("vk_permute_rh_to_hr_f32", SPIR_V_VK_PERMUTE_RH_TO_HR_F32),
+    ("vk_permute_hr_to_rh_f32", SPIR_V_VK_PERMUTE_HR_TO_RH_F32),
+    ("vk_repeat_kv_heads_f32", SPIR_V_VK_REPEAT_KV_HEADS_F32),
+    ("vk_sum_kv_groups_f32", SPIR_V_VK_SUM_KV_GROUPS_F32),
+    ("vk_embedding_lookup_f32", SPIR_V_VK_EMBEDDING_LOOKUP_F32),
+    (
+        "vk_embedding_lookup_bf16w_f32",
+        SPIR_V_VK_EMBEDDING_LOOKUP_BF16W_F32,
+    ),
+    ("vk_flce_chunk_stats_f32", SPIR_V_VK_FLCE_CHUNK_STATS_F32),
+    (
+        "vk_flce_gather_correct_f32",
+        SPIR_V_VK_FLCE_GATHER_CORRECT_F32,
+    ),
+    (
+        "vk_flce_log_sum_exp_combine_f32",
+        SPIR_V_VK_FLCE_LOG_SUM_EXP_COMBINE_F32,
+    ),
+    (
+        "vk_flce_per_token_loss_f32",
+        SPIR_V_VK_FLCE_PER_TOKEN_LOSS_F32,
+    ),
+    ("vk_flce_grad_chunk_f32", SPIR_V_VK_FLCE_GRAD_CHUNK_F32),
 ];
 
 // Re-export the spirv_modules for use in SHADER_SPIRVS

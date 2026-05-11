@@ -21,6 +21,8 @@ pub mod qwen35_shapes;
 pub mod sampling;
 pub mod speculative;
 mod transposed_weight_cache;
+#[cfg(feature = "vulkan")]
+pub mod vk_forward;
 pub mod weights;
 
 pub use backend::{BackendRuntime, for_device as backend_for_device};

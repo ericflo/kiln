@@ -1,0 +1,54 @@
+// Tree-reduction sum over all elements of an F32 buffer.
+//
+// Two-pass design: each workgroup of 256 threads cooperatively reduces
+// 256 contiguous elements (plus chunk-strided strides if n_elements
+// exceeds workgroup size) into one partial. The caller dispatches as
+// many workgroups as needed to cover the array, then runs the same
+// kernel a second time on the partials. F32 accumulator throughout.
+//
+// Push constants: [n_elements]
+// Bindings: in (readonly), out (writeonly, one float per workgroup)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+};
+
+layout(binding = 0) readonly buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+shared float scratch[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_WorkGroupID.x;
+    uint stride = gl_NumWorkGroups.x * 256u;
+
+    // Grid-stride accumulation: each thread reads (n_elements / stride)
+    // elements and sums them into a private accumulator.
+    float acc = 0.0;
+    uint i = gid * 256u + tid;
+    while (i < n_elements) {
+        acc += data_in[i];
+        i += stride;
+    }
+
+    scratch[tid] = acc;
+    barrier();
+
+    // Tree reduce within the workgroup.
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            scratch[tid] = scratch[tid] + scratch[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        data_out[gid] = scratch[0];
+    }
+}

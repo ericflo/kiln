@@ -28,6 +28,11 @@ rand = { workspace = true }
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda"]
 metal = ["kiln-model/metal"]
+vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel"]
+
+[dependencies.kiln-vulkan-kernel]
+workspace = true
+optional = true
 
 [[bin]]
 name = "kiln-replay"

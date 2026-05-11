@@ -1,0 +1,47 @@
+// FLCE "online" log-sum-exp combine across vocab chunks.
+//
+// Given chunk_max and chunk_sumexp accumulated per row, fold the new
+// chunk into running (global_max, global_sumexp):
+//
+//   if first chunk:        global_max = chunk_max; global_sumexp = chunk_sumexp
+//   else:
+//     new_max = max(global_max, chunk_max)
+//     global_sumexp = global_sumexp * exp(global_max - new_max)
+//                   + chunk_sumexp * exp(chunk_max - new_max)
+//     global_max = new_max
+//
+// Push constants: [num_active, is_first_chunk]
+// Bindings: chunk_max, chunk_sumexp, global_max, global_sumexp
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+    uint is_first_chunk;
+};
+
+layout(binding = 0) readonly buffer ChunkMaxBuf    { float chunk_max[]; };
+layout(binding = 1) readonly buffer ChunkSumExpBuf { float chunk_sumexp[]; };
+layout(binding = 2)         buffer GlobalMaxBuf    { float global_max[]; };
+layout(binding = 3)         buffer GlobalSumExpBuf { float global_sumexp[]; };
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= num_active) return;
+    if (is_first_chunk == 1u) {
+        global_max[row] = chunk_max[row];
+        global_sumexp[row] = chunk_sumexp[row];
+        return;
+    }
+    float gm = global_max[row];
+    float gs = global_sumexp[row];
+    float cm = chunk_max[row];
+    float cs = chunk_sumexp[row];
+    float nm = max(gm, cm);
+    float new_sum = gs * exp(gm - nm) + cs * exp(cm - nm);
+    global_max[row] = nm;
+    global_sumexp[row] = new_sum;
+}

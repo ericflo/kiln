@@ -1,0 +1,41 @@
+// Add a causal (additive -inf) mask in-place to attention scores.
+//
+// Logical shape: [batch_heads, q_len, k_len]
+// Per element (q, k): if k > q + kv_offset, write -inf (effectively).
+//
+// `kv_offset` lets the caller mask against a pre-existing KV prefix
+// (Q indexes 0..q_len, K indexes 0..k_len; positions are q + kv_offset
+// vs. k). For full-prefill from scratch, kv_offset = 0 and k_len = q_len.
+//
+// Push constants: [bh, q_len, k_len, kv_offset]
+// Bindings: scores (read-write)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint bh;
+    uint q_len;
+    uint k_len;
+    uint kv_offset;
+};
+
+layout(binding = 0) buffer ScoresBuf { float data_scores[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint per_bh = q_len * k_len;
+    uint total = bh * per_bh;
+    if (linear >= total) return;
+
+    uint within = linear % per_bh;
+    uint q = within / k_len;
+    uint k = within % k_len;
+    if (k > q + kv_offset) {
+        // Use a large negative number (avoid -inf to keep softmax
+        // numerics well-behaved on edge BF16 paths).
+        data_scores[linear] = -1.0e30;
+    }
+}

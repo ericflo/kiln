@@ -1,0 +1,38 @@
+// Gather per-row "correct logit" for FLCE from a chunk of logits, when
+// the correct label lies within this chunk.
+//
+// labels_global: [num_active] u32 (vocab indices for each active row)
+// chunk_offset:  uint push constant — start vocab index of this chunk
+// chunk_len:     uint — length of this chunk
+// logits_chunk:  [num_active, chunk_len]
+//
+// out_correct:   [num_active] F32 — for rows whose label falls in
+// [chunk_offset, chunk_offset + chunk_len), write the gathered logit.
+// Otherwise leave the existing value (initialized to 0 by host; the
+// caller iterates over all chunks so each row is hit exactly once).
+//
+// Push constants: [num_active, chunk_len, chunk_offset]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+    uint chunk_len;
+    uint chunk_offset;
+};
+
+layout(binding = 0) readonly  buffer LabelBuf  { uint  data_labels[]; };
+layout(binding = 1) readonly  buffer LogitsBuf { float data_logits[]; };
+layout(binding = 2) buffer CorrectBuf          { float data_correct[]; };
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= num_active) return;
+    uint label = data_labels[row];
+    if (label < chunk_offset || label >= chunk_offset + chunk_len) return;
+    uint within = label - chunk_offset;
+    data_correct[row] = data_logits[row * chunk_len + within];
+}

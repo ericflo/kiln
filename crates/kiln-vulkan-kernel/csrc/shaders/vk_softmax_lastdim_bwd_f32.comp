@@ -1,0 +1,54 @@
+// Softmax backward (along last dim).
+//
+// Given y = softmax(x) and grad_out = dL/dy, compute dL/dx as:
+//   s = sum_j (y_j * grad_out_j)
+//   dL/dx_i = y_i * (grad_out_i - s)
+//
+// Two-pass per row: dot-product reduce, then per-element write.
+//
+// Push constants: [rows, cols]
+// Bindings: y (readonly), grad_out (readonly), grad_in (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+
+layout(binding = 0) readonly  buffer YBuf       { float data_y[]; };
+layout(binding = 1) readonly  buffer GradOutBuf { float data_gy[]; };
+layout(binding = 2) writeonly buffer GradInBuf  { float data_gx[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * cols;
+
+    // ---- Pass 1: dot = sum_j (y_j * grad_out_j) ----
+    float local_dot = 0.0;
+    for (uint col = tid; col < cols; col += 256) {
+        local_dot += data_y[base + col] * data_gy[base + col];
+    }
+    reduce_sh[tid] = local_dot;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) reduce_sh[tid] += reduce_sh[tid + s];
+        barrier();
+    }
+    float dot = reduce_sh[0];
+    barrier();
+
+    // ---- Pass 2: dL/dx_i = y_i * (gy_i - dot) ----
+    for (uint col = tid; col < cols; col += 256) {
+        float y = data_y[base + col];
+        float gy = data_gy[base + col];
+        data_gx[base + col] = y * (gy - dot);
+    }
+}

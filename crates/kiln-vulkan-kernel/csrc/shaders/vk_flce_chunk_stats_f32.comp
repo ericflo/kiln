@@ -1,0 +1,72 @@
+// Per-row chunk statistics for FLCE: max(chunk) and sum(exp(chunk - global_max_after))
+// approximated by online tracking. For the simpler 2-pass design we use:
+//   Pass 1 (this shader): per chunk, compute (chunk_max, chunk_sumexp)
+//   given the chunk logits = hidden @ W_chunk.T.
+//
+// Inputs:
+//   logits_chunk: [num_active, chunk_len] F32 (from a prior matmul)
+// Outputs:
+//   chunk_max:    [num_active] F32
+//   chunk_sumexp: [num_active] F32 (sum_j exp(logits_chunk[i, j] - chunk_max[i]))
+//
+// One workgroup per row.
+//
+// Push constants: [num_active, chunk_len]
+// Bindings: logits (readonly), out_max (writeonly), out_sumexp (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+    uint chunk_len;
+};
+
+layout(binding = 0) readonly  buffer LogitsBuf { float data_logits[]; };
+layout(binding = 1) writeonly buffer MaxBuf    { float data_max[]; };
+layout(binding = 2) writeonly buffer SumExpBuf { float data_sumexp[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= num_active) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * chunk_len;
+
+    // Reduce: max
+    float local_max = -3.402823e38;
+    for (uint c = tid; c < chunk_len; c += 256) {
+        float v = data_logits[base + c];
+        if (v > local_max) local_max = v;
+    }
+    reduce_sh[tid] = local_max;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            float other = reduce_sh[tid + s];
+            if (other > reduce_sh[tid]) reduce_sh[tid] = other;
+        }
+        barrier();
+    }
+    float row_max = reduce_sh[0];
+    barrier();
+
+    // Reduce: sum_exp
+    float local_sum = 0.0;
+    for (uint c = tid; c < chunk_len; c += 256) {
+        local_sum += exp(data_logits[base + c] - row_max);
+    }
+    reduce_sh[tid] = local_sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) reduce_sh[tid] += reduce_sh[tid + s];
+        barrier();
+    }
+    if (tid == 0u) {
+        data_max[row] = row_max;
+        data_sumexp[row] = reduce_sh[0];
+    }
+}

@@ -1,0 +1,47 @@
+// FLCE backward: gradient of mean(loss) w.r.t. hidden states, computed
+// chunk-by-chunk via:
+//   d loss_row / d logit[v] = softmax(logit)[v] - 1(v == label)
+//
+// For each chunk:
+//   softmax_chunk[i, j] = exp(logits[i, j] - global_max[i]) / global_sumexp[i]
+//   if (j + chunk_offset == label[i]): softmax_chunk[i, j] -= 1
+//   grad_logits_chunk = softmax_chunk * scale  (scale = 1 / num_active for mean)
+//
+// Then `d loss / d hidden = grad_logits_chunk @ W_chunk` is dispatched
+// separately by the caller (a matmul).
+//
+// This shader produces grad_logits_chunk directly into the existing
+// logits buffer for the chunk (in-place).
+//
+// Push constants: [num_active, chunk_len, chunk_offset, scale_bits]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+    uint chunk_len;
+    uint chunk_offset;
+    uint scale_bits;
+};
+
+layout(binding = 0) readonly buffer LabelsBuf    { uint  labels[]; };
+layout(binding = 1) readonly buffer GMaxBuf      { float global_max[]; };
+layout(binding = 2) readonly buffer GSumExpBuf   { float global_sumexp[]; };
+layout(binding = 3)          buffer LogitsBuf    { float logits[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = num_active * chunk_len;
+    if (linear >= total) return;
+    uint j = linear % chunk_len;
+    uint row = linear / chunk_len;
+    float scale = uintBitsToFloat(scale_bits);
+    float v = exp(logits[row * chunk_len + j] - global_max[row]) / global_sumexp[row];
+    if (chunk_offset + j == labels[row]) {
+        v -= 1.0;
+    }
+    logits[row * chunk_len + j] = v * scale;
+}

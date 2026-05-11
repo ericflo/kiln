@@ -1,0 +1,29 @@
+// Broadcast a scalar (single-element F32 buffer) to an output of
+// `n_elements`. Used by reduce backward (grad of sum/mean is a
+// scalar that needs to be filled across the input shape).
+//
+// Push constants: [n_elements, scale_bits]   (scale = grad_value / divisor)
+// Bindings: in (readonly, expects 1 element at index 0), out (writeonly)
+//
+// `scale_bits` is bit-cast f32; the output is `in[0] * scale`. For
+// `vk_sum` backward, scale = 1; for `vk_mean` backward, scale = 1/n.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint scale_bits;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_elements) return;
+    float scale = uintBitsToFloat(scale_bits);
+    data_out[idx] = data_in[0] * scale;
+}

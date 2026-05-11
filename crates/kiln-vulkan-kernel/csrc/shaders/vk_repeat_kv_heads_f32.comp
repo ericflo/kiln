@@ -1,0 +1,37 @@
+// Repeat KV heads to broadcast for grouped-query attention.
+// in:  [heads_kv, rows, head_dim]
+// out: [heads_kv * groups, rows, head_dim]
+//
+// out[h_q, r, d] = in[h_q / groups, r, d]
+//
+// Push constants: [heads_kv, groups, rows, head_dim]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint heads_kv;
+    uint groups;
+    uint rows;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint heads_q = heads_kv * groups;
+    uint total = heads_q * rows * head_dim;
+    if (linear >= total) return;
+
+    uint d = linear % head_dim;
+    uint hr = linear / head_dim;
+    uint r = hr % rows;
+    uint h_q = hr / rows;
+    uint h_kv = h_q / groups;
+    uint src = (h_kv * rows + r) * head_dim + d;
+    data_out[linear] = data_in[src];
+}

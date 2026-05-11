@@ -1,0 +1,67 @@
+// RoPE backward — apply the inverse rotation (rotation by -theta) to
+// the output gradient. Identical kernel structure to forward, but:
+//   x0_back = gy0 *  cos + gy1 * sin
+//   x1_back = gy0 * (-sin) + gy1 * cos
+// The non-rotary tail copies through.
+//
+// Push constants: [rows, num_heads, head_dim, rotary_dim]
+// Bindings: grad_out (readonly), cos (readonly), sin (readonly), grad_in (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint num_heads;
+    uint head_dim;
+    uint rotary_dim;
+};
+
+layout(binding = 0) readonly  buffer GradOut { float data_gy[]; };
+layout(binding = 1) readonly  buffer CosBuf  { float data_cos[]; };
+layout(binding = 2) readonly  buffer SinBuf  { float data_sin[]; };
+layout(binding = 3) writeonly buffer GradIn  { float data_gx[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = rows * num_heads * head_dim;
+    if (linear >= total) return;
+
+    uint d = linear % head_dim;
+    uint h_and_r = linear / head_dim;
+    uint h = h_and_r % num_heads;
+    uint r = h_and_r / num_heads;
+
+    if (d >= rotary_dim) {
+        data_gx[linear] = data_gy[linear];
+        return;
+    }
+
+    uint half_r = rotary_dim / 2u;
+    uint pair_index;
+    bool is_low_half;
+    if (d < half_r) {
+        pair_index = d;
+        is_low_half = true;
+    } else {
+        pair_index = d - half_r;
+        is_low_half = false;
+    }
+
+    uint base_h = (r * num_heads + h) * head_dim;
+    float gy_low  = data_gy[base_h + pair_index];
+    float gy_high = data_gy[base_h + pair_index + half_r];
+
+    float c = data_cos[r * half_r + pair_index];
+    float s = data_sin[r * half_r + pair_index];
+
+    if (is_low_half) {
+        // y0 = x0*c - x1*s; dx0 = gy0*c + gy1*s
+        data_gx[linear] = gy_low * c + gy_high * s;
+    } else {
+        // y1 = x0*s + x1*c; dx1 = -gy0*s + gy1*c
+        data_gx[linear] = -gy_low * s + gy_high * c;
+    }
+}

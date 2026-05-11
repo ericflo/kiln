@@ -1,0 +1,44 @@
+// Embedding lookup with packed BF16 weights.
+//
+// in_ids: [num_tokens] u32
+// in_w_packed: [vocab*hidden/2] u32 (packed BF16, 2 lanes per word)
+// out: [num_tokens, hidden] F32
+//
+// Push constants: [num_tokens, hidden, vocab]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_tokens;
+    uint hidden;
+    uint vocab;
+};
+
+layout(binding = 0) readonly  buffer IdsBuf { uint  data_ids[]; };
+layout(binding = 1) readonly  buffer WBuf   { uint  data_w[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+float bf16_bits_to_f32(uint bits16) {
+    return uintBitsToFloat(bits16 << 16);
+}
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = num_tokens * hidden;
+    if (linear >= total) return;
+    uint d = linear % hidden;
+    uint t = linear / hidden;
+    uint id = data_ids[t];
+    if (id >= vocab) {
+        data_out[linear] = 0.0;
+        return;
+    }
+    uint flat = id * hidden + d;
+    uint word_idx = flat >> 1u;
+    uint word = data_w[word_idx];
+    uint bf16_bits = ((flat & 1u) == 0u) ? (word & 0xffffu) : (word >> 16);
+    data_out[linear] = bf16_bits_to_f32(bf16_bits);
+}

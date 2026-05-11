@@ -1896,6 +1896,7 @@ dependencies = [
  "kiln-core",
  "kiln-flce-kernel",
  "kiln-model",
+ "kiln-vulkan-kernel",
  "rand 0.10.1",
  "safetensors 0.7.0",
  "serde",

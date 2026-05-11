@@ -6,6 +6,8 @@
 
 pub mod replay;
 pub mod trainer;
+#[cfg(feature = "vulkan")]
+pub mod vk_train;
 
 pub use replay::{
     BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,

@@ -1,0 +1,26 @@
+// Fill a buffer with a constant F32 value.
+//
+// Used by `vk_ones_like` and `vk_zeros_like` to seed the autograd
+// backward pass (`grad_loss = ones_like(loss)`) and to initialize
+// gradient accumulators.
+//
+// Push constants: [n_elements, value_bits]
+// Bindings: out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint value_bits;
+};
+
+layout(binding = 0) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_elements) return;
+    data_out[idx] = uintBitsToFloat(value_bits);
+}

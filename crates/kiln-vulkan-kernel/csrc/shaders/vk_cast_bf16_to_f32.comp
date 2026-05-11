@@ -1,0 +1,32 @@
+// Cast packed BF16 → F32. One thread per logical bf16 element.
+//
+// Push constants: [n_elements]
+// Bindings:
+//   0: in  (readonly, u32-packed BF16, 2 lanes per word)
+//   1: out (writeonly, F32)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { uint  data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+float bf16_bits_to_f32(uint bits16) {
+    return uintBitsToFloat(bits16 << 16);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_elements) return;
+
+    uint word_idx = idx >> 1u;
+    uint word = data_in[word_idx];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16);
+    data_out[idx] = bf16_bits_to_f32(bf16_bits);
+}

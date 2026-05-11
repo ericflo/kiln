@@ -5862,6 +5862,122 @@ pub fn run_compute_pipeline(
     Ok(())
 }
 
+/// 3D-grid variant of `run_compute_pipeline`. Same caching/descriptor
+/// machinery, but dispatches `(x, y, z)` workgroups for shaders that
+/// use 2D (transpose) or 3D workgroup layouts.
+pub fn run_compute_pipeline_3d(
+    vk_device: &VulkanDevice,
+    spirv: &[u8],
+    all_handles: &[vk::Buffer],
+    total_bindings: usize,
+    push_constants: &[u32],
+    workgroup_count: (u32, u32, u32),
+) -> Result<()> {
+    let (wx, wy, wz) = workgroup_count;
+    let limit_x = vk_device.max_compute_work_group_count(0);
+    let limit_y = vk_device.max_compute_work_group_count(1);
+    let limit_z = vk_device.max_compute_work_group_count(2);
+    anyhow::ensure!(
+        wx <= limit_x && wy <= limit_y && wz <= limit_z,
+        "run_compute_pipeline_3d: workgroups ({wx},{wy},{wz}) exceed device limits \
+         ({limit_x},{limit_y},{limit_z})"
+    );
+    let device = vk_device.device();
+    let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
+        spirv,
+        total_bindings,
+        (push_constants.len() * 4) as u32,
+    )?;
+    let set_layouts = vec![set_layout];
+    anyhow::ensure!(
+        total_bindings <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {total_bindings}"
+    );
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate descriptor sets")?[0]
+    };
+    {
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, bui)| make_write_descriptor_set_buf(descriptor_set, i as u32, bui))
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&descriptor_write_infos, &[]);
+        }
+    }
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate command buffer")?;
+    let cmd = command_buffers[0];
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin command buffer")?;
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            layout,
+            0,
+            &[descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(push_constants),
+        );
+        device.cmd_dispatch(cmd, wx, wy, wz);
+        let barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[barrier],
+            &[],
+            &[],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end command buffer")?;
+    }
+    vk_device.submit_and_wait(cmd, "run_compute_pipeline_3d")?;
+    unsafe {
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transient descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_two_stage_compute_pipeline(
     vk_device: &VulkanDevice,

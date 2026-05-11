@@ -1,0 +1,71 @@
+// Softmax along the last dim of an F32 tensor.
+//
+// Numerically stable formulation:
+//   m = max_j x[i, j]
+//   e = exp(x - m)
+//   z = sum_j e[i, j]
+//   out[i, j] = e[i, j] / z
+//
+// One workgroup per row, 256 threads cooperative max-then-sum reduce.
+//
+// Push constants: [rows, cols]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * cols;
+
+    // ---- Pass 1: row max ----
+    float local_max = -3.402823e38; // -FLT_MAX
+    for (uint col = tid; col < cols; col += 256) {
+        float v = data_in[base + col];
+        if (v > local_max) local_max = v;
+    }
+    reduce_sh[tid] = local_max;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) {
+            float other = reduce_sh[tid + s];
+            if (other > reduce_sh[tid]) reduce_sh[tid] = other;
+        }
+        barrier();
+    }
+    float row_max = reduce_sh[0];
+    barrier();
+
+    // ---- Pass 2: row sum of exp(x - row_max) ----
+    float local_sum = 0.0;
+    for (uint col = tid; col < cols; col += 256) {
+        local_sum += exp(data_in[base + col] - row_max);
+    }
+    reduce_sh[tid] = local_sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (tid < s) reduce_sh[tid] += reduce_sh[tid + s];
+        barrier();
+    }
+    float inv_z = 1.0 / reduce_sh[0];
+    barrier();
+
+    // ---- Pass 3: write softmax ----
+    for (uint col = tid; col < cols; col += 256) {
+        data_out[base + col] = exp(data_in[base + col] - row_max) * inv_z;
+    }
+}

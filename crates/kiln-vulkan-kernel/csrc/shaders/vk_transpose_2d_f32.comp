@@ -1,0 +1,33 @@
+// 2D transpose for F32 tensors: out[j, i] = in[i, j]
+//
+// Operates on a logical [rows, cols] input, producing [cols, rows]
+// output. Workgroup tile size 16x16; threads cooperatively read a
+// tile, then write transposed. No shared memory (the staging tile
+// is implicit via global memory; correctness > performance for
+// Phase A — fuse later).
+//
+// Push constants: [rows, cols]
+// Bindings:
+//   0: in  (readonly, [rows*cols] F32)
+//   1: out (writeonly, [cols*rows] F32)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.y; // row in input
+    uint j = gl_GlobalInvocationID.x; // col in input
+    if (i >= rows || j >= cols) return;
+    float v = data_in[i * cols + j];
+    data_out[j * rows + i] = v;
+}

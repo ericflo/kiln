@@ -1,0 +1,32 @@
+// Permute [rows, heads, head_dim] → [heads, rows, head_dim].
+// out[h, r, d] = in[r, h, d]
+//
+// Push constants: [rows, heads, head_dim]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint heads;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = rows * heads * head_dim;
+    if (linear >= total) return;
+    // Interpret as output [h][r][d]
+    uint d = linear % head_dim;
+    uint hr = linear / head_dim;
+    uint r = hr % rows;
+    uint h = hr / rows;
+    uint src = (r * heads + h) * head_dim + d;
+    data_out[linear] = data_in[src];
+}
