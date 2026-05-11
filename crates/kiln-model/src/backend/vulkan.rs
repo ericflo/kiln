@@ -2958,6 +2958,108 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end Phase 4.1 chain: register A and B → call
+    /// `lora_delta_resident` → mutate A via `Var::set` → call
+    /// `update_resident_activation` → call `lora_delta_resident`
+    /// again → second result must reflect the new A.
+    ///
+    /// This is the contract `sgd_step + update_resident_activation`
+    /// relies on: the next forward inference pass after SGD must see
+    /// the updated weights.
+    #[test]
+    fn lora_delta_resident_reflects_post_update_weights() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let in_features = 8usize;
+        let rank = 4usize;
+        let out_features = 6usize;
+        let scale = 1.0f32;
+
+        let x_data: Vec<f32> = (0..in_features).map(|i| (i as f32) * 0.1).collect();
+        let a_init: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.01).collect();
+        let b_init: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.02).collect();
+
+        let x = Tensor::from_vec(x_data, (1, 1, in_features), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        let a_var = candle_core::Var::from_tensor(
+            &Tensor::from_vec(a_init, (rank, in_features), &Device::Cpu)?
+                .to_dtype(DType::BF16)?,
+        )?;
+        let b_var = candle_core::Var::from_tensor(
+            &Tensor::from_vec(b_init, (out_features, rank), &Device::Cpu)?
+                .to_dtype(DType::BF16)?,
+        )?;
+
+        backend.register_resident_activation(a_var.as_tensor())?;
+        backend.register_resident_activation(b_var.as_tensor())?;
+
+        // First forward: gets the init delta.
+        let delta_init = backend
+            .lora_delta_resident(&x, a_var.as_tensor(), b_var.as_tensor(), scale)?
+            .expect("must dispatch on-device when registered");
+
+        // Mutate A — simulate what sgd_step does. New A bytes are
+        // intentionally far from the init values so the resulting
+        // delta will be visibly different.
+        let a_post: Vec<f32> = (0..rank * in_features).map(|i| 5.0 - (i as f32) * 0.05).collect();
+        let a_post_tensor = Tensor::from_vec(a_post, (rank, in_features), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        a_var.set(&a_post_tensor)?;
+        // Critical: keep the registry in sync.
+        backend.update_resident_activation(a_var.as_tensor())?;
+
+        // Second forward: must use the new A bytes.
+        let delta_post = backend
+            .lora_delta_resident(&x, a_var.as_tensor(), b_var.as_tensor(), scale)?
+            .expect("must dispatch on-device when registered");
+
+        // The two deltas must differ — if update_resident_activation
+        // were a no-op or used the wrong encoding, delta_post would
+        // equal delta_init.
+        let init_v: Vec<f32> = delta_init.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let post_v: Vec<f32> = delta_post.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(init_v.len(), post_v.len());
+        let max_diff = init_v
+            .iter()
+            .zip(post_v.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_diff > 0.1,
+            "delta should differ noticeably after A update; max_diff={max_diff}, \
+             init={init_v:?}, post={post_v:?}"
+        );
+
+        // Compare delta_post against a CPU reference computed with
+        // the new A bytes — they should match to bf16 precision.
+        let a_post_round = a_var.as_tensor().to_dtype(DType::F32)?;
+        let b_round = b_var.as_tensor().to_dtype(DType::F32)?;
+        let x_f32 = x.to_dtype(DType::F32)?;
+        let hidden = x_f32.broadcast_matmul(&a_post_round.t()?)?;
+        let cpu_delta_post = hidden
+            .broadcast_matmul(&b_round.t()?)?
+            .to_dtype(DType::BF16)?;
+        let cpu_post_v: Vec<f32> = cpu_delta_post
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (i, (vk, cpu)) in post_v.iter().zip(cpu_post_v.iter()).enumerate() {
+            let abs = (vk - cpu).abs();
+            let rel = abs / cpu.abs().max(1e-3);
+            assert!(
+                abs < 5e-2 || rel < 5e-2,
+                "idx {i}: vk={vk:.6} cpu={cpu:.6} abs={abs:e} rel={rel:e}"
+            );
+        }
+
+        backend.evict_resident_activation(a_var.as_tensor());
+        backend.evict_resident_activation(b_var.as_tensor());
+        Ok(())
+    }
+
     /// `update_resident_activation` is a no-op when the tensor isn't
     /// registered — avoids surprising errors when caller is
     /// dtype-agnostic (e.g. a sgd_step that fires for both
