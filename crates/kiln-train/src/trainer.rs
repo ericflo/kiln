@@ -1527,12 +1527,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
 /// into the naive `model_forward_head` + `cross_entropy_loss` path —
 /// useful for parity debugging only.
 fn use_flce() -> bool {
-    std::env::var("KILN_USE_FLCE")
-        .map(|v| {
-            let v = v.to_lowercase();
-            !(v == "0" || v == "false" || v == "no")
-        })
-        .unwrap_or(true)
+    kiln_core::env_flag::env_flag("KILN_USE_FLCE", true)
 }
 
 /// FLCE chunk-matmul provider that dispatches `[active, hidden] @
