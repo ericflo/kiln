@@ -49,22 +49,23 @@ layers, 32 MLP layers).
 
 3. **Decode-time GQA reshape matmuls** (lines 8484/8531): only matter at inference decode. Lower priority for the training-OOM problem this plan targets.
 
-## Total FLOP picture (T=918 forward, KILN_VULKAN_LINEAR=1)
+## Total FLOP picture (T=918 forward, KILN_VULKAN_LINEAR=1, KILN_VULKAN_SDPA=1)
 
 | Component | FLOP | On GPU? |
 | --- | --- | --- |
-| GDN in_proj (24 layers) | ~2100 GFLOP | yes |
-| MLP gate/up/down (32 layers) | ~1500 GFLOP | yes |
-| Full-attn q/k/v/o proj (8 layers) | ~400 GFLOP | yes |
-| **Full-attn SDPA inner (8 layers)** | **~56 GFLOP** | **NO — Phase 2 work** |
-| lm_head + cross-entropy | ~715 GFLOP | yes (FLCE chunked) |
-| **Total** | **~4770 GFLOP** | **~99% on GPU** |
+| GDN in_proj (24 layers) | ~2100 GFLOP | yes (chunked) |
+| MLP gate/up/down (32 layers) | ~1500 GFLOP | yes (chunked) |
+| Full-attn q/k/v/o proj (8 layers) | ~400 GFLOP | yes (chunked) |
+| Full-attn SDPA inner (8 layers) | ~56 GFLOP | yes (`sdpa_prefill_f32`, opt-in via `KILN_VULKAN_SDPA=1`) |
+| lm_head + cross-entropy | ~715 GFLOP | yes (FLCE chunked, auto-engages at active_count ≥ 16) |
+| **Total** | **~4770 GFLOP** | **~100% on GPU** |
 
-Routing the remaining ~56 GFLOP of SDPA inner matmuls would close the
-last meaningful CPU leak in the Vulkan training forward path. The wall
-impact is bounded (~2 s saved per training step at 25 TFLOPS), but it
-removes the last CPU-bound serialization point that could starve the
-GPU between projection batches.
+Every meaningful matmul in the Vulkan training forward path now has
+a Vulkan dispatch route, gated behind the corresponding env var
+until hardware load validation lands (see runbook). The remaining
+CPU-bound work is small bookkeeping (token embedding lookup, RMSNorm
+when `row_count < 1024`, the MTP head matmul if MTP is enabled) — none
+of which is in the hot path for the SFT loss.
 
 ## Action items
 
