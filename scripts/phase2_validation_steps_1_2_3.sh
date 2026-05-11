@@ -234,5 +234,19 @@ KILN_VULKAN_SDPA=1'; then
 fi
 
 echo ">>> Steps 1, 2, 3 passed. Logs in $LOG_DIR" >&2
+
+# Compact summary of the per-step server logs — surfaces the
+# acceleration-profile and chunking traces so the operator can confirm
+# the right paths engaged without grepping the full server logs.
+for step in step1-defaults step2-vulkan-linear step3-vulkan-sdpa; do
+    echo "" >&2
+    echo "--- $step traces ---" >&2
+    if [[ -f "$LOG_DIR/$step-server.log" ]]; then
+        grep -E "Vulkan training acceleration profile|first chunked dispatch|first sub-chunked dispatch|first call|first dispatch|GPU memory budget" \
+            "$LOG_DIR/$step-server.log" | head -20 >&2 || true
+    fi
+done
+
+echo "" >&2
 echo ">>> Next: run Step 4 (original /tmp/sft-data.jsonl repro) per runbook." >&2
 exit 0
