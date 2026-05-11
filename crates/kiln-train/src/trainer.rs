@@ -820,6 +820,12 @@ pub fn sft_train(
     };
 
     let result = train_body();
+    // Phase 4.1 cleanup: evict the LoRA Vars from the registry so a
+    // long-running server doesn't accumulate stale entries from past
+    // training jobs (each job creates fresh Vars with new TensorIds).
+    // The eviction happens regardless of whether training succeeded
+    // or failed.
+    params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
             Ok((_, loss)) => Ok(*loss),
@@ -1101,6 +1107,10 @@ pub fn grpo_train(
     };
 
     let result = train_body();
+    // Phase 4.1 cleanup: same as sft_train — evict the LoRA Vars
+    // from the registry on completion so stale entries don't
+    // accumulate across jobs.
+    params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
             Ok((_, loss)) => Ok(*loss),
