@@ -2980,7 +2980,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
             if let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)? {
                 return Ok(out);
             }
-        } else if vulkan_rmsnorm_training_enabled() {
+        } else if vulkan_rmsnorm_training_enabled_for(x) {
             if let Some(out) = try_vulkan_rmsnorm_autograd(x, weight, eps as f32)? {
                 return Ok(out);
             }
@@ -2989,30 +2989,42 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     rms_norm_fallback(x, weight, eps)
 }
 
-/// `KILN_VULKAN_RMSNORM_TRAINING=1` opts the autograd-safe RMSNorm
-/// CustomOp1 path on for training. Default off because the per-call
-/// dispatch overhead (upload x + readback dx × ~64 RMSNorm calls per
-/// forward+backward step) currently exceeds the kernel's compute
-/// savings at small T (measured ~+8 s wall on a 244-token payload vs
-/// the candle CPU fallback). The unit-test parity is bit-exact, so
-/// opt-in is safe; this gate is a perf-only switch, not a correctness
-/// one. The crossover where it becomes a net win is expected around
-/// T=1500-2500 — the same regime where the FLCE auto-heuristic flips
-/// on.
+/// Tristate env-var resolution for the autograd-safe RMSNorm path.
+///
+/// `KILN_VULKAN_RMSNORM_TRAINING=1` forces on, `=0` forces off,
+/// otherwise the auto-heuristic decides based on the per-row count
+/// of `x` — the same constant-overhead-vs-compute trade-off that the
+/// FLCE auto-heuristic resolves: at small T the per-call dispatch
+/// overhead (upload x + readback dx) exceeds the kernel's compute
+/// savings vs the candle CPU `broadcast_mul` chain. Hardware
+/// measurement on Strix Halo at T=244 (~30 active rows × ~64 RMSNorm
+/// calls per forward+backward) put the autograd RMSNorm at +8 s wall
+/// vs the candle fallback. Crossover where it becomes a net win is
+/// expected around T=1500-2500.
+///
+/// Threshold: enable when the row count of x (= batch × seq_len) is
+/// at least `RMSNORM_AUTO_ROW_THRESHOLD = 1024`. Tunable via this
+/// constant; documented inline so the next data-driven measurement
+/// can move it.
 #[cfg(feature = "vulkan")]
-fn vulkan_rmsnorm_training_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("KILN_VULKAN_RMSNORM_TRAINING")
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some("1") | Some("true") | Some("yes")
-        )
-    })
+fn vulkan_rmsnorm_training_enabled_for(x: &Tensor) -> bool {
+    let env_setting = std::env::var("KILN_VULKAN_RMSNORM_TRAINING").ok();
+    let env_lower = env_setting
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    match env_lower.as_deref() {
+        Some("1") | Some("true") | Some("yes") => return true,
+        Some("0") | Some("false") | Some("no") => return false,
+        _ => {}
+    }
+    const RMSNORM_AUTO_ROW_THRESHOLD: usize = 1024;
+    let dims = x.shape().dims();
+    if dims.is_empty() {
+        return false;
+    }
+    let row_count: usize = dims[..dims.len() - 1].iter().product();
+    row_count >= RMSNORM_AUTO_ROW_THRESHOLD
 }
 
 /// `KILN_VULKAN_RMSNORM=0` opts the inference RMSNorm Vulkan path off.
