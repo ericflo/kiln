@@ -15,7 +15,11 @@ use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(test)]
 use kiln_flce_kernel::fused_linear_cross_entropy;
-use kiln_flce_kernel::{DEFAULT_CHUNK_SIZE, fused_linear_cross_entropy_dispatch};
+use kiln_flce_kernel::{
+    DEFAULT_CHUNK_SIZE, FlceMatmulProvider, FlceProvider,
+    fused_linear_cross_entropy_dispatch,
+    fused_linear_cross_entropy_dispatch_with_provider,
+};
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState, model_forward,
@@ -657,6 +661,7 @@ pub fn sft_train(
             for (_ex_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
                 let loss_val;
 
+                let flce_provider = build_flce_provider(&backend);
                 if let Some(ref segs) = segments {
                     // Gradient-checkpointed forward/backward
                     let (lv, accumulated_grads) = checkpointed_forward_backward(
@@ -668,6 +673,7 @@ pub fn sft_train(
                         label_mask,
                         segs,
                         &device,
+                        flce_provider,
                     )?;
                     loss_val = lv;
                     sgd_step_from_map(&params, &accumulated_grads, config.learning_rate)?;
@@ -681,6 +687,7 @@ pub fn sft_train(
                         &params,
                         label_mask,
                         &device,
+                        flce_provider,
                     )?;
                     loss_val = lv;
                     sgd_step(&params, &grads, config.learning_rate)?;
@@ -1526,6 +1533,51 @@ fn use_flce() -> bool {
             !(v == "0" || v == "false" || v == "no")
         })
         .unwrap_or(true)
+}
+
+/// FLCE chunk-matmul provider that dispatches `[active, hidden] @
+/// [hidden, chunk_len]` through the active `BackendRuntime`'s
+/// `linear_prefill_apply`. The provider holds an `Arc<dyn ...>` to
+/// the backend so it can satisfy the `'static` bound that
+/// [`kiln_flce_kernel::FlceProvider`] requires.
+#[derive(Debug)]
+struct BackendFlceProvider {
+    backend: std::sync::Arc<dyn BackendRuntime>,
+}
+
+impl FlceMatmulProvider for BackendFlceProvider {
+    fn matmul(
+        &self,
+        lhs: &candle_core::Tensor,
+        rhs: &candle_core::Tensor,
+    ) -> anyhow::Result<Option<candle_core::Tensor>> {
+        // Provider receives lhs as `[active, hidden]` 2-D — the backend's
+        // linear_prefill_apply expects `[B, T, hidden]` 3-D, so reshape
+        // around the dispatch.
+        let lhs_3d = lhs.unsqueeze(0)?;
+        let Some(out_3d) = self.backend.linear_prefill_apply(&lhs_3d, rhs)? else {
+            return Ok(None);
+        };
+        let out = out_3d.squeeze(0)?;
+        Ok(Some(out))
+    }
+}
+
+/// Build a provider when the supplied backend is a Vulkan instance.
+/// Returns None for any other backend so the FLCE path falls back to
+/// candle CPU exactly as before. The KILN_VULKAN_LINEAR opt-in is
+/// checked deeper inside VulkanBackend::linear_prefill_apply, so the
+/// provider being non-None doesn't itself force Vulkan dispatch — the
+/// per-call gate decides per chunk.
+fn build_flce_provider(
+    backend: &std::sync::Arc<dyn BackendRuntime>,
+) -> Option<FlceProvider> {
+    if backend.name() != "vulkan" {
+        return None;
+    }
+    Some(std::sync::Arc::new(BackendFlceProvider {
+        backend: backend.clone(),
+    }))
 }
 
 /// SGD update: param = param - lr * grad
@@ -2439,6 +2491,7 @@ fn checkpointed_forward_backward(
     label_mask: &[bool],
     segments: &[(usize, usize)],
     device: &Device,
+    flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
 
@@ -2587,13 +2640,14 @@ fn checkpointed_forward_backward(
         // LM head + loss (or fused LCE when KILN_USE_FLCE=1).
         let loss = if use_flce() {
             let normed = model_forward_final_norm(&hidden, weights, model_config)?;
-            fused_linear_cross_entropy_dispatch(
+            fused_linear_cross_entropy_dispatch_with_provider(
                 &normed,
                 &weights.embed_tokens_t,
                 input_ids,
                 label_mask,
                 device,
                 DEFAULT_CHUNK_SIZE,
+                flce_provider.clone(),
             )
             .context("fused linear cross-entropy (checkpointed)")?
         } else {
@@ -2626,6 +2680,7 @@ fn standard_forward_backward(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &Device,
+    flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, candle_core::backprop::GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -2640,13 +2695,14 @@ fn standard_forward_backward(
             Some(&lora_weights),
         )
         .context("training forward pass (FLCE)")?;
-        fused_linear_cross_entropy_dispatch(
+        fused_linear_cross_entropy_dispatch_with_provider(
             &hidden,
             &weights.embed_tokens_t,
             input_ids,
             label_mask,
             device,
             DEFAULT_CHUNK_SIZE,
+            flce_provider.clone(),
         )
         .context("fused linear cross-entropy")?
     } else {
@@ -3295,6 +3351,7 @@ mod tests {
             &params_std,
             &label_mask,
             &device,
+            None,
         )?;
 
         // Checkpointed forward/backward with 2 segments
@@ -3311,6 +3368,7 @@ mod tests {
             &label_mask,
             &segments,
             &device,
+            None,
         )?;
 
         // Both losses should be finite and in a reasonable range for random weights
@@ -3415,6 +3473,7 @@ mod tests {
             &label_mask,
             &segments,
             &device,
+            None,
         )?;
 
         // Step 2: tiled. KILN_STREAMING_TILE_TOKENS=64 keeps the tile a
@@ -3443,6 +3502,7 @@ mod tests {
             &label_mask,
             &segments,
             &device,
+            None,
         )?;
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
@@ -3621,6 +3681,7 @@ mod tests {
             &params,
             &label_mask,
             &device,
+            None,
         )?;
         // Lift `grad_store_std` (a `GradStore`) into the same map type as
         // checkpointed_forward_backward returns so the test can compare
@@ -3665,6 +3726,7 @@ mod tests {
             &label_mask,
             &segments,
             &device,
+            None,
         )?;
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
@@ -3873,6 +3935,7 @@ mod tests {
             &label_mask,
             &segments,
             &device,
+            None,
         )?;
 
         // Verify that we got gradients for LoRA params in BOTH segments
@@ -3928,6 +3991,7 @@ mod tests {
                 &label_mask,
                 &segments,
                 device,
+                None,
             )?;
             sgd_step_from_map(&params, &grads, lr)?;
             losses.push(loss_val);
@@ -4041,6 +4105,7 @@ mod tests {
                 &params,
                 &label_mask,
                 &device,
+                None,
             )?;
 
             // Defensive cleanup so the next call (or test) isn't poisoned.
