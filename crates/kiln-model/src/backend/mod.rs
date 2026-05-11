@@ -215,6 +215,20 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Phase 4.2 hook: in-place SGD update `param -= lr * grad`
+    /// against device-resident parameter and gradient buffers.
+    /// Returns true when the dispatch succeeded; false when the
+    /// backend can't service the request and the caller should fall
+    /// back to the candle CPU path (`var.set(var - lr * grad)`).
+    ///
+    /// Callers must register both `param` and `grad` as resident
+    /// activations first (Phase 3.1 hooks). The default implementation
+    /// is a no-op returning false; the Vulkan backend's impl will land
+    /// alongside Phase 4.1's resident `TrainableLoraParams`.
+    fn dispatch_sgd_step(&self, _param: &Tensor, _grad: &Tensor, _lr: f32) -> Result<bool> {
+        Ok(false)
+    }
+
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
         _rows: &[&Tensor],

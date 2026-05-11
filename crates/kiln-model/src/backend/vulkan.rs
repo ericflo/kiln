@@ -771,6 +771,48 @@ impl BackendRuntime for VulkanBackend {
         RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id))
     }
 
+    fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(false);
+        };
+        // Both operands must be resident — no support for mixed
+        // resident/CPU yet (would require a per-call upload that
+        // defeats the purpose of the on-device update).
+        let param_id = param.id();
+        let grad_id = grad.id();
+        let lookup = RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
+            let cache = cache.borrow();
+            cache
+                .get(&param_id)
+                .and_then(|p| cache.get(&grad_id).map(|g| (Arc::clone(p), Arc::clone(g))))
+        });
+        let Some((param_buf, grad_buf)) = lookup else {
+            return Ok(false);
+        };
+        // Both buffers are F32 (resident registry stores raw bytes —
+        // the SGD shader assumes F32, matching the candle Var layout
+        // for LoRA parameters).
+        if param.dtype() != DType::F32 || grad.dtype() != DType::F32 {
+            return Ok(false);
+        }
+        let n_elements: usize = param.shape().elem_count();
+        if n_elements != grad.shape().elem_count() {
+            anyhow::bail!(
+                "dispatch_sgd_step: param ({:?}) and grad ({:?}) have different element counts",
+                param.shape(),
+                grad.shape(),
+            );
+        }
+        kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
+            vk_device,
+            &param_buf,
+            &grad_buf,
+            n_elements,
+            lr,
+        )?;
+        Ok(true)
+    }
+
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
         rows: &[&Tensor],
@@ -2573,6 +2615,87 @@ mod tests {
     /// evicts it, asserts it flips back. Skipped if no Vulkan
     /// device — the hooks have no-op defaults so a CPU-only run
     /// would just always answer false.
+    /// dispatch_sgd_step against two registry-resident F32 tensors —
+    /// param := param - lr * grad, computed on-device, must match the
+    /// CPU reference to f32 precision.
+    #[test]
+    fn dispatch_sgd_step_resident_round_trip() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let n = 16usize;
+        let lr = 0.01f32;
+        let param_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1).collect();
+        let grad_data: Vec<f32> = (0..n).map(|i| ((i as i32 - 8) as f32) * 0.05).collect();
+        let expected: Vec<f32> = param_data
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&p, &g)| p - lr * g)
+            .collect();
+
+        let param = Tensor::from_vec(param_data, (n,), &Device::Cpu)?;
+        let grad = Tensor::from_vec(grad_data, (n,), &Device::Cpu)?;
+
+        // Both must be resident before dispatch_sgd_step succeeds.
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+
+        let dispatched = backend.dispatch_sgd_step(&param, &grad, lr)?;
+        assert!(dispatched, "dispatch_sgd_step should succeed when both buffers are resident");
+
+        // Read back the updated param buffer from the registry.
+        let param_buf = RESIDENT_ACTIVATION_REGISTRY
+            .with(|cache| cache.borrow().get(&param.id()).cloned())
+            .expect("param must still be in registry");
+        let device = backend.vulkan_device.as_ref().unwrap();
+        let updated_bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &param_buf,
+        )?;
+        let updated: Vec<f32> = updated_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(updated.len(), n);
+        for (i, (got, want)) in updated.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-7,
+                "idx {i}: got {got:.9} want {want:.9}"
+            );
+        }
+
+        backend.evict_resident_activation(&param);
+        backend.evict_resident_activation(&grad);
+        Ok(())
+    }
+
+    /// dispatch_sgd_step must return false (caller falls back to CPU)
+    /// when the operands aren't both resident.
+    #[test]
+    fn dispatch_sgd_step_falls_back_when_not_resident() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;
+        // Neither registered — fall back.
+        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
+        assert!(!dispatched);
+        // Only param registered — still falls back.
+        backend.register_resident_activation(&p)?;
+        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
+        assert!(!dispatched);
+        backend.evict_resident_activation(&p);
+        Ok(())
+    }
+
     #[test]
     fn resident_activation_register_evict_round_trip() -> Result<()> {
         let backend = VulkanBackend::new(Device::Cpu);
