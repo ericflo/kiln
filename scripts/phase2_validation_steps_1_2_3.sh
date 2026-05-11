@@ -7,21 +7,25 @@
 #         active_count >= 16, with all KILN_VULKAN_LINEAR* defaults.
 # Step 2: same payload with KILN_VULKAN_LINEAR=1 — first run that
 #         exercises the in-op chunking against the SFT path.
+# Step 3: same payload with KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1
+#         — full-attn matmuls go through the new SDPA F32 kernel.
+#         At T~256 the per-dispatch SDPA work is ~134 MFLOP × 8
+#         layers, well under any safety threshold.
 #
-# Both steps are bounded (1 example × 1 epoch, T~256, ~30s each) and
-# abort if MemAvailable drops below 8 GiB. Steps 3 and 4 (with SDPA
-# enabled, then the original T=918 repro) are still operator-driven
-# per the runbook — running them autonomously is what crashed the
-# host twice.
+# All three steps are bounded (1 example × 1 epoch, T~256, ~30s each)
+# and abort if MemAvailable drops below 8 GiB. Step 4 (the original
+# T=918 repro) is still operator-driven per the runbook — running it
+# autonomously is what crashed the host twice.
 #
 # Usage:
 #   ./scripts/phase2_validation_step1_step2.sh <model-path>
 #
 # Exit codes:
-#   0  — both steps passed
+#   0  — all three steps passed
 #   1  — pre-flight check failed (build, memory, or stale processes)
 #   2  — Step 1 failed
 #   3  — Step 2 failed
+#   4  — Step 3 failed
 
 set -euo pipefail
 
@@ -210,6 +214,17 @@ KILN_VULKAN_LINEAR=1'; then
     exit 3
 fi
 
-echo ">>> Steps 1 and 2 passed. Logs in $LOG_DIR" >&2
-echo ">>> Next: run Step 3 (KILN_VULKAN_SDPA=1) and Step 4 (original repro) per runbook." >&2
+# -----------------------------------------------------------------------------
+# Step 3: KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1 — full-attn
+# prefill matmuls now go through the new SDPA F32 kernel.
+# -----------------------------------------------------------------------------
+if ! run_step "step3-vulkan-sdpa" 'RUST_LOG=info
+KILN_VULKAN_LINEAR=1
+KILN_VULKAN_SDPA=1'; then
+    echo ">>> Step 3 FAILED. Logs in $LOG_DIR" >&2
+    exit 4
+fi
+
+echo ">>> Steps 1, 2, 3 passed. Logs in $LOG_DIR" >&2
+echo ">>> Next: run Step 4 (original /tmp/sft-data.jsonl repro) per runbook." >&2
 exit 0
