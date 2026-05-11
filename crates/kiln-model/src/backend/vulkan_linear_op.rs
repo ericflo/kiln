@@ -61,6 +61,13 @@ pub struct VulkanLinearOp {
     /// the input dtype, avoiding a second `.to_dtype()` round-trip in
     /// every call site.
     pub out_dtype: DType,
+    /// The candle weight tensor backing `weight_buffer`. Held here so
+    /// `bwd` can compute `dX = grad_y @ W` without taking a second copy
+    /// of the device buffer back to CPU (the candle tensor's CPU storage
+    /// is already there). For frozen LoRA-base weights this is the same
+    /// `Arc<Storage>` the rest of the model holds, so capturing the
+    /// `Tensor` here adds no real memory cost.
+    pub weight_t: Tensor,
 }
 
 impl std::fmt::Debug for VulkanLinearOp {
@@ -192,18 +199,60 @@ impl CustomOp1 for VulkanLinearOp {
 
     fn bwd(
         &self,
-        x: &Tensor,
+        _x: &Tensor,
         _y: &Tensor,
         grad_y: &Tensor,
     ) -> candle_core::Result<Option<Tensor>> {
-        // dX = grad_y @ W where W = weight_t.t() has shape [out_dim, hidden].
-        // First-cut: route through candle CPU for parity safety. A future
-        // commit can replace this with a second Vulkan dispatch (the
-        // transpose-of-transpose lookup makes this a one-line swap).
-        let _ = (x, grad_y);
-        Err(candle_core::Error::Msg(
-            "VulkanLinearOp::bwd: not yet implemented — wire forward.rs only after backward lands".into(),
-        ))
+        // y = x @ weight_t        — weight_t has shape [hidden, out_dim]
+        // dX = grad_y @ weight_t.T — i.e. grad_y has shape [..., out_dim],
+        //                            weight_t.T has shape [out_dim, hidden],
+        //                            dX has shape [..., hidden].
+        //
+        // First-cut: route through candle's broadcast_matmul on CPU for
+        // parity safety. The forward already eats the upload/readback
+        // round-trip; backward stays on candle until a follow-up commit
+        // lands the second Vulkan dispatch (which can reuse the same
+        // weight buffer if a transposed-of-transposed view is uploaded
+        // once at op-build time — left for the production wiring step).
+        //
+        // Promotion-to-f32 mirrors lora_loader::linear_with_lora_t's CPU
+        // path so the gradient numerics match exactly when the caller
+        // compares against the pre-Vulkan baseline.
+        let weight_t = if self.weight_t.dtype() == DType::F32 {
+            self.weight_t.clone()
+        } else {
+            self.weight_t
+                .to_dtype(DType::F32)
+                .map_err(|e| candle_core::Error::Msg(format!("bwd weight→f32: {e:?}")))?
+        };
+        let weight = weight_t
+            .transpose(0, 1)
+            .map_err(|e| candle_core::Error::Msg(format!("bwd weight transpose: {e:?}")))?
+            .contiguous()
+            .map_err(|e| candle_core::Error::Msg(format!("bwd weight contiguous: {e:?}")))?;
+        let grad_y_f32 = if grad_y.dtype() == DType::F32 {
+            grad_y.clone()
+        } else {
+            grad_y
+                .to_dtype(DType::F32)
+                .map_err(|e| candle_core::Error::Msg(format!("bwd grad_y→f32: {e:?}")))?
+        };
+        let dx_f32 = grad_y_f32
+            .broadcast_matmul(&weight)
+            .map_err(|e| candle_core::Error::Msg(format!("bwd matmul: {e:?}")))?;
+        // Match the input's dtype on the gradient — candle's autograd
+        // expects dX.dtype() == X.dtype(). Since the caller's X may have
+        // been bf16, return bf16 to avoid a downstream cast surprise.
+        // The dtype to return is `out_dtype` of THIS op which mirrors X
+        // dtype by convention.
+        let dx = if self.out_dtype == DType::F32 {
+            dx_f32
+        } else {
+            dx_f32
+                .to_dtype(self.out_dtype)
+                .map_err(|e| candle_core::Error::Msg(format!("bwd cast dx: {e:?}")))?
+        };
+        Ok(Some(dx))
     }
 }
 
@@ -211,10 +260,13 @@ impl CustomOp1 for VulkanLinearOp {
 /// weight buffer and returns a ready-to-apply [`VulkanLinearOp`].
 ///
 /// `weight_t` is the row-major `[hidden, out_dim]` transposed weight. The
-/// caller is expected to have computed it once at load time.
+/// caller is expected to have computed it once at load time. The same
+/// candle `Tensor` is captured into op state so `bwd` can compute
+/// `dX = grad_y @ weight_t.T` without re-downloading the weight.
 pub fn build_op(
     vk_device: Arc<VulkanDevice>,
     weight_buffer: Arc<VulkanBuffer>,
+    weight_t: Tensor,
     weight_layout: WeightLayout,
     hidden: usize,
     out_dim: usize,
@@ -227,6 +279,7 @@ pub fn build_op(
         hidden,
         out_dim,
         out_dtype,
+        weight_t,
     }
 }
 
@@ -408,6 +461,96 @@ mod tests {
         Ok(())
     }
 
+    /// End-to-end autograd parity: applying VulkanLinearOp via
+    /// `apply_op1` and then calling `.backward()` must produce the
+    /// same gradient on `x` as candle's native broadcast_matmul.
+    /// This is the contract that lets the wrapper be safely wired
+    /// into the training forward path — without it, training would
+    /// silently produce wrong LoRA updates.
+    #[test]
+    fn vulkan_linear_backward_parity_small() -> Result<()> {
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!("no Vulkan device, skipping");
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+
+        let device = Device::Cpu;
+        let t = 4usize;
+        let hidden = 6usize;
+        let out_dim = 5usize;
+
+        let x_data: Vec<f32> = (0..t * hidden).map(|i| 0.05 * (i as f32 + 1.0)).collect();
+        let w_data: Vec<f32> = (0..hidden * out_dim)
+            .map(|i| 0.03 * (i as f32 + 1.0))
+            .collect();
+
+        // The autograd-baseline path must mark x as requiring grad so
+        // candle records it in the backprop graph; we use Var.
+        let x_var = candle_core::Var::from_tensor(&Tensor::from_vec(
+            x_data.clone(),
+            (1, t, hidden),
+            &device,
+        )?)?;
+        let weight_t = Tensor::from_vec(w_data.clone(), (hidden, out_dim), &device)?;
+
+        // Baseline: candle native broadcast_matmul → loss = sum(out).
+        let baseline_out = x_var.as_tensor().broadcast_matmul(&weight_t)?;
+        let baseline_loss = baseline_out.sum_all()?;
+        let baseline_grads = baseline_loss.backward()?;
+        let baseline_dx = baseline_grads
+            .get(x_var.as_tensor())
+            .expect("baseline dx present")
+            .clone();
+
+        // Vulkan path: same x (fresh Var so the new graph stands alone).
+        let x_var2 = candle_core::Var::from_tensor(&Tensor::from_vec(
+            x_data, (1, t, hidden), &device,
+        )?)?;
+        let weight_buffer = Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t)?);
+        let op = build_op(
+            vk_device.clone(),
+            weight_buffer,
+            weight_t.clone(),
+            WeightLayout::F32,
+            hidden,
+            out_dim,
+            DType::F32,
+        );
+        let vulkan_out = x_var2.as_tensor().apply_op1(op)?;
+        let vulkan_loss = vulkan_out.sum_all()?;
+        let vulkan_grads = vulkan_loss.backward()?;
+        let vulkan_dx = vulkan_grads
+            .get(x_var2.as_tensor())
+            .expect("vulkan dx present")
+            .clone();
+
+        // Forward outputs must agree.
+        let baseline_out_v = baseline_out.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_out_v = vulkan_out.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_out_v.iter().zip(vulkan_out_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            assert!(
+                abs < 1e-3,
+                "fwd mismatch idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+
+        // Gradients must agree.
+        assert_eq!(baseline_dx.dims(), vulkan_dx.dims());
+        let baseline_dx_v = baseline_dx.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_dx_v = vulkan_dx.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_dx_v.iter().zip(vulkan_dx_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            let rel = abs / (b.abs().max(1e-3));
+            assert!(
+                abs < 1e-3 || rel < 1e-3,
+                "bwd mismatch idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Op-state debug snapshot. Cheap sanity check that the struct
     /// formats useful metadata without panicking.
     #[test]
@@ -425,6 +568,7 @@ mod tests {
         let op = build_op(
             vk_device,
             weight_buffer,
+            weight_t.clone(),
             WeightLayout::F32,
             2,
             2,
