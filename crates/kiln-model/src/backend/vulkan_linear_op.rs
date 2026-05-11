@@ -208,16 +208,52 @@ impl CustomOp1 for VulkanLinearOp {
         //                            weight_t.T has shape [out_dim, hidden],
         //                            dX has shape [..., hidden].
         //
-        // First-cut: route through candle's broadcast_matmul on CPU for
-        // parity safety. The forward already eats the upload/readback
-        // round-trip; backward stays on candle until a follow-up commit
-        // lands the second Vulkan dispatch (which can reuse the same
-        // weight buffer if a transposed-of-transposed view is uploaded
-        // once at op-build time — left for the production wiring step).
-        //
-        // Promotion-to-f32 mirrors lora_loader::linear_with_lora_t's CPU
-        // path so the gradient numerics match exactly when the caller
-        // compares against the pre-Vulkan baseline.
+        // Try the Vulkan transposed-weight kernel first: it dispatches
+        // against the SAME bf16-packed buffer the forward used (no
+        // re-upload of a transposed view). Falls back to candle CPU
+        // broadcast_matmul if the kernel preconditions don't hold (e.g.
+        // weight is f32, or the kernel returns None for shape reasons).
+        if self.weight_layout == WeightLayout::Bf16Packed {
+            let dims = grad_y.shape().dims().to_vec();
+            let row_count: usize = dims[..dims.len() - 1].iter().product();
+            let grad_y_f32 = if grad_y.dtype() == DType::F32 {
+                grad_y.clone()
+            } else {
+                grad_y
+                    .to_dtype(DType::F32)
+                    .map_err(|e| candle_core::Error::Msg(format!("bwd grad_y→f32: {e:?}")))?
+            };
+            let dispatch_x = grad_y_f32
+                .reshape((row_count, self.out_dim))
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("bwd reshape grad_y: {e:?}"))
+                })?;
+            let dx_3d = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+                self.vk_device.as_ref(),
+                &dispatch_x,
+                self.weight_buffer.as_ref(),
+                row_count,
+                self.out_dim,
+                self.hidden,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}")))?;
+            // dx_3d is [row_count, 1, hidden]; restore caller's leading dims.
+            let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
+            out_dims.push(self.hidden);
+            let dx_f32 = dx_3d.reshape(out_dims.as_slice()).map_err(|e| {
+                candle_core::Error::Msg(format!("bwd reshape dx: {e:?}"))
+            })?;
+            let dx = if self.out_dtype == DType::F32 {
+                dx_f32
+            } else {
+                dx_f32.to_dtype(self.out_dtype).map_err(|e| {
+                    candle_core::Error::Msg(format!("bwd cast dx: {e:?}"))
+                })?
+            };
+            return Ok(Some(dx));
+        }
+
+        // F32 weight path: fall back to candle CPU broadcast_matmul.
         let weight_t = if self.weight_t.dtype() == DType::F32 {
             self.weight_t.clone()
         } else {
@@ -614,6 +650,71 @@ mod tests {
             assert!(
                 abs < 5e-3 || rel < 5e-3,
                 "offset bf16 mismatch at idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Verify the transposed-weight kernel matches `x @ W.T` against
+    /// the same buffer the forward kernel uses. Used by
+    /// VulkanLinearOp::bwd to compute dx without re-uploading W.T.
+    #[test]
+    fn vulkan_linear_transposed_parity() -> Result<()> {
+        use kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed;
+
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!("no Vulkan device, skipping");
+            return Ok(());
+        };
+
+        let device = Device::Cpu;
+        let batch = 5usize;
+        let forward_k = 8usize; // = bwd's n_dim
+        let forward_n = 6usize; // = bwd's k_dim
+
+        // Build W as a [forward_k, forward_n] row-major matrix (the
+        // layout the forward kernel uses), upload as bf16-packed.
+        let w_data: Vec<f32> = (0..forward_k * forward_n)
+            .map(|i| (i as f32) * 0.03)
+            .collect();
+        let weight_full = Tensor::from_vec(w_data.clone(), (forward_k, forward_n), &device)?;
+        let weight_full_bf16 = weight_full.to_dtype(DType::BF16)?;
+        let weight_buffer = upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
+
+        // x has shape [batch, k_dim] = [batch, forward_n].
+        let x_data: Vec<f32> = (0..batch * forward_n)
+            .map(|i| (i as f32) * 0.05)
+            .collect();
+        let x = Tensor::from_vec(x_data, (batch, forward_n), &device)?;
+
+        // Vulkan: out = x @ W.T  (W.T shape [forward_n, forward_k] →
+        // out shape [batch, forward_k]).
+        let out_raw = dispatch_linear_decode_cached_bf16_weights_transposed(
+            &vk_device,
+            &x,
+            &weight_buffer,
+            batch,
+            forward_n, // k_dim (inner sum)
+            forward_k, // n_dim (output dim)
+        )?;
+        let out = out_raw.reshape((batch, forward_k))?;
+
+        // Reference: candle CPU broadcast_matmul of x (f32) @ W.T (f32).
+        let weight_t_f32 = weight_full_bf16
+            .to_dtype(DType::F32)?
+            .transpose(0, 1)?
+            .contiguous()?;
+        let baseline = x.broadcast_matmul(&weight_t_f32)?;
+
+        assert_eq!(out.dims(), baseline.dims());
+        let baseline_v = baseline.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_v = out.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_v.iter().zip(vulkan_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            let rel = abs / (b.abs().max(1e-3));
+            assert!(
+                abs < 5e-3 || rel < 5e-3,
+                "transposed bf16 mismatch at idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
             );
         }
         Ok(())

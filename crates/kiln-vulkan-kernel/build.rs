@@ -79,6 +79,10 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_LINEAR_DECODE_BATCHED_OFFSET_BF16W",
     ),
     (
+        "linear_decode_batched_transposed_bf16w",
+        "SPIR_V_LINEAR_DECODE_BATCHED_TRANSPOSED_BF16W",
+    ),
+    (
         "linear_decode_batched_rows2",
         "SPIR_V_LINEAR_DECODE_BATCHED_ROWS2",
     ),

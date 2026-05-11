@@ -1,0 +1,79 @@
+// Batched matmul against the TRANSPOSE of a bf16-packed weight buffer.
+//
+// Buffer layout (unchanged from the forward kernel): row-major
+// `[forward_k, forward_n]` where `forward_k * forward_n` is the total
+// element count.
+//
+// Conceptually we treat the buffer as W (shape `[forward_k, forward_n]`)
+// for the forward kernel, and as W.T (shape `[forward_n, forward_k]`)
+// here. The matmul this kernel performs is:
+//
+//   out[i, n] = sum_k x[i, k] * W.T[k, n]
+//             = sum_k x[i, k] * W[n, k]
+//             = sum_k x[i, k] * data_w[n * forward_n_stride + k]
+//
+// where `forward_n_stride` is the buffer's row stride in bf16 elements
+// (i.e. `forward_n` from the forward kernel's perspective). Since we
+// renamed the dims for this kernel: here `k_dim` is the inner sum dim
+// (= forward_n), `n_dim` is the output dim (= forward_k), and
+// `weight_row_stride` is the buffer's stride (= forward_n = k_dim).
+//
+// Therefore the buffer access is `load_weight(col * k_dim + k)` — for
+// each output column `col`, walk a contiguous `k_dim`-element row of
+// the original buffer (cache-friendly).
+//
+// Used by VulkanLinearOp::bwd to compute dx = dy @ weight_t.T
+// against the same weight buffer the forward dispatch uploaded.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint k_dim;   // inner sum dim (= forward kernel's `out_dim`)
+    uint n_dim;   // output dim (= forward kernel's `hidden`)
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { uint data_w[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+
+float load_weight(uint idx) {
+    uint packed = data_w[idx >> 1];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (n_dim + 31) / 32;
+    uint batch_idx = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
+    uint col = col_group * 32 + col_lane;
+    uint partial_idx = col_lane * 8 + red_lane;
+
+    float sum = 0.0;
+    if (batch_idx < batch && col < n_dim) {
+        uint x_base = batch_idx * k_dim;
+        uint w_base = col * k_dim;
+        for (uint k = red_lane; k < k_dim; k += 8) {
+            sum += data_x[x_base + k] * load_weight(w_base + k);
+        }
+    }
+
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0 && batch_idx < batch && col < n_dim) {
+        float total = 0.0;
+        for (uint lane = 0; lane < 8; lane++) {
+            total += partial[col_lane * 8 + lane];
+        }
+        data_out[batch_idx * n_dim + col] = total;
+    }
+}

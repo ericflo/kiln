@@ -1785,6 +1785,95 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
     create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
 }
 
+/// Matmul against the TRANSPOSE of a bf16-packed weight buffer.
+///
+/// `weight_buffer` holds a row-major bf16-packed matrix of shape
+/// `[forward_k, forward_n]` (the same buffer the forward kernel
+/// dispatches against). This function dispatches:
+///
+/// `out[batch, n_dim] = x[batch, k_dim] * W.T`
+///
+/// where `W.T` has shape `[forward_n, forward_k]` and `k_dim = forward_n`,
+/// `n_dim = forward_k`. Used by VulkanLinearOp::bwd to compute
+/// `dx = dy @ weight_t.T` against the same buffer the forward dispatch
+/// uploaded — no separate upload of the transposed weight needed.
+///
+/// Output shape is `[batch, 1, n_dim]`.
+pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    k_dim: usize,
+    n_dim: usize,
+) -> Result<Tensor> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let x_data = extract_tensor_bytes(x)?.0;
+    anyhow::ensure!(
+        x_data.len() == batch * k_dim * 4,
+        "linear_decode_transposed: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        batch * k_dim * 4
+    );
+
+    let x_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+            .context("failed to create linear_decode_transposed x buffer")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &x_buf,
+            &x_data,
+        )
+        .context("failed to upload linear_decode_transposed x buffer")?;
+    }
+
+    let out_buf = VulkanBuffer::create_device_local(
+        device,
+        device_local_mt,
+        (batch * n_dim * 4) as u64,
+    )
+    .context("failed to create linear_decode_transposed output buffer")?;
+
+    let all_handles = vec![x_buf.handle(), weight_buffer.handle(), out_buf.handle()];
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_batched_transposed_bf16w.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [k_dim as u32, n_dim as u32, batch as u32];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        (batch * n_dim.div_ceil(32)) as u32,
+    )
+    .context("linear_decode_batched_transposed_bf16w kernel failed")?;
+
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("failed to read back linear_decode_transposed output")?
+    };
+    create_tensor_from_data(&out_data, &[batch, 1, n_dim], DType::F32)
+}
+
 fn dispatch_linear_decode_cached_impl(
     vk_device: &VulkanDevice,
     x: &Tensor,
