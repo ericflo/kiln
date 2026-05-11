@@ -29,6 +29,37 @@ Vulkan training-route changes) twice hard-hung the host on the
   `RESIDENT_ACTIVATION_REGISTRY` and falls back to the candle CPU
   path if either is not resident. Drops in for the trainer once
   Phase 4.1 lands and `TrainableLoraParams` are registry-resident.
+- vulkan: Phase 4.1 partial (LoRA Vars on device, forward inference
+  path).
+  - `TrainableLoraParams::register_with_backend` uploads each LoRA
+    Var to the resident activation registry at init time. Production
+    callers (sft_train, grpo_train) wire it.
+  - `BackendRuntime::lora_delta_resident` hook computes
+    `(x @ A.T @ B.T) * scale` against registry-resident A and B
+    via two dispatches of the existing transposed bf16 kernel.
+    Plumbed into `add_lora_delta_to_base` in forward.rs.
+  - **Gated to inference-only**: the on-device dispatch returns a
+    candle-leaf Tensor with no autograd back-link, so it's only
+    invoked when neither x, A, nor B is autograd-tracked. Training
+    still uses the candle CPU `compute_lora_delta` path. A future
+    CustomOp3 wrapper (with analytic LoRA backward) will make the
+    on-device path training-safe.
+  - Registry encoding bifurcated by dtype:
+    BF16 tensors store packed BF16 bytes (2 bytes/elem) so every
+    `load_weight(idx) = data_w[idx >> 1]` kernel reads them
+    correctly; F32 tensors store F32 bytes (preserves the original
+    boundary-state resolve path). `resolve_resident_activation`
+    knows about both encodings.
+  - `BackendRuntime::update_resident_activation` keeps the registry
+    buffer in sync with candle CPU `var.set(...)` after the SGD
+    step. Wired into `sgd_step` and `sgd_step_from_map`. Without
+    this, `lora_delta_resident` would forever read the init bytes.
+- training: Phase 3.2 partial drop also covers the tiled checkpoint
+  paths — boundary_states[seg_idx]'s candle CPU mirror is replaced
+  with a 1-element BF16 stub right after the tiled subroutine
+  returns (it took `&boundary_states` so couldn't mutate; the
+  outer loop does the drop). Frees ~9 MB per boundary on Vulkan
+  in tiled mode too.
 - vulkan: `BackendRuntime::resolve_resident_activation` read-back
   hook + Vulkan impl using `VulkanBuffer::read_back` +
   `kernels::create_tensor_from_data`. API surface for Phase 3.2's
