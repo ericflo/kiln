@@ -2186,6 +2186,29 @@ fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor>
     }
 }
 
+/// Vulkan-routed `[B, T, H] @ [H, D] -> [B, T, D]` matmul with autograd
+/// support, falling back to [`broadcast_matmul_cpu_compatible`] when
+/// the backend declines.
+///
+/// Phase 2 sub-step 2: GDN linear-attention layers' in_proj_qkv,
+/// in_proj_z, in_proj_a, in_proj_b matmuls were going through
+/// `broadcast_matmul_cpu_compatible` directly, bypassing the existing
+/// Vulkan routing in `linear_with_lora_t_backend_decode_if`. This
+/// helper threads them through `backend.linear_prefill_apply` (the
+/// autograd-safe `CustomOp1`) when `KILN_VULKAN_LINEAR=1` is set.
+/// On Qwen3.5-4B that's 24 GDN layers × 4 in-proj matmuls per layer
+/// — the dominant CPU compute in training before this commit.
+fn gdn_in_proj_matmul(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weight_t: &Tensor,
+) -> Result<Tensor> {
+    if let Some(out) = backend.linear_prefill_apply(x, weight_t)? {
+        return Ok(out);
+    }
+    broadcast_matmul_cpu_compatible(x, weight_t)
+}
+
 fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
     if matches!(t.device(), Device::Cpu) && t.dtype() != DType::F32 {
         Ok(t.to_dtype(DType::F32)?)
@@ -5054,8 +5077,8 @@ fn gated_deltanet_forward_decode_if(
         {
             (mixed_qkv, z, a, b, None::<Tensor>)
         } else {
-            let mixed_qkv = broadcast_matmul_cpu_compatible(x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-            let z = broadcast_matmul_cpu_compatible(x, &weights.in_proj_z_t)?; // [B, T, v_dim]
+            let mixed_qkv = gdn_in_proj_matmul(backend, x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
+            let z = gdn_in_proj_matmul(backend, x, &weights.in_proj_z_t)?; // [B, T, v_dim]
             let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
                 #[cfg(any(feature = "cuda", feature = "metal"))]
                 {
@@ -5116,8 +5139,8 @@ fn gated_deltanet_forward_decode_if(
             if let Some((ab, a, b)) = prefill_ab {
                 (mixed_qkv, z, a, b, Some(ab))
             } else {
-                let a = broadcast_matmul_cpu_compatible(x, &weights.in_proj_a_t)?; // [B, T, nv]
-                let b = broadcast_matmul_cpu_compatible(x, &weights.in_proj_b_t)?; // [B, T, nv]
+                let a = gdn_in_proj_matmul(backend, x, &weights.in_proj_a_t)?; // [B, T, nv]
+                let b = gdn_in_proj_matmul(backend, x, &weights.in_proj_b_t)?; // [B, T, nv]
                 (mixed_qkv, z, a, b, None::<Tensor>)
             }
         }
