@@ -2280,7 +2280,16 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     // single `loss.backward()` through later segments + LM head produces the
     // gradient at the segment-output node, which becomes the seed for the
     // per-block gradient-injection backward in step 4.
-    let seg_output_var = Var::from_tensor(&boundary_states[seg_idx + 1])?;
+    //
+    // Phase 3.2: resolve from registry when supported — same fast
+    // path as the segment input boundary.
+    let resident_activation_for_output = backend.supports_resident_activation();
+    let seg_output_tensor = segment_input_via_registry_or_clone(
+        backend,
+        &boundary_states[seg_idx + 1],
+        resident_activation_for_output,
+    )?;
+    let seg_output_var = Var::from_tensor(&seg_output_tensor)?;
 
     // Use DETACHED LoRA weights for the tail forward — we want the tail
     // backward to produce ONLY `∂loss/∂seg_output_var`, not LoRA grads
