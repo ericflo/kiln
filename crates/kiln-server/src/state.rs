@@ -1585,6 +1585,8 @@ impl AppState {
                 rmsnorm_inference = env_flag("KILN_VULKAN_RMSNORM", true),
                 rmsnorm_training = "auto (row_count >= 1024)",
                 flce_provider = "auto (active_count >= 16)",
+                resident_activation = "always (Phase 3.1 hooks)",
+                sgd_step_on_device = "auto (Phase 4.2: gated on registry residency)",
                 "Vulkan training acceleration profile"
             );
         }
