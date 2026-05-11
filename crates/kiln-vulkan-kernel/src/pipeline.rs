@@ -149,6 +149,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("flash_attn", SPIR_V_FLASH_ATTN),
     ("sdpa_prefill_f32", SPIR_V_SDPA_PREFILL_F32),
     ("sgd_step_f32", SPIR_V_SGD_STEP_F32),
+    ("sgd_step_bf16", SPIR_V_SGD_STEP_BF16),
 ];
 
 // Re-export the spirv_modules for use in SHADER_SPIRVS

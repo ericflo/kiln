@@ -1,0 +1,72 @@
+// SGD parameter update for BF16 buffers: param_bf16 -= lr * grad_bf16.
+//
+// One thread per u32 WORD (each word holds 2 bf16 elements). Each
+// thread updates both lanes of its word, computing the f32 update
+// math via bf16↔f32 lane bit-expansion (no native bf16 support
+// required).
+//
+// Layout: both data_param and data_grad are flat arrays of u32, each
+// holding two bf16 elements packed `(hi << 16) | lo` per the encoding
+// `kiln_vulkan_kernel::extract_tensor_packed_bf16_bytes` produces.
+// Total element count is `n` (push constant); the last u32 may have
+// only its lo lane valid when n is odd, in which case we preserve
+// the hi lane unchanged.
+//
+// Used by `dispatch_sgd_step_bf16` against registry-resident LoRA Var
+// + grad buffers — the Phase 4.x on-device SGD path that closes the
+// loop opened by Phase 4.1 (LoRA Vars resident on device).
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n;       // total bf16 element count
+    float lr;
+};
+
+layout(binding = 0) buffer ParamBuf { uint data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { uint data_grad[]; };
+
+float bf16_to_f32(uint bits16) {
+    return uintBitsToFloat(bits16 << 16);
+}
+
+uint f32_to_bf16(float v) {
+    uint b = floatBitsToUint(v);
+    // Round-to-nearest-even truncation. (b >> 16) & 1 is the LSB of
+    // the truncated result; adding it together with 0x7fff gives
+    // banker's rounding for the half-way case.
+    uint rounded = b + ((b >> 16) & 1u) + 0x7fffu;
+    return rounded >> 16;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1u) >> 1;
+    if (word_idx >= num_words) return;
+
+    uint param_word = data_param[word_idx];
+    uint grad_word = data_grad[word_idx];
+
+    float p0 = bf16_to_f32(param_word & 0xffffu);
+    float p1 = bf16_to_f32(param_word >> 16);
+    float g0 = bf16_to_f32(grad_word & 0xffffu);
+    float g1 = bf16_to_f32(grad_word >> 16);
+
+    float u0 = p0 - lr * g0;
+    float u1 = p1 - lr * g1;
+
+    uint u0_bits = f32_to_bf16(u0);
+    uint u1_bits = f32_to_bf16(u1);
+
+    uint base_idx = word_idx * 2u;
+    if (base_idx + 1u < n) {
+        // Both lanes valid.
+        data_param[word_idx] = u0_bits | (u1_bits << 16);
+    } else if (base_idx < n) {
+        // Only lo lane valid (n is odd at this end); preserve hi.
+        data_param[word_idx] = (param_word & 0xffff0000u) | (u0_bits & 0xffffu);
+    }
+}

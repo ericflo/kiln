@@ -897,10 +897,11 @@ impl BackendRuntime for VulkanBackend {
         let Some((param_buf, grad_buf)) = lookup else {
             return Ok(false);
         };
-        // Both buffers are F32 (resident registry stores raw bytes —
-        // the SGD shader assumes F32, matching the candle Var layout
-        // for LoRA parameters).
-        if param.dtype() != DType::F32 || grad.dtype() != DType::F32 {
+        // Dispatch the dtype-appropriate kernel. Param and grad must
+        // share dtype (mixed-precision SGD is a different design that
+        // would need an F32 master copy). LoRA Vars are BF16 in
+        // production; activations and intermediate buffers are F32.
+        if param.dtype() != grad.dtype() {
             return Ok(false);
         }
         let n_elements: usize = param.shape().elem_count();
@@ -911,26 +912,38 @@ impl BackendRuntime for VulkanBackend {
                 grad.shape(),
             );
         }
-        // One-shot trace so the operator can confirm the on-device
-        // SGD path is engaging. Cumulatively the FIRST_*_LOGGED OneLocks
-        // give a clear "registry → matmul chunking → SGD" signal in
-        // the startup log without per-step spam.
         static FIRST_SGD_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         FIRST_SGD_LOGGED.get_or_init(|| {
             tracing::info!(
                 n_elements,
                 lr,
+                dtype = ?param.dtype(),
                 "VulkanBackend::dispatch_sgd_step first call"
             );
         });
-        kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
-            vk_device,
-            &param_buf,
-            &grad_buf,
-            n_elements,
-            lr,
-        )?;
-        Ok(true)
+        match param.dtype() {
+            DType::F32 => {
+                kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
+                    vk_device,
+                    &param_buf,
+                    &grad_buf,
+                    n_elements,
+                    lr,
+                )?;
+                Ok(true)
+            }
+            DType::BF16 => {
+                kiln_vulkan_kernel::kernels::dispatch_sgd_step_bf16(
+                    vk_device,
+                    &param_buf,
+                    &grad_buf,
+                    n_elements,
+                    lr,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn lora_delta_resident(
@@ -3341,26 +3354,82 @@ mod tests {
         Ok(())
     }
 
-    /// dispatch_sgd_step must fall back (return Ok(false), not error)
-    /// when operands have a non-F32 dtype the kernel doesn't handle.
-    /// This matches the trait contract: false = "caller use the
-    /// candle CPU path"; error = "I tried but it failed."
+    /// dispatch_sgd_step on BF16 operands must NOW succeed (post-Phase
+    /// 4.x bf16 SGD kernel) and produce results that match the F32
+    /// reference computation to bf16 precision. This is the path
+    /// that lets LoRA Vars (BF16 by convention) update on-device
+    /// without the candle CPU re-upload round-trip.
     #[test]
-    fn dispatch_sgd_step_falls_back_on_non_f32_dtype() -> Result<()> {
+    fn dispatch_sgd_step_bf16_resident_round_trip() -> Result<()> {
         let backend = VulkanBackend::new(Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p_f32 = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let n = 32usize;
+        let lr = 0.01f32;
+        let p_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1).collect();
+        let g_data: Vec<f32> = (0..n).map(|i| ((i as i32 - 16) as f32) * 0.05).collect();
+        // F32 reference for what BF16 SGD should produce.
+        let expected_f32: Vec<f32> = p_data
+            .iter()
+            .zip(g_data.iter())
+            .map(|(&p, &g)| p - lr * g)
+            .collect();
+
+        let p_f32 = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
+        let g_f32 = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
         let p_bf16 = p_f32.to_dtype(DType::BF16)?;
-        let g_bf16 = p_f32.to_dtype(DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(DType::BF16)?;
+
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
-        let dispatched = backend.dispatch_sgd_step(&p_bf16, &g_bf16, 0.01)?;
-        assert!(!dispatched, "BF16 operands must fall back to CPU");
+
+        let dispatched = backend.dispatch_sgd_step(&p_bf16, &g_bf16, lr)?;
+        assert!(dispatched, "BF16 dispatch_sgd_step must succeed when both operands are resident");
+
+        // Read the updated param buffer back via resolve.
+        let resolved = backend
+            .resolve_resident_activation(&p_bf16, &[n], DType::BF16)?
+            .expect("must resolve");
+        let updated_v: Vec<f32> = resolved
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (i, (got, want)) in updated_v.iter().zip(expected_f32.iter()).enumerate() {
+            // BF16 has ~3 decimal digits of precision; tolerance reflects that.
+            let abs = (got - want).abs();
+            let rel = abs / want.abs().max(1e-3);
+            assert!(
+                abs < 5e-2 || rel < 5e-2,
+                "idx {i}: got={got:.6} want={want:.6} abs={abs:e} rel={rel:e}"
+            );
+        }
+
         backend.evict_resident_activation(&p_bf16);
         backend.evict_resident_activation(&g_bf16);
+        Ok(())
+    }
+
+    /// dispatch_sgd_step still falls back when dtypes don't match
+    /// (e.g. BF16 param but F32 grad). Mixed-precision SGD requires
+    /// an F32 master copy that we don't maintain.
+    #[test]
+    fn dispatch_sgd_step_falls_back_on_dtype_mismatch() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;  // F32
+        backend.register_resident_activation(&p)?;
+        backend.register_resident_activation(&g)?;
+        let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
+        assert!(!dispatched, "dtype mismatch must fall back");
+        backend.evict_resident_activation(&p);
+        backend.evict_resident_activation(&g);
         Ok(())
     }
 

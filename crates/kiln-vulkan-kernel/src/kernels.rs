@@ -8768,6 +8768,50 @@ pub fn dispatch_sdpa_prefill_f32(
 /// trivially small (3n F32 reads/writes) so no chunking is required
 /// even for the largest LoRA Vars (rank=64, hidden=2560 = 164K F32 =
 /// 640 KB).
+/// BF16 variant of `dispatch_sgd_step_f32`. Both buffers hold
+/// packed BF16 (2 bf16 elements per u32) — same layout as the
+/// `extract_tensor_packed_bf16_bytes_pub` encoding the residency
+/// registry uses for BF16 tensors. One thread per u32 word; each
+/// thread updates both lanes via bf16↔f32 bit-expansion.
+///
+/// Used by the trainer to run SGD on registry-resident LoRA Vars
+/// (which are BF16 by convention) without the candle CPU
+/// var.set + update_resident_activation re-upload.
+pub fn dispatch_sgd_step_bf16(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "sgd_step_bf16: n_elements must be > 0");
+    let num_words = n_elements.div_ceil(2);
+    let workgroup_count = num_words.div_ceil(256) as u32;
+    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    anyhow::ensure!(
+        workgroup_count <= VK_MIN_DISPATCH_AXIS,
+        "sgd_step_bf16: n_elements={n_elements} → {workgroup_count} workgroups \
+         (>{VK_MIN_DISPATCH_AXIS} per-axis Vulkan minimum)"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/sgd_step_bf16.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("sgd_step_bf16: shader compile/load")?;
+    let push_constants: [u32; 2] = [n_elements as u32, lr.to_bits()];
+    let all_handles = vec![param_buffer.handle(), grad_buffer.handle()];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        workgroup_count,
+    )
+    .context("sgd_step_bf16: kernel dispatch")
+}
+
 pub fn dispatch_sgd_step_f32(
     vk_device: &VulkanDevice,
     param_buffer: &VulkanBuffer,

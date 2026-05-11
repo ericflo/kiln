@@ -1747,18 +1747,66 @@ fn sgd_step(
     let resident_activation = backend.supports_resident_activation();
     for var in params.all_vars() {
         if let Some(grad) = grads.get(var.as_tensor()) {
-            let updated = (var.as_tensor() - (grad * lr)?)?;
-            var.set(&updated)?;
-            // Phase 4.1: keep the registry buffer in sync with the
-            // freshly-updated CPU storage so `lora_delta_resident`
-            // reads current values on the next forward pass.
-            // Without this the registry would forever hold the init
-            // bytes from `register_with_backend` and training
-            // wouldn't actually do anything visible to the forward.
-            if resident_activation {
-                backend.update_resident_activation(var.as_tensor())?;
-            }
+            apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
         }
+    }
+    Ok(())
+}
+
+/// Apply one SGD update to a single Var, preferring the on-device
+/// path when both operands are registry-resident.
+///
+/// On-device path (Phase 4.x):
+///   1. Register the freshly-produced grad in the registry.
+///   2. Dispatch dispatch_sgd_step (writes new bytes to param buffer
+///      in-place).
+///   3. Resolve the buffer back into a Tensor and `var.set(...)` so
+///      candle CPU storage stays in sync with the buffer (callers
+///      like `save_peft` read `var.as_tensor()` data, not just
+///      shape).
+///   4. Evict the grad from the registry (its TensorId is per-step;
+///      no point keeping the buffer alive past this iteration).
+///
+/// CPU fallback: candle `var.set(var - lr * grad)` then
+/// `update_resident_activation` to keep the buffer in sync for the
+/// next forward.
+fn apply_sgd_update(
+    backend: &dyn BackendRuntime,
+    var: &Var,
+    grad: &Tensor,
+    lr: f64,
+    resident_activation: bool,
+) -> Result<()> {
+    if resident_activation && backend.has_resident_activation(var.as_tensor()) {
+        // Register the gradient so dispatch_sgd_step can find it.
+        backend.register_resident_activation(grad)?;
+        let dispatched = backend
+            .dispatch_sgd_step(var.as_tensor(), grad, lr as f32)
+            .ok()
+            .unwrap_or(false);
+        if dispatched {
+            // Sync candle storage from the now-updated buffer.
+            let dims_vec: Vec<usize> = var.as_tensor().dims().to_vec();
+            let updated = backend
+                .resolve_resident_activation(var.as_tensor(), &dims_vec, var.as_tensor().dtype())?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "apply_sgd_update: resolve returned None after dispatch_sgd_step succeeded"
+                    )
+                })?;
+            var.set(&updated)?;
+            backend.evict_resident_activation(grad);
+            return Ok(());
+        }
+        // Dispatch declined — clean up the grad registration before
+        // falling through to the CPU path.
+        backend.evict_resident_activation(grad);
+    }
+    // CPU fallback.
+    let updated = (var.as_tensor() - (grad * lr)?)?;
+    var.set(&updated)?;
+    if resident_activation {
+        backend.update_resident_activation(var.as_tensor())?;
     }
     Ok(())
 }
@@ -1794,11 +1842,7 @@ fn sgd_step_from_map(
     for var in params.all_vars() {
         let id = var.as_tensor().id();
         if let Some(grad) = grads.get(&id) {
-            let updated = (var.as_tensor() - (grad * lr)?)?;
-            var.set(&updated)?;
-            if resident_activation {
-                backend.update_resident_activation(var.as_tensor())?;
-            }
+            apply_sgd_update(backend, var, grad, lr, resident_activation)?;
         }
     }
     Ok(())
