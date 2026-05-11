@@ -21,10 +21,14 @@
 //!   grad_B = grad_d.T @ h        (sum over batch dim → [out, rank])
 //!
 //! Forward path: dispatches the existing transposed bf16-packed kernel
-//! twice against A's and B's registry buffers (kept in sync with the
-//! candle CPU storage by `update_resident_activation`). Backward path:
-//! computed entirely in candle CPU using `broadcast_matmul` — the gradient
-//! matmuls are tiny (rank≤64) and CPU is fine for them.
+//! twice against A's and B's registry buffers. Backward path: reads A
+//! and B values directly from those same registry buffers (so the
+//! op no longer depends on candle CPU storage of the LoRA Vars —
+//! enabling the lazy `sync_to_candle` flow where candle storage is
+//! only refreshed before save_peft), then runs the analytic gradient
+//! matmuls on candle CPU. The bwd matmuls are tiny (rank≤64) so CPU
+//! is fine; the win is removing the every-step `var.set` readback of
+//! the optimizer step into candle storage.
 
 use std::sync::Arc;
 
@@ -211,14 +215,30 @@ impl CustomOp3 for VulkanLoraOp {
         _res: &Tensor,
         grad_y: &Tensor,
     ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
-        // Compute backward in F32 then cast each gradient back to its
-        // input's dtype. CPU broadcast_matmul only supports F32 here,
-        // and the LoRA gradient matmuls are small enough that the
-        // CPU cost is negligible (rank≤64 in production).
+        // Read A and B values straight from the registry buffers (the
+        // canonical source of truth post-Phase 4.x — the candle CPU
+        // storage of these Vars is lazily synced and may be stale
+        // between training steps under the on-device optimizer path).
+        // x is an upstream activation, not a LoRA Var, so we still
+        // read it from candle CPU storage.
         let scale = self.scale as f64;
         let x_f32 = if x.dtype() == DType::F32 { x.clone() } else { x.to_dtype(DType::F32)? };
-        let a_f32 = if a.dtype() == DType::F32 { a.clone() } else { a.to_dtype(DType::F32)? };
-        let b_f32 = if b.dtype() == DType::F32 { b.clone() } else { b.to_dtype(DType::F32)? };
+        let a_f32 = kernels::buffer_to_tensor(
+            self.vk_device.as_ref(),
+            self.a_buffer.as_ref(),
+            &[self.rank, self.in_features],
+            a.dtype(),
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor A: {e:?}")))?
+        .to_dtype(DType::F32)?;
+        let b_f32 = kernels::buffer_to_tensor(
+            self.vk_device.as_ref(),
+            self.b_buffer.as_ref(),
+            &[self.out_features, self.rank],
+            b.dtype(),
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor B: {e:?}")))?
+        .to_dtype(DType::F32)?;
         let grad_y_f32 = if grad_y.dtype() == DType::F32 {
             grad_y.clone()
         } else {

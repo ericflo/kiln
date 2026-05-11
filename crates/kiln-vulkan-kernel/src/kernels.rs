@@ -901,6 +901,63 @@ pub fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Re
     }
 }
 
+/// Decode a registry-resident `VulkanBuffer` back into a candle CPU
+/// Tensor of the requested `shape` and `dtype`.
+///
+/// Inverse of the encoding choices in
+/// `vulkan::register_resident_activation`: BF16 entries are stored as
+/// packed bf16 (two bf16 lanes per u32 word, `(hi << 16) | lo`), F32
+/// entries are stored as raw f32 bytes. The decoder bit-expands each
+/// bf16 lane back to f32 then casts to the target dtype via candle so
+/// we don't need a hard dependency on the `half` crate at this layer.
+///
+/// Used by `VulkanLoraOp::bwd` to read LoRA `A` and `B` weights
+/// straight from the registry instead of candle CPU storage —
+/// closes the candle-storage staleness gap that the lazy
+/// `sync_to_candle` flow opens.
+pub fn buffer_to_tensor(
+    vk_device: &VulkanDevice,
+    buffer: &VulkanBuffer,
+    shape: &[usize],
+    dtype: DType,
+) -> Result<Tensor> {
+    let bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buffer,
+    )
+    .context("buffer_to_tensor: VulkanBuffer::read_back")?;
+    if dtype == DType::BF16 {
+        anyhow::ensure!(
+            bytes.len() % 2 == 0,
+            "buffer_to_tensor BF16: buffer byte count {} is not a multiple of 2",
+            bytes.len()
+        );
+        let elem_count: usize = shape.iter().product();
+        let stored = bytes.len() / 2;
+        anyhow::ensure!(
+            stored >= elem_count,
+            "buffer_to_tensor BF16: buffer holds {} bf16 elements, expected at least {} \
+             for shape {:?}",
+            stored,
+            elem_count,
+            shape,
+        );
+        let mut f32_data = Vec::with_capacity(elem_count);
+        for i in 0..elem_count {
+            let lo = bytes[i * 2] as u32;
+            let hi = bytes[i * 2 + 1] as u32;
+            let bf16_bits = (hi << 8) | lo;
+            f32_data.push(f32::from_bits(bf16_bits << 16));
+        }
+        Ok(Tensor::from_vec(f32_data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?)
+    } else {
+        create_tensor_from_data(&bytes, shape, dtype)
+    }
+}
+
 /// Upload a Candle tensor as contiguous f32 values into a device-local Vulkan buffer.
 ///
 /// This is used by model-level caches for immutable weights so repeated decode

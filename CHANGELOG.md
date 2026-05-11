@@ -8,6 +8,37 @@ Vulkan training-route changes) twice hard-hung the host on the
 `/tmp/sft-data.jsonl` SFT repro.
 
 ### Added
+- training: lazy candle-CPU-storage sync. Eliminates the per-step
+  `var.set` GPU→CPU readback that previously kept candle storage of
+  every LoRA Var (and its `(m, v)` moment Vars) in lock-step with
+  the registry buffer.
+  - `apply_sgd_update` and `apply_adamw_update` no longer call
+    `var.set` on the on-device success path — the registry buffer
+    becomes the canonical source of truth between training steps.
+  - `VulkanLoraOp::bwd` now reads `A` and `B` values directly from
+    the registry buffers (`buffer_to_tensor` helper in
+    `kiln-vulkan-kernel`) instead of candle CPU storage. The
+    backward math itself still runs on candle CPU (rank≤64 matmuls
+    are negligible vs. the readback sync cost), but candle storage
+    of LoRA Vars no longer needs to be current during backward.
+  - `TrainableLoraParams::sync_to_candle` and
+    `OptimizerState::sync_to_candle` pull registry values back into
+    candle Var storage on demand. Trainer calls
+    `params.sync_to_candle(&*backend)` right before `save_peft`
+    (final + checkpoint intervals) so the serialized adapter
+    reflects the post-step state.
+  - Net effect on a Qwen3.5-4B SFT run with rank=8 (~210 LoRA
+    Vars, ~9 MB total): removes ~27 MB GPU→CPU readback per step
+    (param + m + v) plus ~210 candle CPU broadcast_matmul reads of
+    `to_dtype(F32)` per backward pass. Candle CPU storage of LoRA
+    Vars is touched only at save_peft time.
+  - Tests: `lazy_sync_keeps_candle_stale_until_explicit_sync` in
+    the Vulkan backend (asserts the 3-step contract: post-dispatch
+    candle is stale, registry is current, post-sync candle matches),
+    plus `sync_to_candle_is_noop_on_cpu_backend` in the trainer for
+    the fallback branch. The existing `vulkan_lora_op_backward_parity_small`
+    test continues to pass with the registry-driven bwd, confirming
+    the math is unchanged.
 - training: on-device AdamW (decoupled weight decay) via Vulkan.
   - New shaders `adamw_step_f32.comp` and `adamw_step_bf16.comp`
     update param + first moment + second moment in-place in a single

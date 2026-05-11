@@ -3747,6 +3747,81 @@ mod tests {
         Ok(())
     }
 
+    /// Lazy candle-storage sync end-to-end. Register a `Var`, run an
+    /// on-device SGD step against its registry buffer (which the
+    /// trainer now does *without* calling `var.set`), then verify
+    /// that:
+    ///   1. Candle storage is STALE — `var.as_tensor()` data still
+    ///      matches the pre-step values.
+    ///   2. The registry buffer is CURRENT — `resolve_resident_activation`
+    ///      returns the post-step values.
+    ///   3. After explicit `var.set(resolve(...))` (which is what
+    ///      `TrainableLoraParams::sync_to_candle` does internally),
+    ///      candle storage matches the registry.
+    /// This is the contract the lazy-sync flow relies on.
+    #[test]
+    fn lazy_sync_keeps_candle_stale_until_explicit_sync() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let n = 8usize;
+        let lr = 0.1f32;
+        let init: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1 + 1.0).collect();
+        let grad: Vec<f32> = (0..n).map(|i| ((i as i32 - 4) as f32) * 0.05).collect();
+        let expected: Vec<f32> = init
+            .iter()
+            .zip(grad.iter())
+            .map(|(&p, &g)| p - lr * g)
+            .collect();
+
+        let p_var = candle_core::Var::from_tensor(
+            &Tensor::from_vec(init.clone(), (n,), &Device::Cpu)?,
+        )?;
+        let g_tensor = Tensor::from_vec(grad, (n,), &Device::Cpu)?;
+
+        backend.register_resident_activation(p_var.as_tensor())?;
+        backend.register_resident_activation(&g_tensor)?;
+        let dispatched = backend.dispatch_sgd_step(p_var.as_tensor(), &g_tensor, lr)?;
+        assert!(dispatched);
+
+        // (1) Candle storage is still the initial values.
+        let stale: Vec<f32> = p_var.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+        for (i, (s, w)) in stale.iter().zip(init.iter()).enumerate() {
+            assert!(
+                (s - w).abs() < 1e-7,
+                "candle storage must be stale post-dispatch: idx {i}: got {s}, init {w}"
+            );
+        }
+
+        // (2) Registry has post-step values.
+        let resolved = backend
+            .resolve_resident_activation(p_var.as_tensor(), &[n], DType::F32)?
+            .expect("must resolve after on-device dispatch");
+        let resolved_v: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (r, w)) in resolved_v.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (r - w).abs() < 1e-6,
+                "registry must hold post-step values: idx {i}: got {r}, want {w}"
+            );
+        }
+
+        // (3) After explicit var.set, candle storage matches.
+        p_var.set(&resolved)?;
+        let fresh: Vec<f32> = p_var.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+        for (i, (f, w)) in fresh.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (f - w).abs() < 1e-6,
+                "candle storage must match registry post-sync: idx {i}: got {f}, want {w}"
+            );
+        }
+
+        backend.evict_resident_activation(p_var.as_tensor());
+        backend.evict_resident_activation(&g_tensor);
+        Ok(())
+    }
+
     /// dispatch_sgd_step still falls back when dtypes don't match
     /// (e.g. BF16 param but F32 grad). Mixed-precision SGD requires
     /// an F32 master copy that we don't maintain.

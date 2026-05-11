@@ -433,6 +433,37 @@ impl TrainableLoraParams {
         }
     }
 
+    /// Pull every LoRA Var's current value from the registry buffer
+    /// back into candle CPU storage via `Var::set`.
+    ///
+    /// The on-device SGD and AdamW dispatch paths leave candle CPU
+    /// storage stale (the registry buffer is the source of truth
+    /// between training steps). Callers that need current candle
+    /// storage — `save_peft`, checkpoint writes, tests that snapshot
+    /// `var.as_tensor()` — invoke this first.
+    ///
+    /// No-op on backends without resident-activation support
+    /// (CPU/Metal/CUDA today). Returns the number of Vars synced for
+    /// telemetry.
+    pub fn sync_to_candle(&self, backend: &dyn BackendRuntime) -> Result<usize> {
+        if !backend.supports_resident_activation() {
+            return Ok(0);
+        }
+        let mut synced = 0;
+        for var in self.all_vars() {
+            if !backend.has_resident_activation(var.as_tensor()) {
+                continue;
+            }
+            let dims: Vec<usize> = var.as_tensor().dims().to_vec();
+            let dtype = var.as_tensor().dtype();
+            if let Some(resolved) = backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)? {
+                var.set(&resolved)?;
+                synced += 1;
+            }
+        }
+        Ok(synced)
+    }
+
     /// Allocate AdamW per-parameter moment state: a zero-init Var of
     /// matching shape/dtype for each LoRA Var (so each LoRA `Var` has
     /// one `m` Var and one `v` Var). The order matches `all_vars()`,
@@ -512,6 +543,36 @@ impl OptimizerState {
             backend.evict_resident_activation(moments.m.as_tensor());
             backend.evict_resident_activation(moments.v.as_tensor());
         }
+    }
+
+    /// Pull every `(m, v)` moment Var's current value from the
+    /// registry buffer back into candle CPU storage. Mirrors
+    /// `TrainableLoraParams::sync_to_candle`. Useful when persisting
+    /// optimizer state alongside an adapter checkpoint (not yet
+    /// implemented in `save_peft` — the resumable-training story is
+    /// a separate workstream — but kept for symmetry and for tests
+    /// that assert on `moments.m.as_tensor()` values).
+    pub fn sync_to_candle(&self, backend: &dyn BackendRuntime) -> Result<usize> {
+        if !backend.supports_resident_activation() {
+            return Ok(0);
+        }
+        let mut synced = 0;
+        for moments in self.moments.values() {
+            for var in [&moments.m, &moments.v] {
+                if !backend.has_resident_activation(var.as_tensor()) {
+                    continue;
+                }
+                let dims: Vec<usize> = var.as_tensor().dims().to_vec();
+                let dtype = var.as_tensor().dtype();
+                if let Some(resolved) =
+                    backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)?
+                {
+                    var.set(&resolved)?;
+                    synced += 1;
+                }
+            }
+        }
+        Ok(synced)
     }
 }
 
@@ -869,6 +930,11 @@ pub fn sft_train(
                     if interval > 0 && global_step % interval == 0 && global_step < total_steps {
                         let ckpt_dir =
                             adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        // Pull current Var values from registry into candle
+                        // CPU storage before save_peft serializes them.
+                        if let Err(e) = params.sync_to_candle(&*backend) {
+                            tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for checkpoint");
+                        }
                         if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
                             tracing::warn!(step = global_step, error = %e, "failed to save training checkpoint");
                         } else {
@@ -915,6 +981,12 @@ pub fn sft_train(
         if let Some(pb) = pb {
             pb.finish_and_clear();
         }
+
+        // Pull current Var values from registry into candle CPU
+        // storage before final save_peft (the on-device optimizer
+        // path leaves candle storage stale between steps).
+        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        tracing::debug!(synced, "synced LoRA Vars to candle before SFT save");
 
         // Save the trained adapter
         let output_dir = adapter_dir.join(adapter_name);
@@ -1193,6 +1265,9 @@ pub fn grpo_train(
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
                     let ckpt_dir =
                         adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if let Err(e) = params.sync_to_candle(&*backend) {
+                        tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for GRPO checkpoint");
+                    }
                     if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
                         tracing::warn!(step = global_step, error = %e, "failed to save GRPO training checkpoint");
                     } else {
@@ -1229,6 +1304,11 @@ pub fn grpo_train(
         if let Some(pb) = pb {
             pb.finish_and_clear();
         }
+
+        // Pull current Var values from registry into candle CPU
+        // storage before final save_peft.
+        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        tracing::debug!(synced, "synced LoRA Vars to candle before GRPO save");
 
         // Save the trained adapter
         let output_dir = adapter_dir.join(adapter_name);
@@ -1955,12 +2035,13 @@ fn optimizer_step(
 ///   1. Register the freshly-produced grad in the registry.
 ///   2. Dispatch dispatch_sgd_step (writes new bytes to param buffer
 ///      in-place).
-///   3. Resolve the buffer back into a Tensor and `var.set(...)` so
-///      candle CPU storage stays in sync with the buffer (callers
-///      like `save_peft` read `var.as_tensor()` data, not just
-///      shape).
-///   4. Evict the grad from the registry (its TensorId is per-step;
+///   3. Evict the grad from the registry (its TensorId is per-step;
 ///      no point keeping the buffer alive past this iteration).
+///
+/// Candle CPU storage of `var` is *not* updated on the on-device
+/// path — the registry buffer is the source of truth from this
+/// point on. Callers that need current candle storage (e.g.
+/// `save_peft`) invoke `TrainableLoraParams::sync_to_candle` first.
 ///
 /// CPU fallback: candle `var.set(var - lr * grad)` then
 /// `update_resident_activation` to keep the buffer in sync for the
@@ -1987,16 +2068,8 @@ fn apply_sgd_update(
             }
         };
         if dispatched {
-            // Sync candle storage from the now-updated buffer.
-            let dims_vec: Vec<usize> = var.as_tensor().dims().to_vec();
-            let updated = backend
-                .resolve_resident_activation(var.as_tensor(), &dims_vec, var.as_tensor().dtype())?
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "apply_sgd_update: resolve returned None after dispatch_sgd_step succeeded"
-                    )
-                })?;
-            var.set(&updated)?;
+            // Registry buffer is canonical now; candle CPU storage
+            // intentionally left stale until sync_to_candle is called.
             backend.evict_resident_activation(grad);
             return Ok(());
         }
@@ -2017,9 +2090,13 @@ fn apply_sgd_update(
 ///
 /// On-device path: param/grad/m/v are all registry-resident →
 /// `dispatch_adamw_step` updates all three (param, m, v) in-place in
-/// one kernel; the candle storage of `var`, `moments.m`, `moments.v`
-/// is then synced from the registry buffer so callers like
-/// `save_peft` (which reads `var.as_tensor()`) see the latest values.
+/// one kernel. Candle CPU storage of `var`, `moments.m`,
+/// `moments.v` is *not* synced — the registry buffer is canonical.
+/// `VulkanLoraOp::bwd` reads A and B directly from registry buffers
+/// so backward doesn't depend on candle storage either.
+/// `TrainableLoraParams::sync_to_candle` and
+/// `OptimizerState::sync_to_candle` pull the registry back into
+/// candle storage on demand (before `save_peft` / checkpoint writes).
 ///
 /// CPU fallback: pure candle ops implementing the same math
 /// (decoupled WD applied first, biased moments, bias-corrected,
@@ -2068,24 +2145,8 @@ fn apply_adamw_update(
             }
         };
         if dispatched {
-            // Sync candle storage of all three Vars from the now-updated
-            // registry buffers so subsequent reads (autograd reuse,
-            // save_peft, replay logging) see consistent state.
-            let dims_p: Vec<usize> = var.as_tensor().dims().to_vec();
-            let dims_m: Vec<usize> = moments.m.as_tensor().dims().to_vec();
-            let dims_v: Vec<usize> = moments.v.as_tensor().dims().to_vec();
-            let new_p = backend
-                .resolve_resident_activation(var.as_tensor(), &dims_p, dtype)?
-                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve param returned None"))?;
-            let new_m = backend
-                .resolve_resident_activation(moments.m.as_tensor(), &dims_m, dtype)?
-                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve m returned None"))?;
-            let new_v = backend
-                .resolve_resident_activation(moments.v.as_tensor(), &dims_v, dtype)?
-                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve v returned None"))?;
-            var.set(&new_p)?;
-            moments.m.set(&new_m)?;
-            moments.v.set(&new_v)?;
+            // Registry buffers are canonical post-dispatch; candle
+            // CPU storage is intentionally left stale.
             backend.evict_resident_activation(grad);
             return Ok(());
         }
@@ -4957,6 +5018,34 @@ mod tests {
             assert!(m_sum > 0.0, "m moment must be nonzero after first step");
             assert!(v_sum > 0.0, "v moment must be nonzero after first step");
         }
+        Ok(())
+    }
+
+    /// Lazy candle-storage sync: after an on-device SGD step the
+    /// registry buffer holds the updated values but candle CPU
+    /// storage still has the initial values (this is the whole point
+    /// of the post-Phase-4.x lazy-sync flow). `sync_to_candle` must
+    /// pull the registry values back so `var.as_tensor()` reads the
+    /// post-step state. This test exercises the contract on CPU
+    /// (where there's no Vulkan backend), which validates the
+    /// fallback branches stay coherent — the actual GPU path is
+    /// covered by the Vulkan backend's resident-activation tests.
+    #[test]
+    fn sync_to_candle_is_noop_on_cpu_backend() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let backend = backend::for_device(&device);
+
+        // CPU backend reports !supports_resident_activation, so
+        // sync_to_candle should report 0 Vars synced (it has nothing
+        // to read from a registry that doesn't exist).
+        let synced = params.sync_to_candle(&*backend)?;
+        assert_eq!(
+            synced, 0,
+            "sync_to_candle on CPU backend should report zero synced Vars"
+        );
         Ok(())
     }
 
