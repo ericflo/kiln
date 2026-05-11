@@ -2256,33 +2256,50 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() {
             return Ok(0);
         }
-        let stub_template = Tensor::zeros((1usize,), DType::BF16, device)
-            .context("drop_uploaded_bf16_weights: create stub")?;
+        // Broadcast-base for cheap shape-preserving stubs. Source has
+        // 2 bytes of storage; broadcast_as(target_shape) creates views
+        // with stride [0, 0] sharing the same Arc<Storage>. Each per-
+        // weight stub costs ~24 bytes of metadata (Layout + Tensor
+        // struct), not `hidden * out_dim * 2` bytes.
+        let broadcast_base = Tensor::zeros((1usize, 1usize), DType::BF16, device)
+            .context("drop_uploaded_bf16_weights: create broadcast base")?;
         let mut cache = self
             .bf16_packed_weight_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("bf16 weight cache mutex poisoned"))?;
 
         // Per-tensor replacement closure. Returns true if the tensor
-        // was stubbed (was BF16 and in the cache).
+        // was stubbed (was BF16, rank-2, and in the cache).
         //
-        // Re-keys the cache: removes the entry at the old TensorId
-        // and inserts the same `Arc<VulkanBuffer>` at the new
-        // (stub) TensorId so subsequent `cached_bf16_packed_weight_buffer`
-        // calls find the same buffer.
+        // - Reads the original `[hidden, out_dim]` shape from `t.dims()`
+        //   *before* replacement.
+        // - Creates a shape-preserving stub by broadcasting the
+        //   2-byte base to that shape (so downstream `weight_t.dims2()`
+        //   reads continue to return the right shape, but the storage
+        //   bytes drop to ~zero).
+        // - Re-keys the cache so subsequent
+        //   `cached_bf16_packed_weight_buffer(weight_t)` lookups by the
+        //   new TensorId still find the original `Arc<VulkanBuffer>`.
         fn replace(
             t: &mut Tensor,
             cache: &mut std::collections::HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
-            stub_template: &Tensor,
+            broadcast_base: &Tensor,
         ) -> bool {
             if t.dtype() != DType::BF16 {
                 return false;
+            }
+            let dims = t.dims();
+            if dims.len() != 2 {
+                return false; // Only rank-2 transposed-cache tensors are stubbable.
             }
             let old_id = t.id();
             let Some(buf) = cache.remove(&old_id) else {
                 return false;
             };
-            let new_stub = stub_template.clone();
+            let Ok(new_stub) = broadcast_base.broadcast_as((dims[0], dims[1])) else {
+                cache.insert(old_id, buf); // restore on failure
+                return false;
+            };
             let new_id = new_stub.id();
             *t = new_stub;
             cache.insert(new_id, buf);
@@ -2311,12 +2328,12 @@ impl BackendRuntime for VulkanBackend {
                         &mut attn.v_proj_t,
                         &mut attn.o_proj_t,
                     ] {
-                        if replace(t, &mut cache, &stub_template) {
+                        if replace(t, &mut cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
                     if let Some(qkv_t) = attn.qkv_proj_t.as_mut() {
-                        if replace(qkv_t, &mut cache, &stub_template) {
+                        if replace(qkv_t, &mut cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
@@ -2329,12 +2346,12 @@ impl BackendRuntime for VulkanBackend {
                         &mut attn.in_proj_b_t,
                         &mut attn.out_proj_t,
                     ] {
-                        if replace(t, &mut cache, &stub_template) {
+                        if replace(t, &mut cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
                     if let Some(ab_t) = attn.in_proj_ab_t.as_mut() {
-                        if replace(ab_t, &mut cache, &stub_template) {
+                        if replace(ab_t, &mut cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
@@ -2345,7 +2362,7 @@ impl BackendRuntime for VulkanBackend {
                 &mut layer.mlp.up_proj_t,
                 &mut layer.mlp.down_proj_t,
             ] {
-                if replace(t, &mut cache, &stub_template) {
+                if replace(t, &mut cache, &broadcast_base) {
                     stubbed += 1;
                 }
             }
