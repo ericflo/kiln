@@ -1,5 +1,66 @@
 # Kiln Server Changelog
 
+## Unreleased — Phase 2 Vulkan training hardening
+
+Active branch since v0.2.15. Targets the Strix Halo / unified-memory APU
+training path that previously OOM-killed `kiln serve` and (after the first
+Vulkan training-route changes) twice hard-hung the host on the
+`/tmp/sft-data.jsonl` SFT repro.
+
+### Added
+- vulkan: in-op chunking in `VulkanLinearOp` — oversized BF16-packed
+  matmuls split along the output dim (forward) or batch dim (backward)
+  via the existing offset/transposed kernels. Each per-chunk submit
+  calls `queue_wait_idle()` for compositor preemption. Per-chunk FLOP
+  ceiling tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP` (default 20 GFLOP,
+  ≈800 ms per submit at 25 TFLOPS — comparable to FLCE's empirically
+  safe per-chunk cadence).
+- vulkan: new `sdpa_prefill_f32.comp` shader replaces the buggy
+  `flash_attn.comp` placeholder. F32 in/out, online-softmax, optional
+  causal mask, head_dim ≤ 128. Wired into `flash_attn_prefill_vulkan`
+  behind opt-in env var `KILN_VULKAN_SDPA=1`.
+- vulkan: Phase 4.2 prep — `sgd_step_f32.comp` shader and
+  `dispatch_sgd_step_f32` helper. Drops in once Phase 4.1 lands and
+  `TrainableLoraParams` are registry-resident `VulkanBuffer`s.
+- vulkan: Phase 3.1 hooks — `register_resident_activation`,
+  `evict_resident_activation`, `has_resident_activation` on
+  `BackendRuntime` plus a `RESIDENT_ACTIVATION_REGISTRY` impl on
+  `VulkanBackend`. Unused by callers today; integration point for
+  Phase 3.2.
+- server: "Vulkan training acceleration profile" startup log surfacing
+  the on/off state of every `KILN_VULKAN_*` training-path env var.
+- core: `EffectiveBudget` accessor + `vram_source` field on the "GPU
+  memory budget" log so the corrected unified-memory budget is honest
+  about its provenance (`linux-drm-sysfs-unified` vs the raw DRM
+  carveout it overrides).
+- docs: Phase 2.1 CPU-fallback matmul leak audit and Phase 2 hardware
+  validation runbook in `docs/audits/`.
+- docs: env-var documentation for `KILN_GPU_MEMORY_GB`,
+  `KILN_TRAINING_MEMORY_RESERVE_GB`, and the unified-memory detection
+  heuristic in `kiln.example.toml`.
+
+### Changed
+- training: FLCE provider auto-engages at `active_count ≥ 16` (was
+  `active_count × num_chunks ≥ 50_000`). The 50K threshold was tuned
+  against the pre-Phase-2 baseline; post-host-crash the comparison is
+  FLCE-chunked-Vulkan vs the unfused lm_head dispatch that hung the
+  host. Any non-trivial supervised batch now routes through the
+  chunked FLCE path.
+- vulkan: `KILN_VULKAN_LINEAR` reverted to default-OFF until the
+  in-op chunking has been load-validated end-to-end on real hardware.
+  Smaller-shape projections (T≤256) ran ~6% faster with this on at
+  bit-exact loss; the runbook in `docs/audits/` walks the operator
+  through enabling it safely.
+
+### Fixed
+- vulkan: lm_head training-time forward queuing ~4.36M workgroups in
+  a single submit on a 40-CU APU (the root cause of two host
+  hard-hangs on `/tmp/sft-data.jsonl`). Mitigation lands as a
+  combination of the FLCE auto-engagement (so the lm_head matmul
+  goes through chunked FLCE for the SFT loss path) and the in-op
+  chunking (so any oversized matmul that does reach `VulkanLinearOp`
+  is split into TDR-safe per-submit pieces).
+
 ## kiln-v0.2.15 — 2026-05-10
 
 A short follow-up cut covering 15 commits since v0.2.14, focused on CUDA
