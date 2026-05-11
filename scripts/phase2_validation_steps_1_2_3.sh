@@ -48,6 +48,14 @@ echo ">>> Logs in $LOG_DIR" >&2
 # -----------------------------------------------------------------------------
 # Pre-flight
 # -----------------------------------------------------------------------------
+echo ">>> Pre-flight: required tools" >&2
+for tool in cargo curl jq pgrep awk mktemp; do
+    if ! command -v "$tool" > /dev/null 2>&1; then
+        echo "ERROR: required tool '$tool' not on PATH" >&2
+        exit 1
+    fi
+done
+
 echo ">>> Pre-flight: orphan kiln processes" >&2
 if pgrep -f "kiln-server\|target/release/kiln" >/dev/null; then
     echo "ERROR: stale kiln processes — kill them before running" >&2
