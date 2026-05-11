@@ -2875,6 +2875,107 @@ mod tests {
     /// evicts it, asserts it flips back. Skipped if no Vulkan
     /// device — the hooks have no-op defaults so a CPU-only run
     /// would just always answer false.
+    /// `update_resident_activation` must overwrite the registry
+    /// buffer with the tensor's current bytes — the SGD path relies
+    /// on this to keep `lora_delta_resident` reading current weights.
+    /// Verifies BF16-packed encoding round-trips correctly through
+    /// the update path too.
+    #[test]
+    fn update_resident_activation_overwrites_buffer() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        // Use a BF16 tensor — that's the LoRA Var case the production
+        // path exercises. The update path's encoding choice depends
+        // on dtype, so testing BF16 specifically (not just F32)
+        // guards against regression in the dtype branch.
+        let initial = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        backend.register_resident_activation(&initial)?;
+        // Sanity: registered with initial values.
+        let resolved = backend
+            .resolve_resident_activation(&initial, &[2, 2], DType::BF16)?
+            .expect("must resolve right after register");
+        let init_v: Vec<f32> = resolved.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(init_v, vec![1.0, 2.0, 3.0, 4.0]);
+
+        // Mutate the tensor's storage out-of-band — analogous to what
+        // candle Var::set does. Use to_dtype roundtrip + a fresh tensor
+        // since we can't mutate in place. The TensorId stays the same
+        // because we update the same Var-equivalent reference.
+        // Workaround: create a NEW tensor with the same TensorId by
+        // using `.copy()` semantics — actually candle doesn't expose
+        // that. So instead simulate the post-SGD state by registering
+        // a different tensor (with a different id) and verify the
+        // update-via-the-original-reference path still works on the
+        // ORIGINAL id.
+        //
+        // Concretely: hand `update_resident_activation` a tensor whose
+        // BYTES differ from what's in the buffer but whose .id() is
+        // the original. We can do that via `Var::set`-like:
+        // use the original Tensor object (.id() unchanged) and
+        // overwrite its underlying storage by re-running update with
+        // a tensor that has different DATA but the same shape. Since
+        // update keys on tensor.id(), we have to use a Var to keep
+        // the id stable across a content change.
+        let v = candle_core::Var::from_tensor(&initial)?;
+        let new_data = Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        v.set(&new_data)?;
+        // v.as_tensor() now wraps the same TensorId as the original
+        // Var construction — but Var wraps a Tensor that has its own
+        // id, distinct from `initial`. So this test path actually
+        // demonstrates that the update applies to whatever id we hand
+        // it, not to the unchanged `initial`.
+        //
+        // Register v.as_tensor() and update it with newer data.
+        backend.register_resident_activation(v.as_tensor())?;
+        // Build "newer" data (v already holds new_data; resolve and
+        // confirm the registry sees IT, not initial).
+        let resolved_v = backend
+            .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
+            .expect("v must resolve after register");
+        let v_init_v: Vec<f32> =
+            resolved_v.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(v_init_v, vec![10.0, 20.0, 30.0, 40.0]);
+
+        // Now mutate v further and call update.
+        let newer_data = Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        v.set(&newer_data)?;
+        backend.update_resident_activation(v.as_tensor())?;
+        let resolved_after = backend
+            .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
+            .expect("v must resolve after update");
+        let after_v: Vec<f32> =
+            resolved_after.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(after_v, vec![100.0, 200.0, 300.0, 400.0]);
+
+        backend.evict_resident_activation(&initial);
+        backend.evict_resident_activation(v.as_tensor());
+        Ok(())
+    }
+
+    /// `update_resident_activation` is a no-op when the tensor isn't
+    /// registered — avoids surprising errors when caller is
+    /// dtype-agnostic (e.g. a sgd_step that fires for both
+    /// registered LoRA Vars and unregistered legacy Vars).
+    #[test]
+    fn update_resident_activation_noop_when_not_registered() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let t = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        // Not registered — must not error.
+        backend.update_resident_activation(&t)?;
+        assert!(!backend.has_resident_activation(&t));
+        Ok(())
+    }
+
     /// Re-registration after eviction must work — the trainer's
     /// per-step lifecycle relies on this (training step N evicts
     /// boundaries, step N+1 re-registers fresh ones with new
