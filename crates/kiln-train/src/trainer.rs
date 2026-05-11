@@ -2704,6 +2704,21 @@ fn checkpointed_forward_backward(
             &boundary_states[seg_idx],
             resident_activation,
         )?;
+        // Phase 3.2 sub-step: once seg_input has been resolved (or
+        // cloned), the candle CPU mirror in `boundary_states[seg_idx]`
+        // is no longer needed by this function — the recompute will
+        // consume `seg_input` (a separate Arc/Tensor), and no later
+        // iteration of this monolithic-path loop touches the same
+        // boundary slot. Evict the registry entry first so we don't
+        // leak the device buffer, then replace the slot with a tiny
+        // 1-element stub. On Vulkan with the default Qwen3.5-4B
+        // boundary shape, this releases ~9 MB of candle CPU storage
+        // per boundary.
+        if resident_activation && backend.has_resident_activation(&boundary_states[seg_idx]) {
+            backend.evict_resident_activation(&boundary_states[seg_idx]);
+            boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
+                .context("phase3.2: alloc boundary stub")?;
+        }
 
         // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
         let lora_weights_for_seg = params.as_lora_weights();
@@ -2951,6 +2966,15 @@ fn checkpointed_grpo_forward_backward(
             &boundary_states[seg_idx],
             resident_activation,
         )?;
+        // Phase 3.2 sub-step: drop the candle CPU mirror once the
+        // recompute input has been resolved. Same rationale as in
+        // checkpointed_forward_backward — see that comment for
+        // why this is safe in monolithic mode.
+        if resident_activation && backend.has_resident_activation(&boundary_states[seg_idx]) {
+            backend.evict_resident_activation(&boundary_states[seg_idx]);
+            boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
+                .context("phase3.2 grpo: alloc boundary stub")?;
+        }
 
         // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
         let lora_weights_for_seg = params.as_lora_weights();
