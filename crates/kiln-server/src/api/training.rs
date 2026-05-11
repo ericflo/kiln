@@ -54,12 +54,24 @@ fn enforce_training_preflight(
     // ultimately exhaust the host. Once Phase 1.2 is deployed,
     // switch this to WeightResidency::SingleCopy.
     let residency = WeightResidency::for_vram_source(vram.source);
+    // Whether the available budget already accounts for the loaded
+    // model. On unified APUs we read MemAvailable at submission time
+    // so the model is already deducted; including base weights again
+    // double-counts and over-rejects every job. On discrete GPUs the
+    // available number is a static pre-deduction reserve, so weights
+    // ARE still pending and must be counted.
+    let weights_already_resident = matches!(
+        vram.source,
+        kiln_core::vram::VramSource::LinuxDrmSysfsUnified
+            | kiln_core::vram::VramSource::AppleSilicon
+    );
     let estimate = estimate_step_working_set(
         &state.model_config,
         max_seq_len,
         lora_rank,
         num_segments,
         residency,
+        weights_already_resident,
     );
     if estimate.total_bytes > available {
         let msg = format_oom_message(&estimate, available, lora_rank, num_segments);

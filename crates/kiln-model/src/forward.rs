@@ -504,7 +504,27 @@ fn linear_with_lora_t_backend_decode_if(
     lora_scale: f32,
 ) -> Result<Tensor> {
     if let Some(backend) = backend {
+        // Autograd-tracked input → prefer the autograd-safe Vulkan
+        // CustomOp1 (linear_prefill_apply). The existing linear_decode
+        // returns a candle leaf tensor, which silently loses the
+        // gradient w.r.t. `x` and produces wrong gradients to upstream
+        // LoRA params. Routing by track_op() preserves the existing
+        // leaf-fast path for inference (where autograd doesn't matter)
+        // while routing training through the parity-tested CustomOp.
+        // Gated on KILN_VULKAN_LINEAR=1 inside linear_prefill_apply
+        // until production validation flips the default on.
+        if x.track_op() {
+            if let Some(base) = backend.linear_prefill_apply(x, weight_t)? {
+                return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
+            }
+        }
         if let Some(base) = backend.linear_decode(x, weight_t)? {
+            return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
+        }
+        // Last-ditch: try the autograd-safe path even for non-tracked
+        // inputs in case the backend supports a shape/dtype combo
+        // linear_decode declines.
+        if let Some(base) = backend.linear_prefill_apply(x, weight_t)? {
             return add_lora_delta_to_base(Some(backend), base, x, lora, lora_scale);
         }
     }

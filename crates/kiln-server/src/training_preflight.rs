@@ -196,15 +196,28 @@ fn lora_param_and_grad_bytes(cfg: &ModelConfig, lora_rank: usize) -> u64 {
 /// RAM pressure from both the candle CPU mirror and the device-side
 /// `VulkanBuffer` caches is reflected. After Phase 1 lands and the
 /// candle storage is stubbed, callers switch to `SingleCopy`.
+///
+/// `weights_already_resident` should be `true` when the available
+/// budget already accounts for the loaded model (e.g. `MemAvailable`
+/// at submission time, with the model already in candle/Vulkan
+/// caches). In that case the base-weight contribution is excluded
+/// from the working-set estimate to avoid double-counting them
+/// against a budget that's already deducted them. For static budgets
+/// (e.g. discrete-GPU VRAM total minus a fraction reserve) the
+/// weights are still pending in the budget, so pass `false`.
 pub fn estimate_step_working_set(
     cfg: &ModelConfig,
     max_seq_len: usize,
     lora_rank: usize,
     num_segments: usize,
     residency: WeightResidency,
+    weights_already_resident: bool,
 ) -> WorkingSet {
-    let base_weights =
-        approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier());
+    let base_weights = if weights_already_resident {
+        0
+    } else {
+        approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier())
+    };
     let bd = Breakdown {
         base_weights,
         per_segment_activations: per_segment_activation_bytes(cfg, max_seq_len, num_segments),
@@ -411,8 +424,8 @@ mod tests {
     #[test]
     fn estimator_grows_with_seq_len() {
         let cfg = qwen_4b();
-        let small = estimate_step_working_set(&cfg, 256, 16, 4, WeightResidency::SingleCopy);
-        let large = estimate_step_working_set(&cfg, 4096, 16, 4, WeightResidency::SingleCopy);
+        let small = estimate_step_working_set(&cfg, 256, 16, 4, WeightResidency::SingleCopy, false);
+        let large = estimate_step_working_set(&cfg, 4096, 16, 4, WeightResidency::SingleCopy, false);
         assert!(
             large.total_bytes > small.total_bytes,
             "expected larger T to grow estimate; small={} large={}",
@@ -424,8 +437,8 @@ mod tests {
     #[test]
     fn estimator_shrinks_with_more_segments() {
         let cfg = qwen_4b();
-        let few = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
-        let many = estimate_step_working_set(&cfg, 1500, 16, 16, WeightResidency::SingleCopy);
+        let few = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
+        let many = estimate_step_working_set(&cfg, 1500, 16, 16, WeightResidency::SingleCopy, false);
         assert!(
             many.breakdown.per_segment_activations < few.breakdown.per_segment_activations,
             "more segments must reduce per-segment activation footprint"
@@ -438,7 +451,7 @@ mod tests {
         // should sit in single-digit-to-low-tens GB. A wildly different
         // number means a coefficient regression in one of the helpers.
         let cfg = qwen_4b();
-        let est = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
+        let est = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
         let gb = est.total_bytes as f64 / BYTES_PER_GB as f64;
         assert!(
             (8.0..=80.0).contains(&gb),
@@ -449,9 +462,15 @@ mod tests {
     #[test]
     fn dual_residency_doubles_base_weight_contribution() {
         let cfg = qwen_4b();
-        let single = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy);
-        let dual =
-            estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::DualResidentCpuAndVulkan);
+        let single = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
+        let dual = estimate_step_working_set(
+            &cfg,
+            1500,
+            16,
+            4,
+            WeightResidency::DualResidentCpuAndVulkan,
+            false,
+        );
         assert_eq!(dual.breakdown.base_weights, single.breakdown.base_weights * 2);
         assert!(dual.total_bytes > single.total_bytes);
     }
@@ -476,34 +495,37 @@ mod tests {
         );
     }
 
-    /// Regression test for the 2026-05-10 host crash. The validation
-    /// run against /tmp/sft-data.jsonl (4 examples × ~2.5K tokens
-    /// each) on this Strix Halo APU was accepted by the preflight,
-    /// then took down the host mid-step. After the WeightResidency
-    /// + MemAvailable fixes the same payload must be rejected.
+    /// Regression test for the 2026-05-10 host crash. The crash
+    /// happened on the pre-Phase-0 codebase: weights were dual-
+    /// resident (no embed_tokens stub, no projection drop), the
+    /// preflight didn't exist, and MemAvailable at submission time
+    /// (after model+KV-cache load on the old code) was only ~5 GB.
+    /// Reconstructing those exact conditions, the preflight must
+    /// reject — proving the same crash today wouldn't reach the
+    /// kernel OOM path.
     #[test]
     fn preflight_rejects_repro_payload_on_strix_halo() {
         let cfg = qwen_4b();
-        // Mirror the actual Strix Halo signal observed at startup:
-        // total_vram_gb = 24.94 (the corrected unified-memory budget)
         let vram = GpuVramInfo {
             total_bytes: 24_944_216_064,
             source: VramSource::LinuxDrmSysfsUnified,
         };
-        // After model load + KV cache + Vulkan weight caches the
-        // observed MemAvailable on the actual hardware was around
-        // 8-9 GB. Use 8 GB as a representative submission-time
-        // value.
-        let mem_available = 8 * BYTES_PER_GB;
+        // Pre-Phase-1.2-1 codebase had ~5 GB MemAvailable at
+        // submission time (model loaded twice in CPU+Vulkan, KV
+        // cache resident).
+        let mem_available = 5 * BYTES_PER_GB;
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(mem_available));
-        // 4 examples × ~2.5K tokens, default rank 16, num_segments 8
-        // (recommended_checkpoint_segments at the corrected budget).
+        // weights_already_resident=false models the old codebase's
+        // budget accounting — the dual-resident weights are still
+        // counted in the estimate against a static budget, mirroring
+        // the residency model that crashed.
         let est = estimate_step_working_set(
             &cfg,
             2500,
             16,
             8,
             WeightResidency::DualResidentCpuAndVulkan,
+            false,
         );
         assert!(
             est.total_bytes > avail,
@@ -532,6 +554,7 @@ mod tests {
             16,
             4,
             WeightResidency::DualResidentCpuAndVulkan,
+            true,
         );
         assert!(
             est.total_bytes > avail,
@@ -539,6 +562,41 @@ mod tests {
              got estimate={} avail={}",
             est.total_bytes,
             avail
+        );
+    }
+
+    /// Companion to the repro-rejection test: a SMALL payload (1
+    /// example, ~36 tokens) on the same Strix Halo unified budget
+    /// must be ACCEPTED. The earlier hardening over-corrected by
+    /// double-counting base weights against MemAvailable; the
+    /// `weights_already_resident` flag fixes that.
+    #[test]
+    fn preflight_accepts_tiny_payload_on_strix_halo_post_load() {
+        let cfg = qwen_4b();
+        let vram = GpuVramInfo {
+            total_bytes: 24_944_216_064,
+            source: VramSource::LinuxDrmSysfsUnified,
+        };
+        // Post-load MemAvailable on the actual hardware was ~17 GB
+        // (the model + Vulkan caches were already loaded).
+        let mem_available = 17 * BYTES_PER_GB;
+        let avail = available_for_training_bytes_with_meminfo(&vram, Some(mem_available));
+        let est = estimate_step_working_set(
+            &cfg,
+            36, // 1 short example
+            4,  // tiny rank
+            8,
+            WeightResidency::DualResidentCpuAndVulkan,
+            true, // weights already resident
+        );
+        assert!(
+            est.total_bytes < avail,
+            "small payload on Strix Halo post-load must fit; \
+             got estimate={} ({:.2} GB), avail={} ({:.2} GB)",
+            est.total_bytes,
+            est.total_bytes as f64 / BYTES_PER_GB as f64,
+            avail,
+            avail as f64 / BYTES_PER_GB as f64,
         );
     }
 
@@ -552,7 +610,7 @@ mod tests {
             source: VramSource::NvidiaSmi,
         };
         let big_avail = available_for_training_bytes_with_meminfo(&big_vram, None);
-        let est = estimate_step_working_set(&cfg, 256, 8, 8, WeightResidency::SingleCopy);
+        let est = estimate_step_working_set(&cfg, 256, 8, 8, WeightResidency::SingleCopy, false);
         assert!(
             est.total_bytes < big_avail,
             "small payload on 48 GB dGPU must fit; estimate={} avail={}",
@@ -596,7 +654,7 @@ mod tests {
     #[test]
     fn format_oom_message_includes_actionable_knobs() {
         let cfg = qwen_4b();
-        let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy);
+        let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy, false);
         let msg = format_oom_message(&est, 8 * BYTES_PER_GB, 16, 4);
         assert!(msg.contains("KILN_GRAD_CHECKPOINT_SEGMENTS"));
         assert!(msg.contains("lora_rank"));

@@ -88,6 +88,27 @@ fn fused_gdn_resident_state_enabled() -> bool {
     })
 }
 
+/// `KILN_VULKAN_LINEAR=1` opts the autograd-safe `linear_prefill_apply`
+/// path on. Default off until end-to-end training parity is validated on
+/// production-sized payloads — the CustomOp1's forward and backward are
+/// unit-test covered, but wiring it into every projection in the
+/// transformer needs a hardware-validated training run before flipping
+/// the default.
+fn linear_prefill_apply_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_VULKAN_LINEAR")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        )
+    })
+}
+
 fn enter_recurrent_state_resident_scope() {
     RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| {
         depth.set(depth.get() + 1);
@@ -1241,6 +1262,79 @@ impl BackendRuntime for VulkanBackend {
         } else {
             out.reshape((batch, seq_len, out_dim))?
         };
+        Ok(Some(out))
+    }
+
+    fn linear_prefill_apply(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<Tensor>> {
+        // Opt-in until end-to-end training parity has been validated on
+        // production-sized payloads. The CustomOp1 itself is unit-test
+        // covered (forward + backward parity) and per-tensor parity has
+        // been verified on the actual Strix Halo device, but the
+        // integration into every projection in forward.rs is the kind
+        // of thing that benefits from staged rollout. Set
+        // KILN_VULKAN_LINEAR=1 to enable.
+        if !linear_prefill_apply_enabled() {
+            return Ok(None);
+        }
+        // One-shot dispatch trace so the operator can confirm the
+        // CustomOp path is actually firing without sprinkling per-call
+        // logs through every projection.
+        static FIRST_DISPATCH_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_DISPATCH_LOGGED.get_or_init(|| {
+            tracing::info!(
+                x_dims = ?x.dims(),
+                x_dtype = ?x.dtype(),
+                weight_dims = ?weight_t.dims(),
+                weight_dtype = ?weight_t.dtype(),
+                "VulkanLinearOp::linear_prefill_apply first dispatch"
+            );
+        });
+        if !self.has_vulkan() || !self.linear_decode_enabled {
+            return Ok(None);
+        }
+        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+            return Ok(None);
+        }
+        let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
+            return Ok(None);
+        };
+        let Ok((hidden_w, out_dim)) = weight_t.dims2() else {
+            return Ok(None);
+        };
+        if hidden_x != hidden_w {
+            return Ok(None);
+        }
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?
+            .clone();
+        let out_dtype = x.dtype();
+        let (weight_buffer, layout) = if self.use_bf16_packed_linear_weight(weight_t) {
+            (
+                self.cached_bf16_packed_weight_buffer(weight_t)?,
+                crate::backend::vulkan_linear_op::WeightLayout::Bf16Packed,
+            )
+        } else if weight_t.dtype() == DType::F32 {
+            (
+                self.cached_f32_weight_buffer(weight_t)?,
+                crate::backend::vulkan_linear_op::WeightLayout::F32,
+            )
+        } else {
+            return Ok(None);
+        };
+        let op = crate::backend::vulkan_linear_op::build_op(
+            vk_device,
+            weight_buffer,
+            weight_t.clone(),
+            layout,
+            hidden_x,
+            out_dim,
+            out_dtype,
+        );
+        let out = x
+            .apply_op1(op)
+            .context("VulkanLinearOp apply_op1 failed")?;
         Ok(Some(out))
     }
 
