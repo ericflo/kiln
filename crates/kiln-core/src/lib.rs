@@ -1,6 +1,7 @@
 pub mod block;
 pub mod config;
 pub mod device_buffer;
+pub mod env_flag;
 pub mod prefix_cache;
 pub mod request;
 pub mod sampling;
