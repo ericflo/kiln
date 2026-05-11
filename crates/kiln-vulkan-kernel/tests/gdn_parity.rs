@@ -3079,6 +3079,54 @@ fn sdpa_prefill_f32_matches_cpu_qwen_head_dim_128() -> Result<()> {
 }
 
 #[test]
+fn sdpa_prefill_f32_matches_cpu_realistic_seq_len() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+    // Mid-T shape that exercises the K loop more thoroughly than the
+    // small parity tests but stays well under any safety/load
+    // concerns. T=64 with head_dim=128 = 64 reduction-loop iterations
+    // per workgroup × 256 ops per iteration ≈ 16K ops/WG; total
+    // workgroups = 1 × 4 × 64 = 256. Per-dispatch FLOP ≈ 4 MFLOP,
+    // negligible. Acts as a smoke test that the online softmax
+    // recurrence stays numerically stable across longer K loops.
+    let b = 1usize;
+    let t = 64usize;
+    let h = 4usize;
+    let dh = 128usize;
+    let total = b * t * h * dh;
+
+    // Bounded magnitudes so logits don't blow up — the online softmax
+    // does subtract the running max but is still sensitive to extreme
+    // values in synthetic data.
+    let q_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 31) as f32 - 15.0) * 0.005)
+        .collect();
+    let k_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 37) as f32 - 18.0) * 0.005)
+        .collect();
+    let v_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 41) as f32 - 20.0) * 0.005)
+        .collect();
+
+    let q = Tensor::from_vec(q_data, (b, t, h, dh), &Device::Cpu)?;
+    let k = Tensor::from_vec(k_data, (b, t, h, dh), &Device::Cpu)?;
+    let v = Tensor::from_vec(v_data, (b, t, h, dh), &Device::Cpu)?;
+
+    let scale = 1.0 / (dh as f32).sqrt();
+    let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
+    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
+        &vk, &q, &k, &v, scale, true,
+    )?;
+    assert_eq!(vk_out.dims(), cpu_out.dims());
+    // Slightly looser tolerance than the small-N tests — longer K loop
+    // accumulates more rounding error in the online softmax recurrence.
+    assert_close("sdpa T=64 H=4 dh=128", &vk_out, &cpu_out, 5e-4)?;
+    Ok(())
+}
+
+#[test]
 fn sgd_step_f32_matches_cpu_reference() -> Result<()> {
     use kiln_vulkan_kernel::{VulkanBuffer, kernels};
     let Some(vk) = maybe_vulkan() else {
