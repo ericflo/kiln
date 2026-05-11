@@ -139,11 +139,29 @@ Vulkan training-route changes) twice hard-hung the host on the
   FLCE-chunked-Vulkan vs the unfused lm_head dispatch that hung the
   host. Any non-trivial supervised batch now routes through the
   chunked FLCE path.
-- vulkan: `KILN_VULKAN_LINEAR` reverted to default-OFF until the
-  in-op chunking has been load-validated end-to-end on real hardware.
-  Smaller-shape projections (T≤256) ran ~6% faster with this on at
-  bit-exact loss; the runbook in `docs/audits/` walks the operator
-  through enabling it safely.
+- vulkan: **`KILN_VULKAN_LINEAR` defaulted ON** (after the chunking +
+  CustomOp3 LoRA + BF16 SGD wiring made the full training stack
+  correct + safe by construction). Set to `0` to opt out for parity
+  comparisons.
+- vulkan: **`KILN_VULKAN_SDPA` defaulted ON** (after the
+  sdpa_prefill_f32 kernel was parity-tested at 4 shapes including
+  Qwen3.5-4B head_dim=128). Set to `0` to opt out.
+- vulkan: `BackendRuntime::dispatch_sgd_step` now handles BF16
+  param + grad pairs via the new `dispatch_sgd_step_bf16` kernel
+  (one thread per u32 word, bf16↔f32 lane bit-expansion). Mixed
+  dtypes still fall back to the candle CPU path.
+- training: `sgd_step` and `sgd_step_from_map` now prefer the
+  on-device Vulkan SGD path when the Var is registry-resident.
+  Per-step flow: register grad → dispatch_sgd_step (writes new
+  bytes to param buffer in-place) → resolve buffer → var.set to
+  keep candle storage in sync for save_peft and other readers
+  → evict grad. Falls back to candle CPU SGD when not resident
+  or when the dispatch declines.
+- vulkan: `lora_delta_resident` Vulkan impl now wraps the
+  on-device dispatch in `VulkanLoraOp` (CustomOp3) with analytic
+  backward returning gradients for x, A, and B. The
+  inference-only gate in `add_lora_delta_to_base` was removed —
+  training-time forward now uses the on-device LoRA delta path.
 
 ### Fixed
 - vulkan: lm_head training-time forward queuing ~4.36M workgroups in
