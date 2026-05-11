@@ -705,6 +705,13 @@ impl BackendRuntime for VulkanBackend {
             return Ok(());
         }
         let bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0;
+        // Some Vulkan drivers reject zero-size buffer allocations; we
+        // also have no use for a zero-byte registry entry. Bail
+        // silently — has_resident_activation will return false and
+        // the caller falls through to its CPU path.
+        if bytes.is_empty() {
+            return Ok(());
+        }
         let device = vk_device.device();
         let device_local_mt = vk_device.device_local_mem_type();
         let host_visible_mt = vk_device.host_visible_mem_type();
@@ -2641,6 +2648,25 @@ mod tests {
     /// evicts it, asserts it flips back. Skipped if no Vulkan
     /// device — the hooks have no-op defaults so a CPU-only run
     /// would just always answer false.
+    /// Empty-tensor (zero-byte) input must not panic the Vulkan
+    /// allocator. Bails silently — `has_resident_activation` returns
+    /// false and the caller falls through to its CPU path.
+    #[test]
+    fn register_resident_activation_handles_empty_tensor() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let empty: Tensor = Tensor::from_vec(Vec::<f32>::new(), (0,), &Device::Cpu)?;
+        backend.register_resident_activation(&empty)?;
+        assert!(
+            !backend.has_resident_activation(&empty),
+            "empty tensor must not be registered (zero-size driver issue)"
+        );
+        Ok(())
+    }
+
     /// resolve_resident_activation must reconstruct a Tensor whose
     /// data matches the originally-registered tensor's bytes.
     /// Returns Ok(None) when the tensor isn't in the registry.
