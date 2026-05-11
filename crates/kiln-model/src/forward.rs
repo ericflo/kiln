@@ -462,35 +462,22 @@ fn add_lora_delta_to_base(
         if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
             return Ok(out);
         }
-        // Phase 4.1 step 2: when both A and B are registry-resident
-        // (the trainer's `register_with_backend` runs at init), the
-        // backend can compute the delta on-device against the registry
-        // buffers directly — no upload of A/B per call. Returns
-        // Ok(None) on backends without registry support or when
-        // operands aren't both registered, in which case we fall
-        // through to the candle CPU `compute_lora_delta` path.
-        //
-        // **Inference-only gate.** The on-device dispatch returns a
-        // candle-leaf Tensor with no autograd back-link to A/B, so
-        // calling it during training silently drops the gradient
-        // path through the LoRA Vars (var.set never sees a non-zero
-        // grad → SGD is a no-op → loss doesn't decrease). Use the
-        // candle CPU compute_lora_delta path during training so
-        // autograd tracks A and B; the on-device path is reserved
-        // for inference (and for a future CustomOp2 wrapper that
-        // provides an explicit backward for the LoRA delta).
-        let training = x.track_op() || proj.a.track_op() || proj.b.track_op();
-        if !training {
-            if let Some(delta) =
-                backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)?
-            {
-                let delta = if delta.dtype() == base.dtype() {
-                    delta
-                } else {
-                    delta.to_dtype(base.dtype())?
-                };
-                return Ok((base + delta)?);
-            }
+        // Phase 4.1 step 2 + 5 (autograd-safe via CustomOp3): when
+        // both A and B are registry-resident, dispatch the LoRA
+        // delta on-device. The Vulkan impl wraps the dispatch in
+        // `VulkanLoraOp` which provides analytic gradients for x,
+        // A, and B — so this path is now safe to use during training
+        // too. `loss.backward()` produces correct grad_A and grad_B
+        // that flow into the SGD update.
+        if let Some(delta) =
+            backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)?
+        {
+            let delta = if delta.dtype() == base.dtype() {
+                delta
+            } else {
+                delta.to_dtype(base.dtype())?
+            };
+            return Ok((base + delta)?);
         }
     }
     #[cfg(feature = "metal")]

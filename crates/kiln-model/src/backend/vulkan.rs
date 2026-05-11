@@ -946,16 +946,11 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() || !self.linear_decode_enabled {
             return Ok(None);
         }
-        // Kernel constraint: weight buffer is bf16. The registry holds
-        // raw BF16 bytes (which are byte-equivalent to bf16-packed at
-        // the u32 level — the kernel reads `data_w[idx >> 1]` and
-        // masks per-pair).
+        // Kernel constraint: weight buffer is bf16-packed.
         if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
             return Ok(None);
         }
-        // Both A and B must be registry-resident — otherwise we have
-        // no buffer to dispatch against. Caller falls back to candle
-        // CPU compute_lora_delta.
+        // Both A and B must be registry-resident.
         let a_id = a.id();
         let b_id = b.id();
         let bufs = RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
@@ -987,51 +982,25 @@ impl BackendRuntime for VulkanBackend {
         if row_count == 0 {
             return Ok(None);
         }
-        // Promote x to F32 (the transposed kernel expects F32 input).
-        let x_f32 = if x.dtype() == DType::F32 {
-            x.clone()
-        } else {
-            x.to_dtype(DType::F32)?
-        };
-        let x_2d = x_f32.reshape((row_count, in_features))?;
-
-        // hidden = x @ A.T. Use the transposed bf16-packed kernel:
-        // out[i, n] = sum_k x[i, k] * W[n, k] where W=A is [rank, in].
-        let x_2d_contig = x_2d.contiguous()?;
-        let hidden = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
-            vk_device,
-            &x_2d_contig,
-            &a_buf,
-            row_count,
+        // Construct the autograd-safe CustomOp3 wrapper. apply_op3
+        // builds a backprop link from the returned Tensor through x,
+        // a, and b — VulkanLoraOp::bwd computes analytic gradients
+        // for all three. This lets the trainer's loss.backward()
+        // produce real grad_A and grad_B instead of dropping them
+        // (which is what the prior leaf-Tensor return did).
+        let op = crate::backend::vulkan_lora_op::VulkanLoraOp {
+            vk_device: Arc::clone(vk_device),
+            a_buffer: Arc::clone(&a_buf),
+            b_buffer: Arc::clone(&b_buf),
+            rank: rank_a,
             in_features,
-            rank_a,
-        )?;
-        // dispatch_linear_decode_cached_bf16_weights_transposed returns
-        // `[row_count, 1, rank]` (see the kernel's output layout). We
-        // need `[row_count, rank]` for the next dispatch.
-        let hidden_2d = hidden.reshape((row_count, rank_a))?.contiguous()?;
-
-        // delta = hidden @ B.T. Same kernel: W=B is [out, rank], so
-        // out[i, n] = sum_k hidden[i, k] * B[n, k].
-        let delta = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
-            vk_device,
-            &hidden_2d,
-            &b_buf,
-            row_count,
-            rank_a,
             out_features,
-        )?;
-        // delta is `[row_count, 1, out_features]`. Reshape to caller's
-        // leading dims with out_features in the last position.
-        let mut out_dims = x_dims;
-        *out_dims.last_mut().unwrap() = out_features;
-        let delta = delta.reshape(out_dims.as_slice())?;
-        let delta_scaled = (delta * scale as f64)?;
-        let delta_typed = if delta_scaled.dtype() == in_dtype {
-            delta_scaled
-        } else {
-            delta_scaled.to_dtype(in_dtype)?
+            scale,
+            out_dtype: in_dtype,
         };
+        let delta = x
+            .apply_op3(a, b, op)
+            .context("VulkanLoraOp apply_op3 failed")?;
         // One-shot trace so the operator can confirm the on-device
         // LoRA delta path engaged.
         static FIRST_LORA_DELTA_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -1042,10 +1011,10 @@ impl BackendRuntime for VulkanBackend {
                 rank = rank_a,
                 out_features,
                 scale,
-                "VulkanBackend::lora_delta_resident first call"
+                "VulkanBackend::lora_delta_resident first call (CustomOp3 / autograd-safe)"
             );
         });
-        Ok(Some(delta_typed))
+        Ok(Some(delta))
     }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
