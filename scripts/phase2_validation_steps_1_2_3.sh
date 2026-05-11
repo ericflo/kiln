@@ -29,11 +29,33 @@
 
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-    echo "usage: $0 <model-path>" >&2
+SKIP_BUILD=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-build)
+            SKIP_BUILD=1
+            shift
+            ;;
+        --help|-h)
+            cat >&2 <<EOF
+usage: $0 [--skip-build] <model-path>
+
+  --skip-build  Don't run \`cargo build\` — assume target/release/kiln-server
+                is already up to date. Useful for re-runs.
+EOF
+            exit 0
+            ;;
+        *)
+            MODEL_PATH="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "${MODEL_PATH:-}" ]]; then
+    echo "usage: $0 [--skip-build] <model-path>" >&2
     exit 1
 fi
-MODEL_PATH="$1"
 if [[ ! -d "$MODEL_PATH" ]]; then
     echo "model path '$MODEL_PATH' does not exist or is not a directory" >&2
     exit 1
@@ -70,9 +92,17 @@ if [[ "$mem_avail_gib" -lt 25 ]]; then
     echo "WARNING: MemAvailable ${mem_avail_gib} GiB < 25 GiB — restart the desktop session?" >&2
 fi
 
-echo ">>> Pre-flight: build" >&2
-cargo build --release -p kiln-server --features vulkan --no-default-features 2>&1 \
-    | tee "$LOG_DIR/build.log" >&2
+if [[ "$SKIP_BUILD" -eq 1 ]]; then
+    if [[ ! -x "./target/release/kiln-server" ]]; then
+        echo "ERROR: --skip-build set but ./target/release/kiln-server not found" >&2
+        exit 1
+    fi
+    echo ">>> Pre-flight: build (skipped per --skip-build)" >&2
+else
+    echo ">>> Pre-flight: build" >&2
+    cargo build --release -p kiln-server --features vulkan --no-default-features 2>&1 \
+        | tee "$LOG_DIR/build.log" >&2
+fi
 
 # -----------------------------------------------------------------------------
 # Tiny SFT payload
