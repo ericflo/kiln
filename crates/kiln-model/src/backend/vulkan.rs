@@ -803,6 +803,18 @@ impl BackendRuntime for VulkanBackend {
                 grad.shape(),
             );
         }
+        // One-shot trace so the operator can confirm the on-device
+        // SGD path is engaging. Cumulatively the FIRST_*_LOGGED OneLocks
+        // give a clear "registry → matmul chunking → SGD" signal in
+        // the startup log without per-step spam.
+        static FIRST_SGD_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_SGD_LOGGED.get_or_init(|| {
+            tracing::info!(
+                n_elements,
+                lr,
+                "VulkanBackend::dispatch_sgd_step first call"
+            );
+        });
         kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
             vk_device,
             &param_buf,
