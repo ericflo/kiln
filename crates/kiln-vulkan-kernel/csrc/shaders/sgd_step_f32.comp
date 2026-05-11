@@ -1,0 +1,34 @@
+// SGD parameter update: param -= lr * grad.
+//
+// One workgroup per 256 elements. Each thread updates one element.
+// F32-in / F32-out, both buffers are flat row-major of length `n`.
+//
+// This is the on-device replacement for the candle CPU
+// `var.set(var - (grad * lr)?)?` chain in
+// `kiln-train/src/trainer.rs::sgd_step`. Once Phase 4.1 lands and
+// `TrainableLoraParams` are registry-resident `VulkanBuffer`s, the
+// trainer dispatches this kernel instead of round-tripping through
+// candle CPU autograd ops.
+//
+// Bandwidth-bound (3 × n F32 reads/writes per step), trivially small
+// per dispatch — well below any per-submit FLOP ceiling. No
+// per-element safety chunking needed.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n;
+    float lr;
+};
+
+layout(binding = 0) buffer ParamBuf { float data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { float data_grad[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) return;
+    data_param[i] = data_param[i] - lr * data_grad[i];
+}

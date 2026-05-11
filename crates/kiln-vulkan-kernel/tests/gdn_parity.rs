@@ -3077,3 +3077,87 @@ fn sdpa_prefill_f32_matches_cpu_qwen_head_dim_128() -> Result<()> {
     assert_close("sdpa Qwen head_dim=128", &vk_out, &cpu_out, 1e-4)?;
     Ok(())
 }
+
+#[test]
+fn sgd_step_f32_matches_cpu_reference() -> Result<()> {
+    use kiln_vulkan_kernel::{VulkanBuffer, kernels};
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    // Realistic LoRA-shape param: rank=8, hidden=64 → 512 F32.
+    // Plus a small odd-length test (300) so the workgroup boundary
+    // (multiples of 256) is exercised by the early-return path.
+    for n in [512usize, 300usize, 1usize] {
+        let param_data: Vec<f32> = (0..n).map(|i| ((i as i32 - (n as i32 / 2)) as f32) * 0.01).collect();
+        let grad_data: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.005).collect();
+        let lr: f32 = 0.013;
+
+        // CPU reference: param -= lr * grad.
+        let expected: Vec<f32> = param_data
+            .iter()
+            .zip(grad_data.iter())
+            .map(|(&p, &g)| p - lr * g)
+            .collect();
+
+        // Set up Vulkan buffers + upload + dispatch.
+        let device = vk.device();
+        let device_local_mt = vk.device_local_mem_type();
+        let host_visible_mt = vk.host_visible_mem_type();
+        let queue = vk.queue();
+        let queue_family = vk.queue_family_index();
+        let bytes = n * 4;
+
+        let param_bytes: Vec<u8> = param_data.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let grad_bytes: Vec<u8> = grad_data.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        let param_buf = VulkanBuffer::create_device_local(device, device_local_mt, bytes as u64)
+            .context("alloc param buffer")?;
+        let grad_buf = VulkanBuffer::create_device_local(device, device_local_mt, bytes as u64)
+            .context("alloc grad buffer")?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            queue_family,
+            &param_buf,
+            &param_bytes,
+        )
+        .context("upload param")?;
+        VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            queue_family,
+            &grad_buf,
+            &grad_bytes,
+        )
+        .context("upload grad")?;
+
+        kernels::dispatch_sgd_step_f32(&vk, &param_buf, &grad_buf, n, lr)?;
+
+        let updated = VulkanBuffer::read_back(
+            device,
+            host_visible_mt,
+            queue,
+            queue_family,
+            &param_buf,
+        )
+        .context("read back param")?;
+        let updated_f32: Vec<f32> = updated
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        anyhow::ensure!(updated_f32.len() == n, "n={n}: read back {} elements, expected {n}", updated_f32.len());
+        for (i, (got, want)) in updated_f32.iter().zip(expected.iter()).enumerate() {
+            let diff = (got - want).abs();
+            anyhow::ensure!(
+                diff < 1e-7,
+                "n={n} idx={i}: got={got:.9} want={want:.9} diff={diff:e}"
+            );
+        }
+    }
+    Ok(())
+}

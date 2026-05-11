@@ -8702,3 +8702,45 @@ pub fn dispatch_sdpa_prefill_f32(
     )
     .context("sdpa_prefill_f32: dispatch_kernel")
 }
+
+/// Vulkan SGD parameter update step: `param -= lr * grad`, in-place
+/// against an existing `VulkanBuffer` (the parameter buffer) using
+/// the gradient as a read-only second buffer.
+///
+/// Phase 4.2 of the residency plan. Used by the trainer once
+/// `TrainableLoraParams` have been migrated to registry-resident
+/// `VulkanBuffer`s in Phase 4.1; until then, the existing CPU SGD
+/// step in `kiln-train::trainer::sgd_step` continues to run.
+///
+/// Both buffers are flat F32 of length `n_elements`. The dispatch
+/// allocates one workgroup per 256 elements; per-step compute is
+/// trivially small (3n F32 reads/writes) so no chunking is required
+/// even for the largest LoRA Vars (rank=64, hidden=2560 = 164K F32 =
+/// 640 KB).
+pub fn dispatch_sgd_step_f32(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "sgd_step_f32: n_elements must be > 0");
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/sgd_step_f32.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("sgd_step_f32: shader compile/load")?;
+    let push_constants: [u32; 2] = [n_elements as u32, lr.to_bits()];
+    let all_handles = vec![param_buffer.handle(), grad_buffer.handle()];
+    let workgroup_count = n_elements.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        workgroup_count,
+    )
+    .context("sgd_step_f32: kernel dispatch")
+}
