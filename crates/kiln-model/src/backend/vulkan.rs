@@ -2708,6 +2708,53 @@ mod tests {
         Ok(())
     }
 
+    /// dispatch_sgd_step must error (not silently succeed or fall
+    /// back) when shapes mismatch — that's a programmer bug worth
+    /// surfacing immediately.
+    #[test]
+    fn dispatch_sgd_step_errors_on_shape_mismatch() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let g = Tensor::from_vec(vec![0.5f32; 8], (8,), &Device::Cpu)?;
+        backend.register_resident_activation(&p)?;
+        backend.register_resident_activation(&g)?;
+        let err = backend.dispatch_sgd_step(&p, &g, 0.01).unwrap_err();
+        assert!(
+            err.to_string().contains("different element counts"),
+            "unexpected error: {err}"
+        );
+        backend.evict_resident_activation(&p);
+        backend.evict_resident_activation(&g);
+        Ok(())
+    }
+
+    /// dispatch_sgd_step must fall back (return Ok(false), not error)
+    /// when operands have a non-F32 dtype the kernel doesn't handle.
+    /// This matches the trait contract: false = "caller use the
+    /// candle CPU path"; error = "I tried but it failed."
+    #[test]
+    fn dispatch_sgd_step_falls_back_on_non_f32_dtype() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let p_f32 = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let p_bf16 = p_f32.to_dtype(DType::BF16)?;
+        let g_bf16 = p_f32.to_dtype(DType::BF16)?;
+        backend.register_resident_activation(&p_bf16)?;
+        backend.register_resident_activation(&g_bf16)?;
+        let dispatched = backend.dispatch_sgd_step(&p_bf16, &g_bf16, 0.01)?;
+        assert!(!dispatched, "BF16 operands must fall back to CPU");
+        backend.evict_resident_activation(&p_bf16);
+        backend.evict_resident_activation(&g_bf16);
+        Ok(())
+    }
+
     #[test]
     fn resident_activation_register_evict_round_trip() -> Result<()> {
         let backend = VulkanBackend::new(Device::Cpu);
