@@ -139,6 +139,7 @@ const SHADERS: &[(&str, &str)] = &[
     ),
     ("paged_attn_decode_batch", "SPIR_V_PAGED_ATTN_DECODE_BATCH"),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
+    ("sdpa_prefill_f32", "SPIR_V_SDPA_PREFILL_F32"),
 ];
 
 fn compile_shader_command(

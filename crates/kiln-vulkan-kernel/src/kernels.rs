@@ -8630,3 +8630,75 @@ pub fn dispatch_gdn_chunk_scan(
     let p_out_tensor = create_tensor_from_data(&p_out_data, &out_shape, DType::BF16)?;
     Ok((out_tensor, p_out_tensor))
 }
+
+/// Scaled dot-product attention forward (prefill), online softmax.
+///
+/// Inputs `q`, `k`, `v` are F32 row-major `[batch, seq_len, num_heads,
+/// head_dim]`. Returns the SDPA output with the same shape and dtype.
+///
+/// Replaces the buggy `flash_attn.comp` placeholder. The shader runs
+/// one workgroup per `(batch, head, q_row)` with 128 threads doing a
+/// parallel head_dim reduction per K row, plus the standard online
+/// softmax recurrence. No scratch / LSE buffers are written; this is
+/// the forward-only path used by training prefill.
+///
+/// Constraints: `head_dim` must be ≤ 128 (the workgroup size). For
+/// Qwen3.5-4B head_dim=128 this is exact; smaller head_dim wastes
+/// some threads but produces correct output.
+pub fn dispatch_sdpa_prefill_f32(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        "sdpa_prefill_f32: q/k/v must all be F32, got {:?}/{:?}/{:?}",
+        q.dtype(),
+        k.dtype(),
+        v.dtype()
+    );
+    let (batch, seq_len, num_heads, head_dim) = q.dims4().context("sdpa_prefill_f32: q dims4")?;
+    anyhow::ensure!(
+        k.dims() == q.dims() && v.dims() == q.dims(),
+        "sdpa_prefill_f32: q/k/v must have identical shape, got {:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims()
+    );
+    anyhow::ensure!(
+        head_dim <= 128,
+        "sdpa_prefill_f32: head_dim {head_dim} > 128 (workgroup size limit)"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/sdpa_prefill_f32.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("sdpa_prefill_f32: shader compile/load")?;
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        seq_len as u32,
+        num_heads as u32,
+        head_dim as u32,
+        softmax_scale.to_bits(),
+        causal as u32,
+    ];
+    // Workgroup grid: (q_row, head, batch). Matches gl_WorkGroupID
+    // assignments in the shader.
+    let workgroup_count = (seq_len as u32, num_heads as u32, batch as u32);
+    let output_shape = vec![batch, seq_len, num_heads, head_dim];
+    dispatch_kernel(
+        vk_device,
+        &spirv,
+        &push_constants,
+        workgroup_count,
+        &[q, k, v],
+        &output_shape,
+        DType::F32,
+    )
+    .context("sdpa_prefill_f32: dispatch_kernel")
+}

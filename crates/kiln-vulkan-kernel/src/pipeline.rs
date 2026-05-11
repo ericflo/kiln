@@ -147,6 +147,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("paged_attn_decode_batch", SPIR_V_PAGED_ATTN_DECODE_BATCH),
     ("flash_attn", SPIR_V_FLASH_ATTN),
+    ("sdpa_prefill_f32", SPIR_V_SDPA_PREFILL_F32),
 ];
 
 // Re-export the spirv_modules for use in SHADER_SPIRVS

@@ -2931,3 +2931,149 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     assert_close("full chunk state", &got_state, &expected_state, 3e-2)?;
     Ok(())
 }
+
+/// CPU reference for SDPA forward at the [B, T, H, dh] layout that
+/// `dispatch_sdpa_prefill_f32` consumes.  Used by the parity tests.
+///
+/// Performs the standard `softmax((Q @ K^T) / sqrt(dh)) @ V` against
+/// candle CPU broadcast_matmul + softmax. Returns a tensor with shape
+/// `[B, T, H, dh]` (token-major), F32.
+fn cpu_sdpa_reference(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<Tensor> {
+    let (b, t, h, _dh) = q.dims4()?;
+    // Token-major → head-major: [B, T, H, dh] → [B, H, T, dh]
+    let q_h = q.transpose(1, 2)?.contiguous()?;
+    let k_h = k.transpose(1, 2)?.contiguous()?;
+    let v_h = v.transpose(1, 2)?.contiguous()?;
+    // Scores: [B, H, T, T]
+    let scores = q_h.broadcast_matmul(&k_h.transpose(2, 3)?.contiguous()?)?;
+    let scores = (scores * (softmax_scale as f64))?;
+    let scores = if causal {
+        // Causal mask: scores[..., i, j] = -inf for j > i.
+        let mut mask = vec![0.0f32; t * t];
+        for i in 0..t {
+            for j in 0..t {
+                if j > i {
+                    mask[i * t + j] = f32::MIN;
+                }
+            }
+        }
+        let mask = Tensor::from_vec(mask, (t, t), &Device::Cpu)?
+            .reshape((1, 1, t, t))?
+            .broadcast_as((b, h, t, t))?;
+        scores.broadcast_add(&mask)?
+    } else {
+        scores
+    };
+    // Manual softmax (last dim) — candle-nn isn't a dep of this crate.
+    let last_dim = scores.dims().len() - 1;
+    let max_per_row = scores.max_keepdim(last_dim)?;
+    let shifted = scores.broadcast_sub(&max_per_row)?;
+    let exp_shifted = shifted.exp()?;
+    let sum_exp = exp_shifted.sum_keepdim(last_dim)?;
+    let probs = exp_shifted.broadcast_div(&sum_exp)?;
+    let out_h = probs.broadcast_matmul(&v_h)?;
+    // Back to token-major: [B, H, T, dh] → [B, T, H, dh]
+    Ok(out_h.transpose(1, 2)?.contiguous()?)
+}
+
+#[test]
+fn sdpa_prefill_f32_matches_cpu_non_causal() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+    let b = 1usize;
+    let t = 5usize;
+    let h = 3usize;
+    let dh = 16usize; // < 128 (workgroup size); kernel pads with idle threads
+    let total = b * t * h * dh;
+
+    // Deterministic small inputs.
+    let q_data: Vec<f32> = (0..total).map(|i| ((i % 13) as f32 - 6.0) * 0.07).collect();
+    let k_data: Vec<f32> = (0..total).map(|i| ((i % 11) as f32 - 5.0) * 0.05).collect();
+    let v_data: Vec<f32> = (0..total).map(|i| ((i % 17) as f32 - 8.0) * 0.03).collect();
+
+    let q = Tensor::from_vec(q_data, (b, t, h, dh), &Device::Cpu)?;
+    let k = Tensor::from_vec(k_data, (b, t, h, dh), &Device::Cpu)?;
+    let v = Tensor::from_vec(v_data, (b, t, h, dh), &Device::Cpu)?;
+
+    let scale = 1.0 / (dh as f32).sqrt();
+    let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, false)?;
+    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
+        &vk, &q, &k, &v, scale, false,
+    )?;
+    assert_eq!(vk_out.dims(), cpu_out.dims());
+    // F32 numerics: small per-element drift OK (online softmax may
+    // differ from the textbook softmax in low-order bits).
+    assert_close("sdpa non-causal", &vk_out, &cpu_out, 1e-4)?;
+    Ok(())
+}
+
+#[test]
+fn sdpa_prefill_f32_matches_cpu_causal() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+    let b = 1usize;
+    let t = 7usize;
+    let h = 2usize;
+    let dh = 32usize;
+    let total = b * t * h * dh;
+
+    let q_data: Vec<f32> = (0..total).map(|i| ((i % 9) as f32 - 4.0) * 0.04).collect();
+    let k_data: Vec<f32> = (0..total).map(|i| ((i % 13) as f32 - 6.0) * 0.05).collect();
+    let v_data: Vec<f32> = (0..total).map(|i| ((i % 11) as f32 - 5.0) * 0.06).collect();
+
+    let q = Tensor::from_vec(q_data, (b, t, h, dh), &Device::Cpu)?;
+    let k = Tensor::from_vec(k_data, (b, t, h, dh), &Device::Cpu)?;
+    let v = Tensor::from_vec(v_data, (b, t, h, dh), &Device::Cpu)?;
+
+    let scale = 1.0 / (dh as f32).sqrt();
+    let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
+    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
+        &vk, &q, &k, &v, scale, true,
+    )?;
+    assert_eq!(vk_out.dims(), cpu_out.dims());
+    assert_close("sdpa causal", &vk_out, &cpu_out, 1e-4)?;
+    Ok(())
+}
+
+#[test]
+fn sdpa_prefill_f32_matches_cpu_qwen_head_dim_128() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+    // Mimic Qwen3.5-4B at small T: head_dim=128 exactly matches the
+    // workgroup size, so no thread-padding waste. Larger num_heads
+    // exercises the head dispatch dimension.
+    let b = 1usize;
+    let t = 4usize;
+    let h = 4usize;
+    let dh = 128usize;
+    let total = b * t * h * dh;
+
+    let q_data: Vec<f32> = (0..total).map(|i| ((i % 23) as f32 - 11.0) * 0.013).collect();
+    let k_data: Vec<f32> = (0..total).map(|i| ((i % 19) as f32 - 9.0) * 0.011).collect();
+    let v_data: Vec<f32> = (0..total).map(|i| ((i % 29) as f32 - 14.0) * 0.009).collect();
+
+    let q = Tensor::from_vec(q_data, (b, t, h, dh), &Device::Cpu)?;
+    let k = Tensor::from_vec(k_data, (b, t, h, dh), &Device::Cpu)?;
+    let v = Tensor::from_vec(v_data, (b, t, h, dh), &Device::Cpu)?;
+
+    let scale = 1.0 / (dh as f32).sqrt();
+    let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
+    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
+        &vk, &q, &k, &v, scale, true,
+    )?;
+    assert_eq!(vk_out.dims(), cpu_out.dims());
+    assert_close("sdpa Qwen head_dim=128", &vk_out, &cpu_out, 1e-4)?;
+    Ok(())
+}

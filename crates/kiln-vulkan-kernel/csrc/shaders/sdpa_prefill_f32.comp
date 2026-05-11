@@ -1,0 +1,105 @@
+// Scaled-dot-product attention forward (prefill), online softmax.
+//
+// Replaces the buggy `flash_attn.comp` placeholder. Computes:
+//
+//   scores = Q @ K^T * softmax_scale          // [B, H, T, T]
+//   if causal: scores[q, k] = -inf for k > q
+//   probs  = softmax(scores, dim=-1)          // [B, H, T, T]
+//   out    = probs @ V                        // [B, H, T, dh]
+//
+// without ever materialising the [B, H, T, T] scores matrix — uses the
+// standard online-softmax recurrence with running (max, sum, out_acc).
+//
+// Layout:
+//   q, k, v, out : `[B, T, H, dh]` (token-major), F32, row-major
+// One workgroup per (q_row, head, batch). 128 threads per workgroup —
+// matches Qwen3.5's head_dim. For other head_dim the threads with
+// `tid >= head_dim` fall out of the parallel dot product but still
+// participate in barriers + softmax updates so the workgroup stays
+// uniform-control-flow.
+//
+// Push constants:
+//   batch, seq_len, num_heads, head_dim, softmax_scale (f32 bits),
+//   causal (0 or 1).
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint seq_len;
+    uint num_heads;
+    uint head_dim;
+    float softmax_scale;
+    uint causal;
+};
+
+layout(binding = 0) readonly buffer QBuf  { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf  { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf  { float data_v[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+shared float reduce_sh[128];
+
+void main() {
+    uint q_idx = gl_WorkGroupID.x;
+    uint head  = gl_WorkGroupID.y;
+    uint batch_idx = gl_WorkGroupID.z;
+    uint tid = gl_LocalInvocationID.x;
+
+    if (q_idx >= seq_len || head >= num_heads || batch_idx >= batch) return;
+
+    // Token-major layout: data[b, t, h, d] = data[((b*T + t)*H + h)*dh + d].
+    uint stride_token = num_heads * head_dim;
+    uint stride_batch = seq_len * stride_token;
+    uint q_base = batch_idx * stride_batch + q_idx * stride_token + head * head_dim;
+
+    // Each thread caches one Q[d] in register.
+    float q_val = (tid < head_dim) ? data_q[q_base + tid] : 0.0;
+
+    // Online-softmax accumulators. All threads compute the same
+    // (max_logit, sum_logit) — they're derived from a workgroup-wide
+    // reduction, so no divergence — but each thread keeps its own
+    // out_acc for output element `out[b, q, h, tid]`.
+    float max_logit = -1.0e30;
+    float sum_logit = 0.0;
+    float out_acc   = 0.0;
+
+    uint k_max = (causal != 0u) ? (q_idx + 1u) : seq_len;
+    for (uint k_idx = 0u; k_idx < k_max; k_idx++) {
+        uint k_base = batch_idx * stride_batch + k_idx * stride_token + head * head_dim;
+
+        // ---- Q.K parallel reduction over head_dim.
+        float term = (tid < head_dim) ? (q_val * data_k[k_base + tid]) : 0.0;
+        reduce_sh[tid] = term;
+        barrier();
+        // Tree reduction. local_size_x = 128 → first stride is 64.
+        for (uint stride = 64u; stride > 0u; stride >>= 1) {
+            if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+            barrier();
+        }
+        float logit = reduce_sh[0] * softmax_scale;
+
+        // ---- Online-softmax update (every thread runs identical scalar
+        // arithmetic on the broadcasted `logit`).
+        float new_max = max(max_logit, logit);
+        float alpha = exp(max_logit - new_max);
+        float beta  = exp(logit - new_max);
+        sum_logit = sum_logit * alpha + beta;
+
+        if (tid < head_dim) {
+            float v_val = data_v[k_base + tid];
+            out_acc = out_acc * alpha + beta * v_val;
+        }
+        max_logit = new_max;
+
+        // Barrier so reduce_sh is safe to overwrite next iteration.
+        barrier();
+    }
+
+    if (tid < head_dim) {
+        data_out[q_base + tid] = out_acc / sum_logit;
+    }
+}
