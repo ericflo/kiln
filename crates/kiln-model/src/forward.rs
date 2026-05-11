@@ -2964,7 +2964,82 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 .context("metal rms_norm kernel failed");
         }
     }
+    // Vulkan inference fast path: when not autograd-tracked, dispatch
+    // through Vulkan instead of the candle CPU broadcast_mul chain.
+    // Skipped for tracked tensors because the Vulkan dispatch returns a
+    // leaf (no autograd) — training keeps the existing
+    // `rms_norm_fallback` path that flows through candle's autograd.
+    #[cfg(feature = "vulkan")]
+    if vulkan_rmsnorm_forward_inference_enabled()
+        && crate::backend::vulkan_active()
+        && !x.track_op()
+        && !weight.track_op()
+        && matches!(x.device(), Device::Cpu)
+        && matches!(weight.device(), Device::Cpu)
+        && weight.is_contiguous()
+        && let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)?
+    {
+        return Ok(out);
+    }
     rms_norm_fallback(x, weight, eps)
+}
+
+/// `KILN_VULKAN_RMSNORM=0` opts the inference RMSNorm Vulkan path off.
+/// Default: enabled.
+#[cfg(feature = "vulkan")]
+fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_VULKAN_RMSNORM")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(true)
+    })
+}
+
+/// Inference-only Vulkan RMSNorm dispatch. Promotes inputs to F32,
+/// dispatches the kernel, casts result back to the input dtype.
+/// Returns `Ok(None)` when preconditions don't fit (caller falls back).
+#[cfg(feature = "vulkan")]
+fn try_vulkan_rmsnorm_forward(
+    x: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    use kiln_vulkan_kernel::VulkanDevice;
+    static VK_DEVICE: std::sync::OnceLock<Option<std::sync::Arc<VulkanDevice>>> =
+        std::sync::OnceLock::new();
+    let vk_device = VK_DEVICE
+        .get_or_init(|| VulkanDevice::new().ok().map(std::sync::Arc::new))
+        .as_ref();
+    let Some(vk_device) = vk_device else {
+        return Ok(None);
+    };
+    let in_dtype = x.dtype();
+    let x_f32 = if in_dtype == DType::F32 {
+        x.contiguous()?
+    } else {
+        x.to_dtype(DType::F32)?.contiguous()?
+    };
+    let w_f32 = if weight.dtype() == DType::F32 {
+        weight.clone()
+    } else {
+        weight.to_dtype(DType::F32)?
+    };
+    let out_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
+        vk_device.as_ref(),
+        &x_f32,
+        &w_f32,
+        eps,
+    )?;
+    let out = if out_f32.dtype() == in_dtype {
+        out_f32
+    } else {
+        out_f32.to_dtype(in_dtype)?
+    };
+    Ok(Some(out))
 }
 
 /// Candle-op reference RMSNorm. Kept as the CPU path and as the correctness

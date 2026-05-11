@@ -82,6 +82,7 @@ const SHADERS: &[(&str, &str)] = &[
         "linear_decode_batched_transposed_bf16w",
         "SPIR_V_LINEAR_DECODE_BATCHED_TRANSPOSED_BF16W",
     ),
+    ("qwen_rmsnorm_forward", "SPIR_V_QWEN_RMSNORM_FORWARD"),
     (
         "linear_decode_batched_rows2",
         "SPIR_V_LINEAR_DECODE_BATCHED_ROWS2",

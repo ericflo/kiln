@@ -720,6 +720,56 @@ mod tests {
         Ok(())
     }
 
+    /// Verify the Qwen3.5-style RMSNorm Vulkan kernel matches the
+    /// candle CPU reference implementation in `kiln-model`. Uses the
+    /// same `(1 + w) * x * rsqrt(mean(x^2) + eps)` semantics as
+    /// `forward::rms_norm_fallback`.
+    #[test]
+    fn vulkan_qwen_rmsnorm_forward_parity() -> Result<()> {
+        use kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward;
+
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!("no Vulkan device, skipping");
+            return Ok(());
+        };
+
+        let device = Device::Cpu;
+        let rows = 5usize;
+        let hidden = 16usize;
+        let eps = 1e-6f32;
+
+        let x_data: Vec<f32> = (0..rows * hidden)
+            .map(|i| 0.05 * ((i as f32) + 1.0))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden).map(|i| 0.01 * (i as f32)).collect();
+
+        let x = Tensor::from_vec(x_data, (rows, hidden), &device)?;
+        let weight = Tensor::from_vec(w_data, (hidden,), &device)?;
+
+        // Vulkan path.
+        let vulkan_out = dispatch_qwen_rmsnorm_forward(&vk_device, &x, &weight, eps)?;
+
+        // CPU baseline mirroring rms_norm_fallback.
+        let variance = x.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let rms_inv = (variance + eps as f64)?.sqrt()?.recip()?;
+        let normed = x.broadcast_mul(&rms_inv)?;
+        let one_plus_w = (weight.ones_like()? + &weight)?;
+        let baseline = normed.broadcast_mul(&one_plus_w)?;
+
+        assert_eq!(vulkan_out.dims(), baseline.dims());
+        let baseline_v = baseline.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_v = vulkan_out.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_v.iter().zip(vulkan_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            let rel = abs / (b.abs().max(1e-3));
+            assert!(
+                abs < 1e-4 || rel < 1e-4,
+                "rmsnorm mismatch at idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Op-state debug snapshot. Cheap sanity check that the struct
     /// formats useful metadata without panicking.
     #[test]

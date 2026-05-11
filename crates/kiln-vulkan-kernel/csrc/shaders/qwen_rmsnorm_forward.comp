@@ -1,0 +1,62 @@
+// Qwen3.5-style RMSNorm forward.
+//
+// Computes:
+//   rms_inv = 1.0 / sqrt(mean(x^2) + eps)
+//   out = (1 + weight) * x * rms_inv
+//
+// `(1 + weight)` matches HF's Qwen3.5 RMSNorm semantics, which stores
+// weights centered around 0 and applies them as `output * (1.0 + w)`
+// instead of the more common `weight * x_normed`.
+//
+// Inputs:
+//   - x:      f32, row-major `[rows, hidden]`
+//   - weight: f32, shape `[hidden]`
+//   - eps:    f32 push constant
+//
+// One workgroup per row; 256 threads do a strided sum-of-squares,
+// reduce in shared memory, then write back the normalized output.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+shared float sum_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * hidden;
+
+    // Compute sum of squares across the hidden dim.
+    float sum = 0.0;
+    for (uint col = tid; col < hidden; col += 256) {
+        float xv = data_x[base + col];
+        sum += xv * xv;
+    }
+    sum_sh[tid] = sum;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) sum_sh[tid] += sum_sh[tid + s];
+        barrier();
+    }
+    float rms_inv = inversesqrt(sum_sh[0] / float(hidden) + eps);
+
+    // Apply (1 + w) * x * rms_inv.
+    for (uint col = tid; col < hidden; col += 256) {
+        float xv = data_x[base + col];
+        float wv = data_weight[col];
+        data_out[base + col] = (1.0 + wv) * xv * rms_inv;
+    }
+}
