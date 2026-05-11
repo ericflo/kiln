@@ -1563,16 +1563,33 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance.
-/// Returns None for any other backend so the FLCE path falls back to
-/// candle CPU exactly as before. The KILN_VULKAN_LINEAR opt-in is
-/// checked deeper inside VulkanBackend::linear_prefill_apply, so the
-/// provider being non-None doesn't itself force Vulkan dispatch — the
-/// per-call gate decides per chunk.
+/// Build a provider when the supplied backend is a Vulkan instance AND
+/// the FLCE-on-Vulkan path is explicitly enabled.
+///
+/// Default off because the first-cut FLCE provider hits a cache miss on
+/// every per-chunk `head_t.narrow` — each chunk is a fresh `TensorId`,
+/// so `cached_bf16_packed_weight_buffer` re-uploads the same head every
+/// time. On a 1500-token medium-sized payload this turned a ~111 s
+/// step into ~140 s vs the projection-only Vulkan routing. Set
+/// `KILN_VULKAN_FLCE=1` to opt in once the buffer-offset variant of
+/// dispatch_linear_decode_cached_* (which lets head_t upload once and
+/// per-chunk dispatch reuse it via offsets) lands.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
 ) -> Option<FlceProvider> {
     if backend.name() != "vulkan" {
+        return None;
+    }
+    let opt_in = matches!(
+        std::env::var("KILN_VULKAN_FLCE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
+    if !opt_in {
         return None;
     }
     Some(std::sync::Arc::new(BackendFlceProvider {
