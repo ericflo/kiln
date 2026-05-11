@@ -8739,6 +8739,19 @@ pub fn dispatch_sgd_step_f32(
     lr: f32,
 ) -> Result<()> {
     anyhow::ensure!(n_elements > 0, "sgd_step_f32: n_elements must be > 0");
+    // Vulkan only guarantees `maxComputeWorkGroupCount[i] >= 65535`.
+    // The dispatch is `n_elements.div_ceil(256)` workgroups on axis x;
+    // any caller passing n_elements > 256 * 65535 = ~16.7M would
+    // exceed the conservative cap. Surface clearly. (Typical LoRA
+    // params are tiny — rank=64, hidden=2560 = 164K — so this is
+    // future-proofing rather than a current concern.)
+    const VK_MIN_DISPATCH_AXIS: usize = 65535;
+    anyhow::ensure!(
+        n_elements.div_ceil(256) <= VK_MIN_DISPATCH_AXIS,
+        "sgd_step_f32: n_elements={n_elements} would dispatch \
+         {} workgroups (>{VK_MIN_DISPATCH_AXIS} per-axis Vulkan minimum)",
+        n_elements.div_ceil(256)
+    );
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/sgd_step_f32.comp"
