@@ -23,9 +23,12 @@ Vulkan training-route changes) twice hard-hung the host on the
   `flash_attn.comp` placeholder. F32 in/out, online-softmax, optional
   causal mask, head_dim ≤ 128. Wired into `flash_attn_prefill_vulkan`
   behind opt-in env var `KILN_VULKAN_SDPA=1`.
-- vulkan: Phase 4.2 prep — `sgd_step_f32.comp` shader and
-  `dispatch_sgd_step_f32` helper. Drops in once Phase 4.1 lands and
-  `TrainableLoraParams` are registry-resident `VulkanBuffer`s.
+- vulkan: Phase 4.2 — `sgd_step_f32.comp` shader,
+  `dispatch_sgd_step_f32` helper, and `BackendRuntime::dispatch_sgd_step`
+  trait method. Vulkan impl looks up both operands in
+  `RESIDENT_ACTIVATION_REGISTRY` and falls back to the candle CPU
+  path if either is not resident. Drops in for the trainer once
+  Phase 4.1 lands and `TrainableLoraParams` are registry-resident.
 - vulkan: Phase 3.1 hooks — `supports_resident_activation`,
   `register_resident_activation`, `evict_resident_activation`,
   `has_resident_activation` on `BackendRuntime` plus a
@@ -77,6 +80,14 @@ Vulkan training-route changes) twice hard-hung the host on the
   goes through chunked FLCE for the SFT loss path) and the in-op
   chunking (so any oversized matmul that does reach `VulkanLinearOp`
   is split into TDR-safe per-submit pieces).
+- transposed weight cache writer: replace blocking
+  `thread::sleep(initial_delay)` with `recv_timeout`-based wait so
+  a queued message wakes the writer immediately even mid-deferral.
+  Fixes a flaky-under-`cargo test`, fine-under-`cargo nextest`
+  unit test (`queue_cache_write_persists_payload_on_background_writer`)
+  whose 2-second deadline timed out when an earlier test had
+  initialized the OnceLock'd writer with the production-default
+  120 s initial delay.
 
 ## kiln-v0.2.15 — 2026-05-10
 
