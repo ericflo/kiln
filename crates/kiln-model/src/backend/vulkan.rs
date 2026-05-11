@@ -2576,8 +2576,17 @@ mod tests {
     #[test]
     fn resident_activation_register_evict_round_trip() -> Result<()> {
         let backend = VulkanBackend::new(Device::Cpu);
+        // The capability bit is true regardless of whether a Vulkan
+        // device exists in the test environment — it advertises the
+        // backend's *intent* to handle these hooks non-trivially.
+        // Trainer call sites gate on this to avoid the per-call
+        // extract_tensor_bytes overhead on CPU/Metal/CUDA backends.
+        assert!(
+            backend.supports_resident_activation(),
+            "VulkanBackend must advertise resident-activation support"
+        );
         if !backend.has_vulkan() {
-            eprintln!("Vulkan device unavailable, skipping");
+            eprintln!("Vulkan device unavailable, skipping live registry test");
             return Ok(());
         }
         // Small synthetic tensor — no specific shape required, the
