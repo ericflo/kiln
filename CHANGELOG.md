@@ -163,6 +163,24 @@ Vulkan training-route changes) twice hard-hung the host on the
   inference-only gate in `add_lora_delta_to_base` was removed —
   training-time forward now uses the on-device LoRA delta path.
 
+### Fixed (continued)
+- vulkan: dispatch helpers now query the actual device per-axis
+  workgroup-count limit (`maxComputeWorkGroupCount[i]`, typically
+  ≈ 2^31 - 1 on AMD/Strix Halo) instead of the conservative Vulkan
+  spec minimum (65535). Without this, the LoRA second matmul
+  `hidden @ B.T` for Qwen3.5-4B's gate_proj/up_proj at T=918
+  needs ~294K workgroups on axis 0, which the conservative guard
+  would falsely reject.
+- training: `apply_sgd_update` propagates `dispatch_sgd_step`
+  errors instead of swallowing them via `.ok().unwrap_or(false)`.
+  Shape-mismatch and similar bugs surface immediately rather than
+  silently degrading to CPU SGD with potentially-wrong results.
+
+### Trait additions (forward-looking)
+- `BackendRuntime::dispatch_adamw_step` stub per plan §4.2 ("AdamW
+  slot for later"). No-op default; future implementer adds the
+  Vulkan kernel + impl.
+
 ### Fixed
 - vulkan: lm_head training-time forward queuing ~4.36M workgroups in
   a single submit on a 40-CU APU (the root cause of two host
