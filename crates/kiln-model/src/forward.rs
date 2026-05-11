@@ -11581,6 +11581,16 @@ mod tests {
     use super::*;
     use crate::backend::cpu::CpuBackend;
 
+    /// Module-local mutex for tests that mutate process-wide env vars
+    /// (residency kill-switches, projection drop overrides). Serialises
+    /// those tests against each other so `nextest`'s parallel execution
+    /// doesn't observe a half-mutated environment.
+    ///
+    /// Module-local because `kiln_core::env_flag::TEST_ENV_LOCK` is
+    /// `cfg(test)`-gated and only visible inside kiln-core's own test
+    /// build — from another crate's tests it appears unresolved.
+    static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
@@ -12071,6 +12081,119 @@ mod tests {
         // Cuda device path is gated by feature; rely on the predicate's
         // pattern match returning false for Device::Cpu under non-Metal
         // builds, which is what the negative assertion above covers.
+    }
+
+    /// `marlin_bf16_drop_disabled()` must default to `false` (i.e.,
+    /// drop *enabled*) — that's the contract on the Vulkan training
+    /// path. The kill-switch `KILN_DISABLE_MARLIN_BF16_DROP=1` is the
+    /// only thing that should re-enable the duplicate BF16 residency.
+    ///
+    /// Pins the residency-audit claim that Marlin-absorbed BF16
+    /// weights are stubbed by default. A regression that flips the
+    /// default would silently double base-model footprint on the
+    /// candle CPU side.
+    #[test]
+    fn test_marlin_bf16_drop_default_is_enabled() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Save & clear the env var so the test reads the pure default.
+        let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
+        unsafe { std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP"); }
+        let result = marlin_bf16_drop_disabled();
+        // Restore the prior env state for any later test in this process.
+        if let Some(prev) = prior {
+            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev); }
+        }
+        assert!(!result, "marlin BF16 drop must be enabled by default");
+    }
+
+    /// Kill-switch must actually fire — `KILN_DISABLE_MARLIN_BF16_DROP=1`
+    /// disables the drop. Exercises the parsing logic so a typo in the
+    /// matcher (e.g. lower-casing missing) would be caught.
+    #[test]
+    fn test_marlin_bf16_drop_kill_switch_fires() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
+        for value in &["1", "true", "TRUE", "yes", "Yes"] {
+            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", value); }
+            assert!(
+                marlin_bf16_drop_disabled(),
+                "KILN_DISABLE_MARLIN_BF16_DROP={value} must disable the drop"
+            );
+        }
+        if let Some(prev) = prior {
+            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev); }
+        } else {
+            unsafe { std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP"); }
+        }
+    }
+
+    /// `keep_projection_originals_enabled()` must default to `false`
+    /// (i.e., projection originals are *eligible* for the drop on the
+    /// devices that ask for it). Pins the residency-audit claim that
+    /// per-layer projection originals are stubbed by default on Vulkan.
+    #[test]
+    fn test_keep_projection_originals_default_off() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
+        unsafe { std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS"); }
+        let result = keep_projection_originals_enabled();
+        if let Some(prev) = prior {
+            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+        }
+        assert!(!result, "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed)");
+    }
+
+    /// `KILN_KEEP_PROJECTION_ORIGINALS=1` must override the default
+    /// and keep the originals resident — required for A/B parity
+    /// debugging.
+    #[test]
+    fn test_keep_projection_originals_kill_switch_fires() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
+        for value in &["1", "true", "yes"] {
+            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", value); }
+            assert!(
+                keep_projection_originals_enabled(),
+                "KILN_KEEP_PROJECTION_ORIGINALS={value} must keep the originals"
+            );
+        }
+        if let Some(prev) = prior {
+            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+        } else {
+            unsafe { std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS"); }
+        }
+    }
+
+    /// `projection_original_drop_enabled_for_device(Device::Cpu)` is
+    /// `false` on plain CPU absent any overrides. (The Vulkan-active
+    /// and KILN_DROP_PROJECTION_ORIGINALS branches flip it true; both
+    /// are exercised by the integration runs, but the predicate's CPU
+    /// baseline is what this test pins.)
+    #[test]
+    fn test_projection_drop_cpu_default_off() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_keep = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
+        let prior_drop = std::env::var("KILN_DROP_PROJECTION_ORIGINALS").ok();
+        unsafe {
+            std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
+            std::env::remove_var("KILN_DROP_PROJECTION_ORIGINALS");
+        }
+        let result = if !crate::backend::vulkan_active() {
+            // Safe to assert: vulkan_active=false makes the device
+            // pattern-match the only deciding factor for Device::Cpu.
+            Some(projection_original_drop_enabled_for_device(&Device::Cpu))
+        } else {
+            None
+        };
+        if let Some(prev) = prior_keep {
+            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+        }
+        if let Some(prev) = prior_drop {
+            unsafe { std::env::set_var("KILN_DROP_PROJECTION_ORIGINALS", prev); }
+        }
+        if let Some(res) = result {
+            assert!(!res, "plain CPU with no overrides must NOT drop projection originals");
+        }
     }
 
     /// Property: when `embed_tokens` is a 1-element stub (the only
