@@ -2056,7 +2056,16 @@ fn tiled_segment_recompute_and_backward(
     device: &Device,
 ) -> Result<f64> {
     let (seg_start, seg_end) = segments[seg_idx];
-    let seg_input = boundary_states[seg_idx].clone();
+    // Phase 3.2: prefer registry resolve over candle clone, same as
+    // the monolithic path. Falls back to clone() when the backend
+    // doesn't support the registry, so non-Vulkan backends are
+    // unchanged.
+    let resident_activation = backend.supports_resident_activation();
+    let seg_input = segment_input_via_registry_or_clone(
+        backend,
+        &boundary_states[seg_idx],
+        resident_activation,
+    )?;
     let (_, total, _) = seg_input.dims3()?;
 
     // States threaded across tiles. Grad-tracked segment uses one shared
@@ -2357,7 +2366,14 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     // the inner ops don't bother building the LoRA-side autograd graph.
     let blocks = partition_segment_layers_by_attn_type(weights, seg_start, seg_end);
     let mut block_boundaries: Vec<Tensor> = Vec::with_capacity(blocks.len() + 1);
-    block_boundaries.push(boundary_states[seg_idx].clone());
+    // Phase 3.2: registry-resolve fast path for the segment's input
+    // boundary when supported by the backend.
+    let resident_activation = backend.supports_resident_activation();
+    block_boundaries.push(segment_input_via_registry_or_clone(
+        backend,
+        &boundary_states[seg_idx],
+        resident_activation,
+    )?);
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         let mut current = block_boundaries[0].clone();
