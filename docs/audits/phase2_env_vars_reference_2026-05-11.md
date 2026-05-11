@@ -19,9 +19,9 @@ This is a single-page operator reference. Authoritative sources are the docstrin
 
 | Var | Tristate | Default | Effect |
 |-----|----------|---------|--------|
-| `KILN_VULKAN_LINEAR` | `1`/`0` | **off** (opt-in) | Routes training-time projection forward + backward through `VulkanLinearOp` (CustomOp1) with chunked dispatch. Reverted to opt-in after the Strix Halo host hangs documented in `phase2_hardware_validation_runbook_2026-05-11.md`. |
+| `KILN_VULKAN_LINEAR` | `1`/`0` | **on** | Routes training-time projection forward + backward through `VulkanLinearOp` with chunked dispatch. Default-on after the chunking + FLCE auto-engagement + LoRA CustomOp3 wiring made the entire training stack correct + safe by construction. Set to `0` to opt out for parity comparisons. |
 | `KILN_VULKAN_LINEAR_MAX_GFLOP` | f64 (GFLOP) | 20 | Per-submit FLOP ceiling for `VulkanLinearOp`. Above this, the BF16-packed path chunks along output dim (forward) or batch dim (backward); the F32 path bails to CPU `broadcast_matmul`. Set to 0 to disable the guard (NOT recommended on unified APUs). |
-| `KILN_VULKAN_SDPA` | `1`/`0` | **off** (opt-in) | Wires `flash_attn_prefill` to the new `sdpa_prefill_f32` Vulkan kernel. Replaces the buggy `flash_attn.comp` placeholder. |
+| `KILN_VULKAN_SDPA` | `1`/`0` | **on** | Wires `flash_attn_prefill` to the `sdpa_prefill_f32` Vulkan kernel. Default-on now that the kernel is parity-tested at multiple shapes including Qwen3.5-4B head_dim=128. Set to `0` to opt out. |
 | `KILN_VULKAN_FLCE` | `1`/`0`/auto | **auto** (engages at `active_count ≥ 16`) | Forces the Vulkan FLCE provider on or off, or lets the auto-heuristic decide. Auto threshold lowered from `active_count × num_chunks ≥ 50_000` after the host hangs (the unfused lm_head path it competes against is now itself catastrophic, not just slow). |
 | `KILN_VULKAN_RMSNORM` | `1`/`0` | **on** | Inference-path RMSNorm Vulkan kernel. Default-on since v0.2.14. |
 | `KILN_VULKAN_RMSNORM_TRAINING` | `1`/`0`/auto | **auto** (engages at `row_count ≥ 1024`) | Training-path Vulkan RMSNorm autograd. Below the threshold the per-call dispatch overhead exceeds the kernel's compute savings vs the candle CPU `broadcast_mul` chain. |
@@ -51,15 +51,19 @@ These don't change behaviour, just what gets logged.
 - `VulkanBackend::register_resident_activation first call` trace fires once per process, confirming the Phase 3.1 lifecycle is engaging during checkpointed training.
 - HTTP 413 rejection messages from `/v1/training/sft` and `/v1/training/grpo` include a `vram_source=...` clause when the corrected budget came from the unified-memory path — makes `KILN_TRAINING_MEMORY_RESERVE_GB` the obvious next knob.
 
-## Quick-reference: enabling everything for Strix Halo
+## Quick-reference: defaults already enable the full Vulkan training stack
 
 ```sh
-# Once the validation runbook (Steps 1-4) passes:
-export KILN_VULKAN_LINEAR=1
-export KILN_VULKAN_SDPA=1
-# Default ceiling of 20 GFLOP is calibrated against FLCE's empirical
-# safe per-chunk size — no need to override unless lowering further.
-# export KILN_VULKAN_LINEAR_MAX_GFLOP=10
+# Default `kiln serve` runs:
+#   - KILN_VULKAN_LINEAR=on (chunked projections + lora_delta_resident
+#     via VulkanLoraOp CustomOp3 with autograd backward)
+#   - KILN_VULKAN_SDPA=on (full-attn matmuls via sdpa_prefill_f32)
+#   - KILN_VULKAN_FLCE=auto (engages at active_count >= 16)
+#   - KILN_VULKAN_RMSNORM=on (inference RMSNorm)
+#   - KILN_VULKAN_RMSNORM_TRAINING=auto (engages at row_count >= 1024)
+#   - dispatch_sgd_step on resident LoRA Vars (BF16 + F32 kernels)
+# No env vars needed. Tune `KILN_VULKAN_LINEAR_MAX_GFLOP` if a
+# specific dispatch shape needs more aggressive chunking.
 ```
 
 ## Quick-reference: disabling everything for fall-back

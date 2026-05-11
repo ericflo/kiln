@@ -235,28 +235,38 @@ run_step() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 1: defaults — KILN_VULKAN_LINEAR=0, KILN_VULKAN_SDPA=0,
-# FLCE auto-engagement at active_count >= 16.
+# Step 1: minimal everything-off — opts out of every Vulkan training
+# acceleration path. This is the "all-CPU forward + candle CPU SGD"
+# configuration; gives a known-good baseline against which steps 2-3
+# can be diff'd.
 # -----------------------------------------------------------------------------
-if ! run_step "step1-defaults" 'RUST_LOG=info'; then
+if ! run_step "step1-everything-off" 'RUST_LOG=info
+KILN_VULKAN_LINEAR=0
+KILN_VULKAN_SDPA=0
+KILN_VULKAN_FLCE=0'; then
     echo ">>> Step 1 FAILED. Logs in $LOG_DIR" >&2
     exit 2
 fi
 
 # -----------------------------------------------------------------------------
-# Step 2: KILN_VULKAN_LINEAR=1 — chunked dispatch on SFT path.
+# Step 2: production defaults — KILN_VULKAN_LINEAR=on, SDPA=on, FLCE
+# auto, on-device LoRA delta + BF16 SGD. This is what `kiln serve`
+# now runs out of the box after Phase 4.x landed (commit e501663f).
 # -----------------------------------------------------------------------------
-if ! run_step "step2-vulkan-linear" 'RUST_LOG=info
-KILN_VULKAN_LINEAR=1'; then
+if ! run_step "step2-production-defaults" 'RUST_LOG=info'; then
     echo ">>> Step 2 FAILED. Logs in $LOG_DIR" >&2
     exit 3
 fi
 
 # -----------------------------------------------------------------------------
-# Step 3: KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1 — full-attn
-# prefill matmuls now go through the new SDPA F32 kernel.
+# Step 3: explicit KILN_VULKAN_LINEAR=1 + KILN_VULKAN_SDPA=1.
+# Functionally identical to Step 2 (same as defaults) but flushes
+# the OnceLock-cached env state on a fresh process and surfaces a
+# different "linear=on (env)" vs "on (default)" tag in the
+# acceleration-profile log so the operator can confirm both paths
+# produce the same loss.
 # -----------------------------------------------------------------------------
-if ! run_step "step3-vulkan-sdpa" 'RUST_LOG=info
+if ! run_step "step3-vulkan-explicit" 'RUST_LOG=info
 KILN_VULKAN_LINEAR=1
 KILN_VULKAN_SDPA=1'; then
     echo ">>> Step 3 FAILED. Logs in $LOG_DIR" >&2
@@ -268,7 +278,7 @@ echo ">>> Steps 1, 2, 3 passed. Logs in $LOG_DIR" >&2
 # Compact summary of the per-step server logs — surfaces the
 # acceleration-profile and chunking traces so the operator can confirm
 # the right paths engaged without grepping the full server logs.
-for step in step1-defaults step2-vulkan-linear step3-vulkan-sdpa; do
+for step in step1-everything-off step2-production-defaults step3-vulkan-explicit; do
     echo "" >&2
     echo "--- $step traces ---" >&2
     if [[ -f "$LOG_DIR/$step-server.log" ]]; then
