@@ -36,7 +36,8 @@ use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Storage, 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
 /// Per-dispatch FLOP ceiling for the Vulkan-routed matmul. Above this,
-/// `cpu_fwd` and `bwd` fall back to candle's CPU `broadcast_matmul`
+/// `cpu_fwd` and `bwd` chunk the dispatch into multiple submits (BF16
+/// path) or fall back to candle's CPU `broadcast_matmul` (F32 path)
 /// rather than queuing a single Vulkan submit large enough to risk
 /// hanging the GPU/driver.
 ///
@@ -51,16 +52,20 @@ use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 /// path on Strix Halo evidently does not handle the queue depth
 /// gracefully.
 ///
-/// 100 GFLOP per dispatch translates to ~4 s on a Strix Halo at 25
-/// TFLOPS, which is well within reasonable per-dispatch latency. The
-/// pre-Phase-2 baseline ran the same matmul through CPU
-/// `broadcast_matmul` without crashing — bailing here just restores
-/// that for the lm_head shape.
+/// **Calibration:** FLCE has been running with chunk_size=4096 vocab
+/// columns at T~244 without issue — that's `244 * 2560 * 4096 * 2`
+/// = ~5 GFLOP per submit. At T=918 the same chunk shape is ~19 GFLOP.
+/// Both are safe in observed practice. Setting the ceiling at 20
+/// GFLOP gives ≈ 800 ms per submit at 25 TFLOPS — comparable to FLCE's
+/// proven cadence, leaves frequent compositor preemption windows, and
+/// produces a manageable chunk count (lm_head fwd at T=918 splits into
+/// ~38 chunks, same as FLCE's vocab-chunk count, so total dispatch
+/// overhead is bounded).
 ///
 /// Tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP` (parsed once at process
 /// start). Set to 0 to disable the guard entirely (NOT recommended on
 /// Strix Halo). Decimals are accepted (e.g. `KILN_VULKAN_LINEAR_MAX_GFLOP=50.0`).
-const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 100_000_000_000;
+const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 20_000_000_000;
 
 /// FLOP estimate for a `[batch, hidden] @ [hidden, out_dim]` matmul.
 /// Counts one multiply + one add per inner term, matching the kernel's
@@ -1053,43 +1058,47 @@ mod tests {
     #[test]
     fn safety_guard_rejects_lm_head_repro_shape() {
         // T=918 lm_head forward shape from the crashed repro.
+        // ~715 GFLOP — vastly above the 20 GFLOP per-submit ceiling.
         assert!(
             dispatch_exceeds_safety_ceiling(918, 2560, 152064),
             "[918, 2560] @ [2560, 152064] is the shape that hung the host \
-             twice; it must be rejected"
+             twice; the BF16 path must classify it as 'chunk this'"
         );
-        // Even at T=64 the lm_head shape is still 50 GFLOP — but the
-        // smaller batch is well under the 100 GFLOP ceiling, so it
-        // would dispatch. That's expected: the lm_head guard is about
-        // bandwidth/queue-depth at large T, not output dimension alone.
-        assert!(
-            !dispatch_exceeds_safety_ceiling(64, 2560, 152064),
-            "T=64 lm_head fits under the 100 GFLOP ceiling and should \
-             still dispatch"
-        );
+        // Even modest lm_head shapes get chunked — at T=16 the matmul
+        // is 12 GFLOP (under), at T=32 it's 25 GFLOP (over). The
+        // chunking is essentially free above ~16 since the per-submit
+        // overhead is microseconds vs hundreds of milliseconds of
+        // compute per chunk.
+        assert!(!dispatch_exceeds_safety_ceiling(16, 2560, 152064));
+        assert!(dispatch_exceeds_safety_ceiling(32, 2560, 152064));
     }
 
-    /// Counter-test: normal projection shapes should NOT be guarded
-    /// out — they're an order of magnitude smaller than the lm_head
-    /// matmul and were running fine on the GPU before Phase 2.
+    /// Counter-test: small projection shapes should still single-shot
+    /// dispatch — they're well under the per-submit ceiling. Larger
+    /// projections (GDN in_proj at T=918, MLP gate_up) split into a
+    /// handful of chunks, which is fine: per-dispatch overhead is
+    /// ~50µs each vs the ~800ms compute per chunk.
     #[test]
     fn safety_guard_allows_normal_projection_shapes() {
         // Qwen3.5-4B q_proj forward: T × hidden=2560 → out_dim=2560.
-        // Even at T=4096 this is only ~107 GFLOP — borderline, but a
-        // single matmul of this shape has not been observed to hang
-        // the GPU. Realistic training T is much smaller.
-        for t in [1, 64, 256, 918, 1500] {
+        // 12 GFLOP at T=918, well under the 20 GFLOP ceiling.
+        for t in [1, 64, 256, 918] {
             assert!(
                 !dispatch_exceeds_safety_ceiling(t, 2560, 2560),
-                "q_proj-shape [T={t}, 2560, 2560] is within capability \
-                 — should be allowed"
+                "q_proj-shape [T={t}, 2560, 2560] is well under the \
+                 ceiling — should single-shot dispatch"
             );
         }
-        // GDN in_proj_qkv: hidden=2560 → out_dim=8192. At T=918 this
-        // is ~38 GFLOP, well under the ceiling.
-        assert!(!dispatch_exceeds_safety_ceiling(918, 2560, 8192));
-        // MLP gate_up: hidden=2560 → out_dim=2560*4. Same order.
-        assert!(!dispatch_exceeds_safety_ceiling(918, 2560, 10240));
+        // At T=2048 q_proj would be 27 GFLOP (over), so chunking
+        // engages — that's expected and safe.
+        assert!(dispatch_exceeds_safety_ceiling(2048, 2560, 2560));
+
+        // GDN in_proj_qkv at T=918 (~38 GFLOP) and MLP gate_up
+        // (~24 GFLOP) chunk into a handful of submits. They are
+        // OVER the per-submit ceiling but UNDER the multi-chunk
+        // overhead concern (a few chunks each).
+        assert!(dispatch_exceeds_safety_ceiling(918, 2560, 8192));
+        assert!(dispatch_exceeds_safety_ceiling(918, 2560, 10240));
     }
 
     /// Env-var override: `KILN_VULKAN_LINEAR_MAX_GFLOP=0` should make
@@ -1114,8 +1123,8 @@ mod tests {
     /// in the caller's chunking loop).
     #[test]
     fn max_chunk_dim_for_flop_is_within_ceiling() {
-        // 100 GFLOP default ceiling. lm_head fwd chunking shape:
-        // other_dims = batch * hidden = 918 * 2560.
+        // Default 20 GFLOP per-submit ceiling. lm_head fwd chunking
+        // shape: other_dims = batch * hidden = 918 * 2560.
         let chunk = max_chunk_dim_for_flop(918 * 2560);
         let per_chunk_flop = matmul_flop(918, 2560, chunk);
         assert!(
@@ -1124,6 +1133,15 @@ mod tests {
              {}",
             max_flop_per_dispatch()
         );
+        // Sanity: at the 20 GFLOP ceiling, chunk size for lm_head
+        // fwd should be approximately the FLCE chunk size (4096 vocab
+        // cols), since the underlying compute and target per-submit
+        // time are the same. Loose bound — must be in [1024, 8192].
+        assert!(
+            (1024..=8192).contains(&chunk),
+            "lm_head fwd chunk size {chunk} should be in FLCE-ish range"
+        );
+
         // For the lm_head bwd shape: other_dims = out_dim * hidden
         // = 152064 * 2560 (huge), chunk_batch should be small but ≥ 1.
         let chunk_b = max_chunk_dim_for_flop(152064 * 2560);
