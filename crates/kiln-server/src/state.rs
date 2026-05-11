@@ -1580,8 +1580,8 @@ impl AppState {
                 }
             };
             tracing::info!(
-                linear = env_flag("KILN_VULKAN_LINEAR", false),
-                sdpa = env_flag("KILN_VULKAN_SDPA", false),
+                linear = env_flag("KILN_VULKAN_LINEAR", true),
+                sdpa = env_flag("KILN_VULKAN_SDPA", true),
                 rmsnorm_inference = env_flag("KILN_VULKAN_RMSNORM", true),
                 rmsnorm_training = "auto (row_count >= 1024)",
                 flce_provider = "auto (active_count >= 16)",

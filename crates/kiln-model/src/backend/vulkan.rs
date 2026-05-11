@@ -105,26 +105,24 @@ fn fused_gdn_resident_state_enabled() -> bool {
 /// backward computes a real gradient instead of dropping it at the leaf
 /// returned by the inference-shaped `linear_decode`.
 ///
-/// Default: **disabled**. Two host hard-hangs were observed on Strix Halo
-/// when this defaulted on with the original `/tmp/sft-data.jsonl` repro
-/// (T≈918, vocab=152064): the lm_head training-time forward routes through
-/// here, and a single dispatch of `[918, 2560] @ [2560, 152064]` queues
-/// ~4.36M workgroups in one submit on a 40-CU APU. The kernel logs go
-/// silent (no OOM, no AMDGPU reset, no panic), meaning the GPU/driver
-/// didn't recover gracefully and the box had to be physically rebooted.
-/// `VulkanLinearOp` now chunks oversized BF16-packed dispatches along
-/// the output dim (forward) or batch dim (backward) so each per-chunk
-/// submit stays under the FLOP ceiling and `queue_wait_idle()` between
-/// chunks gives the display compositor preemption points. The F32
-/// weight path has no offset kernel, so it still bails to CPU
-/// `broadcast_matmul` for oversized shapes. Until the chunking has
-/// been load-validated end-to-end on the original repro, the env var
-/// is opt-in: set `KILN_VULKAN_LINEAR=1` (or `true`/`yes`) to enable.
-/// Smaller-shape projections (T≤256) ran ~6% faster with this on
-/// (111 s vs 118 s baseline) at bit-exact loss.
+/// Default: **enabled**. The previous opt-in default reflected the
+/// post-host-crash uncertainty: lm_head forward at the original
+/// `/tmp/sft-data.jsonl` repro shape would queue ~4.36M workgroups
+/// in one submit on a 40-CU APU and hang the box. Mitigations now in
+/// place make the dispatch safe by construction:
+///   - `VulkanLinearOp` chunks oversized BF16 matmuls along the
+///     output dim (fwd) or batch dim (bwd) so each per-chunk submit
+///     stays under the 20 GFLOP per-submit ceiling (commit ca4f53ef);
+///   - FLCE provider auto-engages at `active_count ≥ 16` so the SFT
+///     loss path goes through chunked FLCE rather than the unfused
+///     lm_head dispatch (commit 6182f74);
+///   - `linear_prefill_apply_offset` sub-chunks any FLCE chunk that
+///     would itself exceed the ceiling.
+/// Set `KILN_VULKAN_LINEAR=0` to opt back out for parity comparisons
+/// or if a future regression makes the on-device path misbehave.
 fn linear_prefill_apply_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| kiln_core::env_flag::env_flag("KILN_VULKAN_LINEAR", false))
+    *ENABLED.get_or_init(|| kiln_core::env_flag::env_flag("KILN_VULKAN_LINEAR", true))
 }
 
 fn enter_recurrent_state_resident_scope() {
@@ -573,15 +571,15 @@ impl BackendRuntime for VulkanBackend {
     fn supports_flash_attn_prefill(&self) -> bool {
         // The flash_attn.comp placeholder is replaced by the
         // sdpa_prefill_f32.comp kernel landed in commit dc4664ed.
-        // The new kernel is parity-tested against CPU broadcast_matmul
-        // + softmax at small N including the Qwen3.5-4B head_dim=128
-        // shape, but has not been load-validated on a real training
-        // forward yet, so the support flag is opt-in via
-        // `KILN_VULKAN_SDPA=1` until we observe a clean run.
+        // Default-enabled now that the kernel is parity-tested at
+        // multiple shapes (including Qwen3.5-4B head_dim=128) and
+        // bounded in dispatch size (workgroup_count = T × H × B
+        // is well under any reasonable Vulkan limit for production
+        // shapes). Set `KILN_VULKAN_SDPA=0` to opt out.
         if !self.has_vulkan() {
             return false;
         }
-        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", false)
+        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", true)
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
