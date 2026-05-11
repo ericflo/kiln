@@ -8672,6 +8672,20 @@ pub fn dispatch_sdpa_prefill_f32(
         head_dim <= 128,
         "sdpa_prefill_f32: head_dim {head_dim} > 128 (workgroup size limit)"
     );
+    // Vulkan spec only guarantees `maxComputeWorkGroupCount[i] >= 65535`
+    // per axis. The dispatch grid is (seq_len, num_heads, batch); if any
+    // axis would exceed that, surface a clear error rather than letting
+    // vkCmdDispatch silently drop work or fail with an opaque
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Strix Halo's actual limit is much
+    // higher, but the conservative cap keeps us portable.
+    const VK_MIN_DISPATCH_AXIS: usize = 65535;
+    anyhow::ensure!(
+        seq_len <= VK_MIN_DISPATCH_AXIS
+            && num_heads <= VK_MIN_DISPATCH_AXIS
+            && batch <= VK_MIN_DISPATCH_AXIS,
+        "sdpa_prefill_f32: dispatch grid (seq_len={seq_len}, num_heads={num_heads}, \
+         batch={batch}) exceeds Vulkan's per-axis minimum {VK_MIN_DISPATCH_AXIS}"
+    );
 
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
