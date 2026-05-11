@@ -29,6 +29,26 @@ Vulkan training-route changes) twice hard-hung the host on the
   `RESIDENT_ACTIVATION_REGISTRY` and falls back to the candle CPU
   path if either is not resident. Drops in for the trainer once
   Phase 4.1 lands and `TrainableLoraParams` are registry-resident.
+- vulkan: `BackendRuntime::resolve_resident_activation` read-back
+  hook + Vulkan impl using `VulkanBuffer::read_back` +
+  `kernels::create_tensor_from_data`. API surface for Phase 3.2's
+  actual memory-saving wiring (drop the candle CPU mirror after
+  registering, re-materialise from the device buffer when the
+  recompute pass needs it).
+- core: `kiln_core::env_flag::env_flag(name, default) -> bool` and
+  `env_tristate(name) -> Option<bool>` helpers. Centralised the
+  truthy/falsy spellings (`1`/`true`/`yes` and `0`/`false`/`no`,
+  case-insensitive, whitespace-trimmed) so every `KILN_*` flag
+  parses the same way and unrecognised values fall back to the
+  default rather than silently flipping behaviour. Refactored
+  4 call sites (KILN_VULKAN_LINEAR, KILN_VULKAN_SDPA, KILN_W4A16,
+  KILN_VULKAN_FLCE, KILN_VULKAN_RMSNORM_TRAINING).
+- vulkan: `register_resident_activation` bails silently on a
+  zero-byte tensor (some drivers reject `vkCreateBuffer(size=0)`);
+  caller falls through to its CPU path.
+- telemetry: one-shot trace for first offset sub-chunked dispatch
+  (`linear_prefill_apply_offset` engages internal sub-chunking when
+  a FLCE chunk_len exceeds the FLOP ceiling).
 - vulkan: Phase 3.1 hooks — `supports_resident_activation`,
   `register_resident_activation`, `evict_resident_activation`,
   `has_resident_activation` on `BackendRuntime` plus a
