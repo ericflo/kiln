@@ -418,10 +418,16 @@ fn spawn_backend_prewarm(state: AppState) {
 
             precompile_metal_custom_kernels(&device);
             precompile_vulkan_custom_kernels(&device);
-            let runner_guard = runner.read().unwrap();
+            // Write lock — `prewarm_backend_decode_weights` now mutates
+            // `weights` to stub the pre-transposed bf16 caches after Vulkan
+            // upload (frees ~6-7 GB of candle CPU residency). Prewarm runs
+            // once at startup so the brief exclusive lock is fine.
+            let mut runner_guard = runner.write().unwrap();
             runner_guard
                 .prewarm_backend_decode_weights()
                 .context("backend decode weight prewarm failed")?;
+            drop(runner_guard);
+            let runner_guard = runner.read().unwrap();
             let params = SamplingParams {
                 temperature: 0.0,
                 top_p: 1.0,

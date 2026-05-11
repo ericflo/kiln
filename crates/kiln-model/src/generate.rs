@@ -1019,8 +1019,18 @@ impl ModelRunner {
     }
 
     /// Preload backend-specific decode weights into any persistent device cache.
-    pub fn prewarm_backend_decode_weights(&self) -> Result<()> {
-        self.backend.prewarm_decode_weights(&self.weights)
+    ///
+    /// After upload, on backends that opt in (Vulkan today), drop the
+    /// pre-transposed candle CPU storage of those weights so that the
+    /// device-resident buffer is the only canonical copy. Saves
+    /// ~6-7 GB peak RSS on Qwen3.5-4B at T=918 training shape — see
+    /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
+    pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
+        self.backend.prewarm_decode_weights(&self.weights)?;
+        let device = self.weights.embed_tokens.device().clone();
+        self.backend
+            .drop_uploaded_bf16_weights(&mut self.weights, &device)?;
+        Ok(())
     }
 
     /// Load a LoRA adapter from a PEFT-compatible directory.

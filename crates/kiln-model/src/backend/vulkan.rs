@@ -2225,6 +2225,134 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
+    /// Phase 4.x residency: drop the candle CPU storage of every
+    /// pre-transposed weight cache (`*_proj_t`, `embed_tokens_t`)
+    /// whose BF16-packed bytes are already resident in
+    /// [`Self::bf16_packed_weight_cache`]. Replace each with a
+    /// 1-element BF16 stub and re-key the cache so subsequent
+    /// lookups against the new TensorId still find the same
+    /// `Arc<VulkanBuffer>`.
+    ///
+    /// Saves ~6-7 GB peak RSS on Qwen3.5-4B training at T=918 — the
+    /// transposed-cache copies are the dominant remaining
+    /// candle-side residency item documented in
+    /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
+    ///
+    /// Safe because:
+    /// - The bf16-packed Vulkan code paths read the weight via the
+    ///   `Arc<VulkanBuffer>` looked up in `bf16_packed_weight_cache`.
+    ///   They never re-read the candle storage of the source tensor
+    ///   after the buffer is cached.
+    /// - `VulkanLinearOp::bwd` for BF16 weights routes through the
+    ///   transposed Vulkan kernel (also buffer-backed). The F32
+    ///   fallback bwd path that *does* read `self.weight_t` cannot
+    ///   fire for BF16 weights.
+    /// - Non-BF16 tensors and tensors not in the cache are skipped.
+    fn drop_uploaded_bf16_weights(
+        &self,
+        weights: &mut crate::forward::GpuWeights,
+        device: &Device,
+    ) -> Result<usize> {
+        if !self.has_vulkan() {
+            return Ok(0);
+        }
+        let stub_template = Tensor::zeros((1usize,), DType::BF16, device)
+            .context("drop_uploaded_bf16_weights: create stub")?;
+        let mut cache = self
+            .bf16_packed_weight_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("bf16 weight cache mutex poisoned"))?;
+
+        // Per-tensor replacement closure. Returns true if the tensor
+        // was stubbed (was BF16 and in the cache).
+        //
+        // Re-keys the cache: removes the entry at the old TensorId
+        // and inserts the same `Arc<VulkanBuffer>` at the new
+        // (stub) TensorId so subsequent `cached_bf16_packed_weight_buffer`
+        // calls find the same buffer.
+        fn replace(
+            t: &mut Tensor,
+            cache: &mut std::collections::HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+            stub_template: &Tensor,
+        ) -> bool {
+            if t.dtype() != DType::BF16 {
+                return false;
+            }
+            let old_id = t.id();
+            let Some(buf) = cache.remove(&old_id) else {
+                return false;
+            };
+            let new_stub = stub_template.clone();
+            let new_id = new_stub.id();
+            *t = new_stub;
+            cache.insert(new_id, buf);
+            true
+        }
+
+        let mut stubbed = 0usize;
+
+        // Top-level embedding transpose.
+        if replace(&mut weights.embed_tokens_t, &mut cache, &stub_template) {
+            stubbed += 1;
+        }
+
+        // Per-layer attention + MLP transposes.
+        for layer in weights.layers.iter_mut() {
+            match &mut layer.attention {
+                crate::forward::GpuAttentionWeights::Full(attn) => {
+                    for t in [
+                        &mut attn.q_proj_t,
+                        &mut attn.k_proj_t,
+                        &mut attn.v_proj_t,
+                        &mut attn.o_proj_t,
+                    ] {
+                        if replace(t, &mut cache, &stub_template) {
+                            stubbed += 1;
+                        }
+                    }
+                    if let Some(qkv_t) = attn.qkv_proj_t.as_mut() {
+                        if replace(qkv_t, &mut cache, &stub_template) {
+                            stubbed += 1;
+                        }
+                    }
+                }
+                crate::forward::GpuAttentionWeights::Linear(attn) => {
+                    for t in [
+                        &mut attn.in_proj_qkv_t,
+                        &mut attn.in_proj_z_t,
+                        &mut attn.in_proj_a_t,
+                        &mut attn.in_proj_b_t,
+                        &mut attn.out_proj_t,
+                    ] {
+                        if replace(t, &mut cache, &stub_template) {
+                            stubbed += 1;
+                        }
+                    }
+                    if let Some(ab_t) = attn.in_proj_ab_t.as_mut() {
+                        if replace(ab_t, &mut cache, &stub_template) {
+                            stubbed += 1;
+                        }
+                    }
+                }
+            }
+            for t in [
+                &mut layer.mlp.gate_proj_t,
+                &mut layer.mlp.up_proj_t,
+                &mut layer.mlp.down_proj_t,
+            ] {
+                if replace(t, &mut cache, &stub_template) {
+                    stubbed += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            stubbed,
+            "dropped candle CPU storage of pre-transposed bf16 weight caches"
+        );
+        Ok(stubbed)
+    }
+
     fn full_attn_qkv_decode(
         &self,
         x: &Tensor,

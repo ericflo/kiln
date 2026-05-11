@@ -831,6 +831,30 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(())
     }
 
+    /// Drop the candle CPU storage of pre-transposed weight caches
+    /// (`*_proj_t`, `embed_tokens_t`) that have already been uploaded
+    /// to the backend's persistent device cache during
+    /// `prewarm_decode_weights`.
+    ///
+    /// On Vulkan/UMA APUs this is the biggest remaining residency
+    /// win: the transposed-cache copies are ~6-7 GB across 32 layers
+    /// of Qwen3.5-4B, and after upload they're functionally dead
+    /// weight on the candle CPU side — the kernels read from the
+    /// device-resident `VulkanBuffer` keyed by the cache. Replacing
+    /// each tensor with a 1-element BF16 stub and re-keying the
+    /// backend's TensorId→buffer cache to the stub's new TensorId
+    /// preserves the kernel-lookup path while reclaiming the bytes.
+    ///
+    /// Default no-op; only Vulkan implements it today.
+    /// Returns the number of tensors actually stubbed (for telemetry).
+    fn drop_uploaded_bf16_weights(
+        &self,
+        _weights: &mut crate::forward::GpuWeights,
+        _device: &Device,
+    ) -> Result<usize> {
+        Ok(0)
+    }
+
     /// Fused single-token full-attention Q/K/V projections.
     ///
     /// `x` is `[1, 1, hidden]`; weights are pre-transposed as
