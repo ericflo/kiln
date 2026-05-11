@@ -628,6 +628,25 @@ mod tests {
 
     #[test]
     fn queue_cache_write_persists_payload_on_background_writer() -> Result<()> {
+        // **Run this test under `cargo nextest`, not plain `cargo test`.**
+        //
+        // Why: the cache writer thread reads CACHE_WRITE_INITIAL_DELAY_ENV
+        // ONCE at OnceLock initialization (the spawn at line ~195). If
+        // another test in the kiln-model lib binary triggers
+        // `queue_cache_write` before this test runs, the writer is
+        // already sleeping the production default (120 s) and the
+        // 2-second deadline below times out. nextest runs each test
+        // in its own process, so the OnceLock is fresh per test.
+        //
+        // Plain `cargo test` shares the process, so the test is
+        // race-prone. Marking this `#[cfg_attr(not(nextest), ignore)]`
+        // would be the cleanest fix but the cfg flag isn't standard;
+        // the canonical fix is to restructure the writer to re-read
+        // the env var per message, which is bigger surgery than this
+        // test deserves. For now: be aware that
+        // `cargo test -p kiln-model` may report a single failure
+        // here under load — it's a known race, not a regression.
+        //
         // Each nextest test process is isolated. Keep this unit test fast while
         // production defers cache writes away from startup/first-request load.
         unsafe {
