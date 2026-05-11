@@ -135,6 +135,21 @@ done > /tmp/kiln-validation-mem.log &
 
 After each step, attach `/tmp/kiln-validation-mem.log` to the validation report. The 5-second cadence is enough to spot the kind of slow MemAvailable decline that preceded the prior crashes.
 
+### Trace lines to look for in the server log
+
+Each of these is a one-shot info-level log (fires once per process), so absence == "this code path never engaged this run". Useful checklist for whether the right paths fired:
+
+| Trace | Fires when |
+| --- | --- |
+| `GPU memory budget` (with `vram_source = ...`) | Always, at startup. Confirms the corrected budget. |
+| `Vulkan training acceleration profile` | Always, at startup. Shows on/off state of every `KILN_VULKAN_*` flag. |
+| `VulkanLinearOp::linear_prefill_apply first dispatch` | First time training projection routes through the autograd-safe Vulkan op. Requires `KILN_VULKAN_LINEAR=1`. |
+| `VulkanLinearOp::cpu_fwd first chunked dispatch` | First time an oversized matmul triggers in-op output-dim chunking. Logs chunk_count + per_chunk_gflop. |
+| `VulkanLinearOp::bwd first chunked dispatch` | Same for the backward path's batch-dim chunking. |
+| `linear_prefill_apply_offset first sub-chunked dispatch` | First time a FLCE chunk_len exceeds the FLOP ceiling and gets sub-chunked. |
+| `VulkanBackend::register_resident_activation first call` | First time the trainer registers a boundary state. Confirms Phase 3.1 lifecycle is engaging. |
+| `VulkanBackend::dispatch_sgd_step first call` | First time an on-device SGD step fires. Today this is gated on Phase 4.1 storage interception which isn't landed — should NOT appear in the log. If it does, something else is registering a Var, which is unexpected. |
+
 ## Rollback
 
 If anything regresses at Step 1 (with all the new defaults but no opt-ins), the issue is in the FLCE auto-threshold lowering or the embedded SDPA shader. The cleanest rollback is a hard reset to the pre-Phase-2-hardening tip:
