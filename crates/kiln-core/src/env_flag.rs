@@ -58,8 +58,17 @@ pub fn env_tristate(name: &str) -> Option<bool> {
 mod tests {
     use super::*;
 
+    /// `std::env::set_var` is unsafe because other threads might be
+    /// reading env vars at the same time. Even with unique var names
+    /// per test, neighboring tests in this binary (e.g. `detect_vram`
+    /// reading `KILN_GPU_MEMORY_GB`) can race against any env::set_var
+    /// call. Hold this mutex for the duration of any env-mutating
+    /// test so reads in other tests see consistent values.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn truthy_values() {
+        let _g = ENV_LOCK.lock().unwrap();
         for (val, want) in [("1", true), ("true", true), ("yes", true), ("TRUE", true), ("Yes", true), (" 1 ", true)] {
             unsafe { std::env::set_var("KILN_TEST_FLAG_TRUTHY", val); }
             assert_eq!(env_flag("KILN_TEST_FLAG_TRUTHY", false), want, "value {val:?}");
@@ -69,6 +78,7 @@ mod tests {
 
     #[test]
     fn falsy_values() {
+        let _g = ENV_LOCK.lock().unwrap();
         for (val, want) in [("0", false), ("false", false), ("no", false), ("FALSE", false), ("No", false), (" 0 ", false)] {
             unsafe { std::env::set_var("KILN_TEST_FLAG_FALSY", val); }
             assert_eq!(env_flag("KILN_TEST_FLAG_FALSY", true), want, "value {val:?}");
@@ -78,6 +88,7 @@ mod tests {
 
     #[test]
     fn unrecognised_falls_back_to_default() {
+        let _g = ENV_LOCK.lock().unwrap();
         unsafe { std::env::set_var("KILN_TEST_FLAG_GIBBERISH", "maybe"); }
         assert!(env_flag("KILN_TEST_FLAG_GIBBERISH", true));
         assert!(!env_flag("KILN_TEST_FLAG_GIBBERISH", false));
@@ -86,6 +97,7 @@ mod tests {
 
     #[test]
     fn unset_falls_back_to_default() {
+        let _g = ENV_LOCK.lock().unwrap();
         // Use a name unlikely to be set in any environment.
         let name = "KILN_TEST_FLAG_DEFINITELY_UNSET_b9e0a4f1";
         unsafe { std::env::remove_var(name); }
@@ -95,6 +107,7 @@ mod tests {
 
     #[test]
     fn tristate_truthy_falsy_unset() {
+        let _g = ENV_LOCK.lock().unwrap();
         let name = "KILN_TEST_TRISTATE_e7d2c9";
         unsafe { std::env::set_var(name, "1"); }
         assert_eq!(env_tristate(name), Some(true));
