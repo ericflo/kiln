@@ -88,24 +88,27 @@ fn fused_gdn_resident_state_enabled() -> bool {
     })
 }
 
-/// `KILN_VULKAN_LINEAR=1` opts the autograd-safe `linear_prefill_apply`
-/// path on. Default off until end-to-end training parity is validated on
-/// production-sized payloads — the CustomOp1's forward and backward are
-/// unit-test covered, but wiring it into every projection in the
-/// transformer needs a hardware-validated training run before flipping
-/// the default.
+/// Read `KILN_VULKAN_LINEAR` env var. When enabled, the autograd-safe
+/// `linear_prefill_apply` path wraps the existing Vulkan linear kernel in
+/// a `CustomOp1` so training projections produce a tracked tensor whose
+/// backward computes a real gradient instead of dropping it at the leaf
+/// returned by the inference-shaped `linear_decode`.
+///
+/// Default: enabled. Set `KILN_VULKAN_LINEAR=0` (or `false`/`no`) to opt
+/// back into the leaf-fast inference path for training too — useful for
+/// parity comparisons against the pre-Phase-2 baseline. Hardware
+/// validation on Strix Halo: a 244-token training step ran ~6% faster
+/// with this on (111 s vs 118 s baseline) and the loss matched
+/// bit-exact, confirming correctness across the recompute path.
 fn linear_prefill_apply_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("KILN_VULKAN_LINEAR")
-                .ok()
-                .as_deref()
-                .map(str::trim)
-                .map(str::to_ascii_lowercase)
-                .as_deref(),
-            Some("1") | Some("true") | Some("yes")
-        )
+        std::env::var("KILN_VULKAN_LINEAR")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(true)
     })
 }
 
