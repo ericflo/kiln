@@ -3888,6 +3888,14 @@ fn lm_head_forward_backend_decode_if(
     embed_tokens_t: &Tensor,
 ) -> Result<Tensor> {
     if let Some(backend) = backend {
+        // For autograd-tracked input (non-FLCE training path), prefer
+        // the autograd-safe Vulkan CustomOp; otherwise the leaf
+        // returned by linear_decode silently drops the gradient.
+        if x.track_op() {
+            if let Some(logits) = backend.linear_prefill_apply(x, embed_tokens_t)? {
+                return Ok(logits);
+            }
+        }
         if let Some(logits) = backend.linear_decode(x, embed_tokens_t)? {
             return Ok(logits);
         }
