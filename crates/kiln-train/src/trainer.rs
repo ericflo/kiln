@@ -2796,6 +2796,21 @@ fn checkpointed_forward_backward(
                 )?
             };
             total_loss += seg_loss;
+            // Phase 3.2 sub-step (tiled): the tiled paths internally
+            // resolve their boundary input via the same registry-aware
+            // helper, so once they return we can drop boundary_states
+            // [seg_idx]'s candle CPU mirror. Same safety analysis as
+            // the monolithic-path drop below: the next iteration uses
+            // boundary_states[seg_idx + 1], not [seg_idx]; the
+            // end-of-function eviction loop iterates over stubs whose
+            // TensorIds aren't in the registry (no-op).
+            if resident_activation
+                && backend.has_resident_activation(&boundary_states[seg_idx])
+            {
+                backend.evict_resident_activation(&boundary_states[seg_idx]);
+                boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
+                    .context("phase3.2 tiled: alloc boundary stub")?;
+            }
             continue;
         }
 
