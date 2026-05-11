@@ -309,31 +309,38 @@ impl TrainableLoraParams {
             // Determine actual dimensions from the weight tensors
             let layer_weights = &weights.layers[layer_idx];
 
-            // Derive q/k/v/o projection shapes from ModelConfig rather than
-            // reading the transposed weight tensors' dims. Reasons:
-            //   1. *_proj_t may be a registry-resident stub after
-            //      `drop_uploaded_bf16_weights` ran (Phase 4.x residency:
-            //      the candle tensors are 1-element placeholders, the real
-            //      weights live in Vulkan buffers).
-            //   2. Linear attention layers skip this module set entirely.
-            // The math is the same as what the original tensor-dim read
-            // produced — Transposed weights are `[in_features, out_features]`.
-            let q_out = config.num_attention_heads * config.head_dim;
-            let kv_out = config.num_kv_heads * config.head_dim;
             for &module in DEFAULT_TARGET_MODULES {
                 let (in_features, out_features, bound) = match module {
                     "q_proj" | "k_proj" | "v_proj" | "o_proj" => {
-                        match &layer_weights.attention {
-                            kiln_model::forward::GpuAttentionWeights::Full(_) => {}
-                            kiln_model::forward::GpuAttentionWeights::Linear(_) => continue,
-                        }
-                        match module {
-                            "q_proj" => (hidden, q_out, bound_hidden),
-                            "k_proj" => (hidden, kv_out, bound_hidden),
-                            "v_proj" => (hidden, kv_out, bound_hidden),
-                            "o_proj" => (q_out, hidden, bound_hidden),
-                            _ => unreachable!(),
-                        }
+                        // Read the transposed weight's shape. Post-Phase 4.x
+                        // residency, this tensor is a `broadcast_as` view
+                        // that preserves the original `[hidden, out_dim]`
+                        // dims while sharing 2 bytes of storage — so
+                        // `.dims()` still returns the right shape and
+                        // we don't have to mirror Qwen3.5-specific quirks
+                        // (e.g. attn_output_gate doubling q_proj out_dim)
+                        // here.
+                        let w_t = match &layer_weights.attention {
+                            kiln_model::forward::GpuAttentionWeights::Full(full) => match module {
+                                "q_proj" => &full.q_proj_t,
+                                "k_proj" => &full.k_proj_t,
+                                "v_proj" => &full.v_proj_t,
+                                "o_proj" => &full.o_proj_t,
+                                _ => unreachable!(),
+                            },
+                            // Linear attention layers don't have q/k/v/o_proj
+                            kiln_model::forward::GpuAttentionWeights::Linear(_) => {
+                                continue;
+                            }
+                        };
+                        let dims = w_t.dims();
+                        anyhow::ensure!(
+                            dims.len() == 2,
+                            "expected rank-2 {module}_t for layer {layer_idx}, got {:?}",
+                            dims
+                        );
+                        // Transposed weight is [in_features, out_features].
+                        (dims[0], dims[1], bound_hidden)
                     }
                     "gate_proj" => (hidden, intermediate, bound_hidden),
                     "up_proj" => (hidden, intermediate, bound_hidden),
