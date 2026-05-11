@@ -1606,19 +1606,14 @@ fn build_flce_provider(
     if backend.name() != "vulkan" {
         return None;
     }
-    let env_setting = std::env::var("KILN_VULKAN_FLCE").ok();
-    let env_lower = env_setting
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
-    match env_lower.as_deref() {
-        Some("1") | Some("true") | Some("yes") => {
+    match kiln_core::env_flag::env_tristate("KILN_VULKAN_FLCE") {
+        Some(true) => {
             return Some(std::sync::Arc::new(BackendFlceProvider {
                 backend: backend.clone(),
             }));
         }
-        Some("0") | Some("false") | Some("no") => return None,
-        _ => {}
+        Some(false) => return None,
+        None => {}
     }
     // Auto-heuristic: engage whenever the supervised batch is large
     // enough that the unfused lm_head matmul would itself be a serious

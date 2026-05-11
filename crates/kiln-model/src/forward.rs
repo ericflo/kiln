@@ -3008,15 +3008,8 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
 /// can move it.
 #[cfg(feature = "vulkan")]
 fn vulkan_rmsnorm_training_enabled_for(x: &Tensor) -> bool {
-    let env_setting = std::env::var("KILN_VULKAN_RMSNORM_TRAINING").ok();
-    let env_lower = env_setting
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
-    match env_lower.as_deref() {
-        Some("1") | Some("true") | Some("yes") => return true,
-        Some("0") | Some("false") | Some("no") => return false,
-        _ => {}
+    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_VULKAN_RMSNORM_TRAINING") {
+        return forced;
     }
     const RMSNORM_AUTO_ROW_THRESHOLD: usize = 1024;
     let dims = x.shape().dims();

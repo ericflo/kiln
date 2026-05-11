@@ -22,15 +22,35 @@
 /// let on = env_flag("KILN_VULKAN_RMSNORM", true);
 /// ```
 pub fn env_flag(name: &str, default: bool) -> bool {
+    env_tristate(name).unwrap_or(default)
+}
+
+/// Tristate variant of [`env_flag`]: returns `Some(true)` for truthy
+/// values, `Some(false)` for falsy, `None` for anything else
+/// (including unset / unrecognised). Use this for env vars whose
+/// "unset" arm runs an auto-heuristic rather than falling back to a
+/// fixed boolean — e.g. `KILN_VULKAN_FLCE` (auto-engage based on
+/// `active_count`) and `KILN_VULKAN_RMSNORM_TRAINING` (auto-engage
+/// based on `row_count`).
+///
+/// Idiom:
+/// ```ignore
+/// match env_tristate("KILN_VULKAN_FLCE") {
+///     Some(true) => engage_provider(),
+///     Some(false) => return None,
+///     None => engage_if_heuristic_passes(),
+/// }
+/// ```
+pub fn env_tristate(name: &str) -> Option<bool> {
     let raw = std::env::var(name).ok();
     let lower = raw
         .as_deref()
         .map(str::trim)
         .map(str::to_ascii_lowercase);
     match lower.as_deref() {
-        Some("1") | Some("true") | Some("yes") => true,
-        Some("0") | Some("false") | Some("no") => false,
-        _ => default,
+        Some("1") | Some("true") | Some("yes") => Some(true),
+        Some("0") | Some("false") | Some("no") => Some(false),
+        _ => None,
     }
 }
 
@@ -71,5 +91,18 @@ mod tests {
         unsafe { std::env::remove_var(name); }
         assert!(env_flag(name, true));
         assert!(!env_flag(name, false));
+    }
+
+    #[test]
+    fn tristate_truthy_falsy_unset() {
+        let name = "KILN_TEST_TRISTATE_e7d2c9";
+        unsafe { std::env::set_var(name, "1"); }
+        assert_eq!(env_tristate(name), Some(true));
+        unsafe { std::env::set_var(name, "no"); }
+        assert_eq!(env_tristate(name), Some(false));
+        unsafe { std::env::set_var(name, "auto"); }
+        assert_eq!(env_tristate(name), None);
+        unsafe { std::env::remove_var(name); }
+        assert_eq!(env_tristate(name), None);
     }
 }
