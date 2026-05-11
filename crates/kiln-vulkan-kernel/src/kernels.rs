@@ -317,19 +317,23 @@ pub fn dispatch_kernel(
     output_shape: &[usize],
     output_dtype: DType,
 ) -> Result<Tensor> {
-    // Vulkan only guarantees `maxComputeWorkGroupCount[i] >= 65535`
-    // per axis. Enforce the conservative limit here so any caller
-    // gets a clear error instead of an opaque vkCmdDispatch failure.
-    // Real devices typically allow much higher; if a future caller
-    // needs it, swap this for a query of vkPhysicalDeviceLimits.
-    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    // Per-axis dispatch grid limit. Use the actual device limit
+    // (typically ≈ 2^31 - 1 on AMD/Strix Halo) rather than the
+    // Vulkan spec minimum (65535), so we don't bail on legitimate
+    // dispatches that the hardware can handle.
+    let limit_x = vk_device.max_compute_work_group_count(0);
+    let limit_y = vk_device.max_compute_work_group_count(1);
+    let limit_z = vk_device.max_compute_work_group_count(2);
     anyhow::ensure!(
-        workgroup_count.0 <= VK_MIN_DISPATCH_AXIS
-            && workgroup_count.1 <= VK_MIN_DISPATCH_AXIS
-            && workgroup_count.2 <= VK_MIN_DISPATCH_AXIS,
-        "dispatch_kernel: workgroup_count {:?} exceeds Vulkan's per-axis \
-         minimum {VK_MIN_DISPATCH_AXIS}",
-        workgroup_count
+        workgroup_count.0 <= limit_x
+            && workgroup_count.1 <= limit_y
+            && workgroup_count.2 <= limit_z,
+        "dispatch_kernel: workgroup_count {:?} exceeds device per-axis \
+         limits ({}, {}, {})",
+        workgroup_count,
+        limit_x,
+        limit_y,
+        limit_z
     );
     let device = vk_device.device();
     let queue = vk_device.queue();
@@ -5684,18 +5688,15 @@ pub fn run_compute_pipeline(
     push_constants: &[u32],
     workgroup_count: u32,
 ) -> Result<()> {
-    // Vulkan only guarantees `maxComputeWorkGroupCount[0] >= 65535`.
-    // Anything bigger needs a multi-axis dispatch (callers can pre-
-    // split into a (x, y) grid and use dispatch_kernel for that).
-    // Surface clearly here so an oversized 1-axis dispatch fails
-    // with a meaningful error rather than driver-dependent silent
-    // truncation.
-    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    // Use the actual device per-axis limit rather than the Vulkan
+    // spec minimum (65535). Real devices typically support much
+    // more (AMD/Strix Halo ≈ 2^31 - 1).
+    let limit_x = vk_device.max_compute_work_group_count(0);
     anyhow::ensure!(
-        workgroup_count <= VK_MIN_DISPATCH_AXIS,
+        workgroup_count <= limit_x,
         "run_compute_pipeline: workgroup_count={workgroup_count} \
-         exceeds Vulkan's per-axis minimum {VK_MIN_DISPATCH_AXIS}; \
-         caller should split into a multi-axis dispatch via dispatch_kernel"
+         exceeds device per-axis limit {limit_x}; caller should \
+         split into a multi-axis dispatch via dispatch_kernel"
     );
     let device = vk_device.device();
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
@@ -8713,15 +8714,15 @@ pub fn dispatch_sdpa_prefill_f32(
     // per axis. The dispatch grid is (seq_len, num_heads, batch); if any
     // axis would exceed that, surface a clear error rather than letting
     // vkCmdDispatch silently drop work or fail with an opaque
-    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Strix Halo's actual limit is much
-    // higher, but the conservative cap keeps us portable.
-    const VK_MIN_DISPATCH_AXIS: usize = 65535;
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Use the actual device limit
+    // (typically much higher than the spec minimum on AMD/Strix Halo).
+    let limit_x = vk_device.max_compute_work_group_count(0) as usize;
+    let limit_y = vk_device.max_compute_work_group_count(1) as usize;
+    let limit_z = vk_device.max_compute_work_group_count(2) as usize;
     anyhow::ensure!(
-        seq_len <= VK_MIN_DISPATCH_AXIS
-            && num_heads <= VK_MIN_DISPATCH_AXIS
-            && batch <= VK_MIN_DISPATCH_AXIS,
+        seq_len <= limit_x && num_heads <= limit_y && batch <= limit_z,
         "sdpa_prefill_f32: dispatch grid (seq_len={seq_len}, num_heads={num_heads}, \
-         batch={batch}) exceeds Vulkan's per-axis minimum {VK_MIN_DISPATCH_AXIS}"
+         batch={batch}) exceeds device per-axis limits ({limit_x}, {limit_y}, {limit_z})"
     );
 
     let glsl_path = concat!(
@@ -8787,11 +8788,11 @@ pub fn dispatch_sgd_step_bf16(
     anyhow::ensure!(n_elements > 0, "sgd_step_bf16: n_elements must be > 0");
     let num_words = n_elements.div_ceil(2);
     let workgroup_count = num_words.div_ceil(256) as u32;
-    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    let limit = vk_device.max_compute_work_group_count(0);
     anyhow::ensure!(
-        workgroup_count <= VK_MIN_DISPATCH_AXIS,
+        workgroup_count <= limit,
         "sgd_step_bf16: n_elements={n_elements} → {workgroup_count} workgroups \
-         (>{VK_MIN_DISPATCH_AXIS} per-axis Vulkan minimum)"
+         (>{limit} device per-axis limit)"
     );
     let glsl_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -8822,15 +8823,12 @@ pub fn dispatch_sgd_step_f32(
     anyhow::ensure!(n_elements > 0, "sgd_step_f32: n_elements must be > 0");
     // Vulkan only guarantees `maxComputeWorkGroupCount[i] >= 65535`.
     // The dispatch is `n_elements.div_ceil(256)` workgroups on axis x;
-    // any caller passing n_elements > 256 * 65535 = ~16.7M would
-    // exceed the conservative cap. Surface clearly. (Typical LoRA
-    // params are tiny — rank=64, hidden=2560 = 164K — so this is
-    // future-proofing rather than a current concern.)
-    const VK_MIN_DISPATCH_AXIS: usize = 65535;
+    // Use the actual device limit rather than the spec minimum.
+    let limit = vk_device.max_compute_work_group_count(0) as usize;
     anyhow::ensure!(
-        n_elements.div_ceil(256) <= VK_MIN_DISPATCH_AXIS,
+        n_elements.div_ceil(256) <= limit,
         "sgd_step_f32: n_elements={n_elements} would dispatch \
-         {} workgroups (>{VK_MIN_DISPATCH_AXIS} per-axis Vulkan minimum)",
+         {} workgroups (>{limit} device per-axis limit)",
         n_elements.div_ceil(256)
     );
     let glsl_path = concat!(

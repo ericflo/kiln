@@ -46,6 +46,14 @@ pub struct VulkanDevice {
     /// Maximum shared memory per workgroup (from VkPhysicalDeviceLimits).
     /// Used by PR2 to decide whether solve_tri can run without exceeding device limits.
     max_compute_shared_memory_size: vk::DeviceSize,
+    /// Maximum dispatch grid extent on each axis (from
+    /// VkPhysicalDeviceLimits::maxComputeWorkGroupCount[0..3]). Vulkan
+    /// only guarantees ≥ 65535 per axis, but real devices typically
+    /// support much more (AMD/Strix Halo ≈ 2^31 - 1). Used by
+    /// `dispatch_kernel` and `run_compute_pipeline` to gate oversized
+    /// dispatches with a meaningful error rather than letting
+    /// vkCmdDispatch fail opaquely.
+    max_compute_work_group_count: [u32; 3],
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
     transient_command_pool: Mutex<vk::CommandPool>,
     transient_descriptor_pool: Mutex<vk::DescriptorPool>,
@@ -223,6 +231,7 @@ impl VulkanDevice {
         let device_name = extract_device_name(&properties.device_name);
         let max_compute_shared_memory_size =
             properties.limits.max_compute_shared_memory_size as vk::DeviceSize;
+        let max_compute_work_group_count = properties.limits.max_compute_work_group_count;
 
         // Find compute queue family
         let queue_families =
@@ -316,6 +325,7 @@ impl VulkanDevice {
             device_local_mem_type,
             host_visible_mem_type,
             max_compute_shared_memory_size,
+            max_compute_work_group_count,
             pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
@@ -447,6 +457,16 @@ impl VulkanDevice {
     /// when the kernel won't fit, falling back to the candle CPU path.
     pub fn max_compute_shared_memory_size(&self) -> vk::DeviceSize {
         self.max_compute_shared_memory_size
+    }
+
+    /// Per-axis maximum compute dispatch grid extent (from
+    /// `VkPhysicalDeviceLimits::maxComputeWorkGroupCount[axis]`).
+    /// `axis` is 0, 1, or 2. Vulkan only guarantees ≥ 65535 per axis,
+    /// but real devices typically support much more (AMD/Strix Halo
+    /// reports ≈ 2^31 - 1).
+    pub fn max_compute_work_group_count(&self, axis: usize) -> u32 {
+        debug_assert!(axis < 3, "max_compute_work_group_count axis must be 0..3");
+        self.max_compute_work_group_count[axis.min(2)]
     }
 
     /// Return a cached compute pipeline compatible with the provided shader,
