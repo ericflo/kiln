@@ -382,6 +382,56 @@ impl TrainableLoraParams {
         })
     }
 
+    /// Phase 4.1 partial: register every LoRA `Var` (A and B for all
+    /// modules across all layers) in the backend's resident
+    /// activation registry. After this call, any code path that
+    /// queries `backend.has_resident_activation(var.as_tensor())`
+    /// will see true and can route through registry-resident
+    /// fast paths (e.g. `dispatch_sgd_step` on Vulkan).
+    ///
+    /// Caller invokes this once after [`initialize_seeded`], typically
+    /// from `sft_train` / `grpo_train`. Test code that doesn't
+    /// exercise the registry path skips this call — the trainer's
+    /// existing fall-through logic handles the not-resident case
+    /// transparently.
+    ///
+    /// Memory cost: one DMA upload per Var (~9 MB total for
+    /// Qwen3.5-4B at rank=8: 224 Vars × 40 KB each). On
+    /// non-resident-supporting backends (CPU/Metal/CUDA today) the
+    /// hook is a no-op.
+    ///
+    /// **Important constraint:** the candle CPU storage of each Var
+    /// MUST stay authoritative until Phase 4.1 step 2 (forward-path
+    /// LoRA dispatch interception) lands. Today the trainer's
+    /// `sgd_step` writes to the CPU storage via `var.set(...)`, and
+    /// the registry buffer becomes stale after the first SGD step.
+    /// `dispatch_sgd_step` won't fire because grads aren't registered,
+    /// so this is consistent: the registry exists for shape lookup
+    /// but is never read for data on the LoRA path yet.
+    pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
+        if !backend.supports_resident_activation() {
+            return Ok(());
+        }
+        for var in self.all_vars() {
+            backend.register_resident_activation(var.as_tensor())?;
+        }
+        Ok(())
+    }
+
+    /// Inverse of [`register_with_backend`]: evict every LoRA Var
+    /// from the resident activation registry. Caller invokes this
+    /// after the training loop completes (or per-step if Phase 4.1
+    /// step 2 makes the registry the data-of-record and the trainer
+    /// re-registers per step).
+    pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
+        if !backend.supports_resident_activation() {
+            return;
+        }
+        for var in self.all_vars() {
+            backend.evict_resident_activation(var.as_tensor());
+        }
+    }
+
     /// Convert trainable params to a `LoraWeights` for use with the forward pass.
     ///
     /// The returned `LoraWeights` holds tensors that are backed by our Vars,
@@ -607,6 +657,11 @@ pub fn sft_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+
+    // Phase 4.1 partial: register LoRA Vars in the resident activation
+    // registry so registry-aware code paths (Phase 4.1 step 2 LoRA
+    // dispatch interception, dispatch_sgd_step) can find them.
+    params.register_with_backend(&*backend)?;
 
     // Run the actual training body inside a closure so we can write the
     // outcome record (success or failure) before returning to the caller.
@@ -843,6 +898,11 @@ pub fn grpo_train(
         num_vars = params.all_vars().len(),
         "initialized trainable LoRA parameters"
     );
+
+    // Phase 4.1 partial: register LoRA Vars in the resident activation
+    // registry so registry-aware code paths (Phase 4.1 step 2 LoRA
+    // dispatch interception, dispatch_sgd_step) can find them.
+    params.register_with_backend(&*backend)?;
 
     let train_body = || -> Result<(PathBuf, f64)> {
         // Tokenize all completions: for each group, tokenize prompt + each completion
