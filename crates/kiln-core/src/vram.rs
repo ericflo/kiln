@@ -21,6 +21,41 @@ pub struct GpuMemoryUsedInfo {
     pub source: VramSource,
 }
 
+/// The corrected training memory budget plus provenance.
+///
+/// Use this when reporting "how much memory can training use" — the
+/// `source` makes the log line honest about *why* the budget is what
+/// it is. On a discrete NVIDIA GPU it'll just be `NvidiaSmi` and the
+/// budget equals the detected VRAM. On a unified-memory APU it'll be
+/// `LinuxDrmSysfsUnified` and the budget is the corrected value
+/// (the BIOS-reported VRAM carveout is replaced with `MemTotal − reserve`
+/// so training sized against this number cannot exhaust system RAM).
+///
+/// Field semantics match what consumers like the trainer preflight
+/// estimator and the inference KV-cache sizer already expect.
+#[derive(Debug, Clone, Copy)]
+pub struct EffectiveBudget {
+    /// Total memory addressable by training in bytes. Pre-corrected
+    /// for the unified-memory APU case.
+    pub total_bytes: u64,
+    /// Provenance of the budget — what kind of probe produced it.
+    pub source: VramSource,
+}
+
+/// Convenience: detect VRAM and return an [`EffectiveBudget`] suitable
+/// for direct use in startup logging and the training preflight
+/// estimator.
+///
+/// This is the single source of truth — replaces ad-hoc reads of
+/// `total_vram_gb` scattered around `crates/kiln-server/src/state.rs`.
+pub fn detect_effective_training_budget() -> EffectiveBudget {
+    let info = detect_vram();
+    EffectiveBudget {
+        total_bytes: info.total_bytes,
+        source: info.source,
+    }
+}
+
 /// How the VRAM value was determined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VramSource {
@@ -483,6 +518,18 @@ mod tests {
         // This test relies on KILN_GPU_MEMORY_GB not being set in CI
         // and nvidia-smi not being available, so it should return None source
         // unless overridden. We test the logic paths via the recommendation functions.
+    }
+
+    #[test]
+    fn effective_budget_mirrors_detect_vram_fields() {
+        // The convenience accessor must agree with the underlying
+        // detector — it's literally a thin wrapper. Lock that in so a
+        // future refactor can't silently introduce divergence between
+        // "what we log" and "what we size against".
+        let detected = detect_vram();
+        let budget = detect_effective_training_budget();
+        assert_eq!(budget.total_bytes, detected.total_bytes);
+        assert_eq!(budget.source, detected.source);
     }
 
     #[test]

@@ -108,3 +108,31 @@ composed_cache_max_entries = 64       # Entry-count cap on the same composed-ada
                                       # as recency. Override via
                                       # KILN_ADAPTERS_COMPOSED_CACHE_MAX_ENTRIES. Set to 0
                                       # (or empty) to disable the entry cap.
+
+# -----------------------------------------------------------------------------
+# Memory budget (env-only; no [memory] section needed).
+# -----------------------------------------------------------------------------
+# KILN_GPU_MEMORY_GB
+#   Override the auto-detected GPU memory (in GB, decimal OK). Highest priority
+#   among VRAM detection sources — useful when nvidia-smi or DRM sysfs misreport,
+#   or when you want to deliberately cap kiln serve below physical capacity.
+#
+# KILN_TRAINING_MEMORY_RESERVE_GB
+#   On unified-memory systems (Apple Silicon, AMD APUs like Strix Halo), this is
+#   the GB held back from MemTotal before declaring the training budget. Default
+#   is `max(6, MemTotal / 4)` — chosen so the OS, X/Wayland compositor, and any
+#   other apps don't get crowded out when training occupies most of system RAM.
+#   On a 30 GB unified APU the default reserve is 7.5 GB, leaving ~22.5 GB for
+#   training. Lower it (e.g. 4) to free more headroom for training; raise it
+#   (e.g. 12) on a workstation that runs heavier desktop workloads alongside.
+#
+# Unified-memory detection (Linux):
+#   On a Linux host with an integrated AMD/Intel GPU, the BIOS-configured VRAM
+#   carveout reported via /sys/class/drm/card*/device/mem_info_vram_total can far
+#   exceed physical RAM (the GTT heap pages against system memory). When kiln
+#   detects this — `mem_info_vram_total > MemTotal × 1.25`, OR a display
+#   controller + integrated AMD/Intel vendor + GTT ≥ 1 GB — it corrects the
+#   budget down to `min(reported_vram, MemTotal − reserve)` so training sized
+#   against this number cannot exhaust system RAM. The "GPU memory budget" log
+#   line at startup includes a `vram_source = linux-drm-sysfs-unified` field so
+#   the corrected value is honest about its provenance.

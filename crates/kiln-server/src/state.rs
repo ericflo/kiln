@@ -1546,6 +1546,7 @@ impl AppState {
 
         tracing::info!(
             total_vram_gb = memory_budget.total_vram_bytes as f64 / 1e9,
+            vram_source = %vram_info.source,
             model_gb = memory_budget.model_memory_bytes as f64 / 1e9,
             estimated_model_gb = memory_budget.estimated_model_memory_bytes as f64 / 1e9,
             post_load_used_vram_gb = memory_budget.post_load_used_vram_bytes as f64 / 1e9,
