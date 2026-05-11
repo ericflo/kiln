@@ -1572,34 +1572,37 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance.
+/// Build a provider when the supplied backend is a Vulkan instance AND
+/// the FLCE-on-Vulkan path is explicitly enabled.
 ///
-/// Default-on: the FLCE provider now uses linear_prefill_apply_offset,
-/// which dispatches per-chunk against a once-uploaded weight buffer.
-/// Hardware validation on Strix Halo at T=244 measured no regression
-/// vs the projection-only Vulkan path (both ~111 s wall) and bit-exact
-/// loss against the candle CPU baseline. At larger T the constant-time
-/// per-chunk dispatch overhead is amortized across more compute, so the
-/// matmul win grows.
+/// Default off because the per-chunk Vulkan dispatch overhead
+/// (upload x + record dispatch + readback) is constant-cost per chunk
+/// while the matmul compute scales with active-row count. Hardware
+/// measurement on Strix Halo at T=244 (~30 active rows × 61 vocab
+/// chunks):
 ///
-/// Set `KILN_VULKAN_FLCE=0` to opt back into the candle CPU chunk path
-/// — useful for parity comparisons.
+///   - Without FLCE provider: ~111 s wall
+///   - With FLCE provider (offset kernel):  ~127 s wall (+15 s)
+///
+/// The crossover where the FLCE provider becomes a net win sits around
+/// T=1500-2500. Until a heuristic auto-enables based on payload shape,
+/// the provider is opt-in via `KILN_VULKAN_FLCE=1`.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
 ) -> Option<FlceProvider> {
     if backend.name() != "vulkan" {
         return None;
     }
-    let disabled = matches!(
+    let opt_in = matches!(
         std::env::var("KILN_VULKAN_FLCE")
             .ok()
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("0") | Some("false") | Some("no")
+        Some("1") | Some("true") | Some("yes")
     );
-    if disabled {
+    if !opt_in {
         return None;
     }
     Some(std::sync::Arc::new(BackendFlceProvider {
