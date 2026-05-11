@@ -49,6 +49,15 @@ Vulkan training-route changes) twice hard-hung the host on the
 - telemetry: one-shot trace for first offset sub-chunked dispatch
   (`linear_prefill_apply_offset` engages internal sub-chunking when
   a FLCE chunk_len exceeds the FLOP ceiling).
+- training: Phase 3.2 partial — both `checkpointed_forward_backward`
+  and `checkpointed_grpo_forward_backward` now prefer
+  `resolve_resident_activation` over `clone()` for the per-segment
+  recompute boundary input. Doesn't free the candle CPU mirror yet
+  (pending Phase 4.x storage interception) but exercises the
+  resolve path inside real training; any registry bytes-divergence
+  surfaces as a loss difference vs the non-resident path.
+- server: `resident_activation` and `sgd_step_on_device` fields
+  added to the "Vulkan training acceleration profile" startup log.
 - vulkan: Phase 3.1 hooks — `supports_resident_activation`,
   `register_resident_activation`, `evict_resident_activation`,
   `has_resident_activation` on `BackendRuntime` plus a
