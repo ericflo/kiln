@@ -35,6 +35,67 @@ use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Storage, 
 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
+/// Per-dispatch FLOP ceiling for the Vulkan-routed matmul. Above this,
+/// `cpu_fwd` and `bwd` fall back to candle's CPU `broadcast_matmul`
+/// rather than queuing a single Vulkan submit large enough to risk
+/// hanging the GPU/driver.
+///
+/// **Why:** the host hard-hung twice during the original
+/// `/tmp/sft-data.jsonl` SFT repro (T≈918, vocab=152064) — kernel logs
+/// went silent (no OOM, no AMDGPU reset, no panic), the box had to be
+/// physically rebooted both times. The implicated dispatch was the
+/// training-time lm_head forward `[918, 2560] @ [2560, 152064]` which
+/// queues ~4.36M workgroups (32-col tiles × 918 batch rows) in one
+/// submit on a 40-CU APU. Each workgroup also walks a 2560-element
+/// inner reduction, so total bandwidth is enormous and AMD's recovery
+/// path on Strix Halo evidently does not handle the queue depth
+/// gracefully.
+///
+/// 100 GFLOP per dispatch translates to ~4 s on a Strix Halo at 25
+/// TFLOPS, which is well within reasonable per-dispatch latency. The
+/// pre-Phase-2 baseline ran the same matmul through CPU
+/// `broadcast_matmul` without crashing — bailing here just restores
+/// that for the lm_head shape.
+///
+/// Tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP` (parsed once at process
+/// start). Set to 0 to disable the guard entirely (NOT recommended on
+/// Strix Halo). Decimals are accepted (e.g. `KILN_VULKAN_LINEAR_MAX_GFLOP=50.0`).
+const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 100_000_000_000;
+
+/// FLOP estimate for a `[batch, hidden] @ [hidden, out_dim]` matmul.
+/// Counts one multiply + one add per inner term, matching the kernel's
+/// per-iteration work.
+fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
+    (batch as u64).saturating_mul(hidden as u64).saturating_mul(out_dim as u64).saturating_mul(2)
+}
+
+fn max_flop_per_dispatch() -> u64 {
+    static CEILING: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CEILING.get_or_init(|| {
+        std::env::var("KILN_VULKAN_LINEAR_MAX_GFLOP")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .and_then(|s| s.parse::<f64>().ok())
+            .map(|gflop| {
+                if gflop <= 0.0 {
+                    u64::MAX
+                } else {
+                    (gflop * 1.0e9_f64).round() as u64
+                }
+            })
+            .unwrap_or(DEFAULT_MAX_FLOP_PER_DISPATCH)
+    })
+}
+
+/// True when the requested matmul shape would exceed the per-dispatch
+/// FLOP ceiling and should fall back to the CPU path. The pre-Phase-2
+/// CPU `broadcast_matmul` is what these shapes already used, and they
+/// did not crash.
+pub fn dispatch_exceeds_safety_ceiling(batch: usize, hidden: usize, out_dim: usize) -> bool {
+    matmul_flop(batch, hidden, out_dim) > max_flop_per_dispatch()
+}
+
 /// Marker for which Vulkan kernel variant to dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightLayout {
@@ -212,8 +273,16 @@ impl CustomOp1 for VulkanLinearOp {
         // against the SAME bf16-packed buffer the forward used (no
         // re-upload of a transposed view). Falls back to candle CPU
         // broadcast_matmul if the kernel preconditions don't hold (e.g.
-        // weight is f32, or the kernel returns None for shape reasons).
-        if self.weight_layout == WeightLayout::Bf16Packed {
+        // weight is f32, or the kernel returns None for shape reasons,
+        // or the dispatch shape would exceed the safety ceiling — see
+        // `dispatch_exceeds_safety_ceiling` for the rationale).
+        let bwd_row_count: usize = {
+            let dims = grad_y.shape().dims();
+            dims[..dims.len() - 1].iter().product()
+        };
+        let bwd_uses_vulkan = self.weight_layout == WeightLayout::Bf16Packed
+            && !dispatch_exceeds_safety_ceiling(bwd_row_count, self.out_dim, self.hidden);
+        if bwd_uses_vulkan {
             let dims = grad_y.shape().dims().to_vec();
             let row_count: usize = dims[..dims.len() - 1].iter().product();
             let grad_y_f32 = if grad_y.dtype() == DType::F32 {
@@ -857,5 +926,71 @@ mod tests {
         let s = format!("{op:?}");
         assert!(s.contains("VulkanLinearOp"));
         assert!(s.contains("hidden"));
+    }
+
+    /// Regression for the second host hard-hang on the original
+    /// `/tmp/sft-data.jsonl` repro: at T=918 the lm_head training-time
+    /// forward queues `[918, 2560] @ [2560, 152064]` = ~715 GFLOP in a
+    /// single Vulkan submit, which the Strix Halo APU could not handle
+    /// — the kernel logs went silent and the box had to be physically
+    /// rebooted. The safety ceiling MUST classify that shape as
+    /// "do not dispatch", so the caller falls back to CPU
+    /// `broadcast_matmul` (the pre-Phase-2 baseline that did not crash).
+    #[test]
+    fn safety_guard_rejects_lm_head_repro_shape() {
+        // T=918 lm_head forward shape from the crashed repro.
+        assert!(
+            dispatch_exceeds_safety_ceiling(918, 2560, 152064),
+            "[918, 2560] @ [2560, 152064] is the shape that hung the host \
+             twice; it must be rejected"
+        );
+        // Even at T=64 the lm_head shape is still 50 GFLOP — but the
+        // smaller batch is well under the 100 GFLOP ceiling, so it
+        // would dispatch. That's expected: the lm_head guard is about
+        // bandwidth/queue-depth at large T, not output dimension alone.
+        assert!(
+            !dispatch_exceeds_safety_ceiling(64, 2560, 152064),
+            "T=64 lm_head fits under the 100 GFLOP ceiling and should \
+             still dispatch"
+        );
+    }
+
+    /// Counter-test: normal projection shapes should NOT be guarded
+    /// out — they're an order of magnitude smaller than the lm_head
+    /// matmul and were running fine on the GPU before Phase 2.
+    #[test]
+    fn safety_guard_allows_normal_projection_shapes() {
+        // Qwen3.5-4B q_proj forward: T × hidden=2560 → out_dim=2560.
+        // Even at T=4096 this is only ~107 GFLOP — borderline, but a
+        // single matmul of this shape has not been observed to hang
+        // the GPU. Realistic training T is much smaller.
+        for t in [1, 64, 256, 918, 1500] {
+            assert!(
+                !dispatch_exceeds_safety_ceiling(t, 2560, 2560),
+                "q_proj-shape [T={t}, 2560, 2560] is within capability \
+                 — should be allowed"
+            );
+        }
+        // GDN in_proj_qkv: hidden=2560 → out_dim=8192. At T=918 this
+        // is ~38 GFLOP, well under the ceiling.
+        assert!(!dispatch_exceeds_safety_ceiling(918, 2560, 8192));
+        // MLP gate_up: hidden=2560 → out_dim=2560*4. Same order.
+        assert!(!dispatch_exceeds_safety_ceiling(918, 2560, 10240));
+    }
+
+    /// Env-var override: `KILN_VULKAN_LINEAR_MAX_GFLOP=0` should make
+    /// the guard a no-op (every shape allowed). Tested via the
+    /// `matmul_flop` arithmetic — the env-parsing path is covered
+    /// by the OnceLock initializer, but we don't invoke it from a
+    /// test (would race with other tests that observe the default).
+    #[test]
+    fn matmul_flop_arithmetic_is_correct() {
+        // Standard case: 2 * batch * hidden * out_dim FMAs.
+        assert_eq!(matmul_flop(2, 3, 4), 2 * 2 * 3 * 4);
+        assert_eq!(matmul_flop(918, 2560, 152064), 2u64 * 918 * 2560 * 152064);
+        // Saturating cases for paranoia: large multiply must not
+        // panic or overflow silently in debug builds.
+        let big = matmul_flop(usize::MAX, 1, 1);
+        assert_eq!(big, u64::MAX, "must saturate, not overflow");
     }
 }

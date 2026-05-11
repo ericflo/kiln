@@ -94,21 +94,29 @@ fn fused_gdn_resident_state_enabled() -> bool {
 /// backward computes a real gradient instead of dropping it at the leaf
 /// returned by the inference-shaped `linear_decode`.
 ///
-/// Default: enabled. Set `KILN_VULKAN_LINEAR=0` (or `false`/`no`) to opt
-/// back into the leaf-fast inference path for training too — useful for
-/// parity comparisons against the pre-Phase-2 baseline. Hardware
-/// validation on Strix Halo: a 244-token training step ran ~6% faster
-/// with this on (111 s vs 118 s baseline) and the loss matched
-/// bit-exact, confirming correctness across the recompute path.
+/// Default: **disabled**. Two host hard-hangs were observed on Strix Halo
+/// when this defaulted on with the original `/tmp/sft-data.jsonl` repro
+/// (T≈918, vocab=152064): the lm_head training-time forward routes through
+/// here, and a single dispatch of `[918, 2560] @ [2560, 152064]` queues
+/// ~4.36M workgroups in one submit on a 40-CU APU. The kernel logs go
+/// silent (no OOM, no AMDGPU reset, no panic), meaning the GPU/driver
+/// didn't recover gracefully and the box had to be physically rebooted.
+/// `VulkanLinearOp` now also enforces a per-dispatch FLOP guard that
+/// bails to CPU `broadcast_matmul` for any single matmul over
+/// `MAX_VULKAN_LINEAR_FLOP_PER_DISPATCH`. Until that guard has been
+/// load-validated end-to-end on the original repro, the env var is
+/// opt-in: set `KILN_VULKAN_LINEAR=1` (or `true`/`yes`) to enable it
+/// for measurement runs. Smaller-shape projections (T≤256) ran ~6%
+/// faster with this on (111 s vs 118 s baseline) at bit-exact loss.
 fn linear_prefill_apply_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_VULKAN_LINEAR")
             .map(|v| {
                 let v = v.trim().to_lowercase();
-                !(v == "0" || v == "false" || v == "no")
+                v == "1" || v == "true" || v == "yes"
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
@@ -1307,6 +1315,23 @@ impl BackendRuntime for VulkanBackend {
         if hidden_x != hidden_w {
             return Ok(None);
         }
+        // Per-dispatch FLOP guard. The lm_head training-time forward
+        // routes through here at `[T, hidden=2560] @ [hidden, vocab=152064]`
+        // — for T=918 that's ~4.36M workgroups in one submit, which has
+        // hung the host (twice). Bail to the caller's CPU fallback for
+        // dispatches above the safety ceiling. The transposed bwd
+        // dispatch has the same shape and is guarded inside
+        // `VulkanLinearOp::bwd`.
+        let row_count: usize = x
+            .dims()
+            .iter()
+            .take(x.dims().len().saturating_sub(1))
+            .product();
+        if crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
+            row_count, hidden_x, out_dim,
+        ) {
+            return Ok(None);
+        }
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -1369,6 +1394,22 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         }
         if chunk_start + chunk_len > full_out_dim {
+            return Ok(None);
+        }
+        // Per-chunk FLOP guard. Chunk size is bounded (4096 by default)
+        // so FLCE chunks are normally well below the ceiling, but a
+        // future caller might pass a chunk_len that pushes a single
+        // chunk dispatch over the safety limit. Bail to caller's CPU
+        // fallback if so. See `dispatch_exceeds_safety_ceiling` for the
+        // rationale (Strix Halo host-hang on oversized submits).
+        let row_count_guard: usize = x
+            .dims()
+            .iter()
+            .take(x.dims().len().saturating_sub(1))
+            .product();
+        if crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
+            row_count_guard, hidden_x, chunk_len,
+        ) {
             return Ok(None);
         }
         let vk_device = self
