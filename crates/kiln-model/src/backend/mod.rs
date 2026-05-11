@@ -173,6 +173,35 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Register a non-weight tensor (e.g. a checkpoint-segment activation
+    /// boundary) as registry-resident on the device. The default
+    /// implementation is a no-op — backends that don't have a resident
+    /// activation registry can safely ignore the call.
+    ///
+    /// Phase 3.1 of the residency plan. Generalises the GDN-specific
+    /// `materialize_gdn_recurrent_resident_state` hook above. Once
+    /// Phase 3.2 lands, `checkpointed_forward_backward` calls this for
+    /// each segment-output tensor so the recompute pass can read the
+    /// boundary back from device memory instead of the candle CPU mirror.
+    fn register_resident_activation(&self, _tensor: &Tensor) -> Result<()> {
+        Ok(())
+    }
+
+    /// Evict a previously-registered activation from the residency
+    /// registry. Caller invokes this when the autograd pass no longer
+    /// needs the tensor (e.g. after a segment's backward completes).
+    /// No-op default.
+    fn evict_resident_activation(&self, _tensor: &Tensor) {}
+
+    /// True when the given tensor has been registered as
+    /// resident-on-device. Used by routing code to decide between the
+    /// resident fast path and the legacy CPU-roundtrip path. False by
+    /// default so callers without registry support continue to use the
+    /// legacy path.
+    fn has_resident_activation(&self, _tensor: &Tensor) -> bool {
+        false
+    }
+
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
         _rows: &[&Tensor],
