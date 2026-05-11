@@ -75,17 +75,43 @@ thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
     static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
         RefCell::new(HashMap::new());
-    /// General-purpose resident-activation registry keyed by candle
-    /// `TensorId`. Phase 3.1 of the residency plan — the registry the
-    /// `register_resident_activation` / `evict_resident_activation` /
-    /// `has_resident_activation` BackendRuntime hooks read and write.
-    /// Separate from `RECURRENT_STATE_RESIDENT_CACHE` so the
-    /// GDN-specific hot path can keep its own scope-limited lifecycle
-    /// without growing accidental coupling to non-recurrent
-    /// activations. Entries here are evicted explicitly by the caller
-    /// (Phase 3.2 will add the trainer-side wiring for that).
-    static RESIDENT_ACTIVATION_REGISTRY: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
-        RefCell::new(HashMap::new());
+}
+
+/// General-purpose resident-activation registry keyed by candle
+/// `TensorId`. Process-global (not thread-local) so worker threads
+/// spawned by candle's internal parallelism, rayon, etc. see the
+/// same registry as the thread that registered. Phase 3.1 of the
+/// residency plan — the registry the `register_resident_activation`
+/// / `evict_resident_activation` / `has_resident_activation` /
+/// `update_resident_activation` / `resolve_resident_activation`
+/// BackendRuntime hooks read and write.
+///
+/// Held behind a Mutex; per-access lock cost is negligible relative
+/// to the Vulkan dispatches the registry feeds (~50µs+ each).
+///
+/// Separate from `RECURRENT_STATE_RESIDENT_CACHE` so the
+/// GDN-specific hot path can keep its own thread-local
+/// scope-limited lifecycle without growing accidental coupling to
+/// non-recurrent activations.
+static RESIDENT_ACTIVATION_REGISTRY: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+> = std::sync::OnceLock::new();
+
+fn resident_registry()
+-> &'static std::sync::Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
+    RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Helper: short, self-recovering accessor that wraps the registry's
+/// mutex. Poison recovery returns the inner data so we never leave
+/// the registry inaccessible just because some panicking code touched
+/// it.
+fn with_resident_registry<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
+{
+    let mut guard = resident_registry().lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
 }
 
 fn recurrent_state_resident_scope_active() -> bool {
@@ -697,8 +723,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(());
         };
         let id = tensor.id();
-        let already_registered =
-            RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id));
+        let already_registered = with_resident_registry(|cache| cache.contains_key(&id));
         if already_registered {
             return Ok(());
         }
@@ -762,16 +787,16 @@ impl BackendRuntime for VulkanBackend {
                 "VulkanBackend::register_resident_activation first call"
             );
         });
-        RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
-            cache.borrow_mut().insert(id, buffer);
+        with_resident_registry(|cache| {
+            cache.insert(id, buffer);
         });
         Ok(())
     }
 
     fn evict_resident_activation(&self, tensor: &Tensor) {
         let id = tensor.id();
-        RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
-            cache.borrow_mut().remove(&id);
+        with_resident_registry(|cache| {
+            cache.remove(&id);
         });
     }
 
@@ -780,7 +805,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(());
         };
         let id = tensor.id();
-        let buffer = RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().get(&id).cloned());
+        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
         let Some(buffer) = buffer else {
             // Not registered — caller probably skipped the registration
             // path. No-op.
@@ -815,7 +840,7 @@ impl BackendRuntime for VulkanBackend {
 
     fn has_resident_activation(&self, tensor: &Tensor) -> bool {
         let id = tensor.id();
-        RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id))
+        with_resident_registry(|cache| cache.contains_key(&id))
     }
 
     fn resolve_resident_activation(
@@ -828,7 +853,7 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         };
         let id = tensor.id();
-        let buffer = RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().get(&id).cloned());
+        let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
         let Some(buffer) = buffer else {
             return Ok(None);
         };
@@ -886,8 +911,7 @@ impl BackendRuntime for VulkanBackend {
         // defeats the purpose of the on-device update).
         let param_id = param.id();
         let grad_id = grad.id();
-        let lookup = RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
-            let cache = cache.borrow();
+        let lookup = with_resident_registry(|cache| {
             cache
                 .get(&param_id)
                 .and_then(|p| cache.get(&grad_id).map(|g| (Arc::clone(p), Arc::clone(g))))
@@ -964,8 +988,7 @@ impl BackendRuntime for VulkanBackend {
         // Both A and B must be registry-resident.
         let a_id = a.id();
         let b_id = b.id();
-        let bufs = RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
-            let cache = cache.borrow();
+        let bufs = with_resident_registry(|cache| {
             cache
                 .get(&a_id)
                 .and_then(|ab| cache.get(&b_id).map(|bb| (Arc::clone(ab), Arc::clone(bb))))
@@ -3179,8 +3202,7 @@ mod tests {
         assert!(dispatched, "dispatch_sgd_step should succeed when both buffers are resident");
 
         // Read back the updated param buffer from the registry.
-        let param_buf = RESIDENT_ACTIVATION_REGISTRY
-            .with(|cache| cache.borrow().get(&param.id()).cloned())
+        let param_buf = with_resident_registry(|cache| cache.get(&param.id()).cloned())
             .expect("param must still be in registry");
         let device = backend.vulkan_device.as_ref().unwrap();
         let updated_bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
