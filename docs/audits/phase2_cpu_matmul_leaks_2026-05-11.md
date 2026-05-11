@@ -68,11 +68,18 @@ GPU between projection batches.
 
 ## Action items
 
-- [ ] Replace `flash_attn.comp` with a correct fused-attention shader
+- [x] Replace `flash_attn.comp` with a correct fused-attention shader
       (online softmax, causal mask, F32 inputs, F32 output).
-- [ ] Wire `flash_attn_prefill_vulkan` (`vulkan.rs:504`) and flip
+      **Done:** `sdpa_prefill_f32.comp` (commit `dc4664ed`).
+- [x] Wire `flash_attn_prefill_vulkan` (`vulkan.rs:504`) and flip
       `supports_flash_attn_prefill()` to `true` for the Strix Halo /
-      head_dim=128 / GQA path.
-- [ ] Per-kernel parity test against CPU baseline at small T (T=8,
-      H=2, dh=16) and an integration test at training T (T=918) once
-      hardware-load-validation is greenlit by the user.
+      head_dim=128 / GQA path. **Done:** commit `540cfbbf` —
+      gated behind opt-in `KILN_VULKAN_SDPA=1` until hardware load
+      validation passes (see runbook Step 3).
+- [x] Per-kernel parity test against CPU baseline at small T (T=8,
+      H=2, dh=16). **Done:** 4 parity tests in
+      `crates/kiln-vulkan-kernel/tests/gdn_parity.rs` — non-causal,
+      causal, Qwen-shape head_dim=128, and realistic T=64.
+- [ ] Integration test at training T (T=918) once hardware-load-
+      validation is greenlit by the user.
+      Held: covered by runbook Step 4 (operator-driven).
