@@ -40,6 +40,18 @@ Mitigations (commits 1b8f5f97, 6182f74, 9a50164b, 2ac00877):
   `safety_guard_rejects_lm_head_repro_shape` regression test both gate the
   hypothesis being validated.
 
+## Quick path: run Steps 1, 2, 3 via the helper script
+
+The `scripts/phase2_validation_steps_1_2_3.sh` helper automates Steps 1-3 below — pre-flight checks, build, three bounded SFT runs (defaults, then `KILN_VULKAN_LINEAR=1`, then `+KILN_VULKAN_SDPA=1`), with a memory watchdog that aborts if `MemAvailable` drops below 8 GiB. Pass `--skip-build` on re-runs:
+
+```
+./scripts/phase2_validation_steps_1_2_3.sh <path-to-Qwen3.5-4B>
+```
+
+Exit code 0 means all three steps passed and you can proceed to Step 4. Otherwise the exit code identifies which step regressed (2/3/4 = step number).
+
+Below is the manual Step 1 if you want to drive each step by hand.
+
 ## Step 1 — Smallest payload that exercises the fix path
 
 Run a 1-example × 1-epoch SFT against a TINY dataset at T~256. This exercises the FLCE provider auto-engagement (active_count ≥ 16) without touching the giant lm_head dispatch shape that crashed the host.
