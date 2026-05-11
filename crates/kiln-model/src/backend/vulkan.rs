@@ -124,14 +124,7 @@ fn fused_gdn_resident_state_enabled() -> bool {
 /// (111 s vs 118 s baseline) at bit-exact loss.
 fn linear_prefill_apply_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("KILN_VULKAN_LINEAR")
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                v == "1" || v == "true" || v == "yes"
-            })
-            .unwrap_or(false)
-    })
+    *ENABLED.get_or_init(|| kiln_core::env_flag::env_flag("KILN_VULKAN_LINEAR", false))
 }
 
 fn enter_recurrent_state_resident_scope() {
@@ -588,13 +581,7 @@ impl BackendRuntime for VulkanBackend {
         if !self.has_vulkan() {
             return false;
         }
-        std::env::var("KILN_VULKAN_SDPA")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_ascii_lowercase)
-            .map(|v| v == "1" || v == "true" || v == "yes")
-            .unwrap_or(false)
+        kiln_core::env_flag::env_flag("KILN_VULKAN_SDPA", false)
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {

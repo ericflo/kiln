@@ -328,13 +328,7 @@ pub fn matmul_bf16(_x: &Tensor, _w: &MarlinPackedProj) -> Result<Tensor> {
 /// `KILN_W4A16=1` (or `true`, case-insensitive) enables the Marlin path. Any
 /// other value, or the var being unset, keeps the BF16 baseline.
 pub fn env_enabled() -> bool {
-    match std::env::var("KILN_W4A16") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        }
-        Err(_) => false,
-    }
+    kiln_core::env_flag::env_flag("KILN_W4A16", false)
 }
 
 /// Check the `KILN_DISABLE_PARALLEL_PACK` env var.

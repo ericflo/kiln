@@ -1564,6 +1564,9 @@ impl AppState {
         if vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfs
             || vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfsUnified
         {
+            // Same truthy/falsy semantics as kiln_core::env_flag::env_flag,
+            // but we want to surface whether the value came from the env
+            // or the default — env_flag collapses both to a bool.
             let env_flag = |name: &str, default_on: bool| -> &'static str {
                 let raw = std::env::var(name).ok();
                 let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
