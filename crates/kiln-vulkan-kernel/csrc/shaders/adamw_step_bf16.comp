@@ -1,0 +1,114 @@
+// AdamW parameter update for BF16 buffers (decoupled weight decay).
+//
+// Loshchilov & Hutter (2019) "Decoupled Weight Decay Regularization".
+// Per-step update for one element:
+//     param  <- param * (1 - lr * weight_decay)
+//     m      <- beta1 * m + (1 - beta1) * grad
+//     v      <- beta2 * v + (1 - beta2) * grad^2
+//     m_hat  <- m / (1 - beta1^step)
+//     v_hat  <- v / (1 - beta2^step)
+//     param  <- param - lr * m_hat / (sqrt(v_hat) + eps)
+//
+// All four state buffers (param, grad, m, v) are bf16-packed (2 lanes
+// per u32 word) in the same encoding as `extract_tensor_packed_bf16_bytes`.
+// One thread per u32 word updates both lanes via bf16↔f32 bit-expansion;
+// internal moment math runs in f32 to avoid silent underflow in v
+// when |grad| is small.
+//
+// Used by `dispatch_adamw_step_bf16` against registry-resident LoRA
+// param + grad + first-moment + second-moment buffers.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n;             // total bf16 element count
+    uint step;          // 1-indexed step count
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1; // = 1 - beta1^step  (precomputed host-side)
+    float bias_correction2; // = 1 - beta2^step  (precomputed host-side)
+};
+
+layout(binding = 0) buffer ParamBuf { uint data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { uint data_grad[]; };
+layout(binding = 2) buffer FirstMomentBuf { uint data_m[]; };
+layout(binding = 3) buffer SecondMomentBuf { uint data_v[]; };
+
+float bf16_to_f32(uint bits16) {
+    return uintBitsToFloat(bits16 << 16);
+}
+
+uint f32_to_bf16(float v) {
+    uint b = floatBitsToUint(v);
+    uint rounded = b + ((b >> 16) & 1u) + 0x7fffu;
+    return rounded >> 16;
+}
+
+// Per-lane AdamW math returning (new_param_bf16, new_m_bf16, new_v_bf16).
+// `lane_valid` is false for the hi lane of an odd-length tensor's last
+// word; in that case the caller preserves the existing hi-lane bits.
+void adamw_lane(
+    float p, float g, float m, float v,
+    out uint p_out_bf16, out uint m_out_bf16, out uint v_out_bf16
+) {
+    // Decoupled weight decay applied first (Loshchilov & Hutter style).
+    p = p - lr * weight_decay * p;
+
+    // Update biased moments.
+    float m_new = beta1 * m + (1.0 - beta1) * g;
+    float v_new = beta2 * v + (1.0 - beta2) * g * g;
+
+    // Bias-corrected estimates.
+    float m_hat = m_new / max(bias_correction1, 1e-20);
+    float v_hat = v_new / max(bias_correction2, 1e-20);
+
+    // Adaptive step.
+    p = p - lr * m_hat / (sqrt(v_hat) + eps);
+
+    p_out_bf16 = f32_to_bf16(p);
+    m_out_bf16 = f32_to_bf16(m_new);
+    v_out_bf16 = f32_to_bf16(v_new);
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (n + 1u) >> 1;
+    if (word_idx >= num_words) return;
+
+    uint p_word = data_param[word_idx];
+    uint g_word = data_grad[word_idx];
+    uint m_word = data_m[word_idx];
+    uint v_word = data_v[word_idx];
+
+    float p0 = bf16_to_f32(p_word & 0xffffu);
+    float p1 = bf16_to_f32(p_word >> 16);
+    float g0 = bf16_to_f32(g_word & 0xffffu);
+    float g1 = bf16_to_f32(g_word >> 16);
+    float m0 = bf16_to_f32(m_word & 0xffffu);
+    float m1 = bf16_to_f32(m_word >> 16);
+    float v0 = bf16_to_f32(v_word & 0xffffu);
+    float v1 = bf16_to_f32(v_word >> 16);
+
+    uint p0_b, m0_b, v0_b;
+    uint p1_b, m1_b, v1_b;
+    adamw_lane(p0, g0, m0, v0, p0_b, m0_b, v0_b);
+    adamw_lane(p1, g1, m1, v1, p1_b, m1_b, v1_b);
+
+    uint base_idx = word_idx * 2u;
+    if (base_idx + 1u < n) {
+        data_param[word_idx] = p0_b | (p1_b << 16);
+        data_m[word_idx]     = m0_b | (m1_b << 16);
+        data_v[word_idx]     = v0_b | (v1_b << 16);
+    } else if (base_idx < n) {
+        // Only lo lane is real; preserve hi-lane bits in all three buffers.
+        data_param[word_idx] = (p_word & 0xffff0000u) | (p0_b & 0xffffu);
+        data_m[word_idx]     = (m_word & 0xffff0000u) | (m0_b & 0xffffu);
+        data_v[word_idx]     = (v_word & 0xffff0000u) | (v0_b & 0xffffu);
+    }
+}

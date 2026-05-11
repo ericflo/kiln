@@ -1,0 +1,53 @@
+// AdamW parameter update for F32 buffers (decoupled weight decay).
+//
+// See `adamw_step_bf16.comp` for the math; this is the F32 variant
+// used when LoRA Vars are stored as F32 (currently rare — BF16 is the
+// default — but kept for parity with `sgd_step_f32`).
+//
+// One workgroup per 256 elements, one thread per element.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n;
+    uint step;
+    float lr;
+    float beta1;
+    float beta2;
+    float eps;
+    float weight_decay;
+    float bias_correction1;
+    float bias_correction2;
+};
+
+layout(binding = 0) buffer ParamBuf { float data_param[]; };
+layout(binding = 1) readonly buffer GradBuf { float data_grad[]; };
+layout(binding = 2) buffer FirstMomentBuf { float data_m[]; };
+layout(binding = 3) buffer SecondMomentBuf { float data_v[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= n) return;
+
+    float p = data_param[i];
+    float g = data_grad[i];
+    float m = data_m[i];
+    float v = data_v[i];
+
+    p = p - lr * weight_decay * p;
+
+    float m_new = beta1 * m + (1.0 - beta1) * g;
+    float v_new = beta2 * v + (1.0 - beta2) * g * g;
+
+    float m_hat = m_new / max(bias_correction1, 1e-20);
+    float v_hat = v_new / max(bias_correction2, 1e-20);
+
+    p = p - lr * m_hat / (sqrt(v_hat) + eps);
+
+    data_param[i] = p;
+    data_m[i] = m_new;
+    data_v[i] = v_new;
+}

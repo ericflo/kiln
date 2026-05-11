@@ -8850,3 +8850,140 @@ pub fn dispatch_sgd_step_f32(
     )
     .context("sgd_step_f32: kernel dispatch")
 }
+
+/// AdamW (decoupled weight decay) for registry-resident BF16 buffers.
+///
+/// Updates `param`, `m`, and `v` in place. All four buffers (param,
+/// grad, m, v) hold packed BF16 (2 bf16 per u32 word) in the
+/// `extract_tensor_packed_bf16_bytes_pub` encoding, and must share
+/// the same element count `n_elements`. The step counter is 1-indexed
+/// (so the first call after `m=v=0` passes `step=1`); host-side this
+/// helper computes `bias_correction{1,2} = 1 - beta^step` and ships
+/// them via push constants so the shader doesn't need a pow call.
+///
+/// One thread per u32 word (i.e. two BF16 lanes), 256 threads per
+/// workgroup. Per-step cost is ~8n BF16 reads/writes — bandwidth-bound,
+/// trivially small even for the largest LoRA Vars.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_adamw_step_bf16(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    first_moment_buffer: &VulkanBuffer,
+    second_moment_buffer: &VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "adamw_step_bf16: n_elements must be > 0");
+    anyhow::ensure!(step >= 1, "adamw_step_bf16: step must be 1-indexed (>=1)");
+    let num_words = n_elements.div_ceil(2);
+    let workgroup_count = num_words.div_ceil(256) as u32;
+    let limit = vk_device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroup_count <= limit,
+        "adamw_step_bf16: n_elements={n_elements} → {workgroup_count} workgroups \
+         (>{limit} device per-axis limit)"
+    );
+    let bc1 = 1.0_f32 - beta1.powi(step as i32);
+    let bc2 = 1.0_f32 - beta2.powi(step as i32);
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/adamw_step_bf16.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("adamw_step_bf16: shader compile/load")?;
+    let push_constants: [u32; 9] = [
+        n_elements as u32,
+        step,
+        lr.to_bits(),
+        beta1.to_bits(),
+        beta2.to_bits(),
+        eps.to_bits(),
+        weight_decay.to_bits(),
+        bc1.to_bits(),
+        bc2.to_bits(),
+    ];
+    let all_handles = vec![
+        param_buffer.handle(),
+        grad_buffer.handle(),
+        first_moment_buffer.handle(),
+        second_moment_buffer.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        workgroup_count,
+    )
+    .context("adamw_step_bf16: kernel dispatch")
+}
+
+/// F32 variant of `dispatch_adamw_step_bf16`. Kept for parity with
+/// `dispatch_sgd_step_f32`; currently LoRA Vars default to BF16 so
+/// this path is exercised mainly by tests.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_adamw_step_f32(
+    vk_device: &VulkanDevice,
+    param_buffer: &VulkanBuffer,
+    grad_buffer: &VulkanBuffer,
+    first_moment_buffer: &VulkanBuffer,
+    second_moment_buffer: &VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    anyhow::ensure!(n_elements > 0, "adamw_step_f32: n_elements must be > 0");
+    anyhow::ensure!(step >= 1, "adamw_step_f32: step must be 1-indexed (>=1)");
+    let workgroup_count = n_elements.div_ceil(256) as u32;
+    let limit = vk_device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroup_count <= limit,
+        "adamw_step_f32: n_elements={n_elements} → {workgroup_count} workgroups \
+         (>{limit} device per-axis limit)"
+    );
+    let bc1 = 1.0_f32 - beta1.powi(step as i32);
+    let bc2 = 1.0_f32 - beta2.powi(step as i32);
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/adamw_step_f32.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)
+        .context("adamw_step_f32: shader compile/load")?;
+    let push_constants: [u32; 9] = [
+        n_elements as u32,
+        step,
+        lr.to_bits(),
+        beta1.to_bits(),
+        beta2.to_bits(),
+        eps.to_bits(),
+        weight_decay.to_bits(),
+        bc1.to_bits(),
+        bc2.to_bits(),
+    ];
+    let all_handles = vec![
+        param_buffer.handle(),
+        grad_buffer.handle(),
+        first_moment_buffer.handle(),
+        second_moment_buffer.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        workgroup_count,
+    )
+    .context("adamw_step_f32: kernel dispatch")
+}

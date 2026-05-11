@@ -142,6 +142,8 @@ const SHADERS: &[(&str, &str)] = &[
     ("sdpa_prefill_f32", "SPIR_V_SDPA_PREFILL_F32"),
     ("sgd_step_f32", "SPIR_V_SGD_STEP_F32"),
     ("sgd_step_bf16", "SPIR_V_SGD_STEP_BF16"),
+    ("adamw_step_f32", "SPIR_V_ADAMW_STEP_F32"),
+    ("adamw_step_bf16", "SPIR_V_ADAMW_STEP_BF16"),
 ];
 
 fn compile_shader_command(

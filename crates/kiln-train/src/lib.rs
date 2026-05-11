@@ -36,6 +36,58 @@ pub struct SftRequest {
     pub config: SftConfig,
 }
 
+/// Optimizer selection for training.
+///
+/// `Sgd` is plain stochastic gradient descent (`param -= lr * grad`) — the
+/// historical default; dispatched on-device via `dispatch_sgd_step` when the
+/// backend supports residency, otherwise via candle CPU autograd.
+///
+/// `AdamW` is decoupled-weight-decay Adam (Loshchilov & Hutter 2019);
+/// dispatched on-device via `dispatch_adamw_step` when the backend supports
+/// residency. The trainer allocates per-parameter first/second moment Vars at
+/// init, registers them in the resident-activation registry alongside the
+/// param/grad, and updates all three in-place per step. The CPU fallback runs
+/// the same update via candle ops.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum Optimizer {
+    Sgd,
+    AdamW {
+        #[serde(default = "default_beta1")]
+        beta1: f32,
+        #[serde(default = "default_beta2")]
+        beta2: f32,
+        #[serde(default = "default_eps")]
+        eps: f32,
+        #[serde(default = "default_weight_decay")]
+        weight_decay: f32,
+    },
+}
+
+impl Default for Optimizer {
+    fn default() -> Self {
+        Optimizer::AdamW {
+            beta1: default_beta1(),
+            beta2: default_beta2(),
+            eps: default_eps(),
+            weight_decay: default_weight_decay(),
+        }
+    }
+}
+
+fn default_beta1() -> f32 {
+    0.9
+}
+fn default_beta2() -> f32 {
+    0.999
+}
+fn default_eps() -> f32 {
+    1e-8
+}
+fn default_weight_decay() -> f32 {
+    0.0
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SftConfig {
     #[serde(default = "default_epochs")]
@@ -61,6 +113,11 @@ pub struct SftConfig {
     /// so the run is still exactly reproducible.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Optimizer selection. Defaults to AdamW (decoupled weight decay) per
+    /// LoRA fine-tuning best practice. Plain SGD is available via
+    /// `{"optimizer": {"kind": "sgd"}}` for backwards-compatible runs.
+    #[serde(default)]
+    pub optimizer: Optimizer,
 }
 
 fn default_auto_load() -> bool {
@@ -91,6 +148,7 @@ impl Default for SftConfig {
             auto_load: default_auto_load(),
             checkpoint_interval: None,
             seed: None,
+            optimizer: Optimizer::default(),
         }
     }
 }
@@ -144,6 +202,9 @@ pub struct GrpoConfig {
     /// so the run is still exactly reproducible.
     #[serde(default)]
     pub seed: Option<u64>,
+    /// Optimizer selection — see `SftConfig::optimizer`.
+    #[serde(default)]
+    pub optimizer: Optimizer,
 }
 
 fn default_grpo_lr() -> f64 {
@@ -169,6 +230,7 @@ impl Default for GrpoConfig {
             auto_load: default_auto_load(),
             checkpoint_interval: None,
             seed: None,
+            optimizer: Optimizer::default(),
         }
     }
 }

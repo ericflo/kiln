@@ -968,6 +968,117 @@ impl BackendRuntime for VulkanBackend {
         }
     }
 
+    fn dispatch_adamw_step(
+        &self,
+        param: &Tensor,
+        grad: &Tensor,
+        first_moment: &Tensor,
+        second_moment: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(false);
+        };
+        if step < 1 {
+            anyhow::bail!("dispatch_adamw_step: step must be 1-indexed (>=1), got {step}");
+        }
+        if param.dtype() != grad.dtype()
+            || param.dtype() != first_moment.dtype()
+            || param.dtype() != second_moment.dtype()
+        {
+            anyhow::bail!(
+                "dispatch_adamw_step: dtype mismatch (param={:?}, grad={:?}, m={:?}, v={:?})",
+                param.dtype(),
+                grad.dtype(),
+                first_moment.dtype(),
+                second_moment.dtype(),
+            );
+        }
+        let n_elements: usize = param.shape().elem_count();
+        if n_elements != grad.shape().elem_count()
+            || n_elements != first_moment.shape().elem_count()
+            || n_elements != second_moment.shape().elem_count()
+        {
+            anyhow::bail!(
+                "dispatch_adamw_step: element count mismatch (param={}, grad={}, m={}, v={})",
+                n_elements,
+                grad.shape().elem_count(),
+                first_moment.shape().elem_count(),
+                second_moment.shape().elem_count(),
+            );
+        }
+        let p_id = param.id();
+        let g_id = grad.id();
+        let m_id = first_moment.id();
+        let v_id = second_moment.id();
+        let bufs = with_resident_registry(|cache| {
+            let p = cache.get(&p_id).map(Arc::clone)?;
+            let g = cache.get(&g_id).map(Arc::clone)?;
+            let m = cache.get(&m_id).map(Arc::clone)?;
+            let v = cache.get(&v_id).map(Arc::clone)?;
+            Some((p, g, m, v))
+        });
+        let Some((param_buf, grad_buf, m_buf, v_buf)) = bufs else {
+            return Ok(false);
+        };
+        static FIRST_ADAMW_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_ADAMW_LOGGED.get_or_init(|| {
+            tracing::info!(
+                n_elements,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+                dtype = ?param.dtype(),
+                "VulkanBackend::dispatch_adamw_step first call"
+            );
+        });
+        match param.dtype() {
+            DType::F32 => {
+                kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
+                    vk_device,
+                    &param_buf,
+                    &grad_buf,
+                    &m_buf,
+                    &v_buf,
+                    n_elements,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    step,
+                )?;
+                Ok(true)
+            }
+            DType::BF16 => {
+                kiln_vulkan_kernel::kernels::dispatch_adamw_step_bf16(
+                    vk_device,
+                    &param_buf,
+                    &grad_buf,
+                    &m_buf,
+                    &v_buf,
+                    n_elements,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    step,
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn lora_delta_resident(
         &self,
         x: &Tensor,
@@ -3428,6 +3539,211 @@ mod tests {
 
         backend.evict_resident_activation(&p_bf16);
         backend.evict_resident_activation(&g_bf16);
+        Ok(())
+    }
+
+    /// dispatch_adamw_step on registry-resident F32 operands must
+    /// match a scalar reference of the decoupled-weight-decay AdamW
+    /// math to f32 precision, after one optimizer step from
+    /// `m=v=0`. Exercises the full param/grad/m/v round-trip plus
+    /// the bias-correction precompute path.
+    #[test]
+    fn dispatch_adamw_step_resident_round_trip_f32() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let n = 16usize;
+        let lr = 0.01f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let eps = 1e-8f32;
+        let weight_decay = 0.01f32;
+        let step: u32 = 1;
+
+        let p_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1 + 0.2).collect();
+        let g_data: Vec<f32> = (0..n).map(|i| ((i as i32 - 8) as f32) * 0.03).collect();
+        let m_data: Vec<f32> = vec![0.0; n];
+        let v_data: Vec<f32> = vec![0.0; n];
+
+        // Scalar reference (matches the shader math exactly).
+        let bc1 = 1.0_f32 - beta1.powi(step as i32);
+        let bc2 = 1.0_f32 - beta2.powi(step as i32);
+        let expected: Vec<f32> = p_data
+            .iter()
+            .zip(g_data.iter())
+            .map(|(&p, &g)| {
+                let p_wd = p - lr * weight_decay * p;
+                let m = beta1 * 0.0 + (1.0 - beta1) * g;
+                let v = beta2 * 0.0 + (1.0 - beta2) * g * g;
+                let m_hat = m / bc1.max(1e-20);
+                let v_hat = v / bc2.max(1e-20);
+                p_wd - lr * m_hat / (v_hat.sqrt() + eps)
+            })
+            .collect();
+
+        let param = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
+        let grad = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
+        let m = Tensor::from_vec(m_data, (n,), &Device::Cpu)?;
+        let v = Tensor::from_vec(v_data, (n,), &Device::Cpu)?;
+
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+        backend.register_resident_activation(&m)?;
+        backend.register_resident_activation(&v)?;
+
+        let dispatched = backend.dispatch_adamw_step(
+            &param,
+            &grad,
+            &m,
+            &v,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )?;
+        assert!(dispatched, "adamw_step must succeed when all four buffers are resident");
+
+        let resolved = backend
+            .resolve_resident_activation(&param, &[n], DType::F32)?
+            .expect("param must resolve after dispatch");
+        let got: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (g, w)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-6,
+                "idx {i}: got={g:.9} want={w:.9}"
+            );
+        }
+
+        backend.evict_resident_activation(&param);
+        backend.evict_resident_activation(&grad);
+        backend.evict_resident_activation(&m);
+        backend.evict_resident_activation(&v);
+        Ok(())
+    }
+
+    /// Two-step BF16 AdamW round-trip: starts at m=v=0, runs
+    /// `dispatch_adamw_step` twice with step=1 then step=2, and
+    /// verifies the param ends up close to the bf16-precision
+    /// reference. Catches bugs where bias-correction precompute or
+    /// in-place buffer updates don't carry across steps.
+    #[test]
+    fn dispatch_adamw_step_resident_round_trip_bf16_two_step() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let n = 32usize;
+        let lr = 0.05f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let eps = 1e-8f32;
+        let weight_decay = 0.01f32;
+
+        let p_data: Vec<f32> = (0..n).map(|i| ((i as i32 - 16) as f32) * 0.05).collect();
+        let g_data: Vec<f32> = (0..n).map(|i| ((i % 5) as f32 - 2.0) * 0.02).collect();
+
+        // Reference: two AdamW steps on f32 (no bf16 quantization).
+        let mut ref_p = p_data.clone();
+        let mut ref_m = vec![0.0f32; n];
+        let mut ref_v = vec![0.0f32; n];
+        for step in 1u32..=2 {
+            let bc1 = (1.0_f32 - beta1.powi(step as i32)).max(1e-20);
+            let bc2 = (1.0_f32 - beta2.powi(step as i32)).max(1e-20);
+            for i in 0..n {
+                let g = g_data[i];
+                let p_wd = ref_p[i] - lr * weight_decay * ref_p[i];
+                let m_new = beta1 * ref_m[i] + (1.0 - beta1) * g;
+                let v_new = beta2 * ref_v[i] + (1.0 - beta2) * g * g;
+                let m_hat = m_new / bc1;
+                let v_hat = v_new / bc2;
+                ref_p[i] = p_wd - lr * m_hat / (v_hat.sqrt() + eps);
+                ref_m[i] = m_new;
+                ref_v[i] = v_new;
+            }
+        }
+
+        let p_f32 = Tensor::from_vec(p_data, (n,), &Device::Cpu)?;
+        let g_f32 = Tensor::from_vec(g_data, (n,), &Device::Cpu)?;
+        let m_f32 = Tensor::from_vec(vec![0.0f32; n], (n,), &Device::Cpu)?;
+        let v_f32 = Tensor::from_vec(vec![0.0f32; n], (n,), &Device::Cpu)?;
+        let p_bf16 = p_f32.to_dtype(DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(DType::BF16)?;
+        let m_bf16 = m_f32.to_dtype(DType::BF16)?;
+        let v_bf16 = v_f32.to_dtype(DType::BF16)?;
+
+        backend.register_resident_activation(&p_bf16)?;
+        backend.register_resident_activation(&g_bf16)?;
+        backend.register_resident_activation(&m_bf16)?;
+        backend.register_resident_activation(&v_bf16)?;
+
+        for step in 1u32..=2 {
+            let dispatched = backend.dispatch_adamw_step(
+                &p_bf16,
+                &g_bf16,
+                &m_bf16,
+                &v_bf16,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+            )?;
+            assert!(dispatched, "step {step}: adamw bf16 dispatch must succeed");
+        }
+
+        let resolved = backend
+            .resolve_resident_activation(&p_bf16, &[n], DType::BF16)?
+            .expect("param must resolve");
+        let got: Vec<f32> = resolved
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        for (i, (g, w)) in got.iter().zip(ref_p.iter()).enumerate() {
+            // bf16 mantissa ≈ 7 bits; loose tolerance per lane.
+            let abs = (g - w).abs();
+            let rel = abs / w.abs().max(1e-3);
+            assert!(
+                abs < 5e-2 || rel < 5e-2,
+                "idx {i}: got={g:.6} want={w:.6} abs={abs:e} rel={rel:e}"
+            );
+        }
+
+        backend.evict_resident_activation(&p_bf16);
+        backend.evict_resident_activation(&g_bf16);
+        backend.evict_resident_activation(&m_bf16);
+        backend.evict_resident_activation(&v_bf16);
+        Ok(())
+    }
+
+    /// dispatch_adamw_step falls back (returns false) when any of the
+    /// four operand buffers isn't resident.
+    #[test]
+    fn dispatch_adamw_step_falls_back_when_not_resident() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?;
+        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;
+        let m = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
+        let v = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
+        // Nothing registered.
+        let dispatched = backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        assert!(!dispatched);
+        // Only param + m registered — v missing → fall back.
+        backend.register_resident_activation(&p)?;
+        backend.register_resident_activation(&m)?;
+        let dispatched = backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        assert!(!dispatched);
+        backend.evict_resident_activation(&p);
+        backend.evict_resident_activation(&m);
         Ok(())
     }
 

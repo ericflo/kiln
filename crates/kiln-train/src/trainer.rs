@@ -32,7 +32,7 @@ use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
     RequestRecord,
 };
-use crate::{ChatMessage, GrpoConfig, GrpoGroup, SftConfig, SftExample};
+use crate::{ChatMessage, GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
 
 /// Per-job context the HTTP layer hands the trainer so the training run can
 /// be replayed exactly from its on-disk artifacts.
@@ -433,6 +433,89 @@ impl TrainableLoraParams {
         }
     }
 
+    /// Allocate AdamW per-parameter moment state: a zero-init Var of
+    /// matching shape/dtype for each LoRA Var (so each LoRA `Var` has
+    /// one `m` Var and one `v` Var). The order matches `all_vars()`,
+    /// indexed by `var.as_tensor().id()`.
+    ///
+    /// Returns the [`OptimizerState`] the trainer threads through
+    /// `apply_adamw_update`. CPU and GPU paths both consume it.
+    pub fn allocate_adamw_state(&self, device: &Device) -> Result<OptimizerState> {
+        let mut moments: HashMap<candle_core::TensorId, AdamWMoments> = HashMap::new();
+        for var in self.all_vars() {
+            let shape = var.as_tensor().shape().clone();
+            let dtype = var.as_tensor().dtype();
+            let m = Var::zeros(shape.clone(), dtype, device)
+                .with_context(|| "allocating AdamW first-moment Var")?;
+            let v = Var::zeros(shape, dtype, device)
+                .with_context(|| "allocating AdamW second-moment Var")?;
+            moments.insert(var.as_tensor().id(), AdamWMoments { m, v });
+        }
+        Ok(OptimizerState {
+            moments,
+            step: 0,
+        })
+    }
+}
+
+/// AdamW per-parameter moment state.
+///
+/// `m` and `v` are full-precision (matching the param dtype — BF16 in
+/// production) Vars of the same shape as the corresponding LoRA Var.
+/// The trainer keeps them in lock-step with the param Var: on each
+/// optimizer step both moments and the param are updated together
+/// (in-place on the registry buffer when the backend supports
+/// residency, via candle ops otherwise).
+pub struct AdamWMoments {
+    pub m: Var,
+    pub v: Var,
+}
+
+/// State threaded through the trainer for AdamW. Holds per-param
+/// moment Vars (keyed by the param Var's `TensorId`) plus the global
+/// step counter the bias-correction terms read.
+///
+/// One per training run — allocated alongside `TrainableLoraParams`
+/// (when `Optimizer::AdamW` is selected) and dropped at the end. The
+/// step counter is 1-indexed at the optimizer kernel level: the
+/// trainer increments `step` *before* dispatching so the first call
+/// sees `step=1`.
+pub struct OptimizerState {
+    pub moments: HashMap<candle_core::TensorId, AdamWMoments>,
+    pub step: u32,
+}
+
+impl OptimizerState {
+    /// Register every moment Var in the backend's resident-activation
+    /// registry. The Vulkan AdamW kernel resolves `m` and `v` from
+    /// the registry by Var TensorId, so this must run before the first
+    /// `apply_adamw_update` if the on-device path is to fire.
+    pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
+        if !backend.supports_resident_activation() {
+            return Ok(());
+        }
+        for moments in self.moments.values() {
+            backend.register_resident_activation(moments.m.as_tensor())?;
+            backend.register_resident_activation(moments.v.as_tensor())?;
+        }
+        Ok(())
+    }
+
+    /// Inverse of `register_with_backend` — release every moment Var
+    /// from the registry. Called at training completion alongside
+    /// `TrainableLoraParams::evict_from_backend`.
+    pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
+        if !backend.supports_resident_activation() {
+            return;
+        }
+        for moments in self.moments.values() {
+            backend.evict_resident_activation(moments.m.as_tensor());
+            backend.evict_resident_activation(moments.v.as_tensor());
+        }
+    }
+}
+
+impl TrainableLoraParams {
     /// Convert trainable params to a `LoraWeights` for use with the forward pass.
     ///
     /// The returned `LoraWeights` holds tensors that are backed by our Vars,
@@ -661,13 +744,25 @@ pub fn sft_train(
 
     // Phase 4.1: register LoRA Vars in the resident activation
     // registry. Forward LoRA dispatches via `lora_delta_resident`
-    // (CustomOp3 with autograd backward) and `apply_sgd_update`
-    // dispatches the on-device SGD against the registry buffers.
+    // (CustomOp3 with autograd backward) and the optimizer step
+    // dispatches on-device against the registry buffers.
     params.register_with_backend(&*backend)?;
+
+    // Allocate AdamW state if selected; SGD has no per-param state.
+    // Registered alongside the LoRA Vars so the on-device kernel can
+    // resolve `m` and `v` by TensorId.
+    let mut opt_state = match config.optimizer {
+        Optimizer::Sgd => None,
+        Optimizer::AdamW { .. } => {
+            let state = params.allocate_adamw_state(&device)?;
+            state.register_with_backend(&*backend)?;
+            Some(state)
+        }
+    };
 
     // Run the actual training body inside a closure so we can write the
     // outcome record (success or failure) before returning to the caller.
-    let train_body = || -> Result<(PathBuf, f64)> {
+    let mut train_body = || -> Result<(PathBuf, f64)> {
         // Tokenize all examples and build (input_ids, label_mask) pairs.
         // Labels: we want to train on assistant responses only.
         let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
@@ -733,7 +828,14 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    sgd_step_from_map(&*backend, &params, &accumulated_grads, config.learning_rate)?;
+                    optimizer_step_from_map(
+                        &*backend,
+                        &params,
+                        &accumulated_grads,
+                        config.learning_rate,
+                        config.optimizer,
+                        opt_state.as_mut(),
+                    )?;
                 } else {
                     // Standard (non-checkpointed) forward/backward
                     let (lv, grads) = standard_forward_backward(
@@ -747,7 +849,14 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    sgd_step(&*backend, &params, &grads, config.learning_rate)?;
+                    optimizer_step(
+                        &*backend,
+                        &params,
+                        &grads,
+                        config.learning_rate,
+                        config.optimizer,
+                        opt_state.as_mut(),
+                    )?;
                 }
 
                 epoch_loss += loss_val;
@@ -827,6 +936,9 @@ pub fn sft_train(
     // training jobs (each job creates fresh Vars with new TensorIds).
     // The eviction happens regardless of whether training succeeded
     // or failed.
+    if let Some(state) = opt_state.as_ref() {
+        state.evict_from_backend(&*backend);
+    }
     params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
@@ -909,11 +1021,20 @@ pub fn grpo_train(
 
     // Phase 4.1: register LoRA Vars in the resident activation
     // registry. Forward LoRA dispatches via `lora_delta_resident`
-    // (CustomOp3 with autograd backward) and `apply_sgd_update`
-    // dispatches the on-device SGD against the registry buffers.
+    // (CustomOp3 with autograd backward) and the optimizer step
+    // dispatches on-device against the registry buffers.
     params.register_with_backend(&*backend)?;
 
-    let train_body = || -> Result<(PathBuf, f64)> {
+    let mut opt_state = match config.optimizer {
+        Optimizer::Sgd => None,
+        Optimizer::AdamW { .. } => {
+            let state = params.allocate_adamw_state(&device)?;
+            state.register_with_backend(&*backend)?;
+            Some(state)
+        }
+    };
+
+    let mut train_body = || -> Result<(PathBuf, f64)> {
         // Tokenize all completions: for each group, tokenize prompt + each completion
         let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
             .iter()
@@ -1005,7 +1126,14 @@ pub fn grpo_train(
                         &device,
                     )?;
                     loss_val = lv;
-                    sgd_step_from_map(&*backend, &params, &accumulated_grads, config.learning_rate)?;
+                    optimizer_step_from_map(
+                        &*backend,
+                        &params,
+                        &accumulated_grads,
+                        config.learning_rate,
+                        config.optimizer,
+                        opt_state.as_mut(),
+                    )?;
                 } else {
                     // Standard (non-checkpointed) GRPO step
                     let lora_weights = params.as_lora_weights();
@@ -1039,7 +1167,14 @@ pub fn grpo_train(
                     loss_val = loss.to_scalar::<f32>()? as f64;
 
                     let grads = loss.backward().context("GRPO backward pass")?;
-                    sgd_step(&*backend, &params, &grads, config.learning_rate)?;
+                    optimizer_step(
+                        &*backend,
+                        &params,
+                        &grads,
+                        config.learning_rate,
+                        config.optimizer,
+                        opt_state.as_mut(),
+                    )?;
                 }
 
                 group_loss_sum += loss_val;
@@ -1111,8 +1246,11 @@ pub fn grpo_train(
 
     let result = train_body();
     // Phase 4.1 cleanup: same as sft_train — evict the LoRA Vars
-    // from the registry on completion so stale entries don't
-    // accumulate across jobs.
+    // and any optimizer-state moment Vars from the registry on
+    // completion so stale entries don't accumulate across jobs.
+    if let Some(state) = opt_state.as_ref() {
+        state.evict_from_backend(&*backend);
+    }
     params.evict_from_backend(&*backend);
     if let Some(state) = replay_state {
         let outcome = match &result {
@@ -1756,6 +1894,60 @@ fn sgd_step(
     Ok(())
 }
 
+/// Dispatch the configured optimizer against grads from candle's
+/// `GradStore`. `opt_state` must be `Some` iff `optimizer` is
+/// `Optimizer::AdamW`. Caller mutates `opt_state.step` (increments by
+/// one) before this returns so the next call sees the new step.
+fn optimizer_step(
+    backend: &dyn BackendRuntime,
+    params: &TrainableLoraParams,
+    grads: &candle_core::backprop::GradStore,
+    lr: f64,
+    optimizer: Optimizer,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<()> {
+    match optimizer {
+        Optimizer::Sgd => sgd_step(backend, params, grads, lr),
+        Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => {
+            let state = opt_state.ok_or_else(|| {
+                anyhow::anyhow!("optimizer_step: AdamW requires OptimizerState")
+            })?;
+            state.step = state.step.saturating_add(1);
+            let step = state.step;
+            let resident_activation = backend.supports_resident_activation();
+            for var in params.all_vars() {
+                if let Some(grad) = grads.get(var.as_tensor()) {
+                    let moments = state.moments.get(&var.as_tensor().id()).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "optimizer_step: missing AdamW moments for Var id {:?}",
+                            var.as_tensor().id()
+                        )
+                    })?;
+                    apply_adamw_update(
+                        backend,
+                        var,
+                        &grad,
+                        moments,
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
+                        resident_activation,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Apply one SGD update to a single Var, preferring the on-device
 /// path when both operands are registry-resident.
 ///
@@ -1821,6 +2013,126 @@ fn apply_sgd_update(
     Ok(())
 }
 
+/// Apply one AdamW (decoupled weight decay) update to a single Var.
+///
+/// On-device path: param/grad/m/v are all registry-resident →
+/// `dispatch_adamw_step` updates all three (param, m, v) in-place in
+/// one kernel; the candle storage of `var`, `moments.m`, `moments.v`
+/// is then synced from the registry buffer so callers like
+/// `save_peft` (which reads `var.as_tensor()`) see the latest values.
+///
+/// CPU fallback: pure candle ops implementing the same math
+/// (decoupled WD applied first, biased moments, bias-corrected,
+/// adaptive step). Uses `Var::set` to land the updates.
+///
+/// `step` is 1-indexed at the kernel level; the caller increments
+/// `OptimizerState::step` once per optimizer step *before* iterating
+/// over Vars.
+#[allow(clippy::too_many_arguments)]
+fn apply_adamw_update(
+    backend: &dyn BackendRuntime,
+    var: &Var,
+    grad: &Tensor,
+    moments: &AdamWMoments,
+    lr: f64,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+    resident_activation: bool,
+) -> Result<()> {
+    let dtype = var.as_tensor().dtype();
+    if resident_activation
+        && backend.has_resident_activation(var.as_tensor())
+        && backend.has_resident_activation(moments.m.as_tensor())
+        && backend.has_resident_activation(moments.v.as_tensor())
+    {
+        backend.register_resident_activation(grad)?;
+        let dispatched = match backend.dispatch_adamw_step(
+            var.as_tensor(),
+            grad,
+            moments.m.as_tensor(),
+            moments.v.as_tensor(),
+            lr as f32,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                backend.evict_resident_activation(grad);
+                return Err(e);
+            }
+        };
+        if dispatched {
+            // Sync candle storage of all three Vars from the now-updated
+            // registry buffers so subsequent reads (autograd reuse,
+            // save_peft, replay logging) see consistent state.
+            let dims_p: Vec<usize> = var.as_tensor().dims().to_vec();
+            let dims_m: Vec<usize> = moments.m.as_tensor().dims().to_vec();
+            let dims_v: Vec<usize> = moments.v.as_tensor().dims().to_vec();
+            let new_p = backend
+                .resolve_resident_activation(var.as_tensor(), &dims_p, dtype)?
+                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve param returned None"))?;
+            let new_m = backend
+                .resolve_resident_activation(moments.m.as_tensor(), &dims_m, dtype)?
+                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve m returned None"))?;
+            let new_v = backend
+                .resolve_resident_activation(moments.v.as_tensor(), &dims_v, dtype)?
+                .ok_or_else(|| anyhow::anyhow!("apply_adamw_update: resolve v returned None"))?;
+            var.set(&new_p)?;
+            moments.m.set(&new_m)?;
+            moments.v.set(&new_v)?;
+            backend.evict_resident_activation(grad);
+            return Ok(());
+        }
+        backend.evict_resident_activation(grad);
+    }
+
+    // CPU fallback: run the same math via candle ops in f32 to avoid
+    // BF16 underflow on the v moment, then round-trip back to the
+    // param dtype.
+    let to_f32 = |t: &Tensor| -> Result<Tensor> { Ok(t.to_dtype(DType::F32)?) };
+    let p_f32 = to_f32(var.as_tensor())?;
+    let g_f32 = to_f32(grad)?;
+    let m_f32 = to_f32(moments.m.as_tensor())?;
+    let v_f32 = to_f32(moments.v.as_tensor())?;
+
+    let p_after_wd = p_f32.affine(1.0_f64 - lr * weight_decay as f64, 0.0)?;
+    // m_new = beta1*m + (1-beta1)*g
+    let m_new = (m_f32.affine(beta1 as f64, 0.0)?
+        + g_f32.affine((1.0 - beta1) as f64, 0.0)?)?;
+    // v_new = beta2*v + (1-beta2)*g^2
+    let g_sq = (&g_f32 * &g_f32)?;
+    let v_new = (v_f32.affine(beta2 as f64, 0.0)?
+        + g_sq.affine((1.0 - beta2) as f64, 0.0)?)?;
+
+    let bc1 = (1.0_f32 - beta1.powi(step as i32)).max(1e-20);
+    let bc2 = (1.0_f32 - beta2.powi(step as i32)).max(1e-20);
+    let m_hat = m_new.affine(1.0_f64 / bc1 as f64, 0.0)?;
+    let v_hat = v_new.affine(1.0_f64 / bc2 as f64, 0.0)?;
+    let v_sqrt = v_hat.sqrt()?;
+    let denom = v_sqrt.affine(1.0, eps as f64)?;
+    let upd = (m_hat / denom)?;
+    let new_param_f32 = (p_after_wd - upd.affine(lr, 0.0)?)?;
+
+    let new_param = new_param_f32.to_dtype(dtype)?;
+    let new_m = m_new.to_dtype(dtype)?;
+    let new_v = v_new.to_dtype(dtype)?;
+    var.set(&new_param)?;
+    moments.m.set(&new_m)?;
+    moments.v.set(&new_v)?;
+    if resident_activation {
+        backend.update_resident_activation(var.as_tensor())?;
+        backend.update_resident_activation(moments.m.as_tensor())?;
+        backend.update_resident_activation(moments.v.as_tensor())?;
+    }
+    Ok(())
+}
+
 /// Accumulate gradients from `src` into `dst`. Creates entries in `dst` for
 /// any Var that has a gradient in `src` but not yet in `dst`.
 fn accumulate_grads(
@@ -1856,6 +2168,58 @@ fn sgd_step_from_map(
         }
     }
     Ok(())
+}
+
+/// Configured-optimizer dispatch from accumulated gradient map.
+fn optimizer_step_from_map(
+    backend: &dyn BackendRuntime,
+    params: &TrainableLoraParams,
+    grads: &HashMap<candle_core::TensorId, Tensor>,
+    lr: f64,
+    optimizer: Optimizer,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<()> {
+    match optimizer {
+        Optimizer::Sgd => sgd_step_from_map(backend, params, grads, lr),
+        Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => {
+            let state = opt_state.ok_or_else(|| {
+                anyhow::anyhow!("optimizer_step_from_map: AdamW requires OptimizerState")
+            })?;
+            state.step = state.step.saturating_add(1);
+            let step = state.step;
+            let resident_activation = backend.supports_resident_activation();
+            for var in params.all_vars() {
+                let id = var.as_tensor().id();
+                if let Some(grad) = grads.get(&id) {
+                    let moments = state.moments.get(&id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "optimizer_step_from_map: missing AdamW moments for Var id {:?}",
+                            id
+                        )
+                    })?;
+                    apply_adamw_update(
+                        backend,
+                        var,
+                        grad,
+                        moments,
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
+                        resident_activation,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Gradient checkpointing configuration.
@@ -4515,5 +4879,153 @@ mod tests {
         assert!(!flce_auto_engage(0));
         assert!(!flce_auto_engage(1));
         assert!(!flce_auto_engage(15));
+    }
+
+    /// AdamW CPU fallback path: build a tiny `TrainableLoraParams`,
+    /// allocate optimizer state, hand a synthetic grad through
+    /// `optimizer_step_from_map`, and verify Vars actually change
+    /// AND the moments are bumped off zero. Runs on candle CPU (no
+    /// Vulkan dispatch), exercising the fallback math.
+    #[test]
+    fn adamw_cpu_fallback_updates_params_and_moments() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let mut opt_state = params.allocate_adamw_state(&device)?;
+        let backend = backend::for_device(&device);
+
+        // Synthetic grad: a small nonzero tensor of the right
+        // dtype/shape for every LoRA Var.
+        let mut grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+        for var in params.all_vars() {
+            let t = var.as_tensor();
+            let g = Tensor::ones(t.shape().clone(), t.dtype(), &device)?
+                .affine(0.01, 0.0)?;
+            grads.insert(t.id(), g);
+        }
+
+        // Snapshot original params (as f32).
+        let mut before: Vec<Vec<f32>> = Vec::new();
+        for var in params.all_vars() {
+            before.push(var.as_tensor().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?);
+        }
+
+        let optimizer = Optimizer::AdamW {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        };
+        optimizer_step_from_map(
+            &*backend,
+            &params,
+            &grads,
+            0.01,
+            optimizer,
+            Some(&mut opt_state),
+        )?;
+        assert_eq!(opt_state.step, 1, "step counter must be 1-indexed and bumped");
+
+        // Every Var must have changed at least somewhere.
+        let mut any_changed = false;
+        for (i, var) in params.all_vars().iter().enumerate() {
+            let after = var.as_tensor().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            assert_eq!(after.len(), before[i].len());
+            if after.iter().zip(before[i].iter()).any(|(a, b)| (a - b).abs() > 0.0) {
+                any_changed = true;
+            }
+        }
+        assert!(any_changed, "AdamW step must change at least one param value");
+
+        // Every moments pair must be off zero now.
+        for moments in opt_state.moments.values() {
+            let m_sum = moments
+                .m
+                .as_tensor()
+                .to_dtype(DType::F32)?
+                .abs()?
+                .sum_all()?
+                .to_scalar::<f32>()?;
+            let v_sum = moments
+                .v
+                .as_tensor()
+                .to_dtype(DType::F32)?
+                .abs()?
+                .sum_all()?
+                .to_scalar::<f32>()?;
+            assert!(m_sum > 0.0, "m moment must be nonzero after first step");
+            assert!(v_sum > 0.0, "v moment must be nonzero after first step");
+        }
+        Ok(())
+    }
+
+    /// AdamW scalar reference: after one step with `m=v=0`, the
+    /// update is `lr * sign(g) / (1 + eps/|g|) ≈ lr * sign(g)` (the
+    /// `1/sqrt(v_hat)` term cancels the `(1-beta2)/(1-beta1)`
+    /// magnitude difference under bias correction). This catches
+    /// gross math errors in the CPU fallback like sign flips or
+    /// missing bias correction.
+    #[test]
+    fn adamw_first_step_matches_unbiased_reference() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let mut opt_state = params.allocate_adamw_state(&device)?;
+        let backend = backend::for_device(&device);
+
+        let lr = 0.01f64;
+        let eps = 1e-8f32;
+        let mut grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+        let first_var = params.all_vars()[0].as_tensor().clone();
+        let g_val = 0.5f32;
+        for var in params.all_vars() {
+            let t = var.as_tensor();
+            let g = Tensor::ones(t.shape().clone(), t.dtype(), &device)?
+                .affine(g_val as f64, 0.0)?;
+            grads.insert(t.id(), g);
+        }
+
+        let before = first_var.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+
+        optimizer_step_from_map(
+            &*backend,
+            &params,
+            &grads,
+            lr,
+            Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps,
+                weight_decay: 0.0,
+            },
+            Some(&mut opt_state),
+        )?;
+
+        let after = params.all_vars()[0]
+            .as_tensor()
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        // For step=1, m=v=0 initially:
+        //   m_new = (1-beta1)*g
+        //   v_new = (1-beta2)*g^2
+        //   m_hat = m_new / (1-beta1) = g
+        //   v_hat = v_new / (1-beta2) = g^2
+        //   update = lr * g / (|g| + eps) ≈ lr * sign(g)
+        let expected_delta = -lr as f32 * (g_val / (g_val.abs() + eps));
+        for (i, (a, b)) in after.iter().zip(before.iter()).enumerate() {
+            let delta = a - b;
+            // Both BF16 storage roundtrip and the affine/sqrt math
+            // cost a few ulps; ~5% is plenty for sanity.
+            let rel = (delta - expected_delta).abs() / expected_delta.abs().max(1e-6);
+            assert!(
+                rel < 0.05,
+                "idx {i}: delta={delta:.6} expected={expected_delta:.6} rel={rel:e}"
+            );
+        }
+        Ok(())
     }
 }

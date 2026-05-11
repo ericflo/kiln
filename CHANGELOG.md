@@ -8,6 +8,42 @@ Vulkan training-route changes) twice hard-hung the host on the
 `/tmp/sft-data.jsonl` SFT repro.
 
 ### Added
+- training: on-device AdamW (decoupled weight decay) via Vulkan.
+  - New shaders `adamw_step_f32.comp` and `adamw_step_bf16.comp`
+    update param + first moment + second moment in-place in a single
+    dispatch. Bias-correction terms are precomputed host-side and
+    shipped via push constants; BF16 variant uses bf16↔f32 lane
+    bit-expansion (no `VK_KHR_shader_bfloat16` requirement) and
+    runs internal moment math in f32 to avoid underflow on `v`.
+  - `dispatch_adamw_step_{f32,bf16}` kernel helpers + Vulkan backend
+    `dispatch_adamw_step` impl that resolves param/grad/m/v from
+    `RESIDENT_ACTIVATION_REGISTRY` by `TensorId` and dispatches the
+    dtype-appropriate kernel; falls back when any operand isn't
+    resident (mirrors `dispatch_sgd_step`).
+  - `TrainableLoraParams::allocate_adamw_state` allocates a zero-init
+    `(m, v)` Var pair per LoRA Var; `OptimizerState::{register,evict}_with_backend`
+    register the moment buffers in the residency registry. Both the
+    SFT and GRPO loops own the optimizer state for the lifetime of
+    the training run.
+  - `Optimizer` enum on `SftConfig` + `GrpoConfig`
+    (`Sgd` / `AdamW { beta1, beta2, eps, weight_decay }`); default
+    is **AdamW** per LoRA fine-tuning best practice. `SftConfig`
+    deserializes as `{ "optimizer": { "kind": "adamw" } }` (the
+    default if omitted) or `{ "optimizer": { "kind": "sgd" } }`.
+  - Trainer routes via new `optimizer_step` / `optimizer_step_from_map`
+    that dispatch to `apply_sgd_update` or `apply_adamw_update`. The
+    AdamW path prefers on-device dispatch when the backend supports
+    residency; CPU fallback runs the same math via candle `affine` ops
+    in f32 then quantizes back to the param dtype. Step counter is
+    1-indexed at the kernel level and incremented inside the
+    optimizer routine before iterating Vars.
+  - Tests: `dispatch_adamw_step_resident_round_trip_f32` (1e-6
+    tolerance vs. scalar reference), `dispatch_adamw_step_resident_round_trip_bf16_two_step`
+    (two-step trajectory to catch bias-correction precompute bugs),
+    `dispatch_adamw_step_falls_back_when_not_resident`,
+    `adamw_cpu_fallback_updates_params_and_moments`, and
+    `adamw_first_step_matches_unbiased_reference` (sign + bias-correction
+    sanity at step=1, where `update ≈ lr * sign(g)`).
 - vulkan: in-op chunking in `VulkanLinearOp` — oversized BF16-packed
   matmuls split along the output dim (forward) or batch dim (backward)
   via the existing offset/transposed kernels. Each per-chunk submit
@@ -176,10 +212,10 @@ Vulkan training-route changes) twice hard-hung the host on the
   Shape-mismatch and similar bugs surface immediately rather than
   silently degrading to CPU SGD with potentially-wrong results.
 
-### Trait additions (forward-looking)
-- `BackendRuntime::dispatch_adamw_step` stub per plan §4.2 ("AdamW
-  slot for later"). No-op default; future implementer adds the
-  Vulkan kernel + impl.
+### Trait additions
+- `BackendRuntime::dispatch_adamw_step` is now fully implemented in
+  the Vulkan backend (was a forward-looking stub before this entry).
+  See the AdamW bullet under "Added" for kernel + trainer wiring.
 
 ### Fixed
 - vulkan: lm_head training-time forward queuing ~4.36M workgroups in
