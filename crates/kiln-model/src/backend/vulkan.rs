@@ -704,7 +704,24 @@ impl BackendRuntime for VulkanBackend {
         if already_registered {
             return Ok(());
         }
-        let bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0;
+        // Encoding choice per dtype:
+        //   - BF16 → packed BF16 (2 bytes/elem), byte-compatible with
+        //     every Vulkan kernel that uses `load_weight(idx)` to
+        //     decode `data_w[idx >> 1]` as two BF16 lanes per u32.
+        //     Required for the LoRA `lora_delta_resident` path and
+        //     any future BF16-input training kernel.
+        //   - All other dtypes → F32 bytes (4 bytes/elem). This is
+        //     what the existing boundary-state resolve path
+        //     expects (`create_tensor_from_data` decodes F32 then
+        //     casts).
+        //
+        // `resolve_resident_activation` knows about both encodings
+        // and reconstructs Tensors appropriately.
+        let bytes = if tensor.dtype() == DType::BF16 {
+            kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub(tensor)?.0
+        } else {
+            kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0
+        };
         // Some Vulkan drivers reject zero-size buffer allocations; we
         // also have no use for a zero-byte registry entry. Bail
         // silently — has_resident_activation will return false and
@@ -787,8 +804,40 @@ impl BackendRuntime for VulkanBackend {
             &buffer,
         )
         .context("resolve_resident_activation: read_back")?;
-        let resolved = kiln_vulkan_kernel::kernels::create_tensor_from_data(&bytes, shape, dtype)
-            .context("resolve_resident_activation: create_tensor_from_data")?;
+        // Inverse of the encoding choice in register_resident_activation.
+        // BF16 registry entries hold packed bf16 (2 bytes/elem);
+        // other dtypes hold F32 bytes. To avoid a `half` crate dep
+        // (only enabled under the cuda feature), reconstruct BF16 by
+        // bit-expanding each 16-bit lane into f32 (`bits << 16`) and
+        // then casting back to BF16 via candle.
+        let resolved = if dtype == DType::BF16 {
+            anyhow::ensure!(
+                bytes.len() % 2 == 0,
+                "resolve_resident_activation BF16: buffer byte count {} is not a multiple of 2",
+                bytes.len()
+            );
+            let elem_count: usize = shape.iter().product();
+            let stored = bytes.len() / 2;
+            anyhow::ensure!(
+                stored >= elem_count,
+                "resolve_resident_activation BF16: buffer holds {} bf16 elements, \
+                 expected at least {} for shape {:?}",
+                stored,
+                elem_count,
+                shape,
+            );
+            let mut f32_data = Vec::with_capacity(elem_count);
+            for i in 0..elem_count {
+                let lo = bytes[i * 2] as u32;
+                let hi = bytes[i * 2 + 1] as u32;
+                let bf16_bits = (hi << 8) | lo;
+                f32_data.push(f32::from_bits(bf16_bits << 16));
+            }
+            Tensor::from_vec(f32_data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?
+        } else {
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(&bytes, shape, dtype)
+                .context("resolve_resident_activation: create_tensor_from_data")?
+        };
         Ok(Some(resolved))
     }
 
@@ -844,6 +893,121 @@ impl BackendRuntime for VulkanBackend {
             lr,
         )?;
         Ok(true)
+    }
+
+    fn lora_delta_resident(
+        &self,
+        x: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        scale: f32,
+    ) -> Result<Option<Tensor>> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+        if !self.has_vulkan() || !self.linear_decode_enabled {
+            return Ok(None);
+        }
+        // Kernel constraint: weight buffer is bf16. The registry holds
+        // raw BF16 bytes (which are byte-equivalent to bf16-packed at
+        // the u32 level — the kernel reads `data_w[idx >> 1]` and
+        // masks per-pair).
+        if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
+            return Ok(None);
+        }
+        // Both A and B must be registry-resident — otherwise we have
+        // no buffer to dispatch against. Caller falls back to candle
+        // CPU compute_lora_delta.
+        let a_id = a.id();
+        let b_id = b.id();
+        let bufs = RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
+            let cache = cache.borrow();
+            cache
+                .get(&a_id)
+                .and_then(|ab| cache.get(&b_id).map(|bb| (Arc::clone(ab), Arc::clone(bb))))
+        });
+        let Some((a_buf, b_buf)) = bufs else {
+            return Ok(None);
+        };
+        // Shape inference. A is `[rank, in]`, B is `[out, rank]`. x is
+        // `[..., in]`. delta is `[..., out]`.
+        let Ok((rank_a, in_features)) = a.dims2() else {
+            return Ok(None);
+        };
+        let Ok((out_features, rank_b)) = b.dims2() else {
+            return Ok(None);
+        };
+        if rank_a != rank_b {
+            return Ok(None);
+        }
+        let in_dtype = x.dtype();
+        let x_dims = x.dims().to_vec();
+        if x_dims.is_empty() || *x_dims.last().unwrap() != in_features {
+            return Ok(None);
+        }
+        let row_count: usize = x_dims[..x_dims.len() - 1].iter().product();
+        if row_count == 0 {
+            return Ok(None);
+        }
+        // Promote x to F32 (the transposed kernel expects F32 input).
+        let x_f32 = if x.dtype() == DType::F32 {
+            x.clone()
+        } else {
+            x.to_dtype(DType::F32)?
+        };
+        let x_2d = x_f32.reshape((row_count, in_features))?;
+
+        // hidden = x @ A.T. Use the transposed bf16-packed kernel:
+        // out[i, n] = sum_k x[i, k] * W[n, k] where W=A is [rank, in].
+        let x_2d_contig = x_2d.contiguous()?;
+        let hidden = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+            vk_device,
+            &x_2d_contig,
+            &a_buf,
+            row_count,
+            in_features,
+            rank_a,
+        )?;
+        // dispatch_linear_decode_cached_bf16_weights_transposed returns
+        // `[row_count, 1, rank]` (see the kernel's output layout). We
+        // need `[row_count, rank]` for the next dispatch.
+        let hidden_2d = hidden.reshape((row_count, rank_a))?.contiguous()?;
+
+        // delta = hidden @ B.T. Same kernel: W=B is [out, rank], so
+        // out[i, n] = sum_k hidden[i, k] * B[n, k].
+        let delta = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+            vk_device,
+            &hidden_2d,
+            &b_buf,
+            row_count,
+            rank_a,
+            out_features,
+        )?;
+        // delta is `[row_count, 1, out_features]`. Reshape to caller's
+        // leading dims with out_features in the last position.
+        let mut out_dims = x_dims;
+        *out_dims.last_mut().unwrap() = out_features;
+        let delta = delta.reshape(out_dims.as_slice())?;
+        let delta_scaled = (delta * scale as f64)?;
+        let delta_typed = if delta_scaled.dtype() == in_dtype {
+            delta_scaled
+        } else {
+            delta_scaled.to_dtype(in_dtype)?
+        };
+        // One-shot trace so the operator can confirm the on-device
+        // LoRA delta path engaged.
+        static FIRST_LORA_DELTA_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        FIRST_LORA_DELTA_LOGGED.get_or_init(|| {
+            tracing::info!(
+                row_count,
+                in_features,
+                rank = rank_a,
+                out_features,
+                scale,
+                "VulkanBackend::lora_delta_resident first call"
+            );
+        });
+        Ok(Some(delta_typed))
     }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
@@ -2868,6 +3032,102 @@ mod tests {
         );
         backend.evict_resident_activation(&p);
         backend.evict_resident_activation(&g);
+        Ok(())
+    }
+
+    /// Vulkan lora_delta_resident must match the candle CPU
+    /// `compute_lora_delta` (i.e. `(x @ A.T @ B.T) * scale`) to bf16
+    /// numerics tolerance when A and B are registered.
+    #[test]
+    fn lora_delta_resident_matches_cpu_reference() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        // Small LoRA-shape: rank=4, in=8, out=6.
+        let t = 5usize;
+        let in_features = 8usize;
+        let rank = 4usize;
+        let out_features = 6usize;
+        let scale = 0.5f32;
+
+        let x_data: Vec<f32> = (0..t * in_features).map(|i| (i as f32) * 0.01).collect();
+        let a_data: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.02).collect();
+        let b_data: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.03).collect();
+
+        let x = Tensor::from_vec(x_data, (1, t, in_features), &Device::Cpu)?;
+        let a_f32 = Tensor::from_vec(a_data, (rank, in_features), &Device::Cpu)?;
+        let b_f32 = Tensor::from_vec(b_data, (out_features, rank), &Device::Cpu)?;
+        let a_bf16 = a_f32.to_dtype(DType::BF16)?;
+        let b_bf16 = b_f32.to_dtype(DType::BF16)?;
+        let x_bf16 = x.to_dtype(DType::BF16)?;
+
+        // CPU baseline (manual, F32) — `compute_lora_delta` casts to
+        // x.dtype() which would be BF16 here, but candle CPU doesn't
+        // support BF16 matmul. The math we want to validate is
+        // identical: (x @ A.T @ B.T) * scale, computed against the
+        // same BF16-quantised A and B that the Vulkan path reads
+        // from the registry (we round-trip through bf16 to match
+        // the bytes the kernel sees).
+        let a_round = a_bf16.to_dtype(DType::F32)?;
+        let b_round = b_bf16.to_dtype(DType::F32)?;
+        let hidden_cpu = x.broadcast_matmul(&a_round.t()?)?;
+        let delta_cpu = hidden_cpu.broadcast_matmul(&b_round.t()?)?;
+        let cpu_delta = (delta_cpu * scale as f64)?.to_dtype(DType::BF16)?;
+
+        // Register A and B in the registry.
+        backend.register_resident_activation(&a_bf16)?;
+        backend.register_resident_activation(&b_bf16)?;
+
+        // Vulkan path.
+        let vk_delta = backend
+            .lora_delta_resident(&x_bf16, &a_bf16, &b_bf16, scale)?
+            .expect("lora_delta_resident must succeed when A and B are registered");
+
+        assert_eq!(vk_delta.dims(), cpu_delta.dims());
+        assert_eq!(vk_delta.dtype(), cpu_delta.dtype());
+        let cpu_v: Vec<f32> = cpu_delta.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let vk_v: Vec<f32> = vk_delta.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        for (i, (c, v)) in cpu_v.iter().zip(vk_v.iter()).enumerate() {
+            let abs = (c - v).abs();
+            let rel = abs / c.abs().max(1e-3);
+            assert!(
+                abs < 5e-2 || rel < 5e-2,
+                "idx {i}: cpu={c:.6} vk={v:.6} abs={abs:e} rel={rel:e}"
+            );
+        }
+
+        backend.evict_resident_activation(&a_bf16);
+        backend.evict_resident_activation(&b_bf16);
+        Ok(())
+    }
+
+    /// lora_delta_resident must return Ok(None) when A or B is not
+    /// registered — caller falls back to candle CPU.
+    #[test]
+    fn lora_delta_resident_falls_back_when_not_resident() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let x = Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        let a = Tensor::from_vec(vec![0.0f32; 32], (4, 8), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        let b = Tensor::from_vec(vec![0.0f32; 24], (6, 4), &Device::Cpu)?
+            .to_dtype(DType::BF16)?;
+        // Neither registered — fall back.
+        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        // Only A registered — fall back.
+        backend.register_resident_activation(&a)?;
+        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        // Only B registered — fall back.
+        backend.evict_resident_activation(&a);
+        backend.register_resident_activation(&b)?;
+        assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
+        backend.evict_resident_activation(&b);
         Ok(())
     }
 

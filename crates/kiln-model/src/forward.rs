@@ -462,6 +462,21 @@ fn add_lora_delta_to_base(
         if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
             return Ok(out);
         }
+        // Phase 4.1 step 2: when both A and B are registry-resident
+        // (the trainer's `register_with_backend` runs at init), the
+        // backend can compute the delta on-device against the registry
+        // buffers directly — no upload of A/B per call. Returns
+        // Ok(None) on backends without registry support or when
+        // operands aren't both registered, in which case we fall
+        // through to the candle CPU `compute_lora_delta` path.
+        if let Some(delta) = backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)? {
+            let delta = if delta.dtype() == base.dtype() {
+                delta
+            } else {
+                delta.to_dtype(base.dtype())?
+            };
+            return Ok((base + delta)?);
+        }
     }
     #[cfg(feature = "metal")]
     {

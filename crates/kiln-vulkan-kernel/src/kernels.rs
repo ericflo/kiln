@@ -854,6 +854,16 @@ pub fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
 ///
 /// Shaders expand each 16-bit lane with `uintBitsToFloat(bits << 16)`, which
 /// preserves the exact bf16 value without requiring native shader bf16 support.
+/// Public re-export for kiln-model's residency registry — same impl
+/// as the private `extract_tensor_packed_bf16_bytes`. Used by the
+/// `register_resident_activation` BF16 path to upload bytes in the
+/// layout every Vulkan kernel's `load_weight` helper expects.
+pub fn extract_tensor_packed_bf16_bytes_pub(
+    tensor: &Tensor,
+) -> Result<(Vec<u8>, Vec<usize>)> {
+    extract_tensor_packed_bf16_bytes(tensor)
+}
+
 fn extract_tensor_packed_bf16_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     anyhow::ensure!(
         tensor.dtype() == DType::BF16,

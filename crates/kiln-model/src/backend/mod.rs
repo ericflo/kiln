@@ -249,6 +249,30 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(false)
     }
 
+    /// Phase 4.1 step 2 hook: compute the LoRA delta
+    /// `(x @ A.T @ B.T) * scale` against registry-resident A and B.
+    /// Returns `Ok(Some(delta))` with the delta in `x.dtype()` when
+    /// the backend can service the request; `Ok(None)` when it
+    /// can't (either backend doesn't support it, or A/B aren't
+    /// resident, or shapes don't fit kernel constraints) and the
+    /// caller should fall back to the candle CPU
+    /// `compute_lora_delta` path.
+    ///
+    /// Reading A and B from the registry means the LoRA forward
+    /// path no longer reads `var.as_tensor()`'s candle CPU storage
+    /// for data — only for shape metadata. Phase 4.2's
+    /// `dispatch_sgd_step` can then write to the same registry
+    /// buffers in place without a sync-back to candle storage.
+    fn lora_delta_resident(
+        &self,
+        _x: &Tensor,
+        _a: &Tensor,
+        _b: &Tensor,
+        _scale: f32,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     fn assemble_gdn_recurrent_resident_batch_rows(
         &self,
         _rows: &[&Tensor],
