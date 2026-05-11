@@ -514,45 +514,37 @@ impl VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (b, seq_len, num_heads, head_dim) = q.dims4()?;
-
-        // Only support head_dim=128 for now (matches CUDA kernel constraint)
-        if head_dim != 128 {
+        let (_b, _seq_len, _num_heads, head_dim) = q.dims4()?;
+        // sdpa_prefill_f32.comp uses local_size_x=128. Larger head_dim
+        // would need a multi-pass reduction the v1 kernel doesn't do.
+        if head_dim > 128 {
             return Ok(None);
         }
 
-        // Compile shader (cached after first call)
-        let glsl_path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../kiln-vulkan-kernel/csrc/shaders/flash_attn.comp"
-        );
-        let spirv = kiln_vulkan_kernel::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+        // Cast to F32 if needed — the kernel is F32-in/F32-out. The
+        // BF16→F32 promotion is cheap relative to the SDPA compute
+        // (e.g. T=918, H=16, dh=128 ≈ 7.5 MB to convert vs. 7 GFLOP
+        // to compute) and matches what the candle CPU baseline did
+        // implicitly via broadcast_matmul_cpu_compatible.
+        let in_dtype = q.dtype();
+        let q_f32 = if in_dtype == DType::F32 { q.clone() } else { q.to_dtype(DType::F32)? };
+        let k_f32 = if in_dtype == DType::F32 { k.clone() } else { k.to_dtype(DType::F32)? };
+        let v_f32 = if in_dtype == DType::F32 { v.clone() } else { v.to_dtype(DType::F32)? };
 
-        // Push constants: batch, seq_len, num_heads, head_dim, softmax_scale, causal
-        let push_constants: [u32; 6] = [
-            b as u32,
-            seq_len as u32,
-            num_heads as u32,
-            head_dim as u32,
-            softmax_scale.to_bits(),
-            causal as u32,
-        ];
-
-        // Workgroup count: one group per (head, seq, batch)
-        let workgroup_count = (num_heads as u32, seq_len as u32, b as u32);
-
-        let output_shape = vec![b, seq_len, num_heads, head_dim];
-
-        let out = kiln_vulkan_kernel::kernels::dispatch_kernel(
+        let out_f32 = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
             vk_device,
-            &spirv,
-            &push_constants,
-            workgroup_count,
-            &[q, k, v],
-            &output_shape,
-            DType::BF16,
+            &q_f32,
+            &k_f32,
+            &v_f32,
+            softmax_scale,
+            causal,
         )?;
 
+        let out = if in_dtype == DType::F32 {
+            out_f32
+        } else {
+            out_f32.to_dtype(in_dtype)?
+        };
         Ok(Some(out))
     }
 }
@@ -575,10 +567,23 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
-        // flash_attn_prefill is a placeholder — only works for head_dim=128
-        // and is missing scratch/LSE/causal-mask buffers. Return false
-        // so callers don't skip their preamble work only to get Ok(None).
-        false
+        // The flash_attn.comp placeholder is replaced by the
+        // sdpa_prefill_f32.comp kernel landed in commit dc4664ed.
+        // The new kernel is parity-tested against CPU broadcast_matmul
+        // + softmax at small N including the Qwen3.5-4B head_dim=128
+        // shape, but has not been load-validated on a real training
+        // forward yet, so the support flag is opt-in via
+        // `KILN_VULKAN_SDPA=1` until we observe a clean run.
+        if !self.has_vulkan() {
+            return false;
+        }
+        std::env::var("KILN_VULKAN_SDPA")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .map(|v| v == "1" || v == "true" || v == "yes")
+            .unwrap_or(false)
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
