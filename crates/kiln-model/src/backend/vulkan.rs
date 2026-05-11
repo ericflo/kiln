@@ -75,6 +75,17 @@ thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
     static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
         RefCell::new(HashMap::new());
+    /// General-purpose resident-activation registry keyed by candle
+    /// `TensorId`. Phase 3.1 of the residency plan — the registry the
+    /// `register_resident_activation` / `evict_resident_activation` /
+    /// `has_resident_activation` BackendRuntime hooks read and write.
+    /// Separate from `RECURRENT_STATE_RESIDENT_CACHE` so the
+    /// GDN-specific hot path can keep its own scope-limited lifecycle
+    /// without growing accidental coupling to non-recurrent
+    /// activations. Entries here are evicted explicitly by the caller
+    /// (Phase 3.2 will add the trainer-side wiring for that).
+    static RESIDENT_ACTIVATION_REGISTRY: RefCell<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
+        RefCell::new(HashMap::new());
 }
 
 fn recurrent_state_resident_scope_active() -> bool {
@@ -677,6 +688,63 @@ impl BackendRuntime for VulkanBackend {
         }
         let state_id = state.id();
         RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&state_id))
+    }
+
+    /// Phase 3.1 hook: register a non-weight tensor as resident on the
+    /// device. Uploads `tensor`'s bytes to a fresh `VulkanBuffer` and
+    /// records the buffer under the tensor's `TensorId`. The caller
+    /// owns lifecycle — Phase 3.2 will pair every register with a
+    /// matching evict at the appropriate autograd boundary. Until then
+    /// any caller using this hook must clean up explicitly to avoid
+    /// leaking VRAM.
+    fn register_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(());
+        };
+        let id = tensor.id();
+        let already_registered =
+            RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id));
+        if already_registered {
+            return Ok(());
+        }
+        let bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(tensor)?.0;
+        let device = vk_device.device();
+        let device_local_mt = vk_device.device_local_mem_type();
+        let host_visible_mt = vk_device.host_visible_mem_type();
+        let queue = vk_device.queue();
+        let queue_family = vk_device.queue_family_index();
+        let buffer = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            device,
+            device_local_mt,
+            bytes.len() as u64,
+        )
+        .context("register_resident_activation: alloc buffer")?;
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            device,
+            host_visible_mt,
+            queue,
+            queue_family,
+            &buffer,
+            &bytes,
+        )
+        .context("register_resident_activation: upload bytes")?;
+        let buffer = Arc::new(buffer);
+        RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
+            cache.borrow_mut().insert(id, buffer);
+        });
+        Ok(())
+    }
+
+    fn evict_resident_activation(&self, tensor: &Tensor) {
+        let id = tensor.id();
+        RESIDENT_ACTIVATION_REGISTRY.with(|cache| {
+            cache.borrow_mut().remove(&id);
+        });
+    }
+
+    fn has_resident_activation(&self, tensor: &Tensor) -> bool {
+        let id = tensor.id();
+        RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id))
     }
 
     fn assemble_gdn_recurrent_resident_batch_rows(
@@ -2435,4 +2503,47 @@ pub fn precompile_custom_kernels() -> Result<()> {
     kiln_vulkan_kernel::kernels::prewarm_builtin_pipelines(&vk_device)?;
     tracing::info!("Vulkan shader and pipeline verification complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+    use crate::backend::BackendRuntime;
+
+    /// Round-trip test for the Phase 3.1 hooks. Registers a fresh
+    /// activation, asserts `has_resident_activation` flips true,
+    /// evicts it, asserts it flips back. Skipped if no Vulkan
+    /// device — the hooks have no-op defaults so a CPU-only run
+    /// would just always answer false.
+    #[test]
+    fn resident_activation_register_evict_round_trip() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        // Small synthetic tensor — no specific shape required, the
+        // hook just uploads `extract_tensor_bytes(tensor).0` and
+        // keys on `tensor.id()`.
+        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
+        assert!(!backend.has_resident_activation(&t), "fresh tensor must not be registered");
+        backend.register_resident_activation(&t)?;
+        assert!(
+            backend.has_resident_activation(&t),
+            "tensor must be registered after register_resident_activation"
+        );
+        // Idempotency: re-registering the same tensor is a no-op,
+        // not an error.
+        backend.register_resident_activation(&t)?;
+        assert!(backend.has_resident_activation(&t));
+        backend.evict_resident_activation(&t);
+        assert!(
+            !backend.has_resident_activation(&t),
+            "tensor must be unregistered after evict_resident_activation"
+        );
+        // Evicting again is also a no-op.
+        backend.evict_resident_activation(&t);
+        Ok(())
+    }
 }
