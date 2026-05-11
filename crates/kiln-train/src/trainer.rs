@@ -1618,7 +1618,7 @@ fn build_flce_provider(
     } else {
         0
     };
-    if flce_auto_engage(active_count, model_config.vocab_size) {
+    if flce_auto_engage(active_count) {
         Some(std::sync::Arc::new(BackendFlceProvider {
             backend: backend.clone(),
         }))
@@ -1631,9 +1631,12 @@ fn build_flce_provider(
 /// can be exercised by unit tests without a live Vulkan backend.
 ///
 /// Returns true when the FLCE provider should auto-engage given the
-/// supervised-token count and the model's vocab size. See
-/// [`build_flce_provider`] for rationale.
-fn flce_auto_engage(active_count: usize, _vocab_size: usize) -> bool {
+/// supervised-token count. The model's vocab size used to factor in
+/// (the old heuristic was `active_count × num_chunks ≥ 50_000`); after
+/// commit 6182f74 the rule simplifies to `active_count ≥ 16` because
+/// chunking is the protective path post-host-crash, not just a
+/// performance preference. See [`build_flce_provider`] for rationale.
+fn flce_auto_engage(active_count: usize) -> bool {
     const ACTIVE_COUNT_FLOOR: usize = 16;
     active_count >= ACTIVE_COUNT_FLOOR
 }
@@ -4312,15 +4315,15 @@ mod tests {
         // Original /tmp/sft-data.jsonl repro: T=918, ~80% supervised
         // → active_count ≈ 734.
         assert!(
-            flce_auto_engage(734, 152064),
+            flce_auto_engage(734),
             "T=918 SFT repro must engage FLCE — that's the shape the \
              unfused path hung the host with"
         );
         // Even a tiny supervised batch should engage once it clears
         // the per-chunk-overhead floor.
-        assert!(flce_auto_engage(16, 152064));
-        assert!(flce_auto_engage(64, 152064));
-        assert!(flce_auto_engage(256, 152064));
+        assert!(flce_auto_engage(16));
+        assert!(flce_auto_engage(64));
+        assert!(flce_auto_engage(256));
     }
 
     /// Counter-test: trivially small supervised batches should NOT
@@ -4329,8 +4332,8 @@ mod tests {
     /// the 100 GFLOP safety ceiling) so the unfused path wins.
     #[test]
     fn flce_auto_skips_trivial_active_count() {
-        assert!(!flce_auto_engage(0, 152064));
-        assert!(!flce_auto_engage(1, 152064));
-        assert!(!flce_auto_engage(15, 152064));
+        assert!(!flce_auto_engage(0));
+        assert!(!flce_auto_engage(1));
+        assert!(!flce_auto_engage(15));
     }
 }
