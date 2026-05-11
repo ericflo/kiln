@@ -18,8 +18,8 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, available_for_training_bytes, estimate_step_working_set, format_oom_message,
-    WeightResidency,
+    self, available_for_training_bytes, estimate_step_working_set,
+    format_oom_message_with_source, WeightResidency,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -74,7 +74,13 @@ fn enforce_training_preflight(
         weights_already_resident,
     );
     if estimate.total_bytes > available {
-        let msg = format_oom_message(&estimate, available, lora_rank, num_segments);
+        let msg = format_oom_message_with_source(
+            &estimate,
+            available,
+            lora_rank,
+            num_segments,
+            Some(vram.source),
+        );
         return Err(ApiError::training_will_not_fit(msg));
     }
     Ok(())

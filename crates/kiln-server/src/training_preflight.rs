@@ -389,6 +389,22 @@ pub fn format_oom_message(
     lora_rank: usize,
     num_segments: usize,
 ) -> String {
+    format_oom_message_with_source(estimate, available_bytes, lora_rank, num_segments, None)
+}
+
+/// Variant that includes the VRAM detection source in the message
+/// when supplied. On unified-memory APUs the operator benefits from
+/// knowing the available number is `MemTotal − reserve` rather than
+/// the raw GPU report — that's what `KILN_TRAINING_MEMORY_RESERVE_GB`
+/// actually controls, and seeing it in the rejection message makes
+/// the actionable knob obvious.
+pub fn format_oom_message_with_source(
+    estimate: &WorkingSet,
+    available_bytes: u64,
+    lora_rank: usize,
+    num_segments: usize,
+    vram_source: Option<kiln_core::vram::VramSource>,
+) -> String {
     let est_gb = estimate.total_bytes as f64 / BYTES_PER_GB as f64;
     let avail_gb = available_bytes as f64 / BYTES_PER_GB as f64;
     let bd = &estimate.breakdown;
@@ -397,9 +413,13 @@ pub fn format_oom_message(
         (bd.per_segment_activations + bd.boundary_states) as f64 / BYTES_PER_GB as f64;
     let flce_gb = bd.flce_intermediates as f64 / BYTES_PER_GB as f64;
     let lora_gb = bd.lora_param_grad as f64 / BYTES_PER_GB as f64;
+    let source_clause = match vram_source {
+        Some(src) => format!(" (vram_source={src})"),
+        None => String::new(),
+    };
     format!(
         "Estimated training step working set is {est_gb:.2} GB but only \
-         {avail_gb:.2} GB is available. Breakdown: weights {bw_gb:.2} GB, \
+         {avail_gb:.2} GB is available{source_clause}. Breakdown: weights {bw_gb:.2} GB, \
          activations {act_gb:.2} GB (max_seq_len={msl}, num_segments={num_segments}), \
          FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB \
          (lora_rank={lora_rank}). To fit, raise KILN_GRAD_CHECKPOINT_SEGMENTS \
@@ -659,5 +679,30 @@ mod tests {
         assert!(msg.contains("KILN_GRAD_CHECKPOINT_SEGMENTS"));
         assert!(msg.contains("lora_rank"));
         assert!(msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
+    }
+
+    #[test]
+    fn format_oom_message_with_source_surfaces_unified_memory_signal() {
+        let cfg = qwen_4b();
+        let est = estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy, false);
+        // On a unified-memory APU the rejection message must call out
+        // the corrected source so the operator knows the
+        // KILN_TRAINING_MEMORY_RESERVE_GB knob is the relevant one.
+        let msg = format_oom_message_with_source(
+            &est,
+            8 * BYTES_PER_GB,
+            16,
+            4,
+            Some(VramSource::LinuxDrmSysfsUnified),
+        );
+        assert!(
+            msg.contains("vram_source=linux-drm-sysfs-unified"),
+            "expected unified-memory provenance, got: {msg}"
+        );
+        assert!(msg.contains("KILN_TRAINING_MEMORY_RESERVE_GB"));
+
+        // None preserves the legacy message — no provenance clause.
+        let no_src = format_oom_message_with_source(&est, 8 * BYTES_PER_GB, 16, 4, None);
+        assert!(!no_src.contains("vram_source"));
     }
 }
