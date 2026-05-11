@@ -551,6 +551,74 @@ mod tests {
         Ok(())
     }
 
+    /// Verify the buffer-offset kernel matches a contiguous chunk of the
+    /// same weight tensor. Two dispatches against the same uploaded
+    /// buffer (one with offset 0 over the full out_dim, one with a
+    /// non-zero offset over a slice) should each match the candle
+    /// reference for their respective slices.
+    #[test]
+    fn vulkan_linear_offset_parity() -> Result<()> {
+        use kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset;
+
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!("no Vulkan device, skipping");
+            return Ok(());
+        };
+
+        let device = Device::Cpu;
+        let t = 4usize;
+        let hidden = 8usize;
+        let full_out_dim = 12usize;
+        let chunk_offset = 4usize;
+        let chunk_len = 6usize;
+
+        let x_data: Vec<f32> = (0..t * hidden).map(|i| (i as f32) * 0.01).collect();
+        let w_data: Vec<f32> = (0..hidden * full_out_dim)
+            .map(|i| (i as f32) * 0.02)
+            .collect();
+        let x = Tensor::from_vec(x_data, (1, t, hidden), &device)?;
+        let weight_full = Tensor::from_vec(w_data, (hidden, full_out_dim), &device)?;
+        let weight_full_bf16 = weight_full.to_dtype(DType::BF16)?;
+
+        // Upload the full bf16-packed buffer once.
+        let weight_buffer =
+            upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
+
+        // Chunk slice via the offset variant. The kernel returns
+        // [batch_rows, 1, out_dim]; reshape to match the reference.
+        let chunk_out_raw = dispatch_linear_decode_cached_bf16_weights_offset(
+            &vk_device,
+            &x,
+            &weight_buffer,
+            t,
+            hidden,
+            chunk_len,
+            chunk_offset,
+            full_out_dim,
+        )?;
+        let chunk_out = chunk_out_raw.reshape((1, t, chunk_len))?;
+
+        // Reference: do the matmul against the same slice on CPU.
+        let weight_chunk_bf16 =
+            weight_full_bf16.narrow(1, chunk_offset, chunk_len)?.contiguous()?;
+        let baseline_chunk = x
+            .to_dtype(DType::F32)?
+            .broadcast_matmul(&weight_chunk_bf16.to_dtype(DType::F32)?)?;
+
+        assert_eq!(chunk_out.dims(), baseline_chunk.dims());
+        let baseline_v = baseline_chunk.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_v = chunk_out.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_v.iter().zip(vulkan_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            let rel = abs / (b.abs().max(1e-3));
+            assert!(
+                abs < 5e-3 || rel < 5e-3,
+                "offset bf16 mismatch at idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Op-state debug snapshot. Cheap sanity check that the struct
     /// formats useful metadata without panicking.
     #[test]

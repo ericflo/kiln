@@ -1680,6 +1680,111 @@ pub fn dispatch_linear_decode_cached_bf16_weights(
     dispatch_linear_decode_cached_impl(vk_device, x, weight_t, batch, hidden, out_dim, true)
 }
 
+/// Variant of [`dispatch_linear_decode_cached_bf16_weights`] that takes a
+/// SLICE of a larger weight buffer.
+///
+/// `weight_buffer` holds a row-major bf16-packed `[hidden, full_out_dim]`
+/// matrix. This function dispatches the matmul against the column slice
+/// `weight_buffer[:, weight_offset .. weight_offset + out_dim]` without
+/// requiring a fresh upload of the slice — the same buffer can be reused
+/// across many chunked dispatches.
+///
+/// `weight_offset` is in bf16 elements (i.e., the column index in the
+/// original matrix). Output shape is `[batch, 1, out_dim]`.
+///
+/// Used by the FLCE chunked-head loop and by VulkanLinearOp's backward
+/// path so a once-uploaded weight buffer can serve many chunked /
+/// transposed dispatches.
+pub fn dispatch_linear_decode_cached_bf16_weights_offset(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_buffer: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    weight_offset: usize,
+    full_out_dim: usize,
+) -> Result<Tensor> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let x_data = extract_tensor_bytes(x)?.0;
+    anyhow::ensure!(
+        x_data.len() == batch * hidden * 4,
+        "linear_decode_offset: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        batch * hidden * 4
+    );
+    anyhow::ensure!(
+        weight_offset + out_dim <= full_out_dim,
+        "weight_offset({}) + out_dim({}) overflows full_out_dim({})",
+        weight_offset,
+        out_dim,
+        full_out_dim,
+    );
+
+    let x_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+            .context("failed to create linear_decode_offset x buffer")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &x_buf,
+            &x_data,
+        )
+        .context("failed to upload linear_decode_offset x buffer")?;
+    }
+
+    let out_buf = VulkanBuffer::create_device_local(
+        device,
+        device_local_mt,
+        (batch * out_dim * 4) as u64,
+    )
+    .context("failed to create linear_decode_offset output buffer")?;
+
+    let all_handles = vec![x_buf.handle(), weight_buffer.handle(), out_buf.handle()];
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_batched_offset_bf16w.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        hidden as u32,
+        out_dim as u32,
+        batch as u32,
+        weight_offset as u32,
+        full_out_dim as u32,
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        (batch * out_dim.div_ceil(32)) as u32,
+    )
+    .context("linear_decode_batched_offset_bf16w kernel failed")?;
+
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("failed to read back linear_decode_offset output")?
+    };
+    create_tensor_from_data(&out_data, &[batch, 1, out_dim], DType::F32)
+}
+
 fn dispatch_linear_decode_cached_impl(
     vk_device: &VulkanDevice,
     x: &Tensor,

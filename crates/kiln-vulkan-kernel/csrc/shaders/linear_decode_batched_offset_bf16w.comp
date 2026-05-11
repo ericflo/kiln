@@ -1,0 +1,76 @@
+// Batched transposed linear projection with packed bf16 weights, taking
+// a slice of a larger weight buffer at `weight_offset` (in bf16 elements)
+// with row stride `full_out_dim`.
+//
+// Computes y[batch, out_dim] = x[batch, hidden] * W[hidden, out_dim],
+// where W is the slice W = full_W[:, weight_offset .. weight_offset+out_dim]
+// of a larger row-major matrix `full_W` of shape `[hidden, full_out_dim]`.
+//
+// Used by the FLCE chunk loop and the VulkanLinearOp backward path so a
+// once-uploaded weight buffer can be re-used for chunked or transposed
+// access without re-uploading on every dispatch.
+//
+// Differences vs `linear_decode_batched_bf16w.comp`:
+//   - extra push constants `weight_offset` (bf16 elements) and
+//     `full_out_dim` (original row stride in bf16 elements).
+//   - weight indexing uses `h * full_out_dim + col + weight_offset`
+//     instead of `h * out_dim + col`.
+//   - output indexing is unchanged — output is dense `[batch, out_dim]`.
+//
+// `weight_offset` may be any bf16-element index, including odd; the
+// load_weight() function masks per-pair packing the same way as the
+// non-offset variant.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 32, local_size_y = 8, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+    uint batch;
+    uint weight_offset;
+    uint full_out_dim;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { uint data_w[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+
+float load_weight(uint idx) {
+    uint packed = data_w[idx >> 1];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (out_dim + 31) / 32;
+    uint batch_idx = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - batch_idx * col_groups;
+    uint col = col_group * 32 + col_lane;
+    uint partial_idx = col_lane * 8 + red_lane;
+
+    float sum = 0.0;
+    if (batch_idx < batch && col < out_dim) {
+        uint x_base = batch_idx * hidden;
+        for (uint h = red_lane; h < hidden; h += 8) {
+            uint w_idx = h * full_out_dim + col + weight_offset;
+            sum += data_x[x_base + h] * load_weight(w_idx);
+        }
+    }
+
+    partial[partial_idx] = sum;
+    barrier();
+
+    if (red_lane == 0 && batch_idx < batch && col < out_dim) {
+        float total = 0.0;
+        for (uint lane = 0; lane < 8; lane++) {
+            total += partial[col_lane * 8 + lane];
+        }
+        data_out[batch_idx * out_dim + col] = total;
+    }
+}
