@@ -29,9 +29,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use candle_core::backend::BackendStorage;
 use candle_core::op::BackpropOp;
-use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Storage, Tensor};
+use candle_core::{CpuStorage, CustomOp1, DType, Layout, Shape, Storage, Tensor};
+#[cfg(test)]
+use candle_core::Device;
 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
