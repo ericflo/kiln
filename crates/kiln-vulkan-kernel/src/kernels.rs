@@ -1909,6 +1909,147 @@ pub fn dispatch_qwen_rmsnorm_forward(
     create_tensor_from_data(&out_data, &dims, DType::F32)
 }
 
+/// Qwen3.5-style RMSNorm backward.
+///
+/// Given the forward inputs (`x`, `weight`, `eps`) and the gradient of
+/// the loss w.r.t. the forward output (`grad_y`), returns `dL/dx` with
+/// the same shape as `x`. `dL/dw` is intentionally NOT computed — the
+/// Qwen3.5 base RMSNorm weights are frozen during LoRA training.
+///
+/// All tensors are F32 row-major. Used by the Vulkan training path
+/// (RmsNormCustomOp1) to backprop without materializing the chain of
+/// candle intermediates that would otherwise dominate the per-layer
+/// backward cost on long-context training.
+pub fn dispatch_qwen_rmsnorm_backward(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight: &Tensor,
+    grad_y: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    anyhow::ensure!(
+        x.dtype() == DType::F32,
+        "qwen_rmsnorm_backward: x must be F32, got {:?}",
+        x.dtype()
+    );
+    anyhow::ensure!(
+        weight.dtype() == DType::F32,
+        "qwen_rmsnorm_backward: weight must be F32, got {:?}",
+        weight.dtype()
+    );
+    anyhow::ensure!(
+        grad_y.dtype() == DType::F32,
+        "qwen_rmsnorm_backward: grad_y must be F32, got {:?}",
+        grad_y.dtype()
+    );
+    anyhow::ensure!(
+        x.dims() == grad_y.dims(),
+        "qwen_rmsnorm_backward: x dims {:?} != grad_y dims {:?}",
+        x.dims(),
+        grad_y.dims()
+    );
+
+    let dims = x.shape().dims().to_vec();
+    let hidden = *dims.last().context("qwen_rmsnorm_backward: x has no dims")?;
+    let rows: usize = dims[..dims.len() - 1].iter().product();
+    anyhow::ensure!(
+        weight.dims() == [hidden],
+        "qwen_rmsnorm_backward: weight shape {:?} does not match hidden {}",
+        weight.dims(),
+        hidden,
+    );
+
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let x_data = extract_tensor_bytes(x)?.0;
+    let weight_data = extract_tensor_bytes(weight)?.0;
+    let grad_y_data = extract_tensor_bytes(grad_y)?.0;
+    let out_len = x_data.len();
+
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("qwen_rmsnorm_backward: create x buffer")?;
+    let weight_buf = VulkanBuffer::create_device_local(
+        device,
+        device_local_mt,
+        weight_data.len() as u64,
+    )
+    .context("qwen_rmsnorm_backward: create weight buffer")?;
+    let grad_y_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, grad_y_data.len() as u64)
+            .context("qwen_rmsnorm_backward: create grad_y buffer")?;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_len as u64)
+        .context("qwen_rmsnorm_backward: create out buffer")?;
+
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &x_buf,
+            &x_data,
+        )
+        .context("qwen_rmsnorm_backward: upload x")?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &weight_buf,
+            &weight_data,
+        )
+        .context("qwen_rmsnorm_backward: upload weight")?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &grad_y_buf,
+            &grad_y_data,
+        )
+        .context("qwen_rmsnorm_backward: upload grad_y")?;
+    }
+
+    let all_handles = vec![
+        x_buf.handle(),
+        weight_buf.handle(),
+        grad_y_buf.handle(),
+        out_buf.handle(),
+    ];
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/qwen_rmsnorm_backward.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        rows as u32,
+    )
+    .context("qwen_rmsnorm_backward: kernel dispatch")?;
+
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("qwen_rmsnorm_backward: read back grad_x")?
+    };
+    create_tensor_from_data(&out_data, &dims, DType::F32)
+}
+
 /// Matmul against the TRANSPOSE of a bf16-packed weight buffer.
 ///
 /// `weight_buffer` holds a row-major bf16-packed matrix of shape

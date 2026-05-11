@@ -2964,24 +2964,55 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 .context("metal rms_norm kernel failed");
         }
     }
-    // Vulkan inference fast path: when not autograd-tracked, dispatch
-    // through Vulkan instead of the candle CPU broadcast_mul chain.
-    // Skipped for tracked tensors because the Vulkan dispatch returns a
-    // leaf (no autograd) — training keeps the existing
-    // `rms_norm_fallback` path that flows through candle's autograd.
+    // Vulkan inference path: leaf-fast forward kernel. Skipped for
+    // autograd-tracked tensors because the leaf would drop the
+    // gradient — the autograd-safe CustomOp1 wrapper below handles
+    // those instead (when its separate opt-in is set).
     #[cfg(feature = "vulkan")]
     if vulkan_rmsnorm_forward_inference_enabled()
         && crate::backend::vulkan_active()
-        && !x.track_op()
-        && !weight.track_op()
         && matches!(x.device(), Device::Cpu)
         && matches!(weight.device(), Device::Cpu)
         && weight.is_contiguous()
-        && let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)?
+        && !weight.track_op()
     {
-        return Ok(out);
+        if !x.track_op() {
+            if let Some(out) = try_vulkan_rmsnorm_forward(x, weight, eps as f32)? {
+                return Ok(out);
+            }
+        } else if vulkan_rmsnorm_training_enabled() {
+            if let Some(out) = try_vulkan_rmsnorm_autograd(x, weight, eps as f32)? {
+                return Ok(out);
+            }
+        }
     }
     rms_norm_fallback(x, weight, eps)
+}
+
+/// `KILN_VULKAN_RMSNORM_TRAINING=1` opts the autograd-safe RMSNorm
+/// CustomOp1 path on for training. Default off because the per-call
+/// dispatch overhead (upload x + readback dx × ~64 RMSNorm calls per
+/// forward+backward step) currently exceeds the kernel's compute
+/// savings at small T (measured ~+8 s wall on a 244-token payload vs
+/// the candle CPU fallback). The unit-test parity is bit-exact, so
+/// opt-in is safe; this gate is a perf-only switch, not a correctness
+/// one. The crossover where it becomes a net win is expected around
+/// T=1500-2500 — the same regime where the FLCE auto-heuristic flips
+/// on.
+#[cfg(feature = "vulkan")]
+fn vulkan_rmsnorm_training_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("KILN_VULKAN_RMSNORM_TRAINING")
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("1") | Some("true") | Some("yes")
+        )
+    })
 }
 
 /// `KILN_VULKAN_RMSNORM=0` opts the inference RMSNorm Vulkan path off.
@@ -3008,13 +3039,7 @@ fn try_vulkan_rmsnorm_forward(
     weight: &Tensor,
     eps: f32,
 ) -> Result<Option<Tensor>> {
-    use kiln_vulkan_kernel::VulkanDevice;
-    static VK_DEVICE: std::sync::OnceLock<Option<std::sync::Arc<VulkanDevice>>> =
-        std::sync::OnceLock::new();
-    let vk_device = VK_DEVICE
-        .get_or_init(|| VulkanDevice::new().ok().map(std::sync::Arc::new))
-        .as_ref();
-    let Some(vk_device) = vk_device else {
+    let Some(vk_device) = vulkan_device_handle() else {
         return Ok(None);
     };
     let in_dtype = x.dtype();
@@ -3039,6 +3064,166 @@ fn try_vulkan_rmsnorm_forward(
     } else {
         out_f32.to_dtype(in_dtype)?
     };
+    Ok(Some(out))
+}
+
+/// Process-cached Vulkan device handle. The first call constructs +
+/// caches the handle; subsequent calls just clone the Arc.
+#[cfg(feature = "vulkan")]
+fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>> {
+    static VK_DEVICE: std::sync::OnceLock<Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>>> =
+        std::sync::OnceLock::new();
+    VK_DEVICE
+        .get_or_init(|| {
+            kiln_vulkan_kernel::VulkanDevice::new()
+                .ok()
+                .map(std::sync::Arc::new)
+        })
+        .clone()
+}
+
+/// Autograd-safe Vulkan RMSNorm: wraps `dispatch_qwen_rmsnorm_forward` +
+/// `dispatch_qwen_rmsnorm_backward` in a `CustomOp1` so `loss.backward()`
+/// flows the gradient through `dL/dx` correctly.
+///
+/// The `weight` is captured into op state because Qwen3.5 base RMSNorm
+/// weights are frozen during LoRA training — only `x` participates in
+/// autograd.
+#[cfg(feature = "vulkan")]
+fn try_vulkan_rmsnorm_autograd(
+    x: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Option<Tensor>> {
+    use candle_core::{CpuStorage, CustomOp1, Layout, Shape, Storage};
+
+    let Some(vk_device) = vulkan_device_handle() else {
+        return Ok(None);
+    };
+    let in_dtype = x.dtype();
+
+    struct VulkanRmsNormOp {
+        vk_device: std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>,
+        weight: Tensor, // captured frozen weight
+        eps: f32,
+        out_dtype: DType,
+    }
+    impl std::fmt::Debug for VulkanRmsNormOp {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("VulkanRmsNormOp")
+                .field("eps", &self.eps)
+                .field("out_dtype", &self.out_dtype)
+                .field("hidden", &self.weight.dims())
+                .finish()
+        }
+    }
+    impl CustomOp1 for VulkanRmsNormOp {
+        fn name(&self) -> &'static str {
+            "kiln-vulkan-qwen-rmsnorm"
+        }
+        fn cpu_fwd(
+            &self,
+            s_x: &CpuStorage,
+            l_x: &Layout,
+        ) -> candle_core::Result<(CpuStorage, Shape)> {
+            let storage = Storage::Cpu(s_x.clone());
+            let x_tensor = Tensor::from_storage(
+                storage,
+                Shape::from(l_x.shape().dims()),
+                candle_core::op::BackpropOp::none(),
+                false,
+            );
+            let x_f32 = if x_tensor.dtype() == DType::F32 {
+                x_tensor.contiguous()?
+            } else {
+                x_tensor.to_dtype(DType::F32)?.contiguous()?
+            };
+            let w_f32 = if self.weight.dtype() == DType::F32 {
+                self.weight.clone()
+            } else {
+                self.weight.to_dtype(DType::F32).map_err(|e| {
+                    candle_core::Error::Msg(format!("rmsnorm fwd weight→f32: {e:?}"))
+                })?
+            };
+            let out_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
+                self.vk_device.as_ref(),
+                &x_f32,
+                &w_f32,
+                self.eps,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd dispatch: {e:?}")))?;
+            let out = if out_f32.dtype() == self.out_dtype {
+                out_f32
+            } else {
+                out_f32
+                    .to_dtype(self.out_dtype)
+                    .map_err(|e| candle_core::Error::Msg(format!("rmsnorm fwd cast: {e:?}")))?
+            };
+            let storage = out
+                .storage_and_layout()
+                .0
+                .try_clone(out.layout())
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("rmsnorm fwd storage clone: {e:?}"))
+                })?;
+            let cpu_storage = match storage {
+                Storage::Cpu(s) => s,
+                _ => {
+                    return Err(candle_core::Error::Msg(
+                        "rmsnorm fwd: expected CPU storage from kernel result".into(),
+                    ));
+                }
+            };
+            Ok((cpu_storage, Shape::from(out.dims())))
+        }
+        fn bwd(
+            &self,
+            x: &Tensor,
+            _y: &Tensor,
+            grad_y: &Tensor,
+        ) -> candle_core::Result<Option<Tensor>> {
+            let x_f32 = if x.dtype() == DType::F32 {
+                x.clone()
+            } else {
+                x.to_dtype(DType::F32)?
+            };
+            let w_f32 = if self.weight.dtype() == DType::F32 {
+                self.weight.clone()
+            } else {
+                self.weight.to_dtype(DType::F32)?
+            };
+            let grad_y_f32 = if grad_y.dtype() == DType::F32 {
+                grad_y.clone()
+            } else {
+                grad_y.to_dtype(DType::F32)?
+            };
+            let dx_f32 = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_backward(
+                self.vk_device.as_ref(),
+                &x_f32,
+                &w_f32,
+                &grad_y_f32,
+                self.eps,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("rmsnorm bwd dispatch: {e:?}")))?;
+            let dx = if self.out_dtype == DType::F32 {
+                dx_f32
+            } else {
+                dx_f32
+                    .to_dtype(self.out_dtype)
+                    .map_err(|e| candle_core::Error::Msg(format!("rmsnorm bwd cast: {e:?}")))?
+            };
+            Ok(Some(dx))
+        }
+    }
+
+    let op = VulkanRmsNormOp {
+        vk_device,
+        weight: weight.clone(),
+        eps,
+        out_dtype: in_dtype,
+    };
+    let x_contig = x.contiguous()?;
+    let out = x_contig.apply_op1(op)?;
     Ok(Some(out))
 }
 

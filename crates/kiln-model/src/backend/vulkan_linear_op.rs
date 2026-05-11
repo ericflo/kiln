@@ -770,6 +770,67 @@ mod tests {
         Ok(())
     }
 
+    /// Verify the RMSNorm backward Vulkan kernel matches candle's
+    /// autograd gradient for the same forward.
+    #[test]
+    fn vulkan_qwen_rmsnorm_backward_parity() -> Result<()> {
+        use kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_backward;
+
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!("no Vulkan device, skipping");
+            return Ok(());
+        };
+
+        let device = Device::Cpu;
+        let rows = 4usize;
+        let hidden = 12usize;
+        let eps = 1e-6f32;
+
+        let x_data: Vec<f32> = (0..rows * hidden)
+            .map(|i| 0.05 * (((i % 7) + 1) as f32))
+            .collect();
+        let w_data: Vec<f32> = (0..hidden).map(|i| 0.01 * (i as f32 + 1.0)).collect();
+        let grad_y_data: Vec<f32> = (0..rows * hidden)
+            .map(|i| 0.02 * (((i % 5) as i32 - 2) as f32))
+            .collect();
+
+        let x = Tensor::from_vec(x_data.clone(), (rows, hidden), &device)?;
+        let weight = Tensor::from_vec(w_data, (hidden,), &device)?;
+        let grad_y = Tensor::from_vec(grad_y_data, (rows, hidden), &device)?;
+
+        // Vulkan path.
+        let vulkan_grad_x = dispatch_qwen_rmsnorm_backward(
+            &vk_device, &x, &weight, &grad_y, eps,
+        )?;
+
+        // Candle autograd reference: build forward as a candle graph
+        // over a Var, compute loss = sum(y * grad_y), backward, read
+        // dL/dx — which equals the requested gradient.
+        let x_var = candle_core::Var::from_tensor(&x)?;
+        let variance = x_var.as_tensor().sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let rms_inv = (variance + eps as f64)?.sqrt()?.recip()?;
+        let normed = x_var.as_tensor().broadcast_mul(&rms_inv)?;
+        let one_plus_w = (weight.ones_like()? + &weight)?;
+        let y = normed.broadcast_mul(&one_plus_w)?;
+        // Synthetic loss = sum(y * grad_y) — its gradient w.r.t. y is grad_y.
+        let synthetic_loss = (y * &grad_y)?.sum_all()?;
+        let grads = synthetic_loss.backward()?;
+        let baseline_grad_x = grads.get(x_var.as_tensor()).expect("dx present").clone();
+
+        assert_eq!(vulkan_grad_x.dims(), baseline_grad_x.dims());
+        let baseline_v = baseline_grad_x.flatten_all()?.to_vec1::<f32>()?;
+        let vulkan_v = vulkan_grad_x.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (b, v)) in baseline_v.iter().zip(vulkan_v.iter()).enumerate() {
+            let abs = (b - v).abs();
+            let rel = abs / (b.abs().max(1e-3));
+            assert!(
+                abs < 1e-4 || rel < 1e-3,
+                "rmsnorm bwd mismatch at idx {i}: baseline={b:.6} vulkan={v:.6} abs_diff={abs:e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Op-state debug snapshot. Cheap sanity check that the struct
     /// formats useful metadata without panicking.
     #[test]

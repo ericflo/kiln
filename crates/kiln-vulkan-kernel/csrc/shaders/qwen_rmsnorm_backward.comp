@@ -1,0 +1,87 @@
+// Qwen3.5-style RMSNorm backward: gradient w.r.t. x.
+//
+// Forward:  y_i = (1 + w_i) * x_i / s    where  s = sqrt(mean(x^2) + eps)
+// Backward: dL/dx_i = (1 + w_i) * dL/dy_i / s
+//                   - x_i / (n * s^3) * sum_j (1 + w_j) * x_j * dL/dy_j
+//
+// Two-pass reduction per row (shared memory):
+//   Pass 1: compute s by reducing sum(x^2) across the hidden dim.
+//   Pass 2: compute S = sum_j (1+w_j) * x_j * dL/dy_j across the hidden dim.
+//   Pass 3 (per-element write): dL/dx_i = (1+w_i) * dL/dy_i / s
+//                              - x_i * S / (n * s^3)
+//
+// Shape: x, dL/dy, dL/dx are all `[rows, hidden]` row-major F32.
+// weight is `[hidden]` F32.
+//
+// dL/dw is NOT computed — Qwen3.5 RMSNorm weights are frozen during
+// LoRA training (only LoRA projection weights are trainable), so the
+// gradient w.r.t. weight is not needed by the autograd path.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0) readonly buffer XBuf      { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) readonly buffer GradYBuf  { float data_grad_y[]; };
+layout(binding = 3) writeonly buffer GradXBuf { float data_grad_x[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * hidden;
+    float n_inv = 1.0 / float(hidden);
+
+    // ---- Pass 1: sum_of_squares(x) -> s = sqrt(mean + eps).
+    float partial = 0.0;
+    for (uint col = tid; col < hidden; col += 256) {
+        float xv = data_x[base + col];
+        partial += xv * xv;
+    }
+    reduce_sh[tid] = partial;
+    barrier();
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+        barrier();
+    }
+    float s = sqrt(reduce_sh[0] * n_inv + eps);
+    float s_inv = 1.0 / s;
+    float s3_inv = s_inv * s_inv * s_inv;
+    barrier();
+
+    // ---- Pass 2: S = sum_j (1+w_j) * x_j * dL/dy_j.
+    float partial2 = 0.0;
+    for (uint col = tid; col < hidden; col += 256) {
+        float xv = data_x[base + col];
+        float wv = data_weight[col];
+        float gy = data_grad_y[base + col];
+        partial2 += (1.0 + wv) * xv * gy;
+    }
+    reduce_sh[tid] = partial2;
+    barrier();
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+        barrier();
+    }
+    float S = reduce_sh[0];
+    barrier();
+
+    // ---- Pass 3: per-element write dL/dx_i.
+    float coeff = S * n_inv * s3_inv;
+    for (uint col = tid; col < hidden; col += 256) {
+        float xv = data_x[base + col];
+        float wv = data_weight[col];
+        float gy = data_grad_y[base + col];
+        data_grad_x[base + col] = (1.0 + wv) * gy * s_inv - xv * coeff;
+    }
+}
