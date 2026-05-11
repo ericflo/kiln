@@ -382,12 +382,15 @@ impl TrainableLoraParams {
         })
     }
 
-    /// Phase 4.1 partial: register every LoRA `Var` (A and B for all
-    /// modules across all layers) in the backend's resident
-    /// activation registry. After this call, any code path that
-    /// queries `backend.has_resident_activation(var.as_tensor())`
-    /// will see true and can route through registry-resident
-    /// fast paths (e.g. `dispatch_sgd_step` on Vulkan).
+    /// Phase 4.1: register every LoRA `Var` (A and B for all modules
+    /// across all layers) in the backend's resident activation
+    /// registry. After this call, the trainer's training-time forward
+    /// path dispatches the LoRA delta on-device via
+    /// `lora_delta_resident` (which wraps the dispatch in
+    /// `VulkanLoraOp` — a CustomOp3 with analytic backward), and the
+    /// trainer's `apply_sgd_update` prefers the on-device
+    /// `dispatch_sgd_step` path that writes to the registry buffer
+    /// in-place.
     ///
     /// Caller invokes this once after [`initialize_seeded`], typically
     /// from `sft_train` / `grpo_train`. Test code that doesn't
@@ -400,14 +403,12 @@ impl TrainableLoraParams {
     /// non-resident-supporting backends (CPU/Metal/CUDA today) the
     /// hook is a no-op.
     ///
-    /// **Important constraint:** the candle CPU storage of each Var
-    /// MUST stay authoritative until Phase 4.1 step 2 (forward-path
-    /// LoRA dispatch interception) lands. Today the trainer's
-    /// `sgd_step` writes to the CPU storage via `var.set(...)`, and
-    /// the registry buffer becomes stale after the first SGD step.
-    /// `dispatch_sgd_step` won't fire because grads aren't registered,
-    /// so this is consistent: the registry exists for shape lookup
-    /// but is never read for data on the LoRA path yet.
+    /// Lifecycle: each `apply_sgd_update` keeps the registry buffer
+    /// in sync with the candle Var storage (or vice versa, depending
+    /// on whether the on-device or CPU SGD path fired). The
+    /// matching [`Self::evict_from_backend`] runs at training
+    /// completion to release registry entries before the trainer
+    /// returns.
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
         if !backend.supports_resident_activation() {
             return Ok(());
@@ -658,9 +659,10 @@ pub fn sft_train(
         "initialized trainable LoRA parameters"
     );
 
-    // Phase 4.1 partial: register LoRA Vars in the resident activation
-    // registry so registry-aware code paths (Phase 4.1 step 2 LoRA
-    // dispatch interception, dispatch_sgd_step) can find them.
+    // Phase 4.1: register LoRA Vars in the resident activation
+    // registry. Forward LoRA dispatches via `lora_delta_resident`
+    // (CustomOp3 with autograd backward) and `apply_sgd_update`
+    // dispatches the on-device SGD against the registry buffers.
     params.register_with_backend(&*backend)?;
 
     // Run the actual training body inside a closure so we can write the
@@ -905,9 +907,10 @@ pub fn grpo_train(
         "initialized trainable LoRA parameters"
     );
 
-    // Phase 4.1 partial: register LoRA Vars in the resident activation
-    // registry so registry-aware code paths (Phase 4.1 step 2 LoRA
-    // dispatch interception, dispatch_sgd_step) can find them.
+    // Phase 4.1: register LoRA Vars in the resident activation
+    // registry. Forward LoRA dispatches via `lora_delta_resident`
+    // (CustomOp3 with autograd backward) and `apply_sgd_update`
+    // dispatches the on-device SGD against the registry buffers.
     params.register_with_backend(&*backend)?;
 
     let train_body = || -> Result<(PathBuf, f64)> {

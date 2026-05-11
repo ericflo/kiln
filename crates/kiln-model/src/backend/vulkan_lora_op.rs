@@ -1,11 +1,12 @@
 //! `CustomOp3` wrapper for Vulkan-dispatched LoRA delta application.
 //!
-//! Phase 4.1 step 5 of the residency plan. The earlier `lora_delta_resident`
-//! BackendRuntime hook (commit a48d1f8f) returned a candle-leaf Tensor with
-//! no autograd back-link, so `add_lora_delta_to_base` had to gate it on
-//! `!x.track_op()` (inference-only). This wrapper makes the same on-device
-//! dispatch training-safe by implementing `CustomOp3` with an analytic
-//! backward that returns gradients for x, A, and B.
+//! Phase 4.1 of the residency plan. Implements `CustomOp3` so the
+//! on-device LoRA delta dispatch carries an analytic backward that
+//! returns gradients for x, A, and B — making it safe for both
+//! training-time and inference-time forward passes. (An earlier
+//! version returned a candle-leaf Tensor with no autograd back-link
+//! and had to be gated to inference-only; this CustomOp3 wrapper
+//! removed that gate.)
 //!
 //! Forward:
 //!   delta = (x @ A.T @ B.T) * scale
