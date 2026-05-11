@@ -137,16 +137,27 @@ After each step, attach `/tmp/kiln-validation-mem.log` to the validation report.
 
 ## Rollback
 
-If anything regresses at Step 1 (with all the new defaults but no opt-ins), the issue is in the FLCE auto-threshold lowering or the embedded SDPA shader. Revert to commit `aa64c155` (just before the Step 1 changes):
+If anything regresses at Step 1 (with all the new defaults but no opt-ins), the issue is in the FLCE auto-threshold lowering or the embedded SDPA shader. The cleanest rollback is a hard reset to the pre-Phase-2-hardening tip:
 ```
-git revert --no-commit 02dd31a4 5d7fed8e 011f1378 ebd15fad 540cfbbf dc4664ed f58bf98e 2ac00877 9a50164b 6182f746 1b8f5f97
+git reset --hard aa64c155   # last commit before Phase 2 hardening
 ```
 Then file a report with the failure mode.
 
+The full chain of commits since `aa64c155` is in `git log aa64c155..HEAD --oneline`. They split cleanly into:
+- recovery + chunking + SDPA (1b8f5f97 ... 540cfbbf)
+- Phase 3.1 + 4.2 trait + impls + telemetry (5d7fed8e ... 1b4cd0a6, 120f9b3c, 775881b8)
+- docs + scripts (66a7b902, e04a1623, phase2_validation_steps_1_2_3.sh, CHANGELOG)
+- writer-flake fix (f59861cf)
+
+Granular revert is also possible if a specific commit is implicated — `git log --oneline aa64c155..HEAD | head -50` shows the order.
+
 ## Done criteria
 
-- All four steps pass.
-- The original `/tmp/sft-data.jsonl` repro (Step 4) completes end-to-end with loss converging.
+- Steps 1, 2, 3 (the script) pass.
+- Step 4 (the original `/tmp/sft-data.jsonl` repro at T~918) completes end-to-end with loss converging.
 - Host did not need a physical reboot at any step.
 
-When the user reports all four pass, the task list items #7 (Phase 2 in_progress) can be closed and `KILN_VULKAN_LINEAR` can be considered for default-on in a follow-up commit.
+When the operator reports all four pass:
+1. `KILN_VULKAN_LINEAR` can be considered for default-on in a follow-up commit.
+2. The task list items #7 (Phase 2) can be closed permanently.
+3. Phase 3.2 / 4.1 architectural follow-ups can begin (custom storage interception so the registry-resident path actually skips the candle CPU mirror).
