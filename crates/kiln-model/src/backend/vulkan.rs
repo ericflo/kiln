@@ -101,13 +101,16 @@ fn fused_gdn_resident_state_enabled() -> bool {
 /// ~4.36M workgroups in one submit on a 40-CU APU. The kernel logs go
 /// silent (no OOM, no AMDGPU reset, no panic), meaning the GPU/driver
 /// didn't recover gracefully and the box had to be physically rebooted.
-/// `VulkanLinearOp` now also enforces a per-dispatch FLOP guard that
-/// bails to CPU `broadcast_matmul` for any single matmul over
-/// `MAX_VULKAN_LINEAR_FLOP_PER_DISPATCH`. Until that guard has been
-/// load-validated end-to-end on the original repro, the env var is
-/// opt-in: set `KILN_VULKAN_LINEAR=1` (or `true`/`yes`) to enable it
-/// for measurement runs. Smaller-shape projections (T≤256) ran ~6%
-/// faster with this on (111 s vs 118 s baseline) at bit-exact loss.
+/// `VulkanLinearOp` now chunks oversized BF16-packed dispatches along
+/// the output dim (forward) or batch dim (backward) so each per-chunk
+/// submit stays under the FLOP ceiling and `queue_wait_idle()` between
+/// chunks gives the display compositor preemption points. The F32
+/// weight path has no offset kernel, so it still bails to CPU
+/// `broadcast_matmul` for oversized shapes. Until the chunking has
+/// been load-validated end-to-end on the original repro, the env var
+/// is opt-in: set `KILN_VULKAN_LINEAR=1` (or `true`/`yes`) to enable.
+/// Smaller-shape projections (T≤256) ran ~6% faster with this on
+/// (111 s vs 118 s baseline) at bit-exact loss.
 fn linear_prefill_apply_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1315,23 +1318,6 @@ impl BackendRuntime for VulkanBackend {
         if hidden_x != hidden_w {
             return Ok(None);
         }
-        // Per-dispatch FLOP guard. The lm_head training-time forward
-        // routes through here at `[T, hidden=2560] @ [hidden, vocab=152064]`
-        // — for T=918 that's ~4.36M workgroups in one submit, which has
-        // hung the host (twice). Bail to the caller's CPU fallback for
-        // dispatches above the safety ceiling. The transposed bwd
-        // dispatch has the same shape and is guarded inside
-        // `VulkanLinearOp::bwd`.
-        let row_count: usize = x
-            .dims()
-            .iter()
-            .take(x.dims().len().saturating_sub(1))
-            .product();
-        if crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
-            row_count, hidden_x, out_dim,
-        ) {
-            return Ok(None);
-        }
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -1351,6 +1337,26 @@ impl BackendRuntime for VulkanBackend {
         } else {
             return Ok(None);
         };
+        // Per-dispatch FLOP guard — only relevant for the F32 weight
+        // path. The BF16-packed path chunks oversized dispatches
+        // internally inside `VulkanLinearOp::cpu_fwd` (and the
+        // transposed bwd does the same), so it's safe to dispatch any
+        // shape against the BF16 op. The F32 path has no offset kernel
+        // and would queue a single oversized submit, which is what
+        // hard-hung the host twice — bail to caller's CPU
+        // `broadcast_matmul` for that case.
+        let row_count: usize = x
+            .dims()
+            .iter()
+            .take(x.dims().len().saturating_sub(1))
+            .product();
+        if layout == crate::backend::vulkan_linear_op::WeightLayout::F32
+            && crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
+                row_count, hidden_x, out_dim,
+            )
+        {
+            return Ok(None);
+        }
         let op = crate::backend::vulkan_linear_op::build_op(
             vk_device,
             weight_buffer,

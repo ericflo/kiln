@@ -89,11 +89,37 @@ fn max_flop_per_dispatch() -> u64 {
 }
 
 /// True when the requested matmul shape would exceed the per-dispatch
-/// FLOP ceiling and should fall back to the CPU path. The pre-Phase-2
-/// CPU `broadcast_matmul` is what these shapes already used, and they
-/// did not crash.
+/// FLOP ceiling. For the BF16-packed weight path the caller can split
+/// the matmul into per-chunk submits via [`max_chunk_dim_for_flop`];
+/// for the F32 weight path there is no offset kernel and the caller
+/// should fall back to CPU `broadcast_matmul` (the pre-Phase-2 baseline
+/// that did not crash).
 pub fn dispatch_exceeds_safety_ceiling(batch: usize, hidden: usize, out_dim: usize) -> bool {
     matmul_flop(batch, hidden, out_dim) > max_flop_per_dispatch()
+}
+
+/// Largest `chunk_dim` such that
+/// `2 × other_dim_product × chunk_dim ≤ max_flop_per_dispatch()`.
+///
+/// Used by [`VulkanLinearOp::cpu_fwd`] to chunk oversized forward
+/// matmuls along the output dim (`other_dim_product = batch × hidden`)
+/// and by [`VulkanLinearOp::bwd`] to chunk oversized backward matmuls
+/// along the batch dim (`other_dim_product = out_dim × hidden`).
+///
+/// Always returns at least 1 — even a microscopic ceiling shouldn't
+/// produce zero-sized chunks (the caller's loop would never advance).
+/// Saturates: if `other_dim_product` is so large that even one element
+/// of the chunked dim would exceed the ceiling, returns 1 (caller does
+/// one element at a time, which is slow but safe).
+pub fn max_chunk_dim_for_flop(other_dim_product: usize) -> usize {
+    let max_flop = max_flop_per_dispatch();
+    if max_flop == u64::MAX {
+        // Guard disabled — caller will dispatch single-shot.
+        return usize::MAX;
+    }
+    let denom = (other_dim_product as u64).saturating_mul(2).max(1);
+    let chunk = (max_flop / denom) as usize;
+    chunk.max(1)
 }
 
 /// Marker for which Vulkan kernel variant to dispatch.
@@ -199,25 +225,72 @@ impl CustomOp1 for VulkanLinearOp {
                 })?
         };
 
-        let out_tensor = match self.weight_layout {
-            WeightLayout::F32 => kernels::dispatch_linear_decode_cached(
-                self.vk_device.as_ref(),
-                &dispatch_x,
-                self.weight_buffer.as_ref(),
-                row_count,
-                self.hidden,
-                self.out_dim,
-            ),
-            WeightLayout::Bf16Packed => kernels::dispatch_linear_decode_cached_bf16_weights(
-                self.vk_device.as_ref(),
-                &dispatch_x,
-                self.weight_buffer.as_ref(),
-                row_count,
-                self.hidden,
-                self.out_dim,
-            ),
-        }
-        .map_err(|e| candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}")))?;
+        // Decide single-shot vs chunked dispatch. The BF16-packed path
+        // has an offset kernel, so oversized matmuls split along the
+        // out_dim with bounded per-submit work — each chunk dispatch
+        // calls `queue_wait_idle()` on completion, giving the display
+        // compositor preemption points between chunks. The F32 path has
+        // no offset kernel; its caller (`linear_prefill_apply`) bails
+        // to CPU `broadcast_matmul` before we get here, so a single-
+        // shot F32 dispatch reaching this point is by construction
+        // already under the safety ceiling.
+        let oversized = dispatch_exceeds_safety_ceiling(row_count, self.hidden, self.out_dim);
+        let out_tensor = if oversized && self.weight_layout == WeightLayout::Bf16Packed {
+            let other_dims = row_count.saturating_mul(self.hidden);
+            let chunk_out_dim = max_chunk_dim_for_flop(other_dims);
+            let mut chunk_outputs: Vec<Tensor> = Vec::new();
+            let mut chunk_start = 0usize;
+            while chunk_start < self.out_dim {
+                let chunk_len = (self.out_dim - chunk_start).min(chunk_out_dim);
+                let chunk_out = kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                    self.vk_device.as_ref(),
+                    &dispatch_x,
+                    self.weight_buffer.as_ref(),
+                    row_count,
+                    self.hidden,
+                    chunk_len,
+                    chunk_start,
+                    self.out_dim,
+                )
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!(
+                        "VulkanLinearOp chunked dispatch (start={chunk_start}, \
+                         len={chunk_len}, full={}): {e:?}",
+                        self.out_dim
+                    ))
+                })?;
+                chunk_outputs.push(chunk_out);
+                chunk_start += chunk_len;
+            }
+            // Each chunk output is `[row_count, 1, chunk_len]`. Concat
+            // along the last dim reproduces the single-shot output.
+            Tensor::cat(&chunk_outputs, 2).map_err(|e| {
+                candle_core::Error::Msg(format!(
+                    "VulkanLinearOp chunked concat ({} chunks): {e:?}",
+                    chunk_outputs.len()
+                ))
+            })?
+        } else {
+            match self.weight_layout {
+                WeightLayout::F32 => kernels::dispatch_linear_decode_cached(
+                    self.vk_device.as_ref(),
+                    &dispatch_x,
+                    self.weight_buffer.as_ref(),
+                    row_count,
+                    self.hidden,
+                    self.out_dim,
+                ),
+                WeightLayout::Bf16Packed => kernels::dispatch_linear_decode_cached_bf16_weights(
+                    self.vk_device.as_ref(),
+                    &dispatch_x,
+                    self.weight_buffer.as_ref(),
+                    row_count,
+                    self.hidden,
+                    self.out_dim,
+                ),
+            }
+            .map_err(|e| candle_core::Error::Msg(format!("VulkanLinearOp dispatch: {e:?}")))?
+        };
 
         // Restore the original leading dims with `out_dim` swapped in for
         // `inner`. CustomOp1's output Shape is what candle uses to size
@@ -271,18 +344,15 @@ impl CustomOp1 for VulkanLinearOp {
         //
         // Try the Vulkan transposed-weight kernel first: it dispatches
         // against the SAME bf16-packed buffer the forward used (no
-        // re-upload of a transposed view). Falls back to candle CPU
-        // broadcast_matmul if the kernel preconditions don't hold (e.g.
-        // weight is f32, or the kernel returns None for shape reasons,
-        // or the dispatch shape would exceed the safety ceiling — see
-        // `dispatch_exceeds_safety_ceiling` for the rationale).
-        let bwd_row_count: usize = {
-            let dims = grad_y.shape().dims();
-            dims[..dims.len() - 1].iter().product()
-        };
-        let bwd_uses_vulkan = self.weight_layout == WeightLayout::Bf16Packed
-            && !dispatch_exceeds_safety_ceiling(bwd_row_count, self.out_dim, self.hidden);
-        if bwd_uses_vulkan {
+        // re-upload of a transposed view). Oversized dispatches are
+        // chunked along the batch dim — the transposed kernel itself
+        // takes a `batch` parameter, so we just call it N times with
+        // disjoint slices of `grad_y` and concat along axis 0.
+        // Each per-chunk dispatch calls `queue_wait_idle()` on
+        // completion (compositor preemption), keeping the GPU
+        // submit-time bounded. F32 weights have no transposed kernel
+        // and fall through to the CPU `broadcast_matmul` path below.
+        if self.weight_layout == WeightLayout::Bf16Packed {
             let dims = grad_y.shape().dims().to_vec();
             let row_count: usize = dims[..dims.len() - 1].iter().product();
             let grad_y_f32 = if grad_y.dtype() == DType::F32 {
@@ -297,15 +367,58 @@ impl CustomOp1 for VulkanLinearOp {
                 .map_err(|e| {
                     candle_core::Error::Msg(format!("bwd reshape grad_y: {e:?}"))
                 })?;
-            let dx_3d = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
-                self.vk_device.as_ref(),
-                &dispatch_x,
-                self.weight_buffer.as_ref(),
-                row_count,
-                self.out_dim,
-                self.hidden,
-            )
-            .map_err(|e| candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}")))?;
+            let oversized =
+                dispatch_exceeds_safety_ceiling(row_count, self.out_dim, self.hidden);
+            let dx_3d = if oversized {
+                let other_dims = self.out_dim.saturating_mul(self.hidden);
+                let chunk_batch = max_chunk_dim_for_flop(other_dims);
+                let mut chunk_outputs: Vec<Tensor> = Vec::new();
+                let mut chunk_start = 0usize;
+                while chunk_start < row_count {
+                    let chunk_len = (row_count - chunk_start).min(chunk_batch);
+                    let chunk_dy =
+                        dispatch_x.narrow(0, chunk_start, chunk_len).map_err(|e| {
+                            candle_core::Error::Msg(format!(
+                                "bwd narrow grad_y (start={chunk_start}, \
+                                 len={chunk_len}): {e:?}"
+                            ))
+                        })?;
+                    let chunk_dx = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+                        self.vk_device.as_ref(),
+                        &chunk_dy,
+                        self.weight_buffer.as_ref(),
+                        chunk_len,
+                        self.out_dim,
+                        self.hidden,
+                    )
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "bwd chunked transposed dispatch (start={chunk_start}, \
+                             len={chunk_len}): {e:?}"
+                        ))
+                    })?;
+                    chunk_outputs.push(chunk_dx);
+                    chunk_start += chunk_len;
+                }
+                Tensor::cat(&chunk_outputs, 0).map_err(|e| {
+                    candle_core::Error::Msg(format!(
+                        "bwd chunked concat ({} chunks): {e:?}",
+                        chunk_outputs.len()
+                    ))
+                })?
+            } else {
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
+                    self.vk_device.as_ref(),
+                    &dispatch_x,
+                    self.weight_buffer.as_ref(),
+                    row_count,
+                    self.out_dim,
+                    self.hidden,
+                )
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}"))
+                })?
+            };
             // dx_3d is [row_count, 1, hidden]; restore caller's leading dims.
             let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
             out_dims.push(self.hidden);
@@ -934,8 +1047,9 @@ mod tests {
     /// single Vulkan submit, which the Strix Halo APU could not handle
     /// — the kernel logs went silent and the box had to be physically
     /// rebooted. The safety ceiling MUST classify that shape as
-    /// "do not dispatch", so the caller falls back to CPU
-    /// `broadcast_matmul` (the pre-Phase-2 baseline that did not crash).
+    /// "do not dispatch single-shot"; the BF16-packed path uses this
+    /// signal to switch to chunked dispatch (see `cpu_fwd` and `bwd`),
+    /// the F32 path uses it to bail to CPU `broadcast_matmul`.
     #[test]
     fn safety_guard_rejects_lm_head_repro_shape() {
         // T=918 lm_head forward shape from the crashed repro.
@@ -992,5 +1106,132 @@ mod tests {
         // panic or overflow silently in debug builds.
         let big = matmul_flop(usize::MAX, 1, 1);
         assert_eq!(big, u64::MAX, "must saturate, not overflow");
+    }
+
+    /// Chunk-sizing arithmetic: the chunk dim returned must keep each
+    /// per-chunk dispatch under the FLOP ceiling, and must always be
+    /// at least 1 (a zero-length chunk would cause an infinite loop
+    /// in the caller's chunking loop).
+    #[test]
+    fn max_chunk_dim_for_flop_is_within_ceiling() {
+        // 100 GFLOP default ceiling. lm_head fwd chunking shape:
+        // other_dims = batch * hidden = 918 * 2560.
+        let chunk = max_chunk_dim_for_flop(918 * 2560);
+        let per_chunk_flop = matmul_flop(918, 2560, chunk);
+        assert!(
+            per_chunk_flop <= max_flop_per_dispatch(),
+            "lm_head fwd chunk_size={chunk} → {per_chunk_flop} FLOP > ceiling \
+             {}",
+            max_flop_per_dispatch()
+        );
+        // For the lm_head bwd shape: other_dims = out_dim * hidden
+        // = 152064 * 2560 (huge), chunk_batch should be small but ≥ 1.
+        let chunk_b = max_chunk_dim_for_flop(152064 * 2560);
+        let per_chunk_flop_b = matmul_flop(chunk_b, 152064, 2560);
+        assert!(per_chunk_flop_b <= max_flop_per_dispatch());
+        assert!(chunk_b >= 1);
+    }
+
+    /// Synthetic parity test for the in-op chunking path. The
+    /// chunked-dispatch output for an oversized shape must match the
+    /// single-shot output of the same op evaluated at a smaller (but
+    /// otherwise identical) shape — proven by running the SAME op
+    /// twice with different `KILN_VULKAN_LINEAR_MAX_GFLOP`. This test
+    /// instead exercises a pure-arithmetic invariant: chunking should
+    /// be a no-op when each chunk fits in one dispatch — which is
+    /// the regression we'd want to catch if `Tensor::cat` behaved
+    /// differently than the single-shot kernel output for the
+    /// degenerate case of one chunk == full output dim.
+    #[test]
+    fn vulkan_linear_chunked_fwd_parity_small() -> Result<()> {
+        let Ok(vk_device) = VulkanDevice::new() else {
+            eprintln!(
+                "vulkan_linear_chunked_fwd_parity_small: no Vulkan device available, skipping"
+            );
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+        let device = Device::Cpu;
+        let t = 4usize;
+        let hidden = 8usize;
+        let out_dim = 12usize;
+        // Use the bf16-packed path (the only one with chunking).
+        let x_data: Vec<f32> = (0..t * hidden).map(|i| (i as f32) * 0.013).collect();
+        let w_data: Vec<f32> = (0..hidden * out_dim).map(|i| (i as f32) * 0.017).collect();
+        let x = Tensor::from_vec(x_data, (1, t, hidden), &device)?;
+        let weight_t_f32 = Tensor::from_vec(w_data, (hidden, out_dim), &device)?;
+        let weight_t_bf16 = weight_t_f32.to_dtype(DType::BF16)?;
+        let baseline = x.broadcast_matmul(&weight_t_bf16.to_dtype(DType::F32)?)?;
+
+        let weight_buffer =
+            Arc::new(upload_tensor_bf16_packed_buffer(vk_device.as_ref(), &weight_t_bf16)?);
+
+        // Single-shot Vulkan dispatch.
+        let single_shot = dispatch_forward_only(
+            vk_device.as_ref(),
+            &x,
+            weight_buffer.as_ref(),
+            WeightLayout::Bf16Packed,
+            hidden,
+            out_dim,
+        )?;
+
+        // Manually-chunked Vulkan dispatch (3 chunks of 4 cols each).
+        // This mimics what `cpu_fwd` does when it crosses the FLOP
+        // ceiling. We don't go through the env-var path because
+        // `OnceLock` would lock in whatever the first observation is
+        // and pollute neighboring tests.
+        let dispatch_x = if x.dtype() == DType::F32 {
+            x.clone()
+        } else {
+            x.to_dtype(DType::F32)?
+        };
+        let mut chunks: Vec<Tensor> = Vec::new();
+        let chunk_size = 4usize;
+        let mut start = 0usize;
+        while start < out_dim {
+            let len = (out_dim - start).min(chunk_size);
+            let chunk =
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                    vk_device.as_ref(),
+                    &dispatch_x,
+                    weight_buffer.as_ref(),
+                    t,
+                    hidden,
+                    len,
+                    start,
+                    out_dim,
+                )?;
+            chunks.push(chunk);
+            start += len;
+        }
+        let chunked = Tensor::cat(&chunks, 2)?;
+
+        // All three should agree to f32 precision.
+        let baseline_v = baseline.flatten_all()?.to_vec1::<f32>()?;
+        let single_v = single_shot.flatten_all()?.to_vec1::<f32>()?;
+        let chunked_v = chunked.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(baseline_v.len(), single_v.len());
+        assert_eq!(baseline_v.len(), chunked_v.len());
+        for (i, ((b, s), c)) in baseline_v
+            .iter()
+            .zip(single_v.iter())
+            .zip(chunked_v.iter())
+            .enumerate()
+        {
+            // Single-shot vs chunked: must be bit-exact (same kernel
+            // family, same accumulator order).
+            assert!(
+                (s - c).abs() < 1e-6,
+                "single_shot vs chunked diverge at idx {i}: \
+                 single={s:.6} chunked={c:.6}"
+            );
+            // Baseline f32 vs Vulkan bf16-weight: small drift OK.
+            assert!(
+                (b - c).abs() < 1e-2,
+                "baseline vs chunked drift at idx {i}: baseline={b:.6} chunked={c:.6}"
+            );
+        }
+        Ok(())
     }
 }
