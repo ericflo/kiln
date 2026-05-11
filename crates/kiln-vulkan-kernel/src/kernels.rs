@@ -317,6 +317,20 @@ pub fn dispatch_kernel(
     output_shape: &[usize],
     output_dtype: DType,
 ) -> Result<Tensor> {
+    // Vulkan only guarantees `maxComputeWorkGroupCount[i] >= 65535`
+    // per axis. Enforce the conservative limit here so any caller
+    // gets a clear error instead of an opaque vkCmdDispatch failure.
+    // Real devices typically allow much higher; if a future caller
+    // needs it, swap this for a query of vkPhysicalDeviceLimits.
+    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    anyhow::ensure!(
+        workgroup_count.0 <= VK_MIN_DISPATCH_AXIS
+            && workgroup_count.1 <= VK_MIN_DISPATCH_AXIS
+            && workgroup_count.2 <= VK_MIN_DISPATCH_AXIS,
+        "dispatch_kernel: workgroup_count {:?} exceeds Vulkan's per-axis \
+         minimum {VK_MIN_DISPATCH_AXIS}",
+        workgroup_count
+    );
     let device = vk_device.device();
     let queue = vk_device.queue();
     let queue_family_index = vk_device.queue_family_index();
