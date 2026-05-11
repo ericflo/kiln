@@ -2291,10 +2291,15 @@ impl BackendRuntime for VulkanBackend {
 
         let mut stubbed = 0usize;
 
-        // Top-level embedding transpose.
-        if replace(&mut weights.embed_tokens_t, &mut cache, &stub_template) {
-            stubbed += 1;
-        }
+        // Intentionally NOT stubbing `weights.embed_tokens_t`:
+        // `embedding_lookup_from_transposed_index` calls
+        // `embed_tokens_t.index_select(idx, 1)` which reads the
+        // tensor's data (not just shape), so a 1-element stub would
+        // make the embedding lookup return garbage. The other `*_proj_t`
+        // caches go through `cached_bf16_packed_weight_buffer` (TensorId
+        // → Arc<VulkanBuffer>) so they only need shape/dtype metadata
+        // on the candle side. Embedding savings (~750 MB) are small
+        // next to the per-layer transposes (~5-6 GB across 32 layers).
 
         // Per-layer attention + MLP transposes.
         for layer in weights.layers.iter_mut() {
