@@ -1475,22 +1475,6 @@ impl BackendRuntime for VulkanBackend {
         if chunk_start + chunk_len > full_out_dim {
             return Ok(None);
         }
-        // Per-chunk FLOP guard. Chunk size is bounded (4096 by default)
-        // so FLCE chunks are normally well below the ceiling, but a
-        // future caller might pass a chunk_len that pushes a single
-        // chunk dispatch over the safety limit. Bail to caller's CPU
-        // fallback if so. See `dispatch_exceeds_safety_ceiling` for the
-        // rationale (Strix Halo host-hang on oversized submits).
-        let row_count_guard: usize = x
-            .dims()
-            .iter()
-            .take(x.dims().len().saturating_sub(1))
-            .product();
-        if crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
-            row_count_guard, hidden_x, chunk_len,
-        ) {
-            return Ok(None);
-        }
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -1510,17 +1494,66 @@ impl BackendRuntime for VulkanBackend {
         } else {
             x_f32.reshape((row_count, 1usize, hidden_x))?
         };
-        let out = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
-            vk_device.as_ref(),
-            &dispatch_x,
-            weight_buffer.as_ref(),
-            row_count,
-            hidden_x,
-            chunk_len,
-            chunk_start,
-            full_out_dim,
-        )
-        .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?;
+        // Per-dispatch FLOP guard. FLCE chunks at chunk_size=4096 sit
+        // right at the 20 GFLOP ceiling for T=918; longer T or larger
+        // chunk_len passed by future callers would put a single submit
+        // over the safety limit. Sub-chunk along the chunk_len dim so
+        // each submit fits — that's strictly better than bailing to
+        // FLCE's CPU fallback because each sub-chunk still uses the
+        // same offset kernel with no re-upload of the weight buffer.
+        let sub_chunk_len = if crate::backend::vulkan_linear_op::dispatch_exceeds_safety_ceiling(
+            row_count, hidden_x, chunk_len,
+        ) {
+            crate::backend::vulkan_linear_op::max_chunk_dim_for_flop(
+                row_count.saturating_mul(hidden_x),
+            )
+            .min(chunk_len)
+        } else {
+            chunk_len
+        };
+        let out = if sub_chunk_len == chunk_len {
+            kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                vk_device.as_ref(),
+                &dispatch_x,
+                weight_buffer.as_ref(),
+                row_count,
+                hidden_x,
+                chunk_len,
+                chunk_start,
+                full_out_dim,
+            )
+            .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?
+        } else {
+            // Walk chunk_len in sub_chunk_len-sized strides; concat
+            // outputs along the last axis. Same kernel/buffer per
+            // sub-dispatch, just different `chunk_start` offsets and
+            // smaller `chunk_len` per submit.
+            let mut sub_outputs: Vec<Tensor> = Vec::new();
+            let mut sub_offset = 0usize;
+            while sub_offset < chunk_len {
+                let cur_len = (chunk_len - sub_offset).min(sub_chunk_len);
+                let sub = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                    vk_device.as_ref(),
+                    &dispatch_x,
+                    weight_buffer.as_ref(),
+                    row_count,
+                    hidden_x,
+                    cur_len,
+                    chunk_start + sub_offset,
+                    full_out_dim,
+                )
+                .with_context(|| {
+                    format!(
+                        "VulkanBackend: linear_prefill_apply_offset sub-chunk \
+                         (sub_offset={sub_offset}, cur_len={cur_len}, \
+                          chunk_start={chunk_start}, chunk_len={chunk_len}) failed"
+                    )
+                })?;
+                sub_outputs.push(sub);
+                sub_offset += cur_len;
+            }
+            Tensor::cat(&sub_outputs, 2).context("offset sub-chunk concat")?
+        };
         // Output from kernel is `[row_count, 1, chunk_len]`. Restore the
         // caller's leading dims with chunk_len in the last position.
         let mut out_dims = dims;
