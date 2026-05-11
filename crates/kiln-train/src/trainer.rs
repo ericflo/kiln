@@ -2570,13 +2570,16 @@ fn checkpointed_forward_backward(
     let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
     boundary_states.push(embed_hidden.detach());
     // Phase 3.1 hook: register the embedding boundary as
-    // resident-on-device. The default impl is a no-op (CPU/Metal/CUDA
-    // backends ignore the call); on Vulkan it copies the bytes into
-    // a `RESIDENT_ACTIVATION_REGISTRY` entry keyed by `tensor.id()`.
-    // Phase 3.2 will use these entries to skip the candle-CPU
-    // recompute-input upload — for now the calls just exercise the
-    // lifecycle and provide telemetry for the upcoming wiring work.
-    backend.register_resident_activation(boundary_states.last().unwrap())?;
+    // resident-on-device. Skipped entirely on backends that don't
+    // implement the registry (default no-op trait impls) so we don't
+    // pay an `extract_tensor_bytes` round-trip per boundary on CPU.
+    // On Vulkan it copies the bytes into RESIDENT_ACTIVATION_REGISTRY
+    // keyed by `tensor.id()`. Phase 3.2 will use these entries to
+    // skip the candle-CPU recompute-input upload.
+    let resident_activation = backend.supports_resident_activation();
+    if resident_activation {
+        backend.register_resident_activation(boundary_states.last().unwrap())?;
+    }
 
     {
         let mut current = boundary_states[0].clone();
@@ -2594,7 +2597,9 @@ fn checkpointed_forward_backward(
                 Some(&lora_weights),
             )?;
             boundary_states.push(current.detach());
-            backend.register_resident_activation(boundary_states.last().unwrap())?;
+            if resident_activation {
+                backend.register_resident_activation(boundary_states.last().unwrap())?;
+            }
             current = boundary_states.last().unwrap().clone();
         }
     }
@@ -2742,12 +2747,13 @@ fn checkpointed_forward_backward(
     // Phase 3.1 hook: evict every boundary-state registry entry now
     // that the recompute+backward pass has completed and the segment
     // outputs are no longer needed. On Vulkan this releases the
-    // RESIDENT_ACTIVATION_REGISTRY's Arc<VulkanBuffer> refcount; on
-    // CPU/Metal/CUDA this is a no-op. Done unconditionally so a
-    // future Phase 3.2 wiring change can rely on the registry being
-    // empty between training steps.
-    for boundary in &boundary_states {
-        backend.evict_resident_activation(boundary);
+    // RESIDENT_ACTIVATION_REGISTRY's Arc<VulkanBuffer> refcount.
+    // Skipped when the backend's registry is the no-op default so we
+    // don't iterate just to call no-ops.
+    if resident_activation {
+        for boundary in &boundary_states {
+            backend.evict_resident_activation(boundary);
+        }
     }
 
     // Average loss across segments. In both monolithic and tiled paths the
@@ -2878,8 +2884,12 @@ fn checkpointed_grpo_forward_backward(
 
     let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
     boundary_states.push(embed_hidden.detach());
-    // Phase 3.1 hook — same lifecycle as in checkpointed_forward_backward.
-    backend.register_resident_activation(boundary_states.last().unwrap())?;
+    // Phase 3.1 hook — same capability-gated lifecycle as in
+    // checkpointed_forward_backward.
+    let resident_activation = backend.supports_resident_activation();
+    if resident_activation {
+        backend.register_resident_activation(boundary_states.last().unwrap())?;
+    }
 
     {
         let mut current = boundary_states[0].clone();
@@ -2897,7 +2907,9 @@ fn checkpointed_grpo_forward_backward(
                 Some(&lora_weights),
             )?;
             boundary_states.push(current.detach());
-            backend.register_resident_activation(boundary_states.last().unwrap())?;
+            if resident_activation {
+                backend.register_resident_activation(boundary_states.last().unwrap())?;
+            }
             current = boundary_states.last().unwrap().clone();
         }
     }
@@ -2967,9 +2979,11 @@ fn checkpointed_grpo_forward_backward(
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
     }
 
-    // Phase 3.1 hook — same lifecycle as the SFT path.
-    for boundary in &boundary_states {
-        backend.evict_resident_activation(boundary);
+    // Phase 3.1 hook — same capability-gated eviction as the SFT path.
+    if resident_activation {
+        for boundary in &boundary_states {
+            backend.evict_resident_activation(boundary);
+        }
     }
 
     let avg_loss = total_loss / num_segments as f64;

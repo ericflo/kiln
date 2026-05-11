@@ -690,6 +690,16 @@ impl BackendRuntime for VulkanBackend {
         RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&state_id))
     }
 
+    fn supports_resident_activation(&self) -> bool {
+        // Vulkan implements all three Phase 3.1 hooks against
+        // RESIDENT_ACTIVATION_REGISTRY. Returns true even when the
+        // process has no Vulkan device — `register_resident_activation`
+        // will short-circuit to Ok(()) in that case, but the
+        // capability semantics are still "this backend's registry is
+        // wired non-trivially when conditions allow."
+        true
+    }
+
     /// Phase 3.1 hook: register a non-weight tensor as resident on the
     /// device. Uploads `tensor`'s bytes to a fresh `VulkanBuffer` and
     /// records the buffer under the tensor's `TensorId`. The caller

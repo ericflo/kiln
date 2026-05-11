@@ -173,6 +173,19 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// True when the backend's resident activation registry is
+    /// non-trivially implemented — i.e. `register_resident_activation`
+    /// actually uploads the tensor and `has_resident_activation` will
+    /// return true after registration. False for the default no-op
+    /// implementations. Callers that want to opt OUT of the lifecycle
+    /// hook calls entirely (to avoid the per-call overhead of
+    /// `extract_tensor_bytes` + buffer alloc on Vulkan) can gate on
+    /// this. The default impls are cheap enough that it's safe to
+    /// always invoke them, so most callers should not bother.
+    fn supports_resident_activation(&self) -> bool {
+        false
+    }
+
     /// Register a non-weight tensor (e.g. a checkpoint-segment activation
     /// boundary) as registry-resident on the device. The default
     /// implementation is a no-op — backends that don't have a resident
