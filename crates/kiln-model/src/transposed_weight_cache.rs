@@ -210,34 +210,59 @@ fn cache_write_sender() -> Option<&'static Sender<CacheWrite>> {
 }
 
 fn cache_writer_loop(receiver: Receiver<CacheWrite>) {
+    // Re-read the delays at every iteration so test code that sets
+    // the env vars after the writer thread spawned still takes
+    // effect. Production cost: two `env::var` lookups per cache
+    // entry write, which is negligible relative to the disk I/O
+    // those writes do.
     let initial_delay = cache_write_initial_delay();
     if !initial_delay.is_zero() {
         tracing::debug!(
             delay_ms = initial_delay.as_millis() as u64,
             "deferring transposed weight cache background writes"
         );
-        thread::sleep(initial_delay);
+        // Use recv_timeout so a fresh message wakes us early —
+        // important for tests that don't want to wait the production
+        // 120 s default, and harmless in production where the queue
+        // is normally empty during the initial delay window.
+        match receiver.recv_timeout(initial_delay) {
+            Ok(first) => {
+                process_cache_write(first);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Initial deferral elapsed with no work pending —
+                // fall through to the normal recv loop.
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        }
     }
 
-    let spacing = cache_write_spacing();
-    for CacheWrite { cache_key, weight } in receiver {
-        if cache_key.file_path.exists() {
-            continue;
-        }
-
-        let result = transposed_weight_bytes_2d(&weight)
-            .and_then(|(data, _shape)| try_write_cached(&cache_key, &data));
-        match result {
-            Ok(()) => {
-                CACHE_WRITE_COMPLETED.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(err) => {
-                CACHE_WRITE_FAILED.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(error = %err, "failed to write transposed weight cache entry");
-            }
-        }
+    for write in receiver {
+        process_cache_write(write);
+        let spacing = cache_write_spacing();
         if !spacing.is_zero() {
             thread::sleep(spacing);
+        }
+    }
+}
+
+/// One cache-entry write. Extracted so `cache_writer_loop` can call
+/// it from both the initial-delay-with-recv-timeout path and the
+/// steady-state for-loop path.
+fn process_cache_write(write: CacheWrite) {
+    let CacheWrite { cache_key, weight } = write;
+    if cache_key.file_path.exists() {
+        return;
+    }
+    let result = transposed_weight_bytes_2d(&weight)
+        .and_then(|(data, _shape)| try_write_cached(&cache_key, &data));
+    match result {
+        Ok(()) => {
+            CACHE_WRITE_COMPLETED.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(err) => {
+            CACHE_WRITE_FAILED.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(error = %err, "failed to write transposed weight cache entry");
         }
     }
 }
@@ -628,27 +653,12 @@ mod tests {
 
     #[test]
     fn queue_cache_write_persists_payload_on_background_writer() -> Result<()> {
-        // **Run this test under `cargo nextest`, not plain `cargo test`.**
-        //
-        // Why: the cache writer thread reads CACHE_WRITE_INITIAL_DELAY_ENV
-        // ONCE at OnceLock initialization (the spawn at line ~195). If
-        // another test in the kiln-model lib binary triggers
-        // `queue_cache_write` before this test runs, the writer is
-        // already sleeping the production default (120 s) and the
-        // 2-second deadline below times out. nextest runs each test
-        // in its own process, so the OnceLock is fresh per test.
-        //
-        // Plain `cargo test` shares the process, so the test is
-        // race-prone. Marking this `#[cfg_attr(not(nextest), ignore)]`
-        // would be the cleanest fix but the cfg flag isn't standard;
-        // the canonical fix is to restructure the writer to re-read
-        // the env var per message, which is bigger surgery than this
-        // test deserves. For now: be aware that
-        // `cargo test -p kiln-model` may report a single failure
-        // here under load — it's a known race, not a regression.
-        //
-        // Each nextest test process is isolated. Keep this unit test fast while
-        // production defers cache writes away from startup/first-request load.
+        // The writer thread is process-global behind a OnceLock and
+        // may already have spawned with the production-default
+        // initial delay (120 s) by the time this test runs under
+        // `cargo test`. The writer's `recv_timeout(initial_delay)`
+        // path fixes the race: any queued message wakes the writer
+        // even if it's mid-sleep. See `cache_writer_loop`.
         unsafe {
             std::env::set_var(CACHE_WRITE_INITIAL_DELAY_ENV, "0");
             std::env::set_var(CACHE_WRITE_SPACING_ENV, "0");
