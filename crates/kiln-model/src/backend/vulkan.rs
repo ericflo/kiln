@@ -2673,6 +2673,40 @@ mod tests {
     /// evicts it, asserts it flips back. Skipped if no Vulkan
     /// device — the hooks have no-op defaults so a CPU-only run
     /// would just always answer false.
+    /// Re-registration after eviction must work — the trainer's
+    /// per-step lifecycle relies on this (training step N evicts
+    /// boundaries, step N+1 re-registers fresh ones with new
+    /// TensorIds, but conceptually the same lifecycle).
+    #[test]
+    fn resident_activation_re_register_after_evict() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
+        backend.register_resident_activation(&t)?;
+        assert!(backend.has_resident_activation(&t));
+        backend.evict_resident_activation(&t);
+        assert!(!backend.has_resident_activation(&t));
+        // Re-register with the same TensorId — must succeed and
+        // re-upload (the previous buffer was dropped at eviction).
+        backend.register_resident_activation(&t)?;
+        assert!(
+            backend.has_resident_activation(&t),
+            "tensor must be registered again after eviction"
+        );
+        // Resolve to confirm the bytes round-tripped correctly the
+        // second time too.
+        let resolved = backend
+            .resolve_resident_activation(&t, &[2, 2], DType::F32)?
+            .expect("must resolve after re-register");
+        let data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
+        assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
+        backend.evict_resident_activation(&t);
+        Ok(())
+    }
+
     /// Empty-tensor (zero-byte) input must not panic the Vulkan
     /// allocator. Bails silently — `has_resident_activation` returns
     /// false and the caller falls through to its CPU path.
