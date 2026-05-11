@@ -264,6 +264,35 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(false)
     }
 
+    /// AdamW slot per the residency plan §4.2 ("AdamW slot for later
+    /// — leave the kernel name and signature in place; do not
+    /// implement the moving averages until requested").
+    ///
+    /// Inputs: param + grad + first-moment buffer + second-moment
+    /// buffer. All four must be registry-resident with matching
+    /// shape and dtype. Hyperparams: lr, beta1, beta2, eps,
+    /// weight_decay, step (1-indexed). Returns true on dispatch
+    /// success, false on decline.
+    ///
+    /// Default no-op so trait callers pick up the eventual Vulkan
+    /// impl without code changes. Trainer doesn't call this yet.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_adamw_step(
+        &self,
+        _param: &Tensor,
+        _grad: &Tensor,
+        _first_moment: &Tensor,
+        _second_moment: &Tensor,
+        _lr: f32,
+        _beta1: f32,
+        _beta2: f32,
+        _eps: f32,
+        _weight_decay: f32,
+        _step: u32,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Phase 4.1 step 2 hook: compute the LoRA delta
     /// `(x @ A.T @ B.T) * scale` against registry-resident A and B.
     /// Returns `Ok(Some(delta))` with the delta in `x.dtype()` when
