@@ -40,9 +40,34 @@
 
 use anyhow::{Context, Result, anyhow};
 use candle_core::{D, DType, Device, Tensor};
+use std::sync::Arc;
 
 mod phase_b;
-pub use phase_b::fused_linear_cross_entropy_phase_b;
+pub use phase_b::{fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_with_provider};
+
+/// Optional matmul override hook for the FLCE chunked head pass.
+///
+/// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
+/// ~2.5 GB on Qwen3.5-4B BF16), narrows it per-chunk, and dispatches each
+/// `[active, hidden] @ [hidden, chunk_len]` matmul through candle's CPU
+/// `broadcast_matmul`. On a unified-memory APU this is the dominant
+/// remaining CPU compute in the training tail.
+///
+/// Implementations can route the per-chunk matmul through a Vulkan kernel
+/// (or CUDA/Metal future-equivalents) without FLCE having to take a direct
+/// dependency on the backend crate. Returning `Ok(None)` falls back to the
+/// candle CPU path for that specific chunk; the caller's backward path
+/// remains the analytic Phase B implementation.
+///
+/// `lhs` is `[active, hidden]` F32, `rhs` is `[hidden, chunk_len]` (F32 or
+/// the original head dtype). The expected output shape is
+/// `[active, chunk_len]` F32.
+pub trait FlceMatmulProvider: Send + Sync + std::fmt::Debug {
+    fn matmul(&self, lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>>;
+}
+
+/// Convenience boxed type used by the `_with_provider` entry points.
+pub type FlceProvider = Arc<dyn FlceMatmulProvider>;
 
 /// Default chunk size along the vocab dimension.
 ///
@@ -83,11 +108,36 @@ pub fn fused_linear_cross_entropy_dispatch(
     device: &Device,
     chunk_size: usize,
 ) -> Result<Tensor> {
+    fused_linear_cross_entropy_dispatch_with_provider(
+        hidden, head_t, input_ids, label_mask, device, chunk_size, None,
+    )
+}
+
+/// Same as [`fused_linear_cross_entropy_dispatch`] but accepts an optional
+/// [`FlceProvider`] that the Phase B path consults for the per-chunk
+/// matmul. Phase A ignores the provider (the env var path is the reference
+/// implementation kept for parity debugging).
+///
+/// Trainer call sites that have a `BackendRuntime` handle build a
+/// provider that wraps `backend.linear_prefill_apply` (or equivalent) and
+/// pass it through here.
+pub fn fused_linear_cross_entropy_dispatch_with_provider(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    device: &Device,
+    chunk_size: usize,
+    provider: Option<FlceProvider>,
+) -> Result<Tensor> {
     if use_phase_a() {
+        // Phase A is the reference path for parity debugging only; the
+        // provider is intentionally not threaded through here.
+        let _ = provider;
         fused_linear_cross_entropy(hidden, head_t, input_ids, label_mask, device, chunk_size)
     } else {
-        fused_linear_cross_entropy_phase_b(
-            hidden, head_t, input_ids, label_mask, device, chunk_size,
+        fused_linear_cross_entropy_phase_b_with_provider(
+            hidden, head_t, input_ids, label_mask, device, chunk_size, provider,
         )
     }
 }

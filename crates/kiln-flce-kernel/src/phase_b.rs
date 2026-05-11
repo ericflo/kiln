@@ -53,7 +53,7 @@ use candle_core::{
     CpuStorage, CudaStorage, CustomOp1, D, DType, Device, Layout, Shape, Storage, Tensor,
 };
 
-use crate::DEFAULT_CHUNK_SIZE;
+use crate::{DEFAULT_CHUNK_SIZE, FlceProvider};
 
 /// Phase B entry point: chunked FLCE with a manual-backward [`CustomOp1`].
 ///
@@ -70,6 +70,24 @@ pub fn fused_linear_cross_entropy_phase_b(
     label_mask: &[bool],
     device: &Device,
     chunk_size: usize,
+) -> Result<Tensor> {
+    fused_linear_cross_entropy_phase_b_with_provider(
+        hidden, head_t, input_ids, label_mask, device, chunk_size, None,
+    )
+}
+
+/// Provider-aware variant. The optional [`FlceProvider`] is consulted for
+/// every chunk matmul in both forward and backward — when it returns
+/// `Ok(Some(out))` the result is used directly; on `Ok(None)` the candle
+/// CPU `broadcast_matmul` path runs as before.
+pub fn fused_linear_cross_entropy_phase_b_with_provider(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    device: &Device,
+    chunk_size: usize,
+    provider: Option<FlceProvider>,
 ) -> Result<Tensor> {
     let seq_len = input_ids.len();
     if seq_len < 2 {
@@ -135,11 +153,13 @@ pub fn fused_linear_cross_entropy_phase_b(
         input_ids: input_ids.to_vec(),
         label_mask: label_mask.to_vec(),
         chunk_size,
+        provider,
     };
     hidden_contig.apply_op1(op).map_err(Into::into)
 }
 
 /// CustomOp1 wrapper for Phase B. `apply_op1(hidden)` -> scalar f32 loss.
+#[derive(Debug)]
 struct FlceCustomOp {
     /// `[hidden_size, vocab_size]` transposed lm_head — frozen during LoRA
     /// training, so it is captured here as op state rather than an autograd
@@ -153,6 +173,13 @@ struct FlceCustomOp {
     /// Chunk size along the vocab dim. Use [`DEFAULT_CHUNK_SIZE`] unless
     /// tuning.
     chunk_size: usize,
+    /// Optional matmul override for the per-chunk `[active, hidden] @
+    /// [hidden, chunk_len]` step. When `Some`, every chunk matmul in
+    /// forward and backward consults this provider before falling back
+    /// to candle CPU `broadcast_matmul`. Lets the trainer route the
+    /// FLCE chunk matmul through Vulkan (or any future backend) without
+    /// FLCE having to take a direct dependency on a backend crate.
+    provider: Option<FlceProvider>,
 }
 
 impl CustomOp1 for FlceCustomOp {
@@ -179,6 +206,7 @@ impl CustomOp1 for FlceCustomOp {
             &self.input_ids,
             &self.label_mask,
             self.chunk_size,
+            self.provider.as_ref(),
         )
         .map_err(|e| candle_core::Error::Msg(format!("flce phase b cpu_fwd: {e:#}")))?;
 
@@ -213,6 +241,7 @@ impl CustomOp1 for FlceCustomOp {
                 &self.input_ids,
                 &self.label_mask,
                 self.chunk_size,
+                self.provider.as_ref(),
             )
             .map_err(|e| candle_core::Error::Msg(format!("flce phase b cuda_fwd: {e:#}")))?;
 
@@ -238,6 +267,7 @@ impl CustomOp1 for FlceCustomOp {
             &self.label_mask,
             self.chunk_size,
             grad_loss,
+            self.provider.as_ref(),
         )
         .map(Some)
         .map_err(|e| candle_core::Error::Msg(format!("flce phase b bwd: {e:#}")))
@@ -254,12 +284,30 @@ impl CustomOp1 for FlceCustomOp {
 /// parent so the graph has nowhere to extend back to anyway, but detaching
 /// avoids a `O(num_chunks)` accumulator chain that could otherwise hold
 /// per-chunk tensors live until the final `mean_all` runs.)
+
+/// Run one chunk's `[active, hidden] @ [hidden, chunk_len]` matmul,
+/// preferring the optional `FlceMatmulProvider` and falling back to
+/// candle's `Tensor::matmul` when the provider declines.
+fn forward_chunk_matmul(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    provider: Option<&FlceProvider>,
+) -> Result<Tensor> {
+    if let Some(p) = provider {
+        if let Some(out) = p.matmul(lhs, rhs)? {
+            return Ok(out);
+        }
+    }
+    lhs.matmul(rhs).map_err(Into::into)
+}
+
 fn forward_loss(
     hidden_leaf: &Tensor,
     head_t: &Tensor,
     input_ids: &[u32],
     label_mask: &[bool],
     chunk_size: usize,
+    provider: Option<&FlceProvider>,
 ) -> Result<f32> {
     let device = hidden_leaf.device();
     let seq_len = input_ids.len();
@@ -315,9 +363,12 @@ fn forward_loss(
             .contiguous()
             .context("contiguous head_t chunk for matmul")?;
 
-        let logits_chunk = active_hidden_f32
-            .matmul(&head_chunk)
-            .context("matmul active_hidden_f32 @ head_chunk")?;
+        let logits_chunk = forward_chunk_matmul(
+            &active_hidden_f32,
+            &head_chunk,
+            provider,
+        )
+        .context("matmul active_hidden_f32 @ head_chunk")?;
 
         let chunk_max = logits_chunk
             .max_keepdim(D::Minus1)
@@ -405,6 +456,7 @@ fn backward_dhidden(
     label_mask: &[bool],
     chunk_size: usize,
     grad_loss: &Tensor,
+    provider: Option<&FlceProvider>,
 ) -> Result<Tensor> {
     let device = hidden.device();
     let dtype = hidden.dtype();
@@ -450,7 +502,7 @@ fn backward_dhidden(
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
         let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = active_hidden_f32.matmul(&head_chunk)?;
+        let logits_chunk = forward_chunk_matmul(&active_hidden_f32, &head_chunk, provider)?;
         let chunk_max = logits_chunk.max_keepdim(D::Minus1)?;
         let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
             (None, None) => {
@@ -485,7 +537,7 @@ fn backward_dhidden(
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
         let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = active_hidden_f32.matmul(&head_chunk)?;
+        let logits_chunk = forward_chunk_matmul(&active_hidden_f32, &head_chunk, provider)?;
         let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
         let exp_chunk = shifted.exp()?;
         let softmax_chunk =
@@ -510,7 +562,8 @@ fn backward_dhidden(
 
         // chunk_contrib = grad_logits_chunk @ head_chunk.T  (shape [num_active, hidden_size])
         let head_chunk_t = head_chunk.t()?.contiguous()?;
-        let chunk_contrib = grad_logits_chunk.matmul(&head_chunk_t)?;
+        let chunk_contrib =
+            forward_chunk_matmul(&grad_logits_chunk, &head_chunk_t, provider)?;
 
         dhidden_active = (&dhidden_active + chunk_contrib)?.detach();
 
