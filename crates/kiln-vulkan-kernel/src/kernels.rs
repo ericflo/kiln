@@ -5674,6 +5674,19 @@ pub fn run_compute_pipeline(
     push_constants: &[u32],
     workgroup_count: u32,
 ) -> Result<()> {
+    // Vulkan only guarantees `maxComputeWorkGroupCount[0] >= 65535`.
+    // Anything bigger needs a multi-axis dispatch (callers can pre-
+    // split into a (x, y) grid and use dispatch_kernel for that).
+    // Surface clearly here so an oversized 1-axis dispatch fails
+    // with a meaningful error rather than driver-dependent silent
+    // truncation.
+    const VK_MIN_DISPATCH_AXIS: u32 = 65535;
+    anyhow::ensure!(
+        workgroup_count <= VK_MIN_DISPATCH_AXIS,
+        "run_compute_pipeline: workgroup_count={workgroup_count} \
+         exceeds Vulkan's per-axis minimum {VK_MIN_DISPATCH_AXIS}; \
+         caller should split into a multi-axis dispatch via dispatch_kernel"
+    );
     let device = vk_device.device();
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         spirv,
