@@ -1638,6 +1638,32 @@ fn flce_auto_engage(active_count: usize, _vocab_size: usize) -> bool {
     active_count >= ACTIVE_COUNT_FLOOR
 }
 
+/// Phase 3.2 helper: get the per-segment recompute input either from
+/// the resident activation registry (preferred) or by cloning the
+/// candle CPU mirror (fallback). Centralised so both
+/// `checkpointed_forward_backward` and
+/// `checkpointed_grpo_forward_backward` use the same code path.
+///
+/// `resident_activation` should be the cached
+/// `backend.supports_resident_activation()` value — passing it in
+/// rather than querying per call avoids the per-iteration trait
+/// dispatch overhead.
+fn segment_input_via_registry_or_clone(
+    backend: &dyn BackendRuntime,
+    boundary: &Tensor,
+    resident_activation: bool,
+) -> Result<Tensor> {
+    if resident_activation && backend.has_resident_activation(boundary) {
+        let dims_vec: Vec<usize> = boundary.dims().to_vec();
+        if let Some(resolved) = backend
+            .resolve_resident_activation(boundary, &dims_vec, boundary.dtype())?
+        {
+            return Ok(resolved);
+        }
+    }
+    Ok(boundary.clone())
+}
+
 /// SGD update: param = param - lr * grad
 fn sgd_step(
     params: &TrainableLoraParams,
@@ -2671,30 +2697,13 @@ fn checkpointed_forward_backward(
 
         let (seg_start, seg_end) = segments[seg_idx];
 
-        // Start from the detached boundary state for this segment.
-        // Phase 3.2: when the boundary is registry-resident, prefer
-        // the device-side read-back over cloning the candle CPU
-        // mirror — this exercises the resolve path in real training.
-        // Until Phase 4.x's storage interception lands, the candle
-        // mirror in `boundary_states[seg_idx]` is also still alive,
-        // so this doesn't yet save memory; but the data must agree
-        // (the resolved Tensor's bytes must match what the original
-        // upload captured), so a divergence here surfaces a registry
-        // bug immediately.
-        let seg_input = if resident_activation
-            && backend.has_resident_activation(&boundary_states[seg_idx])
-        {
-            let dims_vec: Vec<usize> = boundary_states[seg_idx].dims().to_vec();
-            backend
-                .resolve_resident_activation(
-                    &boundary_states[seg_idx],
-                    &dims_vec,
-                    boundary_states[seg_idx].dtype(),
-                )?
-                .unwrap_or_else(|| boundary_states[seg_idx].clone())
-        } else {
-            boundary_states[seg_idx].clone()
-        };
+        // Start from the detached boundary state for this segment —
+        // resident-resolve fast path with candle-clone fallback.
+        let seg_input = segment_input_via_registry_or_clone(
+            backend,
+            &boundary_states[seg_idx],
+            resident_activation,
+        )?;
 
         // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
         let lora_weights_for_seg = params.as_lora_weights();
@@ -2934,23 +2943,14 @@ fn checkpointed_grpo_forward_backward(
     for seg_idx in 0..num_segments {
         let (seg_start, seg_end) = segments[seg_idx];
 
-        // Start from the detached boundary state for this segment.
-        // Same Phase 3.2 resolve-or-clone pattern as in
+        // Start from the detached boundary state for this segment —
+        // same resolve-or-clone helper as in
         // checkpointed_forward_backward.
-        let seg_input = if resident_activation
-            && backend.has_resident_activation(&boundary_states[seg_idx])
-        {
-            let dims_vec: Vec<usize> = boundary_states[seg_idx].dims().to_vec();
-            backend
-                .resolve_resident_activation(
-                    &boundary_states[seg_idx],
-                    &dims_vec,
-                    boundary_states[seg_idx].dtype(),
-                )?
-                .unwrap_or_else(|| boundary_states[seg_idx].clone())
-        } else {
-            boundary_states[seg_idx].clone()
-        };
+        let seg_input = segment_input_via_registry_or_clone(
+            backend,
+            &boundary_states[seg_idx],
+            resident_activation,
+        )?;
 
         // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
         let lora_weights_for_seg = params.as_lora_weights();
