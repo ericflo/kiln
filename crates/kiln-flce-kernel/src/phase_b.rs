@@ -288,17 +288,27 @@ impl CustomOp1 for FlceCustomOp {
 /// Run one chunk's `[active, hidden] @ [hidden, chunk_len]` matmul,
 /// preferring the optional `FlceMatmulProvider` and falling back to
 /// candle's `Tensor::matmul` when the provider declines.
+///
+/// Threading `full_rhs` + `(chunk_start, chunk_len)` through to the
+/// provider lets implementations upload `full_rhs` to a device buffer
+/// once and reuse it across all chunks via offset-aware dispatch.
+/// `narrowed_rhs` is the candle-side narrow of `full_rhs` already
+/// computed by the caller; the fallback path uses it directly so the
+/// no-provider behavior is bit-for-bit unchanged.
 fn forward_chunk_matmul(
     lhs: &Tensor,
-    rhs: &Tensor,
+    full_rhs: &Tensor,
+    narrowed_rhs: &Tensor,
+    chunk_start: usize,
+    chunk_len: usize,
     provider: Option<&FlceProvider>,
 ) -> Result<Tensor> {
     if let Some(p) = provider {
-        if let Some(out) = p.matmul(lhs, rhs)? {
+        if let Some(out) = p.chunk_matmul(lhs, full_rhs, chunk_start, chunk_len)? {
             return Ok(out);
         }
     }
-    lhs.matmul(rhs).map_err(Into::into)
+    lhs.matmul(narrowed_rhs).map_err(Into::into)
 }
 
 fn forward_loss(
@@ -365,7 +375,10 @@ fn forward_loss(
 
         let logits_chunk = forward_chunk_matmul(
             &active_hidden_f32,
+            head_t,
             &head_chunk,
+            chunk_start,
+            chunk_len,
             provider,
         )
         .context("matmul active_hidden_f32 @ head_chunk")?;
@@ -502,7 +515,14 @@ fn backward_dhidden(
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
         let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = forward_chunk_matmul(&active_hidden_f32, &head_chunk, provider)?;
+        let logits_chunk = forward_chunk_matmul(
+            &active_hidden_f32,
+            head_t,
+            &head_chunk,
+            chunk_start,
+            chunk_len,
+            provider,
+        )?;
         let chunk_max = logits_chunk.max_keepdim(D::Minus1)?;
         let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
             (None, None) => {
@@ -537,7 +557,14 @@ fn backward_dhidden(
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
         let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = forward_chunk_matmul(&active_hidden_f32, &head_chunk, provider)?;
+        let logits_chunk = forward_chunk_matmul(
+            &active_hidden_f32,
+            head_t,
+            &head_chunk,
+            chunk_start,
+            chunk_len,
+            provider,
+        )?;
         let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
         let exp_chunk = shifted.exp()?;
         let softmax_chunk =
@@ -561,9 +588,13 @@ fn backward_dhidden(
         let grad_logits_chunk = scaled.broadcast_mul(&grad_loss_f32)?;
 
         // chunk_contrib = grad_logits_chunk @ head_chunk.T  (shape [num_active, hidden_size])
+        // The transposed matmul is a different stride pattern from the
+        // forward chunk and the offset kernel doesn't (yet) handle it,
+        // so this stays on the candle CPU path. A future kernel that
+        // takes a "transpose" axis bit could route this through Vulkan
+        // too — left to a follow-up sub-step.
         let head_chunk_t = head_chunk.t()?.contiguous()?;
-        let chunk_contrib =
-            forward_chunk_matmul(&grad_logits_chunk, &head_chunk_t, provider)?;
+        let chunk_contrib = grad_logits_chunk.matmul(&head_chunk_t)?;
 
         dhidden_active = (&dhidden_active + chunk_contrib)?.detach();
 

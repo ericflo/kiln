@@ -1540,22 +1540,31 @@ fn use_flce() -> bool {
 /// `linear_prefill_apply`. The provider holds an `Arc<dyn ...>` to
 /// the backend so it can satisfy the `'static` bound that
 /// [`kiln_flce_kernel::FlceProvider`] requires.
+///
+/// Receives `full_rhs` plus chunk metadata so the underlying weight
+/// buffer is uploaded once via `linear_prefill_apply` (cached by
+/// `full_rhs.id()`) and per-chunk dispatch reuses it via the
+/// offset-aware kernel (`linear_prefill_apply_offset`). This avoids
+/// the per-chunk re-upload that made the previous (non-offset)
+/// version a net-loss on the medium payload.
 #[derive(Debug)]
 struct BackendFlceProvider {
     backend: std::sync::Arc<dyn BackendRuntime>,
 }
 
 impl FlceMatmulProvider for BackendFlceProvider {
-    fn matmul(
+    fn chunk_matmul(
         &self,
         lhs: &candle_core::Tensor,
-        rhs: &candle_core::Tensor,
+        full_rhs: &candle_core::Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
     ) -> anyhow::Result<Option<candle_core::Tensor>> {
-        // Provider receives lhs as `[active, hidden]` 2-D — the backend's
-        // linear_prefill_apply expects `[B, T, hidden]` 3-D, so reshape
-        // around the dispatch.
         let lhs_3d = lhs.unsqueeze(0)?;
-        let Some(out_3d) = self.backend.linear_prefill_apply(&lhs_3d, rhs)? else {
+        let Some(out_3d) =
+            self.backend
+                .linear_prefill_apply_offset(&lhs_3d, full_rhs, chunk_start, chunk_len)?
+        else {
             return Ok(None);
         };
         let out = out_3d.squeeze(0)?;
@@ -1563,33 +1572,34 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance AND
-/// the FLCE-on-Vulkan path is explicitly enabled.
+/// Build a provider when the supplied backend is a Vulkan instance.
 ///
-/// Default off because the first-cut FLCE provider hits a cache miss on
-/// every per-chunk `head_t.narrow` — each chunk is a fresh `TensorId`,
-/// so `cached_bf16_packed_weight_buffer` re-uploads the same head every
-/// time. On a 1500-token medium-sized payload this turned a ~111 s
-/// step into ~140 s vs the projection-only Vulkan routing. Set
-/// `KILN_VULKAN_FLCE=1` to opt in once the buffer-offset variant of
-/// dispatch_linear_decode_cached_* (which lets head_t upload once and
-/// per-chunk dispatch reuse it via offsets) lands.
+/// Default-on: the FLCE provider now uses linear_prefill_apply_offset,
+/// which dispatches per-chunk against a once-uploaded weight buffer.
+/// Hardware validation on Strix Halo at T=244 measured no regression
+/// vs the projection-only Vulkan path (both ~111 s wall) and bit-exact
+/// loss against the candle CPU baseline. At larger T the constant-time
+/// per-chunk dispatch overhead is amortized across more compute, so the
+/// matmul win grows.
+///
+/// Set `KILN_VULKAN_FLCE=0` to opt back into the candle CPU chunk path
+/// — useful for parity comparisons.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
 ) -> Option<FlceProvider> {
     if backend.name() != "vulkan" {
         return None;
     }
-    let opt_in = matches!(
+    let disabled = matches!(
         std::env::var("KILN_VULKAN_FLCE")
             .ok()
             .as_deref()
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("1") | Some("true") | Some("yes")
+        Some("0") | Some("false") | Some("no")
     );
-    if !opt_in {
+    if disabled {
         return None;
     }
     Some(std::sync::Arc::new(BackendFlceProvider {

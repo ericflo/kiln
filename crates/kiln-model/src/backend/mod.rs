@@ -610,6 +610,27 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Same as `linear_prefill_apply` but operates on a column slice of a
+    /// larger weight tensor: dispatches the matmul against
+    /// `full_weight_t[:, chunk_start .. chunk_start + chunk_len]`. Backends
+    /// that can keep `full_weight_t` resident as a single buffer and
+    /// dispatch per-chunk via offset addressing avoid the per-chunk
+    /// re-upload that the naive `linear_prefill_apply(_, narrowed)` path
+    /// would pay for every unique narrowed `TensorId`.
+    ///
+    /// Used by the FLCE chunked head loop. The result need not be
+    /// autograd-tracked — FLCE owns its own analytic backward; the result
+    /// is consumed inside the FLCE CustomOp1's `cpu_fwd`.
+    fn linear_prefill_apply_offset(
+        &self,
+        _x: &Tensor,
+        _full_weight_t: &Tensor,
+        _chunk_start: usize,
+        _chunk_len: usize,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     fn supports_linear_decode_argmax(&self) -> bool {
         false
     }

@@ -1341,6 +1341,74 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(out))
     }
 
+    fn linear_prefill_apply_offset(
+        &self,
+        x: &Tensor,
+        full_weight_t: &Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
+    ) -> Result<Option<Tensor>> {
+        if !self.has_vulkan() || !self.linear_decode_enabled {
+            return Ok(None);
+        }
+        if !matches!(x.device(), Device::Cpu) || !matches!(full_weight_t.device(), Device::Cpu) {
+            return Ok(None);
+        }
+        // Only the bf16-packed kernel has an offset variant today; require
+        // bf16 weights so the cached buffer matches the dispatch shader.
+        if full_weight_t.dtype() != DType::BF16 {
+            return Ok(None);
+        }
+        let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
+            return Ok(None);
+        };
+        let Ok((hidden_w, full_out_dim)) = full_weight_t.dims2() else {
+            return Ok(None);
+        };
+        if hidden_x != hidden_w {
+            return Ok(None);
+        }
+        if chunk_start + chunk_len > full_out_dim {
+            return Ok(None);
+        }
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?
+            .clone();
+        let weight_buffer = self.cached_bf16_packed_weight_buffer(full_weight_t)?;
+        // Promote x to f32 for the kernel (kernel expects f32 input).
+        let x_f32 = if x.dtype() == DType::F32 {
+            x.clone()
+        } else {
+            x.to_dtype(DType::F32)?
+        };
+        let dims = x_f32.shape().dims().to_vec();
+        let row_count: usize = dims[..dims.len() - 1].iter().product();
+        let dispatch_x = if dims.len() == 3 && dims[1] == 1 {
+            x_f32
+        } else {
+            x_f32.reshape((row_count, 1usize, hidden_x))?
+        };
+        let out = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+            vk_device.as_ref(),
+            &dispatch_x,
+            weight_buffer.as_ref(),
+            row_count,
+            hidden_x,
+            chunk_len,
+            chunk_start,
+            full_out_dim,
+        )
+        .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?;
+        // Output from kernel is `[row_count, 1, chunk_len]`. Restore the
+        // caller's leading dims with chunk_len in the last position.
+        let mut out_dims = dims;
+        *out_dims.last_mut().unwrap() = chunk_len;
+        let reshaped = out.reshape(out_dims.as_slice())?;
+        Ok(Some(reshaped))
+    }
+
     fn supports_linear_decode_argmax(&self) -> bool {
         self.has_vulkan() && self.linear_decode_enabled
     }

@@ -59,11 +59,26 @@ pub use phase_b::{fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy
 /// candle CPU path for that specific chunk; the caller's backward path
 /// remains the analytic Phase B implementation.
 ///
-/// `lhs` is `[active, hidden]` F32, `rhs` is `[hidden, chunk_len]` (F32 or
-/// the original head dtype). The expected output shape is
-/// `[active, chunk_len]` F32.
+/// The trait exposes chunk metadata (`full_rhs`, `chunk_start`,
+/// `chunk_len`) so an implementation can upload `full_rhs` once and
+/// reuse the same device buffer for every chunk via offset-aware
+/// dispatch — the alternative (give the provider the already-narrowed
+/// rhs Tensor) costs a fresh device-buffer upload per chunk because
+/// candle's narrow yields a fresh `TensorId` and the underlying
+/// per-tensor weight cache misses on every dispatch.
+///
+/// `lhs` is `[active, hidden]` F32. `full_rhs` is the original
+/// `[hidden, vocab_size]` head_t in its original dtype. The chunk to
+/// compute is `full_rhs[:, chunk_start .. chunk_start + chunk_len]`.
+/// Expected output shape is `[active, chunk_len]` F32.
 pub trait FlceMatmulProvider: Send + Sync + std::fmt::Debug {
-    fn matmul(&self, lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>>;
+    fn chunk_matmul(
+        &self,
+        lhs: &Tensor,
+        full_rhs: &Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
+    ) -> Result<Option<Tensor>>;
 }
 
 /// Convenience boxed type used by the `_with_provider` entry points.
