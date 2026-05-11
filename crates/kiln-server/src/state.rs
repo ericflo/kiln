@@ -1556,6 +1556,36 @@ impl AppState {
             "GPU memory budget"
         );
 
+        // Surface which Vulkan training acceleration paths are
+        // active so the operator can confirm the runtime profile
+        // at-a-glance instead of diff'ing env vars against the docs.
+        // Only logged when there's an actual Vulkan device — on CPU
+        // or non-Vulkan backends these flags are irrelevant.
+        if vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfs
+            || vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfsUnified
+        {
+            let env_flag = |name: &str, default_on: bool| -> &'static str {
+                let raw = std::env::var(name).ok();
+                let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
+                let truthy = matches!(lower.as_deref(), Some("1") | Some("true") | Some("yes"));
+                let falsy = matches!(lower.as_deref(), Some("0") | Some("false") | Some("no"));
+                match (truthy, falsy, default_on) {
+                    (true, _, _) => "on (env)",
+                    (_, true, _) => "off (env)",
+                    (_, _, true) => "on (default)",
+                    (_, _, false) => "off (default)",
+                }
+            };
+            tracing::info!(
+                linear = env_flag("KILN_VULKAN_LINEAR", false),
+                sdpa = env_flag("KILN_VULKAN_SDPA", false),
+                rmsnorm_inference = env_flag("KILN_VULKAN_RMSNORM", true),
+                rmsnorm_training = "auto (row_count >= 1024)",
+                flce_provider = "auto (active_count >= 16)",
+                "Vulkan training acceleration profile"
+            );
+        }
+
         let prefix_cache_max_blocks = if prefix_cache_cfg.enabled {
             prefix_cache_cfg.max_blocks.unwrap_or(num_blocks / 4)
         } else {
