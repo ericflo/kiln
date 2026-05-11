@@ -15,6 +15,10 @@ Vulkan training-route changes) twice hard-hung the host on the
   ceiling tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP` (default 20 GFLOP,
   ≈800 ms per submit at 25 TFLOPS — comparable to FLCE's empirically
   safe per-chunk cadence).
+- vulkan: `linear_prefill_apply_offset` sub-chunks internally when a
+  single chunk_len would exceed the FLOP ceiling, instead of bailing
+  to FLCE's CPU fallback. Same kernel, same buffer, finer-grained
+  submits.
 - vulkan: new `sdpa_prefill_f32.comp` shader replaces the buggy
   `flash_attn.comp` placeholder. F32 in/out, online-softmax, optional
   causal mask, head_dim ≤ 128. Wired into `flash_attn_prefill_vulkan`
@@ -22,19 +26,32 @@ Vulkan training-route changes) twice hard-hung the host on the
 - vulkan: Phase 4.2 prep — `sgd_step_f32.comp` shader and
   `dispatch_sgd_step_f32` helper. Drops in once Phase 4.1 lands and
   `TrainableLoraParams` are registry-resident `VulkanBuffer`s.
-- vulkan: Phase 3.1 hooks — `register_resident_activation`,
-  `evict_resident_activation`, `has_resident_activation` on
-  `BackendRuntime` plus a `RESIDENT_ACTIVATION_REGISTRY` impl on
-  `VulkanBackend`. Unused by callers today; integration point for
-  Phase 3.2.
+- vulkan: Phase 3.1 hooks — `supports_resident_activation`,
+  `register_resident_activation`, `evict_resident_activation`,
+  `has_resident_activation` on `BackendRuntime` plus a
+  `RESIDENT_ACTIVATION_REGISTRY` impl on `VulkanBackend`. Trainer
+  call sites in `checkpointed_forward_backward` and
+  `checkpointed_grpo_forward_backward` invoke the lifecycle hooks
+  at boundary state push/eviction; gated on
+  `supports_resident_activation()` so non-Vulkan backends pay zero
+  overhead.
 - server: "Vulkan training acceleration profile" startup log surfacing
   the on/off state of every `KILN_VULKAN_*` training-path env var.
+- server: HTTP 413 rejection messages from `/v1/training/*` include
+  a `vram_source=...` clause when the corrected budget came from the
+  unified-memory path (makes `KILN_TRAINING_MEMORY_RESERVE_GB` the
+  obvious knob).
 - core: `EffectiveBudget` accessor + `vram_source` field on the "GPU
   memory budget" log so the corrected unified-memory budget is honest
   about its provenance (`linux-drm-sysfs-unified` vs the raw DRM
   carveout it overrides).
-- docs: Phase 2.1 CPU-fallback matmul leak audit and Phase 2 hardware
-  validation runbook in `docs/audits/`.
+- telemetry: one-shot tracing for first chunked
+  `VulkanLinearOp::cpu_fwd` and `::bwd` dispatch (logs chunk count,
+  per-chunk GFLOP) and first
+  `VulkanBackend::register_resident_activation` call.
+- docs: Phase 2.1 CPU-fallback matmul leak audit, Phase 2 hardware
+  validation runbook, and canonical env-var reference in
+  `docs/audits/`.
 - docs: env-var documentation for `KILN_GPU_MEMORY_GB`,
   `KILN_TRAINING_MEMORY_RESERVE_GB`, and the unified-memory detection
   heuristic in `kiln.example.toml`.
