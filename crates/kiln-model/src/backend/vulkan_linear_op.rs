@@ -243,6 +243,26 @@ impl CustomOp1 for VulkanLinearOp {
         let out_tensor = if oversized && self.weight_layout == WeightLayout::Bf16Packed {
             let other_dims = row_count.saturating_mul(self.hidden);
             let chunk_out_dim = max_chunk_dim_for_flop(other_dims);
+            let chunk_count = self.out_dim.div_ceil(chunk_out_dim);
+            // One trace per process for the chunked path so the operator
+            // can confirm chunking is engaging without per-step log spam.
+            // The first chunked dispatch is the most informative one
+            // (covers lm_head at training T) — subsequent dispatches
+            // re-check the OnceLock and short-circuit.
+            static FIRST_CHUNKED_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            FIRST_CHUNKED_LOGGED.get_or_init(|| {
+                tracing::info!(
+                    row_count,
+                    hidden = self.hidden,
+                    out_dim = self.out_dim,
+                    total_gflop = matmul_flop(row_count, self.hidden, self.out_dim) as f64 / 1.0e9,
+                    chunk_out_dim,
+                    chunk_count,
+                    per_chunk_gflop = matmul_flop(row_count, self.hidden, chunk_out_dim) as f64
+                        / 1.0e9,
+                    "VulkanLinearOp::cpu_fwd first chunked dispatch"
+                );
+            });
             let mut chunk_outputs: Vec<Tensor> = Vec::new();
             let mut chunk_start = 0usize;
             while chunk_start < self.out_dim {
@@ -377,6 +397,25 @@ impl CustomOp1 for VulkanLinearOp {
             let dx_3d = if oversized {
                 let other_dims = self.out_dim.saturating_mul(self.hidden);
                 let chunk_batch = max_chunk_dim_for_flop(other_dims);
+                let chunk_count = row_count.div_ceil(chunk_batch);
+                static FIRST_CHUNKED_BWD_LOGGED: std::sync::OnceLock<()> =
+                    std::sync::OnceLock::new();
+                FIRST_CHUNKED_BWD_LOGGED.get_or_init(|| {
+                    tracing::info!(
+                        row_count,
+                        out_dim = self.out_dim,
+                        hidden = self.hidden,
+                        total_gflop = matmul_flop(row_count, self.out_dim, self.hidden)
+                            as f64
+                            / 1.0e9,
+                        chunk_batch,
+                        chunk_count,
+                        per_chunk_gflop = matmul_flop(chunk_batch, self.out_dim, self.hidden)
+                            as f64
+                            / 1.0e9,
+                        "VulkanLinearOp::bwd first chunked dispatch"
+                    );
+                });
                 let mut chunk_outputs: Vec<Tensor> = Vec::new();
                 let mut chunk_start = 0usize;
                 while chunk_start < row_count {
