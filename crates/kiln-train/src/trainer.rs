@@ -1573,19 +1573,31 @@ impl FlceMatmulProvider for BackendFlceProvider {
 }
 
 /// Build a provider when the supplied backend is a Vulkan instance and
-/// the payload shape predicts a net speedup from chunked dispatch.
+/// the payload shape suggests that chunked dispatch is the better choice
+/// than the unfused lm_head matmul + cross-entropy path.
 ///
-/// The per-chunk Vulkan dispatch overhead (upload x + record dispatch +
-/// readback) is constant-cost per chunk while the matmul compute scales
-/// with `active_count × hidden × chunk_len`. Hardware measurement on
-/// Strix Halo at T=244 (~30 active rows × 61 vocab chunks of 4096) put
-/// the crossover where chunked Vulkan FLCE becomes a win at roughly
-/// `active_count × num_chunks >= 50_000` — below that, the per-chunk
-/// dispatch overhead dominates the matmul savings.
+/// The crossover used to be measured against the pre-Phase-2 baseline
+/// (CPU-only `broadcast_matmul` for the unfused path); on Strix Halo the
+/// per-chunk Vulkan dispatch overhead beat the matmul savings only above
+/// `active_count × num_chunks ≥ 50_000`. Post-host-crash that comparison
+/// no longer holds: the unfused path on Vulkan queues the entire
+/// `[T, hidden] @ [hidden, vocab]` lm_head as a single submit, which
+/// queues ~4.36M workgroups at T=918 / vocab=152064 and hard-hung the
+/// host twice — see commit 1b8f5f97. The FLCE provider chunks the same
+/// matmul through `linear_prefill_apply_offset`, so each submit is
+/// bounded by `chunk_len` (4096 by default) and TDR-safe by construction.
+///
+/// New rule: engage as soon as the active count clears a small floor.
+/// At active_count ≥ 16 with vocab=152064 and chunk_size=4096 (38 chunks)
+/// the per-chunk matmul work is ~13 GFLOP — well-amortized vs the
+/// Vulkan dispatch overhead (~50 µs per chunk). Below that floor the
+/// non-FLCE path's lm_head matmul is itself trivial (16 × 2560 × 152064
+/// × 2 = ~12 GFLOP), so the unfused path is fine and FLCE's per-chunk
+/// fixed cost actually dominates.
 ///
 /// `KILN_VULKAN_FLCE=1` forces the provider on; `KILN_VULKAN_FLCE=0`
 /// forces it off; otherwise the auto-heuristic decides based on
-/// `label_mask` and the model's vocab.
+/// `label_mask`.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
     label_mask: &[bool],
@@ -1608,22 +1620,32 @@ fn build_flce_provider(
         Some("0") | Some("false") | Some("no") => return None,
         _ => {}
     }
-    // Auto-heuristic: enable when expected dispatch work is large
-    // enough to amortize the per-chunk overhead.
+    // Auto-heuristic: engage whenever the supervised batch is large
+    // enough that the unfused lm_head matmul would itself be a serious
+    // GPU dispatch.
     let active_count = if label_mask.len() >= 2 {
         label_mask[1..].iter().filter(|&&m| m).count()
     } else {
         0
     };
-    let num_chunks = model_config.vocab_size.div_ceil(DEFAULT_CHUNK_SIZE);
-    const AUTO_THRESHOLD: usize = 50_000;
-    if active_count.saturating_mul(num_chunks) >= AUTO_THRESHOLD {
+    if flce_auto_engage(active_count, model_config.vocab_size) {
         Some(std::sync::Arc::new(BackendFlceProvider {
             backend: backend.clone(),
         }))
     } else {
         None
     }
+}
+
+/// Pure predicate for the FLCE provider auto-heuristic. Extracted so it
+/// can be exercised by unit tests without a live Vulkan backend.
+///
+/// Returns true when the FLCE provider should auto-engage given the
+/// supervised-token count and the model's vocab size. See
+/// [`build_flce_provider`] for rationale.
+fn flce_auto_engage(active_count: usize, _vocab_size: usize) -> bool {
+    const ACTIVE_COUNT_FLOOR: usize = 16;
+    active_count >= ACTIVE_COUNT_FLOOR
 }
 
 /// SGD update: param = param - lr * grad
@@ -4183,5 +4205,39 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Regression: the FLCE auto-heuristic must engage for the original
+    /// `/tmp/sft-data.jsonl` repro shape (T~918, vocab=152064). Pre-fix
+    /// it required `active_count × num_chunks ≥ 50_000`, which was
+    /// ~28K at T=918 and so the unfused lm_head matmul ran instead —
+    /// and that matmul, on Vulkan, hard-hung the host (commit 1b8f5f97).
+    /// Post-fix the floor is `active_count ≥ 16`, so any non-trivial
+    /// supervised batch routes through chunked FLCE.
+    #[test]
+    fn flce_auto_engages_at_sft_repro_shape() {
+        // Original /tmp/sft-data.jsonl repro: T=918, ~80% supervised
+        // → active_count ≈ 734.
+        assert!(
+            flce_auto_engage(734, 152064),
+            "T=918 SFT repro must engage FLCE — that's the shape the \
+             unfused path hung the host with"
+        );
+        // Even a tiny supervised batch should engage once it clears
+        // the per-chunk-overhead floor.
+        assert!(flce_auto_engage(16, 152064));
+        assert!(flce_auto_engage(64, 152064));
+        assert!(flce_auto_engage(256, 152064));
+    }
+
+    /// Counter-test: trivially small supervised batches should NOT
+    /// pay the per-chunk dispatch overhead. At active_count < 16 the
+    /// unfused lm_head matmul is itself tiny (~12 GFLOP, well under
+    /// the 100 GFLOP safety ceiling) so the unfused path wins.
+    #[test]
+    fn flce_auto_skips_trivial_active_count() {
+        assert!(!flce_auto_engage(0, 152064));
+        assert!(!flce_auto_engage(1, 152064));
+        assert!(!flce_auto_engage(15, 152064));
     }
 }
