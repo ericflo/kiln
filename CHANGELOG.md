@@ -60,6 +60,19 @@ Vulkan training-route changes) twice hard-hung the host on the
   returns (it took `&boundary_states` so couldn't mutate; the
   outer loop does the drop). Frees ~9 MB per boundary on Vulkan
   in tiled mode too.
+- inference: Phase 4.1 step 4 — `Model::load_adapter` now registers
+  the adapter's A/B tensors in the resident activation registry,
+  and `Model::unload_adapter` (and the load-replace path) evicts
+  the previous adapter. New `LoraWeights::register_with_backend`
+  mirrors the trainer-side TrainableLoraParams API. Effect: an
+  inference request that uses an adapter now dispatches the LoRA
+  delta on the GPU (via `lora_delta_resident`) instead of going
+  through candle CPU `compute_lora_delta`.
+- core: tests — `kiln_core::env_flag::TEST_ENV_LOCK` is now `pub`
+  (cfg(test)) so sibling test modules (vram, etc.) can hold the
+  same mutex when mutating env vars. Deflakes
+  `test_unified_memory_apu_corrects_oversized_carveout` which
+  used to race with `test_unified_memory_reserve_env_override`.
 - vulkan: `BackendRuntime::resolve_resident_activation` read-back
   hook + Vulkan impl using `VulkanBuffer::read_back` +
   `kernels::create_tensor_from_data`. API surface for Phase 3.2's
