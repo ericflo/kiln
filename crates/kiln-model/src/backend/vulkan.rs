@@ -771,6 +771,33 @@ impl BackendRuntime for VulkanBackend {
         RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().contains_key(&id))
     }
 
+    fn resolve_resident_activation(
+        &self,
+        tensor: &Tensor,
+        shape: &[usize],
+        dtype: DType,
+    ) -> Result<Option<Tensor>> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+        let id = tensor.id();
+        let buffer = RESIDENT_ACTIVATION_REGISTRY.with(|cache| cache.borrow().get(&id).cloned());
+        let Some(buffer) = buffer else {
+            return Ok(None);
+        };
+        let bytes = kiln_vulkan_kernel::VulkanBuffer::read_back(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &buffer,
+        )
+        .context("resolve_resident_activation: read_back")?;
+        let resolved = kiln_vulkan_kernel::kernels::create_tensor_from_data(&bytes, shape, dtype)
+            .context("resolve_resident_activation: create_tensor_from_data")?;
+        Ok(Some(resolved))
+    }
+
     fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(false);
@@ -2627,6 +2654,43 @@ mod tests {
     /// evicts it, asserts it flips back. Skipped if no Vulkan
     /// device — the hooks have no-op defaults so a CPU-only run
     /// would just always answer false.
+    /// resolve_resident_activation must reconstruct a Tensor whose
+    /// data matches the originally-registered tensor's bytes.
+    /// Returns Ok(None) when the tensor isn't in the registry.
+    #[test]
+    fn resolve_resident_activation_round_trip() -> Result<()> {
+        let backend = VulkanBackend::new(Device::Cpu);
+        if !backend.has_vulkan() {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        }
+        let original_data = vec![1.5f32, -2.5, 3.25, -4.75];
+        let t = Tensor::from_vec(original_data.clone(), (2, 2), &Device::Cpu)?;
+
+        // Not registered yet → resolve returns None.
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], DType::F32)?;
+        assert!(unresolved.is_none(), "unregistered tensor must not resolve");
+
+        backend.register_resident_activation(&t)?;
+        let resolved = backend
+            .resolve_resident_activation(&t, &[2, 2], DType::F32)?
+            .expect("must resolve once registered");
+        assert_eq!(resolved.dims(), &[2, 2]);
+        let resolved_data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
+        for (i, (got, want)) in resolved_data.iter().zip(original_data.iter()).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "idx {i}: got {got} want {want}"
+            );
+        }
+
+        backend.evict_resident_activation(&t);
+        // After eviction → resolve returns None again.
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], DType::F32)?;
+        assert!(unresolved.is_none());
+        Ok(())
+    }
+
     /// dispatch_sgd_step against two registry-resident F32 tensors —
     /// param := param - lr * grad, computed on-device, must match the
     /// CPU reference to f32 precision.

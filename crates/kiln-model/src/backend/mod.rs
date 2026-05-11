@@ -18,7 +18,7 @@
 //! anyway. Intended to be constant-return for each concrete backend.
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -213,6 +213,26 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// legacy path.
     fn has_resident_activation(&self, _tensor: &Tensor) -> bool {
         false
+    }
+
+    /// Read a previously-registered activation back from device into
+    /// a fresh CPU `Tensor` with the given shape and dtype. Returns
+    /// `Ok(None)` when the activation isn't resident — caller should
+    /// then use whatever CPU-side storage they retained originally.
+    ///
+    /// Phase 3.2 of the residency plan: pairs with
+    /// `register_resident_activation` to let `checkpointed_forward_backward`
+    /// drop the candle CPU mirror after registering, then re-materialise
+    /// only when the recompute pass actually needs the boundary.
+    /// Today's no-op default returns `Ok(None)` so callers without
+    /// registry support fall through to the legacy code path.
+    fn resolve_resident_activation(
+        &self,
+        _tensor: &Tensor,
+        _shape: &[usize],
+        _dtype: DType,
+    ) -> Result<Option<Tensor>> {
+        Ok(None)
     }
 
     /// Phase 4.2 hook: in-place SGD update `param -= lr * grad`
