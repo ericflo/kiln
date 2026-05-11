@@ -1780,10 +1780,17 @@ fn apply_sgd_update(
     if resident_activation && backend.has_resident_activation(var.as_tensor()) {
         // Register the gradient so dispatch_sgd_step can find it.
         backend.register_resident_activation(grad)?;
-        let dispatched = backend
-            .dispatch_sgd_step(var.as_tensor(), grad, lr as f32)
-            .ok()
-            .unwrap_or(false);
+        // Propagate dispatch errors (shape mismatch is a programmer
+        // bug worth surfacing; falling back to CPU on it would mask
+        // the bug). Returning false from dispatch_sgd_step is the
+        // valid "I declined" signal.
+        let dispatched = match backend.dispatch_sgd_step(var.as_tensor(), grad, lr as f32) {
+            Ok(b) => b,
+            Err(e) => {
+                backend.evict_resident_activation(grad);
+                return Err(e);
+            }
+        };
         if dispatched {
             // Sync candle storage from the now-updated buffer.
             let dims_vec: Vec<usize> = var.as_tensor().dims().to_vec();
