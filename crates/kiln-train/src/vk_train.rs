@@ -27,9 +27,10 @@ use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
-    vk_model_forward_loss, vk_step_backward, VkLayerWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights,
+    vk_count_gdn_layers, vk_model_forward_loss, vk_model_forward_loss_with_state, vk_step_backward,
+    VkLayerWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
 };
+use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanBuffer, VulkanDevice};
 use std::collections::HashMap;
@@ -163,7 +164,25 @@ pub fn vk_train_step(
     cfg: &VkAdamWConfig,
     step: u32,
 ) -> Result<f32> {
-    let loss = vk_model_forward_loss(weights, lora_layers, input_ids)?;
+    vk_train_step_with_state(weights, lora_layers, input_ids, None, adamw_state, cfg, step)
+}
+
+/// Same as `vk_train_step` but threads optional GDN state. For
+/// hybrid models (Qwen3.5-4B), pass a freshly-zeroed
+/// `VkLinearAttentionState`. The state is mutated in place and can
+/// be discarded after the step (training treats each example as
+/// starting from zero state).
+#[allow(clippy::too_many_arguments)]
+pub fn vk_train_step_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    gdn_state: Option<&mut VkLinearAttentionState>,
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    step: u32,
+) -> Result<f32> {
+    let loss = vk_model_forward_loss_with_state(weights, lora_layers, input_ids, gdn_state)?;
     let loss_val = loss.to_vec_f32()?[0];
     let grads = vk_step_backward(&loss)?;
 
@@ -374,6 +393,13 @@ pub fn vk_native_sft_train(
     let mut global_step: u32 = 0;
     let mut last_loss = 0.0f32;
 
+    // Pre-compute GDN state shape from model_config for per-example
+    // allocation. For hybrid Qwen3.5-4B this allocates state for the
+    // 24 GDN layers.
+    let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+    let needs_state = num_gdn_layers > 0;
+    let conv_kernel = model_config.linear_conv_kernel_dim;
+
     // Note: Phase 1 keeps gradient checkpointing as a no-op stub. The
     // VkTape is rebuilt per step (forward → backward → drop), so peak
     // device memory at any point ≈ one full step's intermediates.
@@ -383,14 +409,36 @@ pub fn vk_native_sft_train(
         let mut epoch_loss = 0.0f32;
         for (input_ids, _label_mask) in tokenized.iter() {
             global_step += 1;
+
+            // Fresh GDN state per example (training is short-context;
+            // we don't carry state across examples).
+            let mut maybe_state = if needs_state {
+                let conv_channels = 2 * model_config.linear_num_key_heads * model_config.linear_key_head_dim
+                    + model_config.linear_num_value_heads * model_config.linear_value_head_dim;
+                let state = VkLinearAttentionState::zeros(
+                    &vk_device,
+                    num_gdn_layers,
+                    1, // batch
+                    model_config.linear_num_value_heads,
+                    model_config.linear_key_head_dim,
+                    model_config.linear_value_head_dim,
+                    conv_channels,
+                    conv_kernel,
+                )?;
+                Some(state)
+            } else {
+                None
+            };
+
             // For Phase 1 we ignore label_mask and run FLCE on all
             // positions (matches the synthetic smoke tests). Real SFT
             // training masks prompt tokens; that's a Phase 1.7 follow-up
             // — vk_index_select_rows already exists for the gather.
-            let loss = vk_train_step(
+            let loss = vk_train_step_with_state(
                 &vk_weights,
                 &lora_layers,
                 input_ids,
+                maybe_state.as_mut(),
                 &mut adamw,
                 &cfg,
                 global_step,

@@ -759,6 +759,19 @@ pub fn vk_model_forward_loss(
     lora_layers: &[VkLoraLayer],
     input_ids: &[u32],
 ) -> Result<VkTensor> {
+    vk_model_forward_loss_with_state(weights, lora_layers, input_ids, None)
+}
+
+/// Full forward + FLCE with optional GDN state. Pass
+/// `Some(&mut VkLinearAttentionState)` for hybrid models (Qwen3.5-4B
+/// has 24 GDN + 8 FullAttn layers); pass `None` for FullAttn-only
+/// models.
+pub fn vk_model_forward_loss_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    mut state: Option<&mut kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState>,
+) -> Result<VkTensor> {
     anyhow::ensure!(!input_ids.is_empty(), "vk_model_forward: empty input");
     anyhow::ensure!(
         lora_layers.len() == weights.layers.len(),
@@ -777,8 +790,24 @@ pub fn vk_model_forward_loss(
         }
     };
 
+    let mut gdn_layer_idx = 0usize;
     for (lw, ll) in weights.layers.iter().zip(lora_layers.iter()) {
-        h = vk_transformer_layer(&h, lw, ll)?;
+        h = match lw {
+            VkLayerWeights::FullAttention(_) => vk_transformer_layer(&h, lw, ll)?,
+            VkLayerWeights::LinearAttention(_) => {
+                let s = state
+                    .as_mut()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "vk_model_forward_loss: LinearAttention layer requires \
+                             VkLinearAttentionState — pass it via _with_state variant"
+                        )
+                    })?;
+                let result = vk_transformer_layer_with_state(&h, lw, ll, Some((*s, gdn_layer_idx)))?;
+                gdn_layer_idx += 1;
+                result
+            }
+        };
     }
 
     // Final RMSNorm
@@ -792,6 +821,16 @@ pub fn vk_model_forward_loss(
         labels.push((weights.vocab.saturating_sub(1)) as u32);
     }
     vk_flce_loss(&h, &weights.lm_head, &labels, FLCE_DEFAULT_CHUNK)
+}
+
+/// Count how many layers in the model are GDN (LinearAttention).
+/// Used by trainers to pre-allocate VkLinearAttentionState.
+pub fn vk_count_gdn_layers(weights: &VkModelWeights) -> usize {
+    weights
+        .layers
+        .iter()
+        .filter(|l| matches!(l, VkLayerWeights::LinearAttention(_)))
+        .count()
 }
 
 /// Run vk_backward and return per-`TensorId` gradients ready to feed
