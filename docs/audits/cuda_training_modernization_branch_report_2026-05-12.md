@@ -21,10 +21,12 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `b53602df` | CUDA FLCE backend provider gate | Wires CUDA FLCE backend chunk matmul behind `KILN_CUDA_FLCE=1`; default CUDA SFT remains on the existing candle CUDA Phase B chunked loss path until benchmarks justify auto-on. |
 | `86291129` | CUDA optimizer dispatch explicit decline | Adds CUDA SGD/AdamW dispatch hooks that log first use and return `false` until CUDA owns a real in-place optimizer update. |
 | `6a0824bd` | CUDA attention fast-path training guard | CUDA FlashAttention prefill/paged decode decline autograd-tracked tensors until a CUDA attention op with backward is wired. |
+| `4d60b0a9` | CUDA A6000 preflight rejection coverage | Adds a discrete CUDA/A6000 long-context rejection test for the shared fit-before-run estimator. |
 
 Local validation so far:
 
 - `cargo test -p kiln-model backend::tests::portable_training_capabilities_are_conservative --lib --quiet` passed after each code slice.
+- `cargo test -p kiln-server preflight_rejects_long_context_on_a6000_cuda_budget --lib --quiet` passed for CUDA/discrete fit-gate coverage.
 - `cargo test -p kiln-train flce_provider --lib --quiet` passed for the CUDA opt-in gate and Vulkan auto-heuristic tests.
 - `cargo test -p kiln-train flce_auto --lib --quiet` passed for the FLCE active-token floor tests.
 - `git diff --check` passed before each code commit.
@@ -74,7 +76,7 @@ explicit, testable, and observable:
 
 | Area | Current evidence | Status |
 | --- | --- | --- |
-| Fit gate | `crates/kiln-server/src/training_preflight.rs` has a shared working-set estimator and treats CUDA/discrete devices as `WeightResidency::SingleCopy`. | Present, shared with Vulkan. Needs CUDA-specific rejection runbook. |
+| Fit gate | `crates/kiln-server/src/training_preflight.rs` has a shared working-set estimator, treats CUDA/discrete devices as `WeightResidency::SingleCopy`, accepts small A6000 payloads, and rejects 64k-token Qwen3.5-4B SFT on the A6000 budget. | Present, shared with Vulkan. |
 | FLCE | `crates/kiln-flce-kernel` implements Phase B chunked-vocab CustomOp; `PHASE10_CLOSURE.md` records T=8192 A40 closure and A6000 prediction. | Present. Must remain default for SFT. |
 | RMSNorm training | `forward.rs::rms_norm` routes autograd tensors to `fused_rmsnorm_with_autograd` only behind the 47 GiB gate; small GPUs fall back. | Present with safety gate. |
 | Attention training | CUDA FlashAttention prefill/paged-decode hooks now decline tracked tensors; no CUDA attention backward op is claimed yet. | Honest decline present; CUDA attention training op still missing. |
