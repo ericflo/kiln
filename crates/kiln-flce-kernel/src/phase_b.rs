@@ -46,11 +46,11 @@
 //! pass) — same recompute trick as the forward.
 
 use anyhow::{Context, Result, anyhow};
-#[cfg(feature = "cuda")]
-use candle_core::backend::BackendStorage;
+use candle_core::backend::{BackendDevice, BackendStorage};
 use candle_core::op::BackpropOp;
 use candle_core::{
-    CpuStorage, CudaStorage, CustomOp1, D, DType, Device, Layout, Shape, Storage, Tensor,
+    CpuStorage, CudaStorage, CustomOp1, D, DType, Device, Layout, MetalStorage, Shape, Storage,
+    Tensor,
 };
 
 use crate::{DEFAULT_CHUNK_SIZE, FlceProvider};
@@ -252,6 +252,30 @@ impl CustomOp1 for FlceCustomOp {
                 Shape::from(()),
             ))
         }
+    }
+
+    fn metal_fwd(
+        &self,
+        s_hidden: &MetalStorage,
+        l_hidden: &Layout,
+    ) -> candle_core::Result<(MetalStorage, Shape)> {
+        let storage = Storage::Metal(s_hidden.try_clone(l_hidden)?);
+        let hidden_shape = Shape::from(l_hidden.shape().dims());
+        let hidden_leaf = Tensor::from_storage(storage, hidden_shape, BackpropOp::none(), false);
+
+        let loss_value = forward_loss(
+            &hidden_leaf,
+            &self.head_t,
+            &self.input_ids,
+            &self.label_mask,
+            self.chunk_size,
+            self.provider.as_ref(),
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("flce phase b metal_fwd: {e:#}")))?;
+
+        let device = s_hidden.device();
+        let out_storage = device.storage_from_slice(&[loss_value])?;
+        Ok((out_storage, Shape::from(())))
     }
 
     fn bwd(
