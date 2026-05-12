@@ -1933,7 +1933,7 @@ fn optimizer_tensors_supported(tensors: &[&Tensor]) -> bool {
         && matches!(first.dtype(), DType::F32 | DType::BF16)
         && first.is_contiguous()
         && tensors.iter().all(|tensor| {
-            tensor.device() == first.device()
+            matches!(tensor.device(), Device::Cuda(_))
                 && tensor.dtype() == first.dtype()
                 && tensor.shape().elem_count() == first.shape().elem_count()
                 && tensor.is_contiguous()
