@@ -19,6 +19,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `89926670` | CUDA runtime hook parity tests | Adds A6000-runnable tests for the projection hook and registered LoRA delta hook. |
 | `4aee22f9` | CUDA offset training matmul hook | Adds `linear_prefill_apply_offset` for chunked CUDA matmuls, tested but not yet wired into FLCE auto-routing. |
 | `b53602df` | CUDA FLCE backend provider gate | Wires CUDA FLCE backend chunk matmul behind `KILN_CUDA_FLCE=1`; default CUDA SFT remains on the existing candle CUDA Phase B chunked loss path until benchmarks justify auto-on. |
+| `86291129` | CUDA optimizer dispatch explicit decline | Adds CUDA SGD/AdamW dispatch hooks that log first use and return `false` until CUDA owns a real in-place optimizer update. |
 
 Local validation so far:
 
@@ -38,6 +39,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda test_flce_parity_vs_naive_loss --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda flce_provider --lib --quiet`
   - `KILN_CUDA_FLCE=1 cargo test --release -p kiln-train --features cuda test_flce_parity_vs_naive_loss --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_optimizer_dispatch_hooks_decline_until_owned_kernel_exists --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -76,7 +78,7 @@ explicit, testable, and observable:
 | LoRA precision | `compute_lora_delta` casts A/B to `x.dtype()`; LoRA Vars initialize as BF16. `PHASE10_LORA_PRECISION_STUDY.md` closed performance as null but accepted parity/safety. | Present. |
 | CUDA decode LoRA | `CudaBackend::lora_decode_add` declines tracked tensors and only runs the forward-only fused add for inference. | Correct for safety, not a training acceleration. |
 | Resident activation registry | `BackendRuntime` has hooks; CUDA inherits the no-op defaults. | Missing. |
-| Device optimizer dispatch | `dispatch_sgd_step` / `dispatch_adamw_step` exist in the trait; CUDA inherits decline defaults. | Missing. |
+| Device optimizer dispatch | CUDA implements explicit `dispatch_sgd_step` / `dispatch_adamw_step` decline hooks with first-use telemetry; trainer falls back to candle CUDA `Var::set`. | Honest decline present; real CUDA in-place optimizer still missing. |
 | Autograd-safe projection backend op | CUDA has many inference kernels, but `linear_prefill_apply` inherits `Ok(None)`. Training falls through to candle CUDA matmul. | Missing as explicit backend hook. |
 | Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
 
