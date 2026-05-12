@@ -9,8 +9,9 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaRopeTables, CudaTrainArena,
-    CudaTrainTensor, cuda_adamw_step_from_store, cuda_backward, cuda_embedding_lookup,
-    cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_rmsnorm, cuda_sum_all,
+    CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_backward, cuda_embedding_lookup,
+    cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_rmsnorm, cuda_scale, cuda_sum_all,
+    cuda_transpose2d,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -121,6 +122,24 @@ pub fn allocate_cuda_lora_adamw_state(lora_layers: &[CudaLoraLayer]) -> Result<C
         states.insert(pair.b_id, CudaAdamWState::zeros_like(&pair.b)?);
     }
     Ok(states)
+}
+
+/// Apply `input @ base_weight + scale * input @ A.T @ B.T`.
+pub fn cuda_lora_linear(
+    input: &CudaTrainTensor,
+    base_weight: &CudaTrainTensor,
+    lora: Option<&CudaLoraPair>,
+) -> Result<CudaTrainTensor> {
+    let base = cuda_matmul(input, base_weight).context("cuda LoRA linear base projection")?;
+    let Some(pair) = lora else {
+        return Ok(base);
+    };
+    let a_t = cuda_transpose2d(&pair.a).context("cuda LoRA linear A transpose")?;
+    let hidden = cuda_matmul(input, &a_t).context("cuda LoRA linear A projection")?;
+    let b_t = cuda_transpose2d(&pair.b).context("cuda LoRA linear B transpose")?;
+    let delta = cuda_matmul(&hidden, &b_t).context("cuda LoRA linear B projection")?;
+    let scaled = cuda_scale(&delta, pair.scale).context("cuda LoRA linear scale")?;
+    cuda_add(&base, &scaled).context("cuda LoRA linear add")
 }
 
 /// Run one native CUDA linear training step for `loss = sum((input @ weight)^2)`.
@@ -437,6 +456,73 @@ mod tests {
         assert!(arena.allocated_bytes() >= 12);
         arena.clear();
         assert_eq!(arena.allocation_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_lora_linear_adamw_updates_lora_pair() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda LoRA linear AdamW smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.5f32, -1.0, 1.5, 0.25],
+            (2usize, 2usize),
+            &device,
+        )?)?;
+        let base = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.2f32, -0.4, 0.1, 0.3],
+            (2usize, 2usize),
+            &device,
+        )?)?;
+        let a_tensor = Tensor::from_vec(
+            vec![0.15f32, -0.05, 0.2, 0.1],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let a_id = a_tensor.id();
+        let b_tensor = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.05, 0.3],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let b_id = b_tensor.id();
+        let lora = CudaLoraPair {
+            a: CudaTrainTensor::parameter(a_tensor, a_id)?,
+            b: CudaTrainTensor::parameter(b_tensor, b_id)?,
+            a_id,
+            b_id,
+            scale: 2.0,
+        };
+        let mut adamw = allocate_cuda_adamw_state(&[lora.a.clone(), lora.b.clone()])?;
+        let a_before = lora.a.to_vec_f32()?;
+        let b_before = lora.b.to_vec_f32()?;
+
+        let output = cuda_lora_linear(&input, &base, Some(&lora))?;
+        let squared = cuda_mul(&output, &output)?;
+        let loss = cuda_sum_all(&squared)?;
+        let loss_value = loss.to_vec_f32()?[0];
+        let grads = cuda_backward(&loss)?;
+        let updated = cuda_adamw_step_from_store(
+            &[lora.a.clone(), lora.b.clone()],
+            &grads,
+            &mut adamw,
+            CudaAdamWConfig {
+                lr: 0.01,
+                ..CudaAdamWConfig::default()
+            },
+        )?;
+
+        assert!(loss_value.is_finite() && loss_value > 0.0);
+        assert_eq!(updated, 2);
+        assert_ne!(lora.a.to_vec_f32()?, a_before);
+        assert_ne!(lora.b.to_vec_f32()?, b_before);
+        assert_eq!(adamw.get(&lora.a_id).expect("LoRA A state").step, 1);
+        assert_eq!(adamw.get(&lora.b_id).expect("LoRA B state").step, 1);
         Ok(())
     }
 
