@@ -7,21 +7,45 @@
 //! accepting CPU tensors by accident.
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor, TensorId};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Monotonic op-id allocator for the future CUDA-native training graph.
+static NEXT_CUDA_TRAIN_OP_ID: AtomicU64 = AtomicU64::new(1);
+
+pub fn next_cuda_train_op_id() -> u64 {
+    NEXT_CUDA_TRAIN_OP_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone)]
 pub struct CudaTrainTensor {
     tensor: Tensor,
+    requires_grad: bool,
+    param_id: Option<TensorId>,
+    op_id: u64,
 }
 
 impl CudaTrainTensor {
     pub fn new(tensor: Tensor) -> Result<Self> {
+        Self::leaf(tensor, false, None)
+    }
+
+    pub fn parameter(tensor: Tensor, param_id: TensorId) -> Result<Self> {
+        Self::leaf(tensor, true, Some(param_id))
+    }
+
+    fn leaf(tensor: Tensor, requires_grad: bool, param_id: Option<TensorId>) -> Result<Self> {
         ensure!(
             matches!(tensor.device(), Device::Cuda(_)),
             "CudaTrainTensor requires a CUDA tensor, got {:?}",
             tensor.device()
         );
-        Ok(Self { tensor })
+        Ok(Self {
+            tensor,
+            requires_grad,
+            param_id,
+            op_id: next_cuda_train_op_id(),
+        })
     }
 
     pub fn zeros_like(reference: &Tensor) -> Result<Self> {
@@ -32,7 +56,16 @@ impl CudaTrainTensor {
         );
         let tensor = Tensor::zeros(reference.shape().clone(), reference.dtype(), reference.device())
             .context("alloc CUDA training tensor")?;
-        Ok(Self { tensor })
+        Self::new(tensor)
+    }
+
+    pub fn detach(&self) -> Self {
+        Self {
+            tensor: self.tensor.clone(),
+            requires_grad: false,
+            param_id: None,
+            op_id: next_cuda_train_op_id(),
+        }
     }
 
     pub fn as_tensor(&self) -> &Tensor {
@@ -45,6 +78,18 @@ impl CudaTrainTensor {
 
     pub fn dims(&self) -> &[usize] {
         self.tensor.dims()
+    }
+
+    pub fn op_id(&self) -> u64 {
+        self.op_id
+    }
+
+    pub fn requires_grad(&self) -> bool {
+        self.requires_grad
+    }
+
+    pub fn param_id(&self) -> Option<TensorId> {
+        self.param_id
     }
 
     pub fn sgd_step_inplace(&self, grad: &CudaTrainTensor, lr: f32) -> Result<()> {
@@ -132,6 +177,13 @@ mod tests {
     }
 
     #[test]
+    fn cuda_train_op_ids_are_monotonic() {
+        let first = next_cuda_train_op_id();
+        let second = next_cuda_train_op_id();
+        assert!(second > first);
+    }
+
+    #[test]
     fn cuda_train_tensor_sgd_and_adamw_update_in_place() -> Result<()> {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
@@ -162,6 +214,30 @@ mod tests {
         );
         assert!(m.to_vec_f32()?.iter().any(|x| x.abs() > 0.0));
         assert!(v.to_vec_f32()?.iter().any(|x| x.abs() > 0.0));
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_train_tensor_tracks_parameter_metadata_and_detach() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_train_tensor metadata smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let tensor = Tensor::new(vec![1.0f32], &device)?;
+        let param_id = tensor.id();
+        let param = CudaTrainTensor::parameter(tensor, param_id)?;
+        assert!(param.requires_grad());
+        assert_eq!(param.param_id(), Some(param_id));
+
+        let detached = param.detach();
+        assert!(!detached.requires_grad());
+        assert_eq!(detached.param_id(), None);
+        assert!(detached.op_id() > param.op_id());
+        assert_eq!(detached.to_vec_f32()?, vec![1.0]);
         Ok(())
     }
 }
