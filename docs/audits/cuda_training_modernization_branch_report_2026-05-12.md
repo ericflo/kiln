@@ -1,11 +1,11 @@
 # CUDA Training Modernization Branch Report
 
 **Date:** 2026-05-12
-**Branch:** `cuda-training-modernization`
+**Branch:** `main` (CUDA modernization merged from `cuda-training-modernization`)
 **Reference report:** `docs/audits/vulkan_training_branch_report_2026-05-11.md`
-**Baseline:** `844492ab` - `Update Vulkan training branch audit`
-**Status:** Phase ledger and first implementation target. This branch is intentionally incremental:
-each CUDA training slice must land with tests and a pushed commit before the next larger slice.
+**Baseline:** `ab0963af` - `Synchronize Metal GDN streaming tiles`
+**Status:** Mainline CUDA training modernization ledger. CUDA now tracks the latest Vulkan/Metal
+training process changes on `main`; remaining work is still incremental and validation-gated.
 
 ## Branch Progress
 
@@ -107,6 +107,8 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `a04fe559` | CUDA GDN-state token train loop | Adds a token-sequence training loop over the mixed CUDA LoRA model step, creating fresh GDN state per example. |
 | `1252b056` | CUDA GDN-state adapter train wrapper | Adds an adapter-producing wrapper around the mixed GDN-state token train loop and validates adapter file creation. |
 | `223230dd` | CUDA native SFT GDN-state routing | Routes `cuda_native_sft_train` through the mixed GDN-state model step when imported CUDA weights contain LinearAttention/GDN layers. |
+| `15ba059c` | Mainline CUDA modernization merge | Merges the CUDA modernization stack onto `main` at `ab0963af`, preserving current exact SFT labeling, long-context checkpoint/preflight, Metal FLCE, and Metal GDN tile synchronization work. |
+| `7b4b2b78` | Stable CUDA native Qwen smoke | Adds stable CUDA train softplus, native-CUDA bench/smoke routing, and GDN q/k L2 normalization before recurrence; fixes the real Qwen native CUDA SFT NaN. |
 
 Local validation so far:
 
@@ -216,6 +218,11 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_lora_model_step_with_gdn_state_threads_gdn_state --lib --quiet` re-run after adding the mixed CUDA GDN-state adapter train/save wrapper.
   - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after routing CUDA-native SFT through the mixed GDN-state step for LinearAttention/GDN layers.
   - `cargo test --release -p kiln-server --features cuda native_training_env_enabled --lib --quiet` re-run after routing CUDA-native SFT through the mixed GDN-state step; compile coverage verifies the server route links the updated CUDA-native trainer.
+  - `cargo test --release -p kiln-model --features cuda cuda_exp_and_softplus_backward_match_cpu_reference --lib --quiet` re-run after replacing CUDA train softplus with the stable `max(x,0)+log(1+exp(-abs(x)))` form.
+  - `cargo test --release -p kiln-train --features cuda flce_provider --lib --quiet` passed after merging the CUDA FLCE opt-in provider tests with current main's Vulkan/Metal FLCE changes.
+  - `cargo test --release -p kiln-train --features cuda cuda_lora_model_step_with_gdn_state_threads_gdn_state --lib --quiet` re-run after adding CUDA-native GDN q/k L2 normalization before recurrence.
+  - `cargo test --release -p kiln-server --features cuda native_training_env_enabled --lib --quiet` re-run after mainline merge and native CUDA bench/smoke routing.
+  - `KILN_CUDA_ARCHS=86 scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --native-cuda` passed on A6000 after q/k normalization: native CUDA SFT produced `loss=69478864.000000`, `53.26s/step`, `41384 MB` peak VRAM, and non-null JSON `"training": {"num_steps": 1, ...}`.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
