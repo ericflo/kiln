@@ -3448,9 +3448,12 @@ fn checkpointed_forward_backward(
         );
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
-        spool.save(0, &current)?;
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled embedding checkpoint boundary".to_string()
+        })?;
+        spool.save(0, &current)?;
+        synchronize_checkpoint_boundary(device, || {
+            "synchronize spooled embedding checkpoint boundary save".to_string()
         })?;
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
@@ -3466,9 +3469,12 @@ fn checkpointed_forward_backward(
                 Some(&lora_detached),
             )?;
             current = current.detach();
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize spooled checkpoint boundary {} before save", seg_idx + 1)
+            })?;
             spool.save(seg_idx + 1, &current)?;
             synchronize_checkpoint_boundary(device, || {
-                format!("synchronize spooled checkpoint boundary {}", seg_idx + 1)
+                format!("synchronize spooled checkpoint boundary {} after save", seg_idx + 1)
             })?;
         }
         spooled_final_hidden = Some(current);
