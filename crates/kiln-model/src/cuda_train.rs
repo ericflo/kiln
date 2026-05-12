@@ -654,6 +654,65 @@ pub fn cuda_causal_mask(input: &CudaTrainTensor, kv_offset: usize) -> Result<Cud
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_rmsnorm(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+    eps: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32 && weight.dtype() == DType::F32,
+        "cuda_rmsnorm: expected F32 input and weight, got input={:?} weight={:?}",
+        input.dtype(),
+        weight.dtype()
+    );
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_rmsnorm: input must have at least one dimension"
+    );
+    let hidden = *input.dims().last().expect("checked non-empty dims");
+    ensure!(
+        weight.dims() == [hidden],
+        "cuda_rmsnorm: weight shape {:?} does not match hidden {}",
+        weight.dims(),
+        hidden
+    );
+
+    let variance = input
+        .as_tensor()
+        .sqr()
+        .context("cuda_rmsnorm: square input")?
+        .mean_keepdim(D::Minus1)
+        .context("cuda_rmsnorm: row variance")?;
+    let rms_inv = (variance + eps as f64)
+        .context("cuda_rmsnorm: add eps")?
+        .sqrt()
+        .context("cuda_rmsnorm: sqrt variance")?
+        .recip()
+        .context("cuda_rmsnorm: reciprocal rms")?;
+    let normed = input
+        .as_tensor()
+        .broadcast_mul(&rms_inv)
+        .context("cuda_rmsnorm: normalize input")?;
+    let weight_plus_one = (weight.as_tensor().ones_like()? + weight.as_tensor())
+        .context("cuda_rmsnorm: weight plus one")?;
+    let out = normed
+        .broadcast_mul(&weight_plus_one)
+        .context("cuda_rmsnorm: apply weight")?;
+    let needs_grad = input.requires_grad()
+        || input.grad_fn().is_some()
+        || input.param_id().is_some()
+        || weight.requires_grad()
+        || weight.grad_fn().is_some()
+        || weight.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(RmsNormBackward {
+            eps,
+            inputs: vec![input.clone(), weight.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: DType) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
@@ -1413,6 +1472,80 @@ impl CudaBackwardOp for CausalMaskBackward {
         Ok(vec![Some(CudaTrainTensor::new(
             grad_out.as_tensor().clone(),
         )?)])
+    }
+}
+
+#[derive(Debug)]
+struct RmsNormBackward {
+    inputs: Vec<CudaTrainTensor>,
+    eps: f32,
+}
+
+impl CudaBackwardOp for RmsNormBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_rmsnorm"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_rmsnorm backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let weight = &self.inputs[1];
+        let hidden = *input
+            .dims()
+            .last()
+            .context("cuda_rmsnorm backward: input must have at least one dimension")?;
+        let weight_plus_one = (weight.as_tensor().ones_like()? + weight.as_tensor())
+            .context("cuda_rmsnorm backward: weight plus one")?;
+        let u = grad_out
+            .as_tensor()
+            .broadcast_mul(&weight_plus_one)
+            .context("cuda_rmsnorm backward: grad * weight")?;
+        let dot = (&u * input.as_tensor())
+            .context("cuda_rmsnorm backward: u * input")?
+            .sum_keepdim(D::Minus1)
+            .context("cuda_rmsnorm backward: row dot")?;
+        let variance = input
+            .as_tensor()
+            .sqr()
+            .context("cuda_rmsnorm backward: square input")?
+            .mean_keepdim(D::Minus1)
+            .context("cuda_rmsnorm backward: row variance")?;
+        let rms_inv = (variance + self.eps as f64)
+            .context("cuda_rmsnorm backward: add eps")?
+            .sqrt()
+            .context("cuda_rmsnorm backward: sqrt variance")?
+            .recip()
+            .context("cuda_rmsnorm backward: reciprocal rms")?;
+        let rms_inv_sq = rms_inv
+            .sqr()
+            .context("cuda_rmsnorm backward: inv rms square")?;
+        let rms_inv_cubed = rms_inv_sq
+            .broadcast_mul(&rms_inv)
+            .context("cuda_rmsnorm backward: inv rms cubed")?;
+        let correction_scale = rms_inv_cubed
+            .affine(1.0f64 / hidden as f64, 0.0)
+            .context("cuda_rmsnorm backward: correction scale")?;
+        let correction = input
+            .as_tensor()
+            .broadcast_mul(
+                &dot.broadcast_mul(&correction_scale)
+                    .context("cuda_rmsnorm backward: dot correction")?,
+            )
+            .context("cuda_rmsnorm backward: correction")?;
+        let grad_input = (u
+            .broadcast_mul(&rms_inv)
+            .context("cuda_rmsnorm backward: direct grad")?
+            - correction)
+            .context("cuda_rmsnorm backward: input grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad_input)?), None])
     }
 }
 
@@ -2445,6 +2578,59 @@ mod tests {
         assert_eq!(
             grads.get(scores_id).expect("scores grad").to_vec_f32()?,
             vec![1.0; 9]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_rmsnorm_backward_matches_analytic_dx() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_rmsnorm backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![3.0f32, 4.0, 1.0, -2.0],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let weight_tensor = Tensor::from_vec(vec![0.0f32, 0.5], (2usize,), &device)?;
+        let input_id = input_tensor.id();
+        let weight_id = weight_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
+        let normed = cuda_rmsnorm(&input, &weight, 0.0)?;
+        let loss = cuda_sum_all(&normed)?;
+
+        let expected_out = vec![
+            0.84852815f32,
+            1.6970563,
+            0.6324555,
+            -1.8973665,
+        ];
+        let actual_out = normed.to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_out.iter().zip(expected_out.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "rmsnorm output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+
+        let grads = cuda_backward(&loss)?;
+        let expected_grad = vec![-0.02262742f32, 0.01697056, 0.8854377, 0.44271886];
+        let actual_grad = grads.get(input_id).expect("input grad").to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "rmsnorm grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        assert!(
+            grads.get(weight_id).is_none(),
+            "cuda_rmsnorm should keep frozen base weight gradient empty"
         );
         Ok(())
     }
