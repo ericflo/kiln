@@ -915,6 +915,45 @@ pub fn cuda_repeat_kv_heads(input: &CudaTrainTensor, groups: usize) -> Result<Cu
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_narrow_last_dim(
+    input: &CudaTrainTensor,
+    start: usize,
+    len: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_narrow_last_dim: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_narrow_last_dim: expected non-empty shape"
+    );
+    let last_dim = *input.dims().last().expect("checked non-empty shape");
+    ensure!(
+        start <= last_dim && start + len <= last_dim,
+        "cuda_narrow_last_dim: slice [{start}, {}) out of bounds for last_dim={last_dim}",
+        start + len
+    );
+    let out = input
+        .as_tensor()
+        .narrow(D::Minus1, start, len)
+        .context("cuda_narrow_last_dim: candle CUDA narrow")?
+        .contiguous()
+        .context("cuda_narrow_last_dim: contiguous output")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(NarrowLastDimBackward {
+            start,
+            len,
+            input_dims: input.dims().to_vec(),
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -1154,6 +1193,64 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct NarrowLastDimBackward {
+    start: usize,
+    len: usize,
+    input_dims: Vec<usize>,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for NarrowLastDimBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_narrow_last_dim"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_narrow_last_dim backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let last_dim = *self
+            .input_dims
+            .last()
+            .context("cuda_narrow_last_dim backward: empty input dims")?;
+        ensure!(
+            self.start + self.len <= last_dim,
+            "cuda_narrow_last_dim backward: invalid saved slice"
+        );
+
+        let mut chunks = Vec::new();
+        if self.start > 0 {
+            let mut shape = self.input_dims.clone();
+            *shape.last_mut().expect("checked non-empty shape") = self.start;
+            chunks.push(
+                Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
+                    .context("cuda_narrow_last_dim backward: prefix zeros")?,
+            );
+        }
+        chunks.push(grad_out.as_tensor().clone());
+        let suffix = last_dim - self.start - self.len;
+        if suffix > 0 {
+            let mut shape = self.input_dims.clone();
+            *shape.last_mut().expect("checked non-empty shape") = suffix;
+            chunks.push(
+                Tensor::zeros(shape, grad_out.dtype(), grad_out.as_tensor().device())
+                    .context("cuda_narrow_last_dim backward: suffix zeros")?,
+            );
+        }
+        let refs: Vec<&Tensor> = chunks.iter().collect();
+        let grad = Tensor::cat(&refs, D::Minus1)
+            .context("cuda_narrow_last_dim backward: cat padded grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -2316,6 +2413,43 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![30.0, 3.0, 70.0, 7.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_narrow_last_dim_backward_pads_zero_gradients() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_narrow_last_dim backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            (2usize, 4usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let narrowed = cuda_narrow_last_dim(&param, 1, 2)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 20.0, 30.0, 40.0],
+            (2usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&narrowed, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(narrowed.dims(), &[2, 2]);
+        assert_eq!(narrowed.to_vec_f32()?, vec![2.0, 3.0, 6.0, 7.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![540.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![0.0, 10.0, 20.0, 0.0, 0.0, 30.0, 40.0, 0.0]
         );
         Ok(())
     }
