@@ -596,6 +596,51 @@ pub fn cuda_mean_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_reshape(input: &CudaTrainTensor, dims: &[usize]) -> Result<CudaTrainTensor> {
+    let in_elems = input.num_elements();
+    let out_elems: usize = dims.iter().product();
+    ensure!(
+        in_elems == out_elems,
+        "cuda_reshape: element count mismatch input={:?} output={:?}",
+        input.dims(),
+        dims
+    );
+    let out = input
+        .as_tensor()
+        .reshape(dims)
+        .context("cuda_reshape: candle CUDA reshape")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(ReshapeBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_transpose2d(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_transpose2d: expected 2D input, got {:?}",
+        input.dims()
+    );
+    let out = input
+        .as_tensor()
+        .t()
+        .context("cuda_transpose2d: candle CUDA transpose")?
+        .contiguous()
+        .context("cuda_transpose2d: contiguous output")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(Transpose2dBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.dims().len() == 2 && rhs.dims().len() == 2,
@@ -771,6 +816,65 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct ReshapeBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for ReshapeBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_reshape"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_reshape backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let grad = grad_out
+            .as_tensor()
+            .reshape(input.dims())
+            .context("cuda_reshape backward: restore input shape")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct Transpose2dBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for Transpose2dBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_transpose2d"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_transpose2d backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let grad = grad_out
+            .as_tensor()
+            .t()
+            .context("cuda_transpose2d backward: transpose grad")?
+            .contiguous()
+            .context("cuda_transpose2d backward: contiguous grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -1206,6 +1310,79 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![0.25, 0.25, 0.25, 0.25]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_reshape_backward_restores_input_shape() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_reshape backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let reshaped = cuda_reshape(&param, &[3, 2])?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0],
+            (3usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&reshaped, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(reshaped.dims(), &[3, 2]);
+        assert_eq!(loss.to_vec_f32()?, vec![302.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![1.0, 10.0, 2.0, 20.0, 3.0, 30.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_transpose2d_backward_transposes_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_transpose2d backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let transposed = cuda_transpose2d(&param)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0],
+            (3usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&transposed, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(transposed.dims(), &[3, 2]);
+        assert_eq!(transposed.to_vec_f32()?, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![334.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]
         );
         Ok(())
     }
