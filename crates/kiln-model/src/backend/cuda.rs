@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 
-use super::BackendRuntime;
+use super::{BackendRuntime, TrainingCapabilities};
 
 #[derive(Debug)]
 pub struct CudaBackend {
@@ -73,6 +73,19 @@ impl CudaBackend {
             lora_decode_add_enabled,
         }
     }
+
+    pub fn training_capabilities_static() -> TrainingCapabilities {
+        TrainingCapabilities {
+            projection_training: "candle CUDA autograd; backend linear_prefill_apply declined",
+            flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
+            rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
+            resident_activation: "not implemented; candle CUDA tensors are canonical",
+            lora_delta_training: "candle CUDA autograd; fused lora_decode_add declines tracked tensors",
+            sgd_step: "candle CUDA Var::set fallback",
+            adamw_step: "candle CUDA Var::set fallback",
+            native_training: "not implemented",
+        }
+    }
 }
 
 impl BackendRuntime for CudaBackend {
@@ -82,6 +95,10 @@ impl BackendRuntime for CudaBackend {
 
     fn device(&self) -> &Device {
         &self.device
+    }
+
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        Self::training_capabilities_static()
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {

@@ -63,6 +63,33 @@ pub mod vulkan_linear_op;
 #[cfg(feature = "vulkan")]
 pub mod vulkan_lora_op;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainingCapabilities {
+    pub projection_training: &'static str,
+    pub flce_loss: &'static str,
+    pub rmsnorm_training: &'static str,
+    pub resident_activation: &'static str,
+    pub lora_delta_training: &'static str,
+    pub sgd_step: &'static str,
+    pub adamw_step: &'static str,
+    pub native_training: &'static str,
+}
+
+impl TrainingCapabilities {
+    pub const fn portable() -> Self {
+        Self {
+            projection_training: "portable candle autograd",
+            flce_loss: "portable candle/FLCE dispatch when configured",
+            rmsnorm_training: "portable candle autograd",
+            resident_activation: "not implemented",
+            lora_delta_training: "portable candle autograd",
+            sgd_step: "portable candle Var::set",
+            adamw_step: "portable candle Var::set",
+            native_training: "not implemented",
+        }
+    }
+}
+
 pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Human-readable name (`"cuda"`, `"metal"`, `"cpu"`). Surfaced in
     /// `/health` and logs.
@@ -71,6 +98,13 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// The candle `Device` this backend drives. All tensors passed to trait
     /// methods must live on this device.
     fn device(&self) -> &Device;
+
+    /// Operator-facing summary of which training paths are backend-native,
+    /// candle-on-device, or intentionally declined. This is telemetry only:
+    /// dispatch methods remain the source of truth for actual behavior.
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        TrainingCapabilities::portable()
+    }
 
     fn supports_flash_attn_prefill(&self) -> bool {
         false
@@ -1020,5 +1054,28 @@ pub fn for_device(device: &Device) -> Arc<dyn BackendRuntime> {
             }
             Arc::new(cpu::CpuBackend::new(device.clone()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_training_capabilities_are_conservative() {
+        let caps = TrainingCapabilities::portable();
+        assert_eq!(caps.resident_activation, "not implemented");
+        assert_eq!(caps.native_training, "not implemented");
+        assert!(caps.projection_training.contains("candle"));
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_training_capabilities_do_not_overclaim_native_training() {
+        let caps = cuda::CudaBackend::training_capabilities_static();
+        assert!(caps.projection_training.contains("candle CUDA autograd"));
+        assert!(caps.lora_delta_training.contains("declines tracked tensors"));
+        assert_eq!(caps.resident_activation, "not implemented; candle CUDA tensors are canonical");
+        assert_eq!(caps.native_training, "not implemented");
     }
 }

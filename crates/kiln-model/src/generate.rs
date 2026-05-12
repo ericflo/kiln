@@ -996,6 +996,19 @@ impl ModelRunner {
         let device = weights.embed_tokens.device().clone();
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
+        let training_caps = backend.training_capabilities();
+        tracing::info!(
+            backend = backend.name(),
+            projection_training = training_caps.projection_training,
+            flce_loss = training_caps.flce_loss,
+            rmsnorm_training = training_caps.rmsnorm_training,
+            resident_activation = training_caps.resident_activation,
+            lora_delta_training = training_caps.lora_delta_training,
+            sgd_step = training_caps.sgd_step,
+            adamw_step = training_caps.adamw_step,
+            native_training = training_caps.native_training,
+            "Backend training capability profile"
+        );
         // Phase A.5: registry + decode-buffer config are deferred to first hot-path
         // access. Building them eagerly here regressed c=1 paged decode by 22%
         // (Validation #4: 42.6 tok/s vs 54.76 baseline). The lazy `OnceLock` keeps

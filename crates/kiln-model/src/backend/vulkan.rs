@@ -16,7 +16,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::BackendRuntime;
+use super::{BackendRuntime, TrainingCapabilities};
 use crate::forward::{GpuAttentionWeights, GpuWeights};
 
 /// Vulkan backend for Kiln.
@@ -592,6 +592,19 @@ impl BackendRuntime for VulkanBackend {
 
     fn device(&self) -> &Device {
         &self.device
+    }
+
+    fn training_capabilities(&self) -> TrainingCapabilities {
+        TrainingCapabilities {
+            projection_training: "VulkanLinearOp CustomOp1 when enabled",
+            flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
+            rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
+            resident_activation: "Vulkan buffer registry",
+            lora_delta_training: "VulkanLoraOp CustomOp3 with registry-resident A/B",
+            sgd_step: "Vulkan in-place registry update when operands are resident",
+            adamw_step: "Vulkan in-place registry update when operands are resident",
+            native_training: "vk_native_sft_train behind KILN_VK_NATIVE_TRAINING",
+        }
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
