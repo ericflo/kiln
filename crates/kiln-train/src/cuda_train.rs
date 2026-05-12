@@ -13,7 +13,7 @@ use kiln_model::cuda_train::{
     cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_rmsnorm, cuda_sum_all,
 };
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
 
@@ -318,6 +318,48 @@ pub fn save_cuda_lora_adapter(
         .with_context(|| format!("save CUDA LoRA adapter {}", output_path.display()))?;
     let _ = (rank, alpha);
     Ok(())
+}
+
+pub fn write_cuda_adapter_config(output_dir: &Path, rank: usize, alpha: f32) -> Result<()> {
+    let cfg = serde_json::json!({
+        "base_model_name_or_path": "",
+        "bias": "none",
+        "fan_in_fan_out": false,
+        "inference_mode": true,
+        "init_lora_weights": true,
+        "lora_alpha": alpha,
+        "lora_dropout": 0.0,
+        "modules_to_save": null,
+        "peft_type": "LORA",
+        "r": rank,
+        "task_type": "CAUSAL_LM",
+        "target_modules": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj"
+        ],
+    });
+    let path = output_dir.join("adapter_config.json");
+    let contents = serde_json::to_string_pretty(&cfg)
+        .with_context(|| format!("serialize CUDA adapter config {}", path.display()))?;
+    std::fs::write(&path, contents)
+        .with_context(|| format!("write CUDA adapter config {}", path.display()))?;
+    Ok(())
+}
+
+pub fn save_cuda_lora_adapter_dir(
+    lora_layers: &[CudaLoraLayer],
+    rank: usize,
+    alpha: f32,
+    output_dir: &Path,
+) -> Result<PathBuf> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("create CUDA adapter dir {}", output_dir.display()))?;
+    let adapter_path = output_dir.join("adapter_model.safetensors");
+    save_cuda_lora_adapter(lora_layers, rank, alpha, &adapter_path)
+        .with_context(|| format!("save CUDA adapter tensors {}", adapter_path.display()))?;
+    write_cuda_adapter_config(output_dir, rank, alpha)
+        .with_context(|| format!("write CUDA adapter config {}", output_dir.display()))?;
+    Ok(output_dir.to_path_buf())
 }
 
 #[cfg(test)]
@@ -782,6 +824,21 @@ mod tests {
         assert_eq!(up_b, up_b_expected);
         assert_eq!(loaded.len(), 4);
         let _ = std::fs::remove_file(&tmp);
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "kiln-cuda-lora-adapter-dir-{}",
+            std::process::id()
+        ));
+        let saved_dir = save_cuda_lora_adapter_dir(&layers, 2, 4.0, &out_dir)?;
+        assert_eq!(saved_dir, out_dir);
+        assert!(saved_dir.join("adapter_model.safetensors").exists());
+        let config_text = std::fs::read_to_string(saved_dir.join("adapter_config.json"))?;
+        let config: serde_json::Value = serde_json::from_str(&config_text)?;
+        assert_eq!(config["peft_type"], "LORA");
+        assert_eq!(config["task_type"], "CAUSAL_LM");
+        assert_eq!(config["r"], 2);
+        assert_eq!(config["lora_alpha"], 4.0);
+        let _ = std::fs::remove_dir_all(&saved_dir);
         Ok(())
     }
 }
