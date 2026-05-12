@@ -22,7 +22,11 @@ Local validation so far:
 - `cargo test -p kiln-model backend::tests::portable_training_capabilities_are_conservative --lib --quiet` passed after each code slice.
 - `git diff --check` passed before each code commit.
 - `cargo fmt --all --check` is blocked in this workspace because the active musl Rust toolchain lacks `rustfmt`.
-- CUDA-feature tests are blocked in this workspace because `cudarc` cannot find `nvcc`; they must run on the standard CUDA build host/pod.
+- Local CUDA-feature tests are blocked in this workspace because `cudarc` cannot find `nvcc`.
+- RunPod A6000 validation on pod `pdauarcdn9k62l`, release mode with `KILN_CUDA_ARCHS=86`, passed:
+  - `cargo test --release -p kiln-model --features cuda cuda_training_capabilities_do_not_overclaim_native_training --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_resident_activation_registry_lifecycle --lib --quiet`
+  - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
 
