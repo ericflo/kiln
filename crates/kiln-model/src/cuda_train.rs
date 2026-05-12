@@ -979,6 +979,19 @@ pub fn cuda_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaT
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_swiglu_mlp(
+    input: &CudaTrainTensor,
+    gate_weight: &CudaTrainTensor,
+    up_weight: &CudaTrainTensor,
+    down_weight: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    let gate = cuda_matmul(input, gate_weight)?;
+    let up = cuda_matmul(input, up_weight)?;
+    let activated = cuda_silu(&gate)?;
+    let hidden = cuda_mul(&activated, &up)?;
+    cuda_matmul(&hidden, down_weight)
+}
+
 pub fn cuda_batched_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.dims().len() >= 3 && rhs.dims().len() >= 3,
@@ -3273,6 +3286,74 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "silu grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_swiglu_mlp_backward_reaches_input_and_weights() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_swiglu_mlp backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![0.5f32, -1.0, 1.5, 0.25],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let gate_tensor = Tensor::from_vec(
+            vec![0.2f32, -0.3, 0.4, 0.1],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let up_tensor = Tensor::from_vec(
+            vec![0.7f32, -0.2, -0.5, 0.6],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let down_tensor = Tensor::from_vec(
+            vec![0.3f32, -0.4, 0.8, 0.2],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let gate_id = gate_tensor.id();
+        let up_id = up_tensor.id();
+        let down_id = down_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let gate = CudaTrainTensor::parameter(gate_tensor, gate_id)?;
+        let up = CudaTrainTensor::parameter(up_tensor, up_id)?;
+        let down = CudaTrainTensor::parameter(down_tensor, down_id)?;
+
+        let out = cuda_swiglu_mlp(&input, &gate, &up, &down)?;
+        let loss = cuda_sum_all(&out)?;
+
+        assert_eq!(out.dims(), &[2, 2]);
+        let out_values = out.to_vec_f32()?;
+        assert!(
+            out_values.iter().all(|value| value.is_finite()),
+            "SwiGLU output should stay finite: {out_values:?}"
+        );
+        let grads = cuda_backward(&loss)?;
+        for (name, id) in [
+            ("input", input_id),
+            ("gate", gate_id),
+            ("up", up_id),
+            ("down", down_id),
+        ] {
+            let values = grads
+                .get(id)
+                .with_context(|| format!("missing {name} grad"))?
+                .to_vec_f32()?;
+            assert!(
+                values.iter().all(|value| value.is_finite())
+                    && values.iter().any(|value| value.abs() > 1e-6),
+                "{name} grad should be finite and non-zero: {values:?}"
             );
         }
         Ok(())
