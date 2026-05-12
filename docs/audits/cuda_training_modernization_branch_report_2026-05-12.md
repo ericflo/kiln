@@ -86,6 +86,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `62d38ee0` | CUDA native SFT server route | Adds `KILN_CUDA_NATIVE_TRAINING=1` routing in the training queue to call `cuda_native_sft_train`, plus the matching native-GRPO rejection. |
 | `535561c1` | CUDA native SFT unsupported-layer preflight | Rejects empty or LinearAttention/GDN CUDA-native SFT models before LoRA/AdamW allocation. |
 | `0cbd130d` | CUDA GDN training state foundation | Adds zeroed CUDA LinearAttention recurrent/conv state holders and a GDN-layer counter for future native GDN threading. |
+| `9c823d10` | CUDA GDN LoRA input projections | Adds native CUDA RMSNorm plus LoRA-enabled GDN q/k/v/z input projections with gradient coverage for the trainable LoRA slots. |
 
 Local validation so far:
 
@@ -173,6 +174,7 @@ Local validation so far:
   - `cargo test --release -p kiln-server --features cuda native_training_env_enabled --lib --quiet` passed after adding `KILN_CUDA_NATIVE_TRAINING=1` server routing; compile coverage verifies the CUDA-native trainer call is linked from `kiln-server`.
   - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding CUDA-native SFT unsupported-layer preflight rejection.
   - `cargo test --release -p kiln-model --features cuda cuda_linear_attention_state_zeros_allocates_layer_state --lib --quiet` passed after adding CUDA GDN recurrent/conv state foundations.
+  - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding CUDA GDN LoRA input projection coverage.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
