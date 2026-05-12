@@ -1,13 +1,18 @@
 # Vulkan Training Modernization Branch Report
 
 **Date:** 2026-05-11
-**Branch audited:** `main`
-**Committed range:** `origin/main..HEAD`
+**Updated:** 2026-05-12
+**Branch audited:** `main` local `HEAD`
+**Committed range:** `99aba44c..50e14ddc`
 **Base:** `99aba44c` - `Detect Vulkan VK_ERROR_DEVICE_LOST and short-circuit subsequent dispatches (#1021)`
-**Head:** `10b96405` - `vk-native training: GPU-resident VkTensor + autograd + Qwen-style stack`
-**Committed scope:** 121 commits, 111 files changed, 18,294 insertions, 153 deletions.
-**Latest milestone:** `10b96405` commits the vk-native training prototype that was previously
-worktree-local: 66 files, 7,853 insertions, and the native tensor/autograd stack described below.
+**Head:** `50e14ddc` - `Eliminate hot-path CPU readbacks in vk-native training`
+**Origin head at update:** `0846b385` - `END-TO-END /tmp/sft.jsonl training succeeds on real Qwen3.5-4B`
+**Committed scope:** 153 commits, 147 files changed, 27,293 insertions, 177 deletions.
+**New since original report head:** 32 commits after `10b96405`; excluding the audit commit itself,
+31 follow-up commits changed 56 files with 8,280 insertions and 301 deletions.
+**Latest milestone:** `0846b385` proves end-to-end vk-native SFT on real Qwen3.5-4B with
+`/tmp/sft.jsonl`; `50e14ddc` adds the buffer pool and removes hot-path allocation/readback churn
+that remained after the real-model validation pass.
 
 ## Executive Summary
 
@@ -26,12 +31,13 @@ while routing the expensive training pieces through Vulkan and a device-resident
 covers projection matmuls, FLCE chunk matmuls, RMSNorm, SDPA prefill, LoRA deltas, SGD, AdamW,
 checkpoint activation boundaries, memory preflight, and operator telemetry.
 
-The latest committed vk-native prototype is an "Option A"-style stack proving the end-state
-architecture is viable: a `VkTensor` type, eager autograd tape, Vulkan op library, FLCE loss,
-transformer-layer forward, and a multi-step AdamW smoke test where loss decreases with all forward
-intermediates, gradients, and optimizer buffers living in Vulkan memory. The smoke test runs on a
-synthetic one-layer model; production wiring against real Qwen3.5-4B safetensors is enumerated as
-follow-up work in `docs/vk_native_training.md` and is not yet committed.
+The vk-native path has moved from prototype to first end-to-end production wiring. The follow-up
+commits add real `GpuWeights` upload, a `KILN_VK_NATIVE_TRAINING=1` server route, Qwen3.5-specific
+FullAttention support, hybrid FullAttention/Gated DeltaNet layer dispatch, GDN forward/backward
+coverage, FullAttn-only gradient checkpointing, adapter-save hardening, and a successful real
+Qwen3.5-4B SFT run on `/tmp/sft.jsonl`. Within one training step, all forward intermediates,
+gradients, GDN state math, FLCE loss, and AdamW updates now run as Vulkan dispatches; the planned
+host touchpoints are input upload, scalar loss readback for logging, and adapter/checkpoint save.
 
 For CUDA and Metal ports, the important lesson is not "copy the Vulkan shaders." The reusable
 design is:
@@ -89,6 +95,9 @@ The committed diff concentrates in these areas:
 | Memory budget and preflight | `crates/kiln-core/src/vram.rs`, `crates/kiln-server/src/training_preflight.rs` |
 | Operator docs and validation | `docs/audits/*2026-05-11.md`, `scripts/phase2_validation_steps_1_2_3.sh`, `CHANGELOG.md` |
 | Native vk-training stack | `crates/kiln-vulkan-kernel/src/vk_tensor.rs`, `crates/kiln-vulkan-kernel/src/vk_ops/*`, `crates/kiln-model/src/vk_forward.rs`, `crates/kiln-train/src/vk_train.rs` |
+| Native server route and real-model bridge | `crates/kiln-server/src/training_queue.rs`, `crates/kiln-model/src/vk_forward.rs::VkModelWeights::from_gpu_weights` |
+| Native GDN implementation | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_*`, `docs/vk_native_gdn.md`, `vk_gdn_*` shaders |
+| Native allocation/readback hardening | `crates/kiln-vulkan-kernel/src/buffer_pool.rs`, GPU narrow/scatter/permute helpers |
 
 Largest committed files by insertions:
 
@@ -97,20 +106,26 @@ Largest committed files by insertions:
 | `crates/kiln-model/src/backend/vulkan.rs` | 1860 | Backend registry, dispatch routing, AdamW/SGD, LoRA, SDPA, weight drops |
 | `crates/kiln-model/src/backend/vulkan_linear_op.rs` | 1295 | Autograd-safe projection op with chunked fwd/bwd |
 | `crates/kiln-train/src/trainer.rs` | 1099 | Trainer residency, FLCE provider, optimizers, checkpoint integration |
+| `crates/kiln-model/src/vk_forward.rs` | 1071 | Native Qwen3.5 FullAttn/GDN forward and real-weight bridge |
 | `crates/kiln-vulkan-kernel/src/kernels.rs` | 998 | Kernel helpers and dispatch wrappers |
+| `crates/kiln-train/src/vk_train.rs` | 970 | Native SFT loop, checkpointed step, AdamW, adapter save |
+| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunkwise.rs` | 937 | Native GDN chunkwise forward/backward composition |
+| `crates/kiln-vulkan-kernel/tests/vk_gdn_backward_parity.rs` | 799 | GDN backward parity tests |
 | `crates/kiln-server/src/training_preflight.rs` | 708 | Fit estimator and HTTP 413 rejection |
+| `crates/kiln-vulkan-kernel/src/vk_ops/gdn_chunk_bwd.rs` | 639 | Native GDN chunk backward pieces |
+| `crates/kiln-train/tests/vk_train_smoke.rs` | 633 | Native end-to-end training, checkpoint, adapter-save smoke tests |
 | `crates/kiln-model/src/forward.rs` | 545 | Training/inference routing for GPU-backed ops |
-| `crates/kiln-vulkan-kernel/src/vk_ops/flce.rs` | 507 | Native Vulkan FLCE forward/backward |
+| `crates/kiln-vulkan-kernel/src/vk_ops/flce.rs` | 466 | Native Vulkan FLCE forward/backward |
 | `crates/kiln-model/src/backend/vulkan_lora_op.rs` | 479 | Autograd-safe LoRA delta op |
 | `crates/kiln-vulkan-kernel/src/vk_tensor.rs` | 419 | Native GPU-resident tensor shell |
+| `crates/kiln-vulkan-kernel/tests/vk_gdn_chunkwise_parity.rs` | 403 | GDN chunkwise parity tests |
 | `crates/kiln-core/src/vram.rs` | 382 | Unified-memory budget correction |
 | `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | 372 | Native tensor/autograd parity tests |
-| `crates/kiln-model/src/vk_forward.rs` | 361 | Native Qwen-style forward stack |
-| `crates/kiln-train/tests/vk_train_smoke.rs` | 353 | Native end-to-end training smoke tests |
 
-The latest native-training commit adds 7,853 insertions across 66 files, including 29 `vk_*.comp`
-shaders, 17 `vk_ops` Rust modules, 6 Vulkan parity-test files, and
-`crates/kiln-train/tests/vk_train_smoke.rs`.
+The follow-up native-training series after the original report adds 15 `vk_*.comp` shaders,
+13 new `vk_ops` Rust modules, a Vulkan buffer pool, three GDN parity-test files, and
+`docs/vk_native_gdn.md`. The largest behavioral change is that Qwen3.5-4B hybrid training is now
+wired through the native path rather than listed as future productionization work.
 
 ## Timeline by Phase
 
@@ -442,6 +457,8 @@ The branch gives operators and future port authors a control plane:
 | `KILN_GPU_MEMORY_GB` | highest-priority GPU memory override |
 | `KILN_TRAINING_MEMORY_RESERVE_GB` | reserve for unified-memory hosts |
 | `KILN_GRAD_CHECKPOINT_SEGMENTS` | manual activation/checkpoint memory tradeoff |
+| `KILN_VK_NATIVE_TRAINING` | opt-in server route for vk-native SFT |
+| `KILN_NO_GRAD_CHECKPOINT` | disables native FullAttn checkpointing; hybrid GDN v1 runs uncheckpointed |
 
 The validation runbook escalates from tiny SFT to the original T=918 repro. It also calls out trace
 lines that prove whether the intended paths fired:
@@ -460,6 +477,53 @@ Porting implication:
 - CUDA/Metal modernization should ship with equivalent env controls and startup profile logging.
 - "It compiled" is not an operator validation story. The port needs shape-specific trace lines that
   prove the paged path engaged.
+
+### Phase 9: Native Qwen3.5-4B Route, GDN, and Hot-Path Residency
+
+Key commits:
+
+- `a2382653`, `32128ce5`, `8a545722`, `372236a6` - native Qwen3.5 integration ops,
+  `VkLayerWeights`, FullAttn Qwen specifics, real `GpuWeights` bridge, and the
+  `KILN_VK_NATIVE_TRAINING` server route.
+- `8fe5ae51`, `e4d985ce`, `2cdc2360`, `86a134c0`, `c3ae1649`, `1048c870`, `9e702d1a` -
+  native GDN state, forward wrappers, chunkwise forward, backward pieces, autograd composition,
+  layer dispatch, and trainer state plumbing.
+- `47b45a69`, `fe0886a5`, `c01bb87b`, `cff9195c`, `2ff0f14c` - RoPE in FullAttn, recommended
+  checkpoint segments, FullAttn-only checkpointed training, native SFT checkpoint wiring, and
+  adapter-save hardening.
+- `293de3e7`, `8d31120c`, `795a13b0`, `8f99cf0c`, `4f23a206`, `cba4340d`, `55da8e97`,
+  `d983f724`, `98daf221`, `1a8299cc` - CPU fallback/readback removal across GDN triangular solves,
+  chunk scan backward, gated RMSNorm backward, state exit, chunk prep backward, state update, and
+  QKV/GQA/out permutes.
+- `7885f2a9`, `eab40f1b`, `0846b385`, `50e14ddc` - docs reflecting full GPU residency,
+  successful real Qwen3.5-4B `/tmp/sft.jsonl` training, and the buffer-pool/readback cleanup pass.
+
+This phase changes the native path's status. At the time of the original report, native training was
+a synthetic one-layer proof. It is now a real SFT route that can upload the existing Qwen3.5-4B
+weights, create LoRA tensors, run a per-example training loop, dispatch AdamW on device, write PEFT
+adapter safetensors, and report progress through the existing training queue.
+
+The GDN work matters because Qwen3.5-4B is hybrid: 24 GDN layers and 8 FullAttention layers. The new
+`VkLayerWeights` enum lets `vk_transformer_layer_with_state` dispatch full attention or linear
+attention per layer. GDN now has Vulkan-native conv1d, gate, gated-RMSNorm, chunk-prep, triangular
+solve, chunk-scan, state-exit, reverse-cumsum, and chunk-prep-backward coverage. The late GPU
+cleanup commits are not cosmetic: they remove the small CPU loops and per-chunk readbacks that would
+otherwise dominate a real 32-layer run after the obvious matmuls had moved to GPU.
+
+The final local commit, `50e14ddc`, adds a process-wide Vulkan buffer pool keyed by device and byte
+bucket. Native training issues thousands of dispatches per step; without pooling, the DRM allocator
+cost can dominate even after CPU readbacks are gone. The pool keeps scratch buffers alive and reuses
+them once only the pool's `Arc` remains, trading a bounded working-set footprint for much lower
+allocator churn.
+
+Porting implication:
+
+- CUDA/Metal native paths need linear-attention coverage, not only transformer FullAttn coverage,
+  if they are meant to train hybrid Qwen-class models.
+- Removing readbacks from the obvious large kernels is not sufficient; tiny per-chunk CPU loops in
+  recurrent attention become the next bottleneck.
+- A native tensor stack needs an allocator story. Vulkan now has a simple pool; CUDA/Metal should
+  map that idea to their own caching allocator or buffer heap strategy.
 
 ### Supporting Work
 
@@ -548,6 +612,12 @@ The branch expands `BackendRuntime` with hooks that CUDA/Metal should mirror:
 | `sgd_step_bf16.comp` | packed-BF16 in-place SGD |
 | `adamw_step_f32.comp` | F32 in-place AdamW |
 | `adamw_step_bf16.comp` | packed-BF16 in-place AdamW |
+| `vk_narrow_lastdim_f32.comp`, `vk_index_select_rows_f32.comp` | GPU slicing/gathering for native model loss and routing |
+| `vk_sigmoid_f32.comp`, `vk_broadcast_mul_lastdim.comp` | pointwise helpers used by Qwen gates and GDN state math |
+| `vk_causal_conv1d_bwd.comp` | native GDN conv1d backward |
+| `vk_solve_tri_v2.comp`, `vk_solve_tri_transpose.comp` | bounded-shared-memory GDN triangular solve and adjoint |
+| `vk_gdn_*_bwd.comp`, `vk_reverse_cumsum.comp` | native GDN backward pieces for gates, gated RMSNorm, state exit, chunk prep |
+| `buffer_pool::pool_alloc_*` | recycles native scratch buffers to avoid hot-path `vkAllocateMemory` churn |
 | `dispatch_kernel` and `run_compute_pipeline` guards | enforce real per-axis workgroup limits |
 
 ### Test and Validation Coverage
@@ -566,16 +636,27 @@ Representative committed tests:
   `crates/kiln-server/src/training_preflight.rs`.
 - DRM unified-memory, reserve override, and source display tests in `crates/kiln-core/src/vram.rs`.
 - Env truthy/falsy/tristate parser tests in `crates/kiln-core/src/env_flag.rs`.
+- Native tensor/autograd, matmul, RMSNorm, softmax, attention, FLCE, and trainer smoke coverage in
+  `crates/kiln-vulkan-kernel/tests/vk_*_parity.rs` and
+  `crates/kiln-train/tests/vk_train_smoke.rs`.
+- Native GDN foundation, chunkwise forward, and backward parity in
+  `tests/vk_gdn_foundation_parity.rs`, `tests/vk_gdn_chunkwise_parity.rs`, and
+  `tests/vk_gdn_backward_parity.rs`.
+- Native SFT route coverage includes gradient existence, multi-step loss decrease,
+  Qwen3.5-specific FullAttn smoke tests, FullAttn checkpointed training, full-pipeline adapter save,
+  and GDN component parity.
 
 The runbook remains the required gate for production hardware confidence. Unit tests prove kernel
 math and routing contracts; they do not prove the original long-run host-hang repro is closed on
 every APU/driver combination.
 
-## Native Vulkan Training Prototype
+## Native Vulkan Training Stack
 
-Commit `10b96405` adds `docs/vk_native_training.md` plus a self-contained vk-native training stack.
-This is a working prototype demonstrating the pattern CUDA and Metal can converge toward once their
-bridge work is stable; it is not yet a Qwen3.5-4B production training driver.
+Commit `10b96405` introduced `docs/vk_native_training.md` plus a self-contained vk-native training
+prototype. The follow-up commits turn that prototype into a gated production path for real
+Qwen3.5-4B SFT: `KILN_VK_NATIVE_TRAINING=1` routes server jobs through `vk_native_sft_train`,
+`VkModelWeights::from_gpu_weights` uploads the existing candle/GPU model inventory into `VkTensor`
+weights, and the layer enum dispatches both FullAttention and GDN layers.
 
 ### What It Adds
 
@@ -587,6 +668,9 @@ bridge work is stable; it is not yet a Qwen3.5-4B production training driver.
 | Native shaders | `crates/kiln-vulkan-kernel/csrc/shaders/vk_*.comp` |
 | Transformer forward | `crates/kiln-model/src/vk_forward.rs` |
 | Native training step and adapter save | `crates/kiln-train/src/vk_train.rs` |
+| Native GDN forward/backward | `crates/kiln-vulkan-kernel/src/vk_ops/gdn_*`, `docs/vk_native_gdn.md` |
+| Server route | `crates/kiln-server/src/training_queue.rs`, gated by `KILN_VK_NATIVE_TRAINING=1` |
+| Scratch buffer recycling | `crates/kiln-vulkan-kernel/src/buffer_pool.rs` |
 | Native parity/smoke tests | `crates/kiln-vulkan-kernel/tests/vk_*_parity.rs`, `crates/kiln-train/tests/vk_train_smoke.rs` |
 
 `VkTensor` wraps:
@@ -603,7 +687,7 @@ param_id: Option<TensorId>
 ```
 
 Clones are cheap `Arc` clones. Buffer lifetime is refcount-driven. Parameter leaves carry candle
-`TensorId` values so the prototype can still key optimizer state and adapter serialization
+`TensorId` values so the native stack can still key optimizer state and adapter serialization
 consistently with the existing trainer.
 
 `vk_backward(loss)` performs a DFS topo walk, seeds scalar loss gradient with ones, walks reverse
@@ -612,7 +696,7 @@ topological order, accumulates multi-use gradients with a no-grad add kernel, an
 
 ### Native Op Surface
 
-The prototype includes kernels and backward rules for:
+The stack includes kernels and backward rules for:
 
 | Op family | Notes |
 | --- | --- |
@@ -628,31 +712,37 @@ The prototype includes kernels and backward rules for:
 | RoPE | inverse rotation backward |
 | permute rh/hr | inverse permutes |
 | repeat KV heads | sum groups backward |
+| narrow/index-select | GPU slice/gather and backward scatter for native loss and routing |
 | mask/scale | causal mask and scale ship as in-place no-grad helpers used inside the SDPA composition; a separate `vk_scale` op with proper autograd backward is also exposed and used by the LoRA delta path (without it, scale != 1.0 would silently sever the gradient chain) |
 | embedding lookup | F32 and BF16-weight lookup |
 | FLCE | chunked online-LSE forward and hidden-gradient backward |
 | SDPA prefill | composed from permute (rh→hr) × 3, KV-head repeat × 2, batched transpose, batched matmul (Q@K.T), in-place scale, in-place causal mask, softmax-lastdim, batched matmul (attn@V), and permute (hr→rh) |
 | SwiGLU MLP | composed from linears, SiLU, multiply |
-| transformer layer | RMSNorm, q/k/v/o LoRA linears, SDPA, MLP, residuals |
+| FullAttention transformer layer | RMSNorm, q/k/v/o LoRA linears, Qwen q/k norm, RoPE, SDPA, `attn_output_gate`, MLP, residuals |
+| GDN transformer layer | in-projections, conv1d, gates, chunkwise recurrence, state threading, gated RMSNorm, out projection |
 
-The native test set now has 87 GPU-backed parity/trainer tests in the commit message's accounting
-(81 kernel/op tests plus 6 trainer smoke tests). The end-to-end smoke test constructs a one-layer
-synthetic transformer with 7 LoRA pairs (14 trainable tensors), verifies gradients exist through
-full transformer-layer -> FLCE chains, and runs 10 AdamW steps with loss dropping from 3.572 to
-2.250.
+The native test set has grown from the original synthetic proof into a real-model validation path.
+It still includes the one-layer synthetic transformer with 7 LoRA pairs and multi-step AdamW loss
+drop, and now adds Qwen3.5-specific FullAttn coverage, FullAttn checkpointed training, adapter-save
+roundtrip, and GDN forward/backward parity suites. The most important validation artifact is
+`0846b385`: `/tmp/sft.jsonl` training succeeds end to end on real Qwen3.5-4B weights through the
+vk-native route.
 
-### Native Prototype Boundaries
+### Native Stack Boundaries After Update
 
-The prototype still has explicit host boundaries:
+The vk-native route's planned host touchpoints are now narrow:
 
-- parameter initialization/upload from candle tensors;
-- adapter save through safetensors after `VkTensor::to_candle`;
-- one loss-shaping slice currently implemented via readback/reupload in `vk_model_forward_loss`.
+- parameter initialization/upload from existing candle/GPU model tensors;
+- input-id upload at the start of each example/batch;
+- scalar loss readback for logging;
+- adapter/checkpoint save through safetensors after `VkTensor::to_candle`.
 
-The remaining productionization work is already listed in `docs/vk_native_training.md`: real
-safetensors upload into `VkModelWeights`, a server route behind a flag, a proper `vk_narrow` op,
-BF16 elementwise/accumulation improvements, arena allocation, fused attention backward, mask/scale
-gradient cleanup, and native checkpointing.
+The follow-up commits remove the earlier loss-shaping readback/reupload by adding native
+`vk_narrow`, replace GDN CPU fallbacks with GLSL or GPU compositions, replace per-chunk forward
+readbacks with GPU scatter/concat helpers, and add a buffer pool so repeated native op outputs reuse
+device-local allocations. Remaining optimization work is BF16 FLCE/elementwise accumulation, fused
+attention with backward, checkpointing for hybrid GDN models, and broader long-run hardware
+validation beyond the successful `/tmp/sft.jsonl` run.
 
 ## CUDA and Metal Port Blueprint
 
@@ -827,17 +917,20 @@ Committed bridge limits:
   gradients, though it reads A/B values from registry buffers;
 - runbook Step 4 remains the operator-level proof for the original T=918 host-hang repro.
 
-Native prototype limits:
+Native stack limits:
 
-- real Qwen safetensors are not yet lazily uploaded into `VkModelWeights`;
-- no server route is wired yet;
-- `vk_model_forward_loss` still needs a native `vk_narrow` to remove a readback/reupload slice;
+- gradient checkpointing is implemented for FullAttn-only native models; hybrid GDN models run the
+  uncheckpointed native step in v1 because checkpointing needs per-segment recurrent-state
+  snapshots;
 - the in-place causal mask and pre-softmax scale carry no autograd link of their own — gradient
-  through them is approximate (close enough that the smoke test loss decreases monotonically, but
-  not analytically exact). A clean fix wraps both as autograd ops;
-- BF16 elementwise + accumulation, arena allocation, and fused flash-attention with backward all
-  remain future work;
-- the prototype is Vulkan-only while this report is intended to guide CUDA/Metal parity.
+  through them is approximate. The smoke tests and real-model run train successfully, but the clean
+  fix is to wrap both as autograd ops;
+- BF16 FLCE, BF16 elementwise/accumulation, and fused flash-attention with backward remain future
+  work;
+- the new buffer pool removes allocator churn but is a coarse process-wide pool, not a scoped arena;
+- `/tmp/sft.jsonl` proves a real Qwen3.5-4B run succeeds, but broader long-sequence and multi-driver
+  validation is still needed;
+- the native stack is Vulkan-only while this report is intended to guide CUDA/Metal parity.
 
 ## Artifacts to Read Next
 
@@ -848,7 +941,8 @@ Native prototype limits:
 | `docs/audits/phase2_hardware_validation_runbook_2026-05-11.md` | operator validation path for host-hang risk |
 | `docs/audits/phase2_env_vars_reference_2026-05-11.md` | current flags, defaults, and rollback knobs |
 | `docs/audits/candle_cpu_residency_2026-05-11.md` | what candle still keeps and why |
-| `docs/vk_native_training.md` | native Vulkan tensor/autograd prototype note |
+| `docs/vk_native_training.md` | native Vulkan tensor/autograd route and current status |
+| `docs/vk_native_gdn.md` | Gated DeltaNet math, implementation phasing, and shipped pieces |
 
 ## Completion Criteria for CUDA and Metal Ports
 
@@ -862,6 +956,10 @@ A CUDA or Metal modernization should not be considered equivalent to this branch
 - LoRA A/B and AdamW moments remain backend-resident between steps;
 - optimizer steps update backend buffers in place;
 - adapter save is the only required trainable-state readback;
+- the native path can train a hybrid Qwen-class model, not only a FullAttn toy model;
+- hot-path recurrent-attention loops do not bounce through CPU readbacks;
+- the native path has a buffer/arena strategy that avoids allocator churn during thousands of
+  dispatches per step;
 - operator logs prove each accelerated path engaged;
 - parity tests cover forward, backward, fallbacks, shape errors, BF16/F32, and end-to-end loss
   decrease.
@@ -869,7 +967,7 @@ A CUDA or Metal modernization should not be considered equivalent to this branch
 ## Commit Ledger
 
 This is the complete committed range audited for this report, oldest first. Subjects are copied
-verbatim from `git log origin/main..HEAD --format='%h %s' --reverse`.
+verbatim from `git log 99aba44c..50e14ddc --format='%h %s' --reverse`.
 
 ```text
 9bbed4f9 Default KILN_USE_FLCE on; add explicit opt-out in parity tests
@@ -993,4 +1091,36 @@ a15e0f65 Stub pre-transposed bf16 weight caches after Vulkan upload
 e0ac5888 Use broadcast_as for shape-preserving stub of transposed weights
 93c94949 Revert trainer config-derived q/k/v/o shapes
 10b96405 vk-native training: GPU-resident VkTensor + autograd + Qwen-style stack
+2c29d8ee Add Vulkan training modernization branch audit (2026-05-11)
+a2382653 vk-native: add ops needed for Qwen3.5-4B integration + GDN spec
+32128ce5 Add VkLayerWeights enum + Qwen3.5 FullAttn specifics + GpuWeights bridge
+8a545722 Add Qwen3.5-specific FullAttn smoke tests (q_norm + k_norm + output_gate)
+372236a6 Add vk_native_sft_train + KILN_VK_NATIVE_TRAINING server route
+8fe5ae51 Add GDN foundation: VkLinearAttentionState + 3 forward wrappers + parity
+e4d985ce Phase 3: vk-native GDN chunkwise forward composition + parity vs CPU
+2cdc2360 Phase 4 (partial): backward kernels for gates, conv1d, reverse_cumsum
+86a134c0 Phase 4: complete GDN backward (gated_rms_norm + chunk_scan + state_exit + chunk_prep + solve_tri_transpose), all parity-tested
+c3ae1649 Phase 5: vk_gdn_chunkwise autograd composition (forward + backward)
+1048c870 Phase 5.3-5.4: full GDN layer + dispatch in vk_transformer_layer
+9e702d1a Phase 6: thread VkLinearAttentionState through forward + trainer
+5660f98a Phase 7: docs reflect shipped vk-native + GDN state
+47b45a69 Phase 6 prep: RoPE wired into vk_full_attention_layer
+fe0886a5 Phase 1.5 stub: vk_recommended_checkpoint_segments helper
+c01bb87b Phase 1.5: vk_checkpointed_train_step (real impl, FullAttn-only)
+cff9195c Phase 6 wiring: vk_native_sft_train uses checkpointed step when no GDN
+2ff0f14c Phase 7 hardening: full-pipeline adapter-save test + docs refresh
+293de3e7 GPU solve_tri: replace CPU fallback with bounded-shared-memory shader
+8d31120c GPU solve_tri_transpose: replace CPU fallback with GLSL shader
+795a13b0 GPU chunk_scan_bwd: composition via vk_matmul_batched
+8f99cf0c GPU gated_rms_norm_bwd: GLSL shader replaces CPU fallback
+4f23a206 GPU state_exit_bwd: GLSL shader replaces CPU loop
+cba4340d Remove CPU readbacks from GDN chunkwise forward (per-chunk hot loop)
+55da8e97 GPU state_update: replace per-chunk CPU broadcast scaling
+d983f724 GPU permute in vk_gdn_layer_forward (replaces 2 CPU readbacks)
+98daf221 GPU permutes for QKV head-layout + GQA expand + final out reshape
+7885f2a9 Docs: reflect end-to-end GPU residency post-optimization sweep
+1a8299cc GPU chunk_prep_bwd: GLSL shader replaces the last CPU backward fallback
+eab40f1b Docs: vk-native training step is now FULLY GPU-resident
+0846b385 END-TO-END /tmp/sft.jsonl training succeeds on real Qwen3.5-4B
+50e14ddc Eliminate hot-path CPU readbacks in vk-native training
 ```
