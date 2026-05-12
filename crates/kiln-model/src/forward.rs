@@ -5312,6 +5312,7 @@ pub fn gated_deltanet_forward_streaming(
 
     let cap = total.div_ceil(tile_size);
     let mut tile_outs: Vec<Tensor> = Vec::with_capacity(cap);
+    let tile_device = x.device();
     let mut cursor = 0usize;
     while cursor < total {
         let end = (cursor + tile_size).min(total);
@@ -5331,6 +5332,11 @@ pub fn gated_deltanet_forward_streaming(
             format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
         })?;
         tile_outs.push(tile_out);
+        if matches!(tile_device, Device::Metal(_)) {
+            tile_device.synchronize().with_context(|| {
+                format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
+            })?;
+        }
         cursor = end;
     }
 
