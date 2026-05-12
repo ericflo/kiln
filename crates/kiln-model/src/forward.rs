@@ -2862,6 +2862,14 @@ impl GpuWeights {
                 .map(|source| MtpGpuWeightsSlot::lazy_deferred(source.clone(), device))
         };
 
+        if projection_load_cache.drops_projection_originals() && matches!(device, Device::Metal(_))
+        {
+            device
+                .synchronize()
+                .context("synchronize after dropping Metal projection originals")?;
+            tracing::info!("Metal projection original buffer cache swept after load");
+        }
+
         Ok(Self {
             embed_tokens,
             embed_tokens_t,

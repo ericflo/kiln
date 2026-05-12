@@ -191,6 +191,8 @@ async fn main() -> Result<()> {
             pb.set_message("uploading weights to GPU");
         }
         let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)?;
+        drop(model_weights);
+        tracing::info!("CPU model weights dropped after GPU upload");
 
         if let Some(pb) = load_spinner.as_ref() {
             pb.set_message("initializing inference runtime");
