@@ -5,27 +5,28 @@
 //! to an optimizer step in the training crate, mirroring the direction of the
 //! Vulkan `vk_train` module without claiming full model coverage yet.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
+    cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
+    cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad, cuda_embedding_lookup,
+    cuda_exp, cuda_flash_attn_prefill_causal_f32, cuda_frozen_matmul, cuda_full_attention_layer,
+    cuda_gdn_multi_head_sequence_recurrence, cuda_lora_linear_fused, cuda_matmul, cuda_mul,
+    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh, cuda_permute_rh_to_hr,
+    cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope, cuda_scale,
+    cuda_sdpa_prefill_causal, cuda_shifted_linear_cross_entropy_loss, cuda_sigmoid, cuda_silu,
+    cuda_silu_inplace, cuda_softplus, cuda_sum_all, cuda_to_dtype, cuda_transpose2d,
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaGdnLayerState, CudaLayerWeights,
     CudaLinearAttentionState, CudaModelWeights, CudaOwnedLinearAttentionLayer, CudaRopeTables,
     CudaTrainArena, CudaTrainTensor,
-    cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
-    cuda_causal_depthwise_conv1d_prefill_with_state, cuda_embedding_lookup, cuda_exp,
-    cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_matmul, cuda_mul,
-    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh,
-    cuda_permute_rh_to_hr, cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope,
-    cuda_scale, cuda_sdpa_prefill_causal, cuda_shifted_linear_cross_entropy_loss, cuda_sigmoid,
-    cuda_silu, cuda_softplus, cuda_sum_all, cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
+use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
 use crate::{SftConfig, SftExample};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
@@ -100,9 +101,7 @@ pub struct CudaLoraLayer {
     pub gdn_out_proj: Option<CudaLoraPair>,
 }
 
-fn cuda_lora_pairs<'a>(
-    layers: &'a [CudaLoraLayer],
-) -> impl Iterator<Item = &'a CudaLoraPair> + 'a {
+fn cuda_lora_pairs<'a>(layers: &'a [CudaLoraLayer]) -> impl Iterator<Item = &'a CudaLoraPair> + 'a {
     layers.iter().flat_map(|layer| {
         [
             layer.q_proj.as_ref(),
@@ -154,8 +153,15 @@ fn cuda_lora_for_weight(
         "cuda_lora_for_weight {name}: expected rank-2 [in,out] weight, got {:?}",
         weight.dims()
     );
-    CudaLoraPair::init_kaiming(device, weight.dims()[0], weight.dims()[1], rank, alpha, seed)
-        .with_context(|| format!("initialize CUDA LoRA pair for {name}"))
+    CudaLoraPair::init_kaiming(
+        device,
+        weight.dims()[0],
+        weight.dims()[1],
+        rank,
+        alpha,
+        seed,
+    )
+    .with_context(|| format!("initialize CUDA LoRA pair for {name}"))
 }
 
 pub fn cuda_init_lora_layers(
@@ -208,16 +214,11 @@ pub fn cuda_lora_linear(
     base_weight: &CudaTrainTensor,
     lora: Option<&CudaLoraPair>,
 ) -> Result<CudaTrainTensor> {
-    let base = cuda_matmul(input, base_weight).context("cuda LoRA linear base projection")?;
-    let Some(pair) = lora else {
-        return Ok(base);
-    };
-    let a_t = cuda_transpose2d(&pair.a).context("cuda LoRA linear A transpose")?;
-    let hidden = cuda_matmul(input, &a_t).context("cuda LoRA linear A projection")?;
-    let b_t = cuda_transpose2d(&pair.b).context("cuda LoRA linear B transpose")?;
-    let delta = cuda_matmul(&hidden, &b_t).context("cuda LoRA linear B projection")?;
-    let scaled = cuda_scale(&delta, pair.scale).context("cuda LoRA linear scale")?;
-    cuda_add(&base, &scaled).context("cuda LoRA linear add")
+    match lora {
+        Some(pair) => cuda_lora_linear_fused(input, base_weight, &pair.a, &pair.b, pair.scale)
+            .context("cuda LoRA linear fused projection"),
+        None => cuda_frozen_matmul(input, base_weight).context("cuda LoRA linear base projection"),
+    }
 }
 
 pub struct CudaGdnInputProjections {
@@ -266,6 +267,7 @@ pub fn cuda_gdn_lora_input_projections(
 }
 
 pub struct CudaGdnConvQkv {
+    pub h_norm: CudaTrainTensor,
     pub q: CudaTrainTensor,
     pub k: CudaTrainTensor,
     pub v: CudaTrainTensor,
@@ -301,15 +303,20 @@ pub fn cuda_gdn_lora_conv_qkv(
         qkv.dims().last().copied().unwrap_or(0),
         expected_qkv_dim
     );
-    let z = cuda_lora_linear(&h_norm, &weights.in_proj_z_weight, lora.in_proj_z.as_ref())?;
     let (conv, next_conv_state) =
-        cuda_causal_depthwise_conv1d_prefill_with_state(&qkv, &weights.conv1d_weight, conv_state)
-            .context("cuda GDN qkv causal conv1d")?;
-    let mixed = cuda_silu(&conv).context("cuda GDN qkv conv SiLU")?;
+        cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
+            &qkv,
+            &weights.conv1d_weight,
+            conv_state,
+        )
+        .context("cuda GDN qkv causal conv1d")?;
+    let mixed = cuda_silu_inplace(&conv).context("cuda GDN qkv conv SiLU")?;
     let q = cuda_narrow_last_dim(&mixed, 0, qk_dim)?;
     let k = cuda_narrow_last_dim(&mixed, qk_dim, qk_dim)?;
     let v = cuda_narrow_last_dim(&mixed, qk_dim * 2, v_dim)?;
+    let z = cuda_lora_linear(&h_norm, &weights.in_proj_z_weight, lora.in_proj_z.as_ref())?;
     Ok(CudaGdnConvQkv {
+        h_norm,
         q,
         k,
         v,
@@ -321,6 +328,37 @@ pub fn cuda_gdn_lora_conv_qkv(
 pub struct CudaGdnGateOutputs {
     pub beta: CudaTrainTensor,
     pub g: CudaTrainTensor,
+}
+
+pub fn cuda_gdn_gate_outputs_from_normed(
+    h_norm: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+) -> Result<CudaGdnGateOutputs> {
+    ensure!(
+        h_norm.dims().len() == 2,
+        "cuda_gdn_gate_outputs_from_normed: expected rank-2 [rows, hidden], got {:?}",
+        h_norm.dims()
+    );
+    let a =
+        cuda_frozen_matmul(h_norm, &weights.in_proj_a_weight).context("cuda GDN a projection")?;
+    let b =
+        cuda_frozen_matmul(h_norm, &weights.in_proj_b_weight).context("cuda GDN b projection")?;
+    ensure!(
+        a.dims() == b.dims(),
+        "cuda_gdn_gate_outputs_from_normed: a/b shape mismatch {:?} vs {:?}",
+        a.dims(),
+        b.dims()
+    );
+    let beta = cuda_sigmoid(&b).context("cuda GDN beta sigmoid")?;
+    let a_biased = cuda_add_last_dim_bias(&a, &weights.dt_bias).context("cuda GDN dt bias add")?;
+    let softplus = cuda_softplus(&a_biased).context("cuda GDN softplus")?;
+    let decay = cuda_scale(
+        &cuda_exp(&weights.a_log).context("cuda GDN exp a_log")?,
+        -1.0,
+    )
+    .context("cuda GDN negative decay")?;
+    let g = cuda_mul_last_dim_weight(&softplus, &decay).context("cuda GDN decay scale")?;
+    Ok(CudaGdnGateOutputs { beta, g })
 }
 
 /// Native CUDA GDN gate composition:
@@ -335,25 +373,7 @@ pub fn cuda_gdn_gate_outputs(
         input.dims()
     );
     let h_norm = cuda_rmsnorm(input, &weights.layer_norm_weight, weights.eps)?;
-    let a = cuda_matmul(&h_norm, &weights.in_proj_a_weight).context("cuda GDN a projection")?;
-    let b = cuda_matmul(&h_norm, &weights.in_proj_b_weight).context("cuda GDN b projection")?;
-    ensure!(
-        a.dims() == b.dims(),
-        "cuda_gdn_gate_outputs: a/b shape mismatch {:?} vs {:?}",
-        a.dims(),
-        b.dims()
-    );
-    let beta = cuda_sigmoid(&b).context("cuda GDN beta sigmoid")?;
-    let a_biased =
-        cuda_add_last_dim_bias(&a, &weights.dt_bias).context("cuda GDN dt bias add")?;
-    let softplus = cuda_softplus(&a_biased).context("cuda GDN softplus")?;
-    let decay = cuda_scale(
-        &cuda_exp(&weights.a_log).context("cuda GDN exp a_log")?,
-        -1.0,
-    )
-    .context("cuda GDN negative decay")?;
-    let g = cuda_mul_last_dim_weight(&softplus, &decay).context("cuda GDN decay scale")?;
-    Ok(CudaGdnGateOutputs { beta, g })
+    cuda_gdn_gate_outputs_from_normed(&h_norm, weights)
 }
 
 pub fn cuda_gdn_gated_rmsnorm(
@@ -381,8 +401,8 @@ pub fn cuda_gdn_gated_rmsnorm(
 
     // `cuda_rmsnorm` applies Qwen's (1 + weight) convention. GDN gated norm
     // uses the stored norm weight directly, so shift the frozen weight here.
-    let shifted_weight = (weight.as_tensor() - 1.0f64)
-        .context("cuda_gdn_gated_rmsnorm: shift norm weight")?;
+    let shifted_weight =
+        (weight.as_tensor() - 1.0f64).context("cuda_gdn_gated_rmsnorm: shift norm weight")?;
     let shifted_weight =
         CudaTrainTensor::new(shifted_weight).context("cuda_gdn_gated_rmsnorm: wrap weight")?;
     let normed = cuda_rmsnorm(input, &shifted_weight, eps)?;
@@ -427,8 +447,12 @@ pub fn cuda_gdn_lora_output_projection(
         );
         let per_head = cuda_reshape(recurrent_out, &[rows * weights.heads_v, weights.head_dim_v])?;
         let z_per_head = cuda_reshape(z, &[rows * weights.heads_v, weights.head_dim_v])?;
-        let normed =
-            cuda_gdn_gated_rmsnorm(&per_head, &z_per_head, &weights.gated_norm_weight, weights.eps)?;
+        let normed = cuda_gdn_gated_rmsnorm(
+            &per_head,
+            &z_per_head,
+            &weights.gated_norm_weight,
+            weights.eps,
+        )?;
         cuda_reshape(&normed, &[rows, value_dim])?
     };
     cuda_lora_linear(&gated, &weights.out_proj_weight, lora.gdn_out_proj.as_ref())
@@ -477,10 +501,7 @@ fn cuda_gdn_unflatten_head_blocks(
     cuda_reshape(&rhd, &[rows, heads * head_dim])
 }
 
-fn cuda_gdn_l2_normalize_head_rows(
-    input: &CudaTrainTensor,
-    scale: f32,
-) -> Result<CudaTrainTensor> {
+fn cuda_gdn_l2_normalize_head_rows(input: &CudaTrainTensor, scale: f32) -> Result<CudaTrainTensor> {
     ensure!(
         input.dims().len() == 2,
         "cuda_gdn_l2_normalize_head_rows: expected rank-2 [rows, head_dim], got {:?}",
@@ -493,8 +514,7 @@ fn cuda_gdn_l2_normalize_head_rows(
         input.as_tensor().device(),
     )?)?;
     let normed = cuda_rmsnorm(input, &zeros, 1e-6f32 / head_dim as f32)?;
-    cuda_scale(&normed, scale / (head_dim as f32).sqrt())
-        .context("cuda GDN l2 normalize head rows")
+    cuda_scale(&normed, scale / (head_dim as f32).sqrt()).context("cuda GDN l2 normalize head rows")
 }
 
 pub fn cuda_gdn_lora_layer(
@@ -525,7 +545,7 @@ pub fn cuda_gdn_lora_layer(
     );
 
     let conv_qkv = cuda_gdn_lora_conv_qkv(input, weights, lora, conv_state)?;
-    let gates = cuda_gdn_gate_outputs(input, weights)?;
+    let gates = cuda_gdn_gate_outputs_from_normed(&conv_qkv.h_norm, weights)?;
 
     let q_heads =
         cuda_gdn_flatten_token_major_heads(&conv_qkv.q, rows, weights.heads_k, weights.head_dim_k)?;
@@ -548,10 +568,8 @@ pub fn cuda_gdn_lora_layer(
             cuda_reshape(&k_repeated, &[weights.heads_v * rows, weights.head_dim_k])?,
         )
     };
-    let q_heads = cuda_gdn_l2_normalize_head_rows(
-        &q_heads,
-        1.0f32 / (weights.head_dim_k as f32).sqrt(),
-    )?;
+    let q_heads =
+        cuda_gdn_l2_normalize_head_rows(&q_heads, 1.0f32 / (weights.head_dim_k as f32).sqrt())?;
     let k_heads = cuda_gdn_l2_normalize_head_rows(&k_heads, 1.0)?;
     let v_heads =
         cuda_gdn_flatten_token_major_heads(&conv_qkv.v, rows, weights.heads_v, weights.head_dim_v)?;
@@ -569,7 +587,8 @@ pub fn cuda_gdn_lora_layer(
     )?;
     let recurrent_token_major =
         cuda_gdn_unflatten_head_blocks(&recurrent.out, rows, weights.heads_v, weights.head_dim_v)?;
-    let projected = cuda_gdn_lora_output_projection(&recurrent_token_major, &conv_qkv.z, weights, lora)?;
+    let projected =
+        cuda_gdn_lora_output_projection(&recurrent_token_major, &conv_qkv.z, weights, lora)?;
     let output = cuda_add(input, &projected)?;
 
     Ok(CudaGdnLoraLayerOutput {
@@ -690,7 +709,10 @@ pub fn cuda_full_attention_lora_layer(
     let k_3d = cuda_reshape(&k, &[rows, weights.heads_kv, weights.head_dim])?;
     let v_3d = cuda_reshape(&v, &[rows, weights.heads_kv, weights.head_dim])?;
     let scale = 1.0f32 / (weights.head_dim as f32).sqrt();
-    let attn = cuda_sdpa_prefill_causal(&q_3d, &k_3d, &v_3d, scale)?;
+    let attn = match cuda_flash_attn_prefill_causal_f32(&q_3d, &k_3d, &v_3d, scale)? {
+        Some(attn) => attn,
+        None => cuda_sdpa_prefill_causal(&q_3d, &k_3d, &v_3d, scale)?,
+    };
     let attn_flat = cuda_reshape(&attn, &[rows, q_dim])?;
     let attn_gated = match gate {
         Some(gate) => {
@@ -822,7 +844,8 @@ pub fn cuda_tiny_full_attention_model_adamw_step_with_arena(
         cuda_rmsnorm(&hidden, final_norm_weight, layer_weights.eps)
             .context("cuda tiny model final RMSNorm")?,
     )?;
-    let logits = arena.track(cuda_matmul(&normed, lm_head_weight).context("cuda tiny model LM head")?)?;
+    let logits =
+        arena.track(cuda_matmul(&normed, lm_head_weight).context("cuda tiny model LM head")?)?;
     let squared = arena.track(cuda_mul(&logits, &logits).context("cuda tiny model square")?)?;
     let loss = arena.track(cuda_sum_all(&squared).context("cuda tiny model reduce loss")?)?;
     let loss_value = loss.to_vec_f32()?[0];
@@ -856,7 +879,22 @@ fn cuda_compute_rope_tables(
     }
     let cos = Tensor::from_vec(cos, (rows, half), device).context("cuda model RoPE cos table")?;
     let sin = Tensor::from_vec(sin, (rows, half), device).context("cuda model RoPE sin table")?;
-    Ok(Some((CudaTrainTensor::new(cos)?, CudaTrainTensor::new(sin)?)))
+    Ok(Some((
+        CudaTrainTensor::new(cos)?,
+        CudaTrainTensor::new(sin)?,
+    )))
+}
+
+fn cuda_embedding_lookup_f32(
+    table: &CudaTrainTensor,
+    token_ids: &[usize],
+) -> Result<CudaTrainTensor> {
+    let embedded = cuda_embedding_lookup(table, token_ids)?;
+    match embedded.dtype() {
+        DType::F32 => Ok(embedded),
+        DType::BF16 => cuda_to_dtype(&embedded, DType::F32),
+        dtype => anyhow::bail!("cuda embedding lookup produced unsupported dtype {dtype:?}"),
+    }
 }
 
 pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
@@ -887,7 +925,7 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
     );
 
     let mut hidden = arena.track(
-        cuda_embedding_lookup(&model.token_embedding, token_ids)
+        cuda_embedding_lookup_f32(&model.token_embedding, token_ids)
             .context("cuda FullAttention LoRA model embedding")?,
     )?;
     let rope_tables = cuda_compute_rope_tables(
@@ -929,12 +967,11 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
         )?
     } else {
         let logits = arena.track(
-            cuda_matmul(&normed, &model.lm_head_weight)
+            cuda_frozen_matmul(&normed, &model.lm_head_weight)
                 .context("cuda FullAttention LoRA model LM head")?,
         )?;
-        let squared = arena.track(
-            cuda_mul(&logits, &logits).context("cuda FullAttention LoRA model square")?,
-        )?;
+        let squared = arena
+            .track(cuda_mul(&logits, &logits).context("cuda FullAttention LoRA model square")?)?;
         arena.track(cuda_sum_all(&squared).context("cuda FullAttention LoRA model loss")?)?
     };
     let loss_value = loss.to_vec_f32()?[0];
@@ -978,7 +1015,7 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
     );
 
     let mut hidden = arena.track(
-        cuda_embedding_lookup(&model.token_embedding, token_ids)
+        cuda_embedding_lookup_f32(&model.token_embedding, token_ids)
             .context("cuda LoRA model+GDN embedding")?,
     )?;
     let rope_tables = cuda_compute_rope_tables(
@@ -998,7 +1035,9 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
                 let borrowed = full.as_borrowed(rope);
                 hidden = arena.track(
                     cuda_full_attention_lora_layer(&hidden, &borrowed, &lora_layers[idx])
-                        .with_context(|| format!("cuda LoRA model+GDN FullAttention layer {idx}"))?,
+                        .with_context(|| {
+                            format!("cuda LoRA model+GDN FullAttention layer {idx}")
+                        })?,
                 )?;
             }
             CudaLayerWeights::LinearAttention(linear) => {
@@ -1016,8 +1055,8 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
                     linear.head_dim_k,
                     linear.head_dim_v
                 );
-                let conv_channels = linear.heads_k * linear.head_dim_k * 2
-                    + linear.heads_v * linear.head_dim_v;
+                let conv_channels =
+                    linear.heads_k * linear.head_dim_k * 2 + linear.heads_v * linear.head_dim_v;
                 let conv_state_rows = linear.conv_kernel.saturating_sub(1);
                 ensure!(
                     layer_state.conv_state.dims() == [1, conv_channels, conv_state_rows],
@@ -1030,7 +1069,8 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
                     &layer_state.recurrent_state,
                     &[linear.heads_v * linear.head_dim_k, linear.head_dim_v],
                 )?;
-                let conv_state_ct = cuda_reshape(&layer_state.conv_state, &[conv_channels, conv_state_rows])?;
+                let conv_state_ct =
+                    cuda_reshape(&layer_state.conv_state, &[conv_channels, conv_state_rows])?;
                 let conv_state = cuda_transpose2d(&conv_state_ct)?;
                 let out = cuda_gdn_lora_layer(
                     &hidden,
@@ -1075,7 +1115,8 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
         )?
     } else {
         let logits = arena.track(
-            cuda_matmul(&normed, &model.lm_head_weight).context("cuda LoRA model+GDN LM head")?,
+            cuda_frozen_matmul(&normed, &model.lm_head_weight)
+                .context("cuda LoRA model+GDN LM head")?,
         )?;
         let squared =
             arena.track(cuda_mul(&logits, &logits).context("cuda LoRA model+GDN square")?)?;
@@ -1107,12 +1148,7 @@ fn cuda_linear_attention_state_zeros_for_model(
         let CudaLayerWeights::LinearAttention(linear) = layer else {
             continue;
         };
-        let recurrent_shape = (
-            batch,
-            linear.heads_v,
-            linear.head_dim_k,
-            linear.head_dim_v,
-        );
+        let recurrent_shape = (batch, linear.heads_v, linear.head_dim_k, linear.head_dim_v);
         let recurrent_n = batch * linear.heads_v * linear.head_dim_k * linear.head_dim_v;
         let conv_channels =
             linear.heads_k * linear.head_dim_k * 2 + linear.heads_v * linear.head_dim_v;
@@ -1315,13 +1351,9 @@ pub fn cuda_native_sft_train(
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0xC0DA_5EED)
     });
-    let lora_layers = cuda_init_lora_layers(
-        &model,
-        config.lora_rank,
-        config.lora_alpha,
-        effective_seed,
-    )
-    .context("cuda_native_sft_train: initialize LoRA layers")?;
+    let lora_layers =
+        cuda_init_lora_layers(&model, config.lora_rank, config.lora_alpha, effective_seed)
+            .context("cuda_native_sft_train: initialize LoRA layers")?;
     let mut adamw = allocate_cuda_lora_adamw_state(&lora_layers)
         .context("cuda_native_sft_train: allocate AdamW state")?;
     let cfg = CudaAdamWConfig {
@@ -1395,7 +1427,8 @@ pub fn cuda_native_sft_train(
 
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
-                    let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
                     if let Err(err) = save_cuda_lora_adapter_dir(
                         &lora_layers,
                         config.lora_rank,
@@ -1460,7 +1493,10 @@ pub fn save_cuda_training_tensors(
 ) -> Result<()> {
     let mut tensors: HashMap<String, Tensor> = HashMap::new();
     for (name, weight) in weights {
-        ensure!(!name.is_empty(), "CUDA training safetensors key must not be empty");
+        ensure!(
+            !name.is_empty(),
+            "CUDA training safetensors key must not be empty"
+        );
         let tensor = weight
             .as_tensor()
             .to_dtype(DType::F32)
@@ -1835,7 +1871,13 @@ mod tests {
         assert_eq!(updated, trainable.len());
         for (param, old) in trainable.iter().zip(before.iter()) {
             assert_ne!(param.to_vec_f32()?, *old);
-            assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 1);
+            assert_eq!(
+                adamw
+                    .get(&param.param_id().expect("param id"))
+                    .expect("state")
+                    .step,
+                1
+            );
         }
         Ok(())
     }
@@ -1883,11 +1925,7 @@ mod tests {
                 (2usize, 2usize),
                 &device,
             )?)?,
-            post_norm_weight: CudaTrainTensor::new(Tensor::zeros(
-                (2usize,),
-                DType::F32,
-                &device,
-            )?)?,
+            post_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
             gate_weight: CudaTrainTensor::new(Tensor::from_vec(
                 vec![0.25f32, -0.15, 0.35, 0.05],
                 (2usize, 2usize),
@@ -1958,7 +1996,13 @@ mod tests {
         assert_eq!(arena.allocation_count(), 6);
         for (param, old) in trainable.iter().zip(before.iter()) {
             assert_ne!(param.to_vec_f32()?, *old);
-            assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 1);
+            assert_eq!(
+                adamw
+                    .get(&param.param_id().expect("param id"))
+                    .expect("state")
+                    .step,
+                1
+            );
         }
 
         let losses = cuda_full_attention_lora_train_token_sequences(
@@ -1975,26 +2019,33 @@ mod tests {
         assert_eq!(losses.len(), 2);
         assert!(losses.iter().all(|loss| loss.is_finite() && *loss > 0.0));
         for param in &trainable {
-            assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 3);
+            assert_eq!(
+                adamw
+                    .get(&param.param_id().expect("param id"))
+                    .expect("state")
+                    .step,
+                3
+            );
         }
 
         let out_dir = std::env::temp_dir().join(format!(
             "kiln-cuda-token-train-adapter-{}",
             std::process::id()
         ));
-        let (adapter_dir, saved_losses) = cuda_full_attention_lora_train_token_sequences_to_adapter(
-            &model,
-            &[vec![2, 0], vec![1, 3]],
-            1,
-            2,
-            4.0,
-            0xC0DA_5EED,
-            CudaAdamWConfig {
-                lr: 0.01,
-                ..CudaAdamWConfig::default()
-            },
-            &out_dir,
-        )?;
+        let (adapter_dir, saved_losses) =
+            cuda_full_attention_lora_train_token_sequences_to_adapter(
+                &model,
+                &[vec![2, 0], vec![1, 3]],
+                1,
+                2,
+                4.0,
+                0xC0DA_5EED,
+                CudaAdamWConfig {
+                    lr: 0.01,
+                    ..CudaAdamWConfig::default()
+                },
+                &out_dir,
+            )?;
         assert_eq!(saved_losses.len(), 2);
         assert!(adapter_dir.join("adapter_config.json").exists());
         let saved = candle_core::safetensors::load(
@@ -2028,11 +2079,7 @@ mod tests {
             q_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
             k_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
             o_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?,
-            post_norm_weight: CudaTrainTensor::new(Tensor::zeros(
-                (2usize,),
-                DType::F32,
-                &device,
-            )?)?,
+            post_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
             gate_weight: CudaTrainTensor::new(Tensor::zeros(
                 (2usize, 4usize),
                 DType::F32,
@@ -2151,11 +2198,8 @@ mod tests {
         let CudaLayerWeights::LinearAttention(linear_layer) = &model.layers[1] else {
             panic!("expected LinearAttention layer");
         };
-        let input_tensor = Tensor::from_vec(
-            vec![0.25f32, -0.5, 0.75, 1.0],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let input_tensor =
+            Tensor::from_vec(vec![0.25f32, -0.5, 0.75, 1.0], (2usize, 2usize), &device)?;
         let input_id = input_tensor.id();
         let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
         let projections = cuda_gdn_lora_input_projections(&input, linear_layer, &lora_layers[1])?;
@@ -2174,13 +2218,9 @@ mod tests {
         assert!(grads.get(qkv_pair.b_id).is_some());
         assert!(grads.get(z_pair.b_id).is_some());
 
-        let conv_state = CudaTrainTensor::new(Tensor::zeros(
-            (2usize, 6usize),
-            DType::F32,
-            &device,
-        )?)?;
-        let conv_qkv =
-            cuda_gdn_lora_conv_qkv(&input, linear_layer, &lora_layers[1], &conv_state)?;
+        let conv_state =
+            CudaTrainTensor::new(Tensor::zeros((2usize, 6usize), DType::F32, &device)?)?;
+        let conv_qkv = cuda_gdn_lora_conv_qkv(&input, linear_layer, &lora_layers[1], &conv_state)?;
         assert_eq!(conv_qkv.q.dims(), &[2, 2]);
         assert_eq!(conv_qkv.k.dims(), &[2, 2]);
         assert_eq!(conv_qkv.v.dims(), &[2, 2]);
@@ -2193,13 +2233,11 @@ mod tests {
         let gate_grads = cuda_backward(&gate_loss)?;
         assert!(gate_grads.get(input_id).is_some());
 
-        let recurrent_out = CudaTrainTensor::new(
-            Tensor::from_vec(
-                vec![0.15f32, -0.2, 0.35, 0.45],
-                (2usize, 2usize),
-                &device,
-            )?,
-        )?;
+        let recurrent_out = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.15f32, -0.2, 0.35, 0.45],
+            (2usize, 2usize),
+            &device,
+        )?)?;
         let out = cuda_gdn_lora_output_projection(
             &recurrent_out,
             &projections.z,
@@ -2212,11 +2250,8 @@ mod tests {
         let out_pair = lora_layers[1].gdn_out_proj.as_ref().expect("gdn out lora");
         assert!(out_grads.get(out_pair.b_id).is_some());
 
-        let recurrent_state = CudaTrainTensor::new(Tensor::zeros(
-            (2usize, 2usize),
-            DType::F32,
-            &device,
-        )?)?;
+        let recurrent_state =
+            CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?;
         let layer_out = cuda_gdn_lora_layer(
             &input,
             linear_layer,
@@ -2344,13 +2379,11 @@ mod tests {
         )?;
 
         assert!(loss.is_finite());
-        assert!(
-            gdn_state.layers[0]
-                .recurrent_state
-                .to_vec_f32()?
-                .iter()
-                .any(|value| value.abs() > 1e-6)
-        );
+        assert!(gdn_state.layers[0]
+            .recurrent_state
+            .to_vec_f32()?
+            .iter()
+            .any(|value| value.abs() > 1e-6));
         let losses = cuda_lora_train_token_sequences_with_gdn_state(
             &model,
             &lora_layers,
@@ -2404,11 +2437,8 @@ mod tests {
             (2usize, 2usize),
             &device,
         )?)?;
-        let input_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let input_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let q_tensor = Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
@@ -2422,29 +2452,21 @@ mod tests {
         let v_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
         let v_id = v_tensor.id();
         let v_weight = CudaTrainTensor::parameter(v_tensor, v_id)?;
-        let q_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
-        let k_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let q_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+        let k_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let o_tensor = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let o_id = o_tensor.id();
         let o_weight = CudaTrainTensor::parameter(o_tensor, o_id)?;
-        let post_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let post_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let gate_tensor =
             Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
         let gate_id = gate_tensor.id();
         let gate_weight = CudaTrainTensor::parameter(gate_tensor, gate_id)?;
-        let up_tensor = Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+        let up_tensor =
+            Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
         let up_id = up_tensor.id();
         let up_weight = CudaTrainTensor::parameter(up_tensor, up_id)?;
         let down_tensor =
@@ -2533,11 +2555,8 @@ mod tests {
         )?;
         let embedding_id = embedding_tensor.id();
         let embedding = CudaTrainTensor::parameter(embedding_tensor, embedding_id)?;
-        let input_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let input_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let q_tensor = Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
@@ -2551,40 +2570,29 @@ mod tests {
         let v_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
         let v_id = v_tensor.id();
         let v_weight = CudaTrainTensor::parameter(v_tensor, v_id)?;
-        let q_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
-        let k_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let q_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
+        let k_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let o_tensor = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let o_id = o_tensor.id();
         let o_weight = CudaTrainTensor::parameter(o_tensor, o_id)?;
-        let post_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let post_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let gate_tensor =
             Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
         let gate_id = gate_tensor.id();
         let gate_weight = CudaTrainTensor::parameter(gate_tensor, gate_id)?;
-        let up_tensor = Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+        let up_tensor =
+            Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
         let up_id = up_tensor.id();
         let up_weight = CudaTrainTensor::parameter(up_tensor, up_id)?;
         let down_tensor =
             Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
         let down_id = down_tensor.id();
         let down_weight = CudaTrainTensor::parameter(down_tensor, down_id)?;
-        let final_norm = CudaTrainTensor::new(Tensor::from_vec(
-            vec![0.0f32, 0.0],
-            (2usize,),
-            &device,
-        )?)?;
+        let final_norm =
+            CudaTrainTensor::new(Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?)?;
         let lm_head_tensor = Tensor::from_vec(
             vec![0.2f32, -0.1, 0.3, 0.4, 0.05, -0.2],
             (2usize, 3usize),
@@ -2774,10 +2782,8 @@ mod tests {
         assert_eq!(loaded.len(), 4);
         let _ = std::fs::remove_file(&tmp);
 
-        let out_dir = std::env::temp_dir().join(format!(
-            "kiln-cuda-lora-adapter-dir-{}",
-            std::process::id()
-        ));
+        let out_dir =
+            std::env::temp_dir().join(format!("kiln-cuda-lora-adapter-dir-{}", std::process::id()));
         let saved_dir = save_cuda_lora_adapter_dir(&layers, 2, 4.0, &out_dir)?;
         assert_eq!(saved_dir, out_dir);
         assert!(saved_dir.join("adapter_model.safetensors").exists());

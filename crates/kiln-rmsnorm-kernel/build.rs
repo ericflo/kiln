@@ -50,6 +50,7 @@ fn main() {
     build.file(csrc_dir.join("fused_mlp_silu_mul.cu"));
     build.file(csrc_dir.join("fused_sigmoid_mul.cu"));
     build.file(csrc_dir.join("fused_lora_add.cu"));
+    build.file(csrc_dir.join("causal_conv1d_f32.cu"));
     build.file(csrc_dir.join("optimizer_step.cu"));
 
     build.compile("kiln_rmsnorm_kernel");

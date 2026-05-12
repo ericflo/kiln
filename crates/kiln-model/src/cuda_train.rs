@@ -6,13 +6,13 @@
 //! kernels. Higher-level native CUDA training can build on this without
 //! accepting CPU tensors by accident.
 
-use anyhow::{Context, Result, ensure};
-use candle_core::{D, DType, Device, Tensor, TensorId};
-use kiln_core::env_flag::env_flag;
+use anyhow::{ensure, Context, Result};
+use candle_core::{DType, Device, Tensor, TensorId, D};
 use kiln_core::config::ModelConfig;
+use kiln_core::env_flag::env_flag;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::forward::{
     GpuAttentionWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuLinearAttentionWeights,
@@ -88,8 +88,12 @@ impl CudaTrainTensor {
             "CudaTrainTensor::zeros_like requires a CUDA tensor, got {:?}",
             reference.device()
         );
-        let tensor = Tensor::zeros(reference.shape().clone(), reference.dtype(), reference.device())
-            .context("alloc CUDA training tensor")?;
+        let tensor = Tensor::zeros(
+            reference.shape().clone(),
+            reference.dtype(),
+            reference.device(),
+        )
+        .context("alloc CUDA training tensor")?;
         Self::new(tensor)
     }
 
@@ -270,8 +274,8 @@ impl CudaTrainArena {
     }
 
     pub fn zeros(&mut self, dims: &[usize], dtype: DType) -> Result<CudaTrainTensor> {
-        let tensor = Tensor::zeros(dims.to_vec(), dtype, &self.device)
-            .context("CudaTrainArena::zeros")?;
+        let tensor =
+            Tensor::zeros(dims.to_vec(), dtype, &self.device).context("CudaTrainArena::zeros")?;
         let train_tensor = CudaTrainTensor::new(tensor)?;
         self.track(train_tensor)
     }
@@ -467,9 +471,12 @@ pub fn cuda_adamw_step_from_store(
         let Some(grad) = grads.get(param_id) else {
             continue;
         };
-        let state = states
-            .get_mut(&param_id)
-            .with_context(|| format!("cuda_adamw_step_from_store: missing state for {:?}", param_id))?;
+        let state = states.get_mut(&param_id).with_context(|| {
+            format!(
+                "cuda_adamw_step_from_store: missing state for {:?}",
+                param_id
+            )
+        })?;
         state.step = state.step.saturating_add(1);
         param
             .adamw_step_inplace(
@@ -919,18 +926,10 @@ fn cuda_rope_apply(
         .unsqueeze(1)
         .context("cuda_rope: sin unsqueeze heads")?;
 
-    let x1_cos = x1
-        .broadcast_mul(&cos)
-        .context("cuda_rope: x1 * cos")?;
-    let x2_sin = x2
-        .broadcast_mul(&sin)
-        .context("cuda_rope: x2 * sin")?;
-    let x1_sin = x1
-        .broadcast_mul(&sin)
-        .context("cuda_rope: x1 * sin")?;
-    let x2_cos = x2
-        .broadcast_mul(&cos)
-        .context("cuda_rope: x2 * cos")?;
+    let x1_cos = x1.broadcast_mul(&cos).context("cuda_rope: x1 * cos")?;
+    let x2_sin = x2.broadcast_mul(&sin).context("cuda_rope: x2 * sin")?;
+    let x1_sin = x1.broadcast_mul(&sin).context("cuda_rope: x1 * sin")?;
+    let x2_cos = x2.broadcast_mul(&cos).context("cuda_rope: x2 * cos")?;
     let (r1, r2) = if inverse {
         (
             (x1_cos + x2_sin).context("cuda_rope: inverse first half")?,
@@ -1119,17 +1118,158 @@ pub fn cuda_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaT
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_matmul_f32_bf16w(
+    lhs: &CudaTrainTensor,
+    rhs: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        lhs.dims().len() == 2 && rhs.dims().len() == 2,
+        "cuda_matmul_f32_bf16w: expected 2D inputs, got lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dims()[1] == rhs.dims()[0],
+        "cuda_matmul_f32_bf16w: inner-dim mismatch lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dtype() == DType::F32 && rhs.dtype() == DType::BF16,
+        "cuda_matmul_f32_bf16w: expected F32 lhs and BF16 rhs, got {:?}/{:?}",
+        lhs.dtype(),
+        rhs.dtype()
+    );
+    let out = kiln_rmsnorm_kernel::matmul_f32_bf16w(lhs.as_tensor(), rhs.as_tensor())
+        .context("cuda_matmul_f32_bf16w: CUDA mixed GEMM")?;
+    let needs_grad = lhs.requires_grad() || lhs.grad_fn().is_some() || lhs.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MatmulF32Bf16wBackward {
+            inputs: vec![lhs.clone()],
+            weight: rhs.clone(),
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_frozen_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => cuda_matmul(lhs, rhs),
+        (DType::F32, DType::BF16) => cuda_matmul_f32_bf16w(lhs, rhs),
+        _ => anyhow::bail!(
+            "cuda_frozen_matmul: unsupported lhs/rhs dtypes {:?}/{:?}",
+            lhs.dtype(),
+            rhs.dtype()
+        ),
+    }
+}
+
+pub fn cuda_lora_linear_fused(
+    input: &CudaTrainTensor,
+    base_weight: &CudaTrainTensor,
+    a: &CudaTrainTensor,
+    b: &CudaTrainTensor,
+    scale: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2 && base_weight.dims().len() == 2,
+        "cuda_lora_linear_fused: expected rank-2 input/base, got {:?}/{:?}",
+        input.dims(),
+        base_weight.dims()
+    );
+    ensure!(
+        a.dims().len() == 2 && b.dims().len() == 2,
+        "cuda_lora_linear_fused: expected rank-2 A/B, got {:?}/{:?}",
+        a.dims(),
+        b.dims()
+    );
+    let in_dim = input.dims()[1];
+    let out_dim = base_weight.dims()[1];
+    let rank = a.dims()[0];
+    ensure!(
+        input.dims()[1] == base_weight.dims()[0],
+        "cuda_lora_linear_fused: base inner-dim mismatch input={:?} base={:?}",
+        input.dims(),
+        base_weight.dims()
+    );
+    ensure!(
+        a.dims()[1] == in_dim && b.dims() == [out_dim, rank],
+        "cuda_lora_linear_fused: LoRA shape mismatch input={:?} base={:?} A={:?} B={:?}",
+        input.dims(),
+        base_weight.dims(),
+        a.dims(),
+        b.dims()
+    );
+    ensure!(
+        input.dtype() == DType::F32 && a.dtype() == DType::F32 && b.dtype() == DType::F32,
+        "cuda_lora_linear_fused: expected F32 input/A/B, got {:?}/{:?}/{:?}",
+        input.dtype(),
+        a.dtype(),
+        b.dtype()
+    );
+
+    let base_out = match (input.dtype(), base_weight.dtype()) {
+        (DType::F32, DType::F32) => input
+            .as_tensor()
+            .matmul(base_weight.as_tensor())
+            .context("cuda_lora_linear_fused: base F32 matmul")?,
+        (DType::F32, DType::BF16) => {
+            kiln_rmsnorm_kernel::matmul_f32_bf16w(input.as_tensor(), base_weight.as_tensor())
+                .context("cuda_lora_linear_fused: base BF16-weight matmul")?
+        }
+        _ => anyhow::bail!(
+            "cuda_lora_linear_fused: unsupported input/base dtypes {:?}/{:?}",
+            input.dtype(),
+            base_weight.dtype()
+        ),
+    }
+    .contiguous()
+    .context("cuda_lora_linear_fused: contiguous base output")?;
+    let a_t = a
+        .as_tensor()
+        .t()
+        .context("cuda_lora_linear_fused: A transpose")?
+        .contiguous()
+        .context("cuda_lora_linear_fused: contiguous A transpose")?;
+    let hidden = input
+        .as_tensor()
+        .matmul(&a_t)
+        .context("cuda_lora_linear_fused: hidden matmul")?
+        .contiguous()
+        .context("cuda_lora_linear_fused: contiguous hidden")?;
+    kiln_rmsnorm_kernel::lora_add_inplace_f32(&base_out, &hidden, b.as_tensor(), scale)
+        .context("cuda_lora_linear_fused: in-place LoRA add")?;
+
+    let needs_grad = input.requires_grad()
+        || input.grad_fn().is_some()
+        || input.param_id().is_some()
+        || a.requires_grad()
+        || a.grad_fn().is_some()
+        || a.param_id().is_some()
+        || b.requires_grad()
+        || b.grad_fn().is_some()
+        || b.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(FusedLoraLinearBackward {
+            inputs: vec![input.clone(), a.clone(), b.clone()],
+            base_weight: base_weight.clone(),
+            scale,
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(base_out, grad_fn)
+}
+
 pub fn cuda_swiglu_mlp(
     input: &CudaTrainTensor,
     gate_weight: &CudaTrainTensor,
     up_weight: &CudaTrainTensor,
     down_weight: &CudaTrainTensor,
 ) -> Result<CudaTrainTensor> {
-    let gate = cuda_matmul(input, gate_weight)?;
-    let up = cuda_matmul(input, up_weight)?;
+    let gate = cuda_frozen_matmul(input, gate_weight)?;
+    let up = cuda_frozen_matmul(input, up_weight)?;
     let activated = cuda_silu(&gate)?;
     let hidden = cuda_mul(&activated, &up)?;
-    cuda_matmul(&hidden, down_weight)
+    cuda_frozen_matmul(&hidden, down_weight)
 }
 
 pub struct CudaOwnedFullAttentionLayer {
@@ -1293,6 +1433,23 @@ fn cuda_frozen_f32_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor
     CudaTrainTensor::new(tensor).with_context(|| format!("wrap CUDA native model weight {name}"))
 }
 
+fn cuda_frozen_typed_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor> {
+    ensure!(
+        matches!(tensor.device(), Device::Cuda(_)),
+        "CUDA native model import requires CUDA tensor for {name}, got {:?}",
+        tensor.device()
+    );
+    ensure!(
+        matches!(tensor.dtype(), DType::F32 | DType::BF16),
+        "CUDA native typed import supports only F32/BF16 for {name}, got {:?}",
+        tensor.dtype()
+    );
+    let tensor = tensor
+        .contiguous()
+        .with_context(|| format!("make CUDA native model weight {name} contiguous"))?;
+    CudaTrainTensor::new(tensor).with_context(|| format!("wrap CUDA native model weight {name}"))
+}
+
 fn cuda_full_attention_from_gpu(
     weights: &GpuFullAttentionWeights,
     layer: &GpuLayerWeights,
@@ -1302,19 +1459,19 @@ fn cuda_full_attention_from_gpu(
     let ctx = |name: &str| format!("layer {layer_idx} FullAttention {name}");
     Ok(CudaOwnedFullAttentionLayer {
         input_norm_weight: cuda_frozen_f32_tensor(&layer.input_layernorm, &ctx("input_norm"))?,
-        q_weight: cuda_frozen_f32_tensor(&weights.q_proj_t, &ctx("q_proj_t"))?,
-        k_weight: cuda_frozen_f32_tensor(&weights.k_proj_t, &ctx("k_proj_t"))?,
-        v_weight: cuda_frozen_f32_tensor(&weights.v_proj_t, &ctx("v_proj_t"))?,
+        q_weight: cuda_frozen_typed_tensor(&weights.q_proj_t, &ctx("q_proj_t"))?,
+        k_weight: cuda_frozen_typed_tensor(&weights.k_proj_t, &ctx("k_proj_t"))?,
+        v_weight: cuda_frozen_typed_tensor(&weights.v_proj_t, &ctx("v_proj_t"))?,
         q_norm_weight: cuda_frozen_f32_tensor(&weights.q_norm, &ctx("q_norm"))?,
         k_norm_weight: cuda_frozen_f32_tensor(&weights.k_norm, &ctx("k_norm"))?,
-        o_weight: cuda_frozen_f32_tensor(&weights.o_proj_t, &ctx("o_proj_t"))?,
+        o_weight: cuda_frozen_typed_tensor(&weights.o_proj_t, &ctx("o_proj_t"))?,
         post_norm_weight: cuda_frozen_f32_tensor(
             &layer.post_attention_layernorm,
             &ctx("post_attention_norm"),
         )?,
-        gate_weight: cuda_frozen_f32_tensor(&layer.mlp.gate_proj_t, &ctx("gate_proj_t"))?,
-        up_weight: cuda_frozen_f32_tensor(&layer.mlp.up_proj_t, &ctx("up_proj_t"))?,
-        down_weight: cuda_frozen_f32_tensor(&layer.mlp.down_proj_t, &ctx("down_proj_t"))?,
+        gate_weight: cuda_frozen_typed_tensor(&layer.mlp.gate_proj_t, &ctx("gate_proj_t"))?,
+        up_weight: cuda_frozen_typed_tensor(&layer.mlp.up_proj_t, &ctx("up_proj_t"))?,
+        down_weight: cuda_frozen_typed_tensor(&layer.mlp.down_proj_t, &ctx("down_proj_t"))?,
         heads_q: model_config.num_attention_heads,
         heads_kv: model_config.num_kv_heads,
         head_dim: model_config.head_dim,
@@ -1337,16 +1494,19 @@ fn cuda_linear_attention_from_gpu(
         .context("CUDA native model import: conv1d must have rank > 0")?;
     Ok(CudaOwnedLinearAttentionLayer {
         layer_norm_weight: cuda_frozen_f32_tensor(&layer.input_layernorm, &ctx("input_norm"))?,
-        in_proj_qkv_weight: cuda_frozen_f32_tensor(&weights.in_proj_qkv_t, &ctx("in_proj_qkv_t"))?,
-        in_proj_z_weight: cuda_frozen_f32_tensor(&weights.in_proj_z_t, &ctx("in_proj_z_t"))?,
-        in_proj_a_weight: cuda_frozen_f32_tensor(&weights.in_proj_a_t, &ctx("in_proj_a_t"))?,
-        in_proj_b_weight: cuda_frozen_f32_tensor(&weights.in_proj_b_t, &ctx("in_proj_b_t"))?,
+        in_proj_qkv_weight: cuda_frozen_typed_tensor(
+            &weights.in_proj_qkv_t,
+            &ctx("in_proj_qkv_t"),
+        )?,
+        in_proj_z_weight: cuda_frozen_typed_tensor(&weights.in_proj_z_t, &ctx("in_proj_z_t"))?,
+        in_proj_a_weight: cuda_frozen_typed_tensor(&weights.in_proj_a_t, &ctx("in_proj_a_t"))?,
+        in_proj_b_weight: cuda_frozen_typed_tensor(&weights.in_proj_b_t, &ctx("in_proj_b_t"))?,
         conv1d_weight: cuda_frozen_f32_tensor(&weights.conv1d, &ctx("conv1d"))?,
         a_log: cuda_frozen_f32_tensor(&weights.a_log, &ctx("a_log"))?,
         a_log_gates: cuda_frozen_f32_tensor(&weights.a_log_gates, &ctx("a_log_gates"))?,
         dt_bias: cuda_frozen_f32_tensor(&weights.dt_bias, &ctx("dt_bias"))?,
         gated_norm_weight: cuda_frozen_f32_tensor(&weights.norm, &ctx("gated_norm"))?,
-        out_proj_weight: cuda_frozen_f32_tensor(&weights.out_proj_t, &ctx("out_proj_t"))?,
+        out_proj_weight: cuda_frozen_typed_tensor(&weights.out_proj_t, &ctx("out_proj_t"))?,
         heads_k: model_config.linear_num_key_heads,
         heads_v: model_config.linear_num_value_heads,
         head_dim_k: model_config.linear_key_head_dim,
@@ -1358,8 +1518,8 @@ fn cuda_linear_attention_from_gpu(
 
 impl CudaModelWeights {
     pub fn from_gpu_weights(weights: &GpuWeights, model_config: &ModelConfig) -> Result<Self> {
-        let token_embedding = cuda_frozen_f32_tensor(&weights.embed_tokens, "embed_tokens")?;
-        let lm_head_weight = cuda_frozen_f32_tensor(&weights.embed_tokens_t, "embed_tokens_t")?;
+        let token_embedding = cuda_frozen_typed_tensor(&weights.embed_tokens, "embed_tokens")?;
+        let lm_head_weight = cuda_frozen_typed_tensor(&weights.embed_tokens_t, "embed_tokens_t")?;
         let final_norm_weight = cuda_frozen_f32_tensor(&weights.final_norm, "final_norm")?;
         let mut layers = Vec::with_capacity(weights.layers.len());
         for (idx, layer) in weights.layers.iter().enumerate() {
@@ -1482,9 +1642,9 @@ pub fn cuda_full_attention_layer(
     );
 
     let h_norm = cuda_rmsnorm(input, weights.input_norm_weight, weights.eps)?;
-    let q_raw = cuda_matmul(&h_norm, weights.q_weight)?;
-    let k = cuda_matmul(&h_norm, weights.k_weight)?;
-    let v = cuda_matmul(&h_norm, weights.v_weight)?;
+    let q_raw = cuda_frozen_matmul(&h_norm, weights.q_weight)?;
+    let k = cuda_frozen_matmul(&h_norm, weights.k_weight)?;
+    let v = cuda_frozen_matmul(&h_norm, weights.v_weight)?;
 
     let (q, gate) = if weights.attn_output_gate {
         let q_raw_3d = cuda_reshape(&q_raw, &[rows, weights.heads_q, weights.head_dim * 2])?;
@@ -1505,13 +1665,9 @@ pub fn cuda_full_attention_layer(
         None => q,
     };
     let k = match weights.k_norm_weight {
-        Some(weight) => cuda_per_head_rmsnorm_flat(
-            &k,
-            weight,
-            weights.heads_kv,
-            weights.head_dim,
-            weights.eps,
-        )?,
+        Some(weight) => {
+            cuda_per_head_rmsnorm_flat(&k, weight, weights.heads_kv, weights.head_dim, weights.eps)?
+        }
         None => k,
     };
 
@@ -1553,7 +1709,7 @@ pub fn cuda_full_attention_layer(
         }
         None => attn_flat,
     };
-    let o_out = cuda_matmul(&attn_gated, weights.o_weight)?;
+    let o_out = cuda_frozen_matmul(&attn_gated, weights.o_weight)?;
     let after_attn = cuda_add(input, &o_out)?;
     let h_norm2 = cuda_rmsnorm(&after_attn, weights.post_norm_weight, weights.eps)?;
     let mlp = cuda_swiglu_mlp(
@@ -1565,7 +1721,10 @@ pub fn cuda_full_attention_layer(
     cuda_add(&after_attn, &mlp)
 }
 
-pub fn cuda_batched_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+pub fn cuda_batched_matmul(
+    lhs: &CudaTrainTensor,
+    rhs: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.dims().len() >= 3 && rhs.dims().len() >= 3,
         "cuda_batched_matmul: expected rank >= 3 inputs, got lhs={:?} rhs={:?}",
@@ -1730,7 +1889,8 @@ pub fn cuda_shifted_cross_entropy_loss(
         .context("cuda_shifted_cross_entropy_loss: gather correct logits")?
         .squeeze(1)
         .context("cuda_shifted_cross_entropy_loss: squeeze correct logits")?;
-    let per_token = (log_sum_exp - correct).context("cuda_shifted_cross_entropy_loss: per-token")?;
+    let per_token =
+        (log_sum_exp - correct).context("cuda_shifted_cross_entropy_loss: per-token")?;
     let out = per_token
         .mean_all()
         .context("cuda_shifted_cross_entropy_loss: mean")?;
@@ -1747,6 +1907,24 @@ pub fn cuda_shifted_cross_entropy_loss(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+fn cuda_f32_hidden_head_matmul(
+    lhs: &Tensor,
+    rhs: &Tensor,
+    context: &'static str,
+) -> Result<Tensor> {
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => lhs.matmul(rhs).context(context),
+        (DType::F32, DType::BF16) => {
+            kiln_rmsnorm_kernel::matmul_f32_bf16w(lhs, rhs).context(context)
+        }
+        _ => anyhow::bail!(
+            "{context}: unsupported lhs/rhs dtypes {:?}/{:?}",
+            lhs.dtype(),
+            rhs.dtype()
+        ),
+    }
+}
+
 pub fn cuda_shifted_linear_cross_entropy_loss(
     hidden: &CudaTrainTensor,
     lm_head_weight: &CudaTrainTensor,
@@ -1755,8 +1933,8 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
     chunk_size: usize,
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        hidden.dtype() == DType::F32 && lm_head_weight.dtype() == DType::F32,
-        "cuda_shifted_linear_cross_entropy_loss expects F32 hidden/head, got {:?}/{:?}",
+        hidden.dtype() == DType::F32 && matches!(lm_head_weight.dtype(), DType::F32 | DType::BF16),
+        "cuda_shifted_linear_cross_entropy_loss expects F32 hidden and F32/BF16 head, got {:?}/{:?}",
         hidden.dtype(),
         lm_head_weight.dtype()
     );
@@ -1843,9 +2021,11 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
             .context("cuda_shifted_linear_cross_entropy_loss: head chunk")?
             .contiguous()
             .context("cuda_shifted_linear_cross_entropy_loss: contiguous head chunk")?;
-        let logits_chunk = active_hidden
-            .matmul(&head_chunk)
-            .context("cuda_shifted_linear_cross_entropy_loss: logits chunk")?;
+        let logits_chunk = cuda_f32_hidden_head_matmul(
+            &active_hidden,
+            &head_chunk,
+            "cuda_shifted_linear_cross_entropy_loss: logits chunk",
+        )?;
         let chunk_max = logits_chunk
             .max_keepdim(D::Minus1)
             .context("cuda_shifted_linear_cross_entropy_loss: chunk max")?;
@@ -1906,11 +2086,13 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
             .contiguous()
             .context("cuda_shifted_linear_cross_entropy_loss: contiguous correct head col")?;
         correct.push(
-            row_hidden
-                .matmul(&head_col)
-                .context("cuda_shifted_linear_cross_entropy_loss: correct matmul")?
-                .squeeze(1)
-                .context("cuda_shifted_linear_cross_entropy_loss: correct squeeze")?,
+            cuda_f32_hidden_head_matmul(
+                &row_hidden,
+                &head_col,
+                "cuda_shifted_linear_cross_entropy_loss: correct matmul",
+            )?
+            .squeeze(1)
+            .context("cuda_shifted_linear_cross_entropy_loss: correct squeeze")?,
         );
     }
     let correct_refs: Vec<&Tensor> = correct.iter().collect();
@@ -1970,7 +2152,10 @@ pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         "cuda_exp: expected F32 input, got {:?}",
         input.dtype()
     );
-    let out = input.as_tensor().exp().context("cuda_exp: candle CUDA exp")?;
+    let out = input
+        .as_tensor()
+        .exp()
+        .context("cuda_exp: candle CUDA exp")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
@@ -1994,9 +2179,7 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         .maximum(&zeros)
         .context("cuda_softplus: max(x, 0)")?;
     let neg_x = input.as_tensor().neg().context("cuda_softplus: neg")?;
-    let relu_neg_x = neg_x
-        .maximum(&zeros)
-        .context("cuda_softplus: max(-x, 0)")?;
+    let relu_neg_x = neg_x.maximum(&zeros).context("cuda_softplus: max(-x, 0)")?;
     let abs_x = (&relu_x + &relu_neg_x).context("cuda_softplus: abs")?;
     let neg_abs = abs_x.neg().context("cuda_softplus: -abs")?;
     let log_term = (neg_abs.exp().context("cuda_softplus: exp(-abs)")? + 1.0)
@@ -2030,6 +2213,28 @@ pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     let sigmoid_for_backward = CudaTrainTensor::new(sigmoid)?;
     let grad_fn = needs_grad.then(|| {
         Arc::new(SiluBackward {
+            sigmoid: sigmoid_for_backward,
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_silu_inplace(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_silu_inplace: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    let (out, sigmoid) = kiln_rmsnorm_kernel::silu_inplace_save_sigmoid_f32(input.as_tensor())
+        .context("cuda_silu_inplace: fused in-place SiLU")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let output_for_backward = CudaTrainTensor::new(out.clone())?;
+    let sigmoid_for_backward = CudaTrainTensor::new(sigmoid)?;
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SiluInplaceBackward {
+            output: output_for_backward,
             sigmoid: sigmoid_for_backward,
             inputs: vec![input.clone()],
         }) as Arc<dyn CudaBackwardOp>
@@ -2164,9 +2369,11 @@ pub fn cuda_cat_rows(parts: &[CudaTrainTensor]) -> Result<CudaTrainTensor> {
         !parts.is_empty(),
         "cuda_cat_rows: expected at least one tensor"
     );
-    let dim = parts[0].dims().get(1).copied().context(
-        "cuda_cat_rows: expected rank-2 [rows, dim] tensors, got empty first shape",
-    )?;
+    let dim = parts[0]
+        .dims()
+        .get(1)
+        .copied()
+        .context("cuda_cat_rows: expected rank-2 [rows, dim] tensors, got empty first shape")?;
     let dtype = parts[0].dtype();
     for (idx, part) in parts.iter().enumerate() {
         ensure!(
@@ -2322,27 +2529,119 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state(
         channels
     );
 
-    let weight_2d = cuda_reshape(weight, &[channels, kernel])?;
-    let padded = cuda_cat_rows(&[conv_state.clone(), input.clone()])?;
-    let mut output = CudaTrainTensor::new(Tensor::zeros(
-        (rows, channels),
-        DType::F32,
-        input.as_tensor().device(),
-    )?)?;
-    for j in 0..kernel {
-        let x_slice = cuda_narrow_rows(&padded, j, rows)?;
-        let w_col_2d = cuda_narrow_last_dim(&weight_2d, j, 1)?;
-        let w_col = cuda_reshape(&w_col_2d, &[channels])?;
-        let term = cuda_mul_last_dim_weight(&x_slice, &w_col)?;
-        output = cuda_add(&output, &term)?;
-    }
+    let output_tensor = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32(
+        input.as_tensor(),
+        weight.as_tensor(),
+        conv_state.as_tensor(),
+    )
+    .context("cuda_causal_depthwise_conv1d_prefill_with_state: fused F32 conv")?;
+    let needs_grad = [input, weight, conv_state]
+        .iter()
+        .any(|t| t.requires_grad() || t.grad_fn().is_some() || t.param_id().is_some());
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(CausalDepthwiseConv1dWithStateBackward {
+            inputs: vec![input.clone(), weight.clone(), conv_state.clone()],
+            weight: weight.clone(),
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    let output = CudaTrainTensor::from_op(output_tensor, grad_fn)?;
 
     let next_state = if rows >= state_rows {
-        cuda_narrow_rows(input, rows - state_rows, state_rows)?
+        cuda_narrow_rows(input, rows - state_rows, state_rows)?.detach()
     } else {
         let old_part = cuda_narrow_rows(conv_state, rows, state_rows - rows)?;
-        cuda_cat_rows(&[old_part, input.clone()])?
+        cuda_cat_rows(&[old_part, input.clone()])?.detach()
     };
+    Ok((output, next_state))
+}
+
+pub fn cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+    conv_state: &CudaTrainTensor,
+) -> Result<(CudaTrainTensor, CudaTrainTensor)> {
+    ensure!(
+        input.dtype() == DType::F32 && weight.dtype() == DType::F32 && conv_state.dtype() == DType::F32,
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
+        input.dtype(),
+        weight.dtype(),
+        conv_state.dtype()
+    );
+    ensure!(
+        input.dims().len() == 2 && conv_state.dims().len() == 2,
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: expected input/state rank-2, got {:?}/{:?}",
+        input.dims(),
+        conv_state.dims()
+    );
+    ensure!(
+        weight.dims().len() == 2 || weight.dims().len() == 3,
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: expected weight [channels,k] or [channels,1,k], got {:?}",
+        weight.dims()
+    );
+    ensure!(
+        !weight.requires_grad() && weight.grad_fn().is_none() && weight.param_id().is_none(),
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: weight gradients are not supported"
+    );
+    ensure!(
+        !conv_state.requires_grad() && conv_state.grad_fn().is_none() && conv_state.param_id().is_none(),
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: state gradients are not supported"
+    );
+    ensure!(
+        input.as_tensor().is_contiguous(),
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: input must be contiguous"
+    );
+    let rows = input.dims()[0];
+    let channels = input.dims()[1];
+    let kernel = *weight.dims().last().context(
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: empty weight shape",
+    )?;
+    ensure!(
+        kernel > 1,
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: kernel must be > 1"
+    );
+    ensure!(
+        weight.dims()[0] == channels,
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: weight channels {} != input channels {}",
+        weight.dims()[0],
+        channels
+    );
+    if weight.dims().len() == 3 {
+        ensure!(
+            weight.dims()[1] == 1,
+            "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: rank-3 weight middle dim must be 1, got {}",
+            weight.dims()[1]
+        );
+    }
+    let state_rows = kernel - 1;
+    ensure!(
+        conv_state.dims() == [state_rows, channels],
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: state shape {:?} != [{},{}]",
+        conv_state.dims(),
+        state_rows,
+        channels
+    );
+
+    let next_state = if rows >= state_rows {
+        cuda_narrow_rows(input, rows - state_rows, state_rows)?.detach()
+    } else {
+        let old_part = cuda_narrow_rows(conv_state, rows, state_rows - rows)?;
+        cuda_cat_rows(&[old_part, input.clone()])?.detach()
+    };
+    let output_tensor = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_inplace(
+        input.as_tensor(),
+        weight.as_tensor(),
+        conv_state.as_tensor(),
+    )
+    .context("cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: fused in-place F32 conv")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(CausalDepthwiseConv1dInputGradBackward {
+            inputs: vec![input.clone()],
+            weight: weight.clone(),
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    let output = CudaTrainTensor::from_op(output_tensor, grad_fn)?;
     Ok((output, next_state))
 }
 
@@ -2625,8 +2924,8 @@ pub fn cuda_index_select_rows(
     indices: &[usize],
 ) -> Result<CudaTrainTensor> {
     ensure!(
-        input.dtype() == DType::F32,
-        "cuda_index_select_rows: expected F32 input, got {:?}",
+        matches!(input.dtype(), DType::F32 | DType::BF16),
+        "cuda_index_select_rows: expected F32/BF16 input, got {:?}",
         input.dtype()
     );
     ensure!(
@@ -2884,9 +3183,8 @@ pub fn cuda_flash_attn_prefill_causal_bf16(
         .context("cuda_flash_attn_prefill_causal_bf16: reshape v")?
         .contiguous()
         .context("cuda_flash_attn_prefill_causal_bf16: contiguous v")?;
-    let (out_4d, softmax_lse) =
-        kiln_flash_attn::flash_attn_fwd(&q_4d, &k_4d, &v_4d, scale, true)
-            .context("cuda_flash_attn_prefill_causal_bf16: flash_attn_fwd")?;
+    let (out_4d, softmax_lse) = kiln_flash_attn::flash_attn_fwd(&q_4d, &k_4d, &v_4d, scale, true)
+        .context("cuda_flash_attn_prefill_causal_bf16: flash_attn_fwd")?;
     let out = out_4d
         .reshape((rows, heads_q, head_dim))
         .context("cuda_flash_attn_prefill_causal_bf16: reshape output")?;
@@ -3102,11 +3400,9 @@ impl CudaBackwardOp for AddLastDimBiasBackward {
         }
         Ok(vec![
             Some(input_grad),
-            Some(CudaTrainTensor::new(
-                bias_grad
-                    .contiguous()
-                    .context("cuda_add_last_dim_bias backward: contiguous bias grad")?,
-            )?),
+            Some(CudaTrainTensor::new(bias_grad.contiguous().context(
+                "cuda_add_last_dim_bias backward: contiguous bias grad",
+            )?)?),
         ])
     }
 }
@@ -3208,11 +3504,9 @@ impl CudaBackwardOp for MulLastDimWeightBackward {
         }
         Ok(vec![
             Some(CudaTrainTensor::new(input_grad)?),
-            Some(CudaTrainTensor::new(
-                weight_grad
-                    .contiguous()
-                    .context("cuda_mul_last_dim_weight backward: contiguous weight grad")?,
-            )?),
+            Some(CudaTrainTensor::new(weight_grad.contiguous().context(
+                "cuda_mul_last_dim_weight backward: contiguous weight grad",
+            )?)?),
         ])
     }
 }
@@ -3249,11 +3543,9 @@ impl CudaBackwardOp for MulLastDimBroadcastBackward {
             .context("cuda_mul_last_dim_broadcast backward: reduce last dim")?;
         Ok(vec![
             Some(CudaTrainTensor::new(input_grad)?),
-            Some(CudaTrainTensor::new(
-                scalar_grad
-                    .contiguous()
-                    .context("cuda_mul_last_dim_broadcast backward: contiguous scalar grad")?,
-            )?),
+            Some(CudaTrainTensor::new(scalar_grad.contiguous().context(
+                "cuda_mul_last_dim_broadcast backward: contiguous scalar grad",
+            )?)?),
         ])
     }
 }
@@ -3284,7 +3576,8 @@ impl CudaBackwardOp for DivBackward {
             .as_tensor()
             .broadcast_div(rhs.as_tensor())
             .context("cuda_div backward: lhs grad")?;
-        let rhs_sq = (rhs.as_tensor() * rhs.as_tensor()).context("cuda_div backward: rhs square")?;
+        let rhs_sq =
+            (rhs.as_tensor() * rhs.as_tensor()).context("cuda_div backward: rhs square")?;
         let neg_lhs = lhs
             .as_tensor()
             .affine(-1.0, 0.0)
@@ -3749,21 +4042,28 @@ impl CudaBackwardOp for NarrowRowsBackward {
         let mut chunks = Vec::new();
         if self.start > 0 {
             chunks.push(
-                Tensor::zeros((self.start, dim), grad_out.dtype(), grad_out.as_tensor().device())
-                    .context("cuda_narrow_rows backward: prefix zeros")?,
+                Tensor::zeros(
+                    (self.start, dim),
+                    grad_out.dtype(),
+                    grad_out.as_tensor().device(),
+                )
+                .context("cuda_narrow_rows backward: prefix zeros")?,
             );
         }
         chunks.push(grad_out.as_tensor().clone());
         let suffix = rows - self.start - self.len;
         if suffix > 0 {
             chunks.push(
-                Tensor::zeros((suffix, dim), grad_out.dtype(), grad_out.as_tensor().device())
-                    .context("cuda_narrow_rows backward: suffix zeros")?,
+                Tensor::zeros(
+                    (suffix, dim),
+                    grad_out.dtype(),
+                    grad_out.as_tensor().device(),
+                )
+                .context("cuda_narrow_rows backward: suffix zeros")?,
             );
         }
         let refs: Vec<&Tensor> = chunks.iter().collect();
-        let grad =
-            Tensor::cat(&refs, 0).context("cuda_narrow_rows backward: cat padded grad")?;
+        let grad = Tensor::cat(&refs, 0).context("cuda_narrow_rows backward: cat padded grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -4009,9 +4309,46 @@ impl CudaBackwardOp for SiluBackward {
         let bracket = x_term
             .affine(1.0, 1.0)
             .context("cuda_silu backward: derivative bracket")?;
-        let deriv = (self.sigmoid.as_tensor() * &bracket)
-            .context("cuda_silu backward: derivative")?;
+        let deriv =
+            (self.sigmoid.as_tensor() * &bracket).context("cuda_silu backward: derivative")?;
         let grad = (grad_out.as_tensor() * &deriv).context("cuda_silu backward: input grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct SiluInplaceBackward {
+    output: CudaTrainTensor,
+    sigmoid: CudaTrainTensor,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SiluInplaceBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_silu_inplace"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_silu_inplace backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let one_minus_sigmoid = self
+            .sigmoid
+            .as_tensor()
+            .affine(-1.0, 1.0)
+            .context("cuda_silu_inplace backward: one minus sigmoid")?;
+        let y_term = (self.output.as_tensor() * &one_minus_sigmoid)
+            .context("cuda_silu_inplace backward: y * (1 - sigmoid)")?;
+        let deriv = (self.sigmoid.as_tensor() + &y_term)
+            .context("cuda_silu_inplace backward: derivative")?;
+        let grad =
+            (grad_out.as_tensor() * &deriv).context("cuda_silu_inplace backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -4114,8 +4451,7 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
             .as_tensor()
             .narrow(0, 0, seq_len - 1)
             .context("cuda_shifted_cross_entropy_loss backward: shift logits")?;
-        let active_indices_u32: Vec<u32> =
-            active_positions.iter().map(|&idx| idx as u32).collect();
+        let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
         let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
             .context("cuda_shifted_cross_entropy_loss backward: active indices")?;
         let active_logits = shift_logits
@@ -4255,8 +4591,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             .as_tensor()
             .narrow(0, 0, seq_len - 1)
             .context("cuda_shifted_linear_cross_entropy_loss backward: shift hidden")?;
-        let active_indices_u32: Vec<u32> =
-            active_positions.iter().map(|&idx| idx as u32).collect();
+        let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
         let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
             .context("cuda_shifted_linear_cross_entropy_loss backward: active indices")?;
         let active_hidden = shift_hidden
@@ -4273,18 +4608,22 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                 .narrow(1, chunk_start, chunk_len)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: head chunk")?
                 .contiguous()
-                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous head chunk")?;
-            let logits_chunk = active_hidden
-                .matmul(&head_chunk)
-                .context("cuda_shifted_linear_cross_entropy_loss backward: logits chunk")?;
+                .context(
+                    "cuda_shifted_linear_cross_entropy_loss backward: contiguous head chunk",
+                )?;
+            let logits_chunk = cuda_f32_hidden_head_matmul(
+                &active_hidden,
+                &head_chunk,
+                "cuda_shifted_linear_cross_entropy_loss backward: logits chunk",
+            )?;
             let chunk_max = logits_chunk
                 .max_keepdim(D::Minus1)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: chunk max")?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
-                    let shifted = logits_chunk
-                        .broadcast_sub(&chunk_max)
-                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial shift")?;
+                    let shifted = logits_chunk.broadcast_sub(&chunk_max).context(
+                        "cuda_shifted_linear_cross_entropy_loss backward: initial shift",
+                    )?;
                     let chunk_sumexp = shifted
                         .exp()
                         .context("cuda_shifted_linear_cross_entropy_loss backward: initial exp")?
@@ -4300,9 +4639,9 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                         .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale logits")?
                         .exp()
                         .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale")?;
-                    let scaled_prev = prev_sumexp
-                        .broadcast_mul(&prev_scale)
-                        .context("cuda_shifted_linear_cross_entropy_loss backward: scale previous sum")?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale).context(
+                        "cuda_shifted_linear_cross_entropy_loss backward: scale previous sum",
+                    )?;
                     let shifted = logits_chunk
                         .broadcast_sub(&new_max)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: chunk shift")?;
@@ -4323,8 +4662,8 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
         }
         let running_max =
             running_max.context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
-        let running_sumexp =
-            running_sumexp.context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
+        let running_sumexp = running_sumexp
+            .context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
 
         let mut grad_active_hidden =
             Tensor::zeros((active_positions.len(), hidden_size), DType::F32, device)
@@ -4337,10 +4676,14 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                 .narrow(1, chunk_start, chunk_len)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: grad head chunk")?
                 .contiguous()
-                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous grad chunk")?;
-            let logits_chunk = active_hidden
-                .matmul(&head_chunk)
-                .context("cuda_shifted_linear_cross_entropy_loss backward: grad logits chunk")?;
+                .context(
+                    "cuda_shifted_linear_cross_entropy_loss backward: contiguous grad chunk",
+                )?;
+            let logits_chunk = cuda_f32_hidden_head_matmul(
+                &active_hidden,
+                &head_chunk,
+                "cuda_shifted_linear_cross_entropy_loss backward: grad logits chunk",
+            )?;
             let shifted = logits_chunk
                 .broadcast_sub(&running_max)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: grad shift")?;
@@ -4354,29 +4697,45 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                 .t()
                 .context("cuda_shifted_linear_cross_entropy_loss backward: head transpose")?
                 .contiguous()
-                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous head transpose")?;
-            let chunk_contrib = softmax_chunk
-                .matmul(&head_chunk_t)
-                .context("cuda_shifted_linear_cross_entropy_loss backward: chunk grad hidden")?;
-            grad_active_hidden = (&grad_active_hidden + chunk_contrib)
-                .context("cuda_shifted_linear_cross_entropy_loss backward: accumulate grad hidden")?;
+                .context(
+                    "cuda_shifted_linear_cross_entropy_loss backward: contiguous head transpose",
+                )?;
+            let chunk_contrib = cuda_f32_hidden_head_matmul(
+                &softmax_chunk,
+                &head_chunk_t,
+                "cuda_shifted_linear_cross_entropy_loss backward: chunk grad hidden",
+            )?;
+            grad_active_hidden = (&grad_active_hidden + chunk_contrib).context(
+                "cuda_shifted_linear_cross_entropy_loss backward: accumulate grad hidden",
+            )?;
             chunk_start += chunk_len;
         }
 
         let mut correct_heads = Vec::with_capacity(active_labels.len());
         for &label in &active_labels {
-            correct_heads.push(
-                lm_head
-                    .as_tensor()
-                    .narrow(1, label, 1)
-                    .context("cuda_shifted_linear_cross_entropy_loss backward: correct head col")?
-                    .contiguous()
-                    .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head col")?
-                    .t()
-                    .context("cuda_shifted_linear_cross_entropy_loss backward: correct head transpose")?
-                    .contiguous()
-                    .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head")?,
-            );
+            let correct_head = lm_head
+                .as_tensor()
+                .narrow(1, label, 1)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: correct head col")?
+                .contiguous()
+                .context(
+                    "cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head col",
+                )?
+                .t()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: correct head transpose")?
+                .contiguous()
+                .context(
+                    "cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head",
+                )?;
+            correct_heads.push(match correct_head.dtype() {
+                DType::F32 => correct_head,
+                DType::BF16 => correct_head
+                    .to_dtype(DType::F32)
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: correct head f32")?,
+                dtype => anyhow::bail!(
+                    "cuda_shifted_linear_cross_entropy_loss backward: unsupported correct head dtype {dtype:?}"
+                ),
+            });
         }
         let correct_refs: Vec<&Tensor> = correct_heads.iter().collect();
         let correct_head_rows = Tensor::cat(&correct_refs, 0)
@@ -4579,6 +4938,227 @@ impl CudaBackwardOp for MatmulBackward {
     }
 }
 
+#[derive(Debug)]
+struct MatmulF32Bf16wBackward {
+    inputs: Vec<CudaTrainTensor>,
+    weight: CudaTrainTensor,
+}
+
+impl CudaBackwardOp for MatmulF32Bf16wBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_matmul_f32_bf16w"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_matmul_f32_bf16w backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let grad = kiln_rmsnorm_kernel::matmul_f32_bf16w_bwd_lhs(
+            grad_out.as_tensor(),
+            self.weight.as_tensor(),
+        )
+        .context("cuda_matmul_f32_bf16w backward: lhs grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct FusedLoraLinearBackward {
+    inputs: Vec<CudaTrainTensor>,
+    base_weight: CudaTrainTensor,
+    scale: f32,
+}
+
+impl CudaBackwardOp for FusedLoraLinearBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_lora_linear_fused"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 3,
+            "cuda_lora_linear_fused backward expected three inputs, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let a = &self.inputs[1];
+        let b = &self.inputs[2];
+        let grad = grad_out
+            .as_tensor()
+            .contiguous()
+            .context("cuda_lora_linear_fused backward: grad_out contiguous")?;
+
+        let base_input_grad = match self.base_weight.dtype() {
+            DType::F32 => {
+                let weight_t = self
+                    .base_weight
+                    .as_tensor()
+                    .t()
+                    .context("cuda_lora_linear_fused backward: base transpose")?
+                    .contiguous()
+                    .context("cuda_lora_linear_fused backward: base transpose contiguous")?;
+                grad.matmul(&weight_t)
+                    .context("cuda_lora_linear_fused backward: base input grad")?
+            }
+            DType::BF16 => {
+                kiln_rmsnorm_kernel::matmul_f32_bf16w_bwd_lhs(&grad, self.base_weight.as_tensor())
+                    .context("cuda_lora_linear_fused backward: BF16 base input grad")?
+            }
+            dtype => {
+                anyhow::bail!("cuda_lora_linear_fused backward: unsupported base dtype {dtype:?}")
+            }
+        };
+
+        let scale = self.scale as f64;
+        let grad_delta = grad
+            .affine(scale, 0.0)
+            .context("cuda_lora_linear_fused backward: scale grad")?;
+        let a_t = a
+            .as_tensor()
+            .t()
+            .context("cuda_lora_linear_fused backward: A transpose")?
+            .contiguous()
+            .context("cuda_lora_linear_fused backward: A transpose contiguous")?;
+        let hidden = input
+            .as_tensor()
+            .matmul(&a_t)
+            .context("cuda_lora_linear_fused backward: recompute hidden")?;
+        let grad_hidden = grad_delta
+            .matmul(b.as_tensor())
+            .context("cuda_lora_linear_fused backward: grad hidden")?;
+        let lora_input_grad = grad_hidden
+            .matmul(a.as_tensor())
+            .context("cuda_lora_linear_fused backward: LoRA input grad")?;
+        let input_grad = (&base_input_grad + &lora_input_grad)
+            .context("cuda_lora_linear_fused backward: input grad add")?;
+
+        let grad_hidden_t = grad_hidden
+            .t()
+            .context("cuda_lora_linear_fused backward: grad_hidden transpose")?
+            .contiguous()
+            .context("cuda_lora_linear_fused backward: grad_hidden transpose contiguous")?;
+        let grad_a = grad_hidden_t
+            .matmul(input.as_tensor())
+            .context("cuda_lora_linear_fused backward: A grad")?;
+        let grad_delta_t = grad_delta
+            .t()
+            .context("cuda_lora_linear_fused backward: grad_delta transpose")?
+            .contiguous()
+            .context("cuda_lora_linear_fused backward: grad_delta transpose contiguous")?;
+        let grad_b = grad_delta_t
+            .matmul(&hidden)
+            .context("cuda_lora_linear_fused backward: B grad")?;
+
+        Ok(vec![
+            Some(CudaTrainTensor::new(input_grad)?),
+            Some(CudaTrainTensor::new(grad_a)?),
+            Some(CudaTrainTensor::new(grad_b)?),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct CausalDepthwiseConv1dWithStateBackward {
+    inputs: Vec<CudaTrainTensor>,
+    weight: CudaTrainTensor,
+}
+
+impl CudaBackwardOp for CausalDepthwiseConv1dWithStateBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_causal_depthwise_conv1d_prefill_with_state"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 3,
+            "cuda_causal_depthwise_conv1d_prefill_with_state backward expected three inputs, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let weight = &self.inputs[1];
+        let state = &self.inputs[2];
+        let input_grad = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+            grad_out.as_tensor(),
+            self.weight.as_tensor(),
+        )
+        .context("cuda_causal_depthwise_conv1d_prefill_with_state backward: input grad")?;
+        let weight_grad = (weight.requires_grad()
+            || weight.grad_fn().is_some()
+            || weight.param_id().is_some())
+        .then(|| {
+            kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_weight(
+                grad_out.as_tensor(),
+                input.as_tensor(),
+                state.as_tensor(),
+                weight.as_tensor(),
+            )
+            .context("cuda_causal_depthwise_conv1d_prefill_with_state backward: weight grad")
+            .and_then(CudaTrainTensor::new)
+        })
+        .transpose()?;
+        let state_grad =
+            (state.requires_grad() || state.grad_fn().is_some() || state.param_id().is_some())
+                .then(|| {
+                    kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_state(
+                        grad_out.as_tensor(),
+                        self.weight.as_tensor(),
+                    )
+                    .context("cuda_causal_depthwise_conv1d_prefill_with_state backward: state grad")
+                    .and_then(CudaTrainTensor::new)
+                })
+                .transpose()?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(input_grad)?),
+            weight_grad,
+            state_grad,
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct CausalDepthwiseConv1dInputGradBackward {
+    inputs: Vec<CudaTrainTensor>,
+    weight: CudaTrainTensor,
+}
+
+impl CudaBackwardOp for CausalDepthwiseConv1dInputGradBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let input_grad = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+            grad_out.as_tensor(),
+            self.weight.as_tensor(),
+        )
+        .context("cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad backward: input grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(input_grad)?)])
+    }
+}
+
 fn collect_topo(
     t: &CudaTrainTensor,
     visited: &mut HashSet<u64>,
@@ -4730,7 +5310,11 @@ mod tests {
             assert_eq!(layer.recurrent_state.dims(), &[3, 4, 5, 6]);
             assert_eq!(layer.conv_n_elements, 3 * 7 * 3);
             assert_eq!(layer.conv_state.dims(), &[3, 7, 3]);
-            assert!(layer.recurrent_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
+            assert!(layer
+                .recurrent_state
+                .to_vec_f32()?
+                .iter()
+                .all(|v| *v == 0.0));
             assert!(layer.conv_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
         }
         Ok(())
@@ -4835,11 +5419,17 @@ mod tests {
         let loss = cuda_sum_all(&out)?;
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            grads
+                .get(input_id)
+                .context("missing input grad")?
+                .to_vec_f32()?,
             vec![1.0; 6]
         );
         assert_eq!(
-            grads.get(bias_id).context("missing bias grad")?.to_vec_f32()?,
+            grads
+                .get(bias_id)
+                .context("missing bias grad")?
+                .to_vec_f32()?,
             vec![2.0; 3]
         );
         Ok(())
@@ -4871,7 +5461,10 @@ mod tests {
         let loss = cuda_sum_all(&out)?;
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            grads
+                .get(input_id)
+                .context("missing input grad")?
+                .to_vec_f32()?,
             vec![0.5, -2.0, 3.0, 0.5, -2.0, 3.0]
         );
         assert_eq!(
@@ -5013,8 +5606,14 @@ mod tests {
 
         assert_eq!(loss.to_vec_f32()?, vec![5.0]);
         let grads = cuda_backward(&loss)?;
-        assert_eq!(grads.get(lhs_id).expect("lhs grad").to_vec_f32()?, vec![1.0]);
-        assert_eq!(grads.get(rhs_id).expect("rhs grad").to_vec_f32()?, vec![1.0]);
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![1.0]
+        );
+        assert_eq!(
+            grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
+            vec![1.0]
+        );
         Ok(())
     }
 
@@ -5095,8 +5694,14 @@ mod tests {
 
         assert_eq!(loss.to_vec_f32()?, vec![6.0]);
         let grads = cuda_backward(&loss)?;
-        assert_eq!(grads.get(lhs_id).expect("lhs grad").to_vec_f32()?, vec![3.0]);
-        assert_eq!(grads.get(rhs_id).expect("rhs grad").to_vec_f32()?, vec![2.0]);
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![3.0]
+        );
+        assert_eq!(
+            grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
+            vec![2.0]
+        );
         Ok(())
     }
 
@@ -5129,9 +5734,7 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_mul_last_dim_broadcast smoke: {err}"
-                );
+                eprintln!("CUDA unavailable, skipping cuda_mul_last_dim_broadcast smoke: {err}");
                 return Ok(());
             }
         };
@@ -5274,11 +5877,8 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
-            vec![3.0f32, 4.0, 1.0, -2.0],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let input_tensor =
+            Tensor::from_vec(vec![3.0f32, 4.0, 1.0, -2.0], (2usize, 2usize), &device)?;
         let weight_tensor = Tensor::from_vec(vec![0.0f32, 0.5], (2usize,), &device)?;
         let input_id = input_tensor.id();
         let weight_id = weight_tensor.id();
@@ -5287,12 +5887,7 @@ mod tests {
         let normed = cuda_rmsnorm(&input, &weight, 0.0)?;
         let loss = cuda_sum_all(&normed)?;
 
-        let expected_out = vec![
-            0.84852815f32,
-            1.6970563,
-            0.6324555,
-            -1.8973665,
-        ];
+        let expected_out = vec![0.84852815f32, 1.6970563, 0.6324555, -1.8973665];
         let actual_out = normed.to_vec_f32()?;
         for (idx, (actual, expected)) in actual_out.iter().zip(expected_out.iter()).enumerate() {
             assert!(
@@ -5513,13 +6108,17 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_transpose_last_two backward smoke: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_transpose_last_two backward smoke: {err}"
+                );
                 return Ok(());
             }
         };
 
         let param_tensor = Tensor::from_vec(
-            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0],
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0,
+            ],
             (2usize, 2usize, 3usize),
             &device,
         )?;
@@ -5527,7 +6126,9 @@ mod tests {
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let transposed = cuda_transpose_last_two(&param)?;
         let weights = CudaTrainTensor::new(Tensor::from_vec(
-            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0],
+            vec![
+                1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0,
+            ],
             (2usize, 3usize, 2usize),
             &device,
         )?)?;
@@ -5615,6 +6216,48 @@ mod tests {
     }
 
     #[test]
+    fn cuda_matmul_f32_bf16w_backward_matches_expected_lhs_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_matmul_f32_bf16w smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let lhs_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let weight_tensor = Tensor::from_vec(
+            vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0],
+            (3usize, 2usize),
+            &device,
+        )?
+        .to_dtype(DType::BF16)?;
+        let lhs_id = lhs_tensor.id();
+        let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
+        let weight = CudaTrainTensor::new(weight_tensor)?;
+        let product = cuda_matmul_f32_bf16w(&lhs, &weight)?;
+        let loss = cuda_sum_all(&product)?;
+
+        assert_eq!(product.to_vec_f32()?, vec![46.0, 52.0, 109.0, 124.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![331.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![11.0, 15.0, 19.0, 11.0, 15.0, 19.0]
+        );
+        assert_eq!(
+            grads.len(),
+            1,
+            "frozen BF16 weight should not receive a grad"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn cuda_batched_matmul_sum_backward_matches_expected_grads() -> Result<()> {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
@@ -5625,12 +6268,16 @@ mod tests {
         };
 
         let lhs_tensor = Tensor::from_vec(
-            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0],
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0,
+            ],
             (2usize, 2usize, 3usize),
             &device,
         )?;
         let rhs_tensor = Tensor::from_vec(
-            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0],
+            vec![
+                1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0,
+            ],
             (2usize, 3usize, 2usize),
             &device,
         )?;
@@ -5834,8 +6481,7 @@ mod tests {
                     g -= 1.0;
                 }
                 expected_grad[row * 2] += g * head_data[vocab_idx] / active.len() as f32;
-                expected_grad[row * 2 + 1] +=
-                    g * head_data[4 + vocab_idx] / active.len() as f32;
+                expected_grad[row * 2 + 1] += g * head_data[4 + vocab_idx] / active.len() as f32;
             }
         }
         expected_loss /= active.len() as f32;
@@ -6036,26 +6682,13 @@ mod tests {
             }
         };
 
-        let input_tensor = Tensor::from_vec(
-            vec![0.5f32, -1.0, 1.5, 0.25],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let gate_tensor = Tensor::from_vec(
-            vec![0.2f32, -0.3, 0.4, 0.1],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let up_tensor = Tensor::from_vec(
-            vec![0.7f32, -0.2, -0.5, 0.6],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let down_tensor = Tensor::from_vec(
-            vec![0.3f32, -0.4, 0.8, 0.2],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let input_tensor =
+            Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
+        let gate_tensor =
+            Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
+        let up_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
+        let down_tensor =
+            Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let input_id = input_tensor.id();
         let gate_id = gate_tensor.id();
         let up_id = up_tensor.id();
@@ -6099,55 +6732,33 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_full_attention_layer backward smoke: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_full_attention_layer backward smoke: {err}"
+                );
                 return Ok(());
             }
         };
 
-        let input_tensor = Tensor::from_vec(
-            vec![0.5f32, -1.0, 1.5, 0.25],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let input_tensor =
+            Tensor::from_vec(vec![0.5f32, -1.0, 1.5, 0.25], (2usize, 2usize), &device)?;
         let input_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
         let q_tensor = Tensor::from_vec(
             vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
             (2usize, 4usize),
             &device,
         )?;
-        let k_tensor = Tensor::from_vec(
-            vec![0.1f32, 0.6, 0.8, -0.2],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let v_tensor = Tensor::from_vec(
-            vec![0.7f32, -0.2, -0.5, 0.6],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let k_tensor = Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
+        let v_tensor = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
         let q_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
         let k_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
-        let o_tensor = Tensor::from_vec(
-            vec![0.3f32, -0.4, 0.8, 0.2],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let o_tensor = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
         let post_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
-        let gate_tensor = Tensor::from_vec(
-            vec![0.25f32, -0.15, 0.35, 0.05],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let up_tensor = Tensor::from_vec(
-            vec![0.45f32, 0.2, -0.1, 0.55],
-            (2usize, 2usize),
-            &device,
-        )?;
-        let down_tensor = Tensor::from_vec(
-            vec![0.6f32, -0.25, 0.15, 0.5],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let gate_tensor =
+            Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
+        let up_tensor =
+            Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+        let down_tensor =
+            Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
         let cos = CudaTrainTensor::new(Tensor::from_vec(
             vec![1.0f32, 0.0],
             (2usize, 1usize),
@@ -6250,8 +6861,11 @@ mod tests {
             }
         };
 
-        let param_tensor =
-            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2usize, 1usize, 2usize), &device)?;
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0],
+            (2usize, 1usize, 2usize),
+            &device,
+        )?;
         let param_id = param_tensor.id();
         let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
         let repeated = cuda_repeat_kv_heads(&param, 2)?;
@@ -6264,7 +6878,10 @@ mod tests {
         let loss = cuda_sum_all(&weighted)?;
 
         assert_eq!(repeated.dims(), &[4, 1, 2]);
-        assert_eq!(repeated.to_vec_f32()?, vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+        assert_eq!(
+            repeated.to_vec_f32()?,
+            vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]
+        );
         assert_eq!(loss.to_vec_f32()?, vec![274.0]);
         let grads = cuda_backward(&loss)?;
         assert_eq!(
@@ -6358,11 +6975,8 @@ mod tests {
             }
         };
 
-        let first_tensor = Tensor::from_vec(
-            vec![1.0f32, 2.0, 3.0, 4.0],
-            (2usize, 2usize),
-            &device,
-        )?;
+        let first_tensor =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2usize, 2usize), &device)?;
         let first_id = first_tensor.id();
         let first = CudaTrainTensor::parameter(first_tensor, first_id)?;
         let second_tensor =
@@ -6386,7 +7000,10 @@ mod tests {
         assert_eq!(loss.to_vec_f32()?, vec![650.0]);
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(first_id).context("missing first grad")?.to_vec_f32()?,
+            grads
+                .get(first_id)
+                .context("missing first grad")?
+                .to_vec_f32()?,
             vec![1.0, 10.0, 2.0, 20.0]
         );
         assert_eq!(
@@ -6433,7 +7050,10 @@ mod tests {
         );
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            grads
+                .get(input_id)
+                .context("missing input grad")?
+                .to_vec_f32()?,
             vec![111.0, 222.0, 110.0, 220.0, 100.0, 200.0]
         );
         assert_eq!(
@@ -6471,12 +7091,18 @@ mod tests {
         let short = CudaTrainTensor::new(short_tensor)?;
         let short_state = cuda_causal_depthwise_conv1d_next_state_zero_state(&short, 4)?;
         assert_eq!(short_state.dims(), &[3, 2]);
-        assert_eq!(short_state.to_vec_f32()?, vec![0.0, 0.0, 0.0, 0.0, 7.0, 8.0]);
+        assert_eq!(
+            short_state.to_vec_f32()?,
+            vec![0.0, 0.0, 0.0, 0.0, 7.0, 8.0]
+        );
 
         let loss = cuda_sum_all(&state)?;
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            grads
+                .get(input_id)
+                .context("missing input grad")?
+                .to_vec_f32()?,
             vec![0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
         );
         Ok(())
@@ -6518,7 +7144,10 @@ mod tests {
         assert_eq!(next_state.to_vec_f32()?, vec![3.0, 4.0, 5.0, 6.0]);
         let grads = cuda_backward(&loss)?;
         assert_eq!(
-            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            grads
+                .get(input_id)
+                .context("missing input grad")?
+                .to_vec_f32()?,
             vec![110.0, 220.0, 100.0, 200.0]
         );
         assert_eq!(
@@ -6529,7 +7158,10 @@ mod tests {
             vec![2.0, 4.5, 8.0, 3.0, 6.0, 10.0]
         );
         assert_eq!(
-            grads.get(state_id).context("missing state grad")?.to_vec_f32()?,
+            grads
+                .get(state_id)
+                .context("missing state grad")?
+                .to_vec_f32()?,
             vec![1.0, 2.0, 11.0, 22.0]
         );
         Ok(())
@@ -6547,8 +7179,7 @@ mod tests {
 
         let q_tensor = Tensor::from_vec(vec![0.5f32, -1.0], (1usize, 2usize), &device)?;
         let k_tensor = Tensor::from_vec(vec![1.5f32, 0.25], (1usize, 2usize), &device)?;
-        let v_tensor =
-            Tensor::from_vec(vec![0.1f32, -0.2, 0.3], (1usize, 3usize), &device)?;
+        let v_tensor = Tensor::from_vec(vec![0.1f32, -0.2, 0.3], (1usize, 3usize), &device)?;
         let beta_tensor = Tensor::from_vec(vec![0.4f32], (1usize, 1usize), &device)?;
         let g_tensor = Tensor::from_vec(vec![0.0f32], (1usize, 1usize), &device)?;
         let state_tensor = Tensor::from_vec(
@@ -6599,7 +7230,10 @@ mod tests {
             );
         }
 
-        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let loss = cuda_add(
+            &cuda_sum_all(&result.out)?,
+            &cuda_sum_all(&result.next_state)?,
+        )?;
         let grads = cuda_backward(&loss)?;
         assert!(grads.get(q_id).is_some());
         assert!(grads.get(k_id).is_some());
@@ -6620,10 +7254,8 @@ mod tests {
             }
         };
 
-        let q_tensor =
-            Tensor::from_vec(vec![0.5f32, -1.0, 0.25, 0.75], (2usize, 2usize), &device)?;
-        let k_tensor =
-            Tensor::from_vec(vec![1.5f32, 0.25, -0.5, 1.0], (2usize, 2usize), &device)?;
+        let q_tensor = Tensor::from_vec(vec![0.5f32, -1.0, 0.25, 0.75], (2usize, 2usize), &device)?;
+        let k_tensor = Tensor::from_vec(vec![1.5f32, 0.25, -0.5, 1.0], (2usize, 2usize), &device)?;
         let v_tensor = Tensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, 0.2, -0.1],
             (2usize, 3usize),
@@ -6679,7 +7311,10 @@ mod tests {
             );
         }
 
-        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let loss = cuda_add(
+            &cuda_sum_all(&result.out)?,
+            &cuda_sum_all(&result.next_state)?,
+        )?;
         let grads = cuda_backward(&loss)?;
         assert!(grads.get(q_id).is_some());
         assert!(grads.get(k_id).is_some());
@@ -6721,7 +7356,9 @@ mod tests {
             Tensor::from_vec(vec![0.4f32, 0.6, 0.5, 0.25], (4usize, 1usize), &device)?;
         let g_tensor = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], (4usize, 1usize), &device)?;
         let state_tensor = Tensor::from_vec(
-            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.5, -0.5, 1.0, 1.5, 0.25, -1.0],
+            vec![
+                1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.5, -0.5, 1.0, 1.5, 0.25, -1.0,
+            ],
             (4usize, 3usize),
             &device,
         )?;
@@ -6742,8 +7379,8 @@ mod tests {
         assert_eq!(result.out.dims(), &[4, 3]);
         assert_eq!(result.next_state.dims(), &[4, 3]);
         let expected_out = [
-            -3.98f32, -4.89, -5.64, 1.3675, 1.49, 1.815, 0.3, -0.36875, 0.95, 1.29375,
-            0.29882812, -0.928125,
+            -3.98f32, -4.89, -5.64, 1.3675, 1.49, 1.815, 0.3, -0.36875, 0.95, 1.29375, 0.29882812,
+            -0.928125,
         ];
         for (idx, (actual, expected)) in result
             .out
@@ -6758,8 +7395,18 @@ mod tests {
             );
         }
         let expected_state = [
-            0.634f32, 0.737, 1.302, 1.612, 1.741, 1.986, 0.3125, -0.20390625, 0.70625,
-            1.29375, 0.29882812, -0.928125,
+            0.634f32,
+            0.737,
+            1.302,
+            1.612,
+            1.741,
+            1.986,
+            0.3125,
+            -0.20390625,
+            0.70625,
+            1.29375,
+            0.29882812,
+            -0.928125,
         ];
         for (idx, (actual, expected)) in result
             .next_state
@@ -6774,7 +7421,10 @@ mod tests {
             );
         }
 
-        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let loss = cuda_add(
+            &cuda_sum_all(&result.out)?,
+            &cuda_sum_all(&result.next_state)?,
+        )?;
         let grads = cuda_backward(&loss)?;
         assert!(grads.get(q_id).is_some());
         assert!(grads.get(k_id).is_some());
@@ -6790,7 +7440,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_index_select_rows backward smoke: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_index_select_rows backward smoke: {err}"
+                );
                 return Ok(());
             }
         };
@@ -6975,7 +7627,11 @@ mod tests {
             "SDPA output should stay finite: {out_values:?}"
         );
         let grads = cuda_backward(&loss)?;
-        for (name, id, expected_len) in [("q", q_id, 8usize), ("k", k_id, 4usize), ("v", v_id, 4usize)] {
+        for (name, id, expected_len) in [
+            ("q", q_id, 8usize),
+            ("k", k_id, 4usize),
+            ("v", v_id, 4usize),
+        ] {
             let values = grads
                 .get(id)
                 .with_context(|| format!("missing {name} grad"))?
@@ -6995,7 +7651,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_sdpa_prefill_causal backward smoke: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_sdpa_prefill_causal backward smoke: {err}"
+                );
                 return Ok(());
             }
         };
@@ -7033,7 +7691,11 @@ mod tests {
             "causal SDPA output should stay finite: {out_values:?}"
         );
         let grads = cuda_backward(&loss)?;
-        for (name, id, expected_len) in [("q", q_id, 8usize), ("k", k_id, 4usize), ("v", v_id, 4usize)] {
+        for (name, id, expected_len) in [
+            ("q", q_id, 8usize),
+            ("k", k_id, 4usize),
+            ("v", v_id, 4usize),
+        ] {
             let values = grads
                 .get(id)
                 .with_context(|| format!("missing {name} grad"))?
@@ -7077,11 +7739,17 @@ mod tests {
         let fast = cuda_flash_attn_prefill_causal_f32(&q, &k, &v, scale)?
             .context("FlashAttention path unexpectedly declined supported shape")?;
 
-        let q_ref = CudaTrainTensor::new(q.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
-        let k_ref = CudaTrainTensor::new(k.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
-        let v_ref = CudaTrainTensor::new(v.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let q_ref =
+            CudaTrainTensor::new(q.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let k_ref =
+            CudaTrainTensor::new(k.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let v_ref =
+            CudaTrainTensor::new(v.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let reference = cuda_sdpa_prefill_causal(&q_ref, &k_ref, &v_ref, scale)?;
-        let reference = reference.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+        let reference = reference
+            .as_tensor()
+            .to_dtype(DType::BF16)?
+            .to_dtype(DType::F32)?;
 
         assert_eq!(fast.dims(), &[rows, heads_q, head_dim]);
         let fast_values = fast.to_vec_f32()?;
@@ -7184,8 +7852,16 @@ mod tests {
 
         let state = states.get(&param_id).expect("adamw state");
         assert_eq!(state.step, 1);
-        assert!(state.first_moment.to_vec_f32()?.iter().any(|v| v.abs() > 0.0));
-        assert!(state.second_moment.to_vec_f32()?.iter().any(|v| v.abs() > 0.0));
+        assert!(state
+            .first_moment
+            .to_vec_f32()?
+            .iter()
+            .any(|v| v.abs() > 0.0));
+        assert!(state
+            .second_moment
+            .to_vec_f32()?
+            .iter()
+            .any(|v| v.abs() > 0.0));
 
         let after = cuda_sum_all(&cuda_mul(&param, &param)?)?;
         let after_loss = after.to_vec_f32()?[0];

@@ -40,6 +40,16 @@ int32_t kiln_lora_decode_add_bf16(
     int32_t rank,
     void *stream);
 
+int32_t kiln_lora_add_inplace_f32(
+    float *base,
+    const float *hidden,
+    const float *b,
+    float scale,
+    int32_t rows,
+    int32_t out_dim,
+    int32_t rank,
+    void *stream);
+
 #ifdef __cplusplus
 }
 #endif

@@ -74,8 +74,8 @@
 //! ([`fused_rmsnorm_backward`]); the QK-norm kernels remain forward-only.
 
 use candle_core::{
-    CpuStorage, CudaStorage, DType, Device, Layout, Result, Shape, Tensor, backend::BackendStorage,
-    cuda_backend::cudarc::driver::DevicePtr,
+    backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr, CpuStorage, CudaStorage,
+    DType, Device, Layout, Result, Shape, Tensor,
 };
 use half::bf16;
 use std::sync::OnceLock;
@@ -207,6 +207,76 @@ unsafe extern "C" {
         batch: i32,
         out_dim: i32,
         rank: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_lora_add_inplace_f32(
+        base: *mut f32,
+        hidden: *const f32,
+        b: *const f32,
+        scale: f32,
+        rows: i32,
+        out_dim: i32,
+        rank: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_causal_depthwise_conv1d_f32(
+        input: *const f32,
+        weight: *const f32,
+        state: *const f32,
+        out: *mut f32,
+        rows: i32,
+        channels: i32,
+        kernel: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_causal_depthwise_conv1d_inplace_f32(
+        input_out: *mut f32,
+        weight: *const f32,
+        state: *const f32,
+        rows: i32,
+        channels: i32,
+        kernel: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_causal_depthwise_conv1d_bwd_input_f32(
+        grad_out: *const f32,
+        weight: *const f32,
+        grad_input: *mut f32,
+        rows: i32,
+        channels: i32,
+        kernel: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_causal_depthwise_conv1d_bwd_weight_f32(
+        grad_out: *const f32,
+        input: *const f32,
+        state: *const f32,
+        grad_weight: *mut f32,
+        rows: i32,
+        channels: i32,
+        kernel: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_causal_depthwise_conv1d_bwd_state_f32(
+        grad_out: *const f32,
+        weight: *const f32,
+        grad_state: *mut f32,
+        rows: i32,
+        channels: i32,
+        kernel: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_silu_inplace_save_sigmoid_f32(
+        input_out: *mut f32,
+        sigmoid_out: *mut f32,
+        elems: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
@@ -1925,6 +1995,107 @@ pub fn supports_lora_decode_add(base: &Tensor, x: &Tensor, a: &Tensor, b: &Tenso
         && rank <= i32::MAX as usize
 }
 
+fn matmul_f32_bf16w_dims(lhs: &Tensor, weight: &Tensor) -> Result<(usize, usize, usize)> {
+    let Ok((m, k)) = lhs.dims2() else {
+        candle_core::bail!(
+            "matmul_f32_bf16w: lhs must be rank-2 [rows,in], got {:?}",
+            lhs.shape()
+        );
+    };
+    let Ok((w_k, n)) = weight.dims2() else {
+        candle_core::bail!(
+            "matmul_f32_bf16w: weight must be rank-2 [in,out], got {:?}",
+            weight.shape()
+        );
+    };
+    if k != w_k {
+        candle_core::bail!(
+            "matmul_f32_bf16w: inner dim mismatch lhs={:?} weight={:?}",
+            lhs.shape(),
+            weight.shape()
+        );
+    }
+    if m > i32::MAX as usize || k > i32::MAX as usize || n > i32::MAX as usize {
+        candle_core::bail!("matmul_f32_bf16w: dimensions exceed i32 kernel envelope");
+    }
+    Ok((m, k, n))
+}
+
+pub fn supports_matmul_f32_bf16w(lhs: &Tensor, weight: &Tensor) -> bool {
+    matches!(lhs.device(), Device::Cuda(_))
+        && matches!(weight.device(), Device::Cuda(_))
+        && lhs.dtype() == DType::F32
+        && weight.dtype() == DType::BF16
+        && matmul_f32_bf16w_dims(lhs, weight).is_ok()
+}
+
+pub fn matmul_f32_bf16w(lhs: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    if !supports_matmul_f32_bf16w(lhs, weight) {
+        candle_core::bail!(
+            "matmul_f32_bf16w unsupported lhs={:?} weight={:?} dtypes=({:?},{:?})",
+            lhs.shape(),
+            weight.shape(),
+            lhs.dtype(),
+            weight.dtype()
+        );
+    }
+    let (m, _k, n) = matmul_f32_bf16w_dims(lhs, weight)?;
+    let lhs = lhs.contiguous()?;
+    let weight = weight.contiguous()?;
+    if m == 0 {
+        return Tensor::zeros((m, n), DType::F32, lhs.device());
+    }
+    let weight_f32 = weight.to_dtype(DType::F32)?;
+    lhs.matmul(&weight_f32)
+}
+
+pub fn matmul_f32_bf16w_bwd_lhs(grad_out: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    let (m, _n, k) = {
+        let Ok((m, out_dim)) = grad_out.dims2() else {
+            candle_core::bail!(
+                "matmul_f32_bf16w_bwd_lhs: grad must be rank-2 [rows,out], got {:?}",
+                grad_out.shape()
+            );
+        };
+        let Ok((in_dim, weight_out)) = weight.dims2() else {
+            candle_core::bail!(
+                "matmul_f32_bf16w_bwd_lhs: weight must be rank-2 [in,out], got {:?}",
+                weight.shape()
+            );
+        };
+        if out_dim != weight_out {
+            candle_core::bail!(
+                "matmul_f32_bf16w_bwd_lhs: out dim mismatch grad={:?} weight={:?}",
+                grad_out.shape(),
+                weight.shape()
+            );
+        }
+        if m > i32::MAX as usize || in_dim > i32::MAX as usize || out_dim > i32::MAX as usize {
+            candle_core::bail!("matmul_f32_bf16w_bwd_lhs: dimensions exceed i32 kernel envelope");
+        }
+        (m, out_dim, in_dim)
+    };
+    if !matches!(grad_out.device(), Device::Cuda(_)) || !matches!(weight.device(), Device::Cuda(_))
+    {
+        candle_core::bail!("matmul_f32_bf16w_bwd_lhs requires CUDA tensors");
+    }
+    if grad_out.dtype() != DType::F32 || weight.dtype() != DType::BF16 {
+        candle_core::bail!(
+            "matmul_f32_bf16w_bwd_lhs expects F32 grad and BF16 weight, got {:?}/{:?}",
+            grad_out.dtype(),
+            weight.dtype()
+        );
+    }
+
+    let grad_out = grad_out.contiguous()?;
+    let weight = weight.contiguous()?;
+    if m == 0 {
+        return Tensor::zeros((m, k), DType::F32, grad_out.device());
+    }
+    let weight_t = weight.to_dtype(DType::F32)?.t()?.contiguous()?;
+    grad_out.matmul(&weight_t)
+}
+
 fn optimizer_tensors_supported(tensors: &[&Tensor]) -> bool {
     let Some(first) = tensors.first() else {
         return false;
@@ -2074,10 +2245,18 @@ pub fn adamw_step_inplace(
 
     let status = match param.dtype() {
         DType::F32 => {
-            let p = p_cuda.as_cuda_slice::<f32>()?.slice(p_layout.start_offset()..);
-            let g = g_cuda.as_cuda_slice::<f32>()?.slice(g_layout.start_offset()..);
-            let m = m_cuda.as_cuda_slice::<f32>()?.slice(m_layout.start_offset()..);
-            let v = v_cuda.as_cuda_slice::<f32>()?.slice(v_layout.start_offset()..);
+            let p = p_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(p_layout.start_offset()..);
+            let g = g_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(g_layout.start_offset()..);
+            let m = m_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(m_layout.start_offset()..);
+            let v = v_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(v_layout.start_offset()..);
             unsafe {
                 let (p_ptr, _p_guard) = p.device_ptr(&stream);
                 let (g_ptr, _g_guard) = g.device_ptr(&stream);
@@ -2101,10 +2280,18 @@ pub fn adamw_step_inplace(
             }
         }
         DType::BF16 => {
-            let p = p_cuda.as_cuda_slice::<bf16>()?.slice(p_layout.start_offset()..);
-            let g = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
-            let m = m_cuda.as_cuda_slice::<bf16>()?.slice(m_layout.start_offset()..);
-            let v = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
+            let p = p_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(p_layout.start_offset()..);
+            let g = g_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(g_layout.start_offset()..);
+            let m = m_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(m_layout.start_offset()..);
+            let v = v_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(v_layout.start_offset()..);
             unsafe {
                 let (p_ptr, _p_guard) = p.device_ptr(&stream);
                 let (g_ptr, _g_guard) = g.device_ptr(&stream);
@@ -2260,6 +2447,723 @@ pub fn lora_decode_add(
     }
 
     Ok(out)
+}
+
+/// Add a F32 LoRA delta into an already-computed projection output.
+///
+/// Shapes are row-major: `base=[rows,out]`, `hidden=[rows,rank]`,
+/// `b=[out,rank]`. `base` is mutated in place and returned by the caller.
+pub fn lora_add_inplace_f32(base: &Tensor, hidden: &Tensor, b: &Tensor, scale: f32) -> Result<()> {
+    let Ok((rows, out_dim)) = base.dims2() else {
+        candle_core::bail!(
+            "lora_add_inplace_f32: base must be rank-2, got {:?}",
+            base.shape()
+        );
+    };
+    let Ok((hidden_rows, rank)) = hidden.dims2() else {
+        candle_core::bail!(
+            "lora_add_inplace_f32: hidden must be rank-2, got {:?}",
+            hidden.shape()
+        );
+    };
+    let Ok((b_out, b_rank)) = b.dims2() else {
+        candle_core::bail!(
+            "lora_add_inplace_f32: B must be rank-2, got {:?}",
+            b.shape()
+        );
+    };
+    if rows != hidden_rows || out_dim != b_out || rank != b_rank {
+        candle_core::bail!(
+            "lora_add_inplace_f32: shape mismatch base={:?} hidden={:?} b={:?}",
+            base.shape(),
+            hidden.shape(),
+            b.shape()
+        );
+    }
+    if base.dtype() != DType::F32 || hidden.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        candle_core::bail!(
+            "lora_add_inplace_f32: expected F32 tensors, got base={:?} hidden={:?} b={:?}",
+            base.dtype(),
+            hidden.dtype(),
+            b.dtype()
+        );
+    }
+    if !base.is_contiguous() || !hidden.is_contiguous() || !b.is_contiguous() {
+        candle_core::bail!("lora_add_inplace_f32: tensors must be contiguous");
+    }
+    if rows > i32::MAX as usize || out_dim > i32::MAX as usize || rank > i32::MAX as usize {
+        candle_core::bail!("lora_add_inplace_f32: dimensions exceed i32 kernel envelope");
+    }
+    if rows == 0 || out_dim == 0 || rank == 0 {
+        return Ok(());
+    }
+
+    let (base_storage, base_layout) = base.storage_and_layout();
+    let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
+    let (b_storage, b_layout) = b.storage_and_layout();
+    let base_cuda = match &*base_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("lora_add_inplace_f32: base must be CUDA"),
+    };
+    let hidden_cuda = match &*hidden_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("lora_add_inplace_f32: hidden must be CUDA"),
+    };
+    let b_cuda = match &*b_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("lora_add_inplace_f32: B must be CUDA"),
+    };
+    let stream = base_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let base_slice = base_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(base_layout.start_offset()..);
+    let hidden_slice = hidden_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(hidden_layout.start_offset()..);
+    let b_slice = b_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(b_layout.start_offset()..);
+
+    let status = unsafe {
+        let (base_ptr, _base_guard) = base_slice.device_ptr(&stream);
+        let (hidden_ptr, _hidden_guard) = hidden_slice.device_ptr(&stream);
+        let (b_ptr, _b_guard) = b_slice.device_ptr(&stream);
+        kiln_lora_add_inplace_f32(
+            base_ptr as *mut f32,
+            hidden_ptr as *const f32,
+            b_ptr as *const f32,
+            scale,
+            rows as i32,
+            out_dim as i32,
+            rank as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_lora_add_inplace_f32 failed with status {status}");
+    }
+    Ok(())
+}
+
+pub fn causal_depthwise_conv1d_f32(
+    input: &Tensor,
+    weight: &Tensor,
+    state: &Tensor,
+) -> Result<Tensor> {
+    let (rows, channels) = input.dims2()?;
+    let kernel = *weight.dims().last().ok_or_else(|| {
+        candle_core::Error::Msg("causal_depthwise_conv1d_f32: empty weight".into())
+    })?;
+    if kernel <= 1 {
+        candle_core::bail!("causal_depthwise_conv1d_f32: kernel must be > 1");
+    }
+    let weight_flat = match weight.rank() {
+        2 => {
+            let (c, k) = weight.dims2()?;
+            if c != channels || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.clone()
+        }
+        3 => {
+            let (c, one, k) = weight.dims3()?;
+            if c != channels || one != 1 || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.reshape((channels, kernel))?
+        }
+        rank => candle_core::bail!("causal_depthwise_conv1d_f32: weight rank {rank} unsupported"),
+    };
+    if state.dims() != [kernel - 1, channels] {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32: state shape {:?} != [{},{}]",
+            state.shape(),
+            kernel - 1,
+            channels
+        );
+    }
+    if input.dtype() != DType::F32
+        || weight_flat.dtype() != DType::F32
+        || state.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
+            input.dtype(),
+            weight_flat.dtype(),
+            state.dtype()
+        );
+    }
+    if rows > i32::MAX as usize || channels > i32::MAX as usize || kernel > i32::MAX as usize {
+        candle_core::bail!("causal_depthwise_conv1d_f32: dimensions exceed i32 kernel envelope");
+    }
+
+    let input = input.contiguous()?;
+    let weight_flat = weight_flat.contiguous()?;
+    let state = state.contiguous()?;
+    let out = unsafe { Tensor::empty((rows, channels), DType::F32, input.device())? };
+
+    {
+        let (i_storage, i_layout) = input.storage_and_layout();
+        let (w_storage, w_layout) = weight_flat.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let (o_storage, o_layout) = out.storage_and_layout();
+        let i_cuda = match &*i_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32: input must be CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32: weight must be CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32: state must be CUDA"),
+        };
+        let o_cuda = match &*o_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32: output must be CUDA"),
+        };
+        let stream = i_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let i_slice = i_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(i_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(w_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(s_layout.start_offset()..);
+        let o_slice = o_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(o_layout.start_offset()..);
+
+        let status = unsafe {
+            let (i_ptr, _i_guard) = i_slice.device_ptr(&stream);
+            let (w_ptr, _w_guard) = w_slice.device_ptr(&stream);
+            let (s_ptr, _s_guard) = s_slice.device_ptr(&stream);
+            let (o_ptr, _o_guard) = o_slice.device_ptr(&stream);
+            kiln_causal_depthwise_conv1d_f32(
+                i_ptr as *const f32,
+                w_ptr as *const f32,
+                s_ptr as *const f32,
+                o_ptr as *mut f32,
+                rows as i32,
+                channels as i32,
+                kernel as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("kiln_causal_depthwise_conv1d_f32 failed with status {status}");
+        }
+    }
+    Ok(out)
+}
+
+pub fn causal_depthwise_conv1d_f32_inplace(
+    input_out: &Tensor,
+    weight: &Tensor,
+    state: &Tensor,
+) -> Result<Tensor> {
+    let (rows, channels) = input_out.dims2()?;
+    let kernel = *weight.dims().last().ok_or_else(|| {
+        candle_core::Error::Msg("causal_depthwise_conv1d_f32_inplace: empty weight".into())
+    })?;
+    if kernel <= 1 {
+        candle_core::bail!("causal_depthwise_conv1d_f32_inplace: kernel must be > 1");
+    }
+    let weight_flat = match weight.rank() {
+        2 => {
+            let (c, k) = weight.dims2()?;
+            if c != channels || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_inplace: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.clone()
+        }
+        3 => {
+            let (c, one, k) = weight.dims3()?;
+            if c != channels || one != 1 || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_inplace: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.reshape((channels, kernel))?
+        }
+        rank => candle_core::bail!(
+            "causal_depthwise_conv1d_f32_inplace: weight rank {rank} unsupported"
+        ),
+    };
+    if state.dims() != [kernel - 1, channels] {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_inplace: state shape {:?} != [{},{}]",
+            state.shape(),
+            kernel - 1,
+            channels
+        );
+    }
+    if input_out.dtype() != DType::F32
+        || weight_flat.dtype() != DType::F32
+        || state.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_inplace: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
+            input_out.dtype(),
+            weight_flat.dtype(),
+            state.dtype()
+        );
+    }
+    if !input_out.is_contiguous() {
+        candle_core::bail!("causal_depthwise_conv1d_f32_inplace: input must be contiguous");
+    }
+    if rows > i32::MAX as usize || channels > i32::MAX as usize || kernel > i32::MAX as usize {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_inplace: dimensions exceed i32 kernel envelope"
+        );
+    }
+    if rows == 0 || channels == 0 {
+        return Ok(input_out.clone());
+    }
+
+    let weight_flat = weight_flat.contiguous()?;
+    let state = state.contiguous()?;
+    {
+        let (io_storage, io_layout) = input_out.storage_and_layout();
+        let (w_storage, w_layout) = weight_flat.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let io_cuda = match &*io_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_inplace: input must be CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_inplace: weight must be CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_inplace: state must be CUDA"),
+        };
+        let stream = io_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let io_slice = io_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(io_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(w_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(s_layout.start_offset()..);
+
+        let status = unsafe {
+            let (io_ptr, _io_guard) = io_slice.device_ptr(&stream);
+            let (w_ptr, _w_guard) = w_slice.device_ptr(&stream);
+            let (s_ptr, _s_guard) = s_slice.device_ptr(&stream);
+            kiln_causal_depthwise_conv1d_inplace_f32(
+                io_ptr as *mut f32,
+                w_ptr as *const f32,
+                s_ptr as *const f32,
+                rows as i32,
+                channels as i32,
+                kernel as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!(
+                "kiln_causal_depthwise_conv1d_inplace_f32 failed with status {status}"
+            );
+        }
+    }
+    Ok(input_out.clone())
+}
+
+pub fn silu_inplace_save_sigmoid_f32(input_out: &Tensor) -> Result<(Tensor, Tensor)> {
+    if input_out.dtype() != DType::F32 {
+        candle_core::bail!(
+            "silu_inplace_save_sigmoid_f32: expected F32 input, got {:?}",
+            input_out.dtype()
+        );
+    }
+    if !input_out.is_contiguous() {
+        candle_core::bail!("silu_inplace_save_sigmoid_f32: input must be contiguous");
+    }
+    let elems = input_out.elem_count();
+    if elems > i64::MAX as usize {
+        candle_core::bail!(
+            "silu_inplace_save_sigmoid_f32: element count exceeds i64 kernel envelope"
+        );
+    }
+    if elems == 0 {
+        let sigmoid =
+            unsafe { Tensor::empty(input_out.shape().clone(), DType::F32, input_out.device())? };
+        return Ok((input_out.clone(), sigmoid));
+    }
+
+    let sigmoid =
+        unsafe { Tensor::empty(input_out.shape().clone(), DType::F32, input_out.device())? };
+    {
+        let (storage, layout) = input_out.storage_and_layout();
+        let cuda = match &*storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("silu_inplace_save_sigmoid_f32: input must be CUDA"),
+        };
+        let (sigmoid_storage, sigmoid_layout) = sigmoid.storage_and_layout();
+        let sigmoid_cuda = match &*sigmoid_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("silu_inplace_save_sigmoid_f32: sigmoid output must be CUDA"),
+        };
+        let stream = cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let slice = cuda.as_cuda_slice::<f32>()?.slice(layout.start_offset()..);
+        let sigmoid_slice = sigmoid_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(sigmoid_layout.start_offset()..);
+
+        let status = unsafe {
+            let (ptr, _guard) = slice.device_ptr(&stream);
+            let (sigmoid_ptr, _sigmoid_guard) = sigmoid_slice.device_ptr(&stream);
+            kiln_silu_inplace_save_sigmoid_f32(
+                ptr as *mut f32,
+                sigmoid_ptr as *mut f32,
+                elems as i64,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!("kiln_silu_inplace_save_sigmoid_f32 failed with status {status}");
+        }
+    }
+    Ok((input_out.clone(), sigmoid))
+}
+
+pub fn causal_depthwise_conv1d_f32_bwd_input(grad_out: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    let (rows, channels) = grad_out.dims2()?;
+    let kernel = *weight.dims().last().ok_or_else(|| {
+        candle_core::Error::Msg("causal_depthwise_conv1d_f32_bwd_input: empty weight".into())
+    })?;
+    if kernel <= 1 {
+        candle_core::bail!("causal_depthwise_conv1d_f32_bwd_input: kernel must be > 1");
+    }
+    let weight_flat = match weight.rank() {
+        2 => {
+            let (c, k) = weight.dims2()?;
+            if c != channels || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_input: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.clone()
+        }
+        3 => {
+            let (c, one, k) = weight.dims3()?;
+            if c != channels || one != 1 || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_input: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.reshape((channels, kernel))?
+        }
+        rank => candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_input: weight rank {rank} unsupported"
+        ),
+    };
+    if grad_out.dtype() != DType::F32 || weight_flat.dtype() != DType::F32 {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_input: expected F32 grad/weight, got {:?}/{:?}",
+            grad_out.dtype(),
+            weight_flat.dtype()
+        );
+    }
+    if rows > i32::MAX as usize || channels > i32::MAX as usize || kernel > i32::MAX as usize {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_input: dimensions exceed i32 kernel envelope"
+        );
+    }
+
+    let grad_out = grad_out.contiguous()?;
+    let weight_flat = weight_flat.contiguous()?;
+    let grad_input = unsafe { Tensor::empty((rows, channels), DType::F32, grad_out.device())? };
+
+    {
+        let (g_storage, g_layout) = grad_out.storage_and_layout();
+        let (w_storage, w_layout) = weight_flat.storage_and_layout();
+        let (o_storage, o_layout) = grad_input.storage_and_layout();
+        let g_cuda = match &*g_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_input: grad must be CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_input: weight must be CUDA"),
+        };
+        let o_cuda = match &*o_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_input: output must be CUDA"),
+        };
+        let stream = g_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let g_slice = g_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(g_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(w_layout.start_offset()..);
+        let o_slice = o_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(o_layout.start_offset()..);
+
+        let status = unsafe {
+            let (g_ptr, _g_guard) = g_slice.device_ptr(&stream);
+            let (w_ptr, _w_guard) = w_slice.device_ptr(&stream);
+            let (o_ptr, _o_guard) = o_slice.device_ptr(&stream);
+            kiln_causal_depthwise_conv1d_bwd_input_f32(
+                g_ptr as *const f32,
+                w_ptr as *const f32,
+                o_ptr as *mut f32,
+                rows as i32,
+                channels as i32,
+                kernel as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!(
+                "kiln_causal_depthwise_conv1d_bwd_input_f32 failed with status {status}"
+            );
+        }
+    }
+    Ok(grad_input)
+}
+
+pub fn causal_depthwise_conv1d_f32_bwd_weight(
+    grad_out: &Tensor,
+    input: &Tensor,
+    state: &Tensor,
+    weight: &Tensor,
+) -> Result<Tensor> {
+    let (rows, channels) = grad_out.dims2()?;
+    if input.dims() != [rows, channels] {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_weight: input shape {:?} != grad {:?}",
+            input.shape(),
+            grad_out.shape()
+        );
+    }
+    let kernel = *weight.dims().last().ok_or_else(|| {
+        candle_core::Error::Msg("causal_depthwise_conv1d_f32_bwd_weight: empty weight".into())
+    })?;
+    if state.dims() != [kernel - 1, channels] {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_weight: state shape {:?} != [{},{}]",
+            state.shape(),
+            kernel - 1,
+            channels
+        );
+    }
+    let weight_flat = match weight.rank() {
+        2 => {
+            let (c, k) = weight.dims2()?;
+            if c != channels || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_weight: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.clone()
+        }
+        3 => {
+            let (c, one, k) = weight.dims3()?;
+            if c != channels || one != 1 || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_weight: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.reshape((channels, kernel))?
+        }
+        rank => candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_weight: weight rank {rank} unsupported"
+        ),
+    };
+    if grad_out.dtype() != DType::F32
+        || input.dtype() != DType::F32
+        || state.dtype() != DType::F32
+        || weight_flat.dtype() != DType::F32
+    {
+        candle_core::bail!("causal_depthwise_conv1d_f32_bwd_weight: expected F32 tensors");
+    }
+
+    let grad_out = grad_out.contiguous()?;
+    let input = input.contiguous()?;
+    let state = state.contiguous()?;
+    let grad_weight = unsafe { Tensor::empty((channels, kernel), DType::F32, grad_out.device())? };
+    {
+        let (g_storage, g_layout) = grad_out.storage_and_layout();
+        let (i_storage, i_layout) = input.storage_and_layout();
+        let (s_storage, s_layout) = state.storage_and_layout();
+        let (o_storage, o_layout) = grad_weight.storage_and_layout();
+        let g_cuda = match &*g_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_weight: grad must be CUDA"),
+        };
+        let i_cuda = match &*i_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_weight: input must be CUDA"),
+        };
+        let s_cuda = match &*s_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_weight: state must be CUDA"),
+        };
+        let o_cuda = match &*o_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_weight: output must be CUDA"),
+        };
+        let stream = g_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let g_slice = g_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(g_layout.start_offset()..);
+        let i_slice = i_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(i_layout.start_offset()..);
+        let s_slice = s_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(s_layout.start_offset()..);
+        let o_slice = o_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(o_layout.start_offset()..);
+        let status = unsafe {
+            let (g_ptr, _g_guard) = g_slice.device_ptr(&stream);
+            let (i_ptr, _i_guard) = i_slice.device_ptr(&stream);
+            let (s_ptr, _s_guard) = s_slice.device_ptr(&stream);
+            let (o_ptr, _o_guard) = o_slice.device_ptr(&stream);
+            kiln_causal_depthwise_conv1d_bwd_weight_f32(
+                g_ptr as *const f32,
+                i_ptr as *const f32,
+                s_ptr as *const f32,
+                o_ptr as *mut f32,
+                rows as i32,
+                channels as i32,
+                kernel as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!(
+                "kiln_causal_depthwise_conv1d_bwd_weight_f32 failed with status {status}"
+            );
+        }
+    }
+    if weight.rank() == 3 {
+        grad_weight.reshape(weight.dims())
+    } else {
+        Ok(grad_weight)
+    }
+}
+
+pub fn causal_depthwise_conv1d_f32_bwd_state(grad_out: &Tensor, weight: &Tensor) -> Result<Tensor> {
+    let (rows, channels) = grad_out.dims2()?;
+    let kernel = *weight.dims().last().ok_or_else(|| {
+        candle_core::Error::Msg("causal_depthwise_conv1d_f32_bwd_state: empty weight".into())
+    })?;
+    let weight_flat = match weight.rank() {
+        2 => {
+            let (c, k) = weight.dims2()?;
+            if c != channels || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_state: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.clone()
+        }
+        3 => {
+            let (c, one, k) = weight.dims3()?;
+            if c != channels || one != 1 || k != kernel {
+                candle_core::bail!(
+                    "causal_depthwise_conv1d_f32_bwd_state: weight shape {:?} incompatible with channels={channels} kernel={kernel}",
+                    weight.shape()
+                );
+            }
+            weight.reshape((channels, kernel))?
+        }
+        rank => candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_state: weight rank {rank} unsupported"
+        ),
+    };
+    if grad_out.dtype() != DType::F32 || weight_flat.dtype() != DType::F32 {
+        candle_core::bail!(
+            "causal_depthwise_conv1d_f32_bwd_state: expected F32 grad/weight, got {:?}/{:?}",
+            grad_out.dtype(),
+            weight_flat.dtype()
+        );
+    }
+    let grad_out = grad_out.contiguous()?;
+    let weight_flat = weight_flat.contiguous()?;
+    let grad_state =
+        unsafe { Tensor::empty((kernel - 1, channels), DType::F32, grad_out.device())? };
+    {
+        let (g_storage, g_layout) = grad_out.storage_and_layout();
+        let (w_storage, w_layout) = weight_flat.storage_and_layout();
+        let (o_storage, o_layout) = grad_state.storage_and_layout();
+        let g_cuda = match &*g_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_state: grad must be CUDA"),
+        };
+        let w_cuda = match &*w_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_state: weight must be CUDA"),
+        };
+        let o_cuda = match &*o_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("causal_depthwise_conv1d_f32_bwd_state: output must be CUDA"),
+        };
+        let stream = g_cuda.device().cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+        let g_slice = g_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(g_layout.start_offset()..);
+        let w_slice = w_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(w_layout.start_offset()..);
+        let o_slice = o_cuda
+            .as_cuda_slice::<f32>()?
+            .slice(o_layout.start_offset()..);
+        let status = unsafe {
+            let (g_ptr, _g_guard) = g_slice.device_ptr(&stream);
+            let (w_ptr, _w_guard) = w_slice.device_ptr(&stream);
+            let (o_ptr, _o_guard) = o_slice.device_ptr(&stream);
+            kiln_causal_depthwise_conv1d_bwd_state_f32(
+                g_ptr as *const f32,
+                w_ptr as *const f32,
+                o_ptr as *mut f32,
+                rows as i32,
+                channels as i32,
+                kernel as i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            candle_core::bail!(
+                "kiln_causal_depthwise_conv1d_bwd_state_f32 failed with status {status}"
+            );
+        }
+    }
+    Ok(grad_state)
 }
 
 #[cfg(test)]

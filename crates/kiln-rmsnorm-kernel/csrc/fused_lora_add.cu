@@ -64,6 +64,27 @@ __global__ void lora_decode_add_kernel(
     out[idx] = __float2bfloat16(base_v + scale * delta);
 }
 
+__global__ void lora_add_inplace_f32_kernel(
+    float *__restrict__ base,
+    const float *__restrict__ hidden,
+    const float *__restrict__ b,
+    float scale,
+    int64_t elems,
+    int out_dim,
+    int rank
+) {
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= elems) return;
+
+    const int row = static_cast<int>(idx / out_dim);
+    const int j = static_cast<int>(idx - static_cast<int64_t>(row) * out_dim);
+    float delta = 0.0f;
+    for (int r = 0; r < rank; ++r) {
+        delta += hidden[row * rank + r] * b[j * rank + r];
+    }
+    base[idx] += scale * delta;
+}
+
 }  // namespace
 
 extern "C" int32_t kiln_lora_decode_hidden_bf16(
@@ -84,6 +105,36 @@ extern "C" int32_t kiln_lora_decode_hidden_bf16(
         reinterpret_cast<const __nv_bfloat16 *>(a),
         hidden,
         static_cast<int>(in_dim),
+        static_cast<int>(rank));
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int32_t>(err);
+    return 0;
+}
+
+extern "C" int32_t kiln_lora_add_inplace_f32(
+    float *base,
+    const float *hidden,
+    const float *b,
+    float scale,
+    int32_t rows,
+    int32_t out_dim,
+    int32_t rank,
+    void *stream
+) {
+    if (rows <= 0 || out_dim <= 0 || rank <= 0) return -1;
+    const int64_t elems = static_cast<int64_t>(rows) * static_cast<int64_t>(out_dim);
+    const int64_t blocks64 = (elems + kAddThreads - 1) / kAddThreads;
+    if (blocks64 > static_cast<int64_t>(INT_MAX)) return -2;
+
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    lora_add_inplace_f32_kernel<<<static_cast<int>(blocks64), kAddThreads, 0, s>>>(
+        base,
+        hidden,
+        b,
+        scale,
+        elems,
+        static_cast<int>(out_dim),
         static_cast<int>(rank));
 
     cudaError_t err = cudaGetLastError();
