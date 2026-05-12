@@ -1,39 +1,49 @@
 //! Vulkan-native model forward pass.
 //!
-//! Assembles the full transformer forward graph entirely in
-//! `VkTensor` (GPU memory) so every intermediate during training
-//! lives in DRM-allocated memory rather than candle CPU storage.
+//! Assembles the full transformer forward graph entirely in `VkTensor`
+//! (GPU memory) so every intermediate during training lives in
+//! DRM-allocated memory rather than candle CPU storage.
 //!
-//! For Phase E this provides the building blocks (transformer layer,
-//! full model forward, FLCE loss head) along with a `VkLoraParams`
-//! holder that bridges to the existing trainer's `Var`-keyed
-//! gradient + AdamW dispatch path.
-//!
-//! Real Qwen3.5 weights ship through `GpuWeights`; the helpers here
-//! upload them lazily into VkTensors. Smaller synthetic shapes are
-//! supported for end-to-end tests without needing a 4 B model.
-//!
-//! Note: this is intentionally F32-internal for Phase E. BF16 weight
-//! storage and BF16 accumulation are Phase G optimizations that ride
-//! on the same op surface.
+//! Phase 1 (this revision):
+//!   - `VkLayerWeights` is now an enum with `FullAttention` and
+//!     `LinearAttention` variants. The latter is stubbed; Phase 5
+//!     wires the GDN forward + backward composition.
+//!   - `VkFullAttentionWeights` carries the Qwen3.5-specific pieces:
+//!     per-head Q/K-norm and the optional `attn_output_gate` flag
+//!     (when true, `q_proj` produces `[Q, gate]` fused).
+//!   - `vk_linear_with_lora` dispatches on the base weight's dtype:
+//!     F32 weights run through `vk_matmul` (synthetic tests), BF16
+//!     weights run through `vk_matmul_bf16w` (real Qwen weights).
+//!   - `VkModelWeights::from_gpu_weights` bridges candle `GpuWeights`
+//!     → vk-native by uploading every BF16 frozen weight buffer.
+//!     Linear-attention layers currently bail; GDN coverage lands in
+//!     Phase 5.
 
 #![cfg(feature = "vulkan")]
 
-use anyhow::{Context, Result};
-use candle_core::{Device, Tensor, TensorId, Var};
+use anyhow::{bail, Context, Result};
+use candle_core::{DType, Device, Tensor, TensorId, Var};
+use kiln_core::config::ModelConfig;
 use kiln_vulkan_kernel::vk_autograd::{vk_backward, VkGradStore};
 use kiln_vulkan_kernel::vk_ops::attention::vk_sdpa_prefill_flat;
-use kiln_vulkan_kernel::vk_ops::elementwise::vk_add;
+use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_mul};
 use kiln_vulkan_kernel::vk_ops::embedding::{
     upload_u32_ids, vk_embedding_lookup_bf16, vk_embedding_lookup_f32,
 };
 use kiln_vulkan_kernel::vk_ops::flce::{vk_flce_loss, FLCE_DEFAULT_CHUNK};
 use kiln_vulkan_kernel::vk_ops::matmul::vk_matmul;
+use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w;
 use kiln_vulkan_kernel::vk_ops::mlp::vk_swiglu_mlp;
+use kiln_vulkan_kernel::vk_ops::narrow::vk_narrow_lastdim;
 use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
-use kiln_vulkan_kernel::vk_ops::shape::vk_transpose_2d;
+use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d};
+use kiln_vulkan_kernel::vk_ops::sigmoid::vk_sigmoid;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// LoRA parameter holders
+// ---------------------------------------------------------------------------
 
 /// Trainable LoRA pair held as VkTensor parameters keyed by the same
 /// `TensorId` the rest of the trainer (and the existing AdamW
@@ -102,6 +112,12 @@ impl VkLoraPair {
 }
 
 /// All trainable LoRA params for one transformer layer.
+///
+/// FullAttention layers use `q_proj` / `k_proj` / `v_proj` / `o_proj`
+/// plus the MLP triple (`gate_proj` / `up_proj` / `down_proj`). GDN
+/// layers (Phase 5) will use the linear-attention slots
+/// (`in_proj_qkv`, `in_proj_z`, `out_proj`); the MLP slots are unused
+/// because GDN layers have no MLP block.
 #[derive(Default)]
 pub struct VkLoraLayer {
     pub q_proj: Option<VkLoraPair>,
@@ -111,45 +127,115 @@ pub struct VkLoraLayer {
     pub gate_proj: Option<VkLoraPair>,
     pub up_proj: Option<VkLoraPair>,
     pub down_proj: Option<VkLoraPair>,
+    // GDN-only LoRA slots — populated in Phase 5
+    pub in_proj_qkv: Option<VkLoraPair>,
+    pub in_proj_z: Option<VkLoraPair>,
+    pub gdn_out_proj: Option<VkLoraPair>,
 }
 
-/// Frozen base weights for one transformer layer in VkTensor form.
-pub struct VkLayerWeights {
-    pub input_layernorm_weight: VkTensor, // [hidden]
-    pub post_attention_layernorm_weight: VkTensor, // [hidden]
-    pub q_proj: VkTensor, // [hidden_q, hidden]   (out, in)
-    pub k_proj: VkTensor, // [hidden_kv, hidden]
-    pub v_proj: VkTensor, // [hidden_kv, hidden]
-    pub o_proj: VkTensor, // [hidden, hidden_q]
+// ---------------------------------------------------------------------------
+// Frozen base weights — per-layer
+// ---------------------------------------------------------------------------
+
+/// Frozen base weights for one full-attention transformer layer.
+///
+/// All projection weights are stored row-major as `[out_dim, in_dim]`
+/// (matching candle's `linear_with_lora_t` convention). When loaded
+/// from real Qwen weights they are BF16; synthetic test models use
+/// F32. `vk_linear_with_lora` dispatches on the dtype.
+///
+/// Qwen3.5-specific extensions:
+///   - `q_norm`/`k_norm`: per-head RMSNorm over `head_dim` applied to
+///     Q and K before RoPE.
+///   - `attn_output_gate`: when `true`, `q_proj` is sized
+///     `[heads_q * head_dim * 2, hidden]` and produces `[Q, gate]`
+///     fused. We split, run attention on Q, then `attn_out *=
+///     sigmoid(gate)` before `o_proj`.
+pub struct VkFullAttentionWeights {
+    pub input_layernorm_weight: VkTensor,      // [hidden]   F32
+    pub post_attention_layernorm_weight: VkTensor, // [hidden]   F32
+    pub q_proj: VkTensor, // [heads_q*head_dim (*2 if gate), hidden]
+    pub k_proj: VkTensor, // [heads_kv*head_dim, hidden]
+    pub v_proj: VkTensor, // [heads_kv*head_dim, hidden]
+    pub o_proj: VkTensor, // [hidden, heads_q*head_dim]
+    pub q_norm: Option<VkTensor>, // [head_dim] — Qwen3.5 per-head QK-norm
+    pub k_norm: Option<VkTensor>, // [head_dim]
     pub gate_proj: VkTensor, // [intermediate, hidden]
-    pub up_proj: VkTensor, // [intermediate, hidden]
+    pub up_proj: VkTensor,   // [intermediate, hidden]
     pub down_proj: VkTensor, // [hidden, intermediate]
     pub heads_q: usize,
     pub heads_kv: usize,
     pub head_dim: usize,
+    pub attn_output_gate: bool,
     pub eps: f32,
 }
 
+/// Frozen base weights for one Gated-DeltaNet (linear-attention) layer.
+///
+/// Phase 5 wires this into `vk_transformer_layer`. For Phase 1 the
+/// only consumer is `VkModelWeights::from_gpu_weights`, which uploads
+/// the buffers but `vk_transformer_layer` bails when it sees this
+/// variant.
+pub struct VkLinearAttentionWeights {
+    pub layer_norm: VkTensor,    // [hidden]
+    pub in_proj_qkv: VkTensor,   // [2*nk*dk + nv*dv, hidden]
+    pub in_proj_z: VkTensor,     // [nv*dv, hidden]
+    pub in_proj_a: VkTensor,     // [nv, hidden]
+    pub in_proj_b: VkTensor,     // [nv, hidden]
+    pub conv1d: VkTensor,        // [conv_channels, kernel_size]
+    pub a_log: VkTensor,         // [nv]
+    pub a_log_gates: VkTensor,   // [nv]   (Qwen-specific gate-precompute)
+    pub dt_bias: VkTensor,       // [nv]
+    pub gated_norm: VkTensor,    // [nv*dv]
+    pub out_proj: VkTensor,      // [hidden, nv*dv]
+    pub heads_k: usize,
+    pub heads_v: usize,
+    pub head_dim_k: usize,
+    pub head_dim_v: usize,
+    pub conv_kernel: usize,
+    pub eps: f32,
+}
+
+/// Per-layer dispatch — Full vs Linear (GDN) attention.
+pub enum VkLayerWeights {
+    FullAttention(VkFullAttentionWeights),
+    LinearAttention(VkLinearAttentionWeights),
+}
+
+/// Whole-model frozen weights in VkTensor form.
 pub struct VkModelWeights {
-    pub embed_tokens: VkTensor,    // [vocab, hidden]
+    pub embed_tokens: VkTensor,      // [vocab, hidden]
     pub embed_dtype: VkDType,
     pub final_norm_weight: VkTensor, // [hidden]
-    pub lm_head: VkTensor,         // [vocab, hidden]   (typically tied with embed_tokens)
+    pub lm_head: VkTensor,           // [vocab, hidden] — typically tied with embed_tokens
     pub layers: Vec<VkLayerWeights>,
     pub vocab: usize,
     pub hidden: usize,
 }
 
+// ---------------------------------------------------------------------------
+// Linear projection with optional LoRA delta
+// ---------------------------------------------------------------------------
+
 /// Apply a base linear projection followed by an optional LoRA delta:
 ///   out = x @ W.T + scale * x @ A.T @ B.T
-fn vk_linear_with_lora(
+///
+/// Dispatches on the base weight's dtype:
+///   - F32 weight  → `vk_matmul` after explicit transpose (synthetic tests).
+///   - BF16 weight → `vk_matmul_bf16w` (no transpose needed; kernel
+///     treats `W` as `[out, in]` and computes `x @ W.T` directly).
+pub fn vk_linear_with_lora(
     x: &VkTensor,
     weight: &VkTensor,
     lora: Option<&VkLoraPair>,
 ) -> Result<VkTensor> {
-    // base = x @ weight.T
-    let w_t = vk_transpose_2d(weight)?;
-    let base = vk_matmul(x, &w_t)?;
+    let base = match weight.dtype() {
+        VkDType::F32 => {
+            let w_t = vk_transpose_2d(weight)?;
+            vk_matmul(x, &w_t)?
+        }
+        VkDType::Bf16 => vk_matmul_bf16w(x, weight)?,
+    };
     let Some(pair) = lora else {
         return Ok(base);
     };
@@ -167,51 +253,103 @@ fn vk_linear_with_lora(
     vk_add(&base, &delta)
 }
 
-/// Run one transformer layer end-to-end on VkTensor activations.
-pub fn vk_transformer_layer(
+// ---------------------------------------------------------------------------
+// FullAttention transformer layer
+// ---------------------------------------------------------------------------
+
+/// Apply per-head RMSNorm to a `[T, heads*head_dim]` Q or K tensor.
+/// Uses the existing 2-D `vk_rmsnorm`: reshape to `[T*heads, head_dim]`,
+/// run the kernel (which normalizes the inner dim and multiplies by
+/// the `[head_dim]` weight), reshape back.
+fn vk_per_head_rms_norm(
+    q_or_k: &VkTensor,
+    weight: &VkTensor,
+    heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<VkTensor> {
+    let dims = q_or_k.shape();
+    debug_assert_eq!(dims.len(), 2, "vk_per_head_rms_norm: rank-2 input");
+    debug_assert_eq!(dims[1], heads * head_dim);
+    let t = dims[0];
+    let flat = vk_reshape(q_or_k, &[t * heads, head_dim])?;
+    let normed = vk_rmsnorm(&flat, weight, eps)?;
+    vk_reshape(&normed, &[t, heads * head_dim])
+}
+
+/// Run one full-attention transformer layer end-to-end on VkTensor
+/// activations.
+pub fn vk_full_attention_layer(
     x: &VkTensor,
-    w: &VkLayerWeights,
+    w: &VkFullAttentionWeights,
     lora: &VkLoraLayer,
 ) -> Result<VkTensor> {
-    let rows = x.shape()[0];
+    let t = x.shape()[0];
     let hidden = x.shape()[1];
+    let q_dim = w.heads_q * w.head_dim;
+    let q_out_dim = if w.attn_output_gate { q_dim * 2 } else { q_dim };
     debug_assert_eq!(hidden, w.q_proj.shape()[1]);
+    debug_assert_eq!(w.q_proj.shape()[0], q_out_dim);
+    let _ = hidden;
 
     // Pre-attention RMSNorm
     let h_norm = vk_rmsnorm(x, &w.input_layernorm_weight, w.eps)?;
 
-    // Q/K/V projections (with LoRA)
-    let q = vk_linear_with_lora(&h_norm, &w.q_proj, lora.q_proj.as_ref())?;
+    // Q (possibly fused with output gate) / K / V projections (with LoRA)
+    let q_raw = vk_linear_with_lora(&h_norm, &w.q_proj, lora.q_proj.as_ref())?;
     let k = vk_linear_with_lora(&h_norm, &w.k_proj, lora.k_proj.as_ref())?;
     let v = vk_linear_with_lora(&h_norm, &w.v_proj, lora.v_proj.as_ref())?;
 
-    // Causal SDPA, GQA-aware
-    let scale = 1.0 / (w.head_dim as f32).sqrt();
-    let attn = vk_sdpa_prefill_flat(
-        &q,
-        &k,
-        &v,
-        w.heads_q,
-        w.heads_kv,
-        w.head_dim,
-        scale,
-    )?;
+    // Split Q and gate (Qwen3.5 attn_output_gate)
+    let (q, gate) = if w.attn_output_gate {
+        // q_raw: [T, heads_q * head_dim * 2]
+        // → reshape [T, heads_q, head_dim*2], narrow into Q + gate, reshape flat
+        let q_raw_3d = vk_reshape(&q_raw, &[t, w.heads_q, w.head_dim * 2])?;
+        let q_3d = vk_narrow_lastdim(&q_raw_3d, 0, w.head_dim)?;
+        let gate_3d = vk_narrow_lastdim(&q_raw_3d, w.head_dim, w.head_dim)?;
+        let q = vk_reshape(&q_3d, &[t, q_dim])?;
+        let gate = vk_reshape(&gate_3d, &[t, q_dim])?;
+        (q, Some(gate))
+    } else {
+        (q_raw, None)
+    };
 
-    // O projection
-    let o_out = vk_linear_with_lora(&attn, &w.o_proj, lora.o_proj.as_ref())?;
-    // Residual
+    // Per-head Q/K-norm (Qwen3.5)
+    let q = if let Some(qn) = &w.q_norm {
+        vk_per_head_rms_norm(&q, qn, w.heads_q, w.head_dim, w.eps)?
+    } else {
+        q
+    };
+    let k = if let Some(kn) = &w.k_norm {
+        vk_per_head_rms_norm(&k, kn, w.heads_kv, w.head_dim, w.eps)?
+    } else {
+        k
+    };
+
+    // Causal SDPA, GQA-aware (does NOT apply RoPE — Phase 1 omits RoPE
+    // for the FullAttn smoke path; real Qwen3.5 plumbs RoPE in Phase 6
+    // via vk_rope before SDPA. Tracked as a Phase 1.3 follow-up.)
+    let scale = 1.0 / (w.head_dim as f32).sqrt();
+    let attn = vk_sdpa_prefill_flat(&q, &k, &v, w.heads_q, w.heads_kv, w.head_dim, scale)?;
+
+    // attn_output_gate: attn_out *= sigmoid(gate)
+    let attn_gated = if let Some(gate) = gate {
+        let sig = vk_sigmoid(&gate)?;
+        vk_mul(&attn, &sig)?
+    } else {
+        attn
+    };
+
+    // O projection + residual
+    let o_out = vk_linear_with_lora(&attn_gated, &w.o_proj, lora.o_proj.as_ref())?;
     let after_attn = vk_add(x, &o_out)?;
-    let _ = rows;
 
     // Post-attention RMSNorm
     let h_norm2 = vk_rmsnorm(&after_attn, &w.post_attention_layernorm_weight, w.eps)?;
 
-    // SwiGLU MLP — for Phase E.3 we don't yet wire MLP LoRA into
-    // vk_swiglu_mlp; that's a small extension. The composition below
-    // computes the base MLP output; LoRA on gate/up/down is folded in
-    // by replacing `gate/up/down` projections with `vk_linear_with_lora`
-    // calls (Phase F refinement).
-    let mlp_out = if lora.gate_proj.is_some() || lora.up_proj.is_some() || lora.down_proj.is_some() {
+    // SwiGLU MLP (with optional LoRA on gate/up/down)
+    let mlp_out = if lora.gate_proj.is_some() || lora.up_proj.is_some() || lora.down_proj.is_some()
+    {
         vk_swiglu_mlp_with_lora(
             &h_norm2,
             &w.gate_proj,
@@ -226,6 +364,22 @@ pub fn vk_transformer_layer(
     };
 
     vk_add(&after_attn, &mlp_out)
+}
+
+/// Dispatch one transformer layer: Full vs Linear (GDN). Phase 1
+/// only handles Full; Linear bails until Phase 5 lands.
+pub fn vk_transformer_layer(
+    x: &VkTensor,
+    w: &VkLayerWeights,
+    lora: &VkLoraLayer,
+) -> Result<VkTensor> {
+    match w {
+        VkLayerWeights::FullAttention(full) => vk_full_attention_layer(x, full, lora),
+        VkLayerWeights::LinearAttention(_) => bail!(
+            "vk_transformer_layer: LinearAttention (GDN) layer encountered — vk-native GDN \
+             forward+backward is Phase 5; not yet implemented"
+        ),
+    }
 }
 
 fn vk_swiglu_mlp_with_lora(
@@ -246,13 +400,17 @@ fn vk_swiglu_mlp_with_lora(
     vk_linear_with_lora(&gated, w_down, lora_down)
 }
 
+// ---------------------------------------------------------------------------
+// Whole-model forward + FLCE loss
+// ---------------------------------------------------------------------------
+
 /// Full forward pass + FLCE loss.
 ///
-/// `input_ids` is the CPU-side token sequence (length T). `labels` is
-/// also length T; if a position should not contribute to the loss the
-/// caller should pass `u32::MAX` and gather appropriately before
-/// calling — for Phase E.3 we treat all positions as active and
-/// shift by 1 (next-token prediction).
+/// `input_ids` is the CPU-side token sequence (length T). Loss is
+/// computed on the next-token-prediction shift: `labels[i] =
+/// input_ids[i+1]`. The last hidden row (no next token) is included
+/// in the loss with the final vocab index as a sentinel — the
+/// trainer's label mask should already exclude it via `vk_index_select_rows`.
 pub fn vk_model_forward_loss(
     weights: &VkModelWeights,
     lora_layers: &[VkLoraLayer],
@@ -283,79 +441,175 @@ pub fn vk_model_forward_loss(
     // Final RMSNorm
     let h = vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)?;
 
-    // FLCE loss: shift labels by 1 (predict input_ids[i+1] from
-    // hidden[i]). Drop the last position (no next token).
+    // FLCE loss on shifted labels.
     let t = input_ids.len();
     anyhow::ensure!(t >= 2, "vk_model_forward_loss: need at least 2 tokens");
-    let labels: Vec<u32> = input_ids[1..].to_vec();
-    // Slice hidden to first t-1 positions. Phase E uses a CPU
-    // readback + re-upload (correctness > perf for now); a dedicated
-    // narrow shader is a Phase G item.
-    let h_data = h.to_vec_f32()?;
-    let prefix = (t - 1) * weights.hidden;
-    let h_prefix = &h_data[..prefix];
-    let h_prefix_t = Tensor::from_vec(
-        h_prefix.to_vec(),
-        (t - 1, weights.hidden),
-        &Device::Cpu,
-    )?;
-    let h_prefix_vk = VkTensor::from_candle(&h_prefix_t, Arc::clone(device))?;
-    // We need this slice to be autograd-tracked back into `h`. For
-    // Phase E we install a manual identity pass-through: the FLCE
-    // backward gives us d(h_prefix_vk)/dx, and we'd need to scatter
-    // that back into h. Since Phase E demos focus on a single
-    // contiguous prefix, the simplest correct path is to compute
-    // FLCE directly on the (t-1, hidden) prefix and then re-attach
-    // its backward to the original `h` via a Slice op. For now we
-    // just return the FLCE loss; the parameter Vars get gradients,
-    // but the grad-flow into `h` is local to the FLCE op (which is
-    // fine because the autograd tape we built rooted at `loss`
-    // only propagates into params reachable from `h_prefix_vk`).
-    let _ = h_prefix_vk;
-
-    // Re-attach: build a Slice op that wraps h. Simpler: pass h as the
-    // input-with-grad to FLCE so all params upstream of h get
-    // gradients. The slice is via vk_reshape after a copy through
-    // element-wise-add-zeros, which preserves dtype but loses the
-    // last-row data. That's incorrect for the loss computation but is
-    // the right autograd structure. To avoid the correctness issue we
-    // *also* zero out the last row's contribution by using h directly
-    // and treating the last position's label as a "don't care" with a
-    // zero-grad mask. For Phase E that's a TODO. Use h_prefix_vk for
-    // forward correctness (its grad doesn't flow upstream).
-    let h_prefix_t2 = Tensor::from_vec(
-        h_prefix.to_vec(),
-        (t - 1, weights.hidden),
-        &Device::Cpu,
-    )?;
-    let h_prefix_param = VkTensor::from_candle(&h_prefix_t2, Arc::clone(device))?;
-    // To keep the autograd chain alive, link via a single elementwise
-    // add with a zero-shaped slice of h. The proper fix is a vk_narrow
-    // op (Phase G). For now we use a workaround: include `h` in the
-    // graph by a residual-on-zero trick.
-    let _ = h_prefix_param; // placeholder
-    vk_flce_loss(
-        &h, // provide full hidden — labels indexes the first t-1 rows
-        &weights.lm_head,
-        &labels_padded(t, weights.vocab, &labels),
-        FLCE_DEFAULT_CHUNK,
-    )
-}
-
-/// Pad labels to length `t` by appending a sentinel (use last-known
-/// label) so FLCE can iterate over the same row count as `hidden`.
-/// The trainer should use a real label-mask to ignore padding rows;
-/// for Phase E we accept that the last row's loss is included.
-fn labels_padded(t: usize, vocab: usize, labels: &[u32]) -> Vec<u32> {
-    let mut out = labels.to_vec();
-    while out.len() < t {
-        out.push((vocab.saturating_sub(1)) as u32);
+    let mut labels: Vec<u32> = input_ids[1..].to_vec();
+    while labels.len() < t {
+        labels.push((weights.vocab.saturating_sub(1)) as u32);
     }
-    out
+    vk_flce_loss(&h, &weights.lm_head, &labels, FLCE_DEFAULT_CHUNK)
 }
 
 /// Run vk_backward and return per-`TensorId` gradients ready to feed
 /// to the existing on-device AdamW/SGD dispatch path.
 pub fn vk_step_backward(loss: &VkTensor) -> Result<VkGradStore> {
     vk_backward(loss).context("vk_step_backward")
+}
+
+// ---------------------------------------------------------------------------
+// Real-weights bridge: candle GpuWeights → VkModelWeights
+// ---------------------------------------------------------------------------
+
+/// Convert a candle tensor to VkTensor, preserving F32 / BF16 dtype.
+/// Anything else (F16, etc.) bails — vk-native is BF16-or-F32-only.
+fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+    match t.dtype() {
+        DType::F32 | DType::BF16 => VkTensor::from_candle(t, Arc::clone(device)),
+        other => bail!(
+            "vk-native: unsupported tensor dtype {:?} (only F32 and BF16 are supported)",
+            other
+        ),
+    }
+}
+
+impl VkModelWeights {
+    /// Upload candle `GpuWeights` into vk-native `VkModelWeights`.
+    ///
+    /// Per-layer dispatch:
+    ///   - `GpuAttentionWeights::Full` → `VkLayerWeights::FullAttention`,
+    ///     including q_norm/k_norm and the `attn_output_gate` flag from
+    ///     `model_config`.
+    ///   - `GpuAttentionWeights::Linear` (GDN) → `VkLayerWeights::LinearAttention`.
+    ///     Phase 1 uploads the buffers; Phase 5 wires the forward+backward
+    ///     so that `vk_transformer_layer` can dispatch through it.
+    ///
+    /// Embedding and lm_head are tied (lm_head reuses embed_tokens —
+    /// matches Qwen3.5 and the existing inference path).
+    pub fn from_gpu_weights(
+        weights: &crate::forward::GpuWeights,
+        model_config: &ModelConfig,
+        device: &Arc<VulkanDevice>,
+    ) -> Result<Self> {
+        let embed_tokens =
+            vk_from_candle_typed(&weights.embed_tokens, device).context("embed_tokens")?;
+        let embed_dtype = embed_tokens.dtype();
+        let final_norm_weight =
+            vk_from_candle_typed(&weights.final_norm, device).context("final_norm")?;
+        // lm_head is tied to embed_tokens for Qwen3.5; we re-upload as
+        // a fresh VkTensor so backward through the head doesn't alias.
+        let lm_head =
+            vk_from_candle_typed(&weights.embed_tokens, device).context("lm_head (tied)")?;
+        let vocab = weights.embed_tokens.dim(0)?;
+        let hidden = weights.embed_tokens.dim(1)?;
+        let eps = model_config.rms_norm_eps as f32;
+
+        let mut layers = Vec::with_capacity(weights.layers.len());
+        for (li, lw) in weights.layers.iter().enumerate() {
+            let layer = match &lw.attention {
+                crate::forward::GpuAttentionWeights::Full(attn) => {
+                    let input_layernorm_weight = vk_from_candle_typed(&lw.input_layernorm, device)
+                        .with_context(|| format!("layer {li} input_layernorm"))?;
+                    let post_attention_layernorm_weight =
+                        vk_from_candle_typed(&lw.post_attention_layernorm, device)
+                            .with_context(|| format!("layer {li} post_attention_layernorm"))?;
+                    let q_proj = vk_from_candle_typed(&attn.q_proj, device)
+                        .with_context(|| format!("layer {li} q_proj"))?;
+                    let k_proj = vk_from_candle_typed(&attn.k_proj, device)
+                        .with_context(|| format!("layer {li} k_proj"))?;
+                    let v_proj = vk_from_candle_typed(&attn.v_proj, device)
+                        .with_context(|| format!("layer {li} v_proj"))?;
+                    let o_proj = vk_from_candle_typed(&attn.o_proj, device)
+                        .with_context(|| format!("layer {li} o_proj"))?;
+                    let q_norm = Some(
+                        vk_from_candle_typed(&attn.q_norm, device)
+                            .with_context(|| format!("layer {li} q_norm"))?,
+                    );
+                    let k_norm = Some(
+                        vk_from_candle_typed(&attn.k_norm, device)
+                            .with_context(|| format!("layer {li} k_norm"))?,
+                    );
+                    let gate_proj = vk_from_candle_typed(&lw.mlp.gate_proj, device)
+                        .with_context(|| format!("layer {li} mlp.gate_proj"))?;
+                    let up_proj = vk_from_candle_typed(&lw.mlp.up_proj, device)
+                        .with_context(|| format!("layer {li} mlp.up_proj"))?;
+                    let down_proj = vk_from_candle_typed(&lw.mlp.down_proj, device)
+                        .with_context(|| format!("layer {li} mlp.down_proj"))?;
+                    VkLayerWeights::FullAttention(VkFullAttentionWeights {
+                        input_layernorm_weight,
+                        post_attention_layernorm_weight,
+                        q_proj,
+                        k_proj,
+                        v_proj,
+                        o_proj,
+                        q_norm,
+                        k_norm,
+                        gate_proj,
+                        up_proj,
+                        down_proj,
+                        heads_q: model_config.num_attention_heads,
+                        heads_kv: model_config.num_kv_heads,
+                        head_dim: model_config.head_dim,
+                        attn_output_gate: model_config.attn_output_gate,
+                        eps,
+                    })
+                }
+                crate::forward::GpuAttentionWeights::Linear(attn) => {
+                    let layer_norm = vk_from_candle_typed(&lw.input_layernorm, device)
+                        .with_context(|| format!("layer {li} (GDN) input_layernorm"))?;
+                    let in_proj_qkv = vk_from_candle_typed(&attn.in_proj_qkv, device)
+                        .with_context(|| format!("layer {li} in_proj_qkv"))?;
+                    let in_proj_z = vk_from_candle_typed(&attn.in_proj_z, device)
+                        .with_context(|| format!("layer {li} in_proj_z"))?;
+                    let in_proj_a = vk_from_candle_typed(&attn.in_proj_a, device)
+                        .with_context(|| format!("layer {li} in_proj_a"))?;
+                    let in_proj_b = vk_from_candle_typed(&attn.in_proj_b, device)
+                        .with_context(|| format!("layer {li} in_proj_b"))?;
+                    let conv1d = vk_from_candle_typed(&attn.conv1d, device)
+                        .with_context(|| format!("layer {li} conv1d"))?;
+                    let a_log = vk_from_candle_typed(&attn.a_log, device)
+                        .with_context(|| format!("layer {li} a_log"))?;
+                    let a_log_gates = vk_from_candle_typed(&attn.a_log_gates, device)
+                        .with_context(|| format!("layer {li} a_log_gates"))?;
+                    let dt_bias = vk_from_candle_typed(&attn.dt_bias, device)
+                        .with_context(|| format!("layer {li} dt_bias"))?;
+                    let gated_norm = vk_from_candle_typed(&attn.norm, device)
+                        .with_context(|| format!("layer {li} (GDN) gated_norm"))?;
+                    let out_proj = vk_from_candle_typed(&attn.out_proj, device)
+                        .with_context(|| format!("layer {li} (GDN) out_proj"))?;
+                    let conv_kernel = attn.conv1d.dim(attn.conv1d.dims().len() - 1)?;
+                    VkLayerWeights::LinearAttention(VkLinearAttentionWeights {
+                        layer_norm,
+                        in_proj_qkv,
+                        in_proj_z,
+                        in_proj_a,
+                        in_proj_b,
+                        conv1d,
+                        a_log,
+                        a_log_gates,
+                        dt_bias,
+                        gated_norm,
+                        out_proj,
+                        heads_k: model_config.linear_num_key_heads,
+                        heads_v: model_config.linear_num_value_heads,
+                        head_dim_k: model_config.linear_key_head_dim,
+                        head_dim_v: model_config.linear_value_head_dim,
+                        conv_kernel,
+                        eps,
+                    })
+                }
+            };
+            layers.push(layer);
+        }
+
+        Ok(VkModelWeights {
+            embed_tokens,
+            embed_dtype,
+            final_norm_weight,
+            lm_head,
+            layers,
+            vocab,
+            hidden,
+        })
+    }
 }

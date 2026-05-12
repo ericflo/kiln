@@ -19,7 +19,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use kiln_model::vk_forward::{
-    vk_model_forward_loss, VkLayerWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
+    vk_model_forward_loss, VkFullAttentionWeights, VkLayerWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights,
 };
 use kiln_train::vk_train::{
     allocate_adamw_state, vk_train_step, VkAdamWConfig,
@@ -78,21 +79,24 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
     let up = small_random(intermediate * hidden, 7);
     let down = small_random(hidden * intermediate, 8);
 
-    let layer = VkLayerWeights {
+    let layer = VkLayerWeights::FullAttention(VkFullAttentionWeights {
         input_layernorm_weight: upload_f32(dev, &in_norm, &[hidden])?,
         post_attention_layernorm_weight: upload_f32(dev, &post_norm, &[hidden])?,
         q_proj: upload_f32(dev, &q, &[hidden, hidden])?,
         k_proj: upload_f32(dev, &k, &[kv_dim, hidden])?,
         v_proj: upload_f32(dev, &v, &[kv_dim, hidden])?,
         o_proj: upload_f32(dev, &o, &[hidden, hidden])?,
+        q_norm: None,
+        k_norm: None,
         gate_proj: upload_f32(dev, &gate, &[intermediate, hidden])?,
         up_proj: upload_f32(dev, &up, &[intermediate, hidden])?,
         down_proj: upload_f32(dev, &down, &[hidden, intermediate])?,
         heads_q,
         heads_kv,
         head_dim,
+        attn_output_gate: false,
         eps: 1e-5,
-    };
+    });
     Ok(VkModelWeights {
         embed_tokens: upload_f32(dev, &embed, &[vocab, hidden])?,
         embed_dtype: VkDType::F32,
@@ -115,6 +119,7 @@ fn build_lora_layer(dev: &Arc<VulkanDevice>, hidden: usize, kv_dim: usize, inter
         gate_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 104)?),
         up_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 105)?),
         down_proj: Some(VkLoraPair::init_kaiming(dev, intermediate, hidden, rank, alpha, 106)?),
+        ..Default::default()
     })
 }
 
@@ -126,7 +131,8 @@ fn vk_full_model_one_layer_grads_exist() -> Result<()> {
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
     let Some(dev) = vk_dev() else { return Ok(()) };
     let model = build_tiny_model(&dev)?;
-    let kv_dim = model.layers[0].heads_kv * model.layers[0].head_dim;
+    // build_tiny_model: heads_kv=1, head_dim=16
+    let kv_dim = 16;
     let lora = build_lora_layer(&dev, model.hidden, kv_dim, 64)?;
     // Use a synthetic hidden state as input (rather than embedding) so we
     // can verify the per-layer chain in isolation.
