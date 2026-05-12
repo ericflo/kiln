@@ -703,6 +703,29 @@ pub fn cuda_transpose2d(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_transpose_last_two(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() >= 2,
+        "cuda_transpose_last_two: expected rank >= 2 input, got {:?}",
+        input.dims()
+    );
+    let rank = input.dims().len();
+    let out = input
+        .as_tensor()
+        .transpose(rank - 2, rank - 1)
+        .context("cuda_transpose_last_two: transpose last two dims")?
+        .contiguous()
+        .context("cuda_transpose_last_two: contiguous output")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(TransposeLastTwoBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.dims().len() == 2 && rhs.dims().len() == 2,
@@ -1743,6 +1766,25 @@ impl CudaBackwardOp for Transpose2dBackward {
 }
 
 #[derive(Debug)]
+struct TransposeLastTwoBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for TransposeLastTwoBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_transpose_last_two"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        Ok(vec![Some(cuda_transpose_last_two(grad_out)?)])
+    }
+}
+
+#[derive(Debug)]
 struct MatmulBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -2332,6 +2374,46 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_transpose_last_two_backward_transposes_batched_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_transpose_last_two backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, -1.0, 1.0, 2.0, 3.0, -2.0, 4.0],
+            (2usize, 2usize, 3usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let transposed = cuda_transpose_last_two(&param)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 1.0, 5.0, 2.0, 6.0, 3.0],
+            (2usize, 3usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&transposed, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(transposed.dims(), &[2, 3, 2]);
+        assert_eq!(
+            transposed.to_vec_f32()?,
+            vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0, -1.0, 3.0, 1.0, -2.0, 2.0, 4.0]
+        );
+        assert_eq!(loss.to_vec_f32()?, vec![358.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0]
         );
         Ok(())
     }
