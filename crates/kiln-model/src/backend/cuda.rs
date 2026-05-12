@@ -15,6 +15,8 @@ use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
 static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
@@ -26,6 +28,18 @@ pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
 pub fn reset_optimizer_dispatch_success_counts() {
     CUDA_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
     CUDA_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+}
+
+pub fn linear_prefill_success_counts() -> (u64, u64) {
+    (
+        CUDA_LINEAR_PREFILL_SUCCESSES.load(Ordering::Relaxed),
+        CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn reset_linear_prefill_success_counts() {
+    CUDA_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
+    CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
 fn any_tracks_op(tensors: &[&Tensor]) -> bool {
@@ -700,7 +714,9 @@ impl BackendRuntime for CudaBackend {
             );
         });
 
-        Ok(Some(x.broadcast_matmul(weight_t)?))
+        let out = x.broadcast_matmul(weight_t)?;
+        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        Ok(Some(out))
     }
 
     fn linear_prefill_apply_offset(
@@ -731,7 +747,11 @@ impl BackendRuntime for CudaBackend {
                 .to_dtype(x.dtype())
                 .context("cuda linear_prefill_apply_offset cast weight chunk")?
         };
-        self.linear_prefill_apply(x, &chunk)
+        let out = self.linear_prefill_apply(x, &chunk)?;
+        if out.is_some() {
+            CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(out)
     }
 
     fn lora_delta_resident(

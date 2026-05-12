@@ -5337,4 +5337,77 @@ mod tests {
         params.evict_from_backend(&*backend);
         Ok(())
     }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_training_forward_uses_projection_and_flce_backend_hooks() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("KILN_USE_FLCE", "1");
+            std::env::set_var("KILN_CUDA_FLCE", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let device = match Device::new_cuda(0) {
+                Ok(device) => device,
+                Err(err) => {
+                    eprintln!("CUDA unavailable, skipping CUDA projection routing test: {err}");
+                    return Ok(());
+                }
+            };
+            let config = tiny_config();
+            let weights = tiny_weights(&config, &device)?;
+            let params = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(0xC0FFEE),
+            )?;
+            let backend = backend::for_device(&device);
+            assert_eq!(backend.name(), "cuda");
+            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
+            let label_mask = vec![false, false, true, true, true, true, true, false];
+            let flce_provider = build_flce_provider(&backend, &label_mask, &config)
+                .expect("KILN_CUDA_FLCE=1 should build a CUDA backend FLCE provider");
+
+            kiln_model::backend::cuda::reset_linear_prefill_success_counts();
+            let (_loss, grads) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &device,
+                Some(flce_provider),
+            )?;
+            let (linear_count, offset_count) =
+                kiln_model::backend::cuda::linear_prefill_success_counts();
+            assert!(
+                offset_count > 0,
+                "CUDA FLCE provider must dispatch at least one offset chunk matmul"
+            );
+            assert!(
+                linear_count > offset_count,
+                "CUDA training forward should dispatch non-FLCE projection matmuls too: \
+                 linear_count={linear_count} offset_count={offset_count}"
+            );
+            assert!(
+                params
+                    .all_vars()
+                    .iter()
+                    .any(|var| grads.get(var.as_tensor()).is_some()),
+                "CUDA training forward/backward should produce at least one LoRA gradient"
+            );
+            Ok(())
+        })();
+
+        unsafe {
+            std::env::remove_var("KILN_USE_FLCE");
+            std::env::remove_var("KILN_CUDA_FLCE");
+        }
+        result
+    }
 }
