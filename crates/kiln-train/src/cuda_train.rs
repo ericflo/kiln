@@ -10,7 +10,7 @@ use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
-    CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaLayerWeights,
+    CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaGdnLayerState, CudaLayerWeights,
     CudaLinearAttentionState, CudaModelWeights, CudaOwnedFullAttentionLayer,
     CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena, CudaTrainTensor,
     cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
@@ -1032,6 +1032,90 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
         trainable.len()
     );
     Ok(loss_value)
+}
+
+fn cuda_linear_attention_state_zeros_for_model(
+    model: &CudaModelWeights,
+    batch: usize,
+) -> Result<CudaLinearAttentionState> {
+    ensure!(
+        batch > 0,
+        "cuda_linear_attention_state_zeros_for_model requires batch > 0"
+    );
+    let device = model.token_embedding.as_tensor().device();
+    let mut layers = Vec::new();
+    for layer in &model.layers {
+        let CudaLayerWeights::LinearAttention(linear) = layer else {
+            continue;
+        };
+        let recurrent_shape = (
+            batch,
+            linear.heads_v,
+            linear.head_dim_k,
+            linear.head_dim_v,
+        );
+        let recurrent_n = batch * linear.heads_v * linear.head_dim_k * linear.head_dim_v;
+        let conv_channels =
+            linear.heads_k * linear.head_dim_k * 2 + linear.heads_v * linear.head_dim_v;
+        let conv_rows = linear.conv_kernel.saturating_sub(1);
+        let conv_n = batch * conv_channels * conv_rows;
+        layers.push(CudaGdnLayerState {
+            recurrent_state: CudaTrainTensor::new(Tensor::zeros(
+                recurrent_shape,
+                DType::F32,
+                device,
+            )?)?,
+            recurrent_n_elements: recurrent_n,
+            conv_state: CudaTrainTensor::new(Tensor::zeros(
+                (batch, conv_channels, conv_rows),
+                DType::F32,
+                device,
+            )?)?,
+            conv_n_elements: conv_n,
+        });
+    }
+    Ok(CudaLinearAttentionState { layers })
+}
+
+pub fn cuda_lora_train_token_sequences_with_gdn_state(
+    model: &CudaModelWeights,
+    lora_layers: &[CudaLoraLayer],
+    token_sequences: &[Vec<usize>],
+    epochs: usize,
+    adamw_state: &mut CudaAdamWBook,
+    cfg: CudaAdamWConfig,
+) -> Result<Vec<f32>> {
+    ensure!(
+        epochs > 0,
+        "cuda_lora_train_token_sequences_with_gdn_state requires at least one epoch"
+    );
+    ensure!(
+        !token_sequences.is_empty(),
+        "cuda_lora_train_token_sequences_with_gdn_state requires token sequences"
+    );
+    let device = model.token_embedding.as_tensor().device();
+    let mut losses = Vec::with_capacity(epochs * token_sequences.len());
+    for _epoch in 0..epochs {
+        for token_ids in token_sequences {
+            let mut arena = CudaTrainArena::new(device)?;
+            let mut gdn_state = cuda_linear_attention_state_zeros_for_model(model, 1)?;
+            let loss = cuda_lora_model_adamw_step_with_gdn_state_with_arena(
+                model,
+                lora_layers,
+                token_ids,
+                &mut gdn_state,
+                adamw_state,
+                cfg,
+                &mut arena,
+            )?;
+            ensure!(
+                loss.is_finite(),
+                "cuda_lora_train_token_sequences_with_gdn_state encountered non-finite loss {loss}"
+            );
+            losses.push(loss);
+        }
+    }
+    Ok(losses)
 }
 
 pub fn cuda_full_attention_lora_train_token_sequences(
@@ -2174,6 +2258,19 @@ mod tests {
                 .iter()
                 .any(|value| value.abs() > 1e-6)
         );
+        let losses = cuda_lora_train_token_sequences_with_gdn_state(
+            &model,
+            &lora_layers,
+            &[vec![0, 1]],
+            1,
+            &mut adamw,
+            CudaAdamWConfig {
+                lr: 0.01,
+                ..CudaAdamWConfig::default()
+            },
+        )?;
+        assert_eq!(losses.len(), 1);
+        assert!(losses[0].is_finite());
         Ok(())
     }
 
