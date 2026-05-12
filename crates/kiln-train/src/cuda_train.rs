@@ -214,6 +214,51 @@ pub fn cuda_lora_linear(
     cuda_add(&base, &scaled).context("cuda LoRA linear add")
 }
 
+pub struct CudaGdnInputProjections {
+    pub q: CudaTrainTensor,
+    pub k: CudaTrainTensor,
+    pub v: CudaTrainTensor,
+    pub z: CudaTrainTensor,
+}
+
+/// Native CUDA front-end for one LinearAttention/GDN layer.
+///
+/// This covers the autograd-safe part before conv/gates/chunkwise recurrence:
+/// input RMSNorm, LoRA-enabled q/k/v projection, LoRA-enabled z projection,
+/// and q/k/v last-dimension splits.
+pub fn cuda_gdn_lora_input_projections(
+    input: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+    lora: &CudaLoraLayer,
+) -> Result<CudaGdnInputProjections> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_gdn_lora_input_projections: expected rank-2 [rows, hidden], got {:?}",
+        input.dims()
+    );
+    let qk_dim = weights.heads_k * weights.head_dim_k;
+    let v_dim = weights.heads_v * weights.head_dim_v;
+    let expected_qkv_dim = qk_dim * 2 + v_dim;
+
+    let h_norm = cuda_rmsnorm(input, &weights.layer_norm_weight, weights.eps)?;
+    let qkv = cuda_lora_linear(
+        &h_norm,
+        &weights.in_proj_qkv_weight,
+        lora.in_proj_qkv.as_ref(),
+    )?;
+    ensure!(
+        qkv.dims().last() == Some(&expected_qkv_dim),
+        "cuda_gdn_lora_input_projections: qkv projection last dim {} != expected {}",
+        qkv.dims().last().copied().unwrap_or(0),
+        expected_qkv_dim
+    );
+    let z = cuda_lora_linear(&h_norm, &weights.in_proj_z_weight, lora.in_proj_z.as_ref())?;
+    let q = cuda_narrow_last_dim(&qkv, 0, qk_dim)?;
+    let k = cuda_narrow_last_dim(&qkv, qk_dim, qk_dim)?;
+    let v = cuda_narrow_last_dim(&qkv, qk_dim * 2, v_dim)?;
+    Ok(CudaGdnInputProjections { q, k, v, z })
+}
+
 fn cuda_lora_per_head_rmsnorm_flat(
     input: &CudaTrainTensor,
     weight: &CudaTrainTensor,
@@ -1504,6 +1549,30 @@ mod tests {
         );
         let adamw = allocate_cuda_lora_adamw_state(&lora_layers)?;
         assert_eq!(adamw.len(), 20);
+
+        let CudaLayerWeights::LinearAttention(linear_layer) = &model.layers[1] else {
+            panic!("expected LinearAttention layer");
+        };
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.25f32, -0.5, 0.75, 1.0],
+            (2usize, 2usize),
+            &device,
+        )?)?;
+        let projections = cuda_gdn_lora_input_projections(&input, linear_layer, &lora_layers[1])?;
+        assert_eq!(projections.q.dims(), &[2, 2]);
+        assert_eq!(projections.k.dims(), &[2, 2]);
+        assert_eq!(projections.v.dims(), &[2, 2]);
+        assert_eq!(projections.z.dims(), &[2, 2]);
+        let q_loss = cuda_sum_all(&projections.q)?;
+        let k_loss = cuda_sum_all(&projections.k)?;
+        let v_loss = cuda_sum_all(&projections.v)?;
+        let z_loss = cuda_sum_all(&projections.z)?;
+        let loss = cuda_add(&cuda_add(&q_loss, &k_loss)?, &cuda_add(&v_loss, &z_loss)?)?;
+        let grads = cuda_backward(&loss)?;
+        let qkv_pair = lora_layers[1].in_proj_qkv.as_ref().expect("qkv lora");
+        let z_pair = lora_layers[1].in_proj_z.as_ref().expect("z lora");
+        assert!(grads.get(qkv_pair.b_id).is_some());
+        assert!(grads.get(z_pair.b_id).is_some());
         Ok(())
     }
 
