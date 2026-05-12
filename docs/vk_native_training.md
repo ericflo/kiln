@@ -31,10 +31,6 @@ validation on a real model + adapter run.
   6 GDN-chunkwise.
 
 **Known gaps** (Phase 7+ follow-ups):
-- `chunk_prep_bwd` is the only remaining CPU implementation in the
-  GDN backward pipeline. The math is the most complex (cumsum + exp
-  + per-pair masked outer products); a fused GLSL shader is queued
-  but the CPU version is parity-tested via finite-diff and works.
 - Gradient checkpointing for hybrid (GDN) models needs per-segment
   recurrent-state snapshots — the current path bypasses checkpointing
   when GDN layers are present. For Qwen3.5-4B, set
@@ -44,17 +40,17 @@ validation on a real model + adapter run.
   not been measured. The math is parity-tested per-shader / per-op,
   but the end-to-end Qwen3.5-4B numerical bar is the Phase 7 gate.
 
-**GPU residency status** (post-optimization sweep):
-
-The vk-native training step is now GPU-resident end-to-end except for
-chunk_prep_bwd. CPU touchpoints in a step are: (1) input_ids upload
-at the start, (2) loss scalar readback for logging, (3) adapter
-safetensors save at the end of the run. Everything else — embedding,
-RMSNorm, projections (Q/K/V/O + gate/up/down), SDPA, RoPE, FLCE
-loss, GDN chunkwise forward (chunk_prep + solve_tri_v2 + matmul +
-state_update), GDN backward (solve_tri_transpose + chunk_scan_bwd +
-state_exit_bwd + gated_rms_norm_bwd + reverse_cumsum + gates_bwd +
-conv1d_bwd), AdamW step — runs as Vulkan dispatches.
+**GPU residency status**: The vk-native training step is now FULLY
+GPU-resident. Every per-chunk and per-layer operation in both forward
+and backward runs as a Vulkan dispatch. CPU touchpoints in a step
+are: (1) input_ids upload at the start, (2) loss scalar readback for
+logging, (3) adapter safetensors save at the end of the run.
+Everything else — embedding, RMSNorm, projections (Q/K/V/O +
+gate/up/down), SDPA, RoPE, FLCE loss, GDN chunkwise forward
+(chunk_prep + solve_tri_v2 + matmul + state_update), GDN backward
+(solve_tri_transpose + chunk_scan_bwd + state_exit_bwd +
+gated_rms_norm_bwd + chunk_prep_bwd + reverse_cumsum + gates_bwd +
+conv1d_bwd), AdamW step — all GPU.
 
 See `docs/vk_native_gdn.md` for the GDN math derivation.
 
