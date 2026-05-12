@@ -1118,6 +1118,35 @@ pub fn cuda_lora_train_token_sequences_with_gdn_state(
     Ok(losses)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_lora_train_token_sequences_with_gdn_state_to_adapter(
+    model: &CudaModelWeights,
+    token_sequences: &[Vec<usize>],
+    epochs: usize,
+    rank: usize,
+    alpha: f32,
+    seed: u64,
+    adamw_cfg: CudaAdamWConfig,
+    output_dir: &Path,
+) -> Result<(PathBuf, Vec<f32>)> {
+    let lora_layers =
+        cuda_init_lora_layers(model, rank, alpha, seed).context("initialize CUDA LoRA layers")?;
+    let mut adamw =
+        allocate_cuda_lora_adamw_state(&lora_layers).context("allocate CUDA LoRA AdamW state")?;
+    let losses = cuda_lora_train_token_sequences_with_gdn_state(
+        model,
+        &lora_layers,
+        token_sequences,
+        epochs,
+        &mut adamw,
+        adamw_cfg,
+    )
+    .context("train CUDA LoRA token sequences with GDN state")?;
+    let adapter_dir = save_cuda_lora_adapter_dir(&lora_layers, rank, alpha, output_dir)
+        .context("save CUDA LoRA GDN-state token adapter")?;
+    Ok((adapter_dir, losses))
+}
+
 pub fn cuda_full_attention_lora_train_token_sequences(
     model: &CudaModelWeights,
     lora_layers: &[CudaLoraLayer],
@@ -2271,6 +2300,28 @@ mod tests {
         )?;
         assert_eq!(losses.len(), 1);
         assert!(losses[0].is_finite());
+        let adapter_dir = std::env::temp_dir().join(format!(
+            "kiln-cuda-gdn-state-token-adapter-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&adapter_dir);
+        let (saved_dir, saved_losses) = cuda_lora_train_token_sequences_with_gdn_state_to_adapter(
+            &model,
+            &[vec![0, 1]],
+            1,
+            2,
+            4.0,
+            0xC0DA_6DAD,
+            CudaAdamWConfig {
+                lr: 0.01,
+                ..CudaAdamWConfig::default()
+            },
+            &adapter_dir,
+        )?;
+        assert_eq!(saved_losses.len(), 1);
+        assert!(saved_dir.join("adapter_model.safetensors").exists());
+        assert!(saved_dir.join("adapter_config.json").exists());
+        let _ = std::fs::remove_dir_all(&adapter_dir);
         Ok(())
     }
 
