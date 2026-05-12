@@ -1006,6 +1006,60 @@ pub fn cuda_index_select_rows(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_permute_rh_to_hr(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_permute_rh_to_hr: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 3,
+        "cuda_permute_rh_to_hr: expected rank-3 [rows, heads, head_dim], got {:?}",
+        input.dims()
+    );
+    let out = input
+        .as_tensor()
+        .transpose(0, 1)
+        .context("cuda_permute_rh_to_hr: transpose rows/heads")?
+        .contiguous()
+        .context("cuda_permute_rh_to_hr: contiguous output")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(PermuteRhToHrBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_permute_hr_to_rh(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_permute_hr_to_rh: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 3,
+        "cuda_permute_hr_to_rh: expected rank-3 [heads, rows, head_dim], got {:?}",
+        input.dims()
+    );
+    let out = input
+        .as_tensor()
+        .transpose(0, 1)
+        .context("cuda_permute_hr_to_rh: transpose heads/rows")?
+        .contiguous()
+        .context("cuda_permute_hr_to_rh: contiguous output")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(PermuteHrToRhBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -1246,6 +1300,44 @@ impl CudaBackwardOp for MeanAllBackward {
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct PermuteRhToHrBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for PermuteRhToHrBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_permute_rh_to_hr"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        Ok(vec![Some(cuda_permute_hr_to_rh(grad_out)?)])
+    }
+}
+
+#[derive(Debug)]
+struct PermuteHrToRhBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for PermuteHrToRhBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_permute_hr_to_rh"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        Ok(vec![Some(cuda_permute_rh_to_hr(grad_out)?)])
     }
 }
 
@@ -2603,6 +2695,80 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![20.0, 2.0, 0.0, 0.0, 40.0, 4.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_permute_rh_to_hr_backward_inverts_permute() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_permute_rh_to_hr backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize, 1usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let permuted = cuda_permute_rh_to_hr(&param)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
+            (3usize, 2usize, 1usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&permuted, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(permuted.dims(), &[3, 2, 1]);
+        assert_eq!(permuted.to_vec_f32()?, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![172.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![10.0, 20.0, 30.0, 1.0, 2.0, 3.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_permute_hr_to_rh_backward_inverts_permute() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_permute_hr_to_rh backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize, 1usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let permuted = cuda_permute_hr_to_rh(&param)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
+            (3usize, 2usize, 1usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&permuted, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(permuted.dims(), &[3, 2, 1]);
+        assert_eq!(permuted.to_vec_f32()?, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![172.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![10.0, 20.0, 30.0, 1.0, 2.0, 3.0]
         );
         Ok(())
     }
