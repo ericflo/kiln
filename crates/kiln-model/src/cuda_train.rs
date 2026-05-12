@@ -992,6 +992,172 @@ pub fn cuda_swiglu_mlp(
     cuda_matmul(&hidden, down_weight)
 }
 
+pub struct CudaRopeTables<'a> {
+    pub cos: &'a CudaTrainTensor,
+    pub sin: &'a CudaTrainTensor,
+    pub rotary_dim: usize,
+}
+
+pub struct CudaFullAttentionLayer<'a> {
+    pub input_norm_weight: &'a CudaTrainTensor,
+    pub q_weight: &'a CudaTrainTensor,
+    pub k_weight: &'a CudaTrainTensor,
+    pub v_weight: &'a CudaTrainTensor,
+    pub q_norm_weight: Option<&'a CudaTrainTensor>,
+    pub k_norm_weight: Option<&'a CudaTrainTensor>,
+    pub o_weight: &'a CudaTrainTensor,
+    pub post_norm_weight: &'a CudaTrainTensor,
+    pub gate_weight: &'a CudaTrainTensor,
+    pub up_weight: &'a CudaTrainTensor,
+    pub down_weight: &'a CudaTrainTensor,
+    pub heads_q: usize,
+    pub heads_kv: usize,
+    pub head_dim: usize,
+    pub eps: f32,
+    pub attn_output_gate: bool,
+    pub rope: Option<CudaRopeTables<'a>>,
+}
+
+fn cuda_per_head_rmsnorm_flat(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+    heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2 && input.dims()[1] == heads * head_dim,
+        "cuda_per_head_rmsnorm_flat: expected [rows, heads*head_dim], got {:?} heads={heads} head_dim={head_dim}",
+        input.dims()
+    );
+    let rows = input.dims()[0];
+    let flat = cuda_reshape(input, &[rows * heads, head_dim])?;
+    let normed = cuda_rmsnorm(&flat, weight, eps)?;
+    cuda_reshape(&normed, &[rows, heads * head_dim])
+}
+
+fn cuda_apply_rope_to_flat(
+    input: &CudaTrainTensor,
+    cos: &CudaTrainTensor,
+    sin: &CudaTrainTensor,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2 && input.dims()[1] == heads * head_dim,
+        "cuda_apply_rope_to_flat: expected [rows, heads*head_dim], got {:?} heads={heads} head_dim={head_dim}",
+        input.dims()
+    );
+    let rows = input.dims()[0];
+    let rank3 = cuda_reshape(input, &[rows, heads, head_dim])?;
+    let rotated = cuda_rope(&rank3, cos, sin, rotary_dim)?;
+    cuda_reshape(&rotated, &[rows, heads * head_dim])
+}
+
+pub fn cuda_full_attention_layer(
+    input: &CudaTrainTensor,
+    weights: &CudaFullAttentionLayer<'_>,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_full_attention_layer: expected rank-2 [rows, hidden] input, got {:?}",
+        input.dims()
+    );
+    let rows = input.dims()[0];
+    let q_dim = weights.heads_q * weights.head_dim;
+    let q_out_dim = if weights.attn_output_gate {
+        q_dim * 2
+    } else {
+        q_dim
+    };
+    ensure!(
+        weights.q_weight.dims().len() == 2 && weights.q_weight.dims()[1] == q_out_dim,
+        "cuda_full_attention_layer: q_weight must project to {q_out_dim}, got {:?}",
+        weights.q_weight.dims()
+    );
+
+    let h_norm = cuda_rmsnorm(input, weights.input_norm_weight, weights.eps)?;
+    let q_raw = cuda_matmul(&h_norm, weights.q_weight)?;
+    let k = cuda_matmul(&h_norm, weights.k_weight)?;
+    let v = cuda_matmul(&h_norm, weights.v_weight)?;
+
+    let (q, gate) = if weights.attn_output_gate {
+        let q_raw_3d = cuda_reshape(&q_raw, &[rows, weights.heads_q, weights.head_dim * 2])?;
+        let q_3d = cuda_narrow_last_dim(&q_raw_3d, 0, weights.head_dim)?;
+        let gate_3d = cuda_narrow_last_dim(&q_raw_3d, weights.head_dim, weights.head_dim)?;
+        (
+            cuda_reshape(&q_3d, &[rows, q_dim])?,
+            Some(cuda_reshape(&gate_3d, &[rows, q_dim])?),
+        )
+    } else {
+        (q_raw, None)
+    };
+
+    let q = match weights.q_norm_weight {
+        Some(weight) => {
+            cuda_per_head_rmsnorm_flat(&q, weight, weights.heads_q, weights.head_dim, weights.eps)?
+        }
+        None => q,
+    };
+    let k = match weights.k_norm_weight {
+        Some(weight) => cuda_per_head_rmsnorm_flat(
+            &k,
+            weight,
+            weights.heads_kv,
+            weights.head_dim,
+            weights.eps,
+        )?,
+        None => k,
+    };
+
+    let (q, k) = match &weights.rope {
+        Some(rope) => (
+            cuda_apply_rope_to_flat(
+                &q,
+                rope.cos,
+                rope.sin,
+                weights.heads_q,
+                weights.head_dim,
+                rope.rotary_dim,
+            )?,
+            cuda_apply_rope_to_flat(
+                &k,
+                rope.cos,
+                rope.sin,
+                weights.heads_kv,
+                weights.head_dim,
+                rope.rotary_dim,
+            )?,
+        ),
+        None => (q, k),
+    };
+
+    let q_3d = cuda_reshape(&q, &[rows, weights.heads_q, weights.head_dim])?;
+    let k_3d = cuda_reshape(&k, &[rows, weights.heads_kv, weights.head_dim])?;
+    let v_3d = cuda_reshape(&v, &[rows, weights.heads_kv, weights.head_dim])?;
+    let scale = 1.0 / (weights.head_dim as f32).sqrt();
+    let attn = cuda_sdpa_prefill_causal(&q_3d, &k_3d, &v_3d, scale)?;
+    let attn_flat = cuda_reshape(&attn, &[rows, q_dim])?;
+    let attn_gated = match gate {
+        Some(gate) => {
+            let sig = cuda_sigmoid(&gate)?;
+            cuda_mul(&attn_flat, &sig)?
+        }
+        None => attn_flat,
+    };
+    let o_out = cuda_matmul(&attn_gated, weights.o_weight)?;
+    let after_attn = cuda_add(input, &o_out)?;
+    let h_norm2 = cuda_rmsnorm(&after_attn, weights.post_norm_weight, weights.eps)?;
+    let mlp = cuda_swiglu_mlp(
+        &h_norm2,
+        weights.gate_weight,
+        weights.up_weight,
+        weights.down_weight,
+    )?;
+    cuda_add(&after_attn, &mlp)
+}
+
 pub fn cuda_batched_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.dims().len() >= 3 && rhs.dims().len() >= 3,
@@ -3353,6 +3519,152 @@ mod tests {
             assert!(
                 values.iter().all(|value| value.is_finite())
                     && values.iter().any(|value| value.abs() > 1e-6),
+                "{name} grad should be finite and non-zero: {values:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_full_attention_layer_backward_reaches_core_weights() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_full_attention_layer backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![0.5f32, -1.0, 1.5, 0.25],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let input_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let q_tensor = Tensor::from_vec(
+            vec![0.2f32, -0.3, 0.05, 0.4, 0.4, 0.1, -0.2, 0.3],
+            (2usize, 4usize),
+            &device,
+        )?;
+        let k_tensor = Tensor::from_vec(
+            vec![0.1f32, 0.6, 0.8, -0.2],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let v_tensor = Tensor::from_vec(
+            vec![0.7f32, -0.2, -0.5, 0.6],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let q_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let k_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let o_tensor = Tensor::from_vec(
+            vec![0.3f32, -0.4, 0.8, 0.2],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let post_norm_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize,), &device)?;
+        let gate_tensor = Tensor::from_vec(
+            vec![0.25f32, -0.15, 0.35, 0.05],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let up_tensor = Tensor::from_vec(
+            vec![0.45f32, 0.2, -0.1, 0.55],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let down_tensor = Tensor::from_vec(
+            vec![0.6f32, -0.25, 0.15, 0.5],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let cos = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 0.0],
+            (2usize, 1usize),
+            &device,
+        )?)?;
+        let sin = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.0f32, 1.0],
+            (2usize, 1usize),
+            &device,
+        )?)?;
+
+        let input_id = input_tensor.id();
+        let input_norm_id = input_norm_tensor.id();
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let q_norm_id = q_norm_tensor.id();
+        let k_norm_id = k_norm_tensor.id();
+        let o_id = o_tensor.id();
+        let post_norm_id = post_norm_tensor.id();
+        let gate_id = gate_tensor.id();
+        let up_id = up_tensor.id();
+        let down_id = down_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let input_norm = CudaTrainTensor::parameter(input_norm_tensor, input_norm_id)?;
+        let q_weight = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k_weight = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v_weight = CudaTrainTensor::parameter(v_tensor, v_id)?;
+        let q_norm = CudaTrainTensor::parameter(q_norm_tensor, q_norm_id)?;
+        let k_norm = CudaTrainTensor::parameter(k_norm_tensor, k_norm_id)?;
+        let o_weight = CudaTrainTensor::parameter(o_tensor, o_id)?;
+        let post_norm = CudaTrainTensor::parameter(post_norm_tensor, post_norm_id)?;
+        let gate_weight = CudaTrainTensor::parameter(gate_tensor, gate_id)?;
+        let up_weight = CudaTrainTensor::parameter(up_tensor, up_id)?;
+        let down_weight = CudaTrainTensor::parameter(down_tensor, down_id)?;
+        let weights = CudaFullAttentionLayer {
+            input_norm_weight: &input_norm,
+            q_weight: &q_weight,
+            k_weight: &k_weight,
+            v_weight: &v_weight,
+            q_norm_weight: Some(&q_norm),
+            k_norm_weight: Some(&k_norm),
+            o_weight: &o_weight,
+            post_norm_weight: &post_norm,
+            gate_weight: &gate_weight,
+            up_weight: &up_weight,
+            down_weight: &down_weight,
+            heads_q: 1,
+            heads_kv: 1,
+            head_dim: 2,
+            eps: 1e-6,
+            attn_output_gate: true,
+            rope: Some(CudaRopeTables {
+                cos: &cos,
+                sin: &sin,
+                rotary_dim: 2,
+            }),
+        };
+
+        let out = cuda_full_attention_layer(&input, &weights)?;
+        let loss = cuda_sum_all(&out)?;
+
+        assert_eq!(out.dims(), &[2, 2]);
+        let out_values = out.to_vec_f32()?;
+        assert!(
+            out_values.iter().all(|value| value.is_finite()),
+            "full attention layer output should stay finite: {out_values:?}"
+        );
+        let grads = cuda_backward(&loss)?;
+        for (name, id) in [
+            ("input", input_id),
+            ("q", q_id),
+            ("k", k_id),
+            ("v", v_id),
+            ("o", o_id),
+            ("gate", gate_id),
+            ("up", up_id),
+            ("down", down_id),
+        ] {
+            let values = grads
+                .get(id)
+                .with_context(|| format!("missing {name} grad"))?
+                .to_vec_f32()?;
+            assert!(
+                values.iter().all(|value| value.is_finite())
+                    && values.iter().any(|value| value.abs() > 1e-7),
                 "{name} grad should be finite and non-zero: {values:?}"
             );
         }
