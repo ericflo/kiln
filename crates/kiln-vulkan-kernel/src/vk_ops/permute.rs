@@ -6,7 +6,7 @@
 //!   [heads_kv * groups, rows, head_dim]` (broadcasts each KV head
 //!   to multiple Q heads for GQA). Backward sums groups together.
 
-use crate::vk_ops::dispatch_simple;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
@@ -26,15 +26,40 @@ fn dispatch_three_dim(
     dim2: usize,
 ) -> Result<()> {
     let total = dim0 * dim1 * dim2;
-    let workgroups = ((total + 255) / 256) as u32;
-    let push = [dim0 as u32, dim1 as u32, dim2 as u32];
-    dispatch_simple(
-        device,
-        shader,
-        &[src.handle(), dst.handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [dim0 as u32, dim1 as u32, dim2 as u32];
+        return dispatch_simple(
+            device,
+            shader,
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        );
+    }
+    let offset_shader = match shader {
+        "vk_permute_rh_to_hr_f32" => "vk_permute_rh_to_hr_f32_offset",
+        "vk_permute_hr_to_rh_f32" => "vk_permute_hr_to_rh_f32_offset",
+        other => anyhow::bail!("vk_permute: no offset shader for {other}"),
+    };
+    for_each_1d_tile(total, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push = [
+            dim0 as u32,
+            dim1 as u32,
+            dim2 as u32,
+            len as u32,
+            offset as u32,
+        ];
+        dispatch_simple(
+            device,
+            offset_shader,
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 // ---- [rows, heads, head_dim] ↔ [heads, rows, head_dim] ----
@@ -169,15 +194,36 @@ fn dispatch_kv_repeat(
     head_dim: usize,
 ) -> Result<()> {
     let total = heads_kv * groups * rows * head_dim;
-    let workgroups = ((total + 255) / 256) as u32;
-    let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
-    dispatch_simple(
-        device,
-        "vk_repeat_kv_heads_f32",
-        &[src.handle(), dst.handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
+        return dispatch_simple(
+            device,
+            "vk_repeat_kv_heads_f32",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(total, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push = [
+            heads_kv as u32,
+            groups as u32,
+            rows as u32,
+            head_dim as u32,
+            len as u32,
+            offset as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_repeat_kv_heads_f32_offset",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 fn dispatch_kv_sum(
@@ -190,23 +236,41 @@ fn dispatch_kv_sum(
     head_dim: usize,
 ) -> Result<()> {
     let total = heads_kv * rows * head_dim;
-    let workgroups = ((total + 255) / 256) as u32;
-    let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
-    dispatch_simple(
-        device,
-        "vk_sum_kv_groups_f32",
-        &[src.handle(), dst.handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [heads_kv as u32, groups as u32, rows as u32, head_dim as u32];
+        return dispatch_simple(
+            device,
+            "vk_sum_kv_groups_f32",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(total, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push = [
+            heads_kv as u32,
+            groups as u32,
+            rows as u32,
+            head_dim as u32,
+            len as u32,
+            offset as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_sum_kv_groups_f32_offset",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 pub fn vk_repeat_kv_heads_no_grad(t: &VkTensor, groups: usize) -> Result<VkTensor> {
     anyhow::ensure!(t.dtype() == VkDType::F32, "vk_repeat_kv_heads: F32-only");
-    anyhow::ensure!(
-        t.shape().len() == 3,
-        "vk_repeat_kv_heads: rank-3 required"
-    );
+    anyhow::ensure!(t.shape().len() == 3, "vk_repeat_kv_heads: rank-3 required");
     anyhow::ensure!(groups >= 1, "vk_repeat_kv_heads: groups >= 1");
     let heads_kv = t.shape()[0];
     let rows = t.shape()[1];
@@ -215,7 +279,15 @@ pub fn vk_repeat_kv_heads_no_grad(t: &VkTensor, groups: usize) -> Result<VkTenso
         return Ok(t.clone());
     }
     let out = alloc_f32(t.device(), heads_kv * groups * rows * head_dim)?;
-    dispatch_kv_repeat(t.device(), t.buffer(), &out, heads_kv, groups, rows, head_dim)?;
+    dispatch_kv_repeat(
+        t.device(),
+        t.buffer(),
+        &out,
+        heads_kv,
+        groups,
+        rows,
+        head_dim,
+    )?;
     Ok(VkTensor::from_buffer(
         out,
         vec![heads_kv * groups, rows, head_dim],

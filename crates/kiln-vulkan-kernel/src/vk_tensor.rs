@@ -237,7 +237,9 @@ impl VkTensor {
     /// strided views are materialized first.
     pub fn from_candle(t: &Tensor, device: Arc<VulkanDevice>) -> Result<Self> {
         let dtype = VkDType::from_candle(t.dtype())?;
-        let t = t.contiguous().context("VkTensor::from_candle: contiguous")?;
+        let t = t
+            .contiguous()
+            .context("VkTensor::from_candle: contiguous")?;
         let shape: Vec<usize> = t.dims().to_vec();
         let nelem: usize = shape.iter().product();
         let bytes_vec = match dtype {
@@ -378,7 +380,10 @@ mod tests {
     use super::*;
 
     fn vk_dev() -> Option<Arc<VulkanDevice>> {
-        VulkanDevice::probe().then(|| VulkanDevice::new().ok()).flatten().map(Arc::new)
+        VulkanDevice::probe()
+            .then(|| VulkanDevice::new().ok())
+            .flatten()
+            .map(Arc::new)
     }
 
     #[test]
@@ -403,7 +408,12 @@ mod tests {
         let vt = VkTensor::from_candle(&t, Arc::clone(&dev)).unwrap();
         let back = vt.to_vec_f32().unwrap();
         for (i, expected) in data.iter().enumerate() {
-            assert!((back[i] - expected.to_f32()).abs() < 1e-6, "idx {i}: {} vs {}", back[i], expected);
+            assert!(
+                (back[i] - expected.to_f32()).abs() < 1e-6,
+                "idx {i}: {} vs {}",
+                back[i],
+                expected
+            );
         }
     }
 

@@ -43,7 +43,9 @@ use candle_core::{D, DType, Device, Tensor};
 use std::sync::Arc;
 
 mod phase_b;
-pub use phase_b::{fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_with_provider};
+pub use phase_b::{
+    fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_with_provider,
+};
 
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///

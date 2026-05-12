@@ -18,5 +18,11 @@ layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
 void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= n_elements) return;
-    data_out[idx] = 1.0 / (1.0 + exp(-data_in[idx]));
+    float x = data_in[idx];
+    if (x >= 0.0) {
+        data_out[idx] = 1.0 / (1.0 + exp(-x));
+    } else {
+        float e = exp(x);
+        data_out[idx] = e / (1.0 + e);
+    }
 }

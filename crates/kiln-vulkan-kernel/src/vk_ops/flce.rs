@@ -68,7 +68,7 @@ struct FlceState {
 
 fn run_flce_forward(
     hidden: &VkTensor,
-    weight_t: &VkTensor,
+    weight: &VkTensor,
     labels_buf: &Arc<VulkanBuffer>,
     num_active: usize,
     hidden_dim: usize,
@@ -96,15 +96,11 @@ fn run_flce_forward(
     let mut first = true;
     while chunk_off < vocab {
         let cur_len = chunk_len.min(vocab - chunk_off);
-        // Slice the transposed weight column-block [hidden_dim, cur_len].
-        // Since weight_t is row-major [hidden_dim, vocab], the column
-        // block at offset chunk_off is contiguous *within rows* but
-        // strided across rows. The simplest correct path is to
-        // materialize a contiguous chunk buffer via a 2D transpose-copy
-        // shader. For Phase E correctness we read it back to host and
-        // re-upload — slower but correct; replace with strided dispatch
-        // later.
-        let chunk_w_t = extract_weight_t_chunk(weight_t, chunk_off, cur_len)?;
+        // Materialize only this vocab chunk, then transpose that small
+        // block. Avoids a full `[hidden_dim, vocab]` F32 LM-head
+        // transpose, which costs multiple GiB at Qwen3.5 vocab size.
+        let w_chunk = extract_weight_chunk_rows(weight, chunk_off, cur_len)?;
+        let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
         // logits_chunk = hidden @ chunk_w_t  → [num_active, cur_len]
         let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
         // chunk stats
@@ -169,39 +165,9 @@ fn run_flce_forward(
         ((num_active + 255) / 256) as u32,
     )?;
 
-    let per_row_tensor = VkTensor::from_buffer(
-        per_row,
-        vec![num_active],
-        VkDType::F32,
-        Arc::clone(device),
-    );
+    let per_row_tensor =
+        VkTensor::from_buffer(per_row, vec![num_active], VkDType::F32, Arc::clone(device));
     Ok((per_row_tensor, global_max, global_sumexp))
-}
-
-/// Materialize a contiguous F32 chunk of weight_t covering vocab columns
-/// `[chunk_off, chunk_off + cur_len)` of shape `[hidden_dim, cur_len]`.
-///
-/// For Phase E we go through a CPU readback + re-upload. A dedicated
-/// `vk_slice_2d` shader is a small Phase G optimization.
-fn extract_weight_t_chunk(
-    weight_t: &VkTensor,
-    chunk_off: usize,
-    cur_len: usize,
-) -> Result<VkTensor> {
-    let dev = weight_t.device();
-    let hidden_dim = weight_t.shape()[0];
-    let vocab = weight_t.shape()[1];
-    anyhow::ensure!(
-        chunk_off + cur_len <= vocab,
-        "flce chunk OOB: {chunk_off}+{cur_len} > {vocab}"
-    );
-    // GPU column-slice via vk_narrow_lastdim. weight_t is [hidden, vocab]
-    // so the last dim IS vocab — narrow on it for [chunk_off, chunk_off+cur_len)
-    // → [hidden, cur_len] in one GPU dispatch. Replaces the prior 2.5 GB
-    // CPU readback + slice + upload PER CHUNK (was ~30 GB of memory bus
-    // traffic per FLCE forward at Qwen3.5-4B vocab=248K).
-    let _ = hidden_dim;
-    crate::vk_ops::narrow::vk_narrow_lastdim_no_grad(weight_t, chunk_off, cur_len)
 }
 
 #[derive(Debug)]
@@ -237,8 +203,7 @@ impl VkBackwardOp for FlceBackward {
         let grad_hidden = alloc_f32(device, self.num_active * self.hidden_dim)?;
         // initialize to zero
         {
-            let workgroups =
-                ((self.num_active * self.hidden_dim + 255) / 256) as u32;
+            let workgroups = ((self.num_active * self.hidden_dim + 255) / 256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0.0_f32.to_bits(),
@@ -253,14 +218,12 @@ impl VkBackwardOp for FlceBackward {
         }
         // labels buffer (re-upload from saved Vec — small, cheap)
         let labels_buf = upload_u32(device, &self.labels)?;
-        // weight_t once
-        let weight_t = vk_transpose_2d_no_grad(&self.weight)?;
-
         let mut chunk_off = 0usize;
         while chunk_off < self.vocab {
             let cur_len = self.chunk_len.min(self.vocab - chunk_off);
             // Recompute logits_chunk
-            let chunk_w_t = extract_weight_t_chunk(&weight_t, chunk_off, cur_len)?;
+            let w_chunk = extract_weight_chunk_rows(&self.weight, chunk_off, cur_len)?;
+            let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
             let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
             // Convert logits_chunk in-place to grad_logits_chunk
             let push = [
@@ -269,8 +232,7 @@ impl VkBackwardOp for FlceBackward {
                 chunk_off as u32,
                 scale.to_bits(),
             ];
-            let workgroups =
-                (((self.num_active * cur_len) + 255) / 256) as u32;
+            let workgroups = (((self.num_active * cur_len) + 255) / 256) as u32;
             dispatch_simple(
                 device,
                 "vk_flce_grad_chunk_f32",
@@ -285,13 +247,10 @@ impl VkBackwardOp for FlceBackward {
             )?;
             // d hidden_chunk = grad_logits_chunk @ W_chunk
             //  shape: [num_active, cur_len] @ [cur_len, hidden_dim]
-            //  → need W_chunk = weight[chunk_off:chunk_off+cur_len, :]
-            //    which is contiguous in original (vocab-major) layout.
-            let w_chunk = extract_weight_chunk_rows(&self.weight, chunk_off, cur_len)?;
+            //  → W_chunk is contiguous in original (vocab-major) layout.
             let dh_chunk = vk_matmul_no_grad(&logits_chunk, &w_chunk)?;
             // accumulate into grad_hidden
-            let workgroups =
-                (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
+            let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
                 0u32, // OP_ADD
@@ -326,13 +285,7 @@ impl VkBackwardOp for FlceBackward {
                     (self.num_active * self.hidden_dim) as u32,
                     0.0_f32.to_bits(),
                 ];
-                dispatch_simple(
-                    device,
-                    "vk_fill_f32",
-                    &[zero.handle()],
-                    &push_zero,
-                    wg,
-                )?;
+                dispatch_simple(device, "vk_fill_f32", &[zero.handle()], &push_zero, wg)?;
             }
             let push_add = [
                 (self.num_active * self.hidden_dim) as u32,
@@ -378,9 +331,27 @@ fn extract_weight_chunk_rows(
     crate::vk_ops::shape::vk_reshape(&sliced, &[cur_len, hidden_dim])
 }
 
-/// Default FLCE chunk length (matches the existing kiln-flce-kernel
-/// chunking heuristic).
+/// Default FLCE vocab-chunk length (matches the existing kiln-flce-kernel
+/// chunking heuristic). The loss path slices the LM-head weight into
+/// `chunk_len`-column chunks along the vocab axis and processes each
+/// chunk sequentially, so peak working-set scales with
+/// `num_active * chunk_len * 4` (F32 logits) — NOT with vocab.
 pub const FLCE_DEFAULT_CHUNK: usize = 4096;
+
+/// Returns the active FLCE chunk length, honoring `KILN_VK_FLCE_CHUNK_LEN`
+/// when set. Used by both the runtime kernel and the preflight memory
+/// estimator so they agree on the chunking strategy.
+///
+/// Lowering this trades a few extra dispatches for proportionally less
+/// peak memory at long sequence lengths (e.g. agent trajectories at
+/// T=76K where a 4096 chunk pins ~1.25 GB of F32 logits per chunk).
+pub fn flce_active_chunk_len() -> usize {
+    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(FLCE_DEFAULT_CHUNK)
+}
 
 pub fn vk_flce_loss(
     hidden: &VkTensor,
@@ -412,12 +383,10 @@ pub fn vk_flce_loss(
 
     let dev = hidden.device();
     let labels_buf = upload_u32(dev, labels)?;
-    // Materialize weight.T once (cheap relative to total cost).
-    let weight_t = vk_transpose_2d_no_grad(weight)?;
 
     let (per_row, global_max, global_sumexp) = run_flce_forward(
         hidden,
-        &weight_t,
+        weight,
         &labels_buf,
         num_active,
         hidden_dim,

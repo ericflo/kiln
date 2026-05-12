@@ -136,8 +136,12 @@ fn vk_gdn_gates_bwd_matches_cpu() -> Result<()> {
     let t = 4;
     let nv = 2;
     let total = b_dim * t * nv;
-    let a_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.13 - 0.5).sin()).collect();
-    let b_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.21 + 0.7).cos()).collect();
+    let a_data: Vec<f32> = (0..total)
+        .map(|i| ((i as f32) * 0.13 - 0.5).sin())
+        .collect();
+    let b_data: Vec<f32> = (0..total)
+        .map(|i| ((i as f32) * 0.21 + 0.7).cos())
+        .collect();
     let a_log_data: Vec<f32> = (0..nv).map(|i| -((i as f32) + 1.0) * 0.5).collect();
     let dt_bias_data: Vec<f32> = (0..nv).map(|i| ((i as f32) - 0.5) * 0.1).collect();
     let d_beta_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.07).sin()).collect();
@@ -152,8 +156,15 @@ fn vk_gdn_gates_bwd_matches_cpu() -> Result<()> {
 
     let (gd_a, gd_b, gd_alog, gd_dt) =
         vk_gdn_gates_bwd_no_grad(&d_beta, &d_g, &a, &b, &a_log, &dt_bias, nv)?;
-    let (cd_a, cd_b, cd_alog, cd_dt) =
-        cpu_gates_bwd(&d_beta_data, &d_g_data, &a_data, &b_data, &a_log_data, &dt_bias_data, nv);
+    let (cd_a, cd_b, cd_alog, cd_dt) = cpu_gates_bwd(
+        &d_beta_data,
+        &d_g_data,
+        &a_data,
+        &b_data,
+        &a_log_data,
+        &dt_bias_data,
+        nv,
+    );
 
     assert!(max_abs_err(&gd_a.to_vec_f32()?, &cd_a) < 1e-5);
     assert!(max_abs_err(&gd_b.to_vec_f32()?, &cd_b) < 1e-5);
@@ -226,7 +237,9 @@ fn vk_gdn_gated_rms_norm_bwd_matches_finite_diff() -> Result<()> {
     let z = upload(&dev, &z_data, &[rows, hidden])?;
     let w = upload(&dev, &w_data, &[hidden])?;
     // d_out: synthetic upstream gradient
-    let dout_data: Vec<f32> = (0..(rows * hidden)).map(|i| (i as f32 + 1.0) * 0.01).collect();
+    let dout_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| (i as f32 + 1.0) * 0.01)
+        .collect();
     let dout = upload(&dev, &dout_data, &[rows, hidden])?;
 
     let (d_x, d_z, d_w) = vk_gdn_gated_rms_norm_bwd_no_grad(&dout, &x, &z, &w, eps)?;
@@ -248,7 +261,9 @@ fn vk_gdn_gated_rms_norm_bwd_matches_finite_diff() -> Result<()> {
     let numerical = (loss_p - loss_m) / (2.0 * h);
     let analytic = d_x.to_vec_f32()?[test_idx];
     let diff = (numerical - analytic).abs();
-    println!("gated_rms_norm_bwd d_x[{test_idx}]: numerical={numerical:.6} analytic={analytic:.6} diff={diff:.6e}");
+    println!(
+        "gated_rms_norm_bwd d_x[{test_idx}]: numerical={numerical:.6} analytic={analytic:.6} diff={diff:.6e}"
+    );
     assert!(
         diff < 1e-2,
         "d_x finite-diff vs analytic: |{numerical} - {analytic}| = {diff}"
@@ -396,7 +411,10 @@ fn vk_gdn_state_exit_bwd_matches_cpu() -> Result<()> {
     }
 
     let max_err = |a: &[f32], b: &[f32]| -> f32 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
     };
     assert!(max_err(&gd_si.to_vec_f32()?, &cd_si.to_vec_f32()?) < 1e-5);
     assert!(max_err(&gd_w.to_vec_f32()?, &cd_w.to_vec_f32()?) < 1e-5);
@@ -419,7 +437,9 @@ fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
     let chunk = 4;
     let dv = 2;
 
-    let g_data: Vec<f32> = (0..(batch * nv * chunk)).map(|i| -0.05 + (i as f32) * 0.01).collect();
+    let g_data: Vec<f32> = (0..(batch * nv * chunk))
+        .map(|i| -0.05 + (i as f32) * 0.01)
+        .collect();
     let v_data: Vec<f32> = (0..(batch * nv * chunk * dv))
         .map(|i| ((i as f32) * 0.07).sin() * 0.3)
         .collect();
@@ -471,19 +491,43 @@ fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
     let h = 1e-4_f32;
     let dotted = |out: &kiln_vulkan_kernel::vk_ops::gdn_chunk_prep::GdnChunkPrepOutput| -> f32 {
         let mut sum = 0.0_f32;
-        for (a, b) in out.a_strict.to_vec_f32().unwrap().iter().zip(das_data.iter()) {
+        for (a, b) in out
+            .a_strict
+            .to_vec_f32()
+            .unwrap()
+            .iter()
+            .zip(das_data.iter())
+        {
             sum += a * b;
         }
         for (a, b) in out.b_mask.to_vec_f32().unwrap().iter().zip(dbm_data.iter()) {
             sum += a * b;
         }
-        for (a, b) in out.v_prime.to_vec_f32().unwrap().iter().zip(dvp_data.iter()) {
+        for (a, b) in out
+            .v_prime
+            .to_vec_f32()
+            .unwrap()
+            .iter()
+            .zip(dvp_data.iter())
+        {
             sum += a * b;
         }
-        for (a, b) in out.q_s_scaled.to_vec_f32().unwrap().iter().zip(dqss_data.iter()) {
+        for (a, b) in out
+            .q_s_scaled
+            .to_vec_f32()
+            .unwrap()
+            .iter()
+            .zip(dqss_data.iter())
+        {
             sum += a * b;
         }
-        for (a, b) in out.decay_last_col.to_vec_f32().unwrap().iter().zip(ddec_data.iter()) {
+        for (a, b) in out
+            .decay_last_col
+            .to_vec_f32()
+            .unwrap()
+            .iter()
+            .zip(ddec_data.iter())
+        {
             sum += a * b;
         }
         for (a, b) in out.p_last.to_vec_f32().unwrap().iter().zip(dpl_data.iter()) {
@@ -556,7 +600,10 @@ fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
     let zero_dpl = upload(&dev, &zero_bh, &[batch, nv])?;
 
     let me = |a: &[f32], b: &[f32]| -> f32 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
     };
 
     let test_branch = |name: &str,
@@ -570,11 +617,15 @@ fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
         let (g_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
             das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
         )?;
-        unsafe { std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1"); }
+        unsafe {
+            std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1");
+        }
         let (c_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
             das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
         )?;
-        unsafe { std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU"); }
+        unsafe {
+            std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU");
+        }
         let g_data = g_dg.to_vec_f32()?;
         let c_data = c_dg.to_vec_f32()?;
         println!("Branch {name}: GPU dg={:?}", g_data);
@@ -583,25 +634,69 @@ fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
         Ok(())
     };
 
-    test_branch("zero_all", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
-    test_branch("v_prime_only", &zero_das, &zero_dbm, &dvp, &zero_dqss, &zero_ddec, &zero_dpl)?;
+    test_branch(
+        "zero_all", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl,
+    )?;
+    test_branch(
+        "v_prime_only",
+        &zero_das,
+        &zero_dbm,
+        &dvp,
+        &zero_dqss,
+        &zero_ddec,
+        &zero_dpl,
+    )?;
 
     let dqss_t = upload(&dev, &unit_dvp, &[batch, nv, chunk, dv])?;
-    test_branch("q_s_only", &zero_das, &zero_dbm, &zero_dqss, &dqss_t, &zero_ddec, &zero_dpl)?;
+    test_branch(
+        "q_s_only", &zero_das, &zero_dbm, &zero_dqss, &dqss_t, &zero_ddec, &zero_dpl,
+    )?;
 
     let unit_cc = vec![0.01_f32; chunk * chunk];
     let das_t = upload(&dev, &unit_cc, &[batch, nv, chunk, chunk])?;
-    test_branch("a_strict_only", &das_t, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
+    test_branch(
+        "a_strict_only",
+        &das_t,
+        &zero_dbm,
+        &zero_dqss,
+        &zero_dqss,
+        &zero_ddec,
+        &zero_dpl,
+    )?;
 
     let dbm_t = upload(&dev, &unit_cc, &[batch, nv, chunk, chunk])?;
-    test_branch("b_mask_only", &zero_das, &dbm_t, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
+    test_branch(
+        "b_mask_only",
+        &zero_das,
+        &dbm_t,
+        &zero_dqss,
+        &zero_dqss,
+        &zero_ddec,
+        &zero_dpl,
+    )?;
 
     let unit_c = vec![0.01_f32; chunk];
     let ddec_t = upload(&dev, &unit_c, &[batch, nv, chunk])?;
-    test_branch("decay_last_only", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &ddec_t, &zero_dpl)?;
+    test_branch(
+        "decay_last_only",
+        &zero_das,
+        &zero_dbm,
+        &zero_dqss,
+        &zero_dqss,
+        &ddec_t,
+        &zero_dpl,
+    )?;
 
     let dpl_t = upload(&dev, &vec![0.01_f32; batch * nv], &[batch, nv])?;
-    test_branch("p_last_only", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &dpl_t)?;
+    test_branch(
+        "p_last_only",
+        &zero_das,
+        &zero_dbm,
+        &zero_dqss,
+        &zero_dqss,
+        &zero_ddec,
+        &dpl_t,
+    )?;
 
     Ok(())
 }
@@ -675,20 +770,53 @@ fn vk_gdn_chunk_prep_bwd_gpu_matches_cpu() -> Result<()> {
     println!("GPU dg = {:?}", g_data);
     println!("CPU dg = {:?}", c_data);
     let me = |a: &[f32], b: &[f32]| -> f32 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max)
     };
     println!("dg max err = {}", me(&g_data, &c_data));
-    println!("dv max err = {}", me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?));
-    println!("dkkt max err = {}", me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?));
-    println!("dqkt max err = {}", me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?));
-    println!("dks max err = {}", me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?));
-    println!("dqs max err = {}", me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?));
+    println!(
+        "dv max err = {}",
+        me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?)
+    );
+    println!(
+        "dkkt max err = {}",
+        me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?)
+    );
+    println!(
+        "dqkt max err = {}",
+        me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?)
+    );
+    println!(
+        "dks max err = {}",
+        me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?)
+    );
+    println!(
+        "dqs max err = {}",
+        me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?)
+    );
     assert!(me(&g_data, &c_data) < 1e-4, "dg mismatch");
-    assert!(me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?) < 1e-4, "dv mismatch");
-    assert!(me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?) < 1e-4, "dkkt mismatch");
-    assert!(me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?) < 1e-4, "dqkt mismatch");
-    assert!(me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?) < 1e-4, "dks mismatch");
-    assert!(me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?) < 1e-4, "dqs mismatch");
+    assert!(
+        me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?) < 1e-4,
+        "dv mismatch"
+    );
+    assert!(
+        me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?) < 1e-4,
+        "dkkt mismatch"
+    );
+    assert!(
+        me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?) < 1e-4,
+        "dqkt mismatch"
+    );
+    assert!(
+        me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?) < 1e-4,
+        "dks mismatch"
+    );
+    assert!(
+        me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?) < 1e-4,
+        "dqs mismatch"
+    );
     Ok(())
 }
 
@@ -713,7 +841,9 @@ fn vk_solve_tri_transpose_solves_correctly() -> Result<()> {
             }
         })
         .collect();
-    let beta_data: Vec<f32> = (0..(batch * nv * chunk)).map(|i| 0.5 + (i as f32) * 0.05).collect();
+    let beta_data: Vec<f32> = (0..(batch * nv * chunk))
+        .map(|i| 0.5 + (i as f32) * 0.05)
+        .collect();
     let dw_data: Vec<f32> = (0..(batch * nv * chunk * dv))
         .map(|i| 0.3 + (i as f32) * 0.1)
         .collect();
@@ -772,7 +902,14 @@ fn vk_causal_conv1d_bwd_matches_cpu() -> Result<()> {
     let cs = upload_buffer(&dev, &cs_data)?;
 
     let (d_x, d_w, _d_cs_buf) = vk_causal_conv1d_bwd_no_grad(
-        &dout, &weight, &x, &cs, batch, channels, seq_len, kernel_size,
+        &dout,
+        &weight,
+        &x,
+        &cs,
+        batch,
+        channels,
+        seq_len,
+        kernel_size,
     )?;
     let (cpu_dx, cpu_dw, _cpu_dcs) = cpu_conv1d_linear_bwd(
         &dout_data,

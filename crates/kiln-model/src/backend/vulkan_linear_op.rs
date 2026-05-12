@@ -29,10 +29,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use candle_core::op::BackpropOp;
-use candle_core::{CpuStorage, CustomOp1, DType, Layout, Shape, Storage, Tensor};
 #[cfg(test)]
 use candle_core::Device;
+use candle_core::op::BackpropOp;
+use candle_core::{CpuStorage, CustomOp1, DType, Layout, Shape, Storage, Tensor};
 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
@@ -72,7 +72,10 @@ const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 20_000_000_000;
 /// Counts one multiply + one add per inner term, matching the kernel's
 /// per-iteration work.
 fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
-    (batch as u64).saturating_mul(hidden as u64).saturating_mul(out_dim as u64).saturating_mul(2)
+    (batch as u64)
+        .saturating_mul(hidden as u64)
+        .saturating_mul(out_dim as u64)
+        .saturating_mul(2)
 }
 
 fn max_flop_per_dispatch() -> u64 {
@@ -179,11 +182,7 @@ impl CustomOp1 for VulkanLinearOp {
         "kiln-vulkan-linear"
     }
 
-    fn cpu_fwd(
-        &self,
-        s_x: &CpuStorage,
-        l_x: &Layout,
-    ) -> candle_core::Result<(CpuStorage, Shape)> {
+    fn cpu_fwd(&self, s_x: &CpuStorage, l_x: &Layout) -> candle_core::Result<(CpuStorage, Shape)> {
         let dims = l_x.shape().dims();
         if dims.is_empty() {
             return Err(candle_core::Error::Msg(
@@ -226,9 +225,7 @@ impl CustomOp1 for VulkanLinearOp {
         } else {
             x_f32
                 .reshape((row_count, 1usize, self.hidden))
-                .map_err(|e| {
-                    candle_core::Error::Msg(format!("VulkanLinearOp reshape x: {e:?}"))
-                })?
+                .map_err(|e| candle_core::Error::Msg(format!("VulkanLinearOp reshape x: {e:?}")))?
         };
 
         // Decide single-shot vs chunked dispatch. The BF16-packed path
@@ -259,8 +256,8 @@ impl CustomOp1 for VulkanLinearOp {
                     total_gflop = matmul_flop(row_count, self.hidden, self.out_dim) as f64 / 1.0e9,
                     chunk_out_dim,
                     chunk_count,
-                    per_chunk_gflop = matmul_flop(row_count, self.hidden, chunk_out_dim) as f64
-                        / 1.0e9,
+                    per_chunk_gflop =
+                        matmul_flop(row_count, self.hidden, chunk_out_dim) as f64 / 1.0e9,
                     "VulkanLinearOp::cpu_fwd first chunked dispatch"
                 );
             });
@@ -324,9 +321,9 @@ impl CustomOp1 for VulkanLinearOp {
         // would have produced.
         let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
         out_dims.push(self.out_dim);
-        let out_tensor = out_tensor.reshape(out_dims.as_slice()).map_err(|e| {
-            candle_core::Error::Msg(format!("VulkanLinearOp reshape out: {e:?}"))
-        })?;
+        let out_tensor = out_tensor
+            .reshape(out_dims.as_slice())
+            .map_err(|e| candle_core::Error::Msg(format!("VulkanLinearOp reshape out: {e:?}")))?;
 
         // Cast to the requested output dtype. F32 → BF16 is a tight loop
         // and trivially small relative to the matmul.
@@ -390,11 +387,8 @@ impl CustomOp1 for VulkanLinearOp {
             };
             let dispatch_x = grad_y_f32
                 .reshape((row_count, self.out_dim))
-                .map_err(|e| {
-                    candle_core::Error::Msg(format!("bwd reshape grad_y: {e:?}"))
-                })?;
-            let oversized =
-                dispatch_exceeds_safety_ceiling(row_count, self.out_dim, self.hidden);
+                .map_err(|e| candle_core::Error::Msg(format!("bwd reshape grad_y: {e:?}")))?;
+            let oversized = dispatch_exceeds_safety_ceiling(row_count, self.out_dim, self.hidden);
             let dx_3d = if oversized {
                 let other_dims = self.out_dim.saturating_mul(self.hidden);
                 let chunk_batch = max_chunk_dim_for_flop(other_dims);
@@ -406,14 +400,12 @@ impl CustomOp1 for VulkanLinearOp {
                         row_count,
                         out_dim = self.out_dim,
                         hidden = self.hidden,
-                        total_gflop = matmul_flop(row_count, self.out_dim, self.hidden)
-                            as f64
-                            / 1.0e9,
+                        total_gflop =
+                            matmul_flop(row_count, self.out_dim, self.hidden) as f64 / 1.0e9,
                         chunk_batch,
                         chunk_count,
-                        per_chunk_gflop = matmul_flop(chunk_batch, self.out_dim, self.hidden)
-                            as f64
-                            / 1.0e9,
+                        per_chunk_gflop =
+                            matmul_flop(chunk_batch, self.out_dim, self.hidden) as f64 / 1.0e9,
                         "VulkanLinearOp::bwd first chunked dispatch"
                     );
                 });
@@ -421,13 +413,12 @@ impl CustomOp1 for VulkanLinearOp {
                 let mut chunk_start = 0usize;
                 while chunk_start < row_count {
                     let chunk_len = (row_count - chunk_start).min(chunk_batch);
-                    let chunk_dy =
-                        dispatch_x.narrow(0, chunk_start, chunk_len).map_err(|e| {
-                            candle_core::Error::Msg(format!(
-                                "bwd narrow grad_y (start={chunk_start}, \
+                    let chunk_dy = dispatch_x.narrow(0, chunk_start, chunk_len).map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "bwd narrow grad_y (start={chunk_start}, \
                                  len={chunk_len}): {e:?}"
-                            ))
-                        })?;
+                        ))
+                    })?;
                     let chunk_dx = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_transposed(
                         self.vk_device.as_ref(),
                         &chunk_dy,
@@ -460,22 +451,20 @@ impl CustomOp1 for VulkanLinearOp {
                     self.out_dim,
                     self.hidden,
                 )
-                .map_err(|e| {
-                    candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}"))
-                })?
+                .map_err(|e| candle_core::Error::Msg(format!("bwd transposed dispatch: {e:?}")))?
             };
             // dx_3d is [row_count, 1, hidden]; restore caller's leading dims.
             let mut out_dims: Vec<usize> = dims[..dims.len() - 1].to_vec();
             out_dims.push(self.hidden);
-            let dx_f32 = dx_3d.reshape(out_dims.as_slice()).map_err(|e| {
-                candle_core::Error::Msg(format!("bwd reshape dx: {e:?}"))
-            })?;
+            let dx_f32 = dx_3d
+                .reshape(out_dims.as_slice())
+                .map_err(|e| candle_core::Error::Msg(format!("bwd reshape dx: {e:?}")))?;
             let dx = if self.out_dtype == DType::F32 {
                 dx_f32
             } else {
-                dx_f32.to_dtype(self.out_dtype).map_err(|e| {
-                    candle_core::Error::Msg(format!("bwd cast dx: {e:?}"))
-                })?
+                dx_f32
+                    .to_dtype(self.out_dtype)
+                    .map_err(|e| candle_core::Error::Msg(format!("bwd cast dx: {e:?}")))?
             };
             return Ok(Some(dx));
         }
@@ -618,9 +607,7 @@ mod tests {
     #[test]
     fn vulkan_linear_forward_parity_small() -> Result<()> {
         let Ok(vk_device) = VulkanDevice::new() else {
-            eprintln!(
-                "vulkan_linear_forward_parity_small: no Vulkan device available, skipping"
-            );
+            eprintln!("vulkan_linear_forward_parity_small: no Vulkan device available, skipping");
             return Ok(());
         };
         let vk_device = Arc::new(vk_device);
@@ -693,9 +680,9 @@ mod tests {
 
         // Baseline mirrors lora_loader::linear_with_lora_t's CPU
         // promote-to-f32 path so the comparison is apples-to-apples.
-        let baseline = x.to_dtype(DType::F32)?.broadcast_matmul(
-            &weight_t_bf16.to_dtype(DType::F32)?,
-        )?;
+        let baseline = x
+            .to_dtype(DType::F32)?
+            .broadcast_matmul(&weight_t_bf16.to_dtype(DType::F32)?)?;
 
         let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer(
             vk_device.as_ref(),
@@ -767,9 +754,8 @@ mod tests {
             .clone();
 
         // Vulkan path: same x (fresh Var so the new graph stands alone).
-        let x_var2 = candle_core::Var::from_tensor(&Tensor::from_vec(
-            x_data, (1, t, hidden), &device,
-        )?)?;
+        let x_var2 =
+            candle_core::Var::from_tensor(&Tensor::from_vec(x_data, (1, t, hidden), &device)?)?;
         let weight_buffer = Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t)?);
         let op = build_op(
             vk_device.clone(),
@@ -844,8 +830,7 @@ mod tests {
         let weight_full_bf16 = weight_full.to_dtype(DType::BF16)?;
 
         // Upload the full bf16-packed buffer once.
-        let weight_buffer =
-            upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
+        let weight_buffer = upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
 
         // Chunk slice via the offset variant. The kernel returns
         // [batch_rows, 1, out_dim]; reshape to match the reference.
@@ -862,8 +847,9 @@ mod tests {
         let chunk_out = chunk_out_raw.reshape((1, t, chunk_len))?;
 
         // Reference: do the matmul against the same slice on CPU.
-        let weight_chunk_bf16 =
-            weight_full_bf16.narrow(1, chunk_offset, chunk_len)?.contiguous()?;
+        let weight_chunk_bf16 = weight_full_bf16
+            .narrow(1, chunk_offset, chunk_len)?
+            .contiguous()?;
         let baseline_chunk = x
             .to_dtype(DType::F32)?
             .broadcast_matmul(&weight_chunk_bf16.to_dtype(DType::F32)?)?;
@@ -909,9 +895,7 @@ mod tests {
         let weight_buffer = upload_tensor_bf16_packed_buffer(&vk_device, &weight_full_bf16)?;
 
         // x has shape [batch, k_dim] = [batch, forward_n].
-        let x_data: Vec<f32> = (0..batch * forward_n)
-            .map(|i| (i as f32) * 0.05)
-            .collect();
+        let x_data: Vec<f32> = (0..batch * forward_n).map(|i| (i as f32) * 0.05).collect();
         let x = Tensor::from_vec(x_data, (batch, forward_n), &device)?;
 
         // Vulkan: out = x @ W.T  (W.T shape [forward_n, forward_k] →
@@ -1026,15 +1010,16 @@ mod tests {
         let grad_y = Tensor::from_vec(grad_y_data, (rows, hidden), &device)?;
 
         // Vulkan path.
-        let vulkan_grad_x = dispatch_qwen_rmsnorm_backward(
-            &vk_device, &x, &weight, &grad_y, eps,
-        )?;
+        let vulkan_grad_x = dispatch_qwen_rmsnorm_backward(&vk_device, &x, &weight, &grad_y, eps)?;
 
         // Candle autograd reference: build forward as a candle graph
         // over a Var, compute loss = sum(y * grad_y), backward, read
         // dL/dx — which equals the requested gradient.
         let x_var = candle_core::Var::from_tensor(&x)?;
-        let variance = x_var.as_tensor().sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let variance = x_var
+            .as_tensor()
+            .sqr()?
+            .mean_keepdim(candle_core::D::Minus1)?;
         let rms_inv = (variance + eps as f64)?.sqrt()?.recip()?;
         let normed = x_var.as_tensor().broadcast_mul(&rms_inv)?;
         let one_plus_w = (weight.ones_like()? + &weight)?;
@@ -1068,8 +1053,7 @@ mod tests {
         };
         let vk_device = Arc::new(vk_device);
         let device = Device::Cpu;
-        let weight_t =
-            Tensor::from_vec(vec![0.0f32; 4], (2, 2), &device).expect("build weight");
+        let weight_t = Tensor::from_vec(vec![0.0f32; 4], (2, 2), &device).expect("build weight");
         let weight_buffer =
             Arc::new(upload_tensor_f32_buffer(vk_device.as_ref(), &weight_t).expect("upload"));
         let op = build_op(
@@ -1221,8 +1205,10 @@ mod tests {
         let weight_t_bf16 = weight_t_f32.to_dtype(DType::BF16)?;
         let baseline = x.broadcast_matmul(&weight_t_bf16.to_dtype(DType::F32)?)?;
 
-        let weight_buffer =
-            Arc::new(upload_tensor_bf16_packed_buffer(vk_device.as_ref(), &weight_t_bf16)?);
+        let weight_buffer = Arc::new(upload_tensor_bf16_packed_buffer(
+            vk_device.as_ref(),
+            &weight_t_bf16,
+        )?);
 
         // Single-shot Vulkan dispatch.
         let single_shot = dispatch_forward_only(

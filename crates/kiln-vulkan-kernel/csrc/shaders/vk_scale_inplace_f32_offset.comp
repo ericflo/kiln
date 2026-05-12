@@ -1,0 +1,26 @@
+// In-place scalar multiply over a contiguous offset slice:
+//   data[offset + i] *= scale
+//
+// Push constants: [n_elements, scale_bits, offset]
+// Bindings: data (read-write)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint scale_bits;
+    uint offset;
+};
+
+layout(binding = 0) buffer DataBuf { float data[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    float scale = uintBitsToFloat(scale_bits);
+    uint idx = offset + local_idx;
+    data[idx] = data[idx] * scale;
+}

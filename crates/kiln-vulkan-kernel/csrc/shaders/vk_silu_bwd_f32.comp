@@ -21,7 +21,13 @@ void main() {
     if (idx >= n_elements) return;
     float x = data_x[idx];
     float gy = data_gy[idx];
-    float sx = 1.0 / (1.0 + exp(-x));
+    float sx;
+    if (x >= 0.0) {
+        sx = 1.0 / (1.0 + exp(-x));
+    } else {
+        float e = exp(x);
+        sx = e / (1.0 + e);
+    }
     float dsilu = sx * (1.0 + x * (1.0 - sx));
     data_gx[idx] = gy * dsilu;
 }

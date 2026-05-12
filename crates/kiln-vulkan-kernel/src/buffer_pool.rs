@@ -72,12 +72,9 @@ pub fn pool_alloc_device_local(
     }
     drop(inner); // release lock before vkAllocateMemory
 
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bucket,
-    )
-    .context("pool_alloc_device_local: vkAllocateMemory")?;
+    let buf =
+        VulkanBuffer::create_device_local(device.device(), device.device_local_mem_type(), bucket)
+            .context("pool_alloc_device_local: vkAllocateMemory")?;
     let arc = Arc::new(buf);
 
     let mut inner = pool().lock().unwrap();
@@ -136,7 +133,5 @@ pub fn pool_drain() {
 /// no live descriptor pool to bind them to.
 pub fn pool_drop_for_device(dev: vk::Device) {
     let mut inner = pool().lock().unwrap();
-    inner
-        .by_device_bytes
-        .retain(|(d, _), _| *d != dev);
+    inner.by_device_bytes.retain(|(d, _), _| *d != dev);
 }

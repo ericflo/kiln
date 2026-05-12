@@ -3005,9 +3005,8 @@ fn sdpa_prefill_f32_matches_cpu_non_causal() -> Result<()> {
 
     let scale = 1.0 / (dh as f32).sqrt();
     let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, false)?;
-    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
-        &vk, &q, &k, &v, scale, false,
-    )?;
+    let vk_out =
+        kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(&vk, &q, &k, &v, scale, false)?;
     assert_eq!(vk_out.dims(), cpu_out.dims());
     // F32 numerics: small per-element drift OK (online softmax may
     // differ from the textbook softmax in low-order bits).
@@ -3037,9 +3036,8 @@ fn sdpa_prefill_f32_matches_cpu_causal() -> Result<()> {
 
     let scale = 1.0 / (dh as f32).sqrt();
     let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
-    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
-        &vk, &q, &k, &v, scale, true,
-    )?;
+    let vk_out =
+        kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(&vk, &q, &k, &v, scale, true)?;
     assert_eq!(vk_out.dims(), cpu_out.dims());
     assert_close("sdpa causal", &vk_out, &cpu_out, 1e-4)?;
     Ok(())
@@ -3060,9 +3058,15 @@ fn sdpa_prefill_f32_matches_cpu_qwen_head_dim_128() -> Result<()> {
     let dh = 128usize;
     let total = b * t * h * dh;
 
-    let q_data: Vec<f32> = (0..total).map(|i| ((i % 23) as f32 - 11.0) * 0.013).collect();
-    let k_data: Vec<f32> = (0..total).map(|i| ((i % 19) as f32 - 9.0) * 0.011).collect();
-    let v_data: Vec<f32> = (0..total).map(|i| ((i % 29) as f32 - 14.0) * 0.009).collect();
+    let q_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 23) as f32 - 11.0) * 0.013)
+        .collect();
+    let k_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 19) as f32 - 9.0) * 0.011)
+        .collect();
+    let v_data: Vec<f32> = (0..total)
+        .map(|i| ((i % 29) as f32 - 14.0) * 0.009)
+        .collect();
 
     let q = Tensor::from_vec(q_data, (b, t, h, dh), &Device::Cpu)?;
     let k = Tensor::from_vec(k_data, (b, t, h, dh), &Device::Cpu)?;
@@ -3070,9 +3074,8 @@ fn sdpa_prefill_f32_matches_cpu_qwen_head_dim_128() -> Result<()> {
 
     let scale = 1.0 / (dh as f32).sqrt();
     let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
-    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
-        &vk, &q, &k, &v, scale, true,
-    )?;
+    let vk_out =
+        kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(&vk, &q, &k, &v, scale, true)?;
     assert_eq!(vk_out.dims(), cpu_out.dims());
     assert_close("sdpa Qwen head_dim=128", &vk_out, &cpu_out, 1e-4)?;
     Ok(())
@@ -3116,9 +3119,8 @@ fn sdpa_prefill_f32_matches_cpu_realistic_seq_len() -> Result<()> {
 
     let scale = 1.0 / (dh as f32).sqrt();
     let cpu_out = cpu_sdpa_reference(&q, &k, &v, scale, true)?;
-    let vk_out = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
-        &vk, &q, &k, &v, scale, true,
-    )?;
+    let vk_out =
+        kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(&vk, &q, &k, &v, scale, true)?;
     assert_eq!(vk_out.dims(), cpu_out.dims());
     // Slightly looser tolerance than the small-N tests — longer K loop
     // accumulates more rounding error in the online softmax recurrence.
@@ -3138,7 +3140,9 @@ fn sgd_step_f32_matches_cpu_reference() -> Result<()> {
     // Plus a small odd-length test (300) so the workgroup boundary
     // (multiples of 256) is exercised by the early-return path.
     for n in [512usize, 300usize, 1usize] {
-        let param_data: Vec<f32> = (0..n).map(|i| ((i as i32 - (n as i32 / 2)) as f32) * 0.01).collect();
+        let param_data: Vec<f32> = (0..n)
+            .map(|i| ((i as i32 - (n as i32 / 2)) as f32) * 0.01)
+            .collect();
         let grad_data: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.005).collect();
         let lr: f32 = 0.013;
 
@@ -3185,20 +3189,19 @@ fn sgd_step_f32_matches_cpu_reference() -> Result<()> {
 
         kernels::dispatch_sgd_step_f32(&vk, &param_buf, &grad_buf, n, lr)?;
 
-        let updated = VulkanBuffer::read_back(
-            device,
-            host_visible_mt,
-            queue,
-            queue_family,
-            &param_buf,
-        )
-        .context("read back param")?;
+        let updated =
+            VulkanBuffer::read_back(device, host_visible_mt, queue, queue_family, &param_buf)
+                .context("read back param")?;
         let updated_f32: Vec<f32> = updated
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
-        anyhow::ensure!(updated_f32.len() == n, "n={n}: read back {} elements, expected {n}", updated_f32.len());
+        anyhow::ensure!(
+            updated_f32.len() == n,
+            "n={n}: read back {} elements, expected {n}",
+            updated_f32.len()
+        );
         for (i, (got, want)) in updated_f32.iter().zip(expected.iter()).enumerate() {
             let diff = (got - want).abs();
             anyhow::ensure!(

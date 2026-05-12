@@ -401,6 +401,14 @@ fn spawn_backend_prewarm(state: AppState) {
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
 
+    if vk_native_training_enabled() {
+        tracing::info!(
+            "skipping background inference prewarm because KILN_VK_NATIVE_TRAINING is enabled"
+        );
+        prewarm_complete.store(true, Ordering::Release);
+        return;
+    }
+
     tokio::spawn(async move {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
@@ -476,6 +484,16 @@ fn spawn_backend_prewarm(state: AppState) {
         }
         prewarm_complete.store(true, Ordering::Release);
     });
+}
+
+fn vk_native_training_enabled() -> bool {
+    std::env::var("KILN_VK_NATIVE_TRAINING")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
+        })
+        .unwrap_or(false)
 }
 
 fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {

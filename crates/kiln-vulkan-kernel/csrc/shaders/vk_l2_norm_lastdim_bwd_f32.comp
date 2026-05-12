@@ -1,0 +1,50 @@
+// Backward for y = scale * x / sqrt(sum(x^2) + eps).
+//
+// Push constants: rows, hidden, scale_bits, eps_bits
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint hidden;
+    float scale;
+    float eps;
+};
+
+layout(binding = 0) readonly buffer XBuf { float x[]; };
+layout(binding = 1) readonly buffer GradOutBuf { float grad_out[]; };
+layout(binding = 2) writeonly buffer GradXBuf { float grad_x[]; };
+
+shared float sum_sq_sh[256];
+shared float dot_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= rows) return;
+
+    uint base = row * hidden;
+    float xv = (tid < hidden) ? x[base + tid] : 0.0;
+    float gv = (tid < hidden) ? grad_out[base + tid] : 0.0;
+    sum_sq_sh[tid] = xv * xv;
+    dot_sh[tid] = gv * xv;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            sum_sq_sh[tid] += sum_sq_sh[tid + stride];
+            dot_sh[tid] += dot_sh[tid + stride];
+        }
+        barrier();
+    }
+
+    float inv = inversesqrt(sum_sq_sh[0] + eps);
+    float coeff = scale * inv;
+    float correction = scale * xv * inv * inv * inv * dot_sh[0];
+    if (tid < hidden) {
+        grad_x[base + tid] = coeff * gv - correction;
+    }
+}

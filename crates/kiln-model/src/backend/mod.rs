@@ -780,11 +780,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Implementations typically wrap the dispatch in a `CustomOp1` with a
     /// proper `bwd` impl. Backends without an autograd-safe path return
     /// `Ok(None)` so the caller falls back to the candle CPU matmul.
-    fn linear_prefill_apply(
-        &self,
-        _x: &Tensor,
-        _weight_t: &Tensor,
-    ) -> Result<Option<Tensor>> {
+    fn linear_prefill_apply(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }
 

@@ -1,0 +1,59 @@
+// Causal Conv1d fused SiLU over a contiguous output offset slice.
+//
+// Push constants: batch, channels, seq_len, kernel_size, n_elements, offset
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer XBuf         { float data_x[]; };
+layout(binding = 1) readonly  buffer WeightBuf    { float data_weight[]; };
+layout(binding = 2) readonly  buffer ConvStateBuf { float data_conv_state[]; };
+layout(binding = 3) writeonly buffer OutBuf       { float data_out[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint idx = offset + local_idx;
+    uint total = batch * channels * seq_len;
+    if (idx >= total) return;
+
+    uint b = idx / (channels * seq_len);
+    uint c = (idx / seq_len) % channels;
+    uint t = idx % seq_len;
+
+    uint state_len = kernel_size - 1u;
+    uint state_base = (b * channels + c) * state_len;
+    uint x_base = (b * channels + c) * seq_len;
+
+    float sum = 0.0;
+    for (uint k = 0u; k < kernel_size; ++k) {
+        uint logical_t = t + k;
+        float x_val;
+        if (logical_t < state_len) {
+            x_val = data_conv_state[state_base + logical_t];
+        } else {
+            x_val = data_x[x_base + logical_t - state_len];
+        }
+        sum += x_val * data_weight[c * kernel_size + k];
+    }
+
+    float silu;
+    if (sum >= 0.0) {
+        silu = sum / (1.0 + exp(-sum));
+    } else {
+        float e = exp(sum);
+        silu = sum * e / (1.0 + e);
+    }
+    data_out[idx] = silu;
+}

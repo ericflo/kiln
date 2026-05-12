@@ -7,7 +7,7 @@
 //! in Phase 4 alongside `vk_gdn_gated_rms_norm_bwd.comp`.
 
 use crate::vk_ops::dispatch_simple;
-use crate::vk_tensor::{VkDType, VkTensor};
+use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -47,9 +47,7 @@ pub fn vk_gdn_gated_rms_norm_no_grad(
         z.shape()
     );
     let dims = x.shape();
-    let hidden = *dims
-        .last()
-        .context("vk_gdn_gated_rms_norm: empty shape")?;
+    let hidden = *dims.last().context("vk_gdn_gated_rms_norm: empty shape")?;
     anyhow::ensure!(
         weight.num_elements() == hidden,
         "vk_gdn_gated_rms_norm: weight size {} != hidden {}",
@@ -152,12 +150,7 @@ pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
         &push_fill,
         ((rows + 255) / 256) as u32,
     )?;
-    let ones_t = VkTensor::from_buffer(
-        ones_buf,
-        vec![1, rows],
-        VkDType::F32,
-        Arc::clone(device),
-    );
+    let ones_t = VkTensor::from_buffer(ones_buf, vec![1, rows], VkDType::F32, Arc::clone(device));
     let dw_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dw_partial_t)?;
     // Reshape [1, hidden] → [hidden]
     let dw_t = crate::vk_ops::shape::vk_reshape(&dw_2d, &[hidden])?;
@@ -166,6 +159,59 @@ pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
         VkTensor::from_buffer(d_x_buf, dims.to_vec(), VkDType::F32, Arc::clone(device)),
         VkTensor::from_buffer(d_z_buf, dims.to_vec(), VkDType::F32, Arc::clone(device)),
         dw_t,
+    ))
+}
+
+#[derive(Debug)]
+struct GdnGatedRmsNormBackward {
+    eps: f32,
+    inputs: [VkTensor; 3],
+}
+
+impl VkBackwardOp for GdnGatedRmsNormBackward {
+    fn op_name(&self) -> &'static str {
+        "gdn_gated_rms_norm"
+    }
+
+    fn input_refs(&self) -> &[VkTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
+        let (d_x, d_z, d_w) = vk_gdn_gated_rms_norm_bwd_no_grad(
+            grad_out,
+            &self.inputs[0],
+            &self.inputs[1],
+            &self.inputs[2],
+            self.eps,
+        )?;
+        Ok(vec![Some(d_x), Some(d_z), Some(d_w)])
+    }
+}
+
+/// Autograd-aware gated RMSNorm.
+pub fn vk_gdn_gated_rms_norm(
+    x: &VkTensor,
+    z: &VkTensor,
+    weight: &VkTensor,
+    eps: f32,
+) -> Result<VkTensor> {
+    let out = vk_gdn_gated_rms_norm_no_grad(x, z, weight, eps)?;
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> =
+        if x.requires_grad() || z.requires_grad() || weight.requires_grad() {
+            Some(Arc::new(GdnGatedRmsNormBackward {
+                eps,
+                inputs: [x.clone(), z.clone(), weight.clone()],
+            }))
+        } else {
+            None
+        };
+    Ok(VkTensor::from_op(
+        Arc::clone(out.buffer()),
+        out.shape().to_vec(),
+        out.dtype(),
+        Arc::clone(out.device()),
+        grad_fn,
     ))
 }
 

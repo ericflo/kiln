@@ -1,0 +1,32 @@
+// Narrow along the last dim over a contiguous output offset slice.
+//
+// Push constants: [outer, inner_in, start, len, n_elements, offset]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint outer;
+    uint inner_in;
+    uint start;
+    uint len;
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint linear = offset + local_idx;
+    uint total = outer * len;
+    if (linear >= total) return;
+    uint i = linear / len;
+    uint j = linear % len;
+    data_out[linear] = data_in[i * inner_in + (start + j)];
+}

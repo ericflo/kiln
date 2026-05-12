@@ -1,0 +1,31 @@
+// Sigmoid forward over a contiguous offset slice:
+//   y[offset + i] = 1 / (1 + exp(-x[offset + i]))
+//
+// Push constants: [n_elements, offset]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint idx = offset + local_idx;
+    float x = data_in[idx];
+    if (x >= 0.0) {
+        data_out[idx] = 1.0 / (1.0 + exp(-x));
+    } else {
+        float e = exp(x);
+        data_out[idx] = e / (1.0 + e);
+    }
+}

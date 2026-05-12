@@ -2,10 +2,10 @@
 
 use anyhow::Result;
 use candle_core::{Device, Tensor, Var};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::vk_flce_loss;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -41,7 +41,14 @@ fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<
 
 /// CPU cross-entropy reference: loss = mean_i (-log(softmax(logit_i)[label_i]))
 /// where logits = hidden @ weight.T
-fn cpu_xent(hidden: &[f32], weight: &[f32], labels: &[u32], num_active: usize, hidden_dim: usize, vocab: usize) -> (f32, Vec<f32>) {
+fn cpu_xent(
+    hidden: &[f32],
+    weight: &[f32],
+    labels: &[u32],
+    num_active: usize,
+    hidden_dim: usize,
+    vocab: usize,
+) -> (f32, Vec<f32>) {
     // logits[n, v] = sum_d hidden[n, d] * weight[v, d]
     let mut loss_sum = 0.0_f32;
     let mut grad_hidden = vec![0.0_f32; num_active * hidden_dim];
@@ -97,7 +104,12 @@ fn vk_flce_forward_backward_parity_small() -> Result<()> {
 
     let (exp_loss, exp_dh) = cpu_xent(&h_data, &w_data, &labels, num_active, hidden_dim, vocab);
     let got_loss = loss.to_vec_f32()?[0];
-    assert!((got_loss - exp_loss).abs() < 1e-3, "loss {} vs {}", got_loss, exp_loss);
+    assert!(
+        (got_loss - exp_loss).abs() < 1e-3,
+        "loss {} vs {}",
+        got_loss,
+        exp_loss
+    );
 
     let grads = vk_backward(&loss)?;
     let grad_h = grads

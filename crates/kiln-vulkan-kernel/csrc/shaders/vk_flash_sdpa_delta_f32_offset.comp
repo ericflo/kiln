@@ -1,0 +1,43 @@
+// delta[row, head] = dot(d_out[row, head, :], out[row, head, :])
+// over a query-row tile.
+//
+// Push constants: total_rows, row_start, rows_chunk, heads_q, head_dim
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total_rows;
+    uint row_start;
+    uint rows_chunk;
+    uint heads_q;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly buffer DOutBuf { float d_out[]; };
+layout(binding = 1) readonly buffer OutBuf { float data_out[]; };
+layout(binding = 2) writeonly buffer DeltaBuf { float delta[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint local_row = gl_WorkGroupID.x;
+    uint row = row_start + local_row;
+    uint hq = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (local_row >= rows_chunk || row >= total_rows || hq >= heads_q) return;
+
+    uint base = (row * heads_q + hq) * head_dim;
+    float term = (tid < head_dim) ? d_out[base + tid] * data_out[base + tid] : 0.0;
+    reduce_sh[tid] = term;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) {
+        delta[row * heads_q + hq] = reduce_sh[0];
+    }
+}

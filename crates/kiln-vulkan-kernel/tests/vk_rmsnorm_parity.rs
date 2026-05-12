@@ -6,12 +6,12 @@
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
 use kiln_vulkan_kernel::vk_ops::reduce::vk_mean_all;
 use kiln_vulkan_kernel::vk_ops::rmsnorm::{vk_rmsnorm, vk_rmsnorm_no_grad};
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -78,7 +78,9 @@ fn vk_rmsnorm_forward_parity() -> Result<()> {
     let x_data: Vec<f32> = (0..(rows * hidden))
         .map(|i| ((i as f32) * 0.013).sin() * 1.5)
         .collect();
-    let w_data: Vec<f32> = (0..hidden).map(|i| ((i as f32) * 0.05).cos() * 0.1).collect();
+    let w_data: Vec<f32> = (0..hidden)
+        .map(|i| ((i as f32) * 0.05).cos() * 0.1)
+        .collect();
     let eps = 1e-5_f32;
     let x = upload_f32(&dev, &x_data, &[rows, hidden])?;
     let w = upload_f32(&dev, &w_data, &[hidden])?;

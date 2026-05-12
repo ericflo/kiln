@@ -497,9 +497,7 @@ fn add_lora_delta_to_base(
         // A, and B — so this path is now safe to use during training
         // too. `loss.backward()` produces correct grad_A and grad_B
         // that flow into the SGD update.
-        if let Some(delta) =
-            backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)?
-        {
+        if let Some(delta) = backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)? {
             let delta = if delta.dtype() == base.dtype() {
                 delta
             } else {
@@ -2031,6 +2029,7 @@ fn stub_embed_tokens_after_upload(device: &Device) -> bool {
 #[derive(Clone)]
 struct ProjectionLoadCache {
     drop_projection_originals: bool,
+    drop_projection_transposes: bool,
     bf16_stub: Option<Tensor>,
     f16_stub: Option<Tensor>,
     f32_stub: Option<Tensor>,
@@ -2039,9 +2038,12 @@ struct ProjectionLoadCache {
 impl ProjectionLoadCache {
     fn new(device: &Device) -> Result<Self> {
         let drop_projection_originals = projection_original_drop_enabled_for_device(device);
-        if drop_projection_originals {
+        let drop_projection_transposes =
+            !drop_projection_originals && drop_projection_transposes_enabled();
+        if drop_projection_originals || drop_projection_transposes {
             Ok(Self {
                 drop_projection_originals,
+                drop_projection_transposes,
                 bf16_stub: Some(Tensor::zeros((1usize,), DType::BF16, device)?),
                 f16_stub: Some(Tensor::zeros((1usize,), DType::F16, device)?),
                 f32_stub: Some(Tensor::zeros((1usize,), DType::F32, device)?),
@@ -2049,6 +2051,7 @@ impl ProjectionLoadCache {
         } else {
             Ok(Self {
                 drop_projection_originals,
+                drop_projection_transposes,
                 bf16_stub: None,
                 f16_stub: None,
                 f32_stub: None,
@@ -2068,6 +2071,20 @@ impl ProjectionLoadCache {
     fn drops_projection_originals(&self) -> bool {
         self.drop_projection_originals
     }
+
+    fn drops_projection_transposes(&self) -> bool {
+        self.drop_projection_transposes
+    }
+}
+
+fn env_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
+        })
+        .unwrap_or(false)
 }
 
 fn drop_projection_originals_enabled() -> bool {
@@ -2091,7 +2108,7 @@ fn keep_projection_originals_enabled() -> bool {
     // is bit-identical across epochs because LoRA gradients vanish.
     // Auto-engage projection-original retention when the vk-native
     // trainer is enabled, so users don't have to set both env vars.
-    if std::env::var("KILN_VK_NATIVE_TRAINING").is_ok() {
+    if env_enabled("KILN_VK_NATIVE_TRAINING") {
         return true;
     }
     matches!(
@@ -2103,6 +2120,10 @@ fn keep_projection_originals_enabled() -> bool {
             .as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
+}
+
+fn drop_projection_transposes_enabled() -> bool {
+    env_enabled("KILN_VK_NATIVE_TRAINING") && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
 }
 
 fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
@@ -2124,6 +2145,13 @@ fn projection_tensors_for_load(
             None => dropped_weight_stub(w, device)?,
         };
         Ok((original_stub, transposed))
+    } else if cache.drops_projection_transposes() {
+        let materialized = weight_to_tensor(w, device)?;
+        let transposed_stub = match cache.stub_for(weight_dtype(w)) {
+            Some(stub) => stub,
+            None => dropped_weight_stub(w, device)?,
+        };
+        Ok((materialized, transposed_stub))
     } else {
         let materialized = weight_to_tensor(w, device)?;
         let transposed = cached_transpose(&materialized)?;
@@ -2556,6 +2584,10 @@ impl GpuWeights {
             ProjectionLoadCache::new(device).context("projection load cache")?;
         if projection_load_cache.drops_projection_originals() {
             tracing::info!("projection original tensors are dropped after transposed upload");
+        } else if projection_load_cache.drops_projection_transposes() {
+            tracing::info!(
+                "projection transposed tensors are dropped because Vulkan-native training keeps originals"
+            );
         }
 
         // Per-layer `pack_from_bf16` used to run inline during weight load,
@@ -3106,11 +3138,7 @@ fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
 /// dispatches the kernel, casts result back to the input dtype.
 /// Returns `Ok(None)` when preconditions don't fit (caller falls back).
 #[cfg(feature = "vulkan")]
-fn try_vulkan_rmsnorm_forward(
-    x: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-) -> Result<Option<Tensor>> {
+fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Option<Tensor>> {
     let Some(vk_device) = vulkan_device_handle() else {
         return Ok(None);
     };
@@ -3143,8 +3171,9 @@ fn try_vulkan_rmsnorm_forward(
 /// caches the handle; subsequent calls just clone the Arc.
 #[cfg(feature = "vulkan")]
 fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>> {
-    static VK_DEVICE: std::sync::OnceLock<Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>>> =
-        std::sync::OnceLock::new();
+    static VK_DEVICE: std::sync::OnceLock<
+        Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>>,
+    > = std::sync::OnceLock::new();
     VK_DEVICE
         .get_or_init(|| {
             kiln_vulkan_kernel::VulkanDevice::new()
@@ -3162,11 +3191,7 @@ fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDev
 /// weights are frozen during LoRA training — only `x` participates in
 /// autograd.
 #[cfg(feature = "vulkan")]
-fn try_vulkan_rmsnorm_autograd(
-    x: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-) -> Result<Option<Tensor>> {
+fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Option<Tensor>> {
     use candle_core::{CpuStorage, CustomOp1, Layout, Shape, Storage};
 
     let Some(vk_device) = vulkan_device_handle() else {
@@ -12196,11 +12221,15 @@ mod tests {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Save & clear the env var so the test reads the pure default.
         let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
-        unsafe { std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP"); }
+        unsafe {
+            std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP");
+        }
         let result = marlin_bf16_drop_disabled();
         // Restore the prior env state for any later test in this process.
         if let Some(prev) = prior {
-            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev); }
+            unsafe {
+                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev);
+            }
         }
         assert!(!result, "marlin BF16 drop must be enabled by default");
     }
@@ -12213,16 +12242,22 @@ mod tests {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("KILN_DISABLE_MARLIN_BF16_DROP").ok();
         for value in &["1", "true", "TRUE", "yes", "Yes"] {
-            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", value); }
+            unsafe {
+                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", value);
+            }
             assert!(
                 marlin_bf16_drop_disabled(),
                 "KILN_DISABLE_MARLIN_BF16_DROP={value} must disable the drop"
             );
         }
         if let Some(prev) = prior {
-            unsafe { std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev); }
+            unsafe {
+                std::env::set_var("KILN_DISABLE_MARLIN_BF16_DROP", prev);
+            }
         } else {
-            unsafe { std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP"); }
+            unsafe {
+                std::env::remove_var("KILN_DISABLE_MARLIN_BF16_DROP");
+            }
         }
     }
 
@@ -12234,12 +12269,19 @@ mod tests {
     fn test_keep_projection_originals_default_off() {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
-        unsafe { std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS"); }
+        unsafe {
+            std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
+        }
         let result = keep_projection_originals_enabled();
         if let Some(prev) = prior {
-            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+            unsafe {
+                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
+            }
         }
-        assert!(!result, "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed)");
+        assert!(
+            !result,
+            "KILN_KEEP_PROJECTION_ORIGINALS must default to off (drop allowed)"
+        );
     }
 
     /// `KILN_KEEP_PROJECTION_ORIGINALS=1` must override the default
@@ -12250,16 +12292,22 @@ mod tests {
         let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior = std::env::var("KILN_KEEP_PROJECTION_ORIGINALS").ok();
         for value in &["1", "true", "yes"] {
-            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", value); }
+            unsafe {
+                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", value);
+            }
             assert!(
                 keep_projection_originals_enabled(),
                 "KILN_KEEP_PROJECTION_ORIGINALS={value} must keep the originals"
             );
         }
         if let Some(prev) = prior {
-            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+            unsafe {
+                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
+            }
         } else {
-            unsafe { std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS"); }
+            unsafe {
+                std::env::remove_var("KILN_KEEP_PROJECTION_ORIGINALS");
+            }
         }
     }
 
@@ -12285,13 +12333,20 @@ mod tests {
             None
         };
         if let Some(prev) = prior_keep {
-            unsafe { std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev); }
+            unsafe {
+                std::env::set_var("KILN_KEEP_PROJECTION_ORIGINALS", prev);
+            }
         }
         if let Some(prev) = prior_drop {
-            unsafe { std::env::set_var("KILN_DROP_PROJECTION_ORIGINALS", prev); }
+            unsafe {
+                std::env::set_var("KILN_DROP_PROJECTION_ORIGINALS", prev);
+            }
         }
         if let Some(res) = result {
-            assert!(!res, "plain CPU with no overrides must NOT drop projection originals");
+            assert!(
+                !res,
+                "plain CPU with no overrides must NOT drop projection originals"
+            );
         }
     }
 

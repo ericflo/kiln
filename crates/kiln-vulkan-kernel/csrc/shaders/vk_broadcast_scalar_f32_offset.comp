@@ -1,0 +1,25 @@
+// Broadcast a scalar to a contiguous offset slice.
+//
+// Push constants: [n_elements, scale_bits, offset]
+// Bindings: in (readonly, expects 1 element at index 0), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint scale_bits;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    float scale = uintBitsToFloat(scale_bits);
+    data_out[offset + local_idx] = data_in[0] * scale;
+}

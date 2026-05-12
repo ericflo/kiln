@@ -110,7 +110,9 @@ fn with_resident_registry<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
 {
-    let mut guard = resident_registry().lock().unwrap_or_else(|e| e.into_inner());
+    let mut guard = resident_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     f(&mut guard)
 }
 
@@ -555,9 +557,21 @@ impl VulkanBackend {
         // to compute) and matches what the candle CPU baseline did
         // implicitly via broadcast_matmul_cpu_compatible.
         let in_dtype = q.dtype();
-        let q_f32 = if in_dtype == DType::F32 { q.clone() } else { q.to_dtype(DType::F32)? };
-        let k_f32 = if in_dtype == DType::F32 { k.clone() } else { k.to_dtype(DType::F32)? };
-        let v_f32 = if in_dtype == DType::F32 { v.clone() } else { v.to_dtype(DType::F32)? };
+        let q_f32 = if in_dtype == DType::F32 {
+            q.clone()
+        } else {
+            q.to_dtype(DType::F32)?
+        };
+        let k_f32 = if in_dtype == DType::F32 {
+            k.clone()
+        } else {
+            k.to_dtype(DType::F32)?
+        };
+        let v_f32 = if in_dtype == DType::F32 {
+            v.clone()
+        } else {
+            v.to_dtype(DType::F32)?
+        };
 
         let out_f32 = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32(
             vk_device,
@@ -959,21 +973,13 @@ impl BackendRuntime for VulkanBackend {
         match param.dtype() {
             DType::F32 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
-                    vk_device,
-                    &param_buf,
-                    &grad_buf,
-                    n_elements,
-                    lr,
+                    vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
                 Ok(true)
             }
             DType::BF16 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_bf16(
-                    vk_device,
-                    &param_buf,
-                    &grad_buf,
-                    n_elements,
-                    lr,
+                    vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
                 Ok(true)
             }
@@ -1867,9 +1873,7 @@ impl BackendRuntime for VulkanBackend {
             out_dim,
             out_dtype,
         );
-        let out = x
-            .apply_op1(op)
-            .context("VulkanLinearOp apply_op1 failed")?;
+        let out = x.apply_op1(op).context("VulkanLinearOp apply_op1 failed")?;
         Ok(Some(out))
     }
 
@@ -1962,8 +1966,7 @@ impl BackendRuntime for VulkanBackend {
                 let total_gflop = (2u64
                     .saturating_mul(row_count as u64)
                     .saturating_mul(hidden_x as u64)
-                    .saturating_mul(chunk_len as u64))
-                    as f64
+                    .saturating_mul(chunk_len as u64)) as f64
                     / 1.0e9;
                 let sub_count = chunk_len.div_ceil(sub_chunk_len);
                 tracing::info!(
@@ -1985,23 +1988,24 @@ impl BackendRuntime for VulkanBackend {
             let mut sub_offset = 0usize;
             while sub_offset < chunk_len {
                 let cur_len = (chunk_len - sub_offset).min(sub_chunk_len);
-                let sub = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
-                    vk_device.as_ref(),
-                    &dispatch_x,
-                    weight_buffer.as_ref(),
-                    row_count,
-                    hidden_x,
-                    cur_len,
-                    chunk_start + sub_offset,
-                    full_out_dim,
-                )
-                .with_context(|| {
-                    format!(
-                        "VulkanBackend: linear_prefill_apply_offset sub-chunk \
+                let sub =
+                    kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset(
+                        vk_device.as_ref(),
+                        &dispatch_x,
+                        weight_buffer.as_ref(),
+                        row_count,
+                        hidden_x,
+                        cur_len,
+                        chunk_start + sub_offset,
+                        full_out_dim,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "VulkanBackend: linear_prefill_apply_offset sub-chunk \
                          (sub_offset={sub_offset}, cur_len={cur_len}, \
                           chunk_start={chunk_start}, chunk_len={chunk_len}) failed"
-                    )
-                })?;
+                        )
+                    })?;
                 sub_outputs.push(sub);
                 sub_offset += cur_len;
             }
@@ -3144,8 +3148,8 @@ pub fn precompile_custom_kernels() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
     use crate::backend::BackendRuntime;
+    use candle_core::Device;
 
     /// Round-trip test for the Phase 3.1 hooks. Registers a fresh
     /// activation, asserts `has_resident_activation` flips true,
@@ -3175,7 +3179,10 @@ mod tests {
         let resolved = backend
             .resolve_resident_activation(&initial, &[2, 2], DType::BF16)?
             .expect("must resolve right after register");
-        let init_v: Vec<f32> = resolved.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let init_v: Vec<f32> = resolved
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(init_v, vec![1.0, 2.0, 3.0, 4.0]);
 
         // Mutate the tensor's storage out-of-band — analogous to what
@@ -3214,20 +3221,25 @@ mod tests {
         let resolved_v = backend
             .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
             .expect("v must resolve after register");
-        let v_init_v: Vec<f32> =
-            resolved_v.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let v_init_v: Vec<f32> = resolved_v
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(v_init_v, vec![10.0, 20.0, 30.0, 40.0]);
 
         // Now mutate v further and call update.
-        let newer_data = Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let newer_data =
+            Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &Device::Cpu)?
+                .to_dtype(DType::BF16)?;
         v.set(&newer_data)?;
         backend.update_resident_activation(v.as_tensor())?;
         let resolved_after = backend
             .resolve_resident_activation(v.as_tensor(), &[2, 2], DType::BF16)?
             .expect("v must resolve after update");
-        let after_v: Vec<f32> =
-            resolved_after.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let after_v: Vec<f32> = resolved_after
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(after_v, vec![100.0, 200.0, 300.0, 400.0]);
 
         backend.evict_resident_activation(&initial);
@@ -3257,17 +3269,17 @@ mod tests {
 
         let x_data: Vec<f32> = (0..in_features).map(|i| (i as f32) * 0.1).collect();
         let a_init: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.01).collect();
-        let b_init: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.02).collect();
+        let b_init: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.02)
+            .collect();
 
-        let x = Tensor::from_vec(x_data, (1, 1, in_features), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let x =
+            Tensor::from_vec(x_data, (1, 1, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?;
         let a_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(a_init, (rank, in_features), &Device::Cpu)?
-                .to_dtype(DType::BF16)?,
+            &Tensor::from_vec(a_init, (rank, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?,
         )?;
         let b_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(b_init, (out_features, rank), &Device::Cpu)?
-                .to_dtype(DType::BF16)?,
+            &Tensor::from_vec(b_init, (out_features, rank), &Device::Cpu)?.to_dtype(DType::BF16)?,
         )?;
 
         backend.register_resident_activation(a_var.as_tensor())?;
@@ -3281,9 +3293,11 @@ mod tests {
         // Mutate A — simulate what sgd_step does. New A bytes are
         // intentionally far from the init values so the resulting
         // delta will be visibly different.
-        let a_post: Vec<f32> = (0..rank * in_features).map(|i| 5.0 - (i as f32) * 0.05).collect();
-        let a_post_tensor = Tensor::from_vec(a_post, (rank, in_features), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let a_post: Vec<f32> = (0..rank * in_features)
+            .map(|i| 5.0 - (i as f32) * 0.05)
+            .collect();
+        let a_post_tensor =
+            Tensor::from_vec(a_post, (rank, in_features), &Device::Cpu)?.to_dtype(DType::BF16)?;
         a_var.set(&a_post_tensor)?;
         // Critical: keep the registry in sync.
         backend.update_resident_activation(a_var.as_tensor())?;
@@ -3296,8 +3310,14 @@ mod tests {
         // The two deltas must differ — if update_resident_activation
         // were a no-op or used the wrong encoding, delta_post would
         // equal delta_init.
-        let init_v: Vec<f32> = delta_init.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-        let post_v: Vec<f32> = delta_post.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let init_v: Vec<f32> = delta_init
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let post_v: Vec<f32> = delta_post
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         assert_eq!(init_v.len(), post_v.len());
         let max_diff = init_v
             .iter()
@@ -3432,10 +3452,7 @@ mod tests {
         assert_eq!(resolved.dims(), &[2, 2]);
         let resolved_data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (got, want)) in resolved_data.iter().zip(original_data.iter()).enumerate() {
-            assert!(
-                (got - want).abs() < 1e-9,
-                "idx {i}: got {got} want {want}"
-            );
+            assert!((got - want).abs() < 1e-9, "idx {i}: got {got} want {want}");
         }
 
         backend.evict_resident_activation(&t);
@@ -3473,7 +3490,10 @@ mod tests {
         backend.register_resident_activation(&grad)?;
 
         let dispatched = backend.dispatch_sgd_step(&param, &grad, lr)?;
-        assert!(dispatched, "dispatch_sgd_step should succeed when both buffers are resident");
+        assert!(
+            dispatched,
+            "dispatch_sgd_step should succeed when both buffers are resident"
+        );
 
         // Read back the updated param buffer from the registry.
         let param_buf = with_resident_registry(|cache| cache.get(&param.id()).cloned())
@@ -3571,7 +3591,9 @@ mod tests {
 
         let x_data: Vec<f32> = (0..t * in_features).map(|i| (i as f32) * 0.01).collect();
         let a_data: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.02).collect();
-        let b_data: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.03).collect();
+        let b_data: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.03)
+            .collect();
 
         let x = Tensor::from_vec(x_data, (1, t, in_features), &Device::Cpu)?;
         let a_f32 = Tensor::from_vec(a_data, (rank, in_features), &Device::Cpu)?;
@@ -3604,8 +3626,14 @@ mod tests {
 
         assert_eq!(vk_delta.dims(), cpu_delta.dims());
         assert_eq!(vk_delta.dtype(), cpu_delta.dtype());
-        let cpu_v: Vec<f32> = cpu_delta.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        let vk_v: Vec<f32> = vk_delta.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let cpu_v: Vec<f32> = cpu_delta
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+        let vk_v: Vec<f32> = vk_delta
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
         for (i, (c, v)) in cpu_v.iter().zip(vk_v.iter()).enumerate() {
             let abs = (c - v).abs();
             let rel = abs / c.abs().max(1e-3);
@@ -3629,12 +3657,10 @@ mod tests {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let x = Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
-        let a = Tensor::from_vec(vec![0.0f32; 32], (4, 8), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
-        let b = Tensor::from_vec(vec![0.0f32; 24], (6, 4), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
+        let x =
+            Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &Device::Cpu)?.to_dtype(DType::BF16)?;
+        let a = Tensor::from_vec(vec![0.0f32; 32], (4, 8), &Device::Cpu)?.to_dtype(DType::BF16)?;
+        let b = Tensor::from_vec(vec![0.0f32; 24], (6, 4), &Device::Cpu)?.to_dtype(DType::BF16)?;
         // Neither registered — fall back.
         assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
         // Only A registered — fall back.
@@ -3680,7 +3706,10 @@ mod tests {
         backend.register_resident_activation(&g_bf16)?;
 
         let dispatched = backend.dispatch_sgd_step(&p_bf16, &g_bf16, lr)?;
-        assert!(dispatched, "BF16 dispatch_sgd_step must succeed when both operands are resident");
+        assert!(
+            dispatched,
+            "BF16 dispatch_sgd_step must succeed when both operands are resident"
+        );
 
         // Read the updated param buffer back via resolve.
         let resolved = backend
@@ -3768,17 +3797,17 @@ mod tests {
             weight_decay,
             step,
         )?;
-        assert!(dispatched, "adamw_step must succeed when all four buffers are resident");
+        assert!(
+            dispatched,
+            "adamw_step must succeed when all four buffers are resident"
+        );
 
         let resolved = backend
             .resolve_resident_activation(&param, &[n], DType::F32)?
             .expect("param must resolve after dispatch");
         let got: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (g - w).abs() < 1e-6,
-                "idx {i}: got={g:.9} want={w:.9}"
-            );
+            assert!((g - w).abs() < 1e-6, "idx {i}: got={g:.9} want={w:.9}");
         }
 
         backend.evict_resident_activation(&param);
@@ -3898,12 +3927,14 @@ mod tests {
         let m = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
         let v = Tensor::from_vec(vec![0.0f32; 4], (4,), &Device::Cpu)?;
         // Nothing registered.
-        let dispatched = backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        let dispatched =
+            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
         assert!(!dispatched);
         // Only param + m registered — v missing → fall back.
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&m)?;
-        let dispatched = backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        let dispatched =
+            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
         assert!(!dispatched);
         backend.evict_resident_activation(&p);
         backend.evict_resident_activation(&m);
@@ -3939,9 +3970,8 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let p_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(init.clone(), (n,), &Device::Cpu)?,
-        )?;
+        let p_var =
+            candle_core::Var::from_tensor(&Tensor::from_vec(init.clone(), (n,), &Device::Cpu)?)?;
         let g_tensor = Tensor::from_vec(grad, (n,), &Device::Cpu)?;
 
         backend.register_resident_activation(p_var.as_tensor())?;
@@ -3995,9 +4025,8 @@ mod tests {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?
-            .to_dtype(DType::BF16)?;
-        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?;  // F32
+        let p = Tensor::from_vec(vec![1.0f32; 4], (4,), &Device::Cpu)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_vec(vec![0.5f32; 4], (4,), &Device::Cpu)?; // F32
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
         let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
@@ -4027,7 +4056,10 @@ mod tests {
         // hook just uploads `extract_tensor_bytes(tensor).0` and
         // keys on `tensor.id()`.
         let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &Device::Cpu)?;
-        assert!(!backend.has_resident_activation(&t), "fresh tensor must not be registered");
+        assert!(
+            !backend.has_resident_activation(&t),
+            "fresh tensor must not be registered"
+        );
         backend.register_resident_activation(&t)?;
         assert!(
             backend.has_resident_activation(&t),

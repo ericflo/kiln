@@ -6,8 +6,8 @@
 //! Forward dispatches `vk_elementwise_binary_f32.comp` with an op_code
 //! push constant.
 
-use crate::vk_ops::dispatch_simple;
 use crate::vk_ops::reduce::vk_neg_no_grad;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
@@ -30,31 +30,42 @@ fn dispatch_binary(
         n_elements > 0,
         "vk_elementwise_binary: n_elements must be > 0"
     );
-    let workgroups = ((n_elements + 255) / 256) as u32;
-    let limit = device.max_compute_work_group_count(0);
-    anyhow::ensure!(
-        workgroups <= limit,
-        "vk_elementwise_binary: workgroups {workgroups} > device limit {limit}"
-    );
-    let push_constants: [u32; 2] = [n_elements as u32, op_code];
-    dispatch_simple(
-        device,
-        "vk_elementwise_binary_f32",
-        &[a.handle(), b.handle(), out.handle()],
-        &push_constants,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if n_elements <= tile_elements {
+        let workgroups = ((n_elements + 255) / 256) as u32;
+        let limit = device.max_compute_work_group_count(0);
+        anyhow::ensure!(
+            workgroups <= limit,
+            "vk_elementwise_binary: workgroups {workgroups} > device limit {limit}"
+        );
+        let push_constants: [u32; 2] = [n_elements as u32, op_code];
+        return dispatch_simple(
+            device,
+            "vk_elementwise_binary_f32",
+            &[a.handle(), b.handle(), out.handle()],
+            &push_constants,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(n_elements, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push_constants: [u32; 3] = [len as u32, op_code, offset as u32];
+        dispatch_simple(
+            device,
+            "vk_elementwise_binary_f32_offset",
+            &[a.handle(), b.handle(), out.handle()],
+            &push_constants,
+            workgroups,
+        )
+    })
 }
 
 fn alloc_like(a: &VkTensor) -> Result<Arc<VulkanBuffer>> {
     let dev = a.device();
     let bytes = (a.num_elements() * a.dtype().byte_size()).max(1);
-    let buf = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_elementwise: alloc output buffer")?;
+    let buf =
+        VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), bytes as u64)
+            .context("vk_elementwise: alloc output buffer")?;
     Ok(Arc::new(buf))
 }
 
@@ -176,12 +187,11 @@ fn elementwise_forward_with_grad<B: VkBackwardOp + 'static>(
         a.num_elements(),
         op_code,
     )?;
-    let grad_fn: Option<Arc<dyn VkBackwardOp>> =
-        if a.requires_grad() || b.requires_grad() {
-            Some(Arc::new(make_grad_fn()))
-        } else {
-            None
-        };
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if a.requires_grad() || b.requires_grad() {
+        Some(Arc::new(make_grad_fn()))
+    } else {
+        None
+    };
     Ok(VkTensor::from_op(
         out_buf,
         a.shape().to_vec(),

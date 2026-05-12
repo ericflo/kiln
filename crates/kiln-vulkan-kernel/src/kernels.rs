@@ -862,9 +862,7 @@ pub fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
 /// as the private `extract_tensor_packed_bf16_bytes`. Used by the
 /// `register_resident_activation` BF16 path to upload bytes in the
 /// layout every Vulkan kernel's `load_weight` helper expects.
-pub fn extract_tensor_packed_bf16_bytes_pub(
-    tensor: &Tensor,
-) -> Result<(Vec<u8>, Vec<usize>)> {
+pub fn extract_tensor_packed_bf16_bytes_pub(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     extract_tensor_packed_bf16_bytes(tensor)
 }
 
@@ -1810,9 +1808,8 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
         full_out_dim,
     );
 
-    let x_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
-            .context("failed to create linear_decode_offset x buffer")?;
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create linear_decode_offset x buffer")?;
     {
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -1826,12 +1823,9 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
         .context("failed to upload linear_decode_offset x buffer")?;
     }
 
-    let out_buf = VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        (batch * out_dim * 4) as u64,
-    )
-    .context("failed to create linear_decode_offset output buffer")?;
+    let out_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
+            .context("failed to create linear_decode_offset output buffer")?;
 
     let all_handles = vec![x_buf.handle(), weight_buffer.handle(), out_buf.handle()];
     let glsl_path = concat!(
@@ -1927,18 +1921,13 @@ pub fn dispatch_qwen_rmsnorm_forward(
         hidden * 4
     );
 
-    let x_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
-            .context("qwen_rmsnorm_forward: create x buffer")?;
-    let weight_buf = VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        weight_data.len() as u64,
-    )
-    .context("qwen_rmsnorm_forward: create weight buffer")?;
-    let out_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
-            .context("qwen_rmsnorm_forward: create out buffer")?;
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("qwen_rmsnorm_forward: create x buffer")?;
+    let weight_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, weight_data.len() as u64)
+            .context("qwen_rmsnorm_forward: create weight buffer")?;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("qwen_rmsnorm_forward: create out buffer")?;
 
     {
         let command_pool = vk_device.transient_command_pool()?;
@@ -2035,7 +2024,9 @@ pub fn dispatch_qwen_rmsnorm_backward(
     );
 
     let dims = x.shape().dims().to_vec();
-    let hidden = *dims.last().context("qwen_rmsnorm_backward: x has no dims")?;
+    let hidden = *dims
+        .last()
+        .context("qwen_rmsnorm_backward: x has no dims")?;
     let rows: usize = dims[..dims.len() - 1].iter().product();
     anyhow::ensure!(
         weight.dims() == [hidden],
@@ -2056,12 +2047,9 @@ pub fn dispatch_qwen_rmsnorm_backward(
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("qwen_rmsnorm_backward: create x buffer")?;
-    let weight_buf = VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        weight_data.len() as u64,
-    )
-    .context("qwen_rmsnorm_backward: create weight buffer")?;
+    let weight_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, weight_data.len() as u64)
+            .context("qwen_rmsnorm_backward: create weight buffer")?;
     let grad_y_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, grad_y_data.len() as u64)
             .context("qwen_rmsnorm_backward: create grad_y buffer")?;
@@ -2170,9 +2158,8 @@ pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
         batch * k_dim * 4
     );
 
-    let x_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
-            .context("failed to create linear_decode_transposed x buffer")?;
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create linear_decode_transposed x buffer")?;
     {
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::upload_data_with_command_pool(
@@ -2186,12 +2173,9 @@ pub fn dispatch_linear_decode_cached_bf16_weights_transposed(
         .context("failed to upload linear_decode_transposed x buffer")?;
     }
 
-    let out_buf = VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        (batch * n_dim * 4) as u64,
-    )
-    .context("failed to create linear_decode_transposed output buffer")?;
+    let out_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * n_dim * 4) as u64)
+            .context("failed to create linear_decode_transposed output buffer")?;
 
     let all_handles = vec![x_buf.handle(), weight_buffer.handle(), out_buf.handle()];
     let glsl_path = concat!(

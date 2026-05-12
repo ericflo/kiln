@@ -1,0 +1,44 @@
+// Causal Conv1d d_x over a contiguous output offset slice.
+//
+// Push constants: batch, channels, seq_len, kernel_size, n_elements, offset
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer DOutBuf   { float data_d_out[]; };
+layout(binding = 1) readonly  buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) writeonly buffer DXBuf     { float data_d_x[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint idx = offset + local_idx;
+    uint total = batch * channels * seq_len;
+    if (idx >= total) return;
+
+    uint b = idx / (channels * seq_len);
+    uint c = (idx / seq_len) % channels;
+    uint tx = idx % seq_len;
+    uint state_len = kernel_size - 1u;
+
+    float acc = 0.0;
+    uint padded_idx = tx + state_len;
+    for (uint k = 0u; k < kernel_size; ++k) {
+        if (k > padded_idx) continue;
+        uint t = padded_idx - k;
+        if (t >= seq_len) continue;
+        acc += data_d_out[(b * channels + c) * seq_len + t] * data_weight[c * kernel_size + k];
+    }
+    data_d_x[idx] = acc;
+}

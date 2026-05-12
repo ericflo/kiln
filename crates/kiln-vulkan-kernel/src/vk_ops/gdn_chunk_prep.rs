@@ -21,12 +21,12 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 
 /// Output bundle: (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last).
 pub struct GdnChunkPrepOutput {
-    pub a_strict: VkTensor,        // [B, nv, C, C] F32
-    pub b_mask: VkTensor,          // [B, nv, C, C] F32
-    pub v_prime: VkTensor,         // [B, nv, C, dv] F32
-    pub q_s_scaled: VkTensor,      // [B, nv, C, dv] F32
-    pub decay_last_col: VkTensor,  // [B, nv, C] F32
-    pub p_last: VkTensor,          // [B, nv] F32
+    pub a_strict: VkTensor,       // [B, nv, C, C] F32
+    pub b_mask: VkTensor,         // [B, nv, C, C] F32
+    pub v_prime: VkTensor,        // [B, nv, C, dv] F32
+    pub q_s_scaled: VkTensor,     // [B, nv, C, dv] F32
+    pub decay_last_col: VkTensor, // [B, nv, C] F32
+    pub p_last: VkTensor,         // [B, nv] F32
 }
 
 /// Forward chunk_prep.
@@ -55,9 +55,18 @@ pub fn vk_gdn_chunk_prep_no_grad(
     }
     anyhow::ensure!(g.num_elements() == batch * heads * chunk, "g size");
     anyhow::ensure!(v.num_elements() == batch * heads * chunk * dv, "v size");
-    anyhow::ensure!(kkt.num_elements() == batch * heads * chunk * chunk, "kkt size");
-    anyhow::ensure!(qkt.num_elements() == batch * heads * chunk * chunk, "qkt size");
-    anyhow::ensure!(ks_entry.num_elements() == batch * heads * chunk * dv, "ks_entry size");
+    anyhow::ensure!(
+        kkt.num_elements() == batch * heads * chunk * chunk,
+        "kkt size"
+    );
+    anyhow::ensure!(
+        qkt.num_elements() == batch * heads * chunk * chunk,
+        "qkt size"
+    );
+    anyhow::ensure!(
+        ks_entry.num_elements() == batch * heads * chunk * dv,
+        "ks_entry size"
+    );
     anyhow::ensure!(q_s.num_elements() == batch * heads * chunk * dv, "q_s size");
 
     let bh = batch * heads;

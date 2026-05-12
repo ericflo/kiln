@@ -63,7 +63,12 @@ fn dispatch_rmsnorm_backward(
     dispatch_simple(
         device,
         "qwen_rmsnorm_backward",
-        &[x.handle(), weight.handle(), grad_y.handle(), grad_x.handle()],
+        &[
+            x.handle(),
+            weight.handle(),
+            grad_y.handle(),
+            grad_x.handle(),
+        ],
         &push_constants,
         workgroups,
     )
@@ -77,10 +82,7 @@ fn check_rmsnorm_shapes(x: &VkTensor, weight: &VkTensor) -> Result<(usize, usize
         weight.dtype()
     );
     let dims = x.shape();
-    anyhow::ensure!(
-        !dims.is_empty(),
-        "vk_rmsnorm: x must have at least 1 dim"
-    );
+    anyhow::ensure!(!dims.is_empty(), "vk_rmsnorm: x must have at least 1 dim");
     let hidden = *dims.last().unwrap();
     let rows: usize = dims[..dims.len() - 1].iter().product::<usize>().max(1);
     anyhow::ensure!(
@@ -153,15 +155,14 @@ pub fn vk_rmsnorm_no_grad(x: &VkTensor, weight: &VkTensor, eps: f32) -> Result<V
 
 pub fn vk_rmsnorm(x: &VkTensor, weight: &VkTensor, eps: f32) -> Result<VkTensor> {
     let out = vk_rmsnorm_no_grad(x, weight, eps)?;
-    let grad_fn: Option<Arc<dyn VkBackwardOp>> =
-        if x.requires_grad() || weight.requires_grad() {
-            Some(Arc::new(RmsNormBackward {
-                eps,
-                inputs: [x.clone(), weight.clone()],
-            }))
-        } else {
-            None
-        };
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if x.requires_grad() || weight.requires_grad() {
+        Some(Arc::new(RmsNormBackward {
+            eps,
+            inputs: [x.clone(), weight.clone()],
+        }))
+    } else {
+        None
+    };
     Ok(VkTensor::from_op(
         Arc::clone(out.buffer()),
         out.shape().to_vec(),

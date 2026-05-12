@@ -1,0 +1,53 @@
+// Causal Conv1d dispatch for training: compute the linear pre-SiLU output.
+//
+// Forward:
+//   out[B,C,T] = sum_k weight[C,k] * concat(conv_state, x)[B,C,T+k]
+//
+// SiLU is applied as a separate autograd op in Rust so the conv backward
+// only needs the linear-conv adjoint.
+//
+// Push constants: batch, channels, seq_len, kernel_size
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) readonly buffer ConvStateBuf { float data_conv_state[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * channels * seq_len;
+    if (idx >= total) return;
+
+    uint b = idx / (channels * seq_len);
+    uint c = (idx / seq_len) % channels;
+    uint t = idx % seq_len;
+
+    uint state_len = kernel_size - 1u;
+    uint state_base = (b * channels + c) * state_len;
+    uint x_base = (b * channels + c) * seq_len;
+
+    float sum = 0.0;
+    for (uint k = 0u; k < kernel_size; ++k) {
+        uint logical_t = t + k;
+        float x_val = 0.0;
+        if (logical_t < state_len) {
+            x_val = data_conv_state[state_base + logical_t];
+        } else {
+            x_val = data_x[x_base + logical_t - state_len];
+        }
+        sum += x_val * data_weight[c * kernel_size + k];
+    }
+    data_out[idx] = sum;
+}

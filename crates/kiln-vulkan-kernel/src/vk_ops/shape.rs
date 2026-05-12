@@ -117,12 +117,9 @@ pub fn vk_transpose_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
     let n = rows * cols;
     let dev = t.device();
     let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_transpose_2d: alloc output buffer")?;
+    let buf =
+        VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), bytes as u64)
+            .context("vk_transpose_2d: alloc output buffer")?;
     let buf = Arc::new(buf);
     dispatch_transpose_2d_f32(dev, t.buffer(), &buf, rows, cols)?;
     Ok(VkTensor::from_buffer(

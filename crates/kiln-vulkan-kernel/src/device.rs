@@ -199,7 +199,8 @@ impl VulkanDevice {
             }
         }
 
-        let mut instance_info_builder = vk::InstanceCreateInfo::builder().application_info(&app_info);
+        let mut instance_info_builder =
+            vk::InstanceCreateInfo::builder().application_info(&app_info);
         if !layer_ptrs.is_empty() {
             instance_info_builder = instance_info_builder.enabled_layer_names(&layer_ptrs);
         }
@@ -670,10 +671,7 @@ impl VulkanDevice {
                 anyhow::bail!(self.terminally_lost_message(label, "queue_wait_idle"));
             }
             Err(e) => {
-                return Err(anyhow!(
-                    "vulkan queue_wait_idle failed ({label}): {:?}",
-                    e
-                ));
+                return Err(anyhow!("vulkan queue_wait_idle failed ({label}): {:?}", e));
             }
         }
         Ok(())

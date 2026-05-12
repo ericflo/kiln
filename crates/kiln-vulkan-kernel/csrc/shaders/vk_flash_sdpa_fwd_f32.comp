@@ -1,0 +1,75 @@
+// Exact causal GQA SDPA forward without materializing scores.
+//
+// q/out: [rows, heads_q, head_dim]
+// k/v:   [rows, heads_kv, head_dim]
+// lse:   [rows, heads_q], log(sum(exp(scores))) for backward
+//
+// Push constants: rows, heads_q, heads_kv, head_dim, scale_bits
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint heads_q;
+    uint heads_kv;
+    uint head_dim;
+    float scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float q[]; };
+layout(binding = 1) readonly buffer KBuf { float k[]; };
+layout(binding = 2) readonly buffer VBuf { float v[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+layout(binding = 4) writeonly buffer LseBuf { float lse[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint hq = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= rows || hq >= heads_q) return;
+
+    uint groups = heads_q / heads_kv;
+    uint hkv = hq / groups;
+    uint q_base = (row * heads_q + hq) * head_dim;
+    float q_val = (tid < head_dim) ? q[q_base + tid] : 0.0;
+
+    float max_logit = -3.402823e38;
+    float sum_exp = 0.0;
+    float out_acc = 0.0;
+
+    for (uint key_row = 0u; key_row <= row; ++key_row) {
+        uint k_base = (key_row * heads_kv + hkv) * head_dim;
+        float term = (tid < head_dim) ? q_val * k[k_base + tid] : 0.0;
+        reduce_sh[tid] = term;
+        barrier();
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+            barrier();
+        }
+        float logit = reduce_sh[0] * scale;
+        barrier();
+
+        float new_max = max(max_logit, logit);
+        float alpha = exp(max_logit - new_max);
+        float beta = exp(logit - new_max);
+        sum_exp = sum_exp * alpha + beta;
+        if (tid < head_dim) {
+            uint v_base = (key_row * heads_kv + hkv) * head_dim;
+            out_acc = out_acc * alpha + beta * v[v_base + tid];
+        }
+        max_logit = new_max;
+        barrier();
+    }
+
+    if (tid < head_dim) {
+        data_out[q_base + tid] = out_acc / sum_exp;
+    }
+    if (tid == 0u) {
+        lse[row * heads_q + hq] = max_logit + log(sum_exp);
+    }
+}

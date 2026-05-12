@@ -143,15 +143,17 @@ fn cpu_solve_tri_transpose(
 ///
 /// GPU-native implementation using vk_matmul_batched composition.
 pub fn vk_gdn_chunk_scan_bwd_no_grad(
-    d_out: &VkTensor,   // [B, nv, C, dv]
-    b_mask: &VkTensor,  // [B, nv, C, C]
-    w: &VkTensor,       // [B, nv, C, dv]
+    d_out: &VkTensor,  // [B, nv, C, dv]
+    b_mask: &VkTensor, // [B, nv, C, C]
+    w: &VkTensor,      // [B, nv, C, dv]
     batch: usize,
     nv: usize,
     chunk: usize,
     dv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor)> {
-    use crate::vk_ops::matmul_batched::{vk_matmul_batched_no_grad, vk_transpose_batched_2d_no_grad};
+    use crate::vk_ops::matmul_batched::{
+        vk_matmul_batched_no_grad, vk_transpose_batched_2d_no_grad,
+    };
     use crate::vk_ops::shape::vk_reshape;
 
     let device = d_out.device();
@@ -318,10 +320,30 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
     )?;
 
     Ok((
-        VkTensor::from_buffer(d_s_in, vec![batch, nv, dk, dv], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_w, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_k, vec![batch, nv, chunk, dk], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_decay, vec![batch, nv, chunk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(
+            d_s_in,
+            vec![batch, nv, dk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_w,
+            vec![batch, nv, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_k,
+            vec![batch, nv, chunk, dk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_decay,
+            vec![batch, nv, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
         VkTensor::from_buffer(d_p_last, vec![batch, nv], VkDType::F32, Arc::clone(device)),
     ))
 }
@@ -448,7 +470,10 @@ pub fn vk_gdn_chunk_prep_bwd_no_grad(
             dv,
         );
     }
-    anyhow::ensure!(chunk <= 64, "vk_gdn_chunk_prep_bwd: chunk ≤ 64 (shader cap)");
+    anyhow::ensure!(
+        chunk <= 64,
+        "vk_gdn_chunk_prep_bwd: chunk ≤ 64 (shader cap)"
+    );
 
     let device = g.device();
     let bh = batch * nv;
@@ -489,28 +514,58 @@ pub fn vk_gdn_chunk_prep_bwd_no_grad(
     )?;
 
     Ok((
-        VkTensor::from_buffer(d_g_buf, vec![batch, nv, chunk], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_v_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_kkt_buf, vec![batch, nv, chunk, chunk], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_qkt_buf, vec![batch, nv, chunk, chunk], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_ks_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(d_qs_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(
+            d_g_buf,
+            vec![batch, nv, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_v_buf,
+            vec![batch, nv, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_kkt_buf,
+            vec![batch, nv, chunk, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_qkt_buf,
+            vec![batch, nv, chunk, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_ks_buf,
+            vec![batch, nv, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        VkTensor::from_buffer(
+            d_qs_buf,
+            vec![batch, nv, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
     ))
 }
 
 fn cpu_chunk_prep_bwd(
-    d_a_strict: &VkTensor,      // [B, nv, C, C]
-    d_b_mask: &VkTensor,        // [B, nv, C, C]
-    d_v_prime: &VkTensor,       // [B, nv, C, dv]
-    d_q_s_scaled: &VkTensor,    // [B, nv, C, dv]
+    d_a_strict: &VkTensor,       // [B, nv, C, C]
+    d_b_mask: &VkTensor,         // [B, nv, C, C]
+    d_v_prime: &VkTensor,        // [B, nv, C, dv]
+    d_q_s_scaled: &VkTensor,     // [B, nv, C, dv]
     d_decay_last_col: &VkTensor, // [B, nv, C]
-    d_p_last: &VkTensor,        // [B, nv]
-    g: &VkTensor,               // [B, nv, C]
-    v: &VkTensor,               // [B, nv, C, dv]
-    kkt: &VkTensor,             // [B, nv, C, C]
-    qkt: &VkTensor,             // [B, nv, C, C]
-    ks_entry: &VkTensor,        // [B, nv, C, dv]
-    q_s: &VkTensor,             // [B, nv, C, dv]
+    d_p_last: &VkTensor,         // [B, nv]
+    g: &VkTensor,                // [B, nv, C]
+    v: &VkTensor,                // [B, nv, C, dv]
+    kkt: &VkTensor,              // [B, nv, C, C]
+    qkt: &VkTensor,              // [B, nv, C, C]
+    ks_entry: &VkTensor,         // [B, nv, C, dv]
+    q_s: &VkTensor,              // [B, nv, C, dv]
     batch: usize,
     nv: usize,
     chunk: usize,

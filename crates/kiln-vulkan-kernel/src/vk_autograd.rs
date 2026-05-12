@@ -123,8 +123,8 @@ pub fn vk_backward(loss: &VkTensor) -> Result<VkGradStore> {
             );
             match grads.remove(&input.op_id()) {
                 Some(existing) => {
-                    let summed = vk_add_no_grad(&existing, &g)
-                        .context("vk_backward: grad accumulation")?;
+                    let summed =
+                        vk_add_no_grad(&existing, &g).context("vk_backward: grad accumulation")?;
                     grads.insert(input.op_id(), summed);
                 }
                 None => {

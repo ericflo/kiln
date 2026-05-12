@@ -1,0 +1,85 @@
+// Exact causal GQA SDPA backward for dK/dV over a key-row tile.
+//
+// Push constants: total_rows, key_start, rows_chunk, heads_q, heads_kv, head_dim, scale_bits
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total_rows;
+    uint key_start;
+    uint rows_chunk;
+    uint heads_q;
+    uint heads_kv;
+    uint head_dim;
+    float scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float q[]; };
+layout(binding = 1) readonly buffer KBuf { float k[]; };
+layout(binding = 2) readonly buffer VBuf { float v[]; };
+layout(binding = 3) readonly buffer DOutBuf { float d_out[]; };
+layout(binding = 4) readonly buffer LseBuf { float lse[]; };
+layout(binding = 5) readonly buffer DeltaBuf { float delta[]; };
+layout(binding = 6) writeonly buffer DKBuf { float d_k[]; };
+layout(binding = 7) writeonly buffer DVBuf { float d_v[]; };
+
+shared float reduce_sh[32];
+
+float workgroup_sum(float value, uint tid) {
+    float sg_sum = subgroupAdd(value);
+    if (subgroupElect()) {
+        reduce_sh[gl_SubgroupID] = sg_sum;
+    }
+    barrier();
+
+    float total_part = (tid < gl_NumSubgroups) ? reduce_sh[tid] : 0.0;
+    float total = subgroupAdd(total_part);
+    if (tid == 0u) {
+        reduce_sh[0] = total;
+    }
+    barrier();
+    return reduce_sh[0];
+}
+
+void main() {
+    uint local_key_row = gl_WorkGroupID.x;
+    uint key_row = key_start + local_key_row;
+    uint hkv = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (local_key_row >= rows_chunk || key_row >= total_rows || hkv >= heads_kv) return;
+
+    uint groups = heads_q / heads_kv;
+    uint kv_base = (key_row * heads_kv + hkv) * head_dim;
+    float k_val = (tid < head_dim) ? k[kv_base + tid] : 0.0;
+    float v_val = (tid < head_dim) ? v[kv_base + tid] : 0.0;
+    float dk_acc = 0.0;
+    float dv_acc = 0.0;
+
+    for (uint g = 0u; g < groups; ++g) {
+        uint hq = hkv * groups + g;
+        for (uint row = key_row; row < total_rows; ++row) {
+            uint q_base = (row * heads_q + hq) * head_dim;
+
+            float dot_term = (tid < head_dim) ? q[q_base + tid] * k_val : 0.0;
+            float p = exp(workgroup_sum(dot_term, tid) * scale - lse[row * heads_q + hq]);
+
+            float dp_term = (tid < head_dim) ? d_out[q_base + tid] * v_val : 0.0;
+            float ds = p * (workgroup_sum(dp_term, tid) - delta[row * heads_q + hq]);
+
+            if (tid < head_dim) {
+                dk_acc += ds * q[q_base + tid] * scale;
+                dv_acc += p * d_out[q_base + tid];
+            }
+        }
+    }
+
+    if (tid < head_dim) {
+        d_k[kv_base + tid] = dk_acc;
+        d_v[kv_base + tid] = dv_acc;
+    }
+}

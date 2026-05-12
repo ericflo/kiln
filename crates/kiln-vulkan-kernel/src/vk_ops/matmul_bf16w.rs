@@ -1,21 +1,18 @@
 //! Frozen-base-weight matmul for VkTensor.
 //!
 //! Wraps the existing inference kernels
-//! `linear_decode_batched_bf16w` (forward) and
-//! `linear_decode_batched_transposed_bf16w` (backward dx) so they
+//! `linear_decode_batched_transposed_bf16w` (forward) and
+//! `linear_decode_batched_bf16w` (backward dx) so they
 //! work on plain `Arc<VulkanBuffer>` activations without going
 //! through candle Tensor wrapping.
 //!
 //! Forward: `out_f32 = x_f32 @ W_bf16.T` with shapes
 //!   x:   [batch, hidden]  (F32)
-//!   W:   row-major bf16-packed [out_dim, hidden] (i.e. the same
-//!        "weight_t" buffer the inference path uploaded — the matmul
-//!        treats it as W with the canonical "weight_t @ x" semantics
-//!        used by linear_with_lora_t).
+//!   W:   row-major bf16-packed [out_dim, hidden]
 //!   out: [batch, out_dim]  (F32)
 //!
-//! Backward: `dx = dy_f32 @ W_bf16` (i.e. against the transpose of
-//! the same weight buffer). Base weight is FROZEN — no dW computed.
+//! Backward: `dx = dy_f32 @ W_bf16`. Base weight is FROZEN — no dW
+//! computed.
 
 use crate::vk_ops::dispatch_simple;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
@@ -46,11 +43,74 @@ fn dispatch_fwd(
     let push = [hidden as u32, out_dim as u32, batch as u32];
     dispatch_simple(
         device,
-        "linear_decode_batched_bf16w",
+        "linear_decode_batched_transposed_bf16w",
         &[x.handle(), weight.handle(), out.handle()],
         &push,
         workgroups,
     )
+}
+
+fn bf16w_row_tile_len() -> usize {
+    std::env::var("KILN_VK_BF16W_ROW_TILE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(256)
+}
+
+fn dispatch_fwd_rows(
+    device: &VulkanDevice,
+    x: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    out: &VulkanBuffer,
+    row_offset: usize,
+    rows: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<()> {
+    let col_groups = (out_dim + 31) / 32;
+    let workgroups = (col_groups * rows) as u32;
+    let limit = device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroups <= limit,
+        "vk_matmul_bf16w fwd rows: workgroups {workgroups} > limit {limit}"
+    );
+    let push = [
+        hidden as u32,
+        out_dim as u32,
+        rows as u32,
+        row_offset as u32,
+    ];
+    dispatch_simple(
+        device,
+        "vk_matmul_bf16w_fwd_rows",
+        &[x.handle(), weight.handle(), out.handle()],
+        &push,
+        workgroups,
+    )
+}
+
+fn dispatch_fwd_tiled(
+    device: &VulkanDevice,
+    x: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<()> {
+    let col_groups = (out_dim + 31) / 32;
+    let limit = device.max_compute_work_group_count(0) as usize;
+    let max_rows_by_limit = (limit / col_groups.max(1)).max(1);
+    let tile = bf16w_row_tile_len().min(max_rows_by_limit).max(1);
+    if batch <= tile {
+        return dispatch_fwd(device, x, weight, out, batch, hidden, out_dim);
+    }
+    for row_offset in (0..batch).step_by(tile) {
+        let rows = (batch - row_offset).min(tile);
+        dispatch_fwd_rows(device, x, weight, out, row_offset, rows, hidden, out_dim)?;
+    }
+    Ok(())
 }
 
 fn dispatch_bwd(
@@ -72,11 +132,68 @@ fn dispatch_bwd(
     let push = [out_dim as u32, hidden as u32, batch as u32];
     dispatch_simple(
         device,
-        "linear_decode_batched_transposed_bf16w",
+        "linear_decode_batched_bf16w",
         &[grad_out.handle(), weight.handle(), grad_in.handle()],
         &push,
         workgroups,
     )
+}
+
+fn dispatch_bwd_rows(
+    device: &VulkanDevice,
+    grad_out: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    grad_in: &VulkanBuffer,
+    row_offset: usize,
+    rows: usize,
+    out_dim: usize,
+    hidden: usize,
+) -> Result<()> {
+    let col_groups = (hidden + 31) / 32;
+    let workgroups = (col_groups * rows) as u32;
+    let limit = device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroups <= limit,
+        "vk_matmul_bf16w bwd rows: workgroups {workgroups} > limit {limit}"
+    );
+    let push = [
+        out_dim as u32,
+        hidden as u32,
+        rows as u32,
+        row_offset as u32,
+    ];
+    dispatch_simple(
+        device,
+        "vk_matmul_bf16w_bwd_rows",
+        &[grad_out.handle(), weight.handle(), grad_in.handle()],
+        &push,
+        workgroups,
+    )
+}
+
+fn dispatch_bwd_tiled(
+    device: &VulkanDevice,
+    grad_out: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    grad_in: &VulkanBuffer,
+    batch: usize,
+    out_dim: usize,
+    hidden: usize,
+) -> Result<()> {
+    let col_groups = (hidden + 31) / 32;
+    let limit = device.max_compute_work_group_count(0) as usize;
+    let max_rows_by_limit = (limit / col_groups.max(1)).max(1);
+    let tile = bf16w_row_tile_len().min(max_rows_by_limit).max(1);
+    if batch <= tile {
+        return dispatch_bwd(device, grad_out, weight, grad_in, batch, out_dim, hidden);
+    }
+    for row_offset in (0..batch).step_by(tile) {
+        let rows = (batch - row_offset).min(tile);
+        dispatch_bwd_rows(
+            device, grad_out, weight, grad_in, row_offset, rows, out_dim, hidden,
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -98,7 +215,7 @@ impl VkBackwardOp for MatmulBf16wBackward {
     fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
         let x = &self.inputs[0];
         let grad_in_buf = alloc_f32(x.device(), self.batch * self.hidden)?;
-        dispatch_bwd(
+        dispatch_bwd_tiled(
             x.device(),
             grad_out.buffer(),
             self.weight.buffer(),
@@ -146,7 +263,7 @@ pub fn vk_matmul_bf16w(x: &VkTensor, weight: &VkTensor) -> Result<VkTensor> {
     );
 
     let out = alloc_f32(x.device(), batch * out_dim)?;
-    dispatch_fwd(
+    dispatch_fwd_tiled(
         x.device(),
         x.buffer(),
         weight.buffer(),

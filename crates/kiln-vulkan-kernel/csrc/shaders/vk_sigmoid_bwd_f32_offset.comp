@@ -1,0 +1,27 @@
+// Sigmoid backward over a contiguous offset slice:
+//   dx = grad_out * y * (1 - y)
+//
+// Push constants: [n_elements, offset]
+// Bindings: y (readonly forward output), grad_out (readonly), grad_in (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer YBuf       { float data_y[]; };
+layout(binding = 1) readonly  buffer GradOutBuf { float data_gy[]; };
+layout(binding = 2) writeonly buffer GradInBuf  { float data_gx[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint idx = offset + local_idx;
+    float y = data_y[idx];
+    data_gx[idx] = data_gy[idx] * y * (1.0 - y);
+}

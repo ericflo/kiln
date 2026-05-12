@@ -184,7 +184,7 @@ fn run_one(
         auto_load: false,
         checkpoint_interval: None,
         seed: None,
-        optimizer: kiln_train::Optimizer::default(),
+        optimizer: Default::default(),
     };
     let adapter_dir = std::env::temp_dir().join("kiln-flce-preflight");
     let _ = std::fs::create_dir_all(&adapter_dir);

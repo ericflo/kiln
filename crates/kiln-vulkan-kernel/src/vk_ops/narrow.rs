@@ -4,7 +4,7 @@
 //! tensor whose data is `t[..., start..start+len]`. Backward
 //! scatters the grad back into a zero-padded full-shape buffer.
 
-use crate::vk_ops::dispatch_simple;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
@@ -34,15 +34,36 @@ fn dispatch_fwd(
     len: usize,
 ) -> Result<()> {
     let total = outer * len;
-    let workgroups = ((total + 255) / 256) as u32;
-    let push = [outer as u32, inner_in as u32, start as u32, len as u32];
-    dispatch_simple(
-        device,
-        "vk_narrow_lastdim_f32",
-        &[src.handle(), dst.handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [outer as u32, inner_in as u32, start as u32, len as u32];
+        return dispatch_simple(
+            device,
+            "vk_narrow_lastdim_f32",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
+        let workgroups = ((chunk_len + 255) / 256) as u32;
+        let push = [
+            outer as u32,
+            inner_in as u32,
+            start as u32,
+            len as u32,
+            chunk_len as u32,
+            offset as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_narrow_lastdim_f32_offset",
+            &[src.handle(), dst.handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 fn dispatch_bwd(
@@ -55,15 +76,36 @@ fn dispatch_bwd(
     len: usize,
 ) -> Result<()> {
     let total = outer * len;
-    let workgroups = ((total + 255) / 256) as u32;
-    let push = [outer as u32, inner_in as u32, start as u32, len as u32];
-    dispatch_simple(
-        device,
-        "vk_narrow_lastdim_bwd_f32",
-        &[grad_out.handle(), grad_in.handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [outer as u32, inner_in as u32, start as u32, len as u32];
+        return dispatch_simple(
+            device,
+            "vk_narrow_lastdim_bwd_f32",
+            &[grad_out.handle(), grad_in.handle()],
+            &push,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
+        let workgroups = ((chunk_len + 255) / 256) as u32;
+        let push = [
+            outer as u32,
+            inner_in as u32,
+            start as u32,
+            len as u32,
+            chunk_len as u32,
+            offset as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_narrow_lastdim_bwd_f32_offset",
+            &[grad_out.handle(), grad_in.handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 pub fn vk_narrow_lastdim_no_grad(t: &VkTensor, start: usize, len: usize) -> Result<VkTensor> {
@@ -75,7 +117,15 @@ pub fn vk_narrow_lastdim_no_grad(t: &VkTensor, start: usize, len: usize) -> Resu
         start + len
     );
     let out_buf = alloc_f32(t.device(), outer * len)?;
-    dispatch_fwd(t.device(), t.buffer(), &out_buf, outer, inner_in, start, len)?;
+    dispatch_fwd(
+        t.device(),
+        t.buffer(),
+        &out_buf,
+        outer,
+        inner_in,
+        start,
+        len,
+    )?;
     let mut new_shape = t.shape().to_vec();
     *new_shape.last_mut().unwrap() = len;
     Ok(VkTensor::from_buffer(
@@ -108,14 +158,7 @@ impl VkBackwardOp for NarrowLastDimBackward {
         let total_in = self.outer * self.inner_in;
         let grad_buf = alloc_f32(device, total_in)?;
         // zero-fill first
-        let push_zero = [total_in as u32, 0.0_f32.to_bits()];
-        dispatch_simple(
-            device,
-            "vk_fill_f32",
-            &[grad_buf.handle()],
-            &push_zero,
-            ((total_in + 255) / 256) as u32,
-        )?;
+        crate::vk_ops::reduce::dispatch_fill(device, &grad_buf, total_in, 0.0)?;
         dispatch_bwd(
             device,
             grad_out.buffer(),

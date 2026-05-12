@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::cast::{
     vk_cast, vk_cast_bf16_to_f32_no_grad, vk_cast_f32_to_bf16_no_grad,
@@ -15,7 +16,6 @@ use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_div, vk_mul, vk_sub};
 use kiln_vulkan_kernel::vk_ops::reduce::{vk_mean_all, vk_sum_all};
 use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -66,7 +66,10 @@ fn vk_add_forward_parity() -> Result<()> {
     let y = vk_add(&a, &b)?;
     let got = y.to_vec_f32()?;
     let expected: Vec<f32> = a_data.iter().zip(&b_data).map(|(x, y)| x + y).collect();
-    assert!(max_abs_diff(&got, &expected) < 1e-6, "got {got:?} vs {expected:?}");
+    assert!(
+        max_abs_diff(&got, &expected) < 1e-6,
+        "got {got:?} vs {expected:?}"
+    );
     Ok(())
 }
 
@@ -102,7 +105,12 @@ fn vk_sum_all_forward_parity() -> Result<()> {
     assert_eq!(summed.shape(), &[1]);
     let got = summed.to_vec_f32()?;
     let expected: f32 = data.iter().sum();
-    assert!((got[0] - expected).abs() < 1e-3, "got {} vs {}", got[0], expected);
+    assert!(
+        (got[0] - expected).abs() < 1e-3,
+        "got {} vs {}",
+        got[0],
+        expected
+    );
     Ok(())
 }
 
@@ -113,7 +121,12 @@ fn vk_mean_all_forward_parity() -> Result<()> {
     let t = upload_f32(&dev, &data, &[2, 4])?;
     let m = vk_mean_all(&t)?.to_vec_f32()?;
     let expected = data.iter().sum::<f32>() / data.len() as f32;
-    assert!((m[0] - expected).abs() < 1e-5, "got {} vs {}", m[0], expected);
+    assert!(
+        (m[0] - expected).abs() < 1e-5,
+        "got {} vs {}",
+        m[0],
+        expected
+    );
     Ok(())
 }
 
@@ -153,7 +166,12 @@ fn vk_chain_backward_parity() -> Result<()> {
     );
 
     let grads = vk_backward(&loss)?;
-    assert_eq!(grads.len(), 3, "expected 3 param grads, got {}", grads.len());
+    assert_eq!(
+        grads.len(),
+        3,
+        "expected 3 param grads, got {}",
+        grads.len()
+    );
 
     let grad_x = grads.get(x.param_id().unwrap()).expect("dx").to_vec_f32()?;
     let grad_a = grads.get(a.param_id().unwrap()).expect("da").to_vec_f32()?;

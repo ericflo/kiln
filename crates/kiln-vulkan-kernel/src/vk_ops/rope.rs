@@ -17,7 +17,12 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
     crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
-fn check_rope_shape(x: &VkTensor, cos: &VkTensor, sin: &VkTensor, rotary_dim: usize) -> Result<(usize, usize, usize)> {
+fn check_rope_shape(
+    x: &VkTensor,
+    cos: &VkTensor,
+    sin: &VkTensor,
+    rotary_dim: usize,
+) -> Result<(usize, usize, usize)> {
     anyhow::ensure!(x.dtype() == VkDType::F32, "vk_rope: F32-only");
     anyhow::ensure!(cos.dtype() == VkDType::F32, "vk_rope cos: F32-only");
     anyhow::ensure!(sin.dtype() == VkDType::F32, "vk_rope sin: F32-only");
@@ -61,7 +66,12 @@ fn dispatch_rope(
 ) -> Result<()> {
     let total = rows * heads * head_dim;
     let workgroups = ((total + 255) / 256) as u32;
-    let push = [rows as u32, heads as u32, head_dim as u32, rotary_dim as u32];
+    let push = [
+        rows as u32,
+        heads as u32,
+        head_dim as u32,
+        rotary_dim as u32,
+    ];
     dispatch_simple(
         device,
         shader,

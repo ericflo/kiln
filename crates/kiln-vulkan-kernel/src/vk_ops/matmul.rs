@@ -70,10 +70,7 @@ fn check_matmul_shapes(a: &VkTensor, b: &VkTensor) -> Result<(usize, usize, usiz
     let k = a.shape()[1];
     let kk = b.shape()[0];
     let n = b.shape()[1];
-    anyhow::ensure!(
-        k == kk,
-        "vk_matmul: inner-dim mismatch: a.K={k}, b.K={kk}"
-    );
+    anyhow::ensure!(k == kk, "vk_matmul: inner-dim mismatch: a.K={k}, b.K={kk}");
     Ok((m, n, k))
 }
 
@@ -116,14 +113,13 @@ impl VkBackwardOp for MatmulBackward {
 
 pub fn vk_matmul(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
     let out = vk_matmul_no_grad(a, b)?;
-    let grad_fn: Option<Arc<dyn VkBackwardOp>> =
-        if a.requires_grad() || b.requires_grad() {
-            Some(Arc::new(MatmulBackward {
-                inputs: [a.clone(), b.clone()],
-            }))
-        } else {
-            None
-        };
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if a.requires_grad() || b.requires_grad() {
+        Some(Arc::new(MatmulBackward {
+            inputs: [a.clone(), b.clone()],
+        }))
+    } else {
+        None
+    };
     Ok(VkTensor::from_op(
         Arc::clone(out.buffer()),
         out.shape().to_vec(),

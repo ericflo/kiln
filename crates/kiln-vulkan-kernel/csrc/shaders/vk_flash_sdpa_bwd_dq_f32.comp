@@ -1,0 +1,77 @@
+// Exact causal GQA SDPA backward for dQ.
+//
+// q/dq/d_out/out: [rows, heads_q, head_dim]
+// k/v:            [rows, heads_kv, head_dim]
+// lse/delta:      [rows, heads_q]
+// Push constants: rows, heads_q, heads_kv, head_dim, scale_bits
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint heads_q;
+    uint heads_kv;
+    uint head_dim;
+    float scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float q[]; };
+layout(binding = 1) readonly buffer KBuf { float k[]; };
+layout(binding = 2) readonly buffer VBuf { float v[]; };
+layout(binding = 3) readonly buffer DOutBuf { float d_out[]; };
+layout(binding = 4) readonly buffer LseBuf { float lse[]; };
+layout(binding = 5) readonly buffer DeltaBuf { float delta[]; };
+layout(binding = 6) writeonly buffer DQBuf { float d_q[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint hq = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= rows || hq >= heads_q) return;
+
+    uint groups = heads_q / heads_kv;
+    uint hkv = hq / groups;
+    uint q_base = (row * heads_q + hq) * head_dim;
+    float q_val = (tid < head_dim) ? q[q_base + tid] : 0.0;
+    float dout_val = (tid < head_dim) ? d_out[q_base + tid] : 0.0;
+    float lse_v = lse[row * heads_q + hq];
+    float delta_v = delta[row * heads_q + hq];
+    float acc = 0.0;
+
+    for (uint key_row = 0u; key_row <= row; ++key_row) {
+        uint kv_base = (key_row * heads_kv + hkv) * head_dim;
+
+        float dot_term = (tid < head_dim) ? q_val * k[kv_base + tid] : 0.0;
+        reduce_sh[tid] = dot_term;
+        barrier();
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+            barrier();
+        }
+        float p = exp(reduce_sh[0] * scale - lse_v);
+        barrier();
+
+        float dp_term = (tid < head_dim) ? dout_val * v[kv_base + tid] : 0.0;
+        reduce_sh[tid] = dp_term;
+        barrier();
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+            barrier();
+        }
+        float ds = p * (reduce_sh[0] - delta_v);
+        barrier();
+
+        if (tid < head_dim) {
+            acc += ds * k[kv_base + tid] * scale;
+        }
+    }
+
+    if (tid < head_dim) {
+        d_q[q_base + tid] = acc;
+    }
+}

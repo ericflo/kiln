@@ -7,7 +7,8 @@
 //! `vk_gdn_gates_bwd.comp`.
 
 use crate::vk_ops::dispatch_simple;
-use crate::vk_tensor::{VkDType, VkTensor};
+use crate::vk_ops::reduce::vk_zeros_like;
+use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -83,7 +84,12 @@ pub fn vk_gdn_gates_no_grad(
     )?;
 
     Ok((
-        VkTensor::from_buffer(beta_out, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(
+            beta_out,
+            a.shape().to_vec(),
+            VkDType::F32,
+            Arc::clone(device),
+        ),
         VkTensor::from_buffer(g_out, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
     ))
 }
@@ -162,12 +168,7 @@ pub fn vk_gdn_gates_bwd_no_grad(
         &push_fill,
         ((outer + 255) / 256) as u32,
     )?;
-    let ones_t = VkTensor::from_buffer(
-        ones_buf,
-        vec![1, outer],
-        VkDType::F32,
-        Arc::clone(device),
-    );
+    let ones_t = VkTensor::from_buffer(ones_buf, vec![1, outer], VkDType::F32, Arc::clone(device));
     let dalog_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dalog_partial_t)?;
     let ddt_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &ddt_partial_t)?;
     let dalog_t = crate::vk_ops::shape::vk_reshape(&dalog_2d, &[nv])?;
@@ -178,5 +179,92 @@ pub fn vk_gdn_gates_bwd_no_grad(
         VkTensor::from_buffer(d_b, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
         dalog_t,
         ddt_t,
+    ))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum GateOutput {
+    Beta,
+    G,
+}
+
+#[derive(Debug)]
+struct GdnGatesBackward {
+    output: GateOutput,
+    nv: usize,
+    inputs: [VkTensor; 4],
+}
+
+impl VkBackwardOp for GdnGatesBackward {
+    fn op_name(&self) -> &'static str {
+        "gdn_gates"
+    }
+
+    fn input_refs(&self) -> &[VkTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
+        let zero = vk_zeros_like(&self.inputs[0])?;
+        let (d_beta, d_g) = match self.output {
+            GateOutput::Beta => (grad_out.clone(), zero),
+            GateOutput::G => (zero, grad_out.clone()),
+        };
+        let (d_a, d_b, d_a_log, d_dt_bias) = vk_gdn_gates_bwd_no_grad(
+            &d_beta,
+            &d_g,
+            &self.inputs[0],
+            &self.inputs[1],
+            &self.inputs[2],
+            &self.inputs[3],
+            self.nv,
+        )?;
+        Ok(vec![Some(d_a), Some(d_b), Some(d_a_log), Some(d_dt_bias)])
+    }
+}
+
+/// Autograd-aware GDN gates. Returns `(beta, g)`.
+///
+/// The two returned tensors attach separate backward nodes. If both outputs
+/// feed the loss, their input gradients are accumulated by `vk_backward`.
+pub fn vk_gdn_gates(
+    a: &VkTensor,
+    b: &VkTensor,
+    a_log: &VkTensor,
+    dt_bias: &VkTensor,
+    nv: usize,
+) -> Result<(VkTensor, VkTensor)> {
+    let (beta, g) = vk_gdn_gates_no_grad(a, b, a_log, dt_bias, nv)?;
+    let needs_grad =
+        a.requires_grad() || b.requires_grad() || a_log.requires_grad() || dt_bias.requires_grad();
+    if !needs_grad {
+        return Ok((beta, g));
+    }
+    let inputs = [a.clone(), b.clone(), a_log.clone(), dt_bias.clone()];
+    let beta_grad: Arc<dyn VkBackwardOp> = Arc::new(GdnGatesBackward {
+        output: GateOutput::Beta,
+        nv,
+        inputs: inputs.clone(),
+    });
+    let g_grad: Arc<dyn VkBackwardOp> = Arc::new(GdnGatesBackward {
+        output: GateOutput::G,
+        nv,
+        inputs,
+    });
+    Ok((
+        VkTensor::from_op(
+            Arc::clone(beta.buffer()),
+            beta.shape().to_vec(),
+            beta.dtype(),
+            Arc::clone(beta.device()),
+            Some(beta_grad),
+        ),
+        VkTensor::from_op(
+            Arc::clone(g.buffer()),
+            g.shape().to_vec(),
+            g.dtype(),
+            Arc::clone(g.device()),
+            Some(g_grad),
+        ),
     ))
 }

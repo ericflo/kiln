@@ -1,0 +1,81 @@
+// Exact causal GQA SDPA backward for dK and dV.
+//
+// q/d_out/out: [rows, heads_q, head_dim]
+// k/v/dk/dv:   [rows, heads_kv, head_dim]
+// lse/delta:   [rows, heads_q]
+// Push constants: rows, heads_q, heads_kv, head_dim, scale_bits
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint heads_q;
+    uint heads_kv;
+    uint head_dim;
+    float scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float q[]; };
+layout(binding = 1) readonly buffer KBuf { float k[]; };
+layout(binding = 2) readonly buffer VBuf { float v[]; };
+layout(binding = 3) readonly buffer DOutBuf { float d_out[]; };
+layout(binding = 4) readonly buffer LseBuf { float lse[]; };
+layout(binding = 5) readonly buffer DeltaBuf { float delta[]; };
+layout(binding = 6) writeonly buffer DKBuf { float d_k[]; };
+layout(binding = 7) writeonly buffer DVBuf { float d_v[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint key_row = gl_WorkGroupID.x;
+    uint hkv = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (key_row >= rows || hkv >= heads_kv) return;
+
+    uint groups = heads_q / heads_kv;
+    uint kv_base = (key_row * heads_kv + hkv) * head_dim;
+    float k_val = (tid < head_dim) ? k[kv_base + tid] : 0.0;
+    float v_val = (tid < head_dim) ? v[kv_base + tid] : 0.0;
+    float dk_acc = 0.0;
+    float dv_acc = 0.0;
+
+    for (uint g = 0u; g < groups; ++g) {
+        uint hq = hkv * groups + g;
+        for (uint row = key_row; row < rows; ++row) {
+            uint q_base = (row * heads_q + hq) * head_dim;
+
+            float dot_term = (tid < head_dim) ? q[q_base + tid] * k_val : 0.0;
+            reduce_sh[tid] = dot_term;
+            barrier();
+            for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+                barrier();
+            }
+            float p = exp(reduce_sh[0] * scale - lse[row * heads_q + hq]);
+            barrier();
+
+            float dp_term = (tid < head_dim) ? d_out[q_base + tid] * v_val : 0.0;
+            reduce_sh[tid] = dp_term;
+            barrier();
+            for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+                if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+                barrier();
+            }
+            float ds = p * (reduce_sh[0] - delta[row * heads_q + hq]);
+            barrier();
+
+            if (tid < head_dim) {
+                dk_acc += ds * q[q_base + tid] * scale;
+                dv_acc += p * d_out[q_base + tid];
+            }
+        }
+    }
+
+    if (tid < head_dim) {
+        d_k[kv_base + tid] = dk_acc;
+        d_v[kv_base + tid] = dv_acc;
+    }
+}

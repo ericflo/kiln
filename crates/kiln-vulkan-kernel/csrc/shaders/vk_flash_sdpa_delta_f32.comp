@@ -1,0 +1,41 @@
+// delta[row, head] = dot(d_out[row, head, :], out[row, head, :]).
+//
+// d_out/out: [rows, heads_q, head_dim]
+// delta:     [rows, heads_q]
+// Push constants: rows, heads_q, head_dim
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint heads_q;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly buffer DOutBuf { float d_out[]; };
+layout(binding = 1) readonly buffer OutBuf { float data_out[]; };
+layout(binding = 2) writeonly buffer DeltaBuf { float delta[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint hq = gl_WorkGroupID.y;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= rows || hq >= heads_q) return;
+
+    uint base = (row * heads_q + hq) * head_dim;
+    float term = (tid < head_dim) ? d_out[base + tid] * data_out[base + tid] : 0.0;
+    reduce_sh[tid] = term;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+        barrier();
+    }
+    if (tid == 0u) {
+        delta[row * heads_q + hq] = reduce_sh[0];
+    }
+}

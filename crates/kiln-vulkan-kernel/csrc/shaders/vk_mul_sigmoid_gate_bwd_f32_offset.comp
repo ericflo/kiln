@@ -1,0 +1,39 @@
+// Backward for fused gated multiply over a contiguous offset slice.
+//
+// Push constants: [n_elements, offset]
+// Bindings: a (readonly), gate (readonly), grad_out (readonly), grad_a (writeonly), grad_gate (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer ABuf       { float data_a[]; };
+layout(binding = 1) readonly  buffer GateBuf    { float data_gate[]; };
+layout(binding = 2) readonly  buffer GradOutBuf { float data_go[]; };
+layout(binding = 3) writeonly buffer GradABuf   { float data_ga[]; };
+layout(binding = 4) writeonly buffer GradGBuf   { float data_gg[]; };
+
+float sigmoid_stable(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float e = exp(x);
+    return e / (1.0 + e);
+}
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint idx = offset + local_idx;
+    float a = data_a[idx];
+    float s = sigmoid_stable(data_gate[idx]);
+    float go = data_go[idx];
+    data_ga[idx] = go * s;
+    data_gg[idx] = go * a * s * (1.0 - s);
+}

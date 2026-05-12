@@ -19,7 +19,8 @@ use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
     self, EstimateOptions, available_for_training_bytes, estimate_step_working_set_with_options,
-    format_oom_message_with_source, WeightResidency,
+    estimate_vk_native_recompute_working_set, format_oom_message_with_source,
+    WeightResidency,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -46,8 +47,8 @@ fn enforce_training_preflight(
         // where detection is misconfigured.
         return Ok(());
     }
-    let num_segments = kiln_train::CheckpointConfig::from_env(state.model_config.num_layers)
-        .num_segments;
+    let num_segments =
+        kiln_train::CheckpointConfig::from_env(state.model_config.num_layers).num_segments;
     // Until the resident registry (Phase 1.2-1.4) lands, weights on
     // Vulkan APUs live in BOTH candle CPU storage and VulkanBuffer
     // caches — same physical RAM on unified memory. The estimator
@@ -69,15 +70,30 @@ fn enforce_training_preflight(
             | kiln_core::vram::VramSource::AppleSilicon
             | kiln_core::vram::VramSource::EnvOverride
     );
-    let estimate = estimate_step_working_set_with_options(
-        &state.model_config,
-        max_seq_len,
-        lora_rank,
-        num_segments,
-        residency,
-        weights_already_resident,
-        options,
-    );
+    let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some();
+    let hybrid_model = state.model_config.num_full_attention_layers < state.model_config.num_layers;
+    let estimate = if vk_native && hybrid_model {
+        estimate_vk_native_recompute_working_set(
+            &state.model_config,
+            max_seq_len,
+            lora_rank,
+            residency,
+            weights_already_resident,
+        )
+    } else {
+        estimate_step_working_set_with_options(
+            &state.model_config,
+            max_seq_len,
+            lora_rank,
+            num_segments,
+            residency,
+            weights_already_resident,
+            options,
+        )
+    };
     if estimate.total_bytes > available {
         let msg = format_oom_message_with_source(
             &estimate,
@@ -148,8 +164,6 @@ async fn submit_sft(
         .unwrap_or_else(|| format!("sft-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
 
-    tracing::info!(num_examples, job_id = %job_id, adapter = %adapter_name, "SFT training request queued");
-
     // Verify we have real model weights
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
         return Err(ApiError::mock_mode_no_training());
@@ -177,6 +191,14 @@ async fn submit_sft(
         },
         req.config.lora_rank,
     )?;
+
+    tracing::info!(
+        num_examples,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        max_seq_len,
+        "SFT training request queued"
+    );
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {

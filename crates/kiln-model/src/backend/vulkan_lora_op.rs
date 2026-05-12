@@ -103,8 +103,12 @@ impl CustomOp3 for VulkanLoraOp {
             // shape rather than dispatching.
             let mut out_dims: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
             out_dims.push(self.out_features);
-            let zero = Tensor::zeros(out_dims.as_slice(), self.out_dtype, &candle_core::Device::Cpu)
-                .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp empty zeros: {e:?}")))?;
+            let zero = Tensor::zeros(
+                out_dims.as_slice(),
+                self.out_dtype,
+                &candle_core::Device::Cpu,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp empty zeros: {e:?}")))?;
             let storage = zero
                 .storage_and_layout()
                 .0
@@ -222,14 +226,20 @@ impl CustomOp3 for VulkanLoraOp {
         // x is an upstream activation, not a LoRA Var, so we still
         // read it from candle CPU storage.
         let scale = self.scale as f64;
-        let x_f32 = if x.dtype() == DType::F32 { x.clone() } else { x.to_dtype(DType::F32)? };
+        let x_f32 = if x.dtype() == DType::F32 {
+            x.clone()
+        } else {
+            x.to_dtype(DType::F32)?
+        };
         let a_f32 = kernels::buffer_to_tensor(
             self.vk_device.as_ref(),
             self.a_buffer.as_ref(),
             &[self.rank, self.in_features],
             a.dtype(),
         )
-        .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor A: {e:?}")))?
+        .map_err(|e| {
+            candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor A: {e:?}"))
+        })?
         .to_dtype(DType::F32)?;
         let b_f32 = kernels::buffer_to_tensor(
             self.vk_device.as_ref(),
@@ -237,7 +247,9 @@ impl CustomOp3 for VulkanLoraOp {
             &[self.out_features, self.rank],
             b.dtype(),
         )
-        .map_err(|e| candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor B: {e:?}")))?
+        .map_err(|e| {
+            candle_core::Error::Msg(format!("VulkanLoraOp::bwd buffer_to_tensor B: {e:?}"))
+        })?
         .to_dtype(DType::F32)?;
         let grad_y_f32 = if grad_y.dtype() == DType::F32 {
             grad_y.clone()
@@ -297,14 +309,15 @@ mod tests {
         let scale = 0.5f32;
 
         let x_data: Vec<f32> = (0..t * in_features).map(|i| (i as f32) * 0.013).collect();
-        let a_data: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.017).collect();
-        let b_data: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.011).collect();
-        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?
-            .to_dtype(DType::BF16)?;
-        let a = Tensor::from_vec(a_data, (rank, in_features), &device)?
-            .to_dtype(DType::BF16)?;
-        let b = Tensor::from_vec(b_data, (out_features, rank), &device)?
-            .to_dtype(DType::BF16)?;
+        let a_data: Vec<f32> = (0..rank * in_features)
+            .map(|i| (i as f32) * 0.017)
+            .collect();
+        let b_data: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.011)
+            .collect();
+        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(DType::BF16)?;
+        let a = Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(DType::BF16)?;
+        let b = Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(DType::BF16)?;
 
         // CPU baseline (manual F32; candle CPU doesn't support BF16
         // matmul).
@@ -318,10 +331,14 @@ mod tests {
             .to_dtype(DType::BF16)?;
 
         // Vulkan path — upload A and B as registry-resident.
-        let a_buf =
-            Arc::new(kernels::upload_tensor_bf16_packed_buffer(vk_device.as_ref(), &a)?);
-        let b_buf =
-            Arc::new(kernels::upload_tensor_bf16_packed_buffer(vk_device.as_ref(), &b)?);
+        let a_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+            vk_device.as_ref(),
+            &a,
+        )?);
+        let b_buf = Arc::new(kernels::upload_tensor_bf16_packed_buffer(
+            vk_device.as_ref(),
+            &b,
+        )?);
         let op = VulkanLoraOp {
             vk_device: vk_device.clone(),
             a_buffer: a_buf,
@@ -367,18 +384,19 @@ mod tests {
         let scale = 0.7f32;
 
         let x_data: Vec<f32> = (0..t * in_features).map(|i| (i as f32) * 0.011).collect();
-        let a_data: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.013).collect();
-        let b_data: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.017).collect();
+        let a_data: Vec<f32> = (0..rank * in_features)
+            .map(|i| (i as f32) * 0.013)
+            .collect();
+        let b_data: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.017)
+            .collect();
 
-        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?
-            .to_dtype(DType::BF16)?;
+        let x = Tensor::from_vec(x_data, (1, t, in_features), &device)?.to_dtype(DType::BF16)?;
         let a_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(a_data, (rank, in_features), &device)?
-                .to_dtype(DType::BF16)?,
+            &Tensor::from_vec(a_data, (rank, in_features), &device)?.to_dtype(DType::BF16)?,
         )?;
         let b_var = candle_core::Var::from_tensor(
-            &Tensor::from_vec(b_data, (out_features, rank), &device)?
-                .to_dtype(DType::BF16)?,
+            &Tensor::from_vec(b_data, (out_features, rank), &device)?.to_dtype(DType::BF16)?,
         )?;
 
         // Synthetic upstream gradient — a tensor that we'll multiply
@@ -386,8 +404,8 @@ mod tests {
         let grad_y_data: Vec<f32> = (0..t * out_features)
             .map(|i| ((i as i32 - 10) as f32) * 0.019)
             .collect();
-        let grad_y = Tensor::from_vec(grad_y_data, (1, t, out_features), &device)?
-            .to_dtype(DType::F32)?;
+        let grad_y =
+            Tensor::from_vec(grad_y_data, (1, t, out_features), &device)?.to_dtype(DType::F32)?;
 
         // ---- Vulkan path: construct VulkanLoraOp + apply_op3,
         // backward, extract grads.

@@ -11,10 +11,12 @@
 #![cfg(test)]
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
-use kiln_vulkan_kernel::vk_ops::conv1d::vk_causal_conv1d_no_grad;
-use kiln_vulkan_kernel::vk_ops::gdn_gated_rms_norm::vk_gdn_gated_rms_norm_no_grad;
-use kiln_vulkan_kernel::vk_ops::gdn_gates::vk_gdn_gates_no_grad;
+use candle_core::{Device, Tensor, TensorId, Var};
+use kiln_vulkan_kernel::vk_ops::conv1d::{vk_causal_conv1d, vk_causal_conv1d_no_grad};
+use kiln_vulkan_kernel::vk_ops::gdn_gated_rms_norm::{
+    vk_gdn_gated_rms_norm, vk_gdn_gated_rms_norm_no_grad,
+};
+use kiln_vulkan_kernel::vk_ops::gdn_gates::{vk_gdn_gates, vk_gdn_gates_no_grad};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkTensor, VulkanBuffer, VulkanDevice};
 use std::sync::Arc;
@@ -29,6 +31,24 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
     VkTensor::from_candle(&t, Arc::clone(device))
+}
+
+fn upload_param(
+    device: &Arc<VulkanDevice>,
+    data: &[f32],
+    shape: &[usize],
+) -> Result<(TensorId, VkTensor)> {
+    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
+    let var = Var::from_tensor(&t)?;
+    let vk = VkTensor::from_candle(&t, Arc::clone(device))?;
+    let param = VkTensor::parameter(
+        Arc::clone(vk.buffer()),
+        vk.shape().to_vec(),
+        vk.dtype(),
+        Arc::clone(vk.device()),
+        var.id(),
+    );
+    Ok((var.id(), param))
 }
 
 fn upload_buffer(device: &Arc<VulkanDevice>, data: &[f32]) -> Result<Arc<VulkanBuffer>> {
@@ -72,7 +92,13 @@ fn vk_linear_attention_state_zeros_initialized() -> Result<()> {
 
 // ---------------- vk_gdn_gates ----------------
 
-fn cpu_gdn_gates(a: &[f32], b: &[f32], a_log: &[f32], dt_bias: &[f32], nv: usize) -> (Vec<f32>, Vec<f32>) {
+fn cpu_gdn_gates(
+    a: &[f32],
+    b: &[f32],
+    a_log: &[f32],
+    dt_bias: &[f32],
+    nv: usize,
+) -> (Vec<f32>, Vec<f32>) {
     let total = a.len();
     let mut beta = Vec::with_capacity(total);
     let mut g = Vec::with_capacity(total);
@@ -100,8 +126,12 @@ fn vk_gdn_gates_matches_cpu_reference() -> Result<()> {
     let t = 8;
     let nv = 2;
     let total = b_dim * t * nv;
-    let a_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.13 - 0.5).sin()).collect();
-    let b_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.21 + 0.7).cos()).collect();
+    let a_data: Vec<f32> = (0..total)
+        .map(|i| ((i as f32) * 0.13 - 0.5).sin())
+        .collect();
+    let b_data: Vec<f32> = (0..total)
+        .map(|i| ((i as f32) * 0.21 + 0.7).cos())
+        .collect();
     let a_log_data: Vec<f32> = (0..nv).map(|i| -((i as f32) + 1.0) * 0.5).collect();
     let dt_bias_data: Vec<f32> = (0..nv).map(|i| ((i as f32) - 0.5) * 0.1).collect();
 
@@ -111,8 +141,7 @@ fn vk_gdn_gates_matches_cpu_reference() -> Result<()> {
     let dt_bias = upload(&dev, &dt_bias_data, &[nv])?;
 
     let (beta_gpu, g_gpu) = vk_gdn_gates_no_grad(&a, &b, &a_log, &dt_bias, nv)?;
-    let (beta_ref, g_ref) =
-        cpu_gdn_gates(&a_data, &b_data, &a_log_data, &dt_bias_data, nv);
+    let (beta_ref, g_ref) = cpu_gdn_gates(&a_data, &b_data, &a_log_data, &dt_bias_data, nv);
 
     let beta_actual = beta_gpu.to_vec_f32()?;
     let g_actual = g_gpu.to_vec_f32()?;
@@ -270,5 +299,74 @@ fn vk_gdn_gated_rms_norm_matches_cpu_reference() -> Result<()> {
     let out_ref = cpu_gated_rms_norm(&x_data, &z_data, &w_data, rows, hidden, eps);
     let err = max_abs_err(&out_actual, &out_ref);
     assert!(err < 1e-5, "gated_rms_norm max abs err {err}");
+    Ok(())
+}
+
+#[test]
+fn vk_gdn_autograd_wrappers_produce_input_grads() -> Result<()> {
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
+
+    let Some(dev) = vk_dev() else { return Ok(()) };
+
+    let nv = 2;
+    let total = 1 * 4 * nv;
+    let a_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.13).sin()).collect();
+    let b_data: Vec<f32> = (0..total).map(|i| ((i as f32) * 0.17).cos()).collect();
+    let a_log = upload(&dev, &[-0.4, -0.8], &[nv])?;
+    let dt_bias = upload(&dev, &[0.1, -0.2], &[nv])?;
+    let (a_id, a) = upload_param(&dev, &a_data, &[1, 4, nv])?;
+    let (b_id, b) = upload_param(&dev, &b_data, &[1, 4, nv])?;
+    let (beta, g) = vk_gdn_gates(&a, &b, &a_log, &dt_bias, nv)?;
+    let loss = vk_sum_all(&vk_mul(&beta, &g)?)?;
+    let grads = vk_backward(&loss)?;
+    assert!(grads.get(a_id).is_some(), "missing gate a grad");
+    assert!(grads.get(b_id).is_some(), "missing gate b grad");
+
+    let rows = 4;
+    let hidden = 8;
+    let x_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| ((i as f32) * 0.03).sin())
+        .collect();
+    let z_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| ((i as f32) * 0.05).cos())
+        .collect();
+    let w_data = vec![1.0_f32; hidden];
+    let (x_id, x) = upload_param(&dev, &x_data, &[rows, hidden])?;
+    let (z_id, z) = upload_param(&dev, &z_data, &[rows, hidden])?;
+    let w = upload(&dev, &w_data, &[hidden])?;
+    let normed = vk_gdn_gated_rms_norm(&x, &z, &w, 1e-6)?;
+    let grads = vk_backward(&vk_sum_all(&normed)?)?;
+    assert!(grads.get(x_id).is_some(), "missing gated RMSNorm x grad");
+    assert!(grads.get(z_id).is_some(), "missing gated RMSNorm z grad");
+
+    let batch = 1;
+    let channels = 3;
+    let seq_len = 5;
+    let kernel_size = 4;
+    let state_len = kernel_size - 1;
+    let conv_x_data: Vec<f32> = (0..(batch * channels * seq_len))
+        .map(|i| ((i as f32) * 0.07).sin())
+        .collect();
+    let conv_w_data: Vec<f32> = (0..(channels * kernel_size))
+        .map(|i| ((i as f32) * 0.11).cos() * 0.2)
+        .collect();
+    let conv_state_data = vec![0.0_f32; batch * channels * state_len];
+    let (conv_x_id, conv_x) = upload_param(&dev, &conv_x_data, &[batch, channels, seq_len])?;
+    let conv_w = upload(&dev, &conv_w_data, &[channels, kernel_size])?;
+    let conv_state = upload_buffer(&dev, &conv_state_data)?;
+    let conv_out = vk_causal_conv1d(
+        &conv_x,
+        &conv_w,
+        &conv_state,
+        batch,
+        channels,
+        seq_len,
+        kernel_size,
+    )?;
+    let grads = vk_backward(&vk_sum_all(&conv_out)?)?;
+    assert!(grads.get(conv_x_id).is_some(), "missing conv input grad");
+
     Ok(())
 }

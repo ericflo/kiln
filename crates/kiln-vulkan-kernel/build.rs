@@ -54,6 +54,20 @@ const SHADERS: &[(&str, &str)] = &[
     ),
     ("gdn_gated_rms_norm", "SPIR_V_GDN_GATED_RMS_NORM"),
     ("causal_conv1d", "SPIR_V_CAUSAL_CONV1D"),
+    ("causal_conv1d_offset", "SPIR_V_CAUSAL_CONV1D_OFFSET"),
+    (
+        "vk_causal_conv1d_pre_silu",
+        "SPIR_V_VK_CAUSAL_CONV1D_PRE_SILU",
+    ),
+    (
+        "vk_causal_conv1d_pre_silu_offset",
+        "SPIR_V_VK_CAUSAL_CONV1D_PRE_SILU_OFFSET",
+    ),
+    ("vk_causal_conv1d_bwd", "SPIR_V_VK_CAUSAL_CONV1D_BWD"),
+    (
+        "vk_causal_conv1d_bwd_offset",
+        "SPIR_V_VK_CAUSAL_CONV1D_BWD_OFFSET",
+    ),
     (
         "causal_conv1d_state_advance",
         "SPIR_V_CAUSAL_CONV1D_STATE_ADVANCE",
@@ -81,6 +95,14 @@ const SHADERS: &[(&str, &str)] = &[
     (
         "linear_decode_batched_transposed_bf16w",
         "SPIR_V_LINEAR_DECODE_BATCHED_TRANSPOSED_BF16W",
+    ),
+    (
+        "vk_matmul_bf16w_fwd_rows",
+        "SPIR_V_VK_MATMUL_BF16W_FWD_ROWS",
+    ),
+    (
+        "vk_matmul_bf16w_bwd_rows",
+        "SPIR_V_VK_MATMUL_BF16W_BWD_ROWS",
     ),
     ("qwen_rmsnorm_forward", "SPIR_V_QWEN_RMSNORM_FORWARD"),
     ("qwen_rmsnorm_backward", "SPIR_V_QWEN_RMSNORM_BACKWARD"),
@@ -140,6 +162,32 @@ const SHADERS: &[(&str, &str)] = &[
     ("paged_attn_decode_batch", "SPIR_V_PAGED_ATTN_DECODE_BATCH"),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
     ("sdpa_prefill_f32", "SPIR_V_SDPA_PREFILL_F32"),
+    ("vk_flash_sdpa_fwd_f32", "SPIR_V_VK_FLASH_SDPA_FWD_F32"),
+    (
+        "vk_flash_sdpa_fwd_f32_offset",
+        "SPIR_V_VK_FLASH_SDPA_FWD_F32_OFFSET",
+    ),
+    ("vk_flash_sdpa_delta_f32", "SPIR_V_VK_FLASH_SDPA_DELTA_F32"),
+    (
+        "vk_flash_sdpa_delta_f32_offset",
+        "SPIR_V_VK_FLASH_SDPA_DELTA_F32_OFFSET",
+    ),
+    (
+        "vk_flash_sdpa_bwd_dq_f32",
+        "SPIR_V_VK_FLASH_SDPA_BWD_DQ_F32",
+    ),
+    (
+        "vk_flash_sdpa_bwd_dq_f32_offset",
+        "SPIR_V_VK_FLASH_SDPA_BWD_DQ_F32_OFFSET",
+    ),
+    (
+        "vk_flash_sdpa_bwd_dkdv_f32",
+        "SPIR_V_VK_FLASH_SDPA_BWD_DKDV_F32",
+    ),
+    (
+        "vk_flash_sdpa_bwd_dkdv_f32_offset",
+        "SPIR_V_VK_FLASH_SDPA_BWD_DKDV_F32_OFFSET",
+    ),
     ("sgd_step_f32", "SPIR_V_SGD_STEP_F32"),
     ("sgd_step_bf16", "SPIR_V_SGD_STEP_BF16"),
     ("adamw_step_f32", "SPIR_V_ADAMW_STEP_F32"),
@@ -149,11 +197,17 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_elementwise_binary_f32",
         "SPIR_V_VK_ELEMENTWISE_BINARY_F32",
     ),
-    ("vk_fill_f32", "SPIR_V_VK_FILL_F32"),
-    ("vk_reduce_sum_f32", "SPIR_V_VK_REDUCE_SUM_F32"),
     (
-        "vk_broadcast_scalar_f32",
-        "SPIR_V_VK_BROADCAST_SCALAR_F32",
+        "vk_elementwise_binary_f32_offset",
+        "SPIR_V_VK_ELEMENTWISE_BINARY_F32_OFFSET",
+    ),
+    ("vk_fill_f32", "SPIR_V_VK_FILL_F32"),
+    ("vk_fill_f32_offset", "SPIR_V_VK_FILL_F32_OFFSET"),
+    ("vk_reduce_sum_f32", "SPIR_V_VK_REDUCE_SUM_F32"),
+    ("vk_broadcast_scalar_f32", "SPIR_V_VK_BROADCAST_SCALAR_F32"),
+    (
+        "vk_broadcast_scalar_f32_offset",
+        "SPIR_V_VK_BROADCAST_SCALAR_F32_OFFSET",
     ),
     ("vk_cast_f32_to_bf16", "SPIR_V_VK_CAST_F32_TO_BF16"),
     ("vk_cast_bf16_to_f32", "SPIR_V_VK_CAST_BF16_TO_F32"),
@@ -164,18 +218,53 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_softmax_lastdim_bwd_f32",
         "SPIR_V_VK_SOFTMAX_LASTDIM_BWD_F32",
     ),
+    ("vk_gdn_gates_bwd", "SPIR_V_VK_GDN_GATES_BWD"),
+    (
+        "vk_gdn_gated_rms_norm_bwd",
+        "SPIR_V_VK_GDN_GATED_RMS_NORM_BWD",
+    ),
+    (
+        "vk_l2_norm_lastdim_f32",
+        "SPIR_V_VK_L2_NORM_LASTDIM_F32",
+    ),
+    (
+        "vk_l2_norm_lastdim_bwd_f32",
+        "SPIR_V_VK_L2_NORM_LASTDIM_BWD_F32",
+    ),
     ("vk_silu_f32", "SPIR_V_VK_SILU_F32"),
+    ("vk_silu_f32_offset", "SPIR_V_VK_SILU_F32_OFFSET"),
     ("vk_silu_bwd_f32", "SPIR_V_VK_SILU_BWD_F32"),
+    ("vk_silu_bwd_f32_offset", "SPIR_V_VK_SILU_BWD_F32_OFFSET"),
     ("vk_rope_f32", "SPIR_V_VK_ROPE_F32"),
     ("vk_rope_bwd_f32", "SPIR_V_VK_ROPE_BWD_F32"),
     ("vk_causal_mask_add_f32", "SPIR_V_VK_CAUSAL_MASK_ADD_F32"),
     ("vk_scale_inplace_f32", "SPIR_V_VK_SCALE_INPLACE_F32"),
+    (
+        "vk_scale_inplace_f32_offset",
+        "SPIR_V_VK_SCALE_INPLACE_F32_OFFSET",
+    ),
     ("vk_matmul_batched_f32", "SPIR_V_VK_MATMUL_BATCHED_F32"),
     ("vk_transpose_3d_f32", "SPIR_V_VK_TRANSPOSE_3D_F32"),
     ("vk_permute_rh_to_hr_f32", "SPIR_V_VK_PERMUTE_RH_TO_HR_F32"),
+    (
+        "vk_permute_rh_to_hr_f32_offset",
+        "SPIR_V_VK_PERMUTE_RH_TO_HR_F32_OFFSET",
+    ),
     ("vk_permute_hr_to_rh_f32", "SPIR_V_VK_PERMUTE_HR_TO_RH_F32"),
+    (
+        "vk_permute_hr_to_rh_f32_offset",
+        "SPIR_V_VK_PERMUTE_HR_TO_RH_F32_OFFSET",
+    ),
     ("vk_repeat_kv_heads_f32", "SPIR_V_VK_REPEAT_KV_HEADS_F32"),
+    (
+        "vk_repeat_kv_heads_f32_offset",
+        "SPIR_V_VK_REPEAT_KV_HEADS_F32_OFFSET",
+    ),
     ("vk_sum_kv_groups_f32", "SPIR_V_VK_SUM_KV_GROUPS_F32"),
+    (
+        "vk_sum_kv_groups_f32_offset",
+        "SPIR_V_VK_SUM_KV_GROUPS_F32_OFFSET",
+    ),
     ("vk_embedding_lookup_f32", "SPIR_V_VK_EMBEDDING_LOOKUP_F32"),
     (
         "vk_embedding_lookup_bf16w_f32",
@@ -196,13 +285,42 @@ const SHADERS: &[(&str, &str)] = &[
     ),
     ("vk_flce_grad_chunk_f32", "SPIR_V_VK_FLCE_GRAD_CHUNK_F32"),
     ("vk_sigmoid_f32", "SPIR_V_VK_SIGMOID_F32"),
+    ("vk_sigmoid_f32_offset", "SPIR_V_VK_SIGMOID_F32_OFFSET"),
     ("vk_sigmoid_bwd_f32", "SPIR_V_VK_SIGMOID_BWD_F32"),
+    (
+        "vk_sigmoid_bwd_f32_offset",
+        "SPIR_V_VK_SIGMOID_BWD_F32_OFFSET",
+    ),
+    ("vk_mul_sigmoid_gate_f32", "SPIR_V_VK_MUL_SIGMOID_GATE_F32"),
+    (
+        "vk_mul_sigmoid_gate_f32_offset",
+        "SPIR_V_VK_MUL_SIGMOID_GATE_F32_OFFSET",
+    ),
+    (
+        "vk_mul_sigmoid_gate_bwd_f32",
+        "SPIR_V_VK_MUL_SIGMOID_GATE_BWD_F32",
+    ),
+    (
+        "vk_mul_sigmoid_gate_bwd_f32_offset",
+        "SPIR_V_VK_MUL_SIGMOID_GATE_BWD_F32_OFFSET",
+    ),
     ("vk_narrow_lastdim_f32", "SPIR_V_VK_NARROW_LASTDIM_F32"),
+    (
+        "vk_narrow_lastdim_f32_offset",
+        "SPIR_V_VK_NARROW_LASTDIM_F32_OFFSET",
+    ),
     (
         "vk_narrow_lastdim_bwd_f32",
         "SPIR_V_VK_NARROW_LASTDIM_BWD_F32",
     ),
-    ("vk_index_select_rows_f32", "SPIR_V_VK_INDEX_SELECT_ROWS_F32"),
+    (
+        "vk_narrow_lastdim_bwd_f32_offset",
+        "SPIR_V_VK_NARROW_LASTDIM_BWD_F32_OFFSET",
+    ),
+    (
+        "vk_index_select_rows_f32",
+        "SPIR_V_VK_INDEX_SELECT_ROWS_F32",
+    ),
     (
         "vk_index_select_rows_bwd_f32",
         "SPIR_V_VK_INDEX_SELECT_ROWS_BWD_F32",

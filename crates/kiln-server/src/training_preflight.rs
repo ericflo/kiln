@@ -9,8 +9,8 @@
 //! Used by [`crate::api::training::submit_sft`] and `submit_grpo`.
 
 use kiln_core::config::{DType, ModelConfig};
-use kiln_core::vram::{GpuVramInfo, VramSource};
 use kiln_core::tokenizer::KilnTokenizer;
+use kiln_core::vram::{GpuVramInfo, VramSource};
 use kiln_train::{GrpoGroup, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
@@ -147,11 +147,7 @@ fn approximate_base_weight_bytes(cfg: &ModelConfig) -> u64 {
 /// Closed-form upper bound per layer: hidden state stash + QKV + attn
 /// output + MLP up/gate/down intermediates. Multiplied by sequence
 /// length and dtype size, then by the number of layers per segment.
-fn per_segment_activation_bytes(
-    cfg: &ModelConfig,
-    max_seq_len: usize,
-    num_segments: usize,
-) -> u64 {
+fn per_segment_activation_bytes(cfg: &ModelConfig, max_seq_len: usize, num_segments: usize) -> u64 {
     let elem = dtype_bytes(cfg.dtype);
     let h = cfg.hidden_size as u64;
     let i = cfg.intermediate_size as u64;
@@ -184,15 +180,41 @@ fn boundary_state_bytes(
     (num_segments as u64 + 1) * h * t * elem
 }
 
-/// One FLCE chunk's reduce accumulator + logits slice.
+/// Peak working-set bytes for the FLCE chunked-head pass.
+///
+/// The vk-native FLCE chunks the LM-head matmul along the VOCAB axis
+/// (`flce_active_chunk_len()` columns per chunk, processed sequentially).
+/// Peak memory at any moment is therefore approximately:
+///
+///   per-chunk logits `[num_active, chunk_len]` (F32, in-place reused as
+///       grad-logits during backward) +
+///   weight slice `[chunk_len, hidden]` (F32, copied via `vk_narrow_lastdim`) +
+///   grad-hidden accumulator `[num_active, hidden]` (F32, lives across the
+///       whole vocab loop).
+///
+/// Honors `KILN_VK_FLCE_CHUNK_LEN` so callers tuning chunk size for
+/// long-context training stay under-budget. The legacy
+/// `DEFAULT_FLCE_CHUNKS=8` token-axis split modeled a different
+/// implementation (kiln-flce-kernel's Phase B) and over-counted by ~10×
+/// at high `max_seq_len`.
 fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
-    let v = cfg.vocab_size as u64;
+    let h = cfg.hidden_size as u64;
     let t = max_seq_len as u64;
-    let per_chunk_tokens = (t + DEFAULT_FLCE_CHUNKS - 1) / DEFAULT_FLCE_CHUNKS;
-    // Reduce accumulator (F32) + logits chunk (compute dtype).
-    let reduce_bytes = per_chunk_tokens * v * 4;
-    let logits_bytes = per_chunk_tokens * v * dtype_bytes(cfg.dtype);
-    reduce_bytes + logits_bytes
+    let chunk_len = active_flce_chunk_len() as u64;
+    let per_chunk_logits = t * chunk_len * 4; // F32 logits / grad-logits
+    // FLCE now slices `[chunk_len, hidden]` and transposes only that
+    // chunk to `[hidden, chunk_len]`; both buffers can be live at once.
+    let per_chunk_weight = 2 * chunk_len * h * 4;
+    let grad_hidden = t * h * 4; // accumulator across vocab loop
+    per_chunk_logits + per_chunk_weight + grad_hidden
+}
+
+fn active_flce_chunk_len() -> usize {
+    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(4096)
 }
 
 /// LoRA params + their gradients, F32 for both.
@@ -271,6 +293,113 @@ pub fn estimate_step_working_set_with_options(
         flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
         lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
         safety_margin: SAFETY_MARGIN_BYTES,
+    };
+    WorkingSet {
+        total_bytes: bd.total(),
+        max_seq_len,
+        breakdown: bd,
+    }
+}
+
+fn f32_matrix_bytes(rows: usize, cols: usize) -> u64 {
+    rows as u64 * cols as u64 * 4
+}
+
+fn ceil_div_u64(n: u64, d: u64) -> u64 {
+    if d == 0 { 0 } else { (n + d - 1) / d }
+}
+
+/// Peak activation estimate for the vk-native exact layerwise
+/// reverse-recompute trainer.
+///
+/// This mode does not hold segment boundary states. It replays one
+/// subgraph at a time:
+///   - Full-attention layers split attention, MLP gate/up, and MLP down.
+///   - GDN chunkwise backward saves recurrent state snapshots and
+///     recomputes per-chunk intermediates during backward.
+///
+/// The estimate is intentionally shape-based rather than layer-count
+/// based: peak memory is dominated by one replayed layer/subblock, not
+/// by the number of layers in a segment.
+fn vk_native_recompute_activation_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
+    let t = max_seq_len;
+    let h = cfg.hidden_size;
+    let i = cfg.intermediate_size;
+    let q_dim = cfg.num_attention_heads * cfg.head_dim;
+    let kv_dim = cfg.num_kv_heads * cfg.head_dim;
+    let q_raw_dim = cfg.full_attn_q_proj_dim();
+
+    let hidden = f32_matrix_bytes(t, h);
+    let intermediate = f32_matrix_bytes(t, i);
+    let q = f32_matrix_bytes(t, q_dim);
+    let q_raw = f32_matrix_bytes(t, q_raw_dim);
+    let kv = f32_matrix_bytes(t, kv_dim);
+
+    // Forward attention block + recomputed exact flash-style SDPA
+    // backward. The implementation does not materialize a [T,T]
+    // score matrix and replays attention as a split subgraph, so peak
+    // residency is the Q/gate/Q-norm/RoPE path, K/V, attention output,
+    // and upstream/boundary tensors rather than all intermediates at
+    // once.
+    let full_attention_peak = 5 * hidden + q_raw + 5 * q + 4 * kv;
+    // Split SwiGLU: gate/up/silu/gated dominate. Down-proj replay is
+    // lower but still included for non-Qwen shapes.
+    let mlp_gate_up_peak = 4 * hidden + 4 * intermediate;
+    let mlp_down_peak = 4 * hidden + 3 * intermediate;
+
+    let linear_qkv = f32_matrix_bytes(t, cfg.linear_qkv_dim());
+    let linear_qk = f32_matrix_bytes(t, cfg.linear_qk_dim());
+    let linear_v = f32_matrix_bytes(t, cfg.linear_v_dim());
+    let gdn_chunks = ceil_div_u64(t as u64, 64);
+    let gdn_state_snapshots = gdn_chunks
+        * cfg.linear_num_value_heads as u64
+        * cfg.linear_key_head_dim as u64
+        * cfg.linear_value_head_dim as u64
+        * 4;
+    // The vk-native GDN backward is split into exact subgraphs instead
+    // of replaying the whole GDN layer at once. The largest pieces are:
+    // no-grad normed recompute for frozen out-proj, chunkwise backward
+    // with recurrent snapshots, and conv/split/repeat backward from
+    // q/k/v to mixed_qkv.
+    let gdn_normed_recompute_peak = 4 * hidden + 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_chunkwise_split_peak =
+        gdn_state_snapshots + hidden + linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_conv_split_peak = 2 * linear_qkv + 3 * linear_v + 2 * linear_qk;
+    let gdn_peak = gdn_normed_recompute_peak
+        .max(gdn_chunkwise_split_peak)
+        .max(gdn_conv_split_peak);
+
+    full_attention_peak
+        .max(mlp_gate_up_peak)
+        .max(mlp_down_peak)
+        .max(gdn_peak)
+}
+
+/// Closed-form working-set estimate for the vk-native exact
+/// layerwise reverse-recompute path used by hybrid Vulkan training.
+pub fn estimate_vk_native_recompute_working_set(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    lora_rank: usize,
+    residency: WeightResidency,
+    weights_already_resident: bool,
+) -> WorkingSet {
+    let base_weights = if weights_already_resident {
+        0
+    } else {
+        approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier())
+    };
+    let bd = Breakdown {
+        base_weights,
+        per_segment_activations: vk_native_recompute_activation_bytes(cfg, max_seq_len),
+        boundary_states: 0,
+        flce_intermediates: flce_chunk_intermediate_bytes(cfg, max_seq_len),
+        lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
+        safety_margin: if weights_already_resident {
+            0
+        } else {
+            SAFETY_MARGIN_BYTES
+        },
     };
     WorkingSet {
         total_bytes: bd.total(),
@@ -481,8 +610,7 @@ pub fn format_oom_message_with_source(
     let avail_gb = available_bytes as f64 / BYTES_PER_GB as f64;
     let bd = &estimate.breakdown;
     let bw_gb = bd.base_weights as f64 / BYTES_PER_GB as f64;
-    let act_gb =
-        (bd.per_segment_activations + bd.boundary_states) as f64 / BYTES_PER_GB as f64;
+    let act_gb = (bd.per_segment_activations + bd.boundary_states) as f64 / BYTES_PER_GB as f64;
     let flce_gb = bd.flce_intermediates as f64 / BYTES_PER_GB as f64;
     let lora_gb = bd.lora_param_grad as f64 / BYTES_PER_GB as f64;
     let source_clause = match vram_source {
@@ -495,10 +623,9 @@ pub fn format_oom_message_with_source(
          activations {act_gb:.2} GB (max_seq_len={msl}, num_segments={num_segments}), \
          FLCE chunk {flce_gb:.2} GB, LoRA params+grads {lora_gb:.2} GB \
          (lora_rank={lora_rank}). To fit, raise KILN_GRAD_CHECKPOINT_SEGMENTS \
-         (more segments = less per-segment activation memory), shrink \
-         lora_rank, send fewer/shorter examples per submission, or set \
-         KILN_TRAINING_MEMORY_RESERVE_GB lower if your host can spare RAM \
-         from other processes.",
+         (more segments = less per-segment activation memory), shrink lora_rank, \
+         send fewer/shorter examples per submission, or set KILN_TRAINING_MEMORY_RESERVE_GB \
+         lower if your host can spare RAM from other processes.",
         msl = estimate.max_seq_len,
     )
 }
@@ -517,7 +644,8 @@ mod tests {
     fn estimator_grows_with_seq_len() {
         let cfg = qwen_4b();
         let small = estimate_step_working_set(&cfg, 256, 16, 4, WeightResidency::SingleCopy, false);
-        let large = estimate_step_working_set(&cfg, 4096, 16, 4, WeightResidency::SingleCopy, false);
+        let large =
+            estimate_step_working_set(&cfg, 4096, 16, 4, WeightResidency::SingleCopy, false);
         assert!(
             large.total_bytes > small.total_bytes,
             "expected larger T to grow estimate; small={} large={}",
@@ -530,7 +658,8 @@ mod tests {
     fn estimator_shrinks_with_more_segments() {
         let cfg = qwen_4b();
         let few = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
-        let many = estimate_step_working_set(&cfg, 1500, 16, 16, WeightResidency::SingleCopy, false);
+        let many =
+            estimate_step_working_set(&cfg, 1500, 16, 16, WeightResidency::SingleCopy, false);
         assert!(
             many.breakdown.per_segment_activations < few.breakdown.per_segment_activations,
             "more segments must reduce per-segment activation footprint"
@@ -560,6 +689,23 @@ mod tests {
     }
 
     #[test]
+    fn vk_native_recompute_has_no_segment_boundaries() {
+        let cfg = qwen_4b();
+        let est = estimate_vk_native_recompute_working_set(
+            &cfg,
+            8192,
+            16,
+            WeightResidency::SingleCopy,
+            true,
+        );
+        assert_eq!(est.breakdown.boundary_states, 0);
+        assert!(
+            est.breakdown.per_segment_activations > 0,
+            "recompute estimate must still count replayed subgraph activations"
+        );
+    }
+
+    #[test]
     fn estimator_recompute_boundaries_does_not_scale_with_segment_count() {
         let cfg = qwen_4b();
         let cached = estimate_step_working_set(&cfg, 8192, 16, 32, WeightResidency::SingleCopy, false);
@@ -582,6 +728,25 @@ mod tests {
     }
 
     #[test]
+    fn vk_native_recompute_is_lower_than_four_layer_segment_at_long_context() {
+        let cfg = qwen_4b();
+        let segmented =
+            estimate_step_working_set(&cfg, 8192, 16, 4, WeightResidency::SingleCopy, true);
+        let recompute = estimate_vk_native_recompute_working_set(
+            &cfg,
+            8192,
+            16,
+            WeightResidency::SingleCopy,
+            true,
+        );
+        assert!(
+            recompute.breakdown.per_segment_activations
+                < segmented.breakdown.per_segment_activations + segmented.breakdown.boundary_states,
+            "exact layerwise recompute should estimate below four-layer segment residency"
+        );
+    }
+
+    #[test]
     fn qwen_4b_baseline_estimate_is_in_expected_range() {
         // Sanity: at T=1500 with 4 segments and rank 16, the estimate
         // should sit in single-digit-to-low-tens GB. A wildly different
@@ -598,7 +763,8 @@ mod tests {
     #[test]
     fn dual_residency_doubles_base_weight_contribution() {
         let cfg = qwen_4b();
-        let single = estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
+        let single =
+            estimate_step_working_set(&cfg, 1500, 16, 4, WeightResidency::SingleCopy, false);
         let dual = estimate_step_working_set(
             &cfg,
             1500,
@@ -607,7 +773,10 @@ mod tests {
             WeightResidency::DualResidentCpuAndVulkan,
             false,
         );
-        assert_eq!(dual.breakdown.base_weights, single.breakdown.base_weights * 2);
+        assert_eq!(
+            dual.breakdown.base_weights,
+            single.breakdown.base_weights * 2
+        );
         assert!(dual.total_bytes > single.total_bytes);
     }
 
@@ -686,7 +855,7 @@ mod tests {
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(8 * BYTES_PER_GB));
         let est = estimate_step_working_set(
             &cfg,
-            8192,
+            32768,
             16,
             4,
             WeightResidency::DualResidentCpuAndVulkan,
@@ -694,7 +863,7 @@ mod tests {
         );
         assert!(
             est.total_bytes > avail,
-            "expected 8K-token Qwen3.5-4B step to overflow 22 GB unified budget; \
+            "expected 32K-token Qwen3.5-4B step to overflow 22 GB unified budget; \
              got estimate={} avail={}",
             est.total_bytes,
             avail

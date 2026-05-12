@@ -1,0 +1,41 @@
+// Sum repeated KV-head gradients over a contiguous output offset slice.
+//
+// Push constants: [heads_kv, groups, rows, head_dim, n_elements, offset]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint heads_kv;
+    uint groups;
+    uint rows;
+    uint head_dim;
+    uint n_elements;
+    uint offset;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint local_idx = gl_GlobalInvocationID.x;
+    if (local_idx >= n_elements) return;
+    uint linear = offset + local_idx;
+    uint total = heads_kv * rows * head_dim;
+    if (linear >= total) return;
+
+    uint d = linear % head_dim;
+    uint hr = linear / head_dim;
+    uint r = hr % rows;
+    uint h_kv = hr / rows;
+
+    float acc = 0.0;
+    for (uint g = 0u; g < groups; ++g) {
+        uint h_q = h_kv * groups + g;
+        acc += data_in[(h_q * rows + r) * head_dim + d];
+    }
+    data_out[linear] = acc;
+}

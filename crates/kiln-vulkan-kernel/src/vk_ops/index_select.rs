@@ -125,7 +125,10 @@ impl VkBackwardOp for IndexSelectRowsBackward {
 /// Returns `[indices.len(), dim]` F32 with autograd.
 pub fn vk_index_select_rows(t: &VkTensor, indices: &[u32]) -> Result<VkTensor> {
     anyhow::ensure!(t.dtype() == VkDType::F32, "vk_index_select_rows: F32-only");
-    anyhow::ensure!(t.shape().len() == 2, "vk_index_select_rows: rank-2 input required");
+    anyhow::ensure!(
+        t.shape().len() == 2,
+        "vk_index_select_rows: rank-2 input required"
+    );
     let n_rows_in = t.shape()[0];
     let dim = t.shape()[1];
     let n_out = indices.len();

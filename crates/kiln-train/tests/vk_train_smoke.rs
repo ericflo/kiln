@@ -18,12 +18,13 @@
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use kiln_core::config::{DType, ModelConfig};
 use kiln_model::vk_forward::{
-    vk_model_forward_loss, VkFullAttentionWeights, VkLayerWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights,
+    VkFullAttentionWeights, VkLayerWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
+    vk_model_forward_loss,
 };
 use kiln_train::vk_train::{
-    allocate_adamw_state, vk_train_step, VkAdamWConfig,
+    VkAdamWConfig, allocate_adamw_state, vk_recompute_train_step_with_state_masked, vk_train_step,
 };
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::sync::Arc;
@@ -52,7 +53,9 @@ fn small_random(n: usize, seed: u64) -> Vec<f32> {
     use rand::rngs::StdRng;
     use rand::{RngExt, SeedableRng};
     let mut rng = StdRng::seed_from_u64(seed);
-    (0..n).map(|_| rng.random_range(-0.1_f32..0.1_f32)).collect()
+    (0..n)
+        .map(|_| rng.random_range(-0.1_f32..0.1_f32))
+        .collect()
 }
 
 fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
@@ -110,24 +113,83 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
     })
 }
 
-fn build_lora_layer(dev: &Arc<VulkanDevice>, hidden: usize, kv_dim: usize, intermediate: usize) -> Result<VkLoraLayer> {
+fn build_lora_layer(
+    dev: &Arc<VulkanDevice>,
+    hidden: usize,
+    kv_dim: usize,
+    intermediate: usize,
+) -> Result<VkLoraLayer> {
     let rank = 4;
     let alpha = 8.0;
     Ok(VkLoraLayer {
-        q_proj: Some(VkLoraPair::init_kaiming(dev, hidden, hidden, rank, alpha, 100)?),
-        k_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 101)?),
-        v_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 102)?),
-        o_proj: Some(VkLoraPair::init_kaiming(dev, hidden, hidden, rank, alpha, 103)?),
-        gate_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 104)?),
-        up_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 105)?),
-        down_proj: Some(VkLoraPair::init_kaiming(dev, intermediate, hidden, rank, alpha, 106)?),
+        q_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, hidden, rank, alpha, 100,
+        )?),
+        k_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, kv_dim, rank, alpha, 101,
+        )?),
+        v_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, kv_dim, rank, alpha, 102,
+        )?),
+        o_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, hidden, rank, alpha, 103,
+        )?),
+        gate_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            104,
+        )?),
+        up_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            105,
+        )?),
+        down_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            intermediate,
+            hidden,
+            rank,
+            alpha,
+            106,
+        )?),
         ..Default::default()
     })
 }
 
+fn tiny_model_config() -> ModelConfig {
+    ModelConfig {
+        hidden_size: 32,
+        num_layers: 1,
+        num_attention_heads: 2,
+        num_kv_heads: 1,
+        head_dim: 16,
+        intermediate_size: 64,
+        vocab_size: 32,
+        max_position_embeddings: 128,
+        rms_norm_eps: 1e-5,
+        rope_theta: 10_000.0,
+        dtype: DType::FP32,
+        num_full_attention_layers: 1,
+        full_attention_interval: 1,
+        attn_output_gate: false,
+        linear_num_key_heads: 1,
+        linear_key_head_dim: 16,
+        linear_num_value_heads: 1,
+        linear_value_head_dim: 16,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 0.0,
+    }
+}
+
 #[test]
 fn vk_full_model_one_layer_grads_exist() -> Result<()> {
-    use kiln_model::vk_forward::{vk_transformer_layer, VkLoraPair};
+    use kiln_model::vk_forward::{VkLoraPair, vk_transformer_layer};
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::flce::vk_flce_loss;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
@@ -324,8 +386,7 @@ fn vk_native_training_loss_decreases() -> Result<()> {
     // Tiny synthetic input: 8 tokens.
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
 
-    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
-        .to_vec_f32()?[0];
+    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
     // Debug: see how many params get gradients on a fresh backward.
     {
         use kiln_model::vk_forward::vk_step_backward;
@@ -439,13 +500,42 @@ fn build_qwen35_specific_lora(dev: &Arc<VulkanDevice>) -> Result<VkLoraLayer> {
     let rank = 4;
     let alpha = 8.0;
     Ok(VkLoraLayer {
-        q_proj: Some(VkLoraPair::init_kaiming(dev, hidden, q_out_dim, rank, alpha, 200)?),
-        k_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 201)?),
-        v_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 202)?),
-        o_proj: Some(VkLoraPair::init_kaiming(dev, q_dim, hidden, rank, alpha, 203)?),
-        gate_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 204)?),
-        up_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 205)?),
-        down_proj: Some(VkLoraPair::init_kaiming(dev, intermediate, hidden, rank, alpha, 206)?),
+        q_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, q_out_dim, rank, alpha, 200,
+        )?),
+        k_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, kv_dim, rank, alpha, 201,
+        )?),
+        v_proj: Some(VkLoraPair::init_kaiming(
+            dev, hidden, kv_dim, rank, alpha, 202,
+        )?),
+        o_proj: Some(VkLoraPair::init_kaiming(
+            dev, q_dim, hidden, rank, alpha, 203,
+        )?),
+        gate_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            204,
+        )?),
+        up_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            205,
+        )?),
+        down_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            intermediate,
+            hidden,
+            rank,
+            alpha,
+            206,
+        )?),
         ..Default::default()
     })
 }
@@ -456,9 +546,11 @@ fn vk_qwen35_specific_forward_produces_finite_output() -> Result<()> {
     let model = build_tiny_qwen35_specific_model(&dev)?;
     let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
-    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
-        .to_vec_f32()?[0];
-    assert!(loss.is_finite(), "Qwen3.5-specific forward produced non-finite loss {loss}");
+    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    assert!(
+        loss.is_finite(),
+        "Qwen3.5-specific forward produced non-finite loss {loss}"
+    );
     println!("vk_qwen35_specific forward loss = {loss}");
     Ok(())
 }
@@ -503,9 +595,11 @@ fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
 
     let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
-    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
-        .to_vec_f32()?[0];
-    assert!(loss.is_finite(), "RoPE-enabled forward produced non-finite loss {loss}");
+    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    assert!(
+        loss.is_finite(),
+        "RoPE-enabled forward produced non-finite loss {loss}"
+    );
     println!("vk_rope_wired loss = {loss}");
 
     let loss_t = vk_model_forward_loss(&model, &lora_layers, &input_ids)?;
@@ -539,7 +633,10 @@ fn vk_native_full_pipeline_saves_loadable_adapter() -> Result<()> {
         let l = vk_train_step(&model, &lora_layers, &input_ids, &mut adamw, &cfg, step)?;
         assert!(l.is_finite());
     }
-    let tmp = std::env::temp_dir().join(format!("kiln-vk-test-adapter-{}.safetensors", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!(
+        "kiln-vk-test-adapter-{}.safetensors",
+        std::process::id()
+    ));
     let rank = 4;
     let alpha = 8.0;
     save_vk_lora_adapter(&lora_layers, rank, alpha, &tmp)?;
@@ -547,12 +644,8 @@ fn vk_native_full_pipeline_saves_loadable_adapter() -> Result<()> {
     let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
     println!("vk_native_full_pipeline saved {} tensors", loaded.len());
     // PEFT convention: at least q_proj.lora_A and q_proj.lora_B should exist
-    let has_q_a = loaded
-        .keys()
-        .any(|k| k.contains("q_proj.lora_A.weight"));
-    let has_q_b = loaded
-        .keys()
-        .any(|k| k.contains("q_proj.lora_B.weight"));
+    let has_q_a = loaded.keys().any(|k| k.contains("q_proj.lora_A.weight"));
+    let has_q_b = loaded.keys().any(|k| k.contains("q_proj.lora_B.weight"));
     assert!(has_q_a, "missing q_proj.lora_A in saved adapter");
     assert!(has_q_b, "missing q_proj.lora_B in saved adapter");
     let _ = std::fs::remove_file(&tmp);
@@ -576,8 +669,7 @@ fn vk_checkpointed_train_step_loss_decreases() -> Result<()> {
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
 
     // 1-segment is equivalent to no-checkpoint, so test 1 first
-    let initial_loss =
-        vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
     let mut last_loss = initial_loss;
     let mut losses = vec![initial_loss];
     for step in 1..=5 {
@@ -604,6 +696,46 @@ fn vk_checkpointed_train_step_loss_decreases() -> Result<()> {
 }
 
 #[test]
+fn vk_recompute_train_step_loss_decreases() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let model_config = tiny_model_config();
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let label_mask = vec![true; input_ids.len()];
+    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    let mut last_loss = initial_loss;
+    let mut losses = vec![initial_loss];
+    for step in 1..=3 {
+        let l = vk_recompute_train_step_with_state_masked(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &label_mask,
+            &model_config,
+            0,
+            &mut adamw,
+            &cfg,
+            step,
+        )?;
+        assert!(l.is_finite(), "step {step}: non-finite loss {l}");
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_recompute losses: {losses:?}");
+    assert!(
+        last_loss < initial_loss,
+        "recompute loss did not drop: {initial_loss} -> {last_loss}"
+    );
+    Ok(())
+}
+
+#[test]
 fn vk_qwen35_specific_training_loss_decreases() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let model = build_tiny_qwen35_specific_model(&dev)?;
@@ -614,8 +746,7 @@ fn vk_qwen35_specific_training_loss_decreases() -> Result<()> {
         ..Default::default()
     };
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
-    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
-        .to_vec_f32()?[0];
+    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
     let mut last_loss = initial_loss;
     let mut losses = vec![initial_loss];
     for step in 1..=10 {

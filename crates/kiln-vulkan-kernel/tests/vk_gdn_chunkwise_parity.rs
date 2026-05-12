@@ -200,8 +200,16 @@ fn vk_chunk_prep_isolated() -> Result<()> {
     let nv = 1;
     let chunk = 2;
     let dv = 2;
-    let g = upload(&dev, &vec![-0.01_f32; batch * nv * chunk], &[batch, nv, chunk])?;
-    let v = upload(&dev, &vec![0.1_f32; batch * nv * chunk * dv], &[batch, nv, chunk, dv])?;
+    let g = upload(
+        &dev,
+        &vec![-0.01_f32; batch * nv * chunk],
+        &[batch, nv, chunk],
+    )?;
+    let v = upload(
+        &dev,
+        &vec![0.1_f32; batch * nv * chunk * dv],
+        &[batch, nv, chunk, dv],
+    )?;
     let kkt = upload(
         &dev,
         &vec![0.05_f32; batch * nv * chunk * chunk],
@@ -249,7 +257,11 @@ fn vk_solve_tri_isolated() -> Result<()> {
         &vec![0.1_f32; batch * nv * chunk * dv],
         &[batch, nv, chunk, dv],
     )?;
-    let beta = upload(&dev, &vec![0.5_f32; batch * nv * chunk], &[batch, nv, chunk])?;
+    let beta = upload(
+        &dev,
+        &vec![0.5_f32; batch * nv * chunk],
+        &[batch, nv, chunk],
+    )?;
     let w = vk_solve_tri_no_grad(&a_strict, &v_prime, &beta, batch, nv, chunk, dv)?;
     let data = w.to_vec_f32()?;
     println!("solve_tri w = {data:?}");
@@ -313,7 +325,9 @@ fn vk_gdn_chunkwise_autograd_smoke() -> Result<()> {
     // and verify gradients shape out correctly).
     use candle_core::{Device, Tensor, Var};
     let mk_param = |seed: u64, n: usize, shape: Vec<usize>| -> Result<VkTensor> {
-        let data: Vec<f32> = (0..n).map(|i| (((i + seed as usize) as f32) * 0.05).sin()).collect();
+        let data: Vec<f32> = (0..n)
+            .map(|i| (((i + seed as usize) as f32) * 0.05).sin())
+            .collect();
         let t = Tensor::from_vec(data, shape.clone(), &Device::Cpu)?;
         let var = Var::from_tensor(&t)?;
         let vk = VkTensor::from_candle(&t, Arc::clone(&dev))?;
@@ -331,7 +345,11 @@ fn vk_gdn_chunkwise_autograd_smoke() -> Result<()> {
     let v = mk_param(3, batch * nv * seq_len * dv, vec![batch, nv, seq_len, dv])?;
     let beta = mk_param(4, batch * nv * seq_len, vec![batch, nv, seq_len])?;
     let g = mk_param(5, batch * nv * seq_len, vec![batch, nv, seq_len])?;
-    let mut state = upload(&dev, &vec![0.0_f32; batch * nv * dk * dv], &[batch, nv, dk, dv])?;
+    let mut state = upload(
+        &dev,
+        &vec![0.0_f32; batch * nv * dk * dv],
+        &[batch, nv, dk, dv],
+    )?;
 
     let out = vk_gdn_chunkwise(&q, &k, &v, &beta, &g, &mut state, chunk_size)?;
     assert!(out.requires_grad());

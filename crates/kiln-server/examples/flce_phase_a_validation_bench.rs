@@ -274,6 +274,7 @@ fn run_one(
         auto_load: false,
         checkpoint_interval: None,
         seed: None,
+        optimizer: Default::default(),
     };
     let adapter_dir = std::env::temp_dir().join("kiln-flce-phaseA-validation");
     let _ = std::fs::create_dir_all(&adapter_dir);

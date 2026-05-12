@@ -28,15 +28,8 @@ fn dispatch_3d(
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(&glsl_path)
         .with_context(|| format!("vk_ops: shader compile/load for {shader}"))?;
-    crate::kernels::run_compute_pipeline_3d(
-        device,
-        &spirv,
-        handles,
-        handles.len(),
-        push,
-        workgroup,
-    )
-    .with_context(|| format!("vk_ops: 3d dispatch {shader}"))
+    crate::kernels::run_compute_pipeline_3d(device, &spirv, handles, handles.len(), push, workgroup)
+        .with_context(|| format!("vk_ops: 3d dispatch {shader}"))
 }
 
 fn dispatch_matmul_batched(
@@ -123,7 +116,10 @@ pub fn vk_transpose_batched_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
         "vk_transpose_batched_2d: rank-3 required, got {:?}",
         t.shape()
     );
-    anyhow::ensure!(t.dtype() == VkDType::F32, "vk_transpose_batched_2d: F32 only");
+    anyhow::ensure!(
+        t.dtype() == VkDType::F32,
+        "vk_transpose_batched_2d: F32 only"
+    );
     let batch = t.shape()[0];
     let rows = t.shape()[1];
     let cols = t.shape()[2];

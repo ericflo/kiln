@@ -13,8 +13,9 @@
 //!   - `vk_causal_conv1d_bwd_no_grad`: backward of the linear conv only
 //!     (assumes caller already applied silu_bwd to dout)
 
-use crate::vk_ops::dispatch_simple;
-use crate::vk_tensor::{VkDType, VkTensor};
+use crate::vk_ops::silu::vk_silu;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
+use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -34,7 +35,10 @@ pub fn vk_causal_conv1d_no_grad(
     kernel_size: usize,
 ) -> Result<VkTensor> {
     anyhow::ensure!(x.dtype() == VkDType::F32, "vk_causal_conv1d: F32 only");
-    anyhow::ensure!(weight.dtype() == VkDType::F32, "vk_causal_conv1d: F32 weight only");
+    anyhow::ensure!(
+        weight.dtype() == VkDType::F32,
+        "vk_causal_conv1d: F32 weight only"
+    );
     anyhow::ensure!(
         x.num_elements() == batch * channels * seq_len,
         "vk_causal_conv1d: x size mismatch"
@@ -47,32 +51,296 @@ pub fn vk_causal_conv1d_no_grad(
     let out_n = batch * channels * seq_len;
     let out = alloc_f32(device, out_n)?;
 
-    let total = (batch * channels * seq_len) as u32;
-    let workgroups = (total + 255) / 256;
-    let push = [
-        batch as u32,
-        channels as u32,
-        seq_len as u32,
-        kernel_size as u32,
-    ];
-    dispatch_simple(
-        device,
-        "causal_conv1d",
-        &[
-            x.buffer().handle(),
-            weight.buffer().handle(),
-            conv_state.handle(),
-            out.handle(),
-        ],
-        &push,
-        workgroups,
-    )?;
+    let total = batch * channels * seq_len;
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let total_u32 = total as u32;
+        let workgroups = (total_u32 + 255) / 256;
+        let push = [
+            batch as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ];
+        dispatch_simple(
+            device,
+            "causal_conv1d",
+            &[
+                x.buffer().handle(),
+                weight.buffer().handle(),
+                conv_state.handle(),
+                out.handle(),
+            ],
+            &push,
+            workgroups,
+        )?;
+    } else {
+        for_each_1d_tile(total, tile_elements, |offset, len| {
+            let workgroups = ((len + 255) / 256) as u32;
+            let push = [
+                batch as u32,
+                channels as u32,
+                seq_len as u32,
+                kernel_size as u32,
+                len as u32,
+                offset as u32,
+            ];
+            dispatch_simple(
+                device,
+                "causal_conv1d_offset",
+                &[
+                    x.buffer().handle(),
+                    weight.buffer().handle(),
+                    conv_state.handle(),
+                    out.handle(),
+                ],
+                &push,
+                workgroups,
+            )
+        })?;
+    }
     Ok(VkTensor::from_buffer(
         out,
         vec![batch, channels, seq_len],
         VkDType::F32,
         Arc::clone(device),
     ))
+}
+
+/// Forward causal Conv1d linear pre-activation. Use this in training,
+/// followed by `vk_silu`, so SiLU's exact derivative remains in the graph.
+pub fn vk_causal_conv1d_pre_silu_no_grad(
+    x: &VkTensor,
+    weight: &VkTensor,
+    conv_state: &Arc<VulkanBuffer>,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<VkTensor> {
+    anyhow::ensure!(x.dtype() == VkDType::F32, "vk_causal_conv1d: F32 only");
+    anyhow::ensure!(
+        weight.dtype() == VkDType::F32,
+        "vk_causal_conv1d: F32 weight only"
+    );
+    anyhow::ensure!(
+        x.num_elements() == batch * channels * seq_len,
+        "vk_causal_conv1d: x size mismatch"
+    );
+    anyhow::ensure!(
+        weight.num_elements() == channels * kernel_size,
+        "vk_causal_conv1d: weight size mismatch"
+    );
+    let device = x.device();
+    let out_n = batch * channels * seq_len;
+    let out = alloc_f32(device, out_n)?;
+
+    let total = batch * channels * seq_len;
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let total_u32 = total as u32;
+        let workgroups = (total_u32 + 255) / 256;
+        let push = [
+            batch as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_causal_conv1d_pre_silu",
+            &[
+                x.buffer().handle(),
+                weight.buffer().handle(),
+                conv_state.handle(),
+                out.handle(),
+            ],
+            &push,
+            workgroups,
+        )?;
+    } else {
+        for_each_1d_tile(total, tile_elements, |offset, len| {
+            let workgroups = ((len + 255) / 256) as u32;
+            let push = [
+                batch as u32,
+                channels as u32,
+                seq_len as u32,
+                kernel_size as u32,
+                len as u32,
+                offset as u32,
+            ];
+            dispatch_simple(
+                device,
+                "vk_causal_conv1d_pre_silu_offset",
+                &[
+                    x.buffer().handle(),
+                    weight.buffer().handle(),
+                    conv_state.handle(),
+                    out.handle(),
+                ],
+                &push,
+                workgroups,
+            )
+        })?;
+    }
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, channels, seq_len],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+fn vk_causal_conv1d_dx_no_grad(
+    d_out: &VkTensor,
+    weight: &VkTensor,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<VkTensor> {
+    let device = d_out.device();
+    let d_x_buf = alloc_f32(device, batch * channels * seq_len)?;
+    let total = batch * channels * seq_len;
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let total_u32 = total as u32;
+        let workgroups = (total_u32 + 255) / 256;
+        let push = [
+            batch as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_causal_conv1d_bwd",
+            &[
+                d_out.buffer().handle(),
+                weight.buffer().handle(),
+                d_x_buf.handle(),
+            ],
+            &push,
+            workgroups,
+        )?;
+    } else {
+        for_each_1d_tile(total, tile_elements, |offset, len| {
+            let workgroups = ((len + 255) / 256) as u32;
+            let push = [
+                batch as u32,
+                channels as u32,
+                seq_len as u32,
+                kernel_size as u32,
+                len as u32,
+                offset as u32,
+            ];
+            dispatch_simple(
+                device,
+                "vk_causal_conv1d_bwd_offset",
+                &[
+                    d_out.buffer().handle(),
+                    weight.buffer().handle(),
+                    d_x_buf.handle(),
+                ],
+                &push,
+                workgroups,
+            )
+        })?;
+    }
+    Ok(VkTensor::from_buffer(
+        d_x_buf,
+        vec![batch, channels, seq_len],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+#[derive(Debug)]
+struct CausalConv1dPreSiluBackward {
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+    inputs: [VkTensor; 2],
+}
+
+impl VkBackwardOp for CausalConv1dPreSiluBackward {
+    fn op_name(&self) -> &'static str {
+        "causal_conv1d_pre_silu"
+    }
+
+    fn input_refs(&self) -> &[VkTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
+        let dx = vk_causal_conv1d_dx_no_grad(
+            grad_out,
+            &self.inputs[1],
+            self.batch,
+            self.channels,
+            self.seq_len,
+            self.kernel_size,
+        )?;
+        // The base depthwise conv weights are frozen in vk-native LoRA
+        // training, so only propagate through the activation input.
+        Ok(vec![Some(dx), None])
+    }
+}
+
+/// Autograd-aware causal Conv1d with fused forward semantics.
+///
+/// Forward computes the exact same `silu(depthwise_conv(...))` value as
+/// `vk_causal_conv1d_no_grad`; the training path keeps the linear conv and
+/// SiLU as separate autograd nodes so gradients flow through GDN layers.
+pub fn vk_causal_conv1d(
+    x: &VkTensor,
+    weight: &VkTensor,
+    conv_state: &Arc<VulkanBuffer>,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<VkTensor> {
+    if !x.requires_grad() && !weight.requires_grad() {
+        return vk_causal_conv1d_no_grad(
+            x,
+            weight,
+            conv_state,
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+        );
+    }
+    let pre = vk_causal_conv1d_pre_silu_no_grad(
+        x,
+        weight,
+        conv_state,
+        batch,
+        channels,
+        seq_len,
+        kernel_size,
+    )?;
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if x.requires_grad() || weight.requires_grad() {
+        Some(Arc::new(CausalConv1dPreSiluBackward {
+            batch,
+            channels,
+            seq_len,
+            kernel_size,
+            inputs: [x.clone(), weight.clone()],
+        }))
+    } else {
+        None
+    };
+    let pre = VkTensor::from_op(
+        Arc::clone(pre.buffer()),
+        pre.shape().to_vec(),
+        pre.dtype(),
+        Arc::clone(pre.device()),
+        grad_fn,
+    );
+    vk_silu(&pre)
 }
 
 /// Backward causal Conv1d (linear part only — caller has applied
@@ -103,25 +371,52 @@ pub fn vk_causal_conv1d_bwd_no_grad(
 
     // d_x via GPU shader
     let d_x_buf = alloc_f32(device, batch * channels * seq_len)?;
-    let total = (batch * channels * seq_len) as u32;
-    let workgroups = (total + 255) / 256;
-    let push = [
-        batch as u32,
-        channels as u32,
-        seq_len as u32,
-        kernel_size as u32,
-    ];
-    dispatch_simple(
-        device,
-        "vk_causal_conv1d_bwd",
-        &[
-            d_out.buffer().handle(),
-            weight.buffer().handle(),
-            d_x_buf.handle(),
-        ],
-        &push,
-        workgroups,
-    )?;
+    let total = batch * channels * seq_len;
+    let tile_elements = vk_1d_tile_elements();
+    if total <= tile_elements {
+        let total_u32 = total as u32;
+        let workgroups = (total_u32 + 255) / 256;
+        let push = [
+            batch as u32,
+            channels as u32,
+            seq_len as u32,
+            kernel_size as u32,
+        ];
+        dispatch_simple(
+            device,
+            "vk_causal_conv1d_bwd",
+            &[
+                d_out.buffer().handle(),
+                weight.buffer().handle(),
+                d_x_buf.handle(),
+            ],
+            &push,
+            workgroups,
+        )?;
+    } else {
+        for_each_1d_tile(total, tile_elements, |offset, len| {
+            let workgroups = ((len + 255) / 256) as u32;
+            let push = [
+                batch as u32,
+                channels as u32,
+                seq_len as u32,
+                kernel_size as u32,
+                len as u32,
+                offset as u32,
+            ];
+            dispatch_simple(
+                device,
+                "vk_causal_conv1d_bwd_offset",
+                &[
+                    d_out.buffer().handle(),
+                    weight.buffer().handle(),
+                    d_x_buf.handle(),
+                ],
+                &push,
+                workgroups,
+            )
+        })?;
+    }
     let d_x = VkTensor::from_buffer(
         d_x_buf,
         vec![batch, channels, seq_len],
@@ -195,4 +490,3 @@ pub fn vk_causal_conv1d_bwd_no_grad(
 
     Ok((d_x, dw, dcs_buf))
 }
-

@@ -6,18 +6,15 @@
 //! `vk_scale_inplace(t, scale)`: multiplies every element by `scale`
 //! in-place. Used before softmax to apply `1/sqrt(head_dim)`.
 
-use crate::vk_ops::dispatch_simple;
 use crate::vk_ops::elementwise::vk_add_no_grad;
 use crate::vk_ops::reduce::vk_zeros_like;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkDType, VkTensor};
 use anyhow::Result;
 
 /// In-place additive causal mask on `[batch_heads, q_len, k_len]`.
 pub fn vk_causal_mask_inplace(scores: &VkTensor, kv_offset: usize) -> Result<()> {
-    anyhow::ensure!(
-        scores.dtype() == VkDType::F32,
-        "vk_causal_mask: F32-only"
-    );
+    anyhow::ensure!(scores.dtype() == VkDType::F32, "vk_causal_mask: F32-only");
     anyhow::ensure!(
         scores.shape().len() == 3,
         "vk_causal_mask: rank-3 required [batch_heads, q_len, k_len] (got {:?})",
@@ -42,15 +39,29 @@ pub fn vk_causal_mask_inplace(scores: &VkTensor, kv_offset: usize) -> Result<()>
 pub fn vk_scale_inplace(t: &VkTensor, scale: f32) -> Result<()> {
     anyhow::ensure!(t.dtype() == VkDType::F32, "vk_scale_inplace: F32-only");
     let n = t.num_elements();
-    let workgroups = ((n + 255) / 256) as u32;
-    let push = [n as u32, scale.to_bits()];
-    dispatch_simple(
-        t.device(),
-        "vk_scale_inplace_f32",
-        &[t.buffer().handle()],
-        &push,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if n <= tile_elements {
+        let workgroups = ((n + 255) / 256) as u32;
+        let push = [n as u32, scale.to_bits()];
+        return dispatch_simple(
+            t.device(),
+            "vk_scale_inplace_f32",
+            &[t.buffer().handle()],
+            &push,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(n, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push = [len as u32, scale.to_bits(), offset as u32];
+        dispatch_simple(
+            t.device(),
+            "vk_scale_inplace_f32_offset",
+            &[t.buffer().handle()],
+            &push,
+            workgroups,
+        )
+    })
 }
 
 /// Out-of-place scalar multiply: returns a fresh VkTensor = t * scale.
@@ -97,10 +108,7 @@ impl crate::vk_tensor::VkBackwardOp for ScaleBackward {
     fn input_refs(&self) -> &[VkTensor] {
         &self.inputs
     }
-    fn backward(
-        &self,
-        grad_out: &VkTensor,
-    ) -> anyhow::Result<Vec<Option<VkTensor>>> {
+    fn backward(&self, grad_out: &VkTensor) -> anyhow::Result<Vec<Option<VkTensor>>> {
         let g = vk_scale_no_grad(grad_out, self.scale)?;
         Ok(vec![Some(g)])
     }

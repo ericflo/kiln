@@ -4,14 +4,16 @@
 //! since it's the Phase B canonical use case.
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candle_core::{DType, Device, Tensor};
+use half::bf16;
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
 use kiln_vulkan_kernel::vk_ops::matmul::{vk_matmul, vk_matmul_no_grad};
+use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w;
 use kiln_vulkan_kernel::vk_ops::reduce::vk_mean_all;
 use kiln_vulkan_kernel::vk_ops::shape::vk_transpose_2d_no_grad;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -23,6 +25,11 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
+    VkTensor::from_candle(&t, Arc::clone(dev))
+}
+
+fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
+    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
     VkTensor::from_candle(&t, Arc::clone(dev))
 }
 
@@ -68,6 +75,47 @@ fn naive_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> 
 }
 
 #[test]
+fn vk_matmul_bf16w_canonical_weight_forward_and_dx() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 3;
+    let hidden = 5;
+    let out_dim = 4;
+    let x_data: Vec<f32> = (0..(batch * hidden))
+        .map(|i| ((i as f32) * 0.17).sin())
+        .collect();
+    // Canonical frozen projection layout: [out_dim, hidden].
+    let w_data: Vec<f32> = (0..(out_dim * hidden))
+        .map(|i| ((i as f32) * 0.11).cos() * 0.5)
+        .collect();
+    let w_bf16: Vec<f32> = w_data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+
+    let (_x_var, x) = upload_param_f32(&dev, &x_data, &[batch, hidden])?;
+    let w = upload_bf16(&dev, &w_data, &[out_dim, hidden])?;
+    let out = vk_matmul_bf16w(&x, &w)?;
+    assert_eq!(out.shape(), &[batch, out_dim]);
+
+    let mut w_t = vec![0.0_f32; hidden * out_dim];
+    for o in 0..out_dim {
+        for h in 0..hidden {
+            w_t[h * out_dim + o] = w_bf16[o * hidden + h];
+        }
+    }
+    let expected = naive_matmul(&x_data, &w_t, batch, out_dim, hidden);
+    let got = out.to_vec_f32()?;
+    let mad = max_abs_diff(&got, &expected);
+    assert!(mad < 2e-3, "bf16w forward max diff {mad}");
+
+    let loss = vk_mean_all(&out)?;
+    let grads = vk_backward(&loss)?;
+    let grad_x = grads.get(x.param_id().unwrap()).expect("dx").to_vec_f32()?;
+    let d_out = vec![1.0_f32 / (batch * out_dim) as f32; batch * out_dim];
+    let expected_dx = naive_matmul(&d_out, &w_bf16, batch, hidden, out_dim);
+    let mad_dx = max_abs_diff(&grad_x, &expected_dx);
+    assert!(mad_dx < 2e-3, "bf16w dx max diff {mad_dx}");
+    Ok(())
+}
+
+#[test]
 fn vk_matmul_forward_small() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     // [3, 4] @ [4, 2] → [3, 2]
@@ -80,7 +128,10 @@ fn vk_matmul_forward_small() -> Result<()> {
     let got = c.to_vec_f32()?;
     let expected = naive_matmul(&a_data, &b_data, 3, 2, 4);
     let mad = max_abs_diff(&got, &expected);
-    assert!(mad < 1e-5, "max abs diff {mad}; got {got:?} vs {expected:?}");
+    assert!(
+        mad < 1e-5,
+        "max abs diff {mad}; got {got:?} vs {expected:?}"
+    );
     Ok(())
 }
 
@@ -92,12 +143,8 @@ fn vk_matmul_forward_tile_boundary() -> Result<()> {
     let m = 17;
     let k = 33;
     let n = 19;
-    let a_data: Vec<f32> = (0..(m * k))
-        .map(|i| ((i as f32) * 0.013).sin())
-        .collect();
-    let b_data: Vec<f32> = (0..(k * n))
-        .map(|i| ((i as f32) * 0.027).cos())
-        .collect();
+    let a_data: Vec<f32> = (0..(m * k)).map(|i| ((i as f32) * 0.013).sin()).collect();
+    let b_data: Vec<f32> = (0..(k * n)).map(|i| ((i as f32) * 0.027).cos()).collect();
     let a = upload_f32(&dev, &a_data, &[m, k])?;
     let b = upload_f32(&dev, &b_data, &[k, n])?;
     let c = vk_matmul_no_grad(&a, &b)?;

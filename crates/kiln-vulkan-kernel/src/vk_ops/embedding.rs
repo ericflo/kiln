@@ -26,10 +26,7 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 /// `vk_embedding_lookup`. (We use F32 dtype here to keep the dtype enum
 /// surface small for Phase E; real u32 dtype support is a Phase H
 /// cleanup.)
-pub fn upload_u32_ids(
-    device: &Arc<VulkanDevice>,
-    ids: &[u32],
-) -> Result<VkTensor> {
+pub fn upload_u32_ids(device: &Arc<VulkanDevice>, ids: &[u32]) -> Result<VkTensor> {
     let bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
     let buf = VulkanBuffer::create_device_local(
         device.device(),
@@ -69,7 +66,11 @@ pub fn vk_embedding_lookup_f32(
     dispatch_simple(
         weight.device(),
         "vk_embedding_lookup_f32",
-        &[ids.buffer().handle(), weight.buffer().handle(), out.handle()],
+        &[
+            ids.buffer().handle(),
+            weight.buffer().handle(),
+            out.handle(),
+        ],
         &push,
         workgroups,
     )?;
@@ -113,7 +114,11 @@ pub fn vk_embedding_lookup_bf16(
     dispatch_simple(
         weight.device(),
         "vk_embedding_lookup_bf16w_f32",
-        &[ids.buffer().handle(), weight.buffer().handle(), out.handle()],
+        &[
+            ids.buffer().handle(),
+            weight.buffer().handle(),
+            out.handle(),
+        ],
         &push,
         workgroups,
     )?;

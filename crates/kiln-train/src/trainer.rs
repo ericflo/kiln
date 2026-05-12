@@ -16,8 +16,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(test)]
 use kiln_flce_kernel::fused_linear_cross_entropy;
 use kiln_flce_kernel::{
-    DEFAULT_CHUNK_SIZE, FlceMatmulProvider, FlceProvider,
-    fused_linear_cross_entropy_dispatch,
+    DEFAULT_CHUNK_SIZE, FlceMatmulProvider, FlceProvider, fused_linear_cross_entropy_dispatch,
     fused_linear_cross_entropy_dispatch_with_provider,
 };
 use kiln_model::backend::{self, BackendRuntime};
@@ -461,7 +460,9 @@ impl TrainableLoraParams {
             }
             let dims: Vec<usize> = var.as_tensor().dims().to_vec();
             let dtype = var.as_tensor().dtype();
-            if let Some(resolved) = backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)? {
+            if let Some(resolved) =
+                backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)?
+            {
                 var.set(&resolved)?;
                 synced += 1;
             }
@@ -487,10 +488,7 @@ impl TrainableLoraParams {
                 .with_context(|| "allocating AdamW second-moment Var")?;
             moments.insert(var.as_tensor().id(), AdamWMoments { m, v });
         }
-        Ok(OptimizerState {
-            moments,
-            step: 0,
-        })
+        Ok(OptimizerState { moments, step: 0 })
     }
 }
 
@@ -2168,8 +2166,8 @@ fn segment_input_via_registry_or_clone(
 ) -> Result<Tensor> {
     if resident_activation && backend.has_resident_activation(boundary) {
         let dims_vec: Vec<usize> = boundary.dims().to_vec();
-        if let Some(resolved) = backend
-            .resolve_resident_activation(boundary, &dims_vec, boundary.dtype())?
+        if let Some(resolved) =
+            backend.resolve_resident_activation(boundary, &dims_vec, boundary.dtype())?
         {
             return Ok(resolved);
         }
@@ -2213,9 +2211,8 @@ fn optimizer_step(
             eps,
             weight_decay,
         } => {
-            let state = opt_state.ok_or_else(|| {
-                anyhow::anyhow!("optimizer_step: AdamW requires OptimizerState")
-            })?;
+            let state = opt_state
+                .ok_or_else(|| anyhow::anyhow!("optimizer_step: AdamW requires OptimizerState"))?;
             state.step = state.step.saturating_add(1);
             let step = state.step;
             let resident_activation = backend.supports_resident_activation();
@@ -2383,12 +2380,10 @@ fn apply_adamw_update(
 
     let p_after_wd = p_f32.affine(1.0_f64 - lr * weight_decay as f64, 0.0)?;
     // m_new = beta1*m + (1-beta1)*g
-    let m_new = (m_f32.affine(beta1 as f64, 0.0)?
-        + g_f32.affine((1.0 - beta1) as f64, 0.0)?)?;
+    let m_new = (m_f32.affine(beta1 as f64, 0.0)? + g_f32.affine((1.0 - beta1) as f64, 0.0)?)?;
     // v_new = beta2*v + (1-beta2)*g^2
     let g_sq = (&g_f32 * &g_f32)?;
-    let v_new = (v_f32.affine(beta2 as f64, 0.0)?
-        + g_sq.affine((1.0 - beta2) as f64, 0.0)?)?;
+    let v_new = (v_f32.affine(beta2 as f64, 0.0)? + g_sq.affine((1.0 - beta2) as f64, 0.0)?)?;
 
     let bc1 = (1.0_f32 - beta1.powi(step as i32)).max(1e-20);
     let bc2 = (1.0_f32 - beta2.powi(step as i32)).max(1e-20);
@@ -6016,15 +6011,19 @@ mod tests {
         let mut grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
         for var in params.all_vars() {
             let t = var.as_tensor();
-            let g = Tensor::ones(t.shape().clone(), t.dtype(), &device)?
-                .affine(0.01, 0.0)?;
+            let g = Tensor::ones(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
             grads.insert(t.id(), g);
         }
 
         // Snapshot original params (as f32).
         let mut before: Vec<Vec<f32>> = Vec::new();
         for var in params.all_vars() {
-            before.push(var.as_tensor().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?);
+            before.push(
+                var.as_tensor()
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?,
+            );
         }
 
         let optimizer = Optimizer::AdamW {
@@ -6041,18 +6040,32 @@ mod tests {
             optimizer,
             Some(&mut opt_state),
         )?;
-        assert_eq!(opt_state.step, 1, "step counter must be 1-indexed and bumped");
+        assert_eq!(
+            opt_state.step, 1,
+            "step counter must be 1-indexed and bumped"
+        );
 
         // Every Var must have changed at least somewhere.
         let mut any_changed = false;
         for (i, var) in params.all_vars().iter().enumerate() {
-            let after = var.as_tensor().to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let after = var
+                .as_tensor()
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
             assert_eq!(after.len(), before[i].len());
-            if after.iter().zip(before[i].iter()).any(|(a, b)| (a - b).abs() > 0.0) {
+            if after
+                .iter()
+                .zip(before[i].iter())
+                .any(|(a, b)| (a - b).abs() > 0.0)
+            {
                 any_changed = true;
             }
         }
-        assert!(any_changed, "AdamW step must change at least one param value");
+        assert!(
+            any_changed,
+            "AdamW step must change at least one param value"
+        );
 
         // Every moments pair must be off zero now.
         for moments in opt_state.moments.values() {
@@ -6126,12 +6139,15 @@ mod tests {
         let g_val = 0.5f32;
         for var in params.all_vars() {
             let t = var.as_tensor();
-            let g = Tensor::ones(t.shape().clone(), t.dtype(), &device)?
-                .affine(g_val as f64, 0.0)?;
+            let g =
+                Tensor::ones(t.shape().clone(), t.dtype(), &device)?.affine(g_val as f64, 0.0)?;
             grads.insert(t.id(), g);
         }
 
-        let before = first_var.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let before = first_var
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
 
         optimizer_step_from_map(
             &*backend,

@@ -43,10 +43,7 @@ pub fn env_flag(name: &str, default: bool) -> bool {
 /// ```
 pub fn env_tristate(name: &str) -> Option<bool> {
     let raw = std::env::var(name).ok();
-    let lower = raw
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase);
+    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
     match lower.as_deref() {
         Some("1") | Some("true") | Some("yes") => Some(true),
         Some("0") | Some("false") | Some("no") => Some(false),
@@ -77,30 +74,64 @@ mod tests {
     #[test]
     fn truthy_values() {
         let _g = ENV_LOCK.lock().unwrap();
-        for (val, want) in [("1", true), ("true", true), ("yes", true), ("TRUE", true), ("Yes", true), (" 1 ", true)] {
-            unsafe { std::env::set_var("KILN_TEST_FLAG_TRUTHY", val); }
-            assert_eq!(env_flag("KILN_TEST_FLAG_TRUTHY", false), want, "value {val:?}");
+        for (val, want) in [
+            ("1", true),
+            ("true", true),
+            ("yes", true),
+            ("TRUE", true),
+            ("Yes", true),
+            (" 1 ", true),
+        ] {
+            unsafe {
+                std::env::set_var("KILN_TEST_FLAG_TRUTHY", val);
+            }
+            assert_eq!(
+                env_flag("KILN_TEST_FLAG_TRUTHY", false),
+                want,
+                "value {val:?}"
+            );
         }
-        unsafe { std::env::remove_var("KILN_TEST_FLAG_TRUTHY"); }
+        unsafe {
+            std::env::remove_var("KILN_TEST_FLAG_TRUTHY");
+        }
     }
 
     #[test]
     fn falsy_values() {
         let _g = ENV_LOCK.lock().unwrap();
-        for (val, want) in [("0", false), ("false", false), ("no", false), ("FALSE", false), ("No", false), (" 0 ", false)] {
-            unsafe { std::env::set_var("KILN_TEST_FLAG_FALSY", val); }
-            assert_eq!(env_flag("KILN_TEST_FLAG_FALSY", true), want, "value {val:?}");
+        for (val, want) in [
+            ("0", false),
+            ("false", false),
+            ("no", false),
+            ("FALSE", false),
+            ("No", false),
+            (" 0 ", false),
+        ] {
+            unsafe {
+                std::env::set_var("KILN_TEST_FLAG_FALSY", val);
+            }
+            assert_eq!(
+                env_flag("KILN_TEST_FLAG_FALSY", true),
+                want,
+                "value {val:?}"
+            );
         }
-        unsafe { std::env::remove_var("KILN_TEST_FLAG_FALSY"); }
+        unsafe {
+            std::env::remove_var("KILN_TEST_FLAG_FALSY");
+        }
     }
 
     #[test]
     fn unrecognised_falls_back_to_default() {
         let _g = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("KILN_TEST_FLAG_GIBBERISH", "maybe"); }
+        unsafe {
+            std::env::set_var("KILN_TEST_FLAG_GIBBERISH", "maybe");
+        }
         assert!(env_flag("KILN_TEST_FLAG_GIBBERISH", true));
         assert!(!env_flag("KILN_TEST_FLAG_GIBBERISH", false));
-        unsafe { std::env::remove_var("KILN_TEST_FLAG_GIBBERISH"); }
+        unsafe {
+            std::env::remove_var("KILN_TEST_FLAG_GIBBERISH");
+        }
     }
 
     #[test]
@@ -108,7 +139,9 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         // Use a name unlikely to be set in any environment.
         let name = "KILN_TEST_FLAG_DEFINITELY_UNSET_b9e0a4f1";
-        unsafe { std::env::remove_var(name); }
+        unsafe {
+            std::env::remove_var(name);
+        }
         assert!(env_flag(name, true));
         assert!(!env_flag(name, false));
     }
@@ -117,13 +150,21 @@ mod tests {
     fn tristate_truthy_falsy_unset() {
         let _g = ENV_LOCK.lock().unwrap();
         let name = "KILN_TEST_TRISTATE_e7d2c9";
-        unsafe { std::env::set_var(name, "1"); }
+        unsafe {
+            std::env::set_var(name, "1");
+        }
         assert_eq!(env_tristate(name), Some(true));
-        unsafe { std::env::set_var(name, "no"); }
+        unsafe {
+            std::env::set_var(name, "no");
+        }
         assert_eq!(env_tristate(name), Some(false));
-        unsafe { std::env::set_var(name, "auto"); }
+        unsafe {
+            std::env::set_var(name, "auto");
+        }
         assert_eq!(env_tristate(name), None);
-        unsafe { std::env::remove_var(name); }
+        unsafe {
+            std::env::remove_var(name);
+        }
         assert_eq!(env_tristate(name), None);
     }
 }

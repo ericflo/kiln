@@ -7,8 +7,8 @@
 //! (each reducing ~256 elements), the second pass reduces the
 //! partials to one. For Phase A this is F32-only.
 
-use crate::vk_ops::dispatch_simple;
 use crate::vk_ops::elementwise::vk_sub_no_grad;
+use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
@@ -20,27 +20,41 @@ fn alloc_f32_buffer(device: &Arc<VulkanDevice>, n_elements: usize) -> Result<Arc
 
 // ---- fill / scale / neg ----
 
-fn dispatch_fill(
+pub(crate) fn dispatch_fill(
     device: &VulkanDevice,
     out: &VulkanBuffer,
     n_elements: usize,
     value: f32,
 ) -> Result<()> {
     anyhow::ensure!(n_elements > 0, "vk_fill: n_elements must be > 0");
-    let workgroups = ((n_elements + 255) / 256) as u32;
-    let limit = device.max_compute_work_group_count(0);
-    anyhow::ensure!(
-        workgroups <= limit,
-        "vk_fill: workgroups {workgroups} > device limit {limit}"
-    );
-    let push_constants: [u32; 2] = [n_elements as u32, value.to_bits()];
-    dispatch_simple(
-        device,
-        "vk_fill_f32",
-        &[out.handle()],
-        &push_constants,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if n_elements <= tile_elements {
+        let workgroups = ((n_elements + 255) / 256) as u32;
+        let limit = device.max_compute_work_group_count(0);
+        anyhow::ensure!(
+            workgroups <= limit,
+            "vk_fill: workgroups {workgroups} > device limit {limit}"
+        );
+        let push_constants: [u32; 2] = [n_elements as u32, value.to_bits()];
+        return dispatch_simple(
+            device,
+            "vk_fill_f32",
+            &[out.handle()],
+            &push_constants,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(n_elements, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push_constants: [u32; 3] = [len as u32, value.to_bits(), offset as u32];
+        dispatch_simple(
+            device,
+            "vk_fill_f32_offset",
+            &[out.handle()],
+            &push_constants,
+            workgroups,
+        )
+    })
 }
 
 pub fn vk_full_like(t: &VkTensor, value: f32) -> Result<VkTensor> {
@@ -89,20 +103,34 @@ fn dispatch_broadcast_scalar(
         n_elements > 0,
         "vk_broadcast_scalar: n_elements must be > 0"
     );
-    let workgroups = ((n_elements + 255) / 256) as u32;
-    let limit = device.max_compute_work_group_count(0);
-    anyhow::ensure!(
-        workgroups <= limit,
-        "vk_broadcast_scalar: workgroups {workgroups} > device limit {limit}"
-    );
-    let push_constants: [u32; 2] = [n_elements as u32, scale.to_bits()];
-    dispatch_simple(
-        device,
-        "vk_broadcast_scalar_f32",
-        &[scalar_in.handle(), out.handle()],
-        &push_constants,
-        workgroups,
-    )
+    let tile_elements = vk_1d_tile_elements();
+    if n_elements <= tile_elements {
+        let workgroups = ((n_elements + 255) / 256) as u32;
+        let limit = device.max_compute_work_group_count(0);
+        anyhow::ensure!(
+            workgroups <= limit,
+            "vk_broadcast_scalar: workgroups {workgroups} > device limit {limit}"
+        );
+        let push_constants: [u32; 2] = [n_elements as u32, scale.to_bits()];
+        return dispatch_simple(
+            device,
+            "vk_broadcast_scalar_f32",
+            &[scalar_in.handle(), out.handle()],
+            &push_constants,
+            workgroups,
+        );
+    }
+    for_each_1d_tile(n_elements, tile_elements, |offset, len| {
+        let workgroups = ((len + 255) / 256) as u32;
+        let push_constants: [u32; 3] = [len as u32, scale.to_bits(), offset as u32];
+        dispatch_simple(
+            device,
+            "vk_broadcast_scalar_f32_offset",
+            &[scalar_in.handle(), out.handle()],
+            &push_constants,
+            workgroups,
+        )
+    })
 }
 
 /// Broadcast a scalar-shaped (1-element) VkTensor to `target_shape`,
@@ -238,8 +266,7 @@ impl VkBackwardOp for MeanAllBackward {
     }
     fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
         // d mean(x) / dx_i = 1/n; broadcast scaled grad to input shape.
-        let grad_in =
-            vk_broadcast_scalar_to_no_grad(grad_out, &self.input_shape, self.inv_n)?;
+        let grad_in = vk_broadcast_scalar_to_no_grad(grad_out, &self.input_shape, self.inv_n)?;
         Ok(vec![Some(grad_in)])
     }
 }

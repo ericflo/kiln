@@ -14,7 +14,10 @@ fn cpu_softmax_lastdim(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut y = vec![0.0_f32; rows * cols];
     for r in 0..rows {
         let base = r * cols;
-        let mx = x[base..base + cols].iter().cloned().fold(f32::MIN, f32::max);
+        let mx = x[base..base + cols]
+            .iter()
+            .cloned()
+            .fold(f32::MIN, f32::max);
         let mut z = 0.0_f32;
         for c in 0..cols {
             z += (x[base + c] - mx).exp();
