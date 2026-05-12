@@ -18,7 +18,7 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, available_for_training_bytes, estimate_step_working_set,
+    self, EstimateOptions, available_for_training_bytes, estimate_step_working_set_with_options,
     format_oom_message_with_source, WeightResidency,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
@@ -32,6 +32,7 @@ use crate::training_queue::{QueueEntry, QueuedJob};
 fn enforce_training_preflight(
     state: &AppState,
     max_seq_len: usize,
+    options: EstimateOptions,
     lora_rank: usize,
 ) -> Result<(), ApiError> {
     if max_seq_len == 0 {
@@ -65,13 +66,14 @@ fn enforce_training_preflight(
         kiln_core::vram::VramSource::LinuxDrmSysfsUnified
             | kiln_core::vram::VramSource::AppleSilicon
     );
-    let estimate = estimate_step_working_set(
+    let estimate = estimate_step_working_set_with_options(
         &state.model_config,
         max_seq_len,
         lora_rank,
         num_segments,
         residency,
         weights_already_resident,
+        options,
     );
     if estimate.total_bytes > available {
         let msg = format_oom_message_with_source(
@@ -157,7 +159,21 @@ async fn submit_sft(
         &req.examples,
         Some(state.tokenizer.as_ref()),
     );
-    enforce_training_preflight(&state, max_seq_len, req.config.lora_rank)?;
+    let max_supervised_tokens = training_preflight::approximate_max_supervised_tokens_sft(
+        &req.examples,
+        Some(state.tokenizer.as_ref()),
+    );
+    enforce_training_preflight(
+        &state,
+        max_seq_len,
+        EstimateOptions {
+            max_supervised_tokens: Some(max_supervised_tokens),
+            recompute_boundaries: training_preflight::recompute_checkpoint_boundaries_for_seq_len(
+                max_seq_len,
+            ),
+        },
+        req.config.lora_rank,
+    )?;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {
@@ -245,7 +261,7 @@ async fn submit_grpo(
         &req.groups,
         Some(state.tokenizer.as_ref()),
     );
-    enforce_training_preflight(&state, max_seq_len, req.config.lora_rank)?;
+    enforce_training_preflight(&state, max_seq_len, EstimateOptions::default(), req.config.lora_rank)?;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {

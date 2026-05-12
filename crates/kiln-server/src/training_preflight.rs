@@ -94,6 +94,12 @@ pub struct WorkingSet {
     pub breakdown: Breakdown,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EstimateOptions {
+    pub max_supervised_tokens: Option<usize>,
+    pub recompute_boundaries: bool,
+}
+
 const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 /// Default safety margin: 1 GB. Large enough to absorb scratch
 /// allocations the closed-form pieces don't model directly (DRM
@@ -157,7 +163,21 @@ fn per_segment_activation_bytes(
 }
 
 /// Boundary states between segments — always live.
-fn boundary_state_bytes(cfg: &ModelConfig, max_seq_len: usize, num_segments: usize) -> u64 {
+fn boundary_state_bytes(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    num_segments: usize,
+    recompute_boundaries: bool,
+) -> u64 {
+    if recompute_boundaries {
+        let h = cfg.hidden_size as u64;
+        let t = max_seq_len as u64;
+        // Long-context SFT recomputes segment inputs on demand. At peak it
+        // keeps the upstream hidden gradient (F32) plus one detached segment
+        // input (model dtype), with a one-extra-buffer cushion for allocator
+        // overlap during recompute.
+        return 3 * h * t * 4;
+    }
     let elem = dtype_bytes(cfg.dtype);
     let h = cfg.hidden_size as u64;
     let t = max_seq_len as u64;
@@ -213,16 +233,42 @@ pub fn estimate_step_working_set(
     residency: WeightResidency,
     weights_already_resident: bool,
 ) -> WorkingSet {
+    estimate_step_working_set_with_options(
+        cfg,
+        max_seq_len,
+        lora_rank,
+        num_segments,
+        residency,
+        weights_already_resident,
+        EstimateOptions::default(),
+    )
+}
+
+pub fn estimate_step_working_set_with_options(
+    cfg: &ModelConfig,
+    max_seq_len: usize,
+    lora_rank: usize,
+    num_segments: usize,
+    residency: WeightResidency,
+    weights_already_resident: bool,
+    options: EstimateOptions,
+) -> WorkingSet {
     let base_weights = if weights_already_resident {
         0
     } else {
         approximate_base_weight_bytes(cfg).saturating_mul(residency.weight_multiplier())
     };
+    let flce_tokens = options.max_supervised_tokens.unwrap_or(max_seq_len).max(1);
     let bd = Breakdown {
         base_weights,
         per_segment_activations: per_segment_activation_bytes(cfg, max_seq_len, num_segments),
-        boundary_states: boundary_state_bytes(cfg, max_seq_len, num_segments),
-        flce_intermediates: flce_chunk_intermediate_bytes(cfg, max_seq_len),
+        boundary_states: boundary_state_bytes(
+            cfg,
+            max_seq_len,
+            num_segments,
+            options.recompute_boundaries,
+        ),
+        flce_intermediates: flce_chunk_intermediate_bytes(cfg, flce_tokens),
         lora_param_grad: lora_param_and_grad_bytes(cfg, lora_rank),
         safety_margin: SAFETY_MARGIN_BYTES,
     };
@@ -310,16 +356,45 @@ fn query_linux_mem_available_bytes() -> Option<u64> {
 /// Best-effort token count estimate for one example without paying
 /// real tokenizer cost on every submission.
 ///
-/// If `tokenizer` is provided, we tokenize one chat-templated turn
-/// and use that as a lower bound; we then upgrade to a `chars/4`
-/// upper bound across all examples so the preflight is conservative
-/// even when the first example is short and later ones are huge.
+/// If `tokenizer` is provided, use the real chat-template token count for
+/// each example. If tokenization is unavailable, fall back to a chars/4
+/// estimate plus template-envelope overhead.
 pub fn approximate_max_seq_len_sft(examples: &[SftExample], tokenizer: Option<&KilnTokenizer>) -> usize {
     examples
         .iter()
         .map(|ex| approximate_tokens_for_messages(&ex.messages, tokenizer))
         .max()
         .unwrap_or(0)
+}
+
+pub fn approximate_max_supervised_tokens_sft(
+    examples: &[SftExample],
+    tokenizer: Option<&KilnTokenizer>,
+) -> usize {
+    examples
+        .iter()
+        .map(|ex| {
+            ex.messages
+                .iter()
+                .filter(|message| message.role == "assistant")
+                .map(|message| approximate_tokens_for_text(&message.content, tokenizer))
+                .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+pub fn recompute_checkpoint_boundaries_for_seq_len(max_seq_len: usize) -> bool {
+    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
+    {
+        return forced;
+    }
+    let threshold = std::env::var("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(8192);
+    max_seq_len >= threshold
 }
 
 pub fn approximate_max_seq_len_grpo(groups: &[GrpoGroup], tokenizer: Option<&KilnTokenizer>) -> usize {
@@ -360,10 +435,7 @@ fn approximate_tokens_for_messages(
             .collect();
         if let Ok(text) = tok.apply_chat_template(&core) {
             if let Ok(ids) = tok.encode(&text) {
-                // Use the larger of the two — if real tokenization
-                // exceeds char/4, trust it; if char/4 is larger,
-                // keep that as a safety upper bound.
-                return ids.len().max(char_estimate);
+                return ids.len();
             }
         }
     }
@@ -462,6 +534,50 @@ mod tests {
         assert!(
             many.breakdown.per_segment_activations < few.breakdown.per_segment_activations,
             "more segments must reduce per-segment activation footprint"
+        );
+    }
+
+    #[test]
+    fn estimator_uses_supervised_tokens_for_flce() {
+        let cfg = qwen_4b();
+        let full_prompt = estimate_step_working_set(&cfg, 8192, 16, 8, WeightResidency::SingleCopy, false);
+        let sparse_labels = estimate_step_working_set_with_options(
+            &cfg,
+            8192,
+            16,
+            8,
+            WeightResidency::SingleCopy,
+            false,
+            EstimateOptions {
+                max_supervised_tokens: Some(512),
+                recompute_boundaries: false,
+            },
+        );
+        assert!(
+            sparse_labels.breakdown.flce_intermediates < full_prompt.breakdown.flce_intermediates,
+            "FLCE estimate should scale with supervised tokens"
+        );
+    }
+
+    #[test]
+    fn estimator_recompute_boundaries_does_not_scale_with_segment_count() {
+        let cfg = qwen_4b();
+        let cached = estimate_step_working_set(&cfg, 8192, 16, 32, WeightResidency::SingleCopy, false);
+        let recompute = estimate_step_working_set_with_options(
+            &cfg,
+            8192,
+            16,
+            32,
+            WeightResidency::SingleCopy,
+            false,
+            EstimateOptions {
+                max_supervised_tokens: None,
+                recompute_boundaries: true,
+            },
+        );
+        assert!(
+            recompute.breakdown.boundary_states < cached.breakdown.boundary_states,
+            "recomputed-boundary estimate should not charge all segment boundaries"
         );
     }
 
