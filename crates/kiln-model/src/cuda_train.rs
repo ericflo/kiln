@@ -1919,6 +1919,38 @@ pub fn cuda_causal_depthwise_conv1d_prefill_zero_state(
     Ok(output)
 }
 
+pub fn cuda_causal_depthwise_conv1d_next_state_zero_state(
+    input: &CudaTrainTensor,
+    kernel_size: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_causal_depthwise_conv1d_next_state_zero_state: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_causal_depthwise_conv1d_next_state_zero_state: expected input [rows, channels], got {:?}",
+        input.dims()
+    );
+    ensure!(
+        kernel_size > 1,
+        "cuda_causal_depthwise_conv1d_next_state_zero_state: kernel must be > 1"
+    );
+    let state_rows = kernel_size.saturating_sub(1);
+    let rows = input.dims()[0];
+    let channels = input.dims()[1];
+    if rows >= state_rows {
+        return cuda_narrow_rows(input, rows - state_rows, state_rows);
+    }
+    let prefix = CudaTrainTensor::new(Tensor::zeros(
+        (state_rows - rows, channels),
+        DType::F32,
+        input.as_tensor().device(),
+    )?)?;
+    cuda_cat_rows(&[prefix, input.clone()])
+}
+
 pub fn cuda_index_select_rows(
     input: &CudaTrainTensor,
     indices: &[usize],
@@ -4972,6 +5004,42 @@ mod tests {
                 .context("missing weight grad")?
                 .to_vec_f32()?,
             vec![1.0, 4.0, 9.0, 2.0, 6.0, 12.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_causal_depthwise_conv1d_next_state_zero_state_tracks_tail() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda conv1d state smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (3usize, 2usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let state = cuda_causal_depthwise_conv1d_next_state_zero_state(&input, 3)?;
+        assert_eq!(state.dims(), &[2, 2]);
+        assert_eq!(state.to_vec_f32()?, vec![3.0, 4.0, 5.0, 6.0]);
+
+        let short_tensor = Tensor::from_vec(vec![7.0f32, 8.0], (1usize, 2usize), &device)?;
+        let short = CudaTrainTensor::new(short_tensor)?;
+        let short_state = cuda_causal_depthwise_conv1d_next_state_zero_state(&short, 4)?;
+        assert_eq!(short_state.dims(), &[3, 2]);
+        assert_eq!(short_state.to_vec_f32()?, vec![0.0, 0.0, 0.0, 0.0, 7.0, 8.0]);
+
+        let loss = cuda_sum_all(&state)?;
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            vec![0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
         );
         Ok(())
     }
