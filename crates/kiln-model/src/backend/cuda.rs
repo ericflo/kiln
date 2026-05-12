@@ -735,4 +735,66 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn cuda_linear_prefill_apply_matches_candle_cuda_matmul() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_candle_cuda_matmul: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+
+        let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
+        let w = Tensor::from_slice(
+            &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
+            (3, 4),
+            &device,
+        )?;
+
+        let routed = backend
+            .linear_prefill_apply(&x, &w)?
+            .expect("CUDA linear_prefill_apply should accept CUDA tensors");
+        let expected = x.broadcast_matmul(&w)?;
+        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_registered_lora_delta_matches_candle_cuda_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_candle_cuda_reference: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+
+        let x = Tensor::from_slice(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], (2, 3), &device)?;
+        let a = Tensor::from_slice(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], (2, 3), &device)?;
+        let b = Tensor::from_slice(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], (4, 2), &device)?;
+        let scale = 0.5;
+
+        assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
+        backend.register_resident_activation(&a)?;
+        backend.register_resident_activation(&b)?;
+
+        let routed = backend
+            .lora_delta_resident(&x, &a, &b, scale)?
+            .expect("registered CUDA LoRA delta should engage");
+        let expected = compute_lora_delta(
+            &x,
+            &LoraProjectionWeights {
+                a: a.clone(),
+                b: b.clone(),
+            },
+            scale,
+        )?;
+
+        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        Ok(())
+    }
 }
