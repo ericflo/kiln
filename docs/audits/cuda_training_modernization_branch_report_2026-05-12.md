@@ -66,6 +66,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `b90cbd88` | CUDA train causal mask op | Adds F32 rank-3 additive causal masking with constant-mask backward passthrough coverage for native SDPA prefill composition. |
 | `306be815` | CUDA train causal SDPA composition | Wires the causal mask into a native F32 CUDA train-shell SDPA prefill helper and proves masked first-row output plus backward gradients to Q/K/V. |
 | `d6247dff` | CUDA train RMSNorm op | Adds F32 Qwen RMSNorm with analytic `dX` backward and frozen-base-weight coverage, matching the Vulkan training contract. |
+| `a70121be` | CUDA train RoPE op | Adds F32 rank-3 RoPE with inverse-rotation backward coverage and passthrough tail dimensions for native attention composition. |
 
 Local validation so far:
 
@@ -133,6 +134,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA causal-mask backward coverage; 36 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA causal SDPA prefill composition coverage; 37 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA RMSNorm analytic backward coverage; 38 CUDA train-shell tests passed.
+  - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA RoPE inverse-backward coverage; 39 CUDA train-shell tests passed.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -162,7 +164,7 @@ and quotient rules, mixed-precision passthrough casts, scalar-loss reductions, s
 projection/attention-shaped matmul, softmax Jacobian-vector products, sigmoid gates, SwiGLU
 activation derivatives, GQA head-repeat gradient summation, slice-gradient scattering, row gather
 scatter-add, inverse attention-layout permutes, inverse last-two transposes for `Q @ K.T`
-gradients, and Qwen RMSNorm analytic `dX` with frozen base weights. Initial unmasked and causal SDPA helpers now compose the native train-shell ops
+gradients, Qwen RMSNorm analytic `dX` with frozen base weights, and RoPE inverse-rotation backward. Initial unmasked and causal SDPA helpers now compose the native train-shell ops
 end-to-end and prove loss/backward reaches Q/K/V parameters. Native SGD and AdamW helpers now apply those gradients through resident optimizer kernels and
 prove tiny loss decreases, and `kiln-train` has a minimal CUDA-native linear AdamW train-step
 bridge. A conservative CUDA training arena now owns step-lifetime tensor handles and tracks
@@ -194,7 +196,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/last-two-transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/attention-permute/causal-mask/RMSNorm backward ops, unmasked and causal SDPA composition helpers, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, RoPE train op, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/last-two-transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/attention-permute/causal-mask/RMSNorm/RoPE backward ops, unmasked and causal SDPA composition helpers, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, embedding lookup/scatter, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
 
 ## Phase Plan
 
