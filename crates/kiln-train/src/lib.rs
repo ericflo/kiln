@@ -6,6 +6,8 @@
 
 pub mod replay;
 pub mod trainer;
+#[cfg(feature = "cuda")]
+pub mod cuda_train;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
 
