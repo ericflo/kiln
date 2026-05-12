@@ -2236,6 +2236,39 @@ fn bench_training(
     }) as kiln_train::trainer::ProgressCallback);
 
     let start = Instant::now();
+    #[cfg(feature = "cuda")]
+    let cuda_native = std::env::var("KILN_CUDA_NATIVE_TRAINING")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    #[cfg(not(feature = "cuda"))]
+    let cuda_native = false;
+
+    #[cfg(feature = "cuda")]
+    let result = if cuda_native {
+        kiln_train::cuda_train::cuda_native_sft_train(
+            &examples,
+            &config,
+            model_config,
+            weights,
+            tokenizer,
+            &adapter_dir,
+            "bench-adapter",
+            progress_cb,
+        )
+    } else {
+        kiln_train::trainer::sft_train(
+            &examples,
+            &config,
+            model_config,
+            weights,
+            tokenizer,
+            &adapter_dir,
+            "bench-adapter",
+            progress_cb,
+            None,
+        )
+    };
+    #[cfg(not(feature = "cuda"))]
     let result = kiln_train::trainer::sft_train(
         &examples,
         &config,

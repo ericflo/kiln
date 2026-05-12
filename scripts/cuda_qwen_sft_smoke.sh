@@ -9,6 +9,7 @@
 # Usage:
 #   scripts/cuda_qwen_sft_smoke.sh
 #   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build
+#   scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build --native-cuda
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ BENCH_BIN="${KILN_BENCH_BIN:-target/release/kiln-bench}"
 CUDA_ARCHS="${KILN_CUDA_ARCHS:-86}"
 SKIP_BUILD=0
 SKIP_DOWNLOAD=0
+NATIVE_CUDA=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -39,6 +41,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-download)
             SKIP_DOWNLOAD=1
+            shift
+            ;;
+        --native-cuda)
+            NATIVE_CUDA=1
             shift
             ;;
         --help|-h)
@@ -79,9 +85,13 @@ if [[ "$SKIP_BUILD" -eq 0 || ! -x "$BENCH_BIN" ]]; then
 fi
 
 echo "running one-step CUDA SFT smoke against $MODEL_PATH" >&2
+if [[ "$NATIVE_CUDA" -eq 1 ]]; then
+    echo "enabling KILN_CUDA_NATIVE_TRAINING=1 for native CUDA SFT smoke" >&2
+fi
 KILN_CUDA_ARCHS="$CUDA_ARCHS" \
 KILN_SPEC_METHOD=off \
 KILN_USE_FLCE=1 \
+KILN_CUDA_NATIVE_TRAINING="$NATIVE_CUDA" \
 "$BENCH_BIN" \
     --model-path "$MODEL_PATH" \
     --prompt-tokens 8 \

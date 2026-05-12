@@ -475,6 +475,26 @@ fn cuda_gdn_unflatten_head_blocks(
     cuda_reshape(&rhd, &[rows, heads * head_dim])
 }
 
+fn cuda_gdn_l2_normalize_head_rows(
+    input: &CudaTrainTensor,
+    scale: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_gdn_l2_normalize_head_rows: expected rank-2 [rows, head_dim], got {:?}",
+        input.dims()
+    );
+    let head_dim = input.dims()[1];
+    let zeros = CudaTrainTensor::new(Tensor::zeros(
+        (head_dim,),
+        DType::F32,
+        input.as_tensor().device(),
+    )?)?;
+    let normed = cuda_rmsnorm(input, &zeros, 1e-6f32 / head_dim as f32)?;
+    cuda_scale(&normed, scale / (head_dim as f32).sqrt())
+        .context("cuda GDN l2 normalize head rows")
+}
+
 pub fn cuda_gdn_lora_layer(
     input: &CudaTrainTensor,
     weights: &CudaOwnedLinearAttentionLayer,
@@ -526,6 +546,11 @@ pub fn cuda_gdn_lora_layer(
             cuda_reshape(&k_repeated, &[weights.heads_v * rows, weights.head_dim_k])?,
         )
     };
+    let q_heads = cuda_gdn_l2_normalize_head_rows(
+        &q_heads,
+        1.0f32 / (weights.head_dim_k as f32).sqrt(),
+    )?;
+    let k_heads = cuda_gdn_l2_normalize_head_rows(&k_heads, 1.0)?;
     let v_heads =
         cuda_gdn_flatten_token_major_heads(&conv_qkv.v, rows, weights.heads_v, weights.head_dim_v)?;
     let beta_heads = cuda_gdn_flatten_token_major_heads(&gates.beta, rows, weights.heads_v, 1)?;

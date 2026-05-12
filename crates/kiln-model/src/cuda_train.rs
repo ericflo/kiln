@@ -1693,14 +1693,23 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         "cuda_softplus: expected F32 input, got {:?}",
         input.dtype()
     );
-    let out = (input
+    let zeros = Tensor::zeros(input.dims(), DType::F32, input.as_tensor().device())
+        .context("cuda_softplus: zeros")?;
+    let relu_x = input
         .as_tensor()
-        .exp()
-        .context("cuda_softplus: exp input")?
-        + 1.0)
+        .maximum(&zeros)
+        .context("cuda_softplus: max(x, 0)")?;
+    let neg_x = input.as_tensor().neg().context("cuda_softplus: neg")?;
+    let relu_neg_x = neg_x
+        .maximum(&zeros)
+        .context("cuda_softplus: max(-x, 0)")?;
+    let abs_x = (&relu_x + &relu_neg_x).context("cuda_softplus: abs")?;
+    let neg_abs = abs_x.neg().context("cuda_softplus: -abs")?;
+    let log_term = (neg_abs.exp().context("cuda_softplus: exp(-abs)")? + 1.0)
         .context("cuda_softplus: add one")?
         .log()
         .context("cuda_softplus: log")?;
+    let out = (relu_x + log_term).context("cuda_softplus: stable output")?;
     let needs_grad =
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
