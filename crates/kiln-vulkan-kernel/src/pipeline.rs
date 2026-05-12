@@ -200,6 +200,18 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         SPIR_V_VK_FLCE_PER_TOKEN_LOSS_F32,
     ),
     ("vk_flce_grad_chunk_f32", SPIR_V_VK_FLCE_GRAD_CHUNK_F32),
+    ("vk_sigmoid_f32", SPIR_V_VK_SIGMOID_F32),
+    ("vk_sigmoid_bwd_f32", SPIR_V_VK_SIGMOID_BWD_F32),
+    ("vk_narrow_lastdim_f32", SPIR_V_VK_NARROW_LASTDIM_F32),
+    (
+        "vk_narrow_lastdim_bwd_f32",
+        SPIR_V_VK_NARROW_LASTDIM_BWD_F32,
+    ),
+    ("vk_index_select_rows_f32", SPIR_V_VK_INDEX_SELECT_ROWS_F32),
+    (
+        "vk_index_select_rows_bwd_f32",
+        SPIR_V_VK_INDEX_SELECT_ROWS_BWD_F32,
+    ),
 ];
 
 // Re-export the spirv_modules for use in SHADER_SPIRVS

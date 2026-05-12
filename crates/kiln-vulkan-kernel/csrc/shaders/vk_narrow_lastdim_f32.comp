@@ -1,0 +1,31 @@
+// Narrow along the last dim of a tensor (slice).
+//
+// Logical input shape:  [outer, inner_in]
+// Logical output shape: [outer, len]  with elements [start..start+len) along inner.
+//
+// Push constants: [outer, inner_in, start, len]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint outer;
+    uint inner_in;
+    uint start;
+    uint len;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = outer * len;
+    if (linear >= total) return;
+    uint i = linear / len;
+    uint j = linear % len;
+    data_out[linear] = data_in[i * inner_in + (start + j)];
+}

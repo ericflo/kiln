@@ -1,0 +1,37 @@
+// Gather rows of a 2D F32 tensor by u32 indices.
+//
+// in:      [n_rows_in, dim] F32
+// indices: [n_out] u32 — each value is a row index in [0, n_rows_in)
+// out:     [n_out, dim] F32
+//
+// Push constants: [n_out, dim, n_rows_in]
+// Bindings: in (readonly F32), indices (readonly u32), out (writeonly F32)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_out;
+    uint dim;
+    uint n_rows_in;
+};
+
+layout(binding = 0) readonly  buffer InBuf      { float data_in[]; };
+layout(binding = 1) readonly  buffer IndicesBuf { uint  data_idx[]; };
+layout(binding = 2) writeonly buffer OutBuf     { float data_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = n_out * dim;
+    if (linear >= total) return;
+    uint i = linear / dim;
+    uint d = linear % dim;
+    uint src_row = data_idx[i];
+    if (src_row >= n_rows_in) {
+        data_out[linear] = 0.0;
+        return;
+    }
+    data_out[linear] = data_in[src_row * dim + d];
+}

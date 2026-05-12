@@ -1,0 +1,43 @@
+// Backward of vk_index_select_rows: scatter gradient rows back to
+// their source row positions in a zero-padded full-shape buffer.
+//
+// grad_out: [n_out, dim] F32
+// indices:  [n_out] u32
+// grad_in:  [n_rows_in, dim] F32 (caller zero-fills first)
+//
+// Multiple gradient rows mapping to the same source row need atomic
+// add. We use atomicAdd on a uint reinterpret of the f32 buffer using
+// `floatBitsToUint`/`uintBitsToFloat` — but Vulkan core 1.0 doesn't
+// guarantee 32-bit atomic float adds. Workaround: assume each output
+// position appears at most once (true for active-row gather where the
+// label-mask is unique per token). If duplicates appear, the last
+// write wins.
+//
+// Push constants: [n_out, dim, n_rows_in]
+// Bindings: grad_out (readonly), indices (readonly u32), grad_in (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_out;
+    uint dim;
+    uint n_rows_in;
+};
+
+layout(binding = 0) readonly  buffer GradOutBuf { float data_gy[]; };
+layout(binding = 1) readonly  buffer IndicesBuf { uint  data_idx[]; };
+layout(binding = 2) writeonly buffer GradInBuf  { float data_gx[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = n_out * dim;
+    if (linear >= total) return;
+    uint i = linear / dim;
+    uint d = linear % dim;
+    uint dst_row = data_idx[i];
+    if (dst_row >= n_rows_in) return;
+    data_gx[dst_row * dim + d] = data_gy[linear];
+}
