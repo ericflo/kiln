@@ -660,6 +660,51 @@ pub fn cuda_mul_last_dim_weight(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_mul_last_dim_broadcast(
+    input: &CudaTrainTensor,
+    scalar: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_mul_last_dim_broadcast: expected non-empty input shape"
+    );
+    ensure!(
+        input.dims().len() == scalar.dims().len(),
+        "cuda_mul_last_dim_broadcast: rank mismatch input={:?} scalar={:?}",
+        input.dims(),
+        scalar.dims()
+    );
+    let rank = input.dims().len();
+    ensure!(
+        input.dims()[..rank - 1] == scalar.dims()[..rank - 1] && scalar.dims()[rank - 1] == 1,
+        "cuda_mul_last_dim_broadcast: scalar shape {:?} must match input {:?} with last dim 1",
+        scalar.dims(),
+        input.dims()
+    );
+    ensure!(
+        input.dtype() == scalar.dtype(),
+        "cuda_mul_last_dim_broadcast: dtype mismatch input={:?} scalar={:?}",
+        input.dtype(),
+        scalar.dtype()
+    );
+    let out = input
+        .as_tensor()
+        .broadcast_mul(scalar.as_tensor())
+        .context("cuda_mul_last_dim_broadcast: candle CUDA broadcast_mul")?;
+    let needs_grad = input.requires_grad()
+        || input.grad_fn().is_some()
+        || input.param_id().is_some()
+        || scalar.requires_grad()
+        || scalar.grad_fn().is_some()
+        || scalar.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MulLastDimBroadcastBackward {
+            inputs: vec![input.clone(), scalar.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_div(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -2430,6 +2475,47 @@ impl CudaBackwardOp for MulLastDimWeightBackward {
 }
 
 #[derive(Debug)]
+struct MulLastDimBroadcastBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for MulLastDimBroadcastBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_mul_last_dim_broadcast"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_mul_last_dim_broadcast backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let scalar = &self.inputs[1];
+        let input_grad = grad_out
+            .as_tensor()
+            .broadcast_mul(scalar.as_tensor())
+            .context("cuda_mul_last_dim_broadcast backward: input grad")?;
+        let scalar_grad = (grad_out.as_tensor() * input.as_tensor())
+            .context("cuda_mul_last_dim_broadcast backward: weighted grad")?
+            .sum_keepdim(D::Minus1)
+            .context("cuda_mul_last_dim_broadcast backward: reduce last dim")?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(input_grad)?),
+            Some(CudaTrainTensor::new(
+                scalar_grad
+                    .contiguous()
+                    .context("cuda_mul_last_dim_broadcast backward: contiguous scalar grad")?,
+            )?),
+        ])
+    }
+}
+
+#[derive(Debug)]
 struct DivBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -3945,6 +4031,48 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![8.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_mul_last_dim_broadcast_backward_reduces_last_dim() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_mul_last_dim_broadcast smoke: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let scalar_tensor = Tensor::from_vec(vec![10.0f32, 20.0], (2usize, 1usize), &device)?;
+        let input_id = input_tensor.id();
+        let scalar_id = scalar_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let scalar = CudaTrainTensor::parameter(scalar_tensor, scalar_id)?;
+        let product = cuda_mul_last_dim_broadcast(&input, &scalar)?;
+        let loss = cuda_sum_all(&product)?;
+
+        assert_eq!(product.dims(), &[2, 3]);
+        assert_eq!(
+            product.to_vec_f32()?,
+            vec![10.0, 20.0, 30.0, 80.0, 100.0, 120.0]
+        );
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).expect("input grad").to_vec_f32()?,
+            vec![10.0, 10.0, 10.0, 20.0, 20.0, 20.0]
+        );
+        assert_eq!(
+            grads.get(scalar_id).expect("scalar grad").to_vec_f32()?,
+            vec![6.0, 15.0]
         );
         Ok(())
     }
