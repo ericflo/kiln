@@ -713,6 +713,122 @@ pub fn cuda_rmsnorm(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+fn cuda_rope_apply(
+    input: &CudaTrainTensor,
+    cos: &CudaTrainTensor,
+    sin: &CudaTrainTensor,
+    rotary_dim: usize,
+    inverse: bool,
+) -> Result<Tensor> {
+    ensure!(
+        input.dtype() == DType::F32 && cos.dtype() == DType::F32 && sin.dtype() == DType::F32,
+        "cuda_rope: expected F32 input/cos/sin, got input={:?} cos={:?} sin={:?}",
+        input.dtype(),
+        cos.dtype(),
+        sin.dtype()
+    );
+    ensure!(
+        input.dims().len() == 3,
+        "cuda_rope: input must be rank-3 [rows, heads, head_dim], got {:?}",
+        input.dims()
+    );
+    let rows = input.dims()[0];
+    let head_dim = input.dims()[2];
+    ensure!(
+        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        "cuda_rope: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
+    );
+    let half = rotary_dim / 2;
+    ensure!(
+        cos.dims() == [rows, half],
+        "cuda_rope: cos shape {:?} != [{rows}, {half}]",
+        cos.dims()
+    );
+    ensure!(
+        sin.dims() == [rows, half],
+        "cuda_rope: sin shape {:?} != [{rows}, {half}]",
+        sin.dims()
+    );
+
+    let x_rot = input
+        .as_tensor()
+        .narrow(D::Minus1, 0, rotary_dim)
+        .context("cuda_rope: narrow rotary dims")?;
+    let x_pass = if rotary_dim < head_dim {
+        Some(
+            input
+                .as_tensor()
+                .narrow(D::Minus1, rotary_dim, head_dim - rotary_dim)
+                .context("cuda_rope: narrow passthrough dims")?,
+        )
+    } else {
+        None
+    };
+    let x1 = x_rot
+        .narrow(D::Minus1, 0, half)
+        .context("cuda_rope: narrow first half")?;
+    let x2 = x_rot
+        .narrow(D::Minus1, half, half)
+        .context("cuda_rope: narrow second half")?;
+    let cos = cos
+        .as_tensor()
+        .unsqueeze(1)
+        .context("cuda_rope: cos unsqueeze heads")?;
+    let sin = sin
+        .as_tensor()
+        .unsqueeze(1)
+        .context("cuda_rope: sin unsqueeze heads")?;
+
+    let x1_cos = x1
+        .broadcast_mul(&cos)
+        .context("cuda_rope: x1 * cos")?;
+    let x2_sin = x2
+        .broadcast_mul(&sin)
+        .context("cuda_rope: x2 * sin")?;
+    let x1_sin = x1
+        .broadcast_mul(&sin)
+        .context("cuda_rope: x1 * sin")?;
+    let x2_cos = x2
+        .broadcast_mul(&cos)
+        .context("cuda_rope: x2 * cos")?;
+    let (r1, r2) = if inverse {
+        (
+            (x1_cos + x2_sin).context("cuda_rope: inverse first half")?,
+            (x2_cos - x1_sin).context("cuda_rope: inverse second half")?,
+        )
+    } else {
+        (
+            (x1_cos - x2_sin).context("cuda_rope: forward first half")?,
+            (x1_sin + x2_cos).context("cuda_rope: forward second half")?,
+        )
+    };
+
+    match x_pass {
+        Some(pass) => Tensor::cat(&[&r1, &r2, &pass], D::Minus1).context("cuda_rope: cat output"),
+        None => Tensor::cat(&[&r1, &r2], D::Minus1).context("cuda_rope: cat output"),
+    }
+}
+
+pub fn cuda_rope(
+    input: &CudaTrainTensor,
+    cos: &CudaTrainTensor,
+    sin: &CudaTrainTensor,
+    rotary_dim: usize,
+) -> Result<CudaTrainTensor> {
+    let out = cuda_rope_apply(input, cos, sin, rotary_dim, false)?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(RopeBackward {
+            cos: cos.clone(),
+            sin: sin.clone(),
+            rotary_dim,
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: DType) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
@@ -1546,6 +1662,35 @@ impl CudaBackwardOp for RmsNormBackward {
             - correction)
             .context("cuda_rmsnorm backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad_input)?), None])
+    }
+}
+
+#[derive(Debug)]
+struct RopeBackward {
+    cos: CudaTrainTensor,
+    sin: CudaTrainTensor,
+    rotary_dim: usize,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for RopeBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_rope"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_rope backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let grad = cuda_rope_apply(grad_out, &self.cos, &self.sin, self.rotary_dim, true)
+            .context("cuda_rope backward: inverse rotation")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
 
@@ -2631,6 +2776,49 @@ mod tests {
         assert!(
             grads.get(weight_id).is_none(),
             "cuda_rmsnorm should keep frozen base weight gradient empty"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_rope_backward_applies_inverse_rotation() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_rope backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 9.0, 10.0, 3.0, 4.0, 11.0, 12.0],
+            (2usize, 1usize, 4usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let cos = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 0.0],
+            (2usize, 1usize),
+            &device,
+        )?)?;
+        let sin = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.0f32, 1.0],
+            (2usize, 1usize),
+            &device,
+        )?)?;
+        let rotated = cuda_rope(&input, &cos, &sin, 2)?;
+        let loss = cuda_sum_all(&rotated)?;
+
+        assert_eq!(rotated.dims(), &[2, 1, 4]);
+        assert_eq!(
+            rotated.to_vec_f32()?,
+            vec![1.0, 2.0, 9.0, 10.0, -4.0, 3.0, 11.0, 12.0]
+        );
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).expect("input grad").to_vec_f32()?,
+            vec![1.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0]
         );
         Ok(())
     }
