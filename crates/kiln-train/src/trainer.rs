@@ -1863,9 +1863,15 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance and
-/// the payload shape suggests that chunked dispatch is the better choice
-/// than the unfused lm_head matmul + cross-entropy path.
+/// Build a backend chunk-matmul provider for FLCE.
+///
+/// Vulkan auto-enables when the payload shape suggests that chunked dispatch is
+/// the better choice than the unfused lm_head matmul + cross-entropy path.
+/// The `model_config` argument is retained for call-site stability and for a
+/// future CUDA/Vulkan crossover rule that may need vocab or hidden size again.
+/// CUDA currently exposes the same provider only through `KILN_CUDA_FLCE=1`
+/// while the offset hook is under validation; default CUDA FLCE still uses
+/// Phase B's candle CUDA chunk matmul path.
 ///
 /// The crossover used to be measured against the pre-Phase-2 baseline
 /// (CPU-only `broadcast_matmul` for the unfused path); on Strix Halo the
@@ -1886,14 +1892,23 @@ impl FlceMatmulProvider for BackendFlceProvider {
 /// × 2 = ~12 GFLOP), so the unfused path is fine and FLCE's per-chunk
 /// fixed cost actually dominates.
 ///
-/// `KILN_VULKAN_FLCE=1` forces the provider on; `KILN_VULKAN_FLCE=0`
-/// forces it off; otherwise the auto-heuristic decides based on
-/// `label_mask`.
+/// `KILN_VULKAN_FLCE=1` forces the Vulkan provider on; `KILN_VULKAN_FLCE=0`
+/// forces it off; otherwise the auto-heuristic decides based on `label_mask`.
+/// `KILN_CUDA_FLCE=1` forces the CUDA provider on; unset/false keeps the
+/// existing candle CUDA Phase B behavior until a benchmark justifies auto-on.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
     label_mask: &[bool],
-    model_config: &ModelConfig,
+    _model_config: &ModelConfig,
 ) -> Option<FlceProvider> {
+    if backend.name() == "cuda" {
+        return match kiln_core::env_flag::env_tristate("KILN_CUDA_FLCE") {
+            Some(true) => Some(std::sync::Arc::new(BackendFlceProvider {
+                backend: backend.clone(),
+            })),
+            Some(false) | None => None,
+        };
+    }
     if backend.name() != "vulkan" {
         return None;
     }
@@ -3665,12 +3680,38 @@ mod tests {
     /// Serializes tests in this binary that mutate process-global env vars
     /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
     /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
-    /// `KILN_DISABLE_RMSNORM_BACKWARD`). `cargo test` runs tests in this
+    /// `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_CUDA_FLCE`,
+    /// `KILN_VULKAN_FLCE`). `cargo test` runs tests in this
     /// binary as parallel threads in a single process, so without this
     /// mutex one test's `set_var` can leak into another test's
     /// "monolithic baseline" forward pass. `cargo nextest run` runs each
     /// test in its own process, so this mutex is a no-op there.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[derive(Debug)]
+    struct NamedTestBackend {
+        name: &'static str,
+        device: Device,
+    }
+
+    impl NamedTestBackend {
+        fn runtime(name: &'static str) -> std::sync::Arc<dyn BackendRuntime> {
+            std::sync::Arc::new(Self {
+                name,
+                device: Device::Cpu,
+            })
+        }
+    }
+
+    impl BackendRuntime for NamedTestBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
+    }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
@@ -4945,6 +4986,79 @@ mod tests {
         assert!(!flce_auto_engage(0));
         assert!(!flce_auto_engage(1));
         assert!(!flce_auto_engage(15));
+    }
+
+    #[test]
+    fn cuda_flce_provider_requires_explicit_opt_in() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
+
+        let backend = NamedTestBackend::runtime("cuda");
+        let config = tiny_config();
+        let label_mask = vec![true; 128];
+
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_none(),
+            "CUDA FLCE must not auto-engage while the offset hook remains opt-in"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_CUDA_FLCE", "0");
+        }
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_none(),
+            "KILN_CUDA_FLCE=0 must force the CUDA backend provider off"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_CUDA_FLCE", "1");
+        }
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_some(),
+            "KILN_CUDA_FLCE=1 must opt into the CUDA backend provider"
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+        }
+    }
+
+    #[test]
+    fn vulkan_flce_provider_keeps_auto_heuristic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
+
+        let backend = NamedTestBackend::runtime("vulkan");
+        let config = tiny_config();
+        let active_label_mask = vec![true; 128];
+        let trivial_label_mask = vec![true; 8];
+
+        assert!(
+            build_flce_provider(&backend, &active_label_mask, &config).is_some(),
+            "Vulkan should still auto-engage for non-trivial supervised batches"
+        );
+        assert!(
+            build_flce_provider(&backend, &trivial_label_mask, &config).is_none(),
+            "Vulkan should still skip trivial supervised batches"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_VULKAN_FLCE", "0");
+        }
+        assert!(
+            build_flce_provider(&backend, &active_label_mask, &config).is_none(),
+            "KILN_VULKAN_FLCE=0 must keep forcing the Vulkan provider off"
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
     }
 
     /// AdamW CPU fallback path: build a tiny `TrainableLoraParams`,
