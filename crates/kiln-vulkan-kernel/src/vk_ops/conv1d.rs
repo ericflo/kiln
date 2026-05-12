@@ -20,14 +20,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_causal_conv1d: alloc f32")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 /// Forward causal Conv1d (depthwise) with fused SiLU activation.

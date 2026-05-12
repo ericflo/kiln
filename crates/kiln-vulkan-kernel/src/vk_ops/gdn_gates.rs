@@ -13,14 +13,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_gdn_gates: alloc f32")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 /// Forward GDN gates.
@@ -143,57 +136,47 @@ pub fn vk_gdn_gates_bwd_no_grad(
         workgroups,
     )?;
 
-    // CPU reduce per-nv (small reduction; nv ≤ 32 typical, total ≤ 1M)
-    let dalog_partial = {
-        let t = VkTensor::from_buffer(
-            Arc::clone(&red_dalog_buf),
-            a.shape().to_vec(),
-            VkDType::F32,
-            Arc::clone(device),
-        );
-        t.to_vec_f32()?
-    };
-    let ddt_partial = {
-        let t = VkTensor::from_buffer(
-            Arc::clone(&red_ddt_buf),
-            a.shape().to_vec(),
-            VkDType::F32,
-            Arc::clone(device),
-        );
-        t.to_vec_f32()?
-    };
-    let mut dalog = vec![0.0_f32; nv];
-    let mut ddt = vec![0.0_f32; nv];
-    for i in 0..total {
-        let n = i % nv;
-        dalog[n] += dalog_partial[i];
-        ddt[n] += ddt_partial[i];
-    }
-    let dalog_buf = alloc_f32(device, nv)?;
-    let ddt_buf = alloc_f32(device, nv)?;
-    let raw_dalog: Vec<u8> = dalog.iter().flat_map(|f| f.to_le_bytes()).collect();
-    let raw_ddt: Vec<u8> = ddt.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &dalog_buf,
-        &raw_dalog,
+    // GPU reduce per-nv: partials are laid out [outer, nv] (innermost
+    // dim is nv; the CPU loop did `n = i % nv`). Reduce via a 1×outer
+    // ones-row matmul: ones[1, outer] @ partial[outer, nv] = [1, nv].
+    // Avoids the prior 2 × total readback per layer per training step.
+    let outer = total / nv;
+    let dalog_partial_t = VkTensor::from_buffer(
+        Arc::clone(&red_dalog_buf),
+        vec![outer, nv],
+        VkDType::F32,
+        Arc::clone(device),
+    );
+    let ddt_partial_t = VkTensor::from_buffer(
+        Arc::clone(&red_ddt_buf),
+        vec![outer, nv],
+        VkDType::F32,
+        Arc::clone(device),
+    );
+    let ones_buf = alloc_f32(device, outer)?;
+    let push_fill = [outer as u32, 1.0_f32.to_bits()];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_fill_f32",
+        &[ones_buf.handle()],
+        &push_fill,
+        ((outer + 255) / 256) as u32,
     )?;
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &ddt_buf,
-        &raw_ddt,
-    )?;
+    let ones_t = VkTensor::from_buffer(
+        ones_buf,
+        vec![1, outer],
+        VkDType::F32,
+        Arc::clone(device),
+    );
+    let dalog_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dalog_partial_t)?;
+    let ddt_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &ddt_partial_t)?;
+    let dalog_t = crate::vk_ops::shape::vk_reshape(&dalog_2d, &[nv])?;
+    let ddt_t = crate::vk_ops::shape::vk_reshape(&ddt_2d, &[nv])?;
 
     Ok((
         VkTensor::from_buffer(d_a, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
         VkTensor::from_buffer(d_b, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(dalog_buf, vec![nv], VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(ddt_buf, vec![nv], VkDType::F32, Arc::clone(device)),
+        dalog_t,
+        ddt_t,
     ))
 }

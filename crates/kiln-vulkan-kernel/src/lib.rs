@@ -12,6 +12,7 @@
 //! device instead of materializing them as candle CPU storage.
 
 pub mod buffer;
+pub mod buffer_pool;
 pub mod device;
 pub mod kernels;
 pub mod pipeline;

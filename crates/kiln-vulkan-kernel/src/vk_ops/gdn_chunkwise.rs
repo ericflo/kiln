@@ -39,14 +39,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_gdn_chunkwise: alloc")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 /// Slice along time dim (dim=2 of a [B, nv, T, ...] tensor) for a
@@ -90,9 +83,10 @@ fn time_narrow_3d_no_grad(t: &VkTensor, t_start: usize, t_len: usize) -> Result<
     vk_reshape(&narrowed, &[dims[0], dims[1], t_len])
 }
 
-/// Concatenate along time axis (dim=2 of [B, nv, T, last_axis]).
-/// Used to assemble the per-chunk outputs into the final [B, nv, T, dv]
-/// tensor. CPU concat through readback (Phase 3 acceptable).
+/// Concatenate along time axis (dim=2 of [B, nv, T, last_axis]) on the
+/// GPU. Pre-allocates one [B, nv, T, last_axis] output and scatters
+/// each chunk into its time slice via `vk_scatter_to_lastdim_slice_inplace`.
+/// No CPU readbacks (was previously per-chunk to_vec_f32 + reupload).
 fn concat_time(chunks: &[VkTensor], last_axis: usize) -> Result<VkTensor> {
     anyhow::ensure!(!chunks.is_empty(), "concat_time: empty input");
     let dims = chunks[0].shape();
@@ -100,44 +94,31 @@ fn concat_time(chunks: &[VkTensor], last_axis: usize) -> Result<VkTensor> {
     let batch = dims[0];
     let nv = dims[1];
     let total_t: usize = chunks.iter().map(|c| c.shape()[2]).sum();
-    let out_n = batch * nv * total_t * last_axis;
-    let mut out = vec![0.0_f32; out_n];
-
-    let mut t_off = 0;
-    for chunk in chunks {
-        let cd = chunk.shape();
-        let c_t = cd[2];
-        let data = chunk.to_vec_f32()?;
-        for b in 0..batch {
-            for h in 0..nv {
-                for ct in 0..c_t {
-                    let src_base = ((b * nv + h) * c_t + ct) * last_axis;
-                    let dst_base = ((b * nv + h) * total_t + (t_off + ct)) * last_axis;
-                    out[dst_base..dst_base + last_axis]
-                        .copy_from_slice(&data[src_base..src_base + last_axis]);
-                }
-            }
-        }
-        t_off += c_t;
-    }
-
+    let bh = batch * nv;
+    let out_n = bh * total_t * last_axis;
     let device = chunks[0].device();
     let out_buf = alloc_f32(device, out_n)?;
-    let raw: Vec<u8> = out.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &out_buf,
-        &raw,
-    )?;
-    Ok(VkTensor::from_buffer(
+    let out_full = VkTensor::from_buffer(
         out_buf,
         vec![batch, nv, total_t, last_axis],
         VkDType::F32,
         Arc::clone(device),
-    ))
+    );
+    // View as [bh, total_t * last_axis] so a chunk slice is contiguous.
+    let dst_view = vk_reshape(&out_full, &[bh, total_t * last_axis])?;
+    let mut t_off = 0usize;
+    for chunk in chunks {
+        let c_t = chunk.shape()[2];
+        let chunk_view = vk_reshape(chunk, &[bh, c_t * last_axis])?;
+        crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+            &dst_view,
+            &chunk_view,
+            t_off * last_axis,
+            c_t * last_axis,
+        )?;
+        t_off += c_t;
+    }
+    Ok(out_full)
 }
 
 /// Per-chunk forward step.
@@ -422,127 +403,124 @@ fn upload_f32(device: &Arc<VulkanDevice>, data: &[f32], shape: Vec<usize>) -> Re
     ))
 }
 
+/// Upload a constant-filled F32 VkTensor.
+fn upload_f32_full(device: &Arc<VulkanDevice>, value: f32, shape: &[usize]) -> Result<VkTensor> {
+    let n: usize = shape.iter().product();
+    let data = vec![value; n];
+    upload_f32(device, &data, shape.to_vec())
+}
+
+/// Zero out the upper-triangular (j >= t) entries of a [B, nv, C, C]
+/// tensor on GPU. CPU pattern: build a [C, C] mask once, broadcast-mul.
+/// This impl uploads the mask once and reuses via vk_mul.
+fn strict_lower_mask_4d(t: &VkTensor, chunk: usize) -> Result<VkTensor> {
+    let dims = t.shape();
+    debug_assert_eq!(dims.len(), 4);
+    debug_assert_eq!(dims[2], chunk);
+    debug_assert_eq!(dims[3], chunk);
+    let device = t.device();
+    let mut mask = vec![0.0_f32; chunk * chunk];
+    for i in 0..chunk {
+        for j in 0..i {
+            mask[i * chunk + j] = 1.0;
+        }
+    }
+    let mask_2d = upload_f32(device, &mask, vec![chunk, chunk])?;
+    // broadcast to [B, nv, C, C] via reshape + mul. mask_2d is [C, C].
+    // vk_mul_no_grad requires same shape; reshape t to [B*nv*C, C] and
+    // broadcast mask via the same shape (it doesn't broadcast — we
+    // need to repeat the mask rows). Simpler: just mul with reshape.
+    let bh_c = dims[0] * dims[1] * dims[2];
+    // Replicate the mask to [bh_c, C] by treating it as a tile. The
+    // pattern we want: mask[r * C + j] = mask_2d[r % C, j]. Quickest:
+    // build the full mask buffer once.
+    let mut full = vec![0.0_f32; dims[0] * dims[1] * chunk * chunk];
+    for i in 0..(dims[0] * dims[1]) {
+        let off = i * chunk * chunk;
+        for j in 0..(chunk * chunk) {
+            full[off + j] = mask[j];
+        }
+    }
+    let mask_full = upload_f32(device, &full, dims.to_vec())?;
+    let _ = mask_2d;
+    crate::vk_ops::elementwise::vk_mul_no_grad(t, &mask_full)
+}
+
+/// Zero-init upload helper.
+fn upload_f32_zeros(
+    device: &Arc<VulkanDevice>,
+    n: usize,
+    shape: Vec<usize>,
+) -> Result<VkTensor> {
+    let data = vec![0.0_f32; n];
+    upload_f32(device, &data, shape)
+}
+
 impl GdnChunkwiseBackward {
-    /// CPU adjoint of the matmul-prep stage:
+    /// GPU adjoint of the matmul-prep stage:
     ///   kkt      = k_c · k_c^T          shape [B, nv, C, C]
     ///   qkt      = q_c · k_c^T          shape [B, nv, C, C]
     ///   ks_entry = k_c · S_in           shape [B, nv, C, dv]
     ///   q_s      = q_c · S_in           shape [B, nv, C, dv]
-    /// Given d_kkt, d_qkt, d_ks_entry, d_q_s, accumulates dq, dk, dS_in.
-    fn matmul_prep_bwd(
+    ///
+    /// Returns (dq, dk, dS_in) as VkTensors with shapes
+    /// [B, nv, C, dk], [B, nv, C, dk], [B, nv, dk, dv] — all GPU.
+    /// Replaces the prior CPU loops + readbacks (3 × to_vec_f32 +
+    /// O(B·nv·C²·dk + B·nv·C·dk·dv) per chunk).
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_prep_bwd_gpu(
         &self,
         ci: usize,
-        d_kkt: &[f32],
-        d_qkt: &[f32],
-        d_ks_entry: &[f32],
-        d_q_s: &[f32],
-        dq_accum: &mut [f32],
-        dk_accum: &mut [f32],
-        ds_in: &mut [f32],
-    ) {
+        d_kkt: &VkTensor,      // [B, nv, C, C]
+        d_qkt: &VkTensor,      // [B, nv, C, C]
+        d_ks_entry: &VkTensor, // [B, nv, C, dv]
+        d_q_s: &VkTensor,      // [B, nv, C, dv]
+    ) -> Result<(VkTensor, VkTensor, VkTensor)> {
         let chunk = self.chunks[ci].chunk_len;
-        let q_data = self.chunks[ci].q_c.to_vec_f32().unwrap();
-        let k_data = self.chunks[ci].k_c.to_vec_f32().unwrap();
-        let s_data = self.chunks[ci].s_in_snapshot.to_vec_f32().unwrap();
-
         let bh = self.batch * self.nv;
-        for bi in 0..bh {
-            let q_base = bi * chunk * self.dk;
-            let k_base = bi * chunk * self.dk;
-            let s_base = bi * self.dk * self.dv;
-            let cc_base = bi * chunk * chunk;
-            let cv_base = bi * chunk * self.dv;
+        let dk = self.dk;
+        let dv = self.dv;
+        let q = vk_reshape(&self.chunks[ci].q_c, &[bh, chunk, dk])?; // [bh, C, dk]
+        let k = vk_reshape(&self.chunks[ci].k_c, &[bh, chunk, dk])?;
+        let s = vk_reshape(&self.chunks[ci].s_in_snapshot, &[bh, dk, dv])?;
+        let kkt3 = vk_reshape(d_kkt, &[bh, chunk, chunk])?;
+        let qkt3 = vk_reshape(d_qkt, &[bh, chunk, chunk])?;
+        let ks3 = vk_reshape(d_ks_entry, &[bh, chunk, dv])?;
+        let qs3 = vk_reshape(d_q_s, &[bh, chunk, dv])?;
+        let q_t = vk_transpose_batched_2d_no_grad(&q)?; // [bh, dk, C]
+        let k_t = vk_transpose_batched_2d_no_grad(&k)?;
+        let s_t = vk_transpose_batched_2d_no_grad(&s)?; // [bh, dv, dk]
+        let kkt_t = vk_transpose_batched_2d_no_grad(&kkt3)?;
+        let qkt_t = vk_transpose_batched_2d_no_grad(&qkt3)?;
+        let ks_t = vk_transpose_batched_2d_no_grad(&ks3)?; // [bh, dv, C]
+        let qs_t = vk_transpose_batched_2d_no_grad(&qs3)?;
 
-            // kkt[t,i] = Σ_kk k[t,kk] · k[i,kk]
-            // dk[t,kk] += Σ_i d_kkt[t,i] · k[i,kk]
-            // dk[i,kk] += Σ_t d_kkt[t,i] · k[t,kk]
-            for t in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for i in 0..chunk {
-                        acc += d_kkt[cc_base + t * chunk + i] * k_data[k_base + i * self.dk + kk];
-                    }
-                    dk_accum[k_base + t * self.dk + kk] += acc;
-                }
-            }
-            for i in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for t in 0..chunk {
-                        acc += d_kkt[cc_base + t * chunk + i] * k_data[k_base + t * self.dk + kk];
-                    }
-                    dk_accum[k_base + i * self.dk + kk] += acc;
-                }
-            }
+        // dk contributions: from kkt (2x), qkt (1x via transpose), ks_entry
+        let dk_kkt_a = vk_matmul_batched_no_grad(&kkt3, &k)?; // [bh, C, dk]
+        let dk_kkt_b = vk_matmul_batched_no_grad(&kkt_t, &k)?;
+        let dk_qkt = vk_matmul_batched_no_grad(&qkt_t, &q)?;
+        let dk_ks = vk_matmul_batched_no_grad(&ks3, &s_t)?; // [bh, C, dk]
+        let dk1 = vk_add_no_grad(&dk_kkt_a, &dk_kkt_b)?;
+        let dk2 = vk_add_no_grad(&dk1, &dk_qkt)?;
+        let dk_sum = vk_add_no_grad(&dk2, &dk_ks)?;
+        let dk_out = vk_reshape(&dk_sum, &[self.batch, self.nv, chunk, dk])?;
 
-            // qkt[t,i] = Σ_kk q[t,kk] · k[i,kk]
-            // dq[t,kk] += Σ_i d_qkt[t,i] · k[i,kk]
-            // dk[i,kk] += Σ_t d_qkt[t,i] · q[t,kk]
-            for t in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for i in 0..chunk {
-                        acc += d_qkt[cc_base + t * chunk + i] * k_data[k_base + i * self.dk + kk];
-                    }
-                    dq_accum[q_base + t * self.dk + kk] += acc;
-                }
-            }
-            for i in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for t in 0..chunk {
-                        acc += d_qkt[cc_base + t * chunk + i] * q_data[q_base + t * self.dk + kk];
-                    }
-                    dk_accum[k_base + i * self.dk + kk] += acc;
-                }
-            }
+        // dq contributions: from qkt (d_qkt @ k) and q_s (d_q_s @ S^T)
+        let dq_qkt = vk_matmul_batched_no_grad(&qkt3, &k)?;
+        let dq_qs = vk_matmul_batched_no_grad(&qs3, &s_t)?;
+        let dq_sum = vk_add_no_grad(&dq_qkt, &dq_qs)?;
+        let dq_out = vk_reshape(&dq_sum, &[self.batch, self.nv, chunk, dk])?;
 
-            // ks_entry[t,d] = Σ_kk k[t,kk] · S[kk,d]
-            // dk[t,kk] += Σ_d d_ks_entry[t,d] · S[kk,d]
-            // dS[kk,d] += Σ_t d_ks_entry[t,d] · k[t,kk]
-            for t in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for d in 0..self.dv {
-                        acc +=
-                            d_ks_entry[cv_base + t * self.dv + d] * s_data[s_base + kk * self.dv + d];
-                    }
-                    dk_accum[k_base + t * self.dk + kk] += acc;
-                }
-            }
-            for kk in 0..self.dk {
-                for d in 0..self.dv {
-                    let mut acc = 0.0_f32;
-                    for t in 0..chunk {
-                        acc +=
-                            d_ks_entry[cv_base + t * self.dv + d] * k_data[k_base + t * self.dk + kk];
-                    }
-                    ds_in[s_base + kk * self.dv + d] += acc;
-                }
-            }
+        // dS contributions: from ks_entry (k^T @ d_ks_entry) and q_s (q^T @ d_q_s)
+        let ds_ks = vk_matmul_batched_no_grad(&k_t, &ks3)?; // [bh, dk, dv]
+        let ds_qs = vk_matmul_batched_no_grad(&q_t, &qs3)?;
+        let ds_sum = vk_add_no_grad(&ds_ks, &ds_qs)?;
+        let ds_out = vk_reshape(&ds_sum, &[self.batch, self.nv, dk, dv])?;
+        // suppress unused
+        let _ = ks_t;
+        let _ = qs_t;
 
-            // q_s[t,d] = Σ_kk q[t,kk] · S[kk,d]
-            // dq[t,kk] += Σ_d d_q_s[t,d] · S[kk,d]
-            // dS[kk,d] += Σ_t d_q_s[t,d] · q[t,kk]
-            for t in 0..chunk {
-                for kk in 0..self.dk {
-                    let mut acc = 0.0_f32;
-                    for d in 0..self.dv {
-                        acc += d_q_s[cv_base + t * self.dv + d] * s_data[s_base + kk * self.dv + d];
-                    }
-                    dq_accum[q_base + t * self.dk + kk] += acc;
-                }
-            }
-            for kk in 0..self.dk {
-                for d in 0..self.dv {
-                    let mut acc = 0.0_f32;
-                    for t in 0..chunk {
-                        acc += d_q_s[cv_base + t * self.dv + d] * q_data[q_base + t * self.dk + kk];
-                    }
-                    ds_in[s_base + kk * self.dv + d] += acc;
-                }
-            }
-        }
+        Ok((dq_out, dk_out, ds_out))
     }
 }
 
@@ -555,35 +533,65 @@ impl VkBackwardOp for GdnChunkwiseBackward {
     }
     fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
         let device = self.inputs[0].device();
-        let dout_full = grad_out.to_vec_f32()?;
         let bh = self.batch * self.nv;
 
-        // Output gradient buffers (full T, accumulated across chunks)
-        let mut dq = vec![0.0_f32; self.batch * self.nv * self.seq_len * self.dk];
-        let mut dk = vec![0.0_f32; self.batch * self.nv * self.seq_len * self.dk];
-        let mut dv_buf = vec![0.0_f32; self.batch * self.nv * self.seq_len * self.dv];
-        let mut dbeta = vec![0.0_f32; self.batch * self.nv * self.seq_len];
-        let mut dg = vec![0.0_f32; self.batch * self.nv * self.seq_len];
+        // GPU dout slicing: reshape grad_out [B, nv, T, dv] →
+        // [bh, T*dv] so vk_narrow_lastdim can carve out chunk-sized
+        // slices without a CPU readback.
+        let dout_2d = vk_reshape(grad_out, &[bh, self.seq_len * self.dv])?;
+
+        // Output gradient buffers (full T) — pre-allocated as GPU
+        // tensors. Each (b, h, t) position is written by exactly one
+        // chunk's scatter (chunks tile [0..T) without overlap), so no
+        // zero-init is needed. Per-chunk grads are scattered into the
+        // corresponding time slice on the GPU — no CPU readback.
+        let dq_full = upload_f32_zeros(
+            device,
+            self.batch * self.nv * self.seq_len * self.dk,
+            vec![self.batch, self.nv, self.seq_len, self.dk],
+        )?;
+        let dk_full = upload_f32_zeros(
+            device,
+            self.batch * self.nv * self.seq_len * self.dk,
+            vec![self.batch, self.nv, self.seq_len, self.dk],
+        )?;
+        let dv_full = upload_f32_zeros(
+            device,
+            self.batch * self.nv * self.seq_len * self.dv,
+            vec![self.batch, self.nv, self.seq_len, self.dv],
+        )?;
+        let dbeta_full = upload_f32_zeros(
+            device,
+            self.batch * self.nv * self.seq_len,
+            vec![self.batch, self.nv, self.seq_len],
+        )?;
+        let dg_full = upload_f32_zeros(
+            device,
+            self.batch * self.nv * self.seq_len,
+            vec![self.batch, self.nv, self.seq_len],
+        )?;
+        // Flat views for scattering: [bh, T * last] / [bh, T].
+        let dq_view = vk_reshape(&dq_full, &[bh, self.seq_len * self.dk])?;
+        let dk_view = vk_reshape(&dk_full, &[bh, self.seq_len * self.dk])?;
+        let dv_view = vk_reshape(&dv_full, &[bh, self.seq_len * self.dv])?;
+        let dbeta_view = vk_reshape(&dbeta_full, &[bh, self.seq_len])?;
+        let dg_view = vk_reshape(&dg_full, &[bh, self.seq_len])?;
 
         // Cross-chunk dS (carried in reverse: dS_out of chunk c = dS_in of chunk c+1)
-        let mut d_s_carry: Option<Vec<f32>> = None;
+        let mut d_s_carry: Option<VkTensor> = None;
 
         for ci in (0..self.chunks.len()).rev() {
             let chunk = self.chunks[ci].chunk_len;
             let t_off = ci * self.chunk_size;
 
-            // Slice d_out for this chunk: shape [B, nv, chunk, dv]
-            let mut d_out_chunk = vec![0.0_f32; bh * chunk * self.dv];
-            for bi in 0..bh {
-                for tt in 0..chunk {
-                    for d in 0..self.dv {
-                        let src_t = t_off + tt;
-                        d_out_chunk[bi * chunk * self.dv + tt * self.dv + d] =
-                            dout_full[bi * self.seq_len * self.dv + src_t * self.dv + d];
-                    }
-                }
-            }
-            let d_out_t = upload_f32(device, &d_out_chunk, vec![self.batch, self.nv, chunk, self.dv])?;
+            // GPU slice grad_out[..., t_off..t_off+chunk, :] →
+            // [B, nv, chunk, dv] without CPU touch.
+            let dout_chunk_2d =
+                vk_narrow_lastdim_no_grad(&dout_2d, t_off * self.dv, chunk * self.dv)?;
+            let d_out_t = vk_reshape(
+                &dout_chunk_2d,
+                &[self.batch, self.nv, chunk, self.dv],
+            )?;
 
             // chunk_scan_bwd → dq_s_scaled, db_mask, dW (initial)
             let (dq_s_scaled, db_mask, mut d_w) = vk_gdn_chunk_scan_bwd_no_grad(
@@ -596,28 +604,28 @@ impl VkBackwardOp for GdnChunkwiseBackward {
                 self.dv,
             )?;
 
-            // Initialize per-chunk grad accumulators in CPU buffers
-            let mut dq_local = vec![0.0_f32; bh * chunk * self.dk];
-            let mut dk_local = vec![0.0_f32; bh * chunk * self.dk];
-            let mut dv_local = vec![0.0_f32; bh * chunk * self.dv];
-            let mut dbeta_local = vec![0.0_f32; bh * chunk];
-            let mut dg_local = vec![0.0_f32; bh * chunk];
+            // Per-chunk grad outputs are produced as GPU tensors and
+            // scattered into the dq_full/dk_full/... buffers below — no
+            // CPU vec accumulators. (Each chunk writes a disjoint time
+            // slice, so a single scatter per output is sufficient.)
 
-            // Chunk-prep grad accumulators
-            let mut d_decay_last_col_acc = vec![0.0_f32; bh * chunk];
-            let mut d_p_last_acc = vec![0.0_f32; bh];
-            let mut d_w_acc = d_w.to_vec_f32()?;
+            // Chunk-prep grad accumulators — kept as GPU VkTensors
+            // throughout (was CPU readbacks in v1).
+            let mut d_w_acc_t = d_w.clone(); // [B, nv, C, dv]
+            let mut d_decay_last_col_acc_t = upload_f32_zeros(
+                device,
+                bh * chunk,
+                vec![self.batch, self.nv, chunk],
+            )?;
+            let mut d_p_last_acc_t =
+                upload_f32_zeros(device, bh, vec![self.batch, self.nv])?;
+            // dk_state_extra_t: optional extra dk contribution from state_exit_bwd
+            let mut dk_state_extra_t: Option<VkTensor> = None;
 
-            // state_exit_bwd if not the last chunk (i.e. dS_carry is Some)
-            if let Some(ds_carry) = d_s_carry.as_ref() {
-                let ds_t = upload_f32(
-                    device,
-                    ds_carry,
-                    vec![self.batch, self.nv, self.dk, self.dv],
-                )?;
+            if let Some(ds_carry_t) = d_s_carry.as_ref() {
                 let (_d_s_in, d_w_extra, d_k_extra, d_decay_extra, d_p_last_extra) =
                     vk_gdn_state_exit_bwd_no_grad(
-                        &ds_t,
+                        ds_carry_t,
                         &self.chunks[ci].decay_last_col,
                         &self.chunks[ci].k_c,
                         &self.chunks[ci].w,
@@ -629,32 +637,13 @@ impl VkBackwardOp for GdnChunkwiseBackward {
                         self.dk,
                         self.dv,
                     )?;
-                // Add extras to accumulators
-                let dwe = d_w_extra.to_vec_f32()?;
-                let dke = d_k_extra.to_vec_f32()?;
-                let dde = d_decay_extra.to_vec_f32()?;
-                let dpe = d_p_last_extra.to_vec_f32()?;
-                for i in 0..d_w_acc.len() {
-                    d_w_acc[i] += dwe[i];
-                }
-                for i in 0..dk_local.len() {
-                    dk_local[i] += dke[i];
-                }
-                for i in 0..d_decay_last_col_acc.len() {
-                    d_decay_last_col_acc[i] += dde[i];
-                }
-                for i in 0..d_p_last_acc.len() {
-                    d_p_last_acc[i] += dpe[i];
-                }
-                // Note: d_s_in from state_exit (= p_last·dS_carry) goes into the
-                // existing d_s_in computed below by chunk_prep_bwd. We capture
-                // separately and add at the end.
+                // GPU adds (no readbacks)
+                d_w_acc_t = vk_add_no_grad(&d_w_acc_t, &d_w_extra)?;
+                d_decay_last_col_acc_t =
+                    vk_add_no_grad(&d_decay_last_col_acc_t, &d_decay_extra)?;
+                d_p_last_acc_t = vk_add_no_grad(&d_p_last_acc_t, &d_p_last_extra)?;
+                dk_state_extra_t = Some(d_k_extra);
             }
-            let d_w_acc_t = upload_f32(
-                device,
-                &d_w_acc,
-                vec![self.batch, self.nv, chunk, self.dv],
-            )?;
 
             // Triangular-solve adjoint:
             //   dr = M^T \ d_w (d_w accumulated above)
@@ -670,70 +659,54 @@ impl VkBackwardOp for GdnChunkwiseBackward {
                 chunk,
                 self.dv,
             )?;
-            let dr_data = dr.to_vec_f32()?;
-            let beta_data = self.chunks[ci].beta_c.to_vec_f32()?;
-            let vp_data = self.chunks[ci].v_prime.to_vec_f32()?;
-            let w_data = self.chunks[ci].w.to_vec_f32()?;
-            let mut d_v_prime = vec![0.0_f32; bh * chunk * self.dv];
-            let mut d_a_strict = vec![0.0_f32; bh * chunk * chunk];
-            for bi in 0..bh {
-                let cc = bi * chunk * chunk;
-                let cv = bi * chunk * self.dv;
-                let bb = bi * chunk;
-                for t in 0..chunk {
-                    let beta_t = beta_data[bb + t];
-                    // dV'[t,d] = beta[t] · dr[t,d]
-                    for d in 0..self.dv {
-                        d_v_prime[cv + t * self.dv + d] = beta_t * dr_data[cv + t * self.dv + d];
-                    }
-                    // dbeta[t] += Σ_d v_prime[t,d] · dr[t,d]
-                    let mut acc_beta = 0.0_f32;
-                    for d in 0..self.dv {
-                        acc_beta += vp_data[cv + t * self.dv + d] * dr_data[cv + t * self.dv + d];
-                    }
-                    // dbeta also gets a contribution from W = beta · (V' - A·W), but W's
-                    // dependence on β has already been captured via dr (since dr = ∂L/∂(βV')).
-                    // Net: dbeta[t] = Σ_d V'[t,d] · dr[t,d]  +  contribution from
-                    //                 dA_strict back into β:
-                    //   ∂W/∂β_t at the diagonal: W[t] = β·(V' - Σ A·W)
-                    //                  ≡ ∂L/∂β_t · (V'[t] - Σ_{i<t} A[t,i]·W[i])
-                    //   That's just ∂L/∂(β·something) absorbed by dr already.
-                    dbeta_local[bb + t] += acc_beta;
-                    // dA_strict[t,i] for i<t: -beta[t] · dr[t,d] · W[i,d] (sum over d)
-                    for i in 0..t {
-                        let mut acc = 0.0_f32;
-                        for d in 0..self.dv {
-                            acc += dr_data[cv + t * self.dv + d] * w_data[cv + i * self.dv + d];
-                        }
-                        d_a_strict[cc + t * chunk + i] += -beta_t * acc;
-                    }
-                }
-            }
-            let d_v_prime_t = upload_f32(
-                device,
-                &d_v_prime,
-                vec![self.batch, self.nv, chunk, self.dv],
+            // Solve_tri adjoint on GPU (replaces 4 CPU readbacks + nested loops):
+            //   dV'[t,d]    = β[t] · dr[t,d]                (broadcast multiply)
+            //   dβ_chunk[t] = Σ_d V'[t,d] · dr[t,d]         (reduce via matmul·ones)
+            //   dA_strict[t,i<t] = -β[t] · (dr @ W^T)[t,i]  (matmul + scale + mask)
+            // dV' = β · dr (β broadcasts over dv axis)
+            let dr_2d = vk_reshape(&dr, &[bh * chunk, self.dv])?;
+            let beta_2d = vk_reshape(&self.chunks[ci].beta_c, &[bh * chunk, 1])?;
+            let d_v_prime_2d =
+                vk_broadcast_mul_lastdim_no_grad(&dr_2d, &beta_2d, self.dv)?;
+            let d_v_prime_t = vk_reshape(
+                &d_v_prime_2d,
+                &[self.batch, self.nv, chunk, self.dv],
             )?;
-            let d_a_strict_t = upload_f32(
-                device,
-                &d_a_strict,
-                vec![self.batch, self.nv, chunk, chunk],
-            )?;
-            let d_decay_last_col_t = upload_f32(
-                device,
-                &d_decay_last_col_acc,
-                vec![self.batch, self.nv, chunk],
-            )?;
-            let d_p_last_t = upload_f32(device, &d_p_last_acc, vec![self.batch, self.nv])?;
 
+            // dβ_chunk[t] = Σ_d V'[t,d] · dr[t,d] — kept on GPU and
+            // scattered directly into dbeta_full below.
+            let prod = vk_mul_no_grad(&self.chunks[ci].v_prime, &dr)?;
+            let prod_3d = vk_reshape(&prod, &[1, bh * chunk, self.dv])?;
+            let ones_dv = upload_f32_full(device, 1.0_f32, &[1, self.dv, 1])?;
+            let dbeta_3d = vk_matmul_batched_no_grad(&prod_3d, &ones_dv)?;
+            let dbeta_chunk = vk_reshape(&dbeta_3d, &[bh, chunk])?;
+            crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+                &dbeta_view,
+                &dbeta_chunk,
+                t_off,
+                chunk,
+            )?;
+
+            // dA_strict[t,i] = -β[t] · (dr @ W^T)[t,i] for i < t else 0
+            let dr_3 = vk_reshape(&dr, &[bh, chunk, self.dv])?;
+            let w_3 = vk_reshape(&self.chunks[ci].w, &[bh, chunk, self.dv])?;
+            let w_t = vk_transpose_batched_2d_no_grad(&w_3)?;
+            let dr_w_t = vk_matmul_batched_no_grad(&dr_3, &w_t)?;
+            let dr_w_t_2d = vk_reshape(&dr_w_t, &[bh * chunk, chunk])?;
+            let beta_neg_2d = vk_scale_no_grad(&beta_2d, -1.0_f32)?;
+            let scaled_2d =
+                vk_broadcast_mul_lastdim_no_grad(&dr_w_t_2d, &beta_neg_2d, chunk)?;
+            let scaled =
+                vk_reshape(&scaled_2d, &[self.batch, self.nv, chunk, chunk])?;
+            let d_a_strict_t = strict_lower_mask_4d(&scaled, chunk)?;
             // chunk_prep_bwd: produces d_g, d_v, d_kkt, d_qkt, d_ks_entry, d_q_s
             let (dg_chunk, dv_chunk, d_kkt, d_qkt, d_ks_entry, d_q_s) = vk_gdn_chunk_prep_bwd_no_grad(
                 &d_a_strict_t,
                 &db_mask,
                 &d_v_prime_t,
                 &dq_s_scaled,
-                &d_decay_last_col_t,
-                &d_p_last_t,
+                &d_decay_last_col_acc_t,
+                &d_p_last_acc_t,
                 &self.chunks[ci].g_c,
                 &self.chunks[ci].v_c,
                 &self.chunks[ci].kkt,
@@ -745,92 +718,79 @@ impl VkBackwardOp for GdnChunkwiseBackward {
                 chunk,
                 self.dv,
             )?;
-            // dv_local = dv_chunk
-            let dv_chunk_data = dv_chunk.to_vec_f32()?;
-            for i in 0..dv_local.len() {
-                dv_local[i] += dv_chunk_data[i];
-            }
-            // dg_local = dg_chunk
-            let dg_chunk_data = dg_chunk.to_vec_f32()?;
-            for i in 0..dg_local.len() {
-                dg_local[i] += dg_chunk_data[i];
-            }
+            // Scatter dv_chunk and dg_chunk into the full-T buffers on
+            // the GPU (no readback).
+            let dv_chunk_2d = vk_reshape(&dv_chunk, &[bh, chunk * self.dv])?;
+            crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+                &dv_view,
+                &dv_chunk_2d,
+                t_off * self.dv,
+                chunk * self.dv,
+            )?;
+            let dg_chunk_2d = vk_reshape(&dg_chunk, &[bh, chunk])?;
+            crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+                &dg_view,
+                &dg_chunk_2d,
+                t_off,
+                chunk,
+            )?;
 
             // matmul_prep_bwd: routes d_kkt, d_qkt, d_ks_entry, d_q_s into dq, dk, dS_in
-            let mut ds_in_local = vec![0.0_f32; bh * self.dk * self.dv];
-            let d_kkt_data = d_kkt.to_vec_f32()?;
-            let d_qkt_data = d_qkt.to_vec_f32()?;
-            let d_ks_data = d_ks_entry.to_vec_f32()?;
-            let d_qs_data = d_q_s.to_vec_f32()?;
-            self.matmul_prep_bwd(
-                ci,
-                &d_kkt_data,
-                &d_qkt_data,
-                &d_ks_data,
-                &d_qs_data,
-                &mut dq_local,
-                &mut dk_local,
-                &mut ds_in_local,
-            );
+            // GPU path: 8 batched matmuls + adds, no CPU loops (was the dominant
+            // per-chunk CPU cost when this was a CPU loop).
+            let (dq_gpu, dk_gpu_a, ds_in_gpu) =
+                self.matmul_prep_bwd_gpu(ci, &d_kkt, &d_qkt, &d_ks_entry, &d_q_s)?;
+            // Fold in state_exit's dk extra (if any) on GPU
+            let dk_gpu = if let Some(extra) = dk_state_extra_t.as_ref() {
+                vk_add_no_grad(&dk_gpu_a, extra)?
+            } else {
+                dk_gpu_a
+            };
+            // Compute dS_in = ds_in_gpu + p_last · dS_carry on GPU (if carry exists)
+            let ds_in_gpu_total = if let Some(carry_t) = d_s_carry.as_ref() {
+                let pl_2d = vk_reshape(&self.chunks[ci].p_last, &[bh, 1])?;
+                let carry_2d = vk_reshape(carry_t, &[bh, self.dk * self.dv])?;
+                let scaled_2d = vk_broadcast_mul_lastdim_no_grad(
+                    &carry_2d, &pl_2d, self.dk * self.dv,
+                )?;
+                let scaled = vk_reshape(
+                    &scaled_2d,
+                    &[self.batch, self.nv, self.dk, self.dv],
+                )?;
+                vk_add_no_grad(&ds_in_gpu, &scaled)?
+            } else {
+                ds_in_gpu
+            };
 
-            // Add dS_in from state_exit (p_last · dS_carry)
-            if let Some(ref ds_carry) = d_s_carry {
-                let pl_data = self.chunks[ci].p_last.to_vec_f32()?;
-                for bi in 0..bh {
-                    let p = pl_data[bi];
-                    let s_base = bi * self.dk * self.dv;
-                    for ix in 0..self.dk * self.dv {
-                        ds_in_local[s_base + ix] += p * ds_carry[s_base + ix];
-                    }
-                }
-            }
+            // Scatter dq_chunk, dk_chunk into full-T buffers on the GPU.
+            let dq_chunk_2d = vk_reshape(&dq_gpu, &[bh, chunk * self.dk])?;
+            crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+                &dq_view,
+                &dq_chunk_2d,
+                t_off * self.dk,
+                chunk * self.dk,
+            )?;
+            let dk_chunk_2d = vk_reshape(&dk_gpu, &[bh, chunk * self.dk])?;
+            crate::vk_ops::narrow::vk_scatter_to_lastdim_slice_inplace(
+                &dk_view,
+                &dk_chunk_2d,
+                t_off * self.dk,
+                chunk * self.dk,
+            )?;
 
-            // Carry for next iteration (going to chunk ci-1):
-            // ds_in for this chunk becomes ds_carry for chunk ci-1
-            d_s_carry = Some(ds_in_local);
-
-            // Splat per-chunk grads into full-T accumulators
-            for bi in 0..bh {
-                let q_base = bi * chunk * self.dk;
-                let v_base = bi * chunk * self.dv;
-                let bb = bi * chunk;
-                for tt in 0..chunk {
-                    let src_t = t_off + tt;
-                    let q_full = (bi * self.seq_len + src_t) * self.dk;
-                    let v_full = (bi * self.seq_len + src_t) * self.dv;
-                    for kk in 0..self.dk {
-                        dq[q_full + kk] += dq_local[q_base + tt * self.dk + kk];
-                        dk[q_full + kk] += dk_local[q_base + tt * self.dk + kk];
-                    }
-                    for d in 0..self.dv {
-                        dv_buf[v_full + d] += dv_local[v_base + tt * self.dv + d];
-                    }
-                    dbeta[bi * self.seq_len + src_t] += dbeta_local[bb + tt];
-                    dg[bi * self.seq_len + src_t] += dg_local[bb + tt];
-                }
-            }
+            // Carry for next iteration: dS_in becomes dS_exit of prior chunk.
+            // Keep as GPU VkTensor.
+            d_s_carry = Some(ds_in_gpu_total);
         }
 
         // The first chunk's dS_in is dropped (initial state is not trained).
-        let dq_t = upload_f32(
-            device,
-            &dq,
-            vec![self.batch, self.nv, self.seq_len, self.dk],
-        )?;
-        let dk_t = upload_f32(
-            device,
-            &dk,
-            vec![self.batch, self.nv, self.seq_len, self.dk],
-        )?;
-        let dv_t = upload_f32(
-            device,
-            &dv_buf,
-            vec![self.batch, self.nv, self.seq_len, self.dv],
-        )?;
-        let dbeta_t = upload_f32(device, &dbeta, vec![self.batch, self.nv, self.seq_len])?;
-        let dg_t = upload_f32(device, &dg, vec![self.batch, self.nv, self.seq_len])?;
-
-        Ok(vec![Some(dq_t), Some(dk_t), Some(dv_t), Some(dbeta_t), Some(dg_t)])
+        Ok(vec![
+            Some(dq_full),
+            Some(dk_full),
+            Some(dv_full),
+            Some(dbeta_full),
+            Some(dg_full),
+        ])
     }
 }
 
@@ -878,11 +838,12 @@ pub fn vk_gdn_chunkwise(
         let beta_c = time_narrow_3d_no_grad(beta, t_start, c)?;
         let g_c = time_narrow_3d_no_grad(g, t_start, c)?;
 
-        // Snapshot S_in BEFORE update for this chunk's backward
-        let s_in_snap = {
-            let s_data = state.to_vec_f32()?;
-            upload_f32(state.device(), &s_data, state.shape().to_vec())?
-        };
+        // Snapshot S_in BEFORE update for this chunk's backward.
+        // state.clone() is an Arc bump on the underlying buffer — the
+        // pre-update buffer stays alive via this snapshot even after
+        // `*state = new_state` swaps in a fresh buffer below. No CPU
+        // readback (was a 2 MB roundtrip per chunk per layer).
+        let s_in_snap = state.clone();
 
         // Compute kkt/qkt/ks_entry/q_s separately so we can save them
         let bh = batch * nv;

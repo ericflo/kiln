@@ -702,6 +702,11 @@ fn validation_requested() -> bool {
 
 impl Drop for VulkanDevice {
     fn drop(&mut self) {
+        // Release any pooled buffers tied to this logical device
+        // BEFORE destroying its descriptor/command pools — otherwise
+        // the global buffer pool's recycler could hand out a buffer
+        // whose owning device no longer has a usable descriptor pool.
+        crate::buffer_pool::pool_drop_for_device(self.device.handle());
         if let Ok(pool) = self.transient_descriptor_pool.lock() {
             unsafe {
                 self.device.destroy_descriptor_pool(*pool, None);

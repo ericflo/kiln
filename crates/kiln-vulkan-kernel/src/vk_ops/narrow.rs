@@ -11,14 +11,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_narrow: alloc")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 fn outer_inner(t: &VkTensor) -> (usize, usize) {
@@ -139,6 +132,55 @@ impl VkBackwardOp for NarrowLastDimBackward {
             Arc::clone(device),
         ))])
     }
+}
+
+/// Scatter `src` into a contiguous slice along the last dim of `dst`,
+/// in place: `dst[..., start..start+len] = src`. The non-slice region
+/// is untouched.
+///
+/// `dst` and `src` must have the same outer dims (the leading `len-1`
+/// axes), differ only on the last dim (`dst` last == `inner_in`,
+/// `src` last == `len`), and both must be F32.
+///
+/// This is the same shader the autograd backward of `vk_narrow_lastdim`
+/// uses to scatter-grad into a zero-padded buffer; here we expose it
+/// for callers (e.g. GDN chunkwise backward) that pre-allocate a
+/// full-shape destination once and write per-chunk slices into it on
+/// GPU instead of round-tripping through CPU vec splatting.
+pub fn vk_scatter_to_lastdim_slice_inplace(
+    dst: &VkTensor,
+    src: &VkTensor,
+    start: usize,
+    len: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        dst.dtype() == VkDType::F32 && src.dtype() == VkDType::F32,
+        "vk_scatter_to_lastdim_slice: F32-only"
+    );
+    let (outer_dst, inner_in) = outer_inner(dst);
+    let (outer_src, inner_src) = outer_inner(src);
+    anyhow::ensure!(
+        outer_src == outer_dst,
+        "vk_scatter_to_lastdim_slice: outer mismatch dst={outer_dst} src={outer_src}"
+    );
+    anyhow::ensure!(
+        inner_src == len,
+        "vk_scatter_to_lastdim_slice: src last dim {inner_src} != len {len}"
+    );
+    anyhow::ensure!(
+        start + len <= inner_in,
+        "vk_scatter_to_lastdim_slice: slice [{start}, {}) out of bounds inner={inner_in}",
+        start + len
+    );
+    dispatch_bwd(
+        dst.device(),
+        src.buffer(),
+        dst.buffer(),
+        outer_dst,
+        inner_in,
+        start,
+        len,
+    )
 }
 
 pub fn vk_narrow_lastdim(t: &VkTensor, start: usize, len: usize) -> Result<VkTensor> {

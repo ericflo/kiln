@@ -33,14 +33,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_flce: alloc f32")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuffer>> {
@@ -202,33 +195,13 @@ fn extract_weight_t_chunk(
         chunk_off + cur_len <= vocab,
         "flce chunk OOB: {chunk_off}+{cur_len} > {vocab}"
     );
-    let full = weight_t.to_vec_f32()?;
-    let mut chunk = vec![0.0_f32; hidden_dim * cur_len];
-    for h in 0..hidden_dim {
-        for c in 0..cur_len {
-            chunk[h * cur_len + c] = full[h * vocab + chunk_off + c];
-        }
-    }
-    let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
-    VulkanBuffer::upload_data(
-        dev.device(),
-        dev.host_visible_mem_type(),
-        dev.queue(),
-        dev.queue_family_index(),
-        &buf,
-        &bytes,
-    )?;
-    Ok(VkTensor::from_buffer(
-        Arc::new(buf),
-        vec![hidden_dim, cur_len],
-        VkDType::F32,
-        Arc::clone(dev),
-    ))
+    // GPU column-slice via vk_narrow_lastdim. weight_t is [hidden, vocab]
+    // so the last dim IS vocab — narrow on it for [chunk_off, chunk_off+cur_len)
+    // → [hidden, cur_len] in one GPU dispatch. Replaces the prior 2.5 GB
+    // CPU readback + slice + upload PER CHUNK (was ~30 GB of memory bus
+    // traffic per FLCE forward at Qwen3.5-4B vocab=248K).
+    let _ = hidden_dim;
+    crate::vk_ops::narrow::vk_narrow_lastdim_no_grad(weight_t, chunk_off, cur_len)
 }
 
 #[derive(Debug)]
@@ -389,34 +362,20 @@ fn extract_weight_chunk_rows(
     chunk_off: usize,
     cur_len: usize,
 ) -> Result<VkTensor> {
-    // weight has shape [vocab, hidden_dim]; we want rows
-    // [chunk_off, chunk_off + cur_len). That's a contiguous slice.
-    let dev = weight.device();
+    // weight is [vocab, hidden_dim]; row-slicing rows
+    // [chunk_off, chunk_off + cur_len) is a contiguous byte range, which
+    // we express as a flat narrow on the second dim of [1, vocab*hidden].
+    // Pure GPU; replaces a 2.5 GB CPU readback per chunk (Qwen3.5-4B
+    // vocab=248K × hidden=2560 × 4 bytes).
     let hidden_dim = weight.shape()[1];
-    let full = weight.to_vec_f32()?;
-    let start = chunk_off * hidden_dim;
-    let end = start + cur_len * hidden_dim;
-    let slice = &full[start..end];
-    let bytes: Vec<u8> = slice.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let buf = VulkanBuffer::create_device_local(
-        dev.device(),
-        dev.device_local_mem_type(),
-        bytes.len().max(4) as u64,
+    let vocab = weight.shape()[0];
+    let flat = crate::vk_ops::shape::vk_reshape(weight, &[1, vocab * hidden_dim])?;
+    let sliced = crate::vk_ops::narrow::vk_narrow_lastdim_no_grad(
+        &flat,
+        chunk_off * hidden_dim,
+        cur_len * hidden_dim,
     )?;
-    VulkanBuffer::upload_data(
-        dev.device(),
-        dev.host_visible_mem_type(),
-        dev.queue(),
-        dev.queue_family_index(),
-        &buf,
-        &bytes,
-    )?;
-    Ok(VkTensor::from_buffer(
-        Arc::new(buf),
-        vec![cur_len, hidden_dim],
-        VkDType::F32,
-        Arc::clone(dev),
-    ))
+    crate::vk_ops::shape::vk_reshape(&sliced, &[cur_len, hidden_dim])
 }
 
 /// Default FLCE chunk length (matches the existing kiln-flce-kernel

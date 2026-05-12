@@ -13,14 +13,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
-    let bytes = (n * 4).max(4);
-    let buf = VulkanBuffer::create_device_local(
-        device.device(),
-        device.device_local_mem_type(),
-        bytes as u64,
-    )
-    .context("vk_gdn_gated_rms_norm: alloc f32")?;
-    Ok(Arc::new(buf))
+    crate::buffer_pool::pool_alloc_f32(device, n)
 }
 
 /// Forward gated RMSNorm.
@@ -140,35 +133,39 @@ pub fn vk_gdn_gated_rms_norm_bwd_no_grad(
         workgroups,
     )?;
 
-    // CPU reduce d_w from per-row partials
+    // GPU reduce d_w from per-row partials: dw[h] = sum_r dw_partial[r, h].
+    // Use a 1×rows ones-row matmul: ones[1, rows] @ dw_partial[rows, hidden]
+    // = dw[1, hidden]. Avoids the prior per-step rows×hidden CPU readback
+    // (~15 MB/layer at typical T=918, hidden=4096).
     let dw_partial_t = VkTensor::from_buffer(
         Arc::clone(&d_w_part_buf),
         vec![rows, hidden],
         VkDType::F32,
         Arc::clone(device),
     );
-    let dw_partial = dw_partial_t.to_vec_f32()?;
-    let mut dw = vec![0.0_f32; hidden];
-    for r in 0..rows {
-        for c in 0..hidden {
-            dw[c] += dw_partial[r * hidden + c];
-        }
-    }
-    let dw_buf = alloc_f32(device, hidden)?;
-    let raw_dw: Vec<u8> = dw.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &dw_buf,
-        &raw_dw,
+    let ones_buf = alloc_f32(device, rows)?;
+    let push_fill = [rows as u32, 1.0_f32.to_bits()];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_fill_f32",
+        &[ones_buf.handle()],
+        &push_fill,
+        ((rows + 255) / 256) as u32,
     )?;
+    let ones_t = VkTensor::from_buffer(
+        ones_buf,
+        vec![1, rows],
+        VkDType::F32,
+        Arc::clone(device),
+    );
+    let dw_2d = crate::vk_ops::matmul::vk_matmul_no_grad(&ones_t, &dw_partial_t)?;
+    // Reshape [1, hidden] → [hidden]
+    let dw_t = crate::vk_ops::shape::vk_reshape(&dw_2d, &[hidden])?;
 
     Ok((
         VkTensor::from_buffer(d_x_buf, dims.to_vec(), VkDType::F32, Arc::clone(device)),
         VkTensor::from_buffer(d_z_buf, dims.to_vec(), VkDType::F32, Arc::clone(device)),
-        VkTensor::from_buffer(dw_buf, vec![hidden], VkDType::F32, Arc::clone(device)),
+        dw_t,
     ))
 }
 
