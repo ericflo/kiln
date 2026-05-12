@@ -954,6 +954,58 @@ pub fn cuda_narrow_last_dim(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_index_select_rows(
+    input: &CudaTrainTensor,
+    indices: &[usize],
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_index_select_rows: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_index_select_rows: expected rank-2 [rows, dim], got {:?}",
+        input.dims()
+    );
+    ensure!(
+        !indices.is_empty(),
+        "cuda_index_select_rows: indices must not be empty"
+    );
+    let rows = input.dims()[0];
+    for &idx in indices {
+        ensure!(
+            idx < rows,
+            "cuda_index_select_rows: index {idx} out of bounds for rows={rows}"
+        );
+    }
+
+    let mut selected = Vec::with_capacity(indices.len());
+    for &idx in indices {
+        selected.push(
+            input
+                .as_tensor()
+                .narrow(0, idx, 1)
+                .with_context(|| format!("cuda_index_select_rows: narrow row {idx}"))?
+                .contiguous()
+                .with_context(|| format!("cuda_index_select_rows: contiguous row {idx}"))?,
+        );
+    }
+    let refs: Vec<&Tensor> = selected.iter().collect();
+    let out = Tensor::cat(&refs, 0).context("cuda_index_select_rows: cat selected rows")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(IndexSelectRowsBackward {
+            indices: indices.to_vec(),
+            input_rows: input.dims()[0],
+            dim: input.dims()[1],
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -1193,6 +1245,70 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct IndexSelectRowsBackward {
+    indices: Vec<usize>,
+    input_rows: usize,
+    dim: usize,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for IndexSelectRowsBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_index_select_rows"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_index_select_rows backward expected one input, got {}",
+            self.inputs.len()
+        );
+        ensure!(
+            grad_out.dims() == [self.indices.len(), self.dim].as_slice(),
+            "cuda_index_select_rows backward: grad shape {:?} incompatible with n_out={} dim={}",
+            grad_out.dims(),
+            self.indices.len(),
+            self.dim
+        );
+
+        let mut rows = Vec::with_capacity(self.input_rows);
+        for input_row in 0..self.input_rows {
+            let mut accum = Tensor::zeros(
+                vec![1usize, self.dim],
+                grad_out.dtype(),
+                grad_out.as_tensor().device(),
+            )
+            .with_context(|| format!("cuda_index_select_rows backward: zero row {input_row}"))?;
+            for (out_row, &idx) in self.indices.iter().enumerate() {
+                if idx != input_row {
+                    continue;
+                }
+                let grad_row = grad_out
+                    .as_tensor()
+                    .narrow(0, out_row, 1)
+                    .with_context(|| {
+                        format!("cuda_index_select_rows backward: narrow grad row {out_row}")
+                    })?
+                    .contiguous()
+                    .with_context(|| {
+                        format!("cuda_index_select_rows backward: contiguous grad row {out_row}")
+                    })?;
+                accum = (&accum + &grad_row)
+                    .context("cuda_index_select_rows backward: scatter-add row")?;
+            }
+            rows.push(accum);
+        }
+        let refs: Vec<&Tensor> = rows.iter().collect();
+        let grad = Tensor::cat(&refs, 0).context("cuda_index_select_rows backward: cat rows")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -2450,6 +2566,43 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![0.0, 10.0, 20.0, 0.0, 0.0, 30.0, 40.0, 0.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_index_select_rows_backward_scatter_adds_duplicate_indices() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_index_select_rows backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (3usize, 2usize),
+            &device,
+        )?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let selected = cuda_index_select_rows(&param, &[2, 0, 2])?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
+            (3usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&selected, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(selected.dims(), &[3, 2]);
+        assert_eq!(selected.to_vec_f32()?, vec![5.0, 6.0, 1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![248.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![20.0, 2.0, 0.0, 0.0, 40.0, 4.0]
         );
         Ok(())
     }
