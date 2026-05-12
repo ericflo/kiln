@@ -89,6 +89,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `9c823d10` | CUDA GDN LoRA input projections | Adds native CUDA RMSNorm plus LoRA-enabled GDN q/k/v/z input projections with gradient coverage for the trainable LoRA slots. |
 | `bf10bf5b` | CUDA train last-dim bias op | Adds autograd-safe CUDA broadcast bias add with leading-dimension gradient reduction, needed for native GDN gate bias composition. |
 | `8f2f269a` | CUDA train exp and softplus ops | Adds autograd-safe CUDA exp and softplus primitives needed for native GDN gate composition. |
+| `c7a42fd3` | CUDA train last-dim multiply op | Adds autograd-safe CUDA broadcast multiply with leading-dimension gradient reduction, needed for native GDN decay scaling. |
 
 Local validation so far:
 
@@ -179,6 +180,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding CUDA GDN LoRA input projection coverage.
   - `cargo test --release -p kiln-model --features cuda cuda_add_last_dim_bias_backward_reduces_leading_dims --lib --quiet` passed after adding CUDA train last-dim broadcast bias.
   - `cargo test --release -p kiln-model --features cuda cuda_exp_and_softplus_backward_match_cpu_reference --lib --quiet` passed after adding CUDA train exp and softplus primitives.
+  - `cargo test --release -p kiln-model --features cuda cuda_mul_last_dim_weight_backward_reduces_leading_dims --lib --quiet` passed after adding CUDA train last-dim broadcast multiply.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
