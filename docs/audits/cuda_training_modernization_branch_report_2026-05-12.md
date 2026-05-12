@@ -91,6 +91,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `8f2f269a` | CUDA train exp and softplus ops | Adds autograd-safe CUDA exp and softplus primitives needed for native GDN gate composition. |
 | `c7a42fd3` | CUDA train last-dim multiply op | Adds autograd-safe CUDA broadcast multiply with leading-dimension gradient reduction, needed for native GDN decay scaling. |
 | `77472a62` | CUDA GDN gate composition | Adds native CUDA beta/g gate composition from GDN a/b projections, dt bias, softplus, and decay scaling. |
+| `955bdad4` | CUDA train row narrow op | Adds autograd-safe CUDA row slicing with backward zero-padding, a building block for causal conv/chunk windows. |
 
 Local validation so far:
 
@@ -183,6 +184,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_exp_and_softplus_backward_match_cpu_reference --lib --quiet` passed after adding CUDA train exp and softplus primitives.
   - `cargo test --release -p kiln-model --features cuda cuda_mul_last_dim_weight_backward_reduces_leading_dims --lib --quiet` passed after adding CUDA train last-dim broadcast multiply.
   - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding native CUDA GDN beta/g gate composition.
+  - `cargo test --release -p kiln-model --features cuda cuda_narrow_rows_backward_pads_zero_gradients --lib --quiet` passed after adding CUDA train row slicing.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
