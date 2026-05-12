@@ -1760,6 +1760,13 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
+fn synchronize_metal_tail_chunk(device: &Device, context: &'static str) -> Result<()> {
+    if matches!(device, Device::Metal(_)) {
+        device.synchronize().context(context)?;
+    }
+    Ok(())
+}
+
 fn analytic_sft_tail_grad_pre_final_norm(
     hidden: &Tensor,
     final_norm_weight: &Tensor,
@@ -1850,28 +1857,31 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = active_normed.matmul(&head_chunk)?;
-        let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
-        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-            (None, None) => {
-                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
-                (chunk_max.detach(), chunk_sumexp.detach())
-            }
-            (Some(prev_max), Some(prev_sumexp)) => {
-                let new_max = prev_max.maximum(&chunk_max)?;
-                let prev_scale = (prev_max - &new_max)?.exp()?;
-                let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
-                let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                (new_max.detach(), new_sumexp.detach())
-            }
-            _ => unreachable!("running max/sumexp are set together"),
-        };
-        running_max = Some(new_max);
-        running_sumexp = Some(new_sumexp);
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_normed.matmul(&head_chunk)?;
+            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running max/sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+        }
+        synchronize_metal_tail_chunk(device, "synchronize analytic SFT tail normalizer chunk")?;
         chunk_start += chunk_len;
     }
     let running_max = running_max.context("vocab_size was zero")?;
@@ -1883,28 +1893,31 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = active_normed.matmul(&head_chunk)?;
-        let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
-        let exp_chunk = shifted.exp()?;
-        let softmax_chunk =
-            exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
-
         let chunk_end = chunk_start + chunk_len;
-        let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-            } else if label >= vocab_size {
-                anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_normed.matmul(&head_chunk)?;
+            let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
+            let exp_chunk = shifted.exp()?;
+            let softmax_chunk =
+                exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
+
+            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+                } else if label >= vocab_size {
+                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
+                }
             }
+            let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let grad_logits = (softmax_chunk - one_hot)?.affine(inv_n, 0.0)?;
+            let head_chunk_t = head_chunk.t()?.contiguous()?;
+            let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
+            grad_normed = (&grad_normed + chunk_contrib)?.detach();
         }
-        let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
-        let grad_logits = (softmax_chunk - one_hot)?.affine(inv_n, 0.0)?;
-        let head_chunk_t = head_chunk.t()?.contiguous()?;
-        let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
-        grad_normed = (&grad_normed + chunk_contrib)?.detach();
+        synchronize_metal_tail_chunk(device, "synchronize analytic SFT tail gradient chunk")?;
 
         chunk_start = chunk_end;
     }

@@ -335,6 +335,13 @@ fn forward_chunk_matmul(
     lhs.matmul(narrowed_rhs).map_err(Into::into)
 }
 
+fn synchronize_metal_chunk(device: &Device, context: &'static str) -> Result<()> {
+    if matches!(device, Device::Metal(_)) {
+        device.synchronize().context(context)?;
+    }
+    Ok(())
+}
+
 fn forward_loss(
     hidden_leaf: &Tensor,
     head_t: &Tensor,
@@ -387,74 +394,78 @@ fn forward_loss(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-
-        // Materialize a contiguous head chunk — `narrow` on a `[H, V]`
-        // tensor preserves stride `[V, 1]` along the V axis, which CUDA
-        // matmul rejects. This matches Phase A's fix (PR #631).
-        let head_chunk = head_t_f32
-            .narrow(1, chunk_start, chunk_len)
-            .context("slice head_t chunk")?
-            .contiguous()
-            .context("contiguous head_t chunk for matmul")?;
-
-        let logits_chunk = forward_chunk_matmul(
-            &active_hidden_f32,
-            head_t,
-            &head_chunk,
-            chunk_start,
-            chunk_len,
-            provider,
-        )
-        .context("matmul active_hidden_f32 @ head_chunk")?;
-
-        let chunk_max = logits_chunk
-            .max_keepdim(D::Minus1)
-            .context("max_keepdim on logits_chunk")?;
-
-        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-            (None, None) => {
-                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                (chunk_max.detach(), chunk_sumexp.detach())
-            }
-            (Some(prev_max), Some(prev_sumexp)) => {
-                let new_max = prev_max.maximum(&chunk_max)?;
-                let prev_scale = (prev_max - &new_max)?.exp()?;
-                let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                (new_max.detach(), new_sumexp.detach())
-            }
-            _ => unreachable!("running_max and running_sumexp are set together"),
-        };
-        running_max = Some(new_max);
-        running_sumexp = Some(new_sumexp);
-
-        // Gather correct logits for labels falling inside this chunk.
         let chunk_end = chunk_start + chunk_len;
-        let mut chunk_hits: Vec<(u32, u32)> = Vec::new();
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                chunk_hits.push((row_idx as u32, (label - chunk_start) as u32));
+
+        {
+            // Materialize a contiguous head chunk — `narrow` on a `[H, V]`
+            // tensor preserves stride `[V, 1]` along the V axis, which CUDA
+            // matmul rejects. This matches Phase A's fix (PR #631).
+            let head_chunk = head_t_f32
+                .narrow(1, chunk_start, chunk_len)
+                .context("slice head_t chunk")?
+                .contiguous()
+                .context("contiguous head_t chunk for matmul")?;
+
+            let logits_chunk = forward_chunk_matmul(
+                &active_hidden_f32,
+                head_t,
+                &head_chunk,
+                chunk_start,
+                chunk_len,
+                provider,
+            )
+            .context("matmul active_hidden_f32 @ head_chunk")?;
+
+            let chunk_max = logits_chunk
+                .max_keepdim(D::Minus1)
+                .context("max_keepdim on logits_chunk")?;
+
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running_max and running_sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+
+            // Gather correct logits for labels falling inside this chunk.
+            let mut chunk_hits: Vec<(u32, u32)> = Vec::new();
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    chunk_hits.push((row_idx as u32, (label - chunk_start) as u32));
+                }
+            }
+            if !chunk_hits.is_empty() {
+                let rows: Vec<u32> = chunk_hits.iter().map(|&(r, _)| r).collect();
+                let cols: Vec<u32> = chunk_hits.iter().map(|&(_, c)| c).collect();
+                let row_idx = Tensor::new(rows.as_slice(), device)?;
+                let col_idx_2d = Tensor::new(cols.as_slice(), device)?.unsqueeze(1)?;
+                let selected_rows = logits_chunk.index_select(&row_idx, 0)?;
+                let gathered = selected_rows.gather(&col_idx_2d, 1)?.squeeze(1)?;
+                let mut cur = match correct_logit.take() {
+                    Some(t) => t,
+                    None => Tensor::zeros(num_active, DType::F32, device)?,
+                };
+                cur = cur.index_add(&row_idx, &gathered, 0)?;
+                correct_logit = Some(cur.detach());
             }
         }
-        if !chunk_hits.is_empty() {
-            let rows: Vec<u32> = chunk_hits.iter().map(|&(r, _)| r).collect();
-            let cols: Vec<u32> = chunk_hits.iter().map(|&(_, c)| c).collect();
-            let row_idx = Tensor::new(rows.as_slice(), device)?;
-            let col_idx_2d = Tensor::new(cols.as_slice(), device)?.unsqueeze(1)?;
-            let selected_rows = logits_chunk.index_select(&row_idx, 0)?;
-            let gathered = selected_rows.gather(&col_idx_2d, 1)?.squeeze(1)?;
-            let mut cur = match correct_logit.take() {
-                Some(t) => t,
-                None => Tensor::zeros(num_active, DType::F32, device)?,
-            };
-            cur = cur.index_add(&row_idx, &gathered, 0)?;
-            correct_logit = Some(cur.detach());
-        }
 
+        synchronize_metal_chunk(device, "synchronize FLCE phase B forward chunk")?;
         chunk_start = chunk_end;
     }
 
@@ -538,35 +549,39 @@ fn backward_dhidden(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = forward_chunk_matmul(
-            &active_hidden_f32,
-            head_t,
-            &head_chunk,
-            chunk_start,
-            chunk_len,
-            provider,
-        )?;
-        let chunk_max = logits_chunk.max_keepdim(D::Minus1)?;
-        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-            (None, None) => {
-                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                (chunk_max.detach(), chunk_sumexp.detach())
-            }
-            (Some(prev_max), Some(prev_sumexp)) => {
-                let new_max = prev_max.maximum(&chunk_max)?;
-                let prev_scale = (prev_max - &new_max)?.exp()?;
-                let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                (new_max.detach(), new_sumexp.detach())
-            }
-            _ => unreachable!(),
-        };
-        running_max = Some(new_max);
-        running_sumexp = Some(new_sumexp);
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = forward_chunk_matmul(
+                &active_hidden_f32,
+                head_t,
+                &head_chunk,
+                chunk_start,
+                chunk_len,
+                provider,
+            )?;
+            let chunk_max = logits_chunk.max_keepdim(D::Minus1)?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!(),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+        }
+        synchronize_metal_chunk(device, "synchronize FLCE phase B backward normalizer chunk")?;
         chunk_start += chunk_len;
     }
     let running_max = running_max.ok_or_else(|| anyhow!("vocab_size was 0"))?;
@@ -580,47 +595,50 @@ fn backward_dhidden(
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-        let logits_chunk = forward_chunk_matmul(
-            &active_hidden_f32,
-            head_t,
-            &head_chunk,
-            chunk_start,
-            chunk_len,
-            provider,
-        )?;
-        let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
-        let exp_chunk = shifted.exp()?;
-        let softmax_chunk =
-            exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
-
-        // One-hot mask for label hits inside this chunk.
         let chunk_end = chunk_start + chunk_len;
-        let mut one_hot_data: Vec<f32> = vec![0.0; num_active * chunk_len];
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                let col = label - chunk_start;
-                one_hot_data[row_idx * chunk_len + col] = 1.0;
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = forward_chunk_matmul(
+                &active_hidden_f32,
+                head_t,
+                &head_chunk,
+                chunk_start,
+                chunk_len,
+                provider,
+            )?;
+            let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
+            let exp_chunk = shifted.exp()?;
+            let softmax_chunk =
+                exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
+
+            // One-hot mask for label hits inside this chunk.
+            let mut one_hot_data: Vec<f32> = vec![0.0; num_active * chunk_len];
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    let col = label - chunk_start;
+                    one_hot_data[row_idx * chunk_len + col] = 1.0;
+                }
             }
+            let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+
+            // grad_logits_chunk = (softmax - one_hot) * (grad_loss / N)
+            let diff = (softmax_chunk - one_hot)?;
+            let scaled = diff.affine(inv_n, 0.0)?;
+            let grad_logits_chunk = scaled.broadcast_mul(&grad_loss_f32)?;
+
+            // chunk_contrib = grad_logits_chunk @ head_chunk.T  (shape [num_active, hidden_size])
+            // The transposed matmul is a different stride pattern from the
+            // forward chunk and the offset kernel doesn't (yet) handle it,
+            // so this stays on the candle CPU path. A future kernel that
+            // takes a "transpose" axis bit could route this through Vulkan
+            // too — left to a follow-up sub-step.
+            let head_chunk_t = head_chunk.t()?.contiguous()?;
+            let chunk_contrib = grad_logits_chunk.matmul(&head_chunk_t)?;
+
+            dhidden_active = (&dhidden_active + chunk_contrib)?.detach();
         }
-        let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
-
-        // grad_logits_chunk = (softmax - one_hot) * (grad_loss / N)
-        let diff = (softmax_chunk - one_hot)?;
-        let scaled = diff.affine(inv_n, 0.0)?;
-        let grad_logits_chunk = scaled.broadcast_mul(&grad_loss_f32)?;
-
-        // chunk_contrib = grad_logits_chunk @ head_chunk.T  (shape [num_active, hidden_size])
-        // The transposed matmul is a different stride pattern from the
-        // forward chunk and the offset kernel doesn't (yet) handle it,
-        // so this stays on the candle CPU path. A future kernel that
-        // takes a "transpose" axis bit could route this through Vulkan
-        // too — left to a follow-up sub-step.
-        let head_chunk_t = head_chunk.t()?.contiguous()?;
-        let chunk_contrib = grad_logits_chunk.matmul(&head_chunk_t)?;
-
-        dhidden_active = (&dhidden_active + chunk_contrib)?.detach();
+        synchronize_metal_chunk(device, "synchronize FLCE phase B backward gradient chunk")?;
 
         chunk_start = chunk_end;
     }
