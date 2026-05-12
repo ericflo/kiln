@@ -21,15 +21,23 @@
 //!   for each lora pair: VkTensor.to_candle() → safetensors save
 //! ```
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use candle_core::TensorId;
+use kiln_core::config::ModelConfig;
+use kiln_core::tokenizer::KilnTokenizer;
+use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
-    vk_model_forward_loss, vk_step_backward, VkLoraLayer, VkLoraPair, VkModelWeights,
+    vk_model_forward_loss, vk_step_backward, VkLayerWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights,
 };
 use kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanBuffer, VulkanDevice};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
+use crate::{SftConfig, SftExample};
 
 /// Per-parameter AdamW state held entirely on the GPU.
 pub struct VkAdamWState {
@@ -200,6 +208,314 @@ pub fn vk_train_step(
     }
 
     Ok(loss_val)
+}
+
+// ---------------------------------------------------------------------------
+// LoRA initialization (one VkLoraLayer per model layer)
+// ---------------------------------------------------------------------------
+
+/// Initialize LoRA params for every layer in the model.
+///
+/// Targets the canonical SFT modules (q/k/v/o + gate/up/down) on
+/// FullAttention layers. LinearAttention (GDN) layers currently get
+/// empty LoRA — Phase 5 will populate `in_proj_qkv` / `in_proj_z` /
+/// `gdn_out_proj`. Callers using a pure-FullAttn model (e.g.
+/// synthetic test or a non-hybrid Qwen variant) get full LoRA
+/// coverage; hybrid Qwen3.5-4B will train only the 8 FullAttn layers
+/// until Phase 5.
+pub fn vk_init_lora_layers(
+    device: &Arc<VulkanDevice>,
+    model_weights: &VkModelWeights,
+    model_config: &ModelConfig,
+    rank: usize,
+    alpha: f32,
+    seed: u64,
+) -> Result<Vec<VkLoraLayer>> {
+    let hidden = model_config.hidden_size;
+    let head_dim = model_config.head_dim;
+    let q_dim = model_config.num_attention_heads * head_dim;
+    let kv_dim = model_config.num_kv_heads * head_dim;
+    let q_out_dim = if model_config.attn_output_gate {
+        q_dim * 2
+    } else {
+        q_dim
+    };
+    let intermediate = model_config.intermediate_size;
+
+    let mut out = Vec::with_capacity(model_weights.layers.len());
+    for (li, layer) in model_weights.layers.iter().enumerate() {
+        let mk = |idx: usize, in_features: usize, out_features: usize| -> Result<VkLoraPair> {
+            // Combine seed with layer + module index for deterministic init
+            let s = seed
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add((li as u64).wrapping_mul(7))
+                .wrapping_add(idx as u64);
+            VkLoraPair::init_kaiming(device, in_features, out_features, rank, alpha, s)
+        };
+        match layer {
+            VkLayerWeights::FullAttention(_) => {
+                out.push(VkLoraLayer {
+                    q_proj: Some(mk(1, hidden, q_out_dim)?),
+                    k_proj: Some(mk(2, hidden, kv_dim)?),
+                    v_proj: Some(mk(3, hidden, kv_dim)?),
+                    o_proj: Some(mk(4, q_dim, hidden)?),
+                    gate_proj: Some(mk(5, hidden, intermediate)?),
+                    up_proj: Some(mk(6, hidden, intermediate)?),
+                    down_proj: Some(mk(7, intermediate, hidden)?),
+                    ..Default::default()
+                });
+            }
+            VkLayerWeights::LinearAttention(_) => {
+                // Phase 5 will populate in_proj_qkv / in_proj_z /
+                // gdn_out_proj LoRA. For now GDN layers get no LoRA —
+                // they still forward (once Phase 5 wires it) but
+                // train no params.
+                out.push(VkLoraLayer::default());
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// vk-native SFT trainer (multi-epoch, single-step optimizer)
+// ---------------------------------------------------------------------------
+
+/// Vulkan-native SFT training loop.
+///
+/// Mirrors `trainer::sft_train()`'s shape (same args, same callback
+/// contract, same on-disk adapter format) but executes the entire
+/// per-step forward → backward → AdamW chain on GPU buffers via
+/// `VkTensor` + `vk_backward` + `dispatch_adamw_step_f32`. No candle
+/// `Var` registry indirection, no `CpuStorage` intermediates.
+///
+/// Hybrid Qwen3.5-4B currently bails because the GDN layer arm of
+/// `vk_transformer_layer` is not yet implemented (Phase 5 wires it).
+/// All-FullAttn models train end-to-end.
+pub fn vk_native_sft_train(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    // Probe Vulkan device — if absent, refuse loud rather than silently
+    // falling back to candle (the env flag explicitly asked for
+    // vk-native; the user wants to know when it's not happening).
+    if !VulkanDevice::probe() {
+        bail!(
+            "vk_native_sft_train: no Vulkan device available — \
+             unset KILN_VK_NATIVE_TRAINING to use the candle path"
+        );
+    }
+    let vk_device = Arc::new(
+        VulkanDevice::new().context("vk_native_sft_train: failed to create Vulkan device")?,
+    );
+
+    tracing::info!(
+        num_examples = examples.len(),
+        epochs = config.epochs,
+        lr = config.learning_rate,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting vk-native SFT training"
+    );
+
+    let effective_seed = config.seed.unwrap_or_else(|| {
+        // Same fallback as sft_train: a deterministic-enough default.
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xdeadbeef)
+    });
+
+    // Upload candle GpuWeights → vk-native VkModelWeights (one-time).
+    let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
+        .context("vk_native_sft_train: VkModelWeights::from_gpu_weights")?;
+
+    // Initialize LoRA params for each layer.
+    let lora_layers = vk_init_lora_layers(
+        &vk_device,
+        &vk_weights,
+        model_config,
+        config.lora_rank,
+        config.lora_alpha,
+        effective_seed,
+    )?;
+
+    // Allocate AdamW state per LoRA pair.
+    let mut adamw = allocate_adamw_state(&vk_device, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: config.learning_rate as f32,
+        ..Default::default()
+    };
+
+    // Tokenize all examples up front.
+    let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
+        .iter()
+        .filter_map(|ex| match tokenize_for_training(ex, tokenizer) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!("vk_native: skipping example: {e}");
+                None
+            }
+        })
+        .collect();
+    if tokenized.is_empty() {
+        bail!("vk_native_sft_train: no valid training examples after tokenization");
+    }
+
+    let total_steps = config.epochs * tokenized.len();
+    let mut global_step: u32 = 0;
+    let mut last_loss = 0.0f32;
+
+    // Note: Phase 1 keeps gradient checkpointing as a no-op stub. The
+    // VkTape is rebuilt per step (forward → backward → drop), so peak
+    // device memory at any point ≈ one full step's intermediates.
+    // Phase 1.5 will add segment-based recompute.
+
+    for epoch in 0..config.epochs {
+        let mut epoch_loss = 0.0f32;
+        for (input_ids, _label_mask) in tokenized.iter() {
+            global_step += 1;
+            // For Phase 1 we ignore label_mask and run FLCE on all
+            // positions (matches the synthetic smoke tests). Real SFT
+            // training masks prompt tokens; that's a Phase 1.7 follow-up
+            // — vk_index_select_rows already exists for the gather.
+            let loss = vk_train_step(
+                &vk_weights,
+                &lora_layers,
+                input_ids,
+                &mut adamw,
+                &cfg,
+                global_step,
+            )
+            .with_context(|| format!("vk_train_step at epoch {} step {}", epoch + 1, global_step))?;
+
+            anyhow::ensure!(
+                loss.is_finite(),
+                "vk_native_sft_train: non-finite loss {loss} at step {global_step}"
+            );
+            epoch_loss += loss;
+            last_loss = loss;
+
+            // Periodic checkpoint
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0
+                    && (global_step as usize) % interval == 0
+                    && (global_step as usize) < total_steps
+                {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if let Err(e) = std::fs::create_dir_all(&ckpt_dir) {
+                        tracing::warn!(error = %e, "create checkpoint dir failed");
+                    } else {
+                        let ckpt_path = ckpt_dir.join("adapter_model.safetensors");
+                        if let Err(e) = save_vk_lora_adapter(
+                            &lora_layers,
+                            config.lora_rank,
+                            config.lora_alpha,
+                            &ckpt_path,
+                        ) {
+                            tracing::warn!(error = %e, "save checkpoint failed");
+                        } else {
+                            tracing::info!(
+                                step = global_step,
+                                path = %ckpt_path.display(),
+                                "saved vk-native training checkpoint"
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: epoch + 1,
+                    total_epochs: config.epochs,
+                    step: global_step as usize,
+                    total_steps,
+                    loss: loss as f64,
+                    progress: (global_step as f32) / (total_steps as f32),
+                });
+            }
+
+            if (global_step as usize) % 10 == 0 || (global_step as usize) == total_steps {
+                tracing::info!(
+                    epoch = epoch + 1,
+                    step = global_step,
+                    total_steps,
+                    loss = format!("{loss:.6}"),
+                    "vk-native training step"
+                );
+            }
+        }
+        let avg = epoch_loss / (tokenized.len() as f32);
+        tracing::info!(
+            epoch = epoch + 1,
+            avg_loss = format!("{avg:.6}"),
+            "vk-native epoch complete"
+        );
+    }
+
+    // Final adapter save
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "vk_native_sft_train: create adapter dir {}",
+            output_dir.display()
+        )
+    })?;
+    let adapter_path = output_dir.join("adapter_model.safetensors");
+    save_vk_lora_adapter(&lora_layers, config.lora_rank, config.lora_alpha, &adapter_path)
+        .with_context(|| format!("save final adapter to {}", adapter_path.display()))?;
+
+    // Write a minimal adapter_config.json mirroring trainer::save_peft.
+    write_vk_adapter_config(
+        &output_dir,
+        config.lora_rank,
+        config.lora_alpha,
+    )?;
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        "vk-native SFT training complete"
+    );
+
+    Ok(output_dir)
+}
+
+fn write_vk_adapter_config(output_dir: &Path, rank: usize, alpha: f32) -> Result<()> {
+    let cfg = serde_json::json!({
+        "base_model_name_or_path": "",
+        "bias": "none",
+        "fan_in_fan_out": false,
+        "inference_mode": true,
+        "init_lora_weights": true,
+        "lora_alpha": alpha,
+        "lora_dropout": 0.0,
+        "modules_to_save": null,
+        "peft_type": "LORA",
+        "r": rank,
+        "task_type": "CAUSAL_LM",
+        "target_modules": [
+            "q_proj", "k_proj", "v_proj", "o_proj",
+            "gate_proj", "up_proj", "down_proj"
+        ],
+    });
+    let path = output_dir.join("adapter_config.json");
+    let s = serde_json::to_string_pretty(&cfg)
+        .with_context(|| format!("serialize adapter_config.json {}", path.display()))?;
+    std::fs::write(&path, s)
+        .with_context(|| format!("write adapter_config.json {}", path.display()))?;
+    Ok(())
 }
 
 /// Save LoRA adapter to safetensors via candle. Each VkTensor is read

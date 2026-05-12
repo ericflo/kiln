@@ -243,6 +243,69 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
     removed
 }
 
+/// Dispatch one SFT job to either the candle trainer or the
+/// vk-native trainer.
+///
+/// The candle path takes a `replay_ctx` (request_body + lineage
+/// tracking); the vk-native path doesn't yet plumb replay so it drops
+/// the context. When the binary is built without `--features vulkan`,
+/// `vk_native=true` falls through to the candle path with a warning
+/// (the env flag was a no-op for this build).
+#[allow(clippy::too_many_arguments)]
+fn run_sft(
+    vk_native: bool,
+    req: &SftRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    replay_ctx: trainer::ReplayContext,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if vk_native {
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                "KILN_VK_NATIVE_TRAINING=1 — routing to vk_native_sft_train"
+            );
+            return kiln_train::vk_train::vk_native_sft_train(
+                &req.examples,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                adapter_dir,
+                adapter_name,
+                Some(progress_cb),
+            )
+            .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                "KILN_VK_NATIVE_TRAINING=1 set but kiln-server was built without \
+                 --features vulkan — falling back to candle SFT trainer"
+            );
+        }
+    }
+    trainer::sft_train(
+        &req.examples,
+        &req.config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_name,
+        Some(progress_cb),
+        Some(replay_ctx),
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -312,14 +375,14 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let base_model = trainer::default_base_model(&state.model_config);
 
     // Run the actual training under GPU write lock
-    let result: Result<PathBuf, String> = match entry.job {
+    let result: std::result::Result<PathBuf, String> = match entry.job {
         QueuedJob::Sft(mut req) => {
             if req.config.checkpoint_interval.is_none() {
                 req.config.checkpoint_interval = server_checkpoint_interval;
             }
             let request_body = serde_json::to_value(&req)
                 .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize SftRequest"}));
-            let replay_ctx = trainer::ReplayContext {
+            let _replay_ctx = trainer::ReplayContext {
                 request_id: job_id.clone(),
                 kind: kiln_train::ReplayKind::Sft,
                 request_body,
@@ -327,18 +390,27 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
-            trainer::sft_train(
-                &req.examples,
-                &req.config,
+            // KILN_VK_NATIVE_TRAINING=1 routes to the vk-native trainer
+            // (every forward intermediate + grad lives in GPU memory,
+            // bypassing candle's CpuStorage 23 GB anon-rss ceiling).
+            // Replay context is candle-trainer-specific, so we drop it
+            // on the vk-native path until that integration is added.
+            let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "0")
+                .is_some();
+            run_sft(
+                vk_native,
+                &req,
                 &state.model_config,
                 &guard.weights,
                 &state.tokenizer,
                 &state.adapter_dir,
                 &adapter_name,
-                Some(progress_cb),
-                Some(replay_ctx),
+                progress_cb,
+                _replay_ctx,
+                &job_id,
             )
-            .map_err(|e| format!("{e:#}"))
         }
         QueuedJob::Grpo(mut req) => {
             if req.config.checkpoint_interval.is_none() {
@@ -353,20 +425,32 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
-            let _gpu_guard = state.gpu_lock.write().unwrap();
-            let guard = runner_arc.read().unwrap();
-            trainer::grpo_train(
-                &req.groups,
-                &req.config,
-                &state.model_config,
-                &guard.weights,
-                &state.tokenizer,
-                &state.adapter_dir,
-                &adapter_name,
-                Some(progress_cb),
-                Some(replay_ctx),
-            )
-            .map_err(|e| format!("{e:#}"))
+            let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
+                .ok()
+                .filter(|v| !v.is_empty() && v != "0")
+                .is_some();
+            if vk_native {
+                Err(
+                    "KILN_VK_NATIVE_TRAINING=1 does not yet support GRPO — \
+                     unset it for GRPO jobs (vk-native GRPO is a follow-on plan)"
+                        .to_string(),
+                )
+            } else {
+                let _gpu_guard = state.gpu_lock.write().unwrap();
+                let guard = runner_arc.read().unwrap();
+                trainer::grpo_train(
+                    &req.groups,
+                    &req.config,
+                    &state.model_config,
+                    &guard.weights,
+                    &state.tokenizer,
+                    &state.adapter_dir,
+                    &adapter_name,
+                    Some(progress_cb),
+                    Some(replay_ctx),
+                )
+                .map_err(|e| format!("{e:#}"))
+            }
         }
     };
 

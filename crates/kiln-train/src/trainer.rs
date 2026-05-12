@@ -1502,7 +1502,7 @@ fn token_log_probs(
 ///
 /// The label_mask indicates which tokens are part of assistant responses
 /// (true = compute loss here, false = ignore).
-fn tokenize_for_training(
+pub(crate) fn tokenize_for_training(
     example: &SftExample,
     tokenizer: &KilnTokenizer,
 ) -> Result<(Vec<u32>, Vec<bool>)> {
