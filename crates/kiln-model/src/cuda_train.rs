@@ -872,6 +872,49 @@ pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_repeat_kv_heads(input: &CudaTrainTensor, groups: usize) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_repeat_kv_heads: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 3,
+        "cuda_repeat_kv_heads: expected rank-3 [heads_kv, rows, head_dim], got {:?}",
+        input.dims()
+    );
+    ensure!(groups >= 1, "cuda_repeat_kv_heads: groups must be >= 1");
+    if groups == 1 {
+        return Ok(input.clone());
+    }
+
+    let heads_kv = input.dims()[0];
+    let mut repeated = Vec::with_capacity(heads_kv * groups);
+    for head in 0..heads_kv {
+        let slice = input
+            .as_tensor()
+            .narrow(0, head, 1)
+            .with_context(|| format!("cuda_repeat_kv_heads: narrow head {head}"))?
+            .contiguous()
+            .with_context(|| format!("cuda_repeat_kv_heads: contiguous head {head}"))?;
+        for _ in 0..groups {
+            repeated.push(slice.clone());
+        }
+    }
+    let refs: Vec<&Tensor> = repeated.iter().collect();
+    let out = Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads: cat repeated heads")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(RepeatKvHeadsBackward {
+            heads_kv,
+            groups,
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -1111,6 +1154,66 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct RepeatKvHeadsBackward {
+    heads_kv: usize,
+    groups: usize,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for RepeatKvHeadsBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_repeat_kv_heads"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_repeat_kv_heads backward expected one input, got {}",
+            self.inputs.len()
+        );
+        ensure!(
+            grad_out.dims().len() == 3 && grad_out.dims()[0] == self.heads_kv * self.groups,
+            "cuda_repeat_kv_heads backward: grad shape {:?} incompatible with heads={} groups={}",
+            grad_out.dims(),
+            self.heads_kv,
+            self.groups
+        );
+
+        let mut head_grads = Vec::with_capacity(self.heads_kv);
+        for head in 0..self.heads_kv {
+            let mut accum: Option<Tensor> = None;
+            for group in 0..self.groups {
+                let slot = head * self.groups + group;
+                let slice = grad_out
+                    .as_tensor()
+                    .narrow(0, slot, 1)
+                    .with_context(|| {
+                        format!("cuda_repeat_kv_heads backward: narrow repeated head {slot}")
+                    })?
+                    .contiguous()
+                    .with_context(|| {
+                        format!("cuda_repeat_kv_heads backward: contiguous repeated head {slot}")
+                    })?;
+                accum = Some(match accum {
+                    Some(existing) => {
+                        (&existing + &slice).context("cuda_repeat_kv_heads backward: sum group")?
+                    }
+                    None => slice,
+                });
+            }
+            head_grads.push(accum.context("cuda_repeat_kv_heads backward: empty group")?);
+        }
+        let refs: Vec<&Tensor> = head_grads.iter().collect();
+        let grad = Tensor::cat(&refs, 0).context("cuda_repeat_kv_heads backward: cat heads")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -2180,6 +2283,40 @@ mod tests {
                 "silu grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_repeat_kv_heads_backward_sums_repeated_groups() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_repeat_kv_heads backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2usize, 1usize, 2usize), &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let repeated = cuda_repeat_kv_heads(&param, 2)?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0, 40.0, 4.0],
+            (4usize, 1usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&repeated, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(repeated.dims(), &[4, 1, 2]);
+        assert_eq!(repeated.to_vec_f32()?, vec![1.0, 2.0, 1.0, 2.0, 3.0, 4.0, 3.0, 4.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![274.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![30.0, 3.0, 70.0, 7.0]
+        );
         Ok(())
     }
 
