@@ -318,6 +318,27 @@ pub fn cuda_backward(loss: &CudaTrainTensor) -> Result<CudaGradStore> {
     Ok(store)
 }
 
+pub fn cuda_sgd_step_from_store(
+    params: &[CudaTrainTensor],
+    grads: &CudaGradStore,
+    lr: f32,
+) -> Result<usize> {
+    let mut updated = 0usize;
+    for param in params {
+        let Some(param_id) = param.param_id() else {
+            continue;
+        };
+        let Some(grad) = grads.get(param_id) else {
+            continue;
+        };
+        param
+            .sgd_step_inplace(grad, lr)
+            .with_context(|| format!("cuda_sgd_step_from_store: param {:?}", param_id))?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 pub fn cuda_add(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -918,6 +939,41 @@ mod tests {
         assert_eq!(
             grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
             vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_native_sgd_step_decreases_sum_square_loss() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda native SGD smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![2.0f32, -4.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+
+        let before = cuda_sum_all(&cuda_mul(&param, &param)?)?;
+        let before_loss = before.to_vec_f32()?[0];
+        let grads = cuda_backward(&before)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![4.0, -8.0]
+        );
+
+        let updated = cuda_sgd_step_from_store(&[param.clone()], &grads, 0.1)?;
+        assert_eq!(updated, 1);
+        assert_eq!(param.to_vec_f32()?, vec![1.6, -3.2]);
+
+        let after = cuda_sum_all(&cuda_mul(&param, &param)?)?;
+        let after_loss = after.to_vec_f32()?[0];
+        assert!(
+            after_loss < before_loss,
+            "expected SGD to reduce loss: before={before_loss} after={after_loss}"
         );
         Ok(())
     }
