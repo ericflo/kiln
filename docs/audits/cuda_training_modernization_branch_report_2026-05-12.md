@@ -96,6 +96,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `1dc880ad` | CUDA train zero-state causal conv1d | Adds a native CUDA training-shell causal depthwise conv1d composition for fresh-state prefill windows. |
 | `40b7f943` | CUDA train zero-state conv1d state update | Adds CUDA-native next-state construction for fresh-state causal conv prefill. |
 | `d0797943` | CUDA train stateful causal conv1d | Generalizes CUDA train causal depthwise conv1d to consume and return explicit conv state. |
+| `4c951645` | CUDA GDN conv qkv bridge | Adds a GDN train bridge for LoRA qkv projection through stateful causal conv, SiLU, q/k/v split, and next conv state. |
 
 Local validation so far:
 
@@ -193,6 +194,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_prefill_zero_state_matches_reference --lib --quiet` passed after adding CUDA train zero-state causal depthwise conv1d.
   - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_next_state_zero_state_tracks_tail --lib --quiet` passed after adding CUDA train zero-state conv next-state construction.
   - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_prefill_with_state_threads_state --lib --quiet` passed after adding stateful CUDA train causal depthwise conv1d.
+  - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding CUDA GDN conv qkv bridge coverage.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
