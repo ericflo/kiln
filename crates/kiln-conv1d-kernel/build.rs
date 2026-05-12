@@ -21,6 +21,7 @@ fn main() {
     let mut build = cc::Build::new();
     build.cuda(true);
     build.cpp(true);
+    configure_nvcc_from_cuda_root(&cuda_root);
 
     build.include(&csrc_dir);
     build.include(cuda_root.join("include"));
@@ -54,7 +55,20 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-env-changed=CUDA_ROOT");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
+}
+
+fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+    if env::var_os("NVCC").is_some() {
+        return;
+    }
+    let nvcc = cuda_root.join("bin").join("nvcc");
+    if nvcc.exists() {
+        unsafe {
+            env::set_var("NVCC", nvcc);
+        }
+    }
 }
 
 fn find_cuda_root() -> Option<PathBuf> {

@@ -8,6 +8,7 @@
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{D, DType, Device, Tensor, TensorId};
+use kiln_core::env_flag::env_flag;
 use kiln_core::config::ModelConfig;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -1540,7 +1541,10 @@ pub fn cuda_full_attention_layer(
     let k_3d = cuda_reshape(&k, &[rows, weights.heads_kv, weights.head_dim])?;
     let v_3d = cuda_reshape(&v, &[rows, weights.heads_kv, weights.head_dim])?;
     let scale = 1.0 / (weights.head_dim as f32).sqrt();
-    let attn = cuda_sdpa_prefill_causal(&q_3d, &k_3d, &v_3d, scale)?;
+    let attn = match cuda_flash_attn_prefill_causal_f32(&q_3d, &k_3d, &v_3d, scale)? {
+        Some(attn) => attn,
+        None => cuda_sdpa_prefill_causal(&q_3d, &k_3d, &v_3d, scale)?,
+    };
     let attn_flat = cuda_reshape(&attn, &[rows, q_dim])?;
     let attn_gated = match gate {
         Some(gate) => {
@@ -2789,6 +2793,131 @@ pub fn cuda_sdpa_unmasked(
     cuda_permute_hr_to_rh(&out_perm)
 }
 
+fn cuda_flash_attn_prefill_supported(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+) -> bool {
+    if !env_flag("KILN_CUDA_NATIVE_FLASH_ATTN", true) {
+        return false;
+    }
+    if q.dims().len() != 3 || k.dims().len() != 3 || v.dims().len() != 3 {
+        return false;
+    }
+    let rows = q.dims()[0];
+    let heads_q = q.dims()[1];
+    let head_dim = q.dims()[2];
+    let heads_kv = k.dims()[1];
+    rows == k.dims()[0]
+        && rows == v.dims()[0]
+        && k.dims()[2] == head_dim
+        && v.dims()[1] == heads_kv
+        && v.dims()[2] == head_dim
+        && heads_kv > 0
+        && heads_q % heads_kv == 0
+        && matches!(head_dim, 128 | 256)
+}
+
+pub fn cuda_flash_attn_prefill_causal_f32(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    scale: f32,
+) -> Result<Option<CudaTrainTensor>> {
+    if !cuda_flash_attn_prefill_supported(q, k, v) {
+        return Ok(None);
+    }
+    ensure!(
+        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        "cuda_flash_attn_prefill_causal_f32: expected F32 inputs, got q={:?} k={:?} v={:?}",
+        q.dtype(),
+        k.dtype(),
+        v.dtype()
+    );
+
+    let q_bf16 = cuda_to_dtype(q, DType::BF16)?;
+    let k_bf16 = cuda_to_dtype(k, DType::BF16)?;
+    let v_bf16 = cuda_to_dtype(v, DType::BF16)?;
+    let Some(out_bf16) = cuda_flash_attn_prefill_causal_bf16(&q_bf16, &k_bf16, &v_bf16, scale)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(cuda_to_dtype(&out_bf16, DType::F32)?))
+}
+
+pub fn cuda_flash_attn_prefill_causal_bf16(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    scale: f32,
+) -> Result<Option<CudaTrainTensor>> {
+    if !cuda_flash_attn_prefill_supported(q, k, v) {
+        return Ok(None);
+    }
+    ensure!(
+        q.dtype() == DType::BF16 && k.dtype() == DType::BF16 && v.dtype() == DType::BF16,
+        "cuda_flash_attn_prefill_causal_bf16: expected BF16 inputs, got q={:?} k={:?} v={:?}",
+        q.dtype(),
+        k.dtype(),
+        v.dtype()
+    );
+    let rows = q.dims()[0];
+    let heads_q = q.dims()[1];
+    let head_dim = q.dims()[2];
+    let heads_kv = k.dims()[1];
+
+    let q_4d = q
+        .as_tensor()
+        .reshape((1usize, rows, heads_q, head_dim))
+        .context("cuda_flash_attn_prefill_causal_bf16: reshape q")?
+        .contiguous()
+        .context("cuda_flash_attn_prefill_causal_bf16: contiguous q")?;
+    let k_4d = k
+        .as_tensor()
+        .reshape((1usize, rows, heads_kv, head_dim))
+        .context("cuda_flash_attn_prefill_causal_bf16: reshape k")?
+        .contiguous()
+        .context("cuda_flash_attn_prefill_causal_bf16: contiguous k")?;
+    let v_4d = v
+        .as_tensor()
+        .reshape((1usize, rows, heads_kv, head_dim))
+        .context("cuda_flash_attn_prefill_causal_bf16: reshape v")?
+        .contiguous()
+        .context("cuda_flash_attn_prefill_causal_bf16: contiguous v")?;
+    let (out_4d, softmax_lse) =
+        kiln_flash_attn::flash_attn_fwd(&q_4d, &k_4d, &v_4d, scale, true)
+            .context("cuda_flash_attn_prefill_causal_bf16: flash_attn_fwd")?;
+    let out = out_4d
+        .reshape((rows, heads_q, head_dim))
+        .context("cuda_flash_attn_prefill_causal_bf16: reshape output")?;
+
+    let needs_grad = q.requires_grad()
+        || q.grad_fn().is_some()
+        || q.param_id().is_some()
+        || k.requires_grad()
+        || k.grad_fn().is_some()
+        || k.param_id().is_some()
+        || v.requires_grad()
+        || v.grad_fn().is_some()
+        || v.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(FlashAttnPrefillCausalBackward {
+            inputs: vec![q.clone(), k.clone(), v.clone()],
+            q: q_4d,
+            k: k_4d,
+            v: v_4d,
+            out: out_4d,
+            softmax_lse,
+            scale,
+            rows,
+            heads_q,
+            heads_kv,
+            head_dim,
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn).map(Some)
+}
+
 pub fn cuda_sdpa_prefill_causal(
     q: &CudaTrainTensor,
     k: &CudaTrainTensor,
@@ -2850,6 +2979,79 @@ pub fn cuda_sdpa_prefill_causal(
     let attn = cuda_softmax_last_dim(&masked)?;
     let out_perm = cuda_batched_matmul(&attn, &v_bcast)?;
     cuda_permute_hr_to_rh(&out_perm)
+}
+
+#[derive(Debug)]
+struct FlashAttnPrefillCausalBackward {
+    inputs: Vec<CudaTrainTensor>,
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    out: Tensor,
+    softmax_lse: Tensor,
+    scale: f32,
+    rows: usize,
+    heads_q: usize,
+    heads_kv: usize,
+    head_dim: usize,
+}
+
+impl CudaBackwardOp for FlashAttnPrefillCausalBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_flash_attn_prefill_causal_bf16"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 3,
+            "cuda_flash_attn_prefill_causal_bf16 backward expected three inputs, got {}",
+            self.inputs.len()
+        );
+        ensure!(
+            grad_out.dims() == [self.rows, self.heads_q, self.head_dim],
+            "cuda_flash_attn_prefill_causal_bf16 backward expected grad {:?}, got {:?}",
+            [self.rows, self.heads_q, self.head_dim],
+            grad_out.dims()
+        );
+
+        let dout = grad_out
+            .as_tensor()
+            .to_dtype(DType::BF16)
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: cast dout")?
+            .reshape((1usize, self.rows, self.heads_q, self.head_dim))
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dout")?
+            .contiguous()
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: contiguous dout")?;
+        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd(
+            &dout,
+            &self.q,
+            &self.k,
+            &self.v,
+            &self.out,
+            &self.softmax_lse,
+            self.scale,
+            true,
+        )
+        .context("cuda_flash_attn_prefill_causal_bf16 backward: flash_attn_bwd")?;
+        let dq = dq
+            .reshape((self.rows, self.heads_q, self.head_dim))
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dq")?;
+        let dk = dk
+            .reshape((self.rows, self.heads_kv, self.head_dim))
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dk")?;
+        let dv = dv
+            .reshape((self.rows, self.heads_kv, self.head_dim))
+            .context("cuda_flash_attn_prefill_causal_bf16 backward: reshape dv")?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(dq)?),
+            Some(CudaTrainTensor::new(dk)?),
+            Some(CudaTrainTensor::new(dv)?),
+        ])
+    }
 }
 
 #[derive(Debug)]
@@ -6841,6 +7043,75 @@ mod tests {
                 values.iter().all(|value| value.is_finite())
                     && values.iter().any(|value| value.abs() > 1e-6),
                 "{name} grad should be finite and non-zero: {values:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_flash_attn_prefill_causal_matches_composed_sdpa_and_reaches_qkv() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_flash_attn_prefill_causal smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let rows = 16usize;
+        let heads_q = 4usize;
+        let heads_kv = 2usize;
+        let head_dim = 128usize;
+        let q_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_q, head_dim), &device)?;
+        let k_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
+        let v_tensor = Tensor::randn(0f32, 0.125f32, (rows, heads_kv, head_dim), &device)?;
+
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let q = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v = CudaTrainTensor::parameter(v_tensor, v_id)?;
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        let fast = cuda_flash_attn_prefill_causal_f32(&q, &k, &v, scale)?
+            .context("FlashAttention path unexpectedly declined supported shape")?;
+
+        let q_ref = CudaTrainTensor::new(q.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let k_ref = CudaTrainTensor::new(k.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let v_ref = CudaTrainTensor::new(v.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
+        let reference = cuda_sdpa_prefill_causal(&q_ref, &k_ref, &v_ref, scale)?;
+        let reference = reference.as_tensor().to_dtype(DType::BF16)?.to_dtype(DType::F32)?;
+
+        assert_eq!(fast.dims(), &[rows, heads_q, head_dim]);
+        let fast_values = fast.to_vec_f32()?;
+        let ref_values: Vec<f32> = reference.flatten_all()?.to_vec1()?;
+        let max_abs = fast_values
+            .iter()
+            .zip(ref_values.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs < 0.08,
+            "FlashAttention output drifted from composed SDPA reference: max_abs={max_abs}"
+        );
+
+        let loss = cuda_sum_all(&fast)?;
+        let grads = cuda_backward(&loss)?;
+        for (name, id, expected_len) in [
+            ("q", q_id, rows * heads_q * head_dim),
+            ("k", k_id, rows * heads_kv * head_dim),
+            ("v", v_id, rows * heads_kv * head_dim),
+        ] {
+            let values = grads
+                .get(id)
+                .with_context(|| format!("missing {name} grad"))?
+                .to_vec_f32()?;
+            assert_eq!(values.len(), expected_len, "{name} grad length mismatch");
+            assert!(
+                values.iter().all(|value| value.is_finite())
+                    && values.iter().any(|value| value.abs() > 1e-6),
+                "{name} grad should be finite and non-zero"
             );
         }
         Ok(())

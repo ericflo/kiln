@@ -27,6 +27,7 @@ fn main() {
     // Use nvcc as the compiler
     build.cuda(true);
     build.cpp(true);
+    configure_nvcc_from_cuda_root(&cuda_root);
 
     // Include paths
     build.include(&flash_attn_dir); // For "src/flash.h" etc.
@@ -81,7 +82,20 @@ fn main() {
     println!("cargo:rerun-if-changed=csrc/");
     println!("cargo:rerun-if-env-changed=CUDA_ROOT");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
+    println!("cargo:rerun-if-env-changed=NVCC");
     println!("cargo:rerun-if-env-changed=KILN_CUDA_ARCHS");
+}
+
+fn configure_nvcc_from_cuda_root(cuda_root: &PathBuf) {
+    if env::var_os("NVCC").is_some() {
+        return;
+    }
+    let nvcc = cuda_root.join("bin").join("nvcc");
+    if nvcc.exists() {
+        unsafe {
+            env::set_var("NVCC", nvcc);
+        }
+    }
 }
 
 fn find_cuda_root() -> Option<PathBuf> {
