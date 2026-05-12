@@ -16,6 +16,7 @@ pub mod conv1d;
 pub mod elementwise;
 pub mod embedding;
 pub mod flce;
+pub mod gdn_chunk_bwd;
 pub mod gdn_chunk_prep;
 pub mod gdn_chunkwise;
 pub mod gdn_gated_rms_norm;

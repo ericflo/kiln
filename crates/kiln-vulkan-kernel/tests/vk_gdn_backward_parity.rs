@@ -203,6 +203,235 @@ fn cpu_conv1d_linear_bwd(
     (d_x, d_weight, d_cs)
 }
 
+// ---------------- vk_gdn_gated_rms_norm_bwd ----------------
+
+#[test]
+fn vk_gdn_gated_rms_norm_bwd_matches_finite_diff() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::gdn_gated_rms_norm::{
+        vk_gdn_gated_rms_norm_bwd_no_grad, vk_gdn_gated_rms_norm_no_grad,
+    };
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let rows = 2;
+    let hidden = 4;
+    let eps = 1e-6_f32;
+    let x_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| ((i as f32) * 0.07 + 0.3).sin() + 0.5)
+        .collect();
+    let z_data: Vec<f32> = (0..(rows * hidden))
+        .map(|i| ((i as f32) * 0.05 - 0.1).cos())
+        .collect();
+    let w_data: Vec<f32> = (0..hidden).map(|i| 0.5 + (i as f32) * 0.1).collect();
+
+    let x = upload(&dev, &x_data, &[rows, hidden])?;
+    let z = upload(&dev, &z_data, &[rows, hidden])?;
+    let w = upload(&dev, &w_data, &[hidden])?;
+    // d_out: synthetic upstream gradient
+    let dout_data: Vec<f32> = (0..(rows * hidden)).map(|i| (i as f32 + 1.0) * 0.01).collect();
+    let dout = upload(&dev, &dout_data, &[rows, hidden])?;
+
+    let (d_x, d_z, d_w) = vk_gdn_gated_rms_norm_bwd_no_grad(&dout, &x, &z, &w, eps)?;
+
+    // Verify d_x via finite differences for one element
+    let test_idx = 1;
+    let h = 1e-4_f32;
+    let mut x_plus = x_data.clone();
+    x_plus[test_idx] += h;
+    let mut x_minus = x_data.clone();
+    x_minus[test_idx] -= h;
+    let xp = upload(&dev, &x_plus, &[rows, hidden])?;
+    let xm = upload(&dev, &x_minus, &[rows, hidden])?;
+    let outp = vk_gdn_gated_rms_norm_no_grad(&xp, &z, &w, eps)?.to_vec_f32()?;
+    let outm = vk_gdn_gated_rms_norm_no_grad(&xm, &z, &w, eps)?.to_vec_f32()?;
+    // numerical d_loss/d_x_i where loss = Σ d_out_j · out_j
+    let loss_p: f32 = outp.iter().zip(dout_data.iter()).map(|(a, b)| a * b).sum();
+    let loss_m: f32 = outm.iter().zip(dout_data.iter()).map(|(a, b)| a * b).sum();
+    let numerical = (loss_p - loss_m) / (2.0 * h);
+    let analytic = d_x.to_vec_f32()?[test_idx];
+    let diff = (numerical - analytic).abs();
+    println!("gated_rms_norm_bwd d_x[{test_idx}]: numerical={numerical:.6} analytic={analytic:.6} diff={diff:.6e}");
+    assert!(
+        diff < 1e-2,
+        "d_x finite-diff vs analytic: |{numerical} - {analytic}| = {diff}"
+    );
+    // Sanity: outputs are finite and right shape
+    assert_eq!(d_x.shape(), &[rows, hidden]);
+    assert_eq!(d_z.shape(), &[rows, hidden]);
+    assert_eq!(d_w.shape(), &[hidden]);
+    for v in d_x.to_vec_f32()? {
+        assert!(v.is_finite());
+    }
+    for v in d_z.to_vec_f32()? {
+        assert!(v.is_finite());
+    }
+    for v in d_w.to_vec_f32()? {
+        assert!(v.is_finite());
+    }
+    Ok(())
+}
+
+// ---------------- vk_gdn_chunk_prep_bwd (most complex) ----------------
+
+#[test]
+fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_prep::vk_gdn_chunk_prep_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+
+    let batch = 1;
+    let nv = 1;
+    let chunk = 4;
+    let dv = 2;
+
+    let g_data: Vec<f32> = (0..(batch * nv * chunk)).map(|i| -0.05 + (i as f32) * 0.01).collect();
+    let v_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| ((i as f32) * 0.07).sin() * 0.3)
+        .collect();
+    let kkt_data: Vec<f32> = (0..(batch * nv * chunk * chunk))
+        .map(|i| ((i as f32) * 0.05 + 0.1).cos() * 0.2)
+        .collect();
+    let qkt_data: Vec<f32> = (0..(batch * nv * chunk * chunk))
+        .map(|i| ((i as f32) * 0.04 - 0.2).sin() * 0.3)
+        .collect();
+    let ks_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| ((i as f32) * 0.06).cos() * 0.1)
+        .collect();
+    let qs_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| ((i as f32) * 0.08).sin() * 0.15)
+        .collect();
+
+    let g = upload(&dev, &g_data, &[batch, nv, chunk])?;
+    let v = upload(&dev, &v_data, &[batch, nv, chunk, dv])?;
+    let kkt = upload(&dev, &kkt_data, &[batch, nv, chunk, chunk])?;
+    let qkt = upload(&dev, &qkt_data, &[batch, nv, chunk, chunk])?;
+    let ks_e = upload(&dev, &ks_data, &[batch, nv, chunk, dv])?;
+    let qs = upload(&dev, &qs_data, &[batch, nv, chunk, dv])?;
+
+    // Synthetic upstream gradients
+    let n_a = batch * nv * chunk * chunk;
+    let n_v = batch * nv * chunk * dv;
+    let n_c = batch * nv * chunk;
+    let n_bh = batch * nv;
+    let das_data: Vec<f32> = (0..n_a).map(|i| 0.01 * ((i + 1) as f32)).collect();
+    let dbm_data: Vec<f32> = (0..n_a).map(|i| 0.013 * ((i + 1) as f32)).collect();
+    let dvp_data: Vec<f32> = (0..n_v).map(|i| 0.017 * ((i + 1) as f32)).collect();
+    let dqss_data: Vec<f32> = (0..n_v).map(|i| 0.019 * ((i + 1) as f32)).collect();
+    let ddec_data: Vec<f32> = (0..n_c).map(|i| 0.023 * ((i + 1) as f32)).collect();
+    let dpl_data: Vec<f32> = (0..n_bh).map(|i| 0.029 * ((i + 1) as f32)).collect();
+
+    let das = upload(&dev, &das_data, &[batch, nv, chunk, chunk])?;
+    let dbm = upload(&dev, &dbm_data, &[batch, nv, chunk, chunk])?;
+    let dvp = upload(&dev, &dvp_data, &[batch, nv, chunk, dv])?;
+    let dqss = upload(&dev, &dqss_data, &[batch, nv, chunk, dv])?;
+    let ddec = upload(&dev, &ddec_data, &[batch, nv, chunk])?;
+    let dpl = upload(&dev, &dpl_data, &[batch, nv])?;
+
+    let (d_g, _d_v, _d_kkt, _d_qkt, _d_ks, _d_qs) = vk_gdn_chunk_prep_bwd_no_grad(
+        &das, &dbm, &dvp, &dqss, &ddec, &dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
+    )?;
+
+    // Finite-diff check on d_g[0]: perturb g[0], rerun forward, measure
+    // change in dotted-loss.
+    let h = 1e-4_f32;
+    let dotted = |out: &kiln_vulkan_kernel::vk_ops::gdn_chunk_prep::GdnChunkPrepOutput| -> f32 {
+        let mut sum = 0.0_f32;
+        for (a, b) in out.a_strict.to_vec_f32().unwrap().iter().zip(das_data.iter()) {
+            sum += a * b;
+        }
+        for (a, b) in out.b_mask.to_vec_f32().unwrap().iter().zip(dbm_data.iter()) {
+            sum += a * b;
+        }
+        for (a, b) in out.v_prime.to_vec_f32().unwrap().iter().zip(dvp_data.iter()) {
+            sum += a * b;
+        }
+        for (a, b) in out.q_s_scaled.to_vec_f32().unwrap().iter().zip(dqss_data.iter()) {
+            sum += a * b;
+        }
+        for (a, b) in out.decay_last_col.to_vec_f32().unwrap().iter().zip(ddec_data.iter()) {
+            sum += a * b;
+        }
+        for (a, b) in out.p_last.to_vec_f32().unwrap().iter().zip(dpl_data.iter()) {
+            sum += a * b;
+        }
+        sum
+    };
+    let mut g_p = g_data.clone();
+    g_p[0] += h;
+    let mut g_m = g_data.clone();
+    g_m[0] -= h;
+    let g_pt = upload(&dev, &g_p, &[batch, nv, chunk])?;
+    let g_mt = upload(&dev, &g_m, &[batch, nv, chunk])?;
+    let out_p = vk_gdn_chunk_prep_no_grad(&g_pt, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv)?;
+    let out_m = vk_gdn_chunk_prep_no_grad(&g_mt, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv)?;
+    let numerical = (dotted(&out_p) - dotted(&out_m)) / (2.0 * h);
+    let analytic = d_g.to_vec_f32()?[0];
+    let err = (numerical - analytic).abs();
+    let rel_err = err / numerical.abs().max(1e-6);
+    println!(
+        "chunk_prep_bwd d_g[0]: numerical={numerical:.6} analytic={analytic:.6} \
+         abs_err={err:.6e} rel_err={rel_err:.6e}"
+    );
+    // Allow 5% rel error or 1e-4 abs — finite-diff at h=1e-4 has its
+    // own numerical noise that can dominate at small gradient values.
+    assert!(
+        err < 1e-4 || rel_err < 5e-2,
+        "chunk_prep_bwd d_g[0] mismatch (abs_err={err}, rel_err={rel_err})"
+    );
+    Ok(())
+}
+
+// ---------------- vk_solve_tri_transpose ----------------
+
+#[test]
+fn vk_solve_tri_transpose_solves_correctly() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_solve_tri_transpose_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 1;
+    let nv = 1;
+    let chunk = 4;
+    let dv = 3;
+    let a_data: Vec<f32> = (0..(batch * nv * chunk * chunk))
+        .map(|i| {
+            let t = (i / chunk) % chunk;
+            let j = i % chunk;
+            if j < t {
+                ((i as f32) * 0.05).sin() * 0.1
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let beta_data: Vec<f32> = (0..(batch * nv * chunk)).map(|i| 0.5 + (i as f32) * 0.05).collect();
+    let dw_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| 0.3 + (i as f32) * 0.1)
+        .collect();
+
+    let a = upload(&dev, &a_data, &[batch, nv, chunk, chunk])?;
+    let beta = upload(&dev, &beta_data, &[batch, nv, chunk])?;
+    let dw = upload(&dev, &dw_data, &[batch, nv, chunk, dv])?;
+
+    let dr = vk_solve_tri_transpose_no_grad(&a, &beta, &dw, batch, nv, chunk, dv)?;
+    let dr_data = dr.to_vec_f32()?;
+
+    // Verify M^T · dr ≈ dW where M[t,i] = δ_{ti} + β[t]·A_strict[t,i]
+    // i.e. (M^T · dr)[t, d] = dr[t, d] + Σ_{i>t} β[i] · A_strict[i, t] · dr[i, d]
+    for bh in 0..batch * nv {
+        for t in 0..chunk {
+            for d in 0..dv {
+                let mut acc = dr_data[bh * chunk * dv + t * dv + d];
+                for i in (t + 1)..chunk {
+                    acc += beta_data[bh * chunk + i]
+                        * a_data[bh * chunk * chunk + i * chunk + t]
+                        * dr_data[bh * chunk * dv + i * dv + d];
+                }
+                let expected = dw_data[bh * chunk * dv + t * dv + d];
+                let err = (acc - expected).abs();
+                assert!(err < 1e-5, "M^T · dr[{t},{d}] = {acc} != dW = {expected}");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn vk_causal_conv1d_bwd_matches_cpu() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
