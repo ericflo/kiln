@@ -32,6 +32,8 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `8ea44f01` | CUDA training projection routing proof | Adds CUDA linear/offset dispatch counters and a trainer test proving projection matmuls plus FLCE chunk matmuls reach backend hooks. |
 | `bee4af4f` | CUDA projection routing validation ledger | Records A6000 release-mode validation for CUDA projection/FLCE trainer routing. |
 | `39ef69c1` | CUDA attention training fallback proof | Counts tracked FlashAttention declines and extends the CUDA trainer routing test to prove differentiable candle-CUDA attention fallback. |
+| `e4fdb98e` | CUDA attention fallback validation ledger | Records A6000 release-mode validation for tracked FlashAttention decline plus candle-CUDA training fallback. |
+| `c5440c6f` | Real Qwen3.5-4B CUDA SFT smoke ledger | Records A6000 release-mode `kiln-bench` validation on downloaded Qwen3.5-4B weights. |
 
 Local validation so far:
 
@@ -62,6 +64,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_optimizer_step_from_map_engages_backend_kernels --lib --quiet` re-run after adding adapter-save safetensors comparison
   - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet` re-run after adding tracked FlashAttention-decline assertion
+  - `KILN_SPEC_METHOD=off KILN_USE_FLCE=1 cargo run --release --features cuda --bin kiln-bench -- --model-path /workspace/qwen3.5-4b --prompt-tokens 8 --max-output-tokens 1 --training-steps 1 --paged --quiet` passed after downloading `Qwen/Qwen3.5-4B` with `hf download`; CUDA backend loaded the real model, completed one SFT step with `loss=1.598035`, `2.85s/step`, and `18952 MB` peak VRAM.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -103,8 +106,8 @@ explicit, testable, and observable:
 | LoRA precision | `compute_lora_delta` casts A/B to `x.dtype()`; LoRA Vars initialize as BF16. `PHASE10_LORA_PRECISION_STUDY.md` closed performance as null but accepted parity/safety. | Present. |
 | CUDA decode LoRA | `CudaBackend::lora_decode_add` declines tracked tensors and only runs the forward-only fused add for inference. | Correct for safety, not a training acceleration. |
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
-| Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, and saved adapter contents proven on CUDA synthetic LoRA params; real-model SFT still pending. |
-| Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests and trainer-level projection/FLCE routing; broader real-model layer coverage still pending. |
+| Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
+| Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
 | Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
 
 ## Phase Plan
