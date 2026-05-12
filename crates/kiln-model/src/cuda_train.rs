@@ -1080,6 +1080,71 @@ pub struct CudaModelWeights {
     pub hidden: usize,
 }
 
+/// One GDN layer's recurrent and conv state for CUDA-native training.
+pub struct CudaGdnLayerState {
+    /// Recurrent state S, shape [batch, num_value_heads, head_dim_k, head_dim_v].
+    pub recurrent_state: CudaTrainTensor,
+    pub recurrent_n_elements: usize,
+    /// Conv1d sliding window, shape [batch, conv_channels, kernel_size - 1].
+    pub conv_state: CudaTrainTensor,
+    pub conv_n_elements: usize,
+}
+
+/// Whole-model CUDA GDN state, indexed by LinearAttention-layer order.
+pub struct CudaLinearAttentionState {
+    pub layers: Vec<CudaGdnLayerState>,
+}
+
+impl CudaLinearAttentionState {
+    /// Create fresh zero-initialized state for `num_gdn_layers` GDN layers.
+    pub fn zeros(
+        device: &Device,
+        num_gdn_layers: usize,
+        batch: usize,
+        heads_v: usize,
+        head_dim_k: usize,
+        head_dim_v: usize,
+        conv_channels: usize,
+        kernel_size: usize,
+    ) -> Result<Self> {
+        ensure!(
+            matches!(device, Device::Cuda(_)),
+            "CudaLinearAttentionState requires a CUDA device, got {:?}",
+            device
+        );
+        let recurrent_n = batch * heads_v * head_dim_k * head_dim_v;
+        let state_len = kernel_size.saturating_sub(1).max(1);
+        let conv_n = batch * conv_channels * state_len;
+        let mut layers = Vec::with_capacity(num_gdn_layers);
+        for _ in 0..num_gdn_layers {
+            layers.push(CudaGdnLayerState {
+                recurrent_state: CudaTrainTensor::new(Tensor::zeros(
+                    (batch, heads_v, head_dim_k, head_dim_v),
+                    DType::F32,
+                    device,
+                )?)?,
+                recurrent_n_elements: recurrent_n,
+                conv_state: CudaTrainTensor::new(Tensor::zeros(
+                    (batch, conv_channels, state_len),
+                    DType::F32,
+                    device,
+                )?)?,
+                conv_n_elements: conv_n,
+            });
+        }
+        Ok(Self { layers })
+    }
+}
+
+/// Count how many imported CUDA layers are GDN (LinearAttention).
+pub fn cuda_count_gdn_layers(weights: &CudaModelWeights) -> usize {
+    weights
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer, CudaLayerWeights::LinearAttention(_)))
+        .count()
+}
+
 fn cuda_frozen_f32_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor> {
     ensure!(
         matches!(tensor.device(), Device::Cuda(_)),
@@ -2808,6 +2873,7 @@ mod tests {
         let CudaLayerWeights::FullAttention(layer) = &imported.layers[0] else {
             panic!("expected imported FullAttention layer");
         };
+        assert_eq!(cuda_count_gdn_layers(&imported), 0);
         assert_eq!(layer.q_weight.dims(), &[2, 2]);
         assert_eq!(layer.heads_q, 1);
         assert!(!layer.q_weight.requires_grad());
@@ -2819,6 +2885,29 @@ mod tests {
         )?)?;
         let output = cuda_full_attention_layer(&input, &layer.as_borrowed(None))?;
         assert_eq!(output.dims(), &[2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_linear_attention_state_zeros_allocates_layer_state() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda GDN state smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let state = CudaLinearAttentionState::zeros(&device, 2, 3, 4, 5, 6, 7, 4)?;
+        assert_eq!(state.layers.len(), 2);
+        for layer in &state.layers {
+            assert_eq!(layer.recurrent_n_elements, 3 * 4 * 5 * 6);
+            assert_eq!(layer.recurrent_state.dims(), &[3, 4, 5, 6]);
+            assert_eq!(layer.conv_n_elements, 3 * 7 * 3);
+            assert_eq!(layer.conv_state.dims(), &[3, 7, 3]);
+            assert!(layer.recurrent_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
+            assert!(layer.conv_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
+        }
         Ok(())
     }
 
