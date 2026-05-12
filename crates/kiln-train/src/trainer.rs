@@ -2091,6 +2091,66 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     seq_len >= threshold
 }
 
+fn spool_checkpoint_boundaries() -> bool {
+    kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES").unwrap_or(false)
+}
+
+fn synchronize_checkpoint_boundary(device: &Device, context: impl FnOnce() -> String) -> Result<()> {
+    if matches!(device, Device::Metal(_)) {
+        device.synchronize().with_context(context)?;
+    }
+    Ok(())
+}
+
+struct SpooledCheckpointBoundaries {
+    _dir: tempfile::TempDir,
+    paths: Vec<PathBuf>,
+}
+
+impl SpooledCheckpointBoundaries {
+    fn new(num_segments: usize) -> Result<Self> {
+        let dir = tempfile::Builder::new()
+            .prefix("kiln-checkpoint-boundaries-")
+            .tempdir()
+            .context("create checkpoint boundary spool directory")?;
+        let paths = (0..=num_segments)
+            .map(|idx| dir.path().join(format!("boundary-{idx:04}.safetensors")))
+            .collect();
+        Ok(Self { _dir: dir, paths })
+    }
+
+    fn save(&self, boundary_idx: usize, tensor: &Tensor) -> Result<()> {
+        let path = self.paths.get(boundary_idx).ok_or_else(|| {
+            anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
+        })?;
+        tensor
+            .save_safetensors("hidden", path)
+            .with_context(|| {
+                format!(
+                    "save checkpoint boundary {boundary_idx} to {}",
+                    path.display()
+                )
+            })
+    }
+
+    fn load(&self, boundary_idx: usize, device: &Device) -> Result<Tensor> {
+        let path = self.paths.get(boundary_idx).ok_or_else(|| {
+            anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
+        })?;
+        let mut tensors = candle_core::safetensors::load(path, device).with_context(|| {
+            format!(
+                "load checkpoint boundary {boundary_idx} from {}",
+                path.display()
+            )
+        })?;
+        tensors
+            .remove("hidden")
+            .ok_or_else(|| {
+                anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
+            })
+    }
+}
+
 /// Phase 3.2 helper: get the per-segment recompute input either from
 /// the resident activation registry (preferred) or by cloning the
 /// candle CPU mirror (fallback). Centralised so both
@@ -3348,6 +3408,7 @@ fn checkpointed_forward_backward(
     let lora_detached = lora_weights_detached(params);
     let resident_activation = backend.supports_resident_activation();
     let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
+    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries();
 
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
@@ -3370,8 +3431,54 @@ fn checkpointed_forward_backward(
                 Some(&lora_detached),
             )?;
             current = current.detach();
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize detached checkpoint boundary segment [{start}, {end})")
+            })?;
         }
         Ok(current)
+    };
+
+    let mut spooled_final_hidden: Option<Tensor> = None;
+    let spooled_boundaries = if should_spool_boundaries {
+        let spool = SpooledCheckpointBoundaries::new(num_segments)?;
+        tracing::info!(
+            num_segments,
+            seq_len = input_ids.len(),
+            "spooling checkpoint boundaries to temporary safetensors"
+        );
+        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+        let mut current = embed_hidden.detach();
+        spool.save(0, &current)?;
+        synchronize_checkpoint_boundary(device, || {
+            "synchronize spooled embedding checkpoint boundary".to_string()
+        })?;
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for (seg_idx, &(start, end)) in segments.iter().enumerate() {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )?;
+            current = current.detach();
+            spool.save(seg_idx + 1, &current)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize spooled checkpoint boundary {}", seg_idx + 1)
+            })?;
+        }
+        spooled_final_hidden = Some(current);
+        tracing::info!(
+            num_segments,
+            "finished spooling checkpoint boundaries to temporary safetensors"
+        );
+        Some(spool)
+    } else {
+        None
     };
 
     // Step 1: Run one full detached forward pass to obtain the final hidden
@@ -3380,7 +3487,9 @@ fn checkpointed_forward_backward(
     // demand in the reverse pass, avoiding `(num_segments + 1) * T * H`
     // resident boundary memory while preserving exact full-context values.
     let mut boundary_states: Vec<Tensor> = Vec::new();
-    let final_hidden = if recompute_boundaries {
+    let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
+        final_hidden
+    } else if recompute_boundaries {
         detached_boundary(num_segments)?
     } else {
         let first_boundary = detached_boundary(0)?;
@@ -3416,6 +3525,9 @@ fn checkpointed_forward_backward(
                 if resident_activation {
                     backend.register_resident_activation(boundary_states.last().unwrap())?;
                 }
+                synchronize_checkpoint_boundary(device, || {
+                    format!("synchronize cached checkpoint boundary segment [{start}, {end})")
+                })?;
                 current = boundary_states.last().unwrap().clone();
             }
         }
@@ -3480,7 +3592,9 @@ fn checkpointed_forward_backward(
         // Start from the detached boundary state for this segment. Wrapping it
         // in a fresh Var lets Candle return d(loss)/d(segment_input), which
         // becomes the upstream gradient for the previous segment.
-        let seg_input = if recompute_boundaries {
+        let seg_input = if let Some(spool) = spooled_boundaries.as_ref() {
+            spool.load(seg_idx, device)?
+        } else if recompute_boundaries {
             detached_boundary(seg_idx)?
         } else {
             segment_input_via_registry_or_clone(

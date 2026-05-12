@@ -24,6 +24,7 @@ indicatif = "0.18"
 console = "0.16"
 sha2 = { workspace = true }
 rand = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda"]
@@ -37,6 +38,3 @@ optional = true
 [[bin]]
 name = "kiln-replay"
 path = "src/bin/kiln-replay.rs"
-
-[dev-dependencies]
-tempfile = { workspace = true }
