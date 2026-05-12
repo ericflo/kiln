@@ -36,9 +36,9 @@ void main() {
         data_out[linear] = 0.0;
         return;
     }
-    uint flat = id * hidden + d;
-    uint word_idx = flat >> 1u;
+    uint flat_idx = id * hidden + d;
+    uint word_idx = flat_idx >> 1u;
     uint word = data_w[word_idx];
-    uint bf16_bits = ((flat & 1u) == 0u) ? (word & 0xffffu) : (word >> 16);
+    uint bf16_bits = ((flat_idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16);
     data_out[linear] = bf16_bits_to_f32(bf16_bits);
 }

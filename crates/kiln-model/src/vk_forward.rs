@@ -236,9 +236,21 @@ pub fn vk_linear_with_lora(
     let base = match weight.dtype() {
         VkDType::F32 => {
             let w_t = vk_transpose_2d(weight)?;
-            vk_matmul(x, &w_t)?
+            vk_matmul(x, &w_t).with_context(|| {
+                format!(
+                    "vk_linear_with_lora F32: x={:?} w={:?}",
+                    x.shape(),
+                    weight.shape()
+                )
+            })?
         }
-        VkDType::Bf16 => vk_matmul_bf16w(x, weight)?,
+        VkDType::Bf16 => vk_matmul_bf16w(x, weight).with_context(|| {
+            format!(
+                "vk_linear_with_lora BF16: x={:?} w={:?}",
+                x.shape(),
+                weight.shape()
+            )
+        })?,
     };
     let Some(pair) = lora else {
         return Ok(base);
@@ -566,8 +578,15 @@ fn vk_gdn_layer_forward(
     let conv_btc_t = vk_reshape(&conv_tc, &[batch, t, qkv_dim])?;
 
     // 4. Split into Q / K / V along channel axis
-    let conv_3d = vk_reshape(&conv_btc_t, &[batch * t, qkv_dim])?;
-    let q_flat = vk_narrow_lastdim(&conv_3d, 0, qk_dim)?;
+    let conv_3d = vk_reshape(&conv_btc_t, &[batch * t, qkv_dim]).with_context(|| {
+        format!(
+            "vk_gdn_layer_forward: conv_3d reshape — conv_btc_t.shape={:?} target=[{},{}] (qk_dim={}, v_dim={}, nk={}, dk={}, nv={}, dv={})",
+            conv_btc_t.shape(), batch * t, qkv_dim, qk_dim, v_dim, nk, dk, nv, dv
+        )
+    })?;
+    let q_flat = vk_narrow_lastdim(&conv_3d, 0, qk_dim).with_context(|| {
+        format!("q_flat narrow: conv_3d.shape={:?} qk_dim={}", conv_3d.shape(), qk_dim)
+    })?;
     let k_flat = vk_narrow_lastdim(&conv_3d, qk_dim, qk_dim)?;
     let v_flat = vk_narrow_lastdim(&conv_3d, 2 * qk_dim, v_dim)?;
 
@@ -583,16 +602,21 @@ fn vk_gdn_layer_forward(
     let q_bnvtd = vk_reshape(&q_htd, &[batch, nk, t, dk])?;
     let k_bnvtd = vk_reshape(&k_htd, &[batch, nk, t, dk])?;
     let v_bnvtd = vk_reshape(&v_htd, &[batch, nv, t, dv])?;
-    // GQA expand for K (replicate nk → nv heads). Use the existing
+    // GQA expand for Q and K (replicate nk → nv heads each — chunkwise
+    // expects all of q/k/v in nv-head layout). Use the existing
     // vk_repeat_kv_heads_no_grad which expects [heads_kv, rows, head_dim].
     use kiln_vulkan_kernel::vk_ops::permute::vk_repeat_kv_heads_no_grad;
-    let k_expanded = if nk < nv {
+    let (q_expanded, k_expanded) = if nk < nv {
         let groups = nv / nk;
+        let q_3d = vk_reshape(&q_bnvtd, &[nk, t, dk])?;
+        let q_repeated = vk_repeat_kv_heads_no_grad(&q_3d, groups)?;
+        let q_expanded = vk_reshape(&q_repeated, &[batch, nv, t, dk])?;
         let k_3d = vk_reshape(&k_bnvtd, &[nk, t, dk])?;
         let k_repeated = vk_repeat_kv_heads_no_grad(&k_3d, groups)?;
-        vk_reshape(&k_repeated, &[batch, nv, t, dk])?
+        let k_expanded = vk_reshape(&k_repeated, &[batch, nv, t, dk])?;
+        (q_expanded, k_expanded)
     } else {
-        k_bnvtd
+        (q_bnvtd, k_bnvtd)
     };
 
     // 6. (Per-head q_norm/k_norm) — Qwen3.5 GDN variant. Currently
@@ -601,11 +625,20 @@ fn vk_gdn_layer_forward(
     //    that doesn't have a learned weight in this codebase).
     //    Skip for v1.
 
-    // 7. Gates
+    // 7. Gates: a_proj/b_proj are [T, nv]. Compute β, g over those
+    //    (gates are pointwise + per-nv broadcast — shape preserved).
+    //    Then transpose to [B, nv, T] for chunkwise consumption.
     let a_3 = vk_reshape(&a_proj, &[batch, t, nv])?;
     let b_3 = vk_reshape(&b_proj, &[batch, t, nv])?;
-    let (beta, g_gates) =
+    let (beta_tn, g_tn) =
         vk_gdn_gates_no_grad(&a_3, &b_3, &w.a_log, &w.dt_bias, nv)?;
+    // [B=1, T, nv] → [B=1, nv, T] via vk_transpose_2d on the [T, nv] matrix.
+    let beta_2d = vk_reshape(&beta_tn, &[t, nv])?;
+    let g_2d = vk_reshape(&g_tn, &[t, nv])?;
+    let beta_t = vk_transpose_2d_no_grad(&beta_2d)?; // [nv, T]
+    let g_t = vk_transpose_2d_no_grad(&g_2d)?;
+    let beta = vk_reshape(&beta_t, &[batch, nv, t])?;
+    let g_gates = vk_reshape(&g_t, &[batch, nv, t])?;
 
     // 8. Chunkwise recurrence (autograd-aware)
     let recurrent_state = state.layers[gdn_layer_idx].recurrent_state.clone();
@@ -616,7 +649,7 @@ fn vk_gdn_layer_forward(
         Arc::clone(x.device()),
     );
     let chunk_c = if t < 64 { t.max(1) } else { 64 };
-    let out_chunkwise = vk_gdn_chunkwise(&q_bnvtd, &k_expanded, &v_bnvtd, &beta, &g_gates, &mut state_t, chunk_c)?;
+    let out_chunkwise = vk_gdn_chunkwise(&q_expanded, &k_expanded, &v_bnvtd, &beta, &g_gates, &mut state_t, chunk_c)?;
     // Save updated recurrent state back
     state.layers[gdn_layer_idx].recurrent_state = Arc::clone(state_t.buffer());
 
@@ -628,9 +661,14 @@ fn vk_gdn_layer_forward(
     let out_t_nv_dv = vk_permute_hr_to_rh_no_grad(&out_3)?; // [T, H, D]
     let flat_t = vk_reshape(&out_t_nv_dv, &[batch * t, v_dim])?;
 
-    // 10. Gated RMSNorm: out = (out / rms(out)) · silu(z) · gated_norm
-    let z_2 = vk_reshape(&z_raw, &[batch * t, v_dim])?;
-    let normed = vk_gdn_gated_rms_norm_no_grad(&flat_t, &z_2, &w.gated_norm, w.eps)?;
+    // 10. Gated RMSNorm — per-head over dv. x and z reshape to
+    //     [B*T*nv, dv] so the kernel sees inner dim = dv (= weight len).
+    //     Then reshape back to [B*T, nv*dv].
+    let flat_per_head = vk_reshape(&flat_t, &[batch * t * nv, dv])?;
+    let z_per_head = vk_reshape(&z_raw, &[batch * t * nv, dv])?;
+    let normed_per_head =
+        vk_gdn_gated_rms_norm_no_grad(&flat_per_head, &z_per_head, &w.gated_norm, w.eps)?;
+    let normed = vk_reshape(&normed_per_head, &[batch * t, v_dim])?;
 
     // 11. Out projection + residual
     let out_proj_out = vk_linear_with_lora(&normed, &w.out_proj, _lora.gdn_out_proj.as_ref())?;
@@ -785,6 +823,53 @@ fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTens
     }
 }
 
+/// Force-upload a small candle tensor as F32. Used for RMSNorm
+/// weights, biases, q/k_norm — vk_rmsnorm and friends require F32
+/// weights regardless of model dtype. The size is small (~hidden =
+/// 2560 floats per layer × 2 norms = 5 MB total for Qwen3.5-4B).
+fn vk_from_candle_as_f32(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+    let t_f32 = match t.dtype() {
+        DType::F32 => t.clone(),
+        _ => t.to_dtype(DType::F32)?,
+    };
+    let t_cpu = t_f32.to_device(&Device::Cpu)?;
+    VkTensor::from_candle(&t_cpu, Arc::clone(device))
+}
+
+/// Pick a projection weight from candle, handling the case where the
+/// "main" weight has been stubbed by the inference loader (Vulkan
+/// stubs the non-_t version after uploading the _t cache, see
+/// `dropped_weight_stub` in forward.rs).
+///
+/// Returns the weight as `[out_dim, in_dim]` (vk_matmul_bf16w's
+/// convention), transposing the _t cache (`[in_dim, out_dim]`) when
+/// the main is stubbed.
+fn pick_projection_weight(
+    main: &Tensor,
+    transposed: &Tensor,
+    device: &Arc<VulkanDevice>,
+    name: &str,
+) -> Result<VkTensor> {
+    let main_dims = main.dims();
+    let t_dims = transposed.dims();
+    let chosen = if main_dims.len() == 2 && main_dims[0] > 1 {
+        main.clone()
+    } else if t_dims.len() == 2 {
+        transposed
+            .t()
+            .with_context(|| format!("{name}: .t() on _t cache"))?
+            .contiguous()
+            .with_context(|| format!("{name}: contiguous after _t transpose"))?
+    } else {
+        bail!(
+            "{name}: cannot resolve weight — main {:?} transposed {:?}",
+            main_dims,
+            t_dims
+        );
+    };
+    vk_from_candle_typed(&chosen, device).with_context(|| name.to_string())
+}
+
 impl VkModelWeights {
     /// Upload candle `GpuWeights` into vk-native `VkModelWeights`.
     ///
@@ -803,50 +888,93 @@ impl VkModelWeights {
         model_config: &ModelConfig,
         device: &Arc<VulkanDevice>,
     ) -> Result<Self> {
+        // On Vulkan-active processes, candle's `embed_tokens` is stubbed
+        // to a single-element placeholder (shape [1]) — see
+        // `dropped_weight_stub` in forward.rs. The real data lives in
+        // `embed_tokens_t` with shape [hidden, vocab]. Detect this and
+        // transpose back to [vocab, hidden] for vk-native consumption.
+        let (embed_source, vocab, hidden) = {
+            let et_dims = weights.embed_tokens.dims();
+            let ett_dims = weights.embed_tokens_t.dims();
+            if et_dims.len() == 2 && et_dims[0] > 1 {
+                // Real [vocab, hidden] available
+                (
+                    weights.embed_tokens.clone(),
+                    et_dims[0],
+                    et_dims[1],
+                )
+            } else if ett_dims.len() == 2 {
+                // Stubbed; reconstruct [vocab, hidden] by transposing
+                // embed_tokens_t (which is [hidden, vocab]).
+                let hidden = ett_dims[0];
+                let vocab = ett_dims[1];
+                let restored = weights
+                    .embed_tokens_t
+                    .t()
+                    .context("embed_tokens_t.t() to recover [vocab, hidden]")?
+                    .contiguous()
+                    .context("embed_tokens contiguous after transpose")?;
+                (restored, vocab, hidden)
+            } else {
+                anyhow::bail!(
+                    "vk_native: cannot find embed_tokens — embed_tokens dims {:?}, \
+                     embed_tokens_t dims {:?}",
+                    et_dims,
+                    ett_dims
+                );
+            }
+        };
         let embed_tokens =
-            vk_from_candle_typed(&weights.embed_tokens, device).context("embed_tokens")?;
+            vk_from_candle_typed(&embed_source, device).context("embed_tokens")?;
         let embed_dtype = embed_tokens.dtype();
+        // Norm weights must be F32 (vk_rmsnorm requirement).
         let final_norm_weight =
-            vk_from_candle_typed(&weights.final_norm, device).context("final_norm")?;
-        // lm_head is tied to embed_tokens for Qwen3.5; we re-upload as
-        // a fresh VkTensor so backward through the head doesn't alias.
+            vk_from_candle_as_f32(&weights.final_norm, device).context("final_norm")?;
+        // lm_head: vk_flce_loss currently requires F32 weight. Cast on
+        // upload (~2.5 GB for Qwen3.5-4B vocab=248K × hidden=2560).
+        // Worth the memory for v1; a BF16 FLCE variant is a follow-up.
         let lm_head =
-            vk_from_candle_typed(&weights.embed_tokens, device).context("lm_head (tied)")?;
-        let vocab = weights.embed_tokens.dim(0)?;
-        let hidden = weights.embed_tokens.dim(1)?;
+            vk_from_candle_as_f32(&embed_source, device).context("lm_head (tied)")?;
         let eps = model_config.rms_norm_eps as f32;
 
         let mut layers = Vec::with_capacity(weights.layers.len());
         for (li, lw) in weights.layers.iter().enumerate() {
             let layer = match &lw.attention {
                 crate::forward::GpuAttentionWeights::Full(attn) => {
-                    let input_layernorm_weight = vk_from_candle_typed(&lw.input_layernorm, device)
+                    let input_layernorm_weight = vk_from_candle_as_f32(&lw.input_layernorm, device)
                         .with_context(|| format!("layer {li} input_layernorm"))?;
                     let post_attention_layernorm_weight =
-                        vk_from_candle_typed(&lw.post_attention_layernorm, device)
+                        vk_from_candle_as_f32(&lw.post_attention_layernorm, device)
                             .with_context(|| format!("layer {li} post_attention_layernorm"))?;
-                    let q_proj = vk_from_candle_typed(&attn.q_proj, device)
-                        .with_context(|| format!("layer {li} q_proj"))?;
-                    let k_proj = vk_from_candle_typed(&attn.k_proj, device)
-                        .with_context(|| format!("layer {li} k_proj"))?;
-                    let v_proj = vk_from_candle_typed(&attn.v_proj, device)
-                        .with_context(|| format!("layer {li} v_proj"))?;
-                    let o_proj = vk_from_candle_typed(&attn.o_proj, device)
-                        .with_context(|| format!("layer {li} o_proj"))?;
+                    let q_proj = pick_projection_weight(
+                        &attn.q_proj, &attn.q_proj_t, device,
+                        &format!("layer {li} q_proj"))?;
+                    let k_proj = pick_projection_weight(
+                        &attn.k_proj, &attn.k_proj_t, device,
+                        &format!("layer {li} k_proj"))?;
+                    let v_proj = pick_projection_weight(
+                        &attn.v_proj, &attn.v_proj_t, device,
+                        &format!("layer {li} v_proj"))?;
+                    let o_proj = pick_projection_weight(
+                        &attn.o_proj, &attn.o_proj_t, device,
+                        &format!("layer {li} o_proj"))?;
                     let q_norm = Some(
-                        vk_from_candle_typed(&attn.q_norm, device)
+                        vk_from_candle_as_f32(&attn.q_norm, device)
                             .with_context(|| format!("layer {li} q_norm"))?,
                     );
                     let k_norm = Some(
-                        vk_from_candle_typed(&attn.k_norm, device)
+                        vk_from_candle_as_f32(&attn.k_norm, device)
                             .with_context(|| format!("layer {li} k_norm"))?,
                     );
-                    let gate_proj = vk_from_candle_typed(&lw.mlp.gate_proj, device)
-                        .with_context(|| format!("layer {li} mlp.gate_proj"))?;
-                    let up_proj = vk_from_candle_typed(&lw.mlp.up_proj, device)
-                        .with_context(|| format!("layer {li} mlp.up_proj"))?;
-                    let down_proj = vk_from_candle_typed(&lw.mlp.down_proj, device)
-                        .with_context(|| format!("layer {li} mlp.down_proj"))?;
+                    let gate_proj = pick_projection_weight(
+                        &lw.mlp.gate_proj, &lw.mlp.gate_proj_t, device,
+                        &format!("layer {li} mlp.gate_proj"))?;
+                    let up_proj = pick_projection_weight(
+                        &lw.mlp.up_proj, &lw.mlp.up_proj_t, device,
+                        &format!("layer {li} mlp.up_proj"))?;
+                    let down_proj = pick_projection_weight(
+                        &lw.mlp.down_proj, &lw.mlp.down_proj_t, device,
+                        &format!("layer {li} mlp.down_proj"))?;
                     VkLayerWeights::FullAttention(VkFullAttentionWeights {
                         input_layernorm_weight,
                         post_attention_layernorm_weight,
@@ -867,28 +995,34 @@ impl VkModelWeights {
                     })
                 }
                 crate::forward::GpuAttentionWeights::Linear(attn) => {
-                    let layer_norm = vk_from_candle_typed(&lw.input_layernorm, device)
+                    let layer_norm = vk_from_candle_as_f32(&lw.input_layernorm, device)
                         .with_context(|| format!("layer {li} (GDN) input_layernorm"))?;
-                    let in_proj_qkv = vk_from_candle_typed(&attn.in_proj_qkv, device)
-                        .with_context(|| format!("layer {li} in_proj_qkv"))?;
-                    let in_proj_z = vk_from_candle_typed(&attn.in_proj_z, device)
-                        .with_context(|| format!("layer {li} in_proj_z"))?;
-                    let in_proj_a = vk_from_candle_typed(&attn.in_proj_a, device)
-                        .with_context(|| format!("layer {li} in_proj_a"))?;
-                    let in_proj_b = vk_from_candle_typed(&attn.in_proj_b, device)
-                        .with_context(|| format!("layer {li} in_proj_b"))?;
-                    let conv1d = vk_from_candle_typed(&attn.conv1d, device)
+                    let in_proj_qkv = pick_projection_weight(
+                        &attn.in_proj_qkv, &attn.in_proj_qkv_t, device,
+                        &format!("layer {li} in_proj_qkv"))?;
+                    let in_proj_z = pick_projection_weight(
+                        &attn.in_proj_z, &attn.in_proj_z_t, device,
+                        &format!("layer {li} in_proj_z"))?;
+                    let in_proj_a = pick_projection_weight(
+                        &attn.in_proj_a, &attn.in_proj_a_t, device,
+                        &format!("layer {li} in_proj_a"))?;
+                    let in_proj_b = pick_projection_weight(
+                        &attn.in_proj_b, &attn.in_proj_b_t, device,
+                        &format!("layer {li} in_proj_b"))?;
+                    // conv1d is small (channels × kernel_size), gates/bias are F32-required.
+                    let conv1d = vk_from_candle_as_f32(&attn.conv1d, device)
                         .with_context(|| format!("layer {li} conv1d"))?;
-                    let a_log = vk_from_candle_typed(&attn.a_log, device)
+                    let a_log = vk_from_candle_as_f32(&attn.a_log, device)
                         .with_context(|| format!("layer {li} a_log"))?;
-                    let a_log_gates = vk_from_candle_typed(&attn.a_log_gates, device)
+                    let a_log_gates = vk_from_candle_as_f32(&attn.a_log_gates, device)
                         .with_context(|| format!("layer {li} a_log_gates"))?;
-                    let dt_bias = vk_from_candle_typed(&attn.dt_bias, device)
+                    let dt_bias = vk_from_candle_as_f32(&attn.dt_bias, device)
                         .with_context(|| format!("layer {li} dt_bias"))?;
-                    let gated_norm = vk_from_candle_typed(&attn.norm, device)
+                    let gated_norm = vk_from_candle_as_f32(&attn.norm, device)
                         .with_context(|| format!("layer {li} (GDN) gated_norm"))?;
-                    let out_proj = vk_from_candle_typed(&attn.out_proj, device)
-                        .with_context(|| format!("layer {li} (GDN) out_proj"))?;
+                    let out_proj = pick_projection_weight(
+                        &attn.out_proj, &attn.out_proj_t, device,
+                        &format!("layer {li} (GDN) out_proj"))?;
                     let conv_kernel = attn.conv1d.dim(attn.conv1d.dims().len() - 1)?;
                     VkLayerWeights::LinearAttention(VkLinearAttentionWeights {
                         layer_norm,
