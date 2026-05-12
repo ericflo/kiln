@@ -6,12 +6,27 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::{BackendRuntime, TrainingCapabilities};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
+static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+
+pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
+    (
+        CUDA_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+        CUDA_ADAMW_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+    )
+}
+
+pub fn reset_optimizer_dispatch_success_counts() {
+    CUDA_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+    CUDA_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+}
 
 fn any_tracks_op(tensors: &[&Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
@@ -155,6 +170,7 @@ impl BackendRuntime for CudaBackend {
         }
         kiln_rmsnorm_kernel::sgd_step_inplace(param, grad, lr)
             .context("cuda dispatch_sgd_step kernel failed")?;
+        CUDA_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         static FIRST_CUDA_SGD_LOGGED: OnceLock<()> = OnceLock::new();
         FIRST_CUDA_SGD_LOGGED.get_or_init(|| {
             tracing::info!(
@@ -210,6 +226,7 @@ impl BackendRuntime for CudaBackend {
             step,
         )
         .context("cuda dispatch_adamw_step kernel failed")?;
+        CUDA_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         static FIRST_CUDA_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
         FIRST_CUDA_ADAMW_LOGGED.get_or_init(|| {
             tracing::info!(
