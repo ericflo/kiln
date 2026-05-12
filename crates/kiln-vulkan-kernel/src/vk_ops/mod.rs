@@ -12,9 +12,13 @@
 
 pub mod attention;
 pub mod cast;
+pub mod conv1d;
 pub mod elementwise;
 pub mod embedding;
 pub mod flce;
+pub mod gdn_gated_rms_norm;
+pub mod gdn_gates;
+pub mod gdn_state;
 pub mod index_select;
 pub mod mask;
 pub mod matmul;
