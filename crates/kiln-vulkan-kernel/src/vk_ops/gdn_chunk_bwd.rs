@@ -147,6 +147,8 @@ fn cpu_solve_tri_transpose(
 /// Backward of the chunk_scan stage:
 ///   out = q_s_scaled + b_mask · W
 /// Given d_out, b_mask, W, produces dq_s_scaled, db_mask, dW.
+///
+/// GPU-native implementation using vk_matmul_batched composition.
 pub fn vk_gdn_chunk_scan_bwd_no_grad(
     d_out: &VkTensor,   // [B, nv, C, dv]
     b_mask: &VkTensor,  // [B, nv, C, C]
@@ -156,25 +158,74 @@ pub fn vk_gdn_chunk_scan_bwd_no_grad(
     chunk: usize,
     dv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor)> {
+    use crate::vk_ops::matmul_batched::{vk_matmul_batched_no_grad, vk_transpose_batched_2d_no_grad};
+    use crate::vk_ops::shape::vk_reshape;
+
+    let device = d_out.device();
+    if std::env::var("KILN_VK_GDN_CHUNK_SCAN_BWD_CPU").is_ok() {
+        return cpu_chunk_scan_bwd(d_out, b_mask, w, batch, nv, chunk, dv);
+    }
+
+    // dq_s_scaled = d_out (just clone/copy — no allocation needed semantically,
+    // but we produce a fresh VkTensor with the same data via add-zero or
+    // re-upload).
+    // Simpler: clone the buffer Arc — the result IS d_out.
+    let dq_s_scaled = VkTensor::from_buffer(
+        Arc::clone(d_out.buffer()),
+        d_out.shape().to_vec(),
+        VkDType::F32,
+        Arc::clone(device),
+    );
+
+    // Reshape to 3D for vk_matmul_batched
+    let bh = batch * nv;
+    let dout_3 = vk_reshape(d_out, &[bh, chunk, dv])?;
+    let bmask_3 = vk_reshape(b_mask, &[bh, chunk, chunk])?;
+    let w_3 = vk_reshape(w, &[bh, chunk, dv])?;
+
+    // dW = b_mask^T @ d_out, where b_mask is [C, C] (rows=t, cols=i)
+    //   dW[i, d] = Σ_t b_mask[t, i] · d_out[t, d]
+    //   b_mask^T: swap (t, i) → (i, t), [C, C] → [C, C]
+    //   dW = transpose(b_mask) @ d_out
+    let bmask_t = vk_transpose_batched_2d_no_grad(&bmask_3)?;
+    let dw_3 = vk_matmul_batched_no_grad(&bmask_t, &dout_3)?;
+    let d_w = vk_reshape(&dw_3, &[batch, nv, chunk, dv])?;
+
+    // db_mask = d_out @ W^T, where W is [C, dv]
+    //   db_mask[t, i] = Σ_d d_out[t, d] · W[i, d]
+    //   W^T: [dv, C]
+    let w_t = vk_transpose_batched_2d_no_grad(&w_3)?;
+    let dbm_3 = vk_matmul_batched_no_grad(&dout_3, &w_t)?;
+    let db_mask = vk_reshape(&dbm_3, &[batch, nv, chunk, chunk])?;
+
+    Ok((dq_s_scaled, db_mask, d_w))
+}
+
+/// CPU fallback for vk_gdn_chunk_scan_bwd (debug aid).
+fn cpu_chunk_scan_bwd(
+    d_out: &VkTensor,
+    b_mask: &VkTensor,
+    w: &VkTensor,
+    batch: usize,
+    nv: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<(VkTensor, VkTensor, VkTensor)> {
     let device = d_out.device();
     let dout = d_out.to_vec_f32()?;
     let bm = b_mask.to_vec_f32()?;
     let wd = w.to_vec_f32()?;
-
     let mut dq_s_scaled = vec![0.0_f32; batch * nv * chunk * dv];
     let mut db_mask = vec![0.0_f32; batch * nv * chunk * chunk];
     let mut d_w = vec![0.0_f32; batch * nv * chunk * dv];
-
     for bh in 0..batch * nv {
         let v_base = bh * chunk * dv;
         let m_base = bh * chunk * chunk;
-        // dq_s_scaled[t, d] = d_out[t, d]
         for t in 0..chunk {
             for d in 0..dv {
                 dq_s_scaled[v_base + t * dv + d] = dout[v_base + t * dv + d];
             }
         }
-        // db_mask[t, i] = Σ_d d_out[t, d] · W[i, d]
         for t in 0..chunk {
             for i in 0..chunk {
                 let mut acc = 0.0_f32;
@@ -184,7 +235,6 @@ pub fn vk_gdn_chunk_scan_bwd_no_grad(
                 db_mask[m_base + t * chunk + i] = acc;
             }
         }
-        // d_W[i, d] += Σ_t b_mask[t, i] · d_out[t, d]
         for i in 0..chunk {
             for d in 0..dv {
                 let mut acc = 0.0_f32;
@@ -195,7 +245,6 @@ pub fn vk_gdn_chunk_scan_bwd_no_grad(
             }
         }
     }
-
     Ok((
         upload(device, &dq_s_scaled, vec![batch, nv, chunk, dv])?,
         upload(device, &db_mask, vec![batch, nv, chunk, chunk])?,

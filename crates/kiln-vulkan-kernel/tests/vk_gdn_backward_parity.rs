@@ -269,6 +269,77 @@ fn vk_gdn_gated_rms_norm_bwd_matches_finite_diff() -> Result<()> {
     Ok(())
 }
 
+// ---------------- vk_gdn_chunk_scan_bwd ----------------
+
+#[test]
+fn vk_gdn_chunk_scan_bwd_matches_cpu() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_scan_bwd_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 1;
+    let nv = 2;
+    let chunk = 4;
+    let dv = 3;
+    // Build masked B (causal lower-tri) and W
+    let bmask: Vec<f32> = (0..(batch * nv * chunk * chunk))
+        .map(|i| {
+            let t = (i / chunk) % chunk;
+            let j = i % chunk;
+            if j <= t {
+                ((i as f32) * 0.05 + 0.1).sin() * 0.3
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let w_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| ((i as f32) * 0.07).cos())
+        .collect();
+    let dout_data: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| 0.1 * ((i + 1) as f32))
+        .collect();
+    let bm = upload(&dev, &bmask, &[batch, nv, chunk, chunk])?;
+    let w = upload(&dev, &w_data, &[batch, nv, chunk, dv])?;
+    let dout = upload(&dev, &dout_data, &[batch, nv, chunk, dv])?;
+    let (gpu_dqs, gpu_dbm, gpu_dw) =
+        vk_gdn_chunk_scan_bwd_no_grad(&dout, &bm, &w, batch, nv, chunk, dv)?;
+
+    // CPU reference
+    let mut cpu_dqs = vec![0.0_f32; batch * nv * chunk * dv];
+    let mut cpu_dbm = vec![0.0_f32; batch * nv * chunk * chunk];
+    let mut cpu_dw = vec![0.0_f32; batch * nv * chunk * dv];
+    for bh in 0..batch * nv {
+        let v_base = bh * chunk * dv;
+        let m_base = bh * chunk * chunk;
+        for t in 0..chunk {
+            for d in 0..dv {
+                cpu_dqs[v_base + t * dv + d] = dout_data[v_base + t * dv + d];
+            }
+        }
+        for t in 0..chunk {
+            for i in 0..chunk {
+                let mut acc = 0.0_f32;
+                for d in 0..dv {
+                    acc += dout_data[v_base + t * dv + d] * w_data[v_base + i * dv + d];
+                }
+                cpu_dbm[m_base + t * chunk + i] = acc;
+            }
+        }
+        for i in 0..chunk {
+            for d in 0..dv {
+                let mut acc = 0.0_f32;
+                for t in 0..chunk {
+                    acc += bmask[m_base + t * chunk + i] * dout_data[v_base + t * dv + d];
+                }
+                cpu_dw[v_base + i * dv + d] = acc;
+            }
+        }
+    }
+    assert!(max_abs_err(&gpu_dqs.to_vec_f32()?, &cpu_dqs) < 1e-5);
+    assert!(max_abs_err(&gpu_dbm.to_vec_f32()?, &cpu_dbm) < 1e-5);
+    assert!(max_abs_err(&gpu_dw.to_vec_f32()?, &cpu_dw) < 1e-5);
+    Ok(())
+}
+
 // ---------------- vk_gdn_chunk_prep_bwd (most complex) ----------------
 
 #[test]
