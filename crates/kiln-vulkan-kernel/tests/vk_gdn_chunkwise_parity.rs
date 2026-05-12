@@ -294,6 +294,56 @@ fn vk_gdn_chunkwise_minimal_sanity() -> Result<()> {
 }
 
 #[test]
+fn vk_gdn_chunkwise_autograd_smoke() -> Result<()> {
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise;
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_mean_all;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+
+    let batch = 1;
+    let nv = 1;
+    let seq_len = 8;
+    let dk = 4;
+    let dv = 4;
+    let chunk_size = 8;
+
+    // Build VkTensors that participate in autograd: synthesize them as
+    // outputs of a no-op upload (we don't need them as parameters here;
+    // we just want the autograd tape to terminate at the GDN bwd op
+    // and verify gradients shape out correctly).
+    use candle_core::{Device, Tensor, Var};
+    let mk_param = |seed: u64, n: usize, shape: Vec<usize>| -> Result<VkTensor> {
+        let data: Vec<f32> = (0..n).map(|i| (((i + seed as usize) as f32) * 0.05).sin()).collect();
+        let t = Tensor::from_vec(data, shape.clone(), &Device::Cpu)?;
+        let var = Var::from_tensor(&t)?;
+        let vk = VkTensor::from_candle(&t, Arc::clone(&dev))?;
+        Ok(VkTensor::parameter(
+            Arc::clone(vk.buffer()),
+            shape,
+            vk.dtype(),
+            Arc::clone(vk.device()),
+            var.id(),
+        ))
+    };
+
+    let q = mk_param(1, batch * nv * seq_len * dk, vec![batch, nv, seq_len, dk])?;
+    let k = mk_param(2, batch * nv * seq_len * dk, vec![batch, nv, seq_len, dk])?;
+    let v = mk_param(3, batch * nv * seq_len * dv, vec![batch, nv, seq_len, dv])?;
+    let beta = mk_param(4, batch * nv * seq_len, vec![batch, nv, seq_len])?;
+    let g = mk_param(5, batch * nv * seq_len, vec![batch, nv, seq_len])?;
+    let mut state = upload(&dev, &vec![0.0_f32; batch * nv * dk * dv], &[batch, nv, dk, dv])?;
+
+    let out = vk_gdn_chunkwise(&q, &k, &v, &beta, &g, &mut state, chunk_size)?;
+    assert!(out.requires_grad());
+    let loss = vk_mean_all(&out)?;
+    let grads = vk_backward(&loss)?;
+    println!("vk_gdn_chunkwise autograd smoke: grads={}", grads.len());
+    // Expect 5 gradients: q, k, v, beta, g
+    assert!(grads.len() >= 5, "expected ≥5 grads, got {}", grads.len());
+    Ok(())
+}
+
+#[test]
 fn vk_gdn_chunkwise_matches_cpu_per_token_c8_t8() -> Result<()> {
     // Smaller smoke test exercising 1 chunk only (T == chunk_size)
     let Some(dev) = vk_dev() else { return Ok(()) };
