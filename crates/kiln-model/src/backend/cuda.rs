@@ -89,7 +89,7 @@ impl CudaBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "backend-routed candle CUDA autograd",
+            projection_training: "backend-routed candle CUDA autograd with offset chunk hook",
             flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
             resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
@@ -597,6 +597,37 @@ impl BackendRuntime for CudaBackend {
         Ok(Some(x.broadcast_matmul(weight_t)?))
     }
 
+    fn linear_prefill_apply_offset(
+        &self,
+        x: &Tensor,
+        full_weight_t: &Tensor,
+        chunk_start: usize,
+        chunk_len: usize,
+    ) -> Result<Option<Tensor>> {
+        if !matches!(x.device(), Device::Cuda(_))
+            || !matches!(full_weight_t.device(), Device::Cuda(_))
+            || full_weight_t.dims().len() != 2
+            || chunk_len == 0
+            || chunk_start >= full_weight_t.dims()[1]
+            || chunk_start + chunk_len > full_weight_t.dims()[1]
+        {
+            return Ok(None);
+        }
+        let chunk = full_weight_t
+            .narrow(1, chunk_start, chunk_len)
+            .context("cuda linear_prefill_apply_offset narrow weight chunk")?
+            .contiguous()
+            .context("cuda linear_prefill_apply_offset contiguous weight chunk")?;
+        let chunk = if chunk.dtype() == x.dtype() {
+            chunk
+        } else {
+            chunk
+                .to_dtype(x.dtype())
+                .context("cuda linear_prefill_apply_offset cast weight chunk")?
+        };
+        self.linear_prefill_apply(x, &chunk)
+    }
+
     fn lora_delta_resident(
         &self,
         x: &Tensor,
@@ -758,6 +789,36 @@ mod tests {
             .linear_prefill_apply(&x, &w)?
             .expect("CUDA linear_prefill_apply should accept CUDA tensors");
         let expected = x.broadcast_matmul(&w)?;
+        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+
+        let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
+        let w = Tensor::from_slice(
+            &[
+                0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0,
+                0.5, -2.0,
+            ],
+            (3, 5),
+            &device,
+        )?;
+
+        let routed = backend
+            .linear_prefill_apply_offset(&x, &w, 1, 3)?
+            .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
+        let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
+        let expected = x.broadcast_matmul(&expected_chunk)?;
         assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
         Ok(())
     }
