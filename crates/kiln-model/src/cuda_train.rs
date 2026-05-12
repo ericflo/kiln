@@ -1811,6 +1811,48 @@ pub fn cuda_narrow_rows(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_cat_rows(parts: &[CudaTrainTensor]) -> Result<CudaTrainTensor> {
+    ensure!(
+        !parts.is_empty(),
+        "cuda_cat_rows: expected at least one tensor"
+    );
+    let dim = parts[0].dims().get(1).copied().context(
+        "cuda_cat_rows: expected rank-2 [rows, dim] tensors, got empty first shape",
+    )?;
+    let dtype = parts[0].dtype();
+    for (idx, part) in parts.iter().enumerate() {
+        ensure!(
+            part.dims().len() == 2,
+            "cuda_cat_rows: part {idx} expected rank-2 [rows, dim], got {:?}",
+            part.dims()
+        );
+        ensure!(
+            part.dims()[1] == dim,
+            "cuda_cat_rows: part {idx} dim {} does not match first dim {dim}",
+            part.dims()[1]
+        );
+        ensure!(
+            part.dtype() == dtype,
+            "cuda_cat_rows: part {idx} dtype {:?} does not match first dtype {:?}",
+            part.dtype(),
+            dtype
+        );
+    }
+    let refs: Vec<&Tensor> = parts.iter().map(|part| part.as_tensor()).collect();
+    let out = Tensor::cat(&refs, 0).context("cuda_cat_rows: cat rows")?;
+    let needs_grad = parts
+        .iter()
+        .any(|part| part.requires_grad() || part.grad_fn().is_some() || part.param_id().is_some());
+    let row_counts: Vec<usize> = parts.iter().map(|part| part.dims()[0]).collect();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(CatRowsBackward {
+            row_counts,
+            inputs: parts.to_vec(),
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_index_select_rows(
     input: &CudaTrainTensor,
     indices: &[usize],
@@ -2717,6 +2759,57 @@ impl CudaBackwardOp for NarrowRowsBackward {
         let grad =
             Tensor::cat(&refs, 0).context("cuda_narrow_rows backward: cat padded grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct CatRowsBackward {
+    row_counts: Vec<usize>,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for CatRowsBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_cat_rows"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == self.row_counts.len(),
+            "cuda_cat_rows backward input/count mismatch: {} vs {}",
+            self.inputs.len(),
+            self.row_counts.len()
+        );
+        ensure!(
+            grad_out.dims().len() == 2,
+            "cuda_cat_rows backward expected rank-2 grad, got {:?}",
+            grad_out.dims()
+        );
+        let total_rows: usize = self.row_counts.iter().sum();
+        ensure!(
+            grad_out.dims()[0] == total_rows,
+            "cuda_cat_rows backward grad rows {} != saved total {}",
+            grad_out.dims()[0],
+            total_rows
+        );
+        let mut offset = 0usize;
+        let mut grads = Vec::with_capacity(self.row_counts.len());
+        for &rows in &self.row_counts {
+            let end = offset + rows;
+            let grad = grad_out
+                .as_tensor()
+                .narrow(0, offset, rows)
+                .with_context(|| format!("cuda_cat_rows backward: narrow rows {offset}..{end}"))?
+                .contiguous()
+                .context("cuda_cat_rows backward: contiguous grad slice")?;
+            grads.push(Some(CudaTrainTensor::new(grad)?));
+            offset = end;
+        }
+        Ok(grads)
     }
 }
 
@@ -4715,6 +4808,57 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![0.0, 0.0, 10.0, 20.0, 30.0, 40.0, 0.0, 0.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_cat_rows_backward_splits_gradients() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_cat_rows backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let first_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0],
+            (2usize, 2usize),
+            &device,
+        )?;
+        let first_id = first_tensor.id();
+        let first = CudaTrainTensor::parameter(first_tensor, first_id)?;
+        let second_tensor =
+            Tensor::from_vec(vec![5.0f32, 6.0, 7.0, 8.0], (2usize, 2usize), &device)?;
+        let second_id = second_tensor.id();
+        let second = CudaTrainTensor::parameter(second_tensor, second_id)?;
+        let cat = cuda_cat_rows(&[first, second])?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0],
+            (4usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&cat, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(cat.dims(), &[4, 2]);
+        assert_eq!(
+            cat.to_vec_f32()?,
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+        );
+        assert_eq!(loss.to_vec_f32()?, vec![650.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(first_id).context("missing first grad")?.to_vec_f32()?,
+            vec![1.0, 10.0, 2.0, 20.0]
+        );
+        assert_eq!(
+            grads
+                .get(second_id)
+                .context("missing second grad")?
+                .to_vec_f32()?,
+            vec![3.0, 30.0, 4.0, 40.0]
         );
         Ok(())
     }
