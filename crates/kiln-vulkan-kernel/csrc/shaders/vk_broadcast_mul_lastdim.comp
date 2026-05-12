@@ -1,0 +1,29 @@
+// vk_broadcast_mul_lastdim: elementwise multiply where one operand
+// has a trailing-axis size of 1.
+//
+//   a:   [..., N]
+//   b:   [..., 1]
+//   out: [..., N]
+//
+//   out[outer, n] = a[outer, n] · b[outer]
+//
+// Push: total = outer × N (size of `a`), N.
+
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total;
+    uint last_dim;
+};
+
+layout(binding = 0) readonly buffer ABuf   { float data_a[]; };
+layout(binding = 1) readonly buffer BBuf   { float data_b[]; };
+layout(binding = 2) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint outer = idx / last_dim;
+    data_out[idx] = data_a[idx] * data_b[outer];
+}

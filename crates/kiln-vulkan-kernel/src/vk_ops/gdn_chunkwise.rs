@@ -50,30 +50,15 @@ fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> 
 }
 
 /// Slice along time dim (dim=2 of a [B, nv, T, ...] tensor) for a
-/// contiguous chunk. Implemented as a fresh allocation + element-wise
-/// copy via dispatch_simple. No autograd attached (Phase 3 forward only).
+/// contiguous chunk. Uses vk_narrow_lastdim_no_grad on a [B*nv,
+/// T*last_axis] reshape — the shader is a pure GPU copy. No CPU
+/// round-trip.
 fn time_narrow_no_grad(
     t: &VkTensor,
     t_start: usize,
     t_len: usize,
     last_axis: usize,
 ) -> Result<VkTensor> {
-    // Reshape to flatten (B, nv) into a single outer dim, treating
-    // [B*nv*T, last_axis] as 2D, then narrow on axis 1's slice
-    // covering rows [t_start * last_axis .. (t_start + t_len) * last_axis)
-    // for each (B*nv) outer element.
-    //
-    // Simplest correct path: reshape to [B*nv, T, last_axis] then for
-    // each outer take rows t_start..t_start+t_len. We don't have a
-    // dim=1 narrow shader yet, so we do this via raw buffer copy: for
-    // each b_h in [0, B*nv), copy contiguous bytes
-    //   src[b_h * T * last_axis + t_start * last_axis ..
-    //       b_h * T * last_axis + (t_start + t_len) * last_axis]
-    // into
-    //   dst[b_h * t_len * last_axis ..
-    //       (b_h + 1) * t_len * last_axis].
-    //
-    // Because `last_axis` may be 1 (g, beta) we keep the math general.
     let dims = t.shape();
     debug_assert!(dims.len() >= 3, "time_narrow: rank >= 3");
     let bh: usize = dims[..dims.len() - 2].iter().product();
@@ -81,44 +66,20 @@ fn time_narrow_no_grad(
     debug_assert_eq!(dims[dims.len() - 1], last_axis);
     debug_assert!(t_start + t_len <= t_total);
 
-    // Reshape input to [B*nv, T*last_axis]; chunk_prep wants [B, nv, C, last]
-    // so output shape = dims[..-2] + [t_len, last_axis].
     let input_2d = vk_reshape(t, &[bh, t_total * last_axis])?;
-    let out_n = bh * t_len * last_axis;
-    let out_buf = alloc_f32(t.device(), out_n)?;
-
-    // Copy via the existing vk_narrow shader: dst[i, 0..t_len*last_axis] =
-    // src[i, t_start*last_axis .. (t_start+t_len)*last_axis]. That's
-    // exactly what vk_narrow_lastdim does on a 2D input.
     let narrowed = vk_narrow_lastdim_no_grad(
         &input_2d,
         t_start * last_axis,
         t_len * last_axis,
     )?;
-    // Copy bytes from narrowed buffer into out_buf to detach dependency
-    let bytes = narrowed.to_vec_f32()?;
-    let raw: Vec<u8> = bytes.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        t.device().device(),
-        t.device().host_visible_mem_type(),
-        t.device().queue(),
-        t.device().queue_family_index(),
-        &out_buf,
-        &raw,
-    )?;
-
     let mut out_shape = dims[..dims.len() - 2].to_vec();
     out_shape.push(t_len);
     out_shape.push(last_axis);
-    Ok(VkTensor::from_buffer(
-        out_buf,
-        out_shape,
-        VkDType::F32,
-        Arc::clone(t.device()),
-    ))
+    vk_reshape(&narrowed, &out_shape)
 }
 
 /// Time-narrow a [B, nv, T] tensor (g or beta) → [B, nv, t_len].
+/// Pure GPU copy via vk_narrow_lastdim_no_grad.
 fn time_narrow_3d_no_grad(t: &VkTensor, t_start: usize, t_len: usize) -> Result<VkTensor> {
     let dims = t.shape();
     debug_assert_eq!(dims.len(), 3);
@@ -126,24 +87,7 @@ fn time_narrow_3d_no_grad(t: &VkTensor, t_start: usize, t_len: usize) -> Result<
     let t_total = dims[2];
     let input_2d = vk_reshape(t, &[bh, t_total])?;
     let narrowed = vk_narrow_lastdim_no_grad(&input_2d, t_start, t_len)?;
-    let out_n = bh * t_len;
-    let out_buf = alloc_f32(t.device(), out_n)?;
-    let bytes = narrowed.to_vec_f32()?;
-    let raw: Vec<u8> = bytes.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        t.device().device(),
-        t.device().host_visible_mem_type(),
-        t.device().queue(),
-        t.device().queue_family_index(),
-        &out_buf,
-        &raw,
-    )?;
-    Ok(VkTensor::from_buffer(
-        out_buf,
-        vec![dims[0], dims[1], t_len],
-        VkDType::F32,
-        Arc::clone(t.device()),
-    ))
+    vk_reshape(&narrowed, &[dims[0], dims[1], t_len])
 }
 
 /// Concatenate along time axis (dim=2 of [B, nv, T, last_axis]).
@@ -271,46 +215,35 @@ fn chunk_forward_no_grad(
     let out_chunk = vk_add_no_grad(&prep.q_s_scaled, &intra_4)?;
 
     // w_weighted = W * decay_last_col_u, where decay_last_col is [B, nv, C]
-    // and w is [B, nv, C, dv]. Broadcast multiply along the dv axis.
-    // decay_last_col is per-(B, nv, c), so w_weighted[b, nv, c, d] =
-    //   w[b, nv, c, d] * decay_last_col[b, nv, c].
+    // and w is [B, nv, C, dv]. GPU broadcast multiply along the dv axis.
     let decay_dlc_4 = vk_reshape(&prep.decay_last_col, &[batch, nv, chunk, 1])?;
-    // We don't have full broadcast multiply yet, so expand decay_dlc_4
-    // along the dv axis manually.
-    let decay_expanded = expand_lastdim(&decay_dlc_4, dv)?;
-    let w_weighted_4 = vk_mul_no_grad(&w_4, &decay_expanded)?;
+    let w_weighted_4 = vk_broadcast_mul_lastdim_no_grad(&w_4, &decay_dlc_4, dv)?;
 
     Ok((out_chunk, w_weighted_4, prep.p_last, k_t))
 }
 
-/// Expand a [..., 1] tensor to [..., N] by repeating the last axis.
-fn expand_lastdim(t: &VkTensor, n: usize) -> Result<VkTensor> {
-    let dims = t.shape();
-    debug_assert_eq!(dims[dims.len() - 1], 1);
-    let outer: usize = dims[..dims.len() - 1].iter().product();
-    let device = t.device();
-    let data = t.to_vec_f32()?;
-    let mut out = Vec::with_capacity(outer * n);
-    for &v in &data {
-        for _ in 0..n {
-            out.push(v);
-        }
-    }
-    let out_buf = alloc_f32(device, outer * n)?;
-    let raw: Vec<u8> = out.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &out_buf,
-        &raw,
+/// GPU broadcast multiply: out[..., n] = a[..., n] · b[..., 0].
+/// Used for the per-position decay scaling in the chunkwise forward.
+fn vk_broadcast_mul_lastdim_no_grad(a: &VkTensor, b: &VkTensor, n: usize) -> Result<VkTensor> {
+    use crate::vk_ops::dispatch_simple;
+    let dims_a = a.shape();
+    let dims_b = b.shape();
+    debug_assert_eq!(dims_a[dims_a.len() - 1], n);
+    debug_assert_eq!(dims_b[dims_b.len() - 1], 1);
+    let total = a.num_elements();
+    let device = a.device();
+    let out_buf = alloc_f32(device, total)?;
+    let push = [total as u32, n as u32];
+    dispatch_simple(
+        device,
+        "vk_broadcast_mul_lastdim",
+        &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
+        &push,
+        ((total as u32 + 255) / 256) as u32,
     )?;
-    let mut out_shape = dims[..dims.len() - 1].to_vec();
-    out_shape.push(n);
     Ok(VkTensor::from_buffer(
         out_buf,
-        out_shape,
+        dims_a.to_vec(),
         VkDType::F32,
         Arc::clone(device),
     ))
@@ -1007,8 +940,7 @@ pub fn vk_gdn_chunkwise(
 
         // State update for next chunk: S = p_last · S + k^T · (decay·W)
         let decay_dlc_4 = vk_reshape(&prep.decay_last_col, &[batch, nv, c, 1])?;
-        let decay_expanded = expand_lastdim(&decay_dlc_4, dv)?;
-        let w_weighted_4 = vk_mul_no_grad(&w_4, &decay_expanded)?;
+        let w_weighted_4 = vk_broadcast_mul_lastdim_no_grad(&w_4, &decay_dlc_4, dv)?;
         let new_state = state_update(state, &prep.p_last, &k_t, &w_weighted_4, batch, nv, dk, dv, c)?;
 
         saved.push(ChunkSaved {
