@@ -710,10 +710,31 @@ pub fn vk_native_sft_train(
     let needs_state = num_gdn_layers > 0;
     let conv_kernel = model_config.linear_conv_kernel_dim;
 
-    // Note: Phase 1 keeps gradient checkpointing as a no-op stub. The
-    // VkTape is rebuilt per step (forward → backward → drop), so peak
-    // device memory at any point ≈ one full step's intermediates.
-    // Phase 1.5 will add segment-based recompute.
+    // Pick gradient-checkpoint segments. KILN_GRAD_CHECKPOINT_SEGMENTS
+    // env var (matches the candle path's convention) overrides the
+    // default 4-segment heuristic. Set to 1 to disable
+    // checkpointing entirely.
+    //
+    // The checkpointed path is FullAttn-only for now; hybrid models
+    // (with GDN layers) fall back to vk_train_step.
+    let ckpt_segments = if needs_state || std::env::var("KILN_NO_GRAD_CHECKPOINT").is_ok() {
+        None
+    } else {
+        let segs = vk_recommended_checkpoint_segments(model_config.num_layers);
+        if segs > 1 {
+            Some(segs)
+        } else {
+            None
+        }
+    };
+    if let Some(segs) = ckpt_segments {
+        tracing::info!(
+            num_segments = segs,
+            "vk-native gradient checkpointing enabled"
+        );
+    } else {
+        tracing::info!("vk-native gradient checkpointing disabled");
+    }
 
     for epoch in 0..config.epochs {
         let mut epoch_loss = 0.0f32;
@@ -744,16 +765,42 @@ pub fn vk_native_sft_train(
             // positions (matches the synthetic smoke tests). Real SFT
             // training masks prompt tokens; that's a Phase 1.7 follow-up
             // — vk_index_select_rows already exists for the gather.
-            let loss = vk_train_step_with_state(
-                &vk_weights,
-                &lora_layers,
-                input_ids,
-                maybe_state.as_mut(),
-                &mut adamw,
-                &cfg,
-                global_step,
-            )
-            .with_context(|| format!("vk_train_step at epoch {} step {}", epoch + 1, global_step))?;
+            let loss = if let Some(segs) = ckpt_segments {
+                // Checkpointed path (FullAttn-only)
+                vk_checkpointed_train_step(
+                    &vk_weights,
+                    &lora_layers,
+                    input_ids,
+                    &mut adamw,
+                    &cfg,
+                    global_step,
+                    segs,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk_checkpointed_train_step at epoch {} step {}",
+                        epoch + 1,
+                        global_step
+                    )
+                })?
+            } else {
+                vk_train_step_with_state(
+                    &vk_weights,
+                    &lora_layers,
+                    input_ids,
+                    maybe_state.as_mut(),
+                    &mut adamw,
+                    &cfg,
+                    global_step,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk_train_step at epoch {} step {}",
+                        epoch + 1,
+                        global_step
+                    )
+                })?
+            };
 
             anyhow::ensure!(
                 loss.is_finite(),
