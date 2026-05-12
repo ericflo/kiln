@@ -1,0 +1,104 @@
+// vk_gdn_gated_rms_norm_bwd — backward of:
+//   out_i = x_i · r_inv · silu(z_i) · w_i,  r = sqrt(mean(x²) + eps)
+//
+// Per row of length `hidden`:
+//   row_dot = Σ_j d_out_j · x_j · silu(z_j) · w_j
+//   d_x_i = d_out_i · r_inv · silu(z_i) · w_i
+//           - (1/hidden) · r_inv³ · x_i · row_dot
+//   d_z_i = d_out_i · x_i · r_inv · w_i · silu_d(z_i)
+//   d_w_i += d_out_i · x_i · r_inv · silu(z_i)         [accumulated across rows]
+//
+// Bindings (8):
+//   in:  d_out, x, z, weight
+//   out: d_x, d_z, d_w_partial (per-row), aux (unused, padding)
+//
+// d_w is reduced from d_w_partial[rows, hidden] on CPU (analogous to
+// vk_gdn_gates_bwd).
+//
+// Push: rows, hidden, eps.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0) readonly buffer DOutBuf  { float data_d_out[]; };
+layout(binding = 1) readonly buffer XBuf     { float data_x[]; };
+layout(binding = 2) readonly buffer ZBuf     { float data_z[]; };
+layout(binding = 3) readonly buffer WBuf     { float data_w[]; };
+layout(binding = 4) writeonly buffer DXBuf   { float data_d_x[]; };
+layout(binding = 5) writeonly buffer DZBuf   { float data_d_z[]; };
+layout(binding = 6) writeonly buffer DWPart  { float data_d_w_part[]; };
+
+shared float sum_sq_sh[256];
+shared float row_dot_sh[256];
+
+float stable_sigmoid(float x) {
+    return x >= 0.0 ? 1.0 / (1.0 + exp(-x)) : exp(x) / (1.0 + exp(x));
+}
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint base = row * hidden;
+
+    // Pass 1: compute mean(x²) → r_inv
+    float local_sq = 0.0;
+    for (uint c = tid; c < hidden; c += 256) {
+        float xv = data_x[base + c];
+        local_sq += xv * xv;
+    }
+    sum_sq_sh[tid] = local_sq;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) sum_sq_sh[tid] += sum_sq_sh[tid + s];
+        barrier();
+    }
+    float r_inv = inversesqrt(sum_sq_sh[0] / float(hidden) + eps);
+
+    // Pass 2: compute row_dot = Σ d_out · x · silu(z) · w
+    float local_dot = 0.0;
+    for (uint c = tid; c < hidden; c += 256) {
+        float dout_v = data_d_out[base + c];
+        float xv = data_x[base + c];
+        float zv = data_z[base + c];
+        float sig = stable_sigmoid(zv);
+        float silu_z = zv * sig;
+        local_dot += dout_v * xv * silu_z * data_w[c];
+    }
+    row_dot_sh[tid] = local_dot;
+    barrier();
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) row_dot_sh[tid] += row_dot_sh[tid + s];
+        barrier();
+    }
+    float row_dot = row_dot_sh[0];
+    float inv3 = r_inv * r_inv * r_inv;
+    float h_inv = 1.0 / float(hidden);
+
+    // Pass 3: emit d_x, d_z, d_w_partial
+    for (uint c = tid; c < hidden; c += 256) {
+        float dout_v = data_d_out[base + c];
+        float xv = data_x[base + c];
+        float zv = data_z[base + c];
+        float wv = data_w[c];
+        float sig = stable_sigmoid(zv);
+        float silu_z = zv * sig;
+        float silu_d = sig + silu_z * (1.0 - sig);
+
+        // d_x
+        data_d_x[base + c] = dout_v * r_inv * silu_z * wv
+                           - inv3 * xv * h_inv * row_dot;
+        // d_z
+        data_d_z[base + c] = dout_v * xv * r_inv * wv * silu_d;
+        // d_w_partial[r, c] = d_out · x · r_inv · silu(z)   (CPU sums over r)
+        data_d_w_part[base + c] = dout_v * xv * r_inv * silu_z;
+    }
+}
