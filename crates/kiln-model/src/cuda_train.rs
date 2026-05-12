@@ -8,6 +8,8 @@
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, TensorId};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Monotonic op-id allocator for the future CUDA-native training graph.
@@ -17,12 +19,20 @@ pub fn next_cuda_train_op_id() -> u64 {
     NEXT_CUDA_TRAIN_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Backward op interface for the future CUDA-native training graph.
+pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
+    fn op_name(&self) -> &'static str;
+    fn input_refs(&self) -> &[CudaTrainTensor];
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>>;
+}
+
 #[derive(Debug, Clone)]
 pub struct CudaTrainTensor {
     tensor: Tensor,
     requires_grad: bool,
     param_id: Option<TensorId>,
     op_id: u64,
+    grad_fn: Option<Arc<dyn CudaBackwardOp>>,
 }
 
 impl CudaTrainTensor {
@@ -45,6 +55,23 @@ impl CudaTrainTensor {
             requires_grad,
             param_id,
             op_id: next_cuda_train_op_id(),
+            grad_fn: None,
+        })
+    }
+
+    pub fn from_op(tensor: Tensor, grad_fn: Option<Arc<dyn CudaBackwardOp>>) -> Result<Self> {
+        ensure!(
+            matches!(tensor.device(), Device::Cuda(_)),
+            "CudaTrainTensor::from_op requires a CUDA tensor, got {:?}",
+            tensor.device()
+        );
+        let requires_grad = grad_fn.is_some();
+        Ok(Self {
+            tensor,
+            requires_grad,
+            param_id: None,
+            op_id: next_cuda_train_op_id(),
+            grad_fn,
         })
     }
 
@@ -65,6 +92,7 @@ impl CudaTrainTensor {
             requires_grad: false,
             param_id: None,
             op_id: next_cuda_train_op_id(),
+            grad_fn: None,
         }
     }
 
@@ -90,6 +118,14 @@ impl CudaTrainTensor {
 
     pub fn param_id(&self) -> Option<TensorId> {
         self.param_id
+    }
+
+    pub fn grad_fn(&self) -> Option<&Arc<dyn CudaBackwardOp>> {
+        self.grad_fn.as_ref()
+    }
+
+    pub fn num_elements(&self) -> usize {
+        self.tensor.dims().iter().product()
     }
 
     pub fn sgd_step_inplace(&self, grad: &CudaTrainTensor, lr: f32) -> Result<()> {
@@ -161,6 +197,143 @@ impl CudaTrainTensor {
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?)
+    }
+}
+
+/// Per-parameter gradient store keyed by candle `TensorId`.
+#[derive(Debug, Default)]
+pub struct CudaGradStore {
+    grads: HashMap<TensorId, CudaTrainTensor>,
+}
+
+impl CudaGradStore {
+    pub fn new() -> Self {
+        Self {
+            grads: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, id: TensorId, t: CudaTrainTensor) {
+        self.grads.insert(id, t);
+    }
+
+    pub fn get(&self, id: TensorId) -> Option<&CudaTrainTensor> {
+        self.grads.get(&id)
+    }
+
+    pub fn remove(&mut self, id: TensorId) -> Option<CudaTrainTensor> {
+        self.grads.remove(&id)
+    }
+
+    pub fn into_inner(self) -> HashMap<TensorId, CudaTrainTensor> {
+        self.grads
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&TensorId, &CudaTrainTensor)> {
+        self.grads.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.grads.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.grads.is_empty()
+    }
+}
+
+/// Walk the CUDA training graph rooted at `loss` and return per-parameter gradients.
+pub fn cuda_backward(loss: &CudaTrainTensor) -> Result<CudaGradStore> {
+    ensure!(
+        loss.num_elements() == 1,
+        "cuda_backward: loss must be scalar (got shape {:?})",
+        loss.dims()
+    );
+
+    let mut order = Vec::new();
+    let mut visited = HashSet::new();
+    let mut leaves = Vec::new();
+    collect_topo(loss, &mut visited, &mut order, &mut leaves);
+
+    let mut grads: HashMap<u64, CudaTrainTensor> = HashMap::new();
+    let seed = Tensor::ones(
+        loss.as_tensor().shape().clone(),
+        loss.dtype(),
+        loss.as_tensor().device(),
+    )
+    .context("cuda_backward: seed ones_like")?;
+    grads.insert(loss.op_id(), CudaTrainTensor::new(seed)?);
+
+    for t in order.iter().rev() {
+        let Some(grad_at_out) = grads.remove(&t.op_id()) else {
+            continue;
+        };
+        let Some(gf) = t.grad_fn() else {
+            continue;
+        };
+        let input_grads = gf
+            .backward(&grad_at_out)
+            .with_context(|| format!("cuda_backward: {} bwd", gf.op_name()))?;
+        let inputs = gf.input_refs();
+        ensure!(
+            inputs.len() == input_grads.len(),
+            "cuda_backward: {} returned {} grads for {} inputs",
+            gf.op_name(),
+            input_grads.len(),
+            inputs.len()
+        );
+        for (input, maybe_grad) in inputs.iter().zip(input_grads.into_iter()) {
+            let Some(g) = maybe_grad else { continue };
+            if !input.requires_grad() && input.grad_fn().is_none() && input.param_id().is_none() {
+                continue;
+            }
+            ensure!(
+                g.as_tensor().shape() == input.as_tensor().shape(),
+                "cuda_backward: {} produced grad of shape {:?} for input of shape {:?}",
+                gf.op_name(),
+                g.dims(),
+                input.dims()
+            );
+            match grads.remove(&input.op_id()) {
+                Some(existing) => {
+                    let summed = (existing.as_tensor() + g.as_tensor())
+                        .context("cuda_backward: grad accumulation")?;
+                    grads.insert(input.op_id(), CudaTrainTensor::new(summed)?);
+                }
+                None => {
+                    grads.insert(input.op_id(), g);
+                }
+            }
+        }
+    }
+
+    let mut store = CudaGradStore::new();
+    for leaf in leaves {
+        if let Some(pid) = leaf.param_id() {
+            if let Some(g) = grads.remove(&leaf.op_id()) {
+                store.insert(pid, g);
+            }
+        }
+    }
+    Ok(store)
+}
+
+fn collect_topo(
+    t: &CudaTrainTensor,
+    visited: &mut HashSet<u64>,
+    order: &mut Vec<CudaTrainTensor>,
+    leaves: &mut Vec<CudaTrainTensor>,
+) {
+    if !visited.insert(t.op_id()) {
+        return;
+    }
+    if let Some(gf) = t.grad_fn() {
+        for input in gf.input_refs() {
+            collect_topo(input, visited, order, leaves);
+        }
+        order.push(t.clone());
+    } else {
+        leaves.push(t.clone());
     }
 }
 
@@ -238,6 +411,88 @@ mod tests {
         assert_eq!(detached.param_id(), None);
         assert!(detached.op_id() > param.op_id());
         assert_eq!(detached.to_vec_f32()?, vec![1.0]);
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct FixedGradOp {
+        inputs: Vec<CudaTrainTensor>,
+        grads: Vec<CudaTrainTensor>,
+    }
+
+    impl CudaBackwardOp for FixedGradOp {
+        fn op_name(&self) -> &'static str {
+            "fixed_grad"
+        }
+
+        fn input_refs(&self) -> &[CudaTrainTensor] {
+            &self.inputs
+        }
+
+        fn backward(&self, _grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+            Ok(self.grads.iter().cloned().map(Some).collect())
+        }
+    }
+
+    #[test]
+    fn cuda_backward_collects_parameter_gradients() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![2.0f32, -3.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let grad = CudaTrainTensor::new(Tensor::new(vec![0.5f32, -1.25], &device)?)?;
+        let loss = CudaTrainTensor::from_op(
+            Tensor::new(vec![1.0f32], &device)?,
+            Some(Arc::new(FixedGradOp {
+                inputs: vec![param.clone()],
+                grads: vec![grad],
+            })),
+        )?;
+
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(grads.len(), 1);
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![0.5, -1.25]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_backward_accumulates_duplicate_parameter_grads() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_backward accumulation smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![2.0f32], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let grad_a = CudaTrainTensor::new(Tensor::new(vec![0.5f32], &device)?)?;
+        let grad_b = CudaTrainTensor::new(Tensor::new(vec![1.25f32], &device)?)?;
+        let loss = CudaTrainTensor::from_op(
+            Tensor::new(vec![1.0f32], &device)?,
+            Some(Arc::new(FixedGradOp {
+                inputs: vec![param.clone(), param],
+                grads: vec![grad_a, grad_b],
+            })),
+        )?;
+
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![1.75]
+        );
         Ok(())
     }
 }
