@@ -613,6 +613,21 @@ pub fn cuda_scale(input: &CudaTrainTensor, scale: f32) -> Result<CudaTrainTensor
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: DType) -> Result<CudaTrainTensor> {
+    let out = input
+        .as_tensor()
+        .to_dtype(dtype)
+        .with_context(|| format!("cuda_to_dtype: convert to {dtype:?}"))?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(CastBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_sum_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
@@ -874,6 +889,35 @@ impl CudaBackwardOp for ScaleBackward {
             .as_tensor()
             .affine(self.scale as f64, 0.0)
             .context("cuda_scale backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct CastBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for CastBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_to_dtype"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_to_dtype backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let grad = grad_out
+            .as_tensor()
+            .to_dtype(input.dtype())
+            .with_context(|| format!("cuda_to_dtype backward: restore {:?}", input.dtype()))?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -1441,6 +1485,33 @@ mod tests {
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![2.5, 2.5]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_to_dtype_backward_passthrough_restores_input_dtype() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_to_dtype backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![1.0f32, 2.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let bf16 = cuda_to_dtype(&param, DType::BF16)?;
+        let f32_again = cuda_to_dtype(&bf16, DType::F32)?;
+        let loss = cuda_sum_all(&f32_again)?;
+
+        assert_eq!(bf16.dtype(), DType::BF16);
+        assert_eq!(f32_again.dtype(), DType::F32);
+        assert_eq!(loss.to_vec_f32()?, vec![3.0]);
+        let grads = cuda_backward(&loss)?;
+        let grad = grads.get(param_id).expect("param grad");
+        assert_eq!(grad.dtype(), DType::F32);
+        assert_eq!(grad.to_vec_f32()?, vec![1.0, 1.0]);
         Ok(())
     }
 
