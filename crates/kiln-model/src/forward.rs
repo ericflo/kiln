@@ -5345,13 +5345,11 @@ pub fn gated_deltanet_forward_streaming(
             #[cfg(feature = "metal")]
             {
                 if matches!(tile_device, Device::Metal(_)) {
-                    metal_autoreleasepool(|| -> Result<Tensor> {
-                        let tile_out = run_tile()?;
-                        tile_device.synchronize().with_context(|| {
-                            format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
-                        })?;
-                        Ok(tile_out)
-                    })?
+                    let tile_out = metal_autoreleasepool(|| run_tile())?;
+                    tile_device.synchronize().with_context(|| {
+                        format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
+                    })?;
+                    tile_out
                 } else {
                     run_tile()?
                 }
