@@ -1075,7 +1075,10 @@ mod tests {
         let caps = cuda::CudaBackend::training_capabilities_static();
         assert!(caps.projection_training.contains("candle CUDA autograd"));
         assert!(caps.lora_delta_training.contains("declines tracked tensors"));
-        assert_eq!(caps.resident_activation, "not implemented; candle CUDA tensors are canonical");
+        assert_eq!(
+            caps.resident_activation,
+            "TensorId lifecycle registry; candle CUDA tensors are canonical"
+        );
         assert_eq!(caps.native_training, "not implemented");
     }
 }

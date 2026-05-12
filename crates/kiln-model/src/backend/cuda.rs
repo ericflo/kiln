@@ -5,8 +5,20 @@
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use super::{BackendRuntime, TrainingCapabilities};
+
+static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
+
+fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<candle_core::TensorId>) -> R) -> R {
+    let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = registry
+        .lock()
+        .expect("CUDA resident TensorId registry mutex poisoned");
+    f(&mut guard)
+}
 
 #[derive(Debug)]
 pub struct CudaBackend {
@@ -79,7 +91,7 @@ impl CudaBackend {
             projection_training: "candle CUDA autograd; backend linear_prefill_apply declined",
             flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
-            resident_activation: "not implemented; candle CUDA tensors are canonical",
+            resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
             lora_delta_training: "candle CUDA autograd; fused lora_decode_add declines tracked tensors",
             sgd_step: "candle CUDA Var::set fallback",
             adamw_step: "candle CUDA Var::set fallback",
@@ -99,6 +111,34 @@ impl BackendRuntime for CudaBackend {
 
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
+    }
+
+    fn supports_resident_activation(&self) -> bool {
+        true
+    }
+
+    fn register_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+        with_cuda_resident_ids(|ids| {
+            ids.insert(tensor.id());
+        });
+        Ok(())
+    }
+
+    fn evict_resident_activation(&self, tensor: &Tensor) {
+        with_cuda_resident_ids(|ids| {
+            ids.remove(&tensor.id());
+        });
+    }
+
+    fn update_resident_activation(&self, tensor: &Tensor) -> Result<()> {
+        with_cuda_resident_ids(|ids| {
+            ids.insert(tensor.id());
+        });
+        Ok(())
+    }
+
+    fn has_resident_activation(&self, tensor: &Tensor) -> bool {
+        with_cuda_resident_ids(|ids| ids.contains(&tensor.id()))
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -593,5 +633,45 @@ impl BackendRuntime for CudaBackend {
         let out = kiln_conv1d_kernel::causal_conv1d_prefill(x, weight, conv_state, kernel_size)
             .context("causal_conv1d_prefill kernel failed")?;
         Ok(Some(out))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_backend() -> CudaBackend {
+        CudaBackend {
+            device: Device::Cpu,
+            gdn_enabled: false,
+            gdn_gates_enabled: false,
+            gdn_gated_rms_norm_enabled: false,
+            gdn_decode_fused_enabled: false,
+            gdn_decode_unexpanded_qk_enabled: false,
+            gdn_decode_qk_norm_recurrent_enabled: false,
+            gdn_decode_qk_norm_recurrent_rmsnorm_enabled: false,
+            fused_conv1d_enabled: false,
+            lora_decode_add_enabled: false,
+        }
+    }
+
+    #[test]
+    fn cuda_resident_activation_registry_lifecycle() -> Result<()> {
+        let backend = test_backend();
+        let tensor = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+
+        assert!(backend.supports_resident_activation());
+        assert!(!backend.has_resident_activation(&tensor));
+
+        backend.register_resident_activation(&tensor)?;
+        assert!(backend.has_resident_activation(&tensor));
+
+        backend.evict_resident_activation(&tensor);
+        assert!(!backend.has_resident_activation(&tensor));
+
+        backend.update_resident_activation(&tensor)?;
+        assert!(backend.has_resident_activation(&tensor));
+
+        Ok(())
     }
 }
