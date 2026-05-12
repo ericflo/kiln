@@ -71,6 +71,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `0b28edd7` | CUDA train SwiGLU MLP composition | Adds a native CUDA train-shell SwiGLU MLP helper composed from matmul, SiLU, multiply, and matmul, with gradient smoke coverage to input and all three weights. |
 | `e87f35ce` | CUDA train FullAttention layer composition | Adds a native CUDA train-shell FullAttention layer helper composed from RMSNorm, q/k/v projections, QK norm, RoPE, causal SDPA, output gate, output projection, residuals, post-attention RMSNorm, and SwiGLU MLP. |
 | `c8dd47d3` | CUDA train FullAttention AdamW bridge | Adds a `kiln-train` one-step AdamW helper that runs loss/backward through the native CUDA FullAttention layer and updates supplied CUDA parameters. |
+| `df549c7a` | CUDA train tiny FullAttention model bridge | Adds a tiny native CUDA model step bridge that runs embedding lookup, FullAttention, final RMSNorm, LM head projection, loss/backward, and AdamW against supplied CUDA parameters. |
 
 Local validation so far:
 
@@ -143,6 +144,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA SwiGLU MLP composition coverage; 41 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA FullAttention layer composition coverage; 42 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-train --features cuda cuda_full_attention_adamw_train_step_updates_projection_weight --lib --quiet` passed after adding the train-crate CUDA FullAttention AdamW bridge.
+  - `cargo test --release -p kiln-train --features cuda cuda_tiny_full_attention_model_adamw_step_updates_lm_head --lib --quiet` passed after adding the tiny native CUDA FullAttention model bridge.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -173,10 +175,10 @@ projection/attention-shaped matmul, softmax Jacobian-vector products, sigmoid ga
 activation derivatives, GQA head-repeat gradient summation, slice-gradient scattering, row gather
 scatter-add, inverse attention-layout permutes, inverse last-two transposes for `Q @ K.T`
 gradients, Qwen RMSNorm analytic `dX` with frozen base weights, RoPE inverse-rotation backward, and embedding lookup scatter-add. Initial unmasked and causal SDPA helpers, a SwiGLU MLP helper, and a synthetic FullAttention layer helper now compose the native train-shell ops
-end-to-end and prove loss/backward reaches attention and MLP weights. Native SGD and AdamW helpers now apply those gradients through resident optimizer kernels and
+end-to-end and prove loss/backward reaches attention and MLP weights. A tiny native CUDA model step now composes embedding lookup, FullAttention, final RMSNorm, LM head projection, scalar loss/backward, and AdamW. Native SGD and AdamW helpers now apply those gradients through resident optimizer kernels and
 prove tiny loss decreases, and `kiln-train` has a minimal CUDA-native linear AdamW train-step
 bridge. A conservative CUDA training arena now owns step-lifetime tensor handles and tracks
-approximate allocation bytes, and the train-crate linear and synthetic FullAttention bridges can run against caller-owned arenas.
+approximate allocation bytes, and the train-crate linear, synthetic FullAttention, and tiny model bridges can run against caller-owned arenas.
 The train-crate bridge also has a minimal safetensors save boundary proving post-update CUDA tensor
 values are read back only at save time. This is still not a full CUDA LoRA adapter save equivalent
 to Vulkan's native stack, and CUDA still does **not** have native Qwen forward/backward ops or a
@@ -204,7 +206,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/last-two-transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/embedding-lookup/attention-permute/causal-mask/RMSNorm/RoPE backward ops, unmasked and causal SDPA plus SwiGLU MLP and synthetic FullAttention layer composition helpers, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds minimal linear and synthetic FullAttention AdamW train-step bridges with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. There is still no CUDA equivalent of `vk_train.rs`, native full Qwen/GDN forward-backward route, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/last-two-transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/embedding-lookup/attention-permute/causal-mask/RMSNorm/RoPE backward ops, unmasked and causal SDPA plus SwiGLU MLP and synthetic FullAttention layer composition helpers, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds minimal linear, synthetic FullAttention, and tiny native model AdamW train-step bridges with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. The tiny model bridge runs embedding lookup -> FullAttention -> final RMSNorm -> LM head -> AdamW. There is still no CUDA equivalent of `vk_train.rs`, native full Qwen/GDN forward-backward route, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
 
 ## Phase Plan
 
