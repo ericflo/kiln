@@ -89,7 +89,7 @@ impl CudaBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "candle CUDA autograd; backend linear_prefill_apply declined",
+            projection_training: "backend-routed candle CUDA autograd",
             flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
             resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
@@ -572,6 +572,29 @@ impl BackendRuntime for CudaBackend {
         let out = kiln_rmsnorm_kernel::lora_decode_add(base, x, a, b, scale)
             .context("cuda lora_decode_add kernel failed")?;
         Ok(Some(out))
+    }
+
+    fn linear_prefill_apply(&self, x: &Tensor, weight_t: &Tensor) -> Result<Option<Tensor>> {
+        if !matches!(x.device(), Device::Cuda(_))
+            || !matches!(weight_t.device(), Device::Cuda(_))
+            || x.dims().is_empty()
+            || weight_t.dims().len() != 2
+            || *x.dims().last().unwrap() != weight_t.dims()[0]
+        {
+            return Ok(None);
+        }
+
+        static FIRST_CUDA_LINEAR_PREFILL_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_LINEAR_PREFILL_LOGGED.get_or_init(|| {
+            tracing::info!(
+                x_shape = ?x.dims(),
+                weight_t_shape = ?weight_t.dims(),
+                tracked = x.track_op() || weight_t.track_op(),
+                "CudaBackend::linear_prefill_apply first call (candle CUDA autograd)"
+            );
+        });
+
+        Ok(Some(x.broadcast_matmul(weight_t)?))
     }
 
     fn lora_delta_resident(
