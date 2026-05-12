@@ -867,7 +867,24 @@ fn pick_projection_weight(
             t_dims
         );
     };
-    vk_from_candle_typed(&chosen, device).with_context(|| name.to_string())
+    let uploaded =
+        vk_from_candle_typed(&chosen, device).with_context(|| name.to_string())?;
+    if std::env::var("KILN_VK_DEBUG_WEIGHTS").is_ok() {
+        let l2: f32 = uploaded
+            .to_vec_f32()
+            .unwrap_or_default()
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            .sqrt();
+        eprintln!(
+            "  [weight] {} shape={:?} l2={:.3e}",
+            name,
+            chosen.dims(),
+            l2
+        );
+    }
+    Ok(uploaded)
 }
 
 impl VkModelWeights {

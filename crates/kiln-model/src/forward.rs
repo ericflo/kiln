@@ -2055,6 +2055,17 @@ fn drop_projection_originals_enabled() -> bool {
 }
 
 fn keep_projection_originals_enabled() -> bool {
+    // vk-native training reads projection weight bytes via candle's
+    // CPU storage path (`extract_tensor_packed_bf16_bytes_pub`). If the
+    // originals were stubbed to shape [1] during loading, those reads
+    // come back as zeros and the bf16w matmul silently outputs zero —
+    // the model then collapses to "embedding + residuals" and the loss
+    // is bit-identical across epochs because LoRA gradients vanish.
+    // Auto-engage projection-original retention when the vk-native
+    // trainer is enabled, so users don't have to set both env vars.
+    if std::env::var("KILN_VK_NATIVE_TRAINING").is_ok() {
+        return true;
+    }
     matches!(
         std::env::var("KILN_KEEP_PROJECTION_ORIGINALS")
             .ok()
