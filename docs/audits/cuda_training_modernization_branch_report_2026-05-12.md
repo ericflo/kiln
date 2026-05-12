@@ -93,6 +93,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `77472a62` | CUDA GDN gate composition | Adds native CUDA beta/g gate composition from GDN a/b projections, dt bias, softplus, and decay scaling. |
 | `955bdad4` | CUDA train row narrow op | Adds autograd-safe CUDA row slicing with backward zero-padding, a building block for causal conv/chunk windows. |
 | `cad62355` | CUDA train row concat op | Adds autograd-safe CUDA row concatenation with backward gradient splitting, needed for causal conv padding/window composition. |
+| `1dc880ad` | CUDA train zero-state causal conv1d | Adds a native CUDA training-shell causal depthwise conv1d composition for fresh-state prefill windows. |
 
 Local validation so far:
 
@@ -187,6 +188,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_init_lora_layers_populates_full_attention_and_gdn_slots --lib --quiet` re-run after adding native CUDA GDN beta/g gate composition.
   - `cargo test --release -p kiln-model --features cuda cuda_narrow_rows_backward_pads_zero_gradients --lib --quiet` passed after adding CUDA train row slicing.
   - `cargo test --release -p kiln-model --features cuda cuda_cat_rows_backward_splits_gradients --lib --quiet` passed after adding CUDA train row concatenation.
+  - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_prefill_zero_state_matches_reference --lib --quiet` passed after adding CUDA train zero-state causal depthwise conv1d.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
