@@ -83,6 +83,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `e22a1f6a` | CUDA FullAttention LoRA token train loop | Adds a multi-epoch token-sequence training loop over the native CUDA FullAttention-only LoRA model step and resident AdamW state. |
 | `3606aac6` | CUDA token train adapter save wrapper | Adds a wrapper that initializes CUDA LoRA, trains token sequences, and saves a PEFT adapter directory. |
 | `985484e1` | CUDA native SFT train entrypoint | Adds a `cuda_native_sft_train` entry point matching the Vulkan trainer shape for CUDA FullAttention-only native SFT. |
+| `62d38ee0` | CUDA native SFT server route | Adds `KILN_CUDA_NATIVE_TRAINING=1` routing in the training queue to call `cuda_native_sft_train`, plus the matching native-GRPO rejection. |
 
 Local validation so far:
 
@@ -167,6 +168,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_full_attention_lora_model_step_updates_lora_pair --lib --quiet` re-run after adding the CUDA-native FullAttention LoRA token-sequence train loop.
   - `cargo test --release -p kiln-train --features cuda cuda_full_attention_lora_model_step_updates_lora_pair --lib --quiet` re-run after adding the CUDA token-train adapter save wrapper.
   - `cargo test --release -p kiln-train --features cuda cuda_full_attention_lora_model_step_updates_lora_pair --lib --quiet` re-run after adding the CUDA-native SFT train entry point.
+  - `cargo test --release -p kiln-server --features cuda native_training_env_enabled --lib --quiet` passed after adding `KILN_CUDA_NATIVE_TRAINING=1` server routing; compile coverage verifies the CUDA-native trainer call is linked from `kiln-server`.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
