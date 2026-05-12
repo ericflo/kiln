@@ -613,6 +613,47 @@ pub fn cuda_scale(input: &CudaTrainTensor, scale: f32) -> Result<CudaTrainTensor
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_causal_mask(input: &CudaTrainTensor, kv_offset: usize) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_causal_mask: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        input.dims().len() == 3,
+        "cuda_causal_mask: expected rank-3 [batch_heads, q_len, kv_len], got {:?}",
+        input.dims()
+    );
+    let q_len = input.dims()[1];
+    let kv_len = input.dims()[2];
+    if q_len <= 1 {
+        return Ok(input.clone());
+    }
+
+    let mask: Vec<f32> = (0..q_len)
+        .flat_map(|q_idx| {
+            let max_kv = kv_offset + q_idx + 1;
+            (0..kv_len).map(move |kv_idx| if kv_idx < max_kv { 0.0 } else { -1.0e30 })
+        })
+        .collect();
+    let mask = Tensor::new(mask, input.as_tensor().device())
+        .context("cuda_causal_mask: build mask tensor")?
+        .reshape((1usize, q_len, kv_len))
+        .context("cuda_causal_mask: reshape mask")?;
+    let out = input
+        .as_tensor()
+        .broadcast_add(&mask)
+        .context("cuda_causal_mask: add mask")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(CausalMaskBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_to_dtype(input: &CudaTrainTensor, dtype: DType) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
@@ -1288,6 +1329,27 @@ impl CudaBackwardOp for ScaleBackward {
             .affine(self.scale as f64, 0.0)
             .context("cuda_scale backward: scale grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct CausalMaskBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for CausalMaskBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_causal_mask"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        Ok(vec![Some(CudaTrainTensor::new(
+            grad_out.as_tensor().clone(),
+        )?)])
     }
 }
 
@@ -2281,6 +2343,45 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![2.5, 2.5]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_causal_mask_applies_future_token_bias() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_causal_mask smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let scores_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            (1usize, 3usize, 3usize),
+            &device,
+        )?;
+        let scores_id = scores_tensor.id();
+        let scores = CudaTrainTensor::parameter(scores_tensor, scores_id)?;
+        let masked = cuda_causal_mask(&scores, 0)?;
+        let loss = cuda_sum_all(&masked)?;
+
+        let values = masked.to_vec_f32()?;
+        assert_eq!(values[0], 1.0);
+        assert!(values[1] < -1.0e20);
+        assert!(values[2] < -1.0e20);
+        assert_eq!(values[3], 4.0);
+        assert_eq!(values[4], 5.0);
+        assert!(values[5] < -1.0e20);
+        assert_eq!(values[6], 7.0);
+        assert_eq!(values[7], 8.0);
+        assert_eq!(values[8], 9.0);
+
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(scores_id).expect("scores grad").to_vec_f32()?,
+            vec![1.0; 9]
         );
         Ok(())
     }
