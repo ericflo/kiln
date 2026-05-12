@@ -346,6 +346,34 @@ pub fn cuda_add(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_mul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        lhs.as_tensor().shape() == rhs.as_tensor().shape(),
+        "cuda_mul: shape mismatch lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dtype() == rhs.dtype(),
+        "cuda_mul: dtype mismatch lhs={:?} rhs={:?}",
+        lhs.dtype(),
+        rhs.dtype()
+    );
+    let out = (lhs.as_tensor() * rhs.as_tensor()).context("cuda_mul: candle CUDA mul")?;
+    let needs_grad = lhs.requires_grad()
+        || lhs.grad_fn().is_some()
+        || lhs.param_id().is_some()
+        || rhs.requires_grad()
+        || rhs.grad_fn().is_some()
+        || rhs.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MulBackward {
+            inputs: vec![lhs.clone(), rhs.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -362,6 +390,37 @@ impl CudaBackwardOp for AddBackward {
 
     fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
         Ok(self.inputs.iter().map(|_| Some(grad_out.clone())).collect())
+    }
+}
+
+#[derive(Debug)]
+struct MulBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for MulBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_mul"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_mul backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let lhs_grad = (grad_out.as_tensor() * self.inputs[1].as_tensor())
+            .context("cuda_mul backward: lhs grad")?;
+        let rhs_grad = (grad_out.as_tensor() * self.inputs[0].as_tensor())
+            .context("cuda_mul backward: rhs grad")?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(lhs_grad)?),
+            Some(CudaTrainTensor::new(rhs_grad)?),
+        ])
     }
 }
 
@@ -588,6 +647,55 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![2.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_mul_backward_uses_saved_inputs() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_mul backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let lhs_tensor = Tensor::new(vec![2.0f32], &device)?;
+        let rhs_tensor = Tensor::new(vec![3.0f32], &device)?;
+        let lhs_id = lhs_tensor.id();
+        let rhs_id = rhs_tensor.id();
+        let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
+        let rhs = CudaTrainTensor::parameter(rhs_tensor, rhs_id)?;
+        let loss = cuda_mul(&lhs, &rhs)?;
+
+        assert_eq!(loss.to_vec_f32()?, vec![6.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(grads.get(lhs_id).expect("lhs grad").to_vec_f32()?, vec![3.0]);
+        assert_eq!(grads.get(rhs_id).expect("rhs grad").to_vec_f32()?, vec![2.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_mul_backward_accumulates_shared_parameter() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_mul shared-param smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![4.0f32], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let loss = cuda_mul(&param, &param)?;
+
+        assert_eq!(loss.to_vec_f32()?, vec![16.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![8.0]
         );
         Ok(())
     }
