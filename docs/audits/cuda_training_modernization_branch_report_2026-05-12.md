@@ -47,6 +47,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `cca827fe` | CUDA native AdamW step helper | Adds CUDA AdamW config/state helpers, connects `CudaGradStore` to resident AdamW kernels, and proves a tiny native CUDA loss decreases. |
 | `aeb64efe` | CUDA native linear train step | Adds a `kiln-train` CUDA helper that runs a minimal linear sum-square AdamW step through native CUDA tensor/autograd primitives. |
 | `7399abcb` | CUDA training arena accounting | Adds a conservative `CudaTrainArena` that owns step-lifetime CUDA tensor handles and tracks approximate allocation bytes by dtype/shape. |
+| `f4eff9b0` | CUDA linear train arena bridge | Adds an arena-backed CUDA linear AdamW train-step variant and proves the train-crate bridge accounts forward/loss tensors. |
 
 Local validation so far:
 
@@ -94,6 +95,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_linear_adamw_train_step_decreases_loss --lib --quiet`
   - `cargo test --release -p kiln-model --features cuda cuda_train_arena --lib --quiet`
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA training arena accounting
+  - `cargo test --release -p kiln-train --features cuda cuda_linear_adamw_train_step --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -120,8 +122,9 @@ tensor ops, including a product rule, scalar-loss reductions, and projection-sha
 gradients. Native SGD and AdamW helpers now apply those gradients through resident optimizer kernels
 and prove tiny loss decreases, and `kiln-train` has a minimal CUDA-native linear AdamW train-step
 bridge. A conservative CUDA training arena now owns step-lifetime tensor handles and tracks
-approximate allocation bytes. It still does **not** have native CUDA Qwen forward/backward ops or a
-custom pooled allocator equivalent to the Vulkan native training path.
+approximate allocation bytes, and the train-crate linear bridge can run against a caller-owned arena.
+It still does **not** have native CUDA Qwen forward/backward ops or a custom pooled allocator
+equivalent to the Vulkan native training path.
 
 The CUDA port should therefore not copy Vulkan's buffer-upload mechanics blindly. CUDA candle tensors
 already live on the device, so the first useful parity target is to make CUDA training decisions
@@ -145,7 +148,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/mul/sum/matmul backward ops, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena boundary and train-crate bridge present; full native stack missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/mul/sum/matmul backward ops, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge with caller-owned arena support. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena boundary and train-crate bridge present; full native stack missing. |
 
 ## Phase Plan
 
