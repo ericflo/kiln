@@ -2075,6 +2075,82 @@ pub fn cuda_causal_depthwise_conv1d_next_state_zero_state(
     cuda_cat_rows(&[prefix, input.clone()])
 }
 
+pub struct CudaGdnSingleTokenOutput {
+    pub out: CudaTrainTensor,
+    pub next_state: CudaTrainTensor,
+}
+
+pub fn cuda_gdn_single_token_recurrence(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    beta: &CudaTrainTensor,
+    g: &CudaTrainTensor,
+    state: &CudaTrainTensor,
+) -> Result<CudaGdnSingleTokenOutput> {
+    ensure!(
+        q.dtype() == DType::F32
+            && k.dtype() == DType::F32
+            && v.dtype() == DType::F32
+            && beta.dtype() == DType::F32
+            && g.dtype() == DType::F32
+            && state.dtype() == DType::F32,
+        "cuda_gdn_single_token_recurrence: expected F32 tensors"
+    );
+    ensure!(
+        q.dims().len() == 2
+            && k.dims().len() == 2
+            && v.dims().len() == 2
+            && beta.dims().len() == 2
+            && g.dims().len() == 2
+            && state.dims().len() == 2,
+        "cuda_gdn_single_token_recurrence: expected q/k/v/beta/g/state ranks 2, got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+    let dk = q.dims()[1];
+    let dv = v.dims()[1];
+    ensure!(
+        q.dims()[0] == 1
+            && k.dims() == [1, dk]
+            && v.dims()[0] == 1
+            && beta.dims() == [1, 1]
+            && g.dims() == [1, 1]
+            && state.dims() == [dk, dv],
+        "cuda_gdn_single_token_recurrence: expected q/k=[1,dk], v=[1,dv], beta/g=[1,1], state=[dk,dv], got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+
+    let p = cuda_exp(g).context("cuda GDN single-token exp(g)")?;
+    let ks_entry = cuda_matmul(k, state).context("cuda GDN single-token k*S")?;
+    let q_s = cuda_matmul(q, state).context("cuda GDN single-token q*S")?;
+    let p_ks = cuda_mul_last_dim_broadcast(&ks_entry, &p)?;
+    let v_prime = cuda_sub(v, &p_ks)?;
+    let w = cuda_mul_last_dim_broadcast(&v_prime, beta)?;
+    let k_t = cuda_transpose2d(k)?;
+    let qk = cuda_matmul(q, &k_t).context("cuda GDN single-token q*k")?;
+    let p_qs = cuda_mul_last_dim_broadcast(&q_s, &p)?;
+    let qk_w = cuda_matmul(&qk, &w).context("cuda GDN single-token qk*w")?;
+    let out = cuda_add(&p_qs, &qk_w)?;
+
+    let state_flat = cuda_reshape(state, &[1, dk * dv])?;
+    let state_scaled_flat = cuda_mul_last_dim_broadcast(&state_flat, &p)?;
+    let state_scaled = cuda_reshape(&state_scaled_flat, &[dk, dv])?;
+    let delta_state = cuda_matmul(&k_t, &w).context("cuda GDN single-token k^T*w")?;
+    let next_state = cuda_add(&state_scaled, &delta_state)?;
+
+    Ok(CudaGdnSingleTokenOutput { out, next_state })
+}
+
 pub fn cuda_index_select_rows(
     input: &CudaTrainTensor,
     indices: &[usize],
@@ -5301,6 +5377,81 @@ mod tests {
             grads.get(state_id).context("missing state grad")?.to_vec_f32()?,
             vec![1.0, 2.0, 11.0, 22.0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_gdn_single_token_recurrence_matches_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda GDN single-token smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let q_tensor = Tensor::from_vec(vec![0.5f32, -1.0], (1usize, 2usize), &device)?;
+        let k_tensor = Tensor::from_vec(vec![1.5f32, 0.25], (1usize, 2usize), &device)?;
+        let v_tensor =
+            Tensor::from_vec(vec![0.1f32, -0.2, 0.3], (1usize, 3usize), &device)?;
+        let beta_tensor = Tensor::from_vec(vec![0.4f32], (1usize, 1usize), &device)?;
+        let g_tensor = Tensor::from_vec(vec![0.0f32], (1usize, 1usize), &device)?;
+        let state_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let beta_id = beta_tensor.id();
+        let g_id = g_tensor.id();
+        let state_id = state_tensor.id();
+        let q = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v = CudaTrainTensor::parameter(v_tensor, v_id)?;
+        let beta = CudaTrainTensor::parameter(beta_tensor, beta_id)?;
+        let g = CudaTrainTensor::parameter(g_tensor, g_id)?;
+        let state = CudaTrainTensor::parameter(state_tensor, state_id)?;
+
+        let result = cuda_gdn_single_token_recurrence(&q, &k, &v, &beta, &g, &state)?;
+        assert_eq!(result.out.dims(), &[1, 3]);
+        assert_eq!(result.next_state.dims(), &[2, 3]);
+        let expected_out = [-3.98f32, -4.89, -5.64];
+        for (idx, (actual, expected)) in result
+            .out
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_out.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN single-token out mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_state = [-0.44f32, -0.67, -0.42, 3.76, 4.555, 5.43];
+        for (idx, (actual, expected)) in result
+            .next_state
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_state.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN single-token state mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+
+        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let grads = cuda_backward(&loss)?;
+        assert!(grads.get(q_id).is_some());
+        assert!(grads.get(k_id).is_some());
+        assert!(grads.get(v_id).is_some());
+        assert!(grads.get(beta_id).is_some());
+        assert!(grads.get(g_id).is_some());
+        assert!(grads.get(state_id).is_some());
         Ok(())
     }
 
