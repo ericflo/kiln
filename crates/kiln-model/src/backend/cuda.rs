@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use super::{BackendRuntime, TrainingCapabilities};
+use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
 
@@ -92,7 +93,7 @@ impl CudaBackend {
             flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
             resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
-            lora_delta_training: "candle CUDA autograd; fused lora_decode_add declines tracked tensors",
+            lora_delta_training: "registered candle CUDA autograd; fused lora_decode_add declines tracked tensors",
             sgd_step: "candle CUDA Var::set fallback",
             adamw_step: "candle CUDA Var::set fallback",
             native_training: "not implemented",
@@ -571,6 +572,43 @@ impl BackendRuntime for CudaBackend {
         let out = kiln_rmsnorm_kernel::lora_decode_add(base, x, a, b, scale)
             .context("cuda lora_decode_add kernel failed")?;
         Ok(Some(out))
+    }
+
+    fn lora_delta_resident(
+        &self,
+        x: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        scale: f32,
+    ) -> Result<Option<Tensor>> {
+        if !matches!(x.device(), Device::Cuda(_))
+            || !matches!(a.device(), Device::Cuda(_))
+            || !matches!(b.device(), Device::Cuda(_))
+            || !self.has_resident_activation(a)
+            || !self.has_resident_activation(b)
+        {
+            return Ok(None);
+        }
+
+        let proj = LoraProjectionWeights {
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let delta = compute_lora_delta(x, &proj, scale)
+            .context("cuda registered LoRA delta via candle CUDA autograd failed")?;
+
+        static FIRST_CUDA_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_LORA_DELTA_LOGGED.get_or_init(|| {
+            tracing::info!(
+                x_shape = ?x.dims(),
+                a_shape = ?a.dims(),
+                b_shape = ?b.dims(),
+                scale,
+                "CudaBackend::lora_delta_resident first call (candle CUDA autograd)"
+            );
+        });
+
+        Ok(Some(delta))
     }
 
     fn gdn_gated_rms_norm(
