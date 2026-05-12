@@ -13,6 +13,10 @@ use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<candle_core::TensorId>>> = OnceLock::new();
 
+fn any_tracks_op(tensors: &[&Tensor]) -> bool {
+    tensors.iter().any(|tensor| tensor.track_op())
+}
+
 fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<candle_core::TensorId>) -> R) -> R {
     let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry
@@ -241,7 +245,7 @@ impl BackendRuntime for CudaBackend {
         // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
         // the caller falls back to the portable path instead of bubbling a
         // hard error up for non-BF16 test configs.
-        if q.dtype() != DType::BF16 {
+        if any_tracks_op(&[q, k, v]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
         let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)
@@ -260,7 +264,7 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
         let out = kiln_flash_attn::flash_attn_paged_decode(
@@ -289,7 +293,8 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if q.dtype() != DType::BF16 {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16
+        {
             return Ok(None);
         }
         let out = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
@@ -848,6 +853,55 @@ mod tests {
         assert!(
             !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
             "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_flash_attention_declines_tracked_training_tensors() -> Result<()> {
+        let backend = test_backend();
+
+        let q_base = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
+        let q_var = candle_core::Var::from_tensor(&q_base)?;
+        let q = q_var.as_tensor();
+        let k = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
+        let v = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
+        assert!(q.track_op(), "test precondition: q must be autograd-tracked");
+        assert!(
+            backend.flash_attn_prefill(q, &k, &v, 1.0, true)?.is_none(),
+            "CUDA FlashAttention prefill must decline tracked tensors until it has a bwd hook"
+        );
+
+        let q_decode_base = Tensor::zeros((1, 1, 1, 128), DType::BF16, &Device::Cpu)?;
+        let q_decode_var = candle_core::Var::from_tensor(&q_decode_base)?;
+        let q_decode = q_decode_var.as_tensor();
+        let k_pool = Tensor::zeros((128, 1, 128), DType::BF16, &Device::Cpu)?;
+        let v_pool = Tensor::zeros((128, 1, 128), DType::BF16, &Device::Cpu)?;
+        let block_table = Tensor::zeros((1, 1), DType::U32, &Device::Cpu)?;
+        let seqused_k = Tensor::zeros((1,), DType::I32, &Device::Cpu)?;
+
+        assert!(
+            backend
+                .flash_attn_paged_decode(q_decode, &k_pool, &v_pool, &block_table, 128, 128, 1.0, true)?
+                .is_none(),
+            "CUDA paged decode attention must decline tracked tensors"
+        );
+        assert!(
+            backend
+                .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
+                    q_decode,
+                    &k_pool,
+                    &v_pool,
+                    &block_table,
+                    &seqused_k,
+                    128,
+                    128,
+                    1.0,
+                    true,
+                )?
+                .is_none(),
+            "CUDA dynamic paged decode attention must decline tracked tensors"
         );
 
         Ok(())
