@@ -616,6 +616,50 @@ pub fn cuda_mul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_mul_last_dim_weight(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_mul_last_dim_weight: expected non-empty input shape"
+    );
+    ensure!(
+        weight.dims().len() == 1,
+        "cuda_mul_last_dim_weight: expected rank-1 weight, got {:?}",
+        weight.dims()
+    );
+    let last_dim = *input.dims().last().expect("checked non-empty shape");
+    ensure!(
+        weight.dims()[0] == last_dim,
+        "cuda_mul_last_dim_weight: weight dim {} must match input last dim {}",
+        weight.dims()[0],
+        last_dim
+    );
+    ensure!(
+        input.dtype() == weight.dtype(),
+        "cuda_mul_last_dim_weight: dtype mismatch input={:?} weight={:?}",
+        input.dtype(),
+        weight.dtype()
+    );
+    let out = input
+        .as_tensor()
+        .broadcast_mul(weight.as_tensor())
+        .context("cuda_mul_last_dim_weight: candle CUDA broadcast_mul")?;
+    let needs_grad = input.requires_grad()
+        || input.grad_fn().is_some()
+        || input.param_id().is_some()
+        || weight.requires_grad()
+        || weight.grad_fn().is_some()
+        || weight.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MulLastDimWeightBackward {
+            inputs: vec![input.clone(), weight.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_div(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -2083,6 +2127,50 @@ impl CudaBackwardOp for MulBackward {
 }
 
 #[derive(Debug)]
+struct MulLastDimWeightBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for MulLastDimWeightBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_mul_last_dim_weight"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_mul_last_dim_weight backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let weight = &self.inputs[1];
+        let input_grad = grad_out
+            .as_tensor()
+            .broadcast_mul(weight.as_tensor())
+            .context("cuda_mul_last_dim_weight backward: input grad")?;
+        let mut weight_grad = (grad_out.as_tensor() * input.as_tensor())
+            .context("cuda_mul_last_dim_weight backward: weighted grad")?;
+        while weight_grad.dims().len() > 1 {
+            weight_grad = weight_grad
+                .sum(0)
+                .context("cuda_mul_last_dim_weight backward: reduce leading dim")?;
+        }
+        Ok(vec![
+            Some(CudaTrainTensor::new(input_grad)?),
+            Some(CudaTrainTensor::new(
+                weight_grad
+                    .contiguous()
+                    .context("cuda_mul_last_dim_weight backward: contiguous weight grad")?,
+            )?),
+        ])
+    }
+}
+
+#[derive(Debug)]
 struct DivBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -3204,6 +3292,45 @@ mod tests {
         assert_eq!(
             grads.get(bias_id).context("missing bias grad")?.to_vec_f32()?,
             vec![2.0; 3]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_mul_last_dim_weight_backward_reduces_leading_dims() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda mul-weight smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, -1.0, 0.5],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let weight_tensor = Tensor::from_vec(vec![0.5f32, -2.0, 3.0], (3usize,), &device)?;
+        let weight_id = weight_tensor.id();
+        let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
+
+        let out = cuda_mul_last_dim_weight(&input, &weight)?;
+        assert_eq!(out.to_vec_f32()?, vec![0.5, -4.0, 9.0, 2.0, 2.0, 1.5]);
+        let loss = cuda_sum_all(&out)?;
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            vec![0.5, -2.0, 3.0, 0.5, -2.0, 3.0]
+        );
+        assert_eq!(
+            grads
+                .get(weight_id)
+                .context("missing weight grad")?
+                .to_vec_f32()?,
+            vec![5.0, 1.0, 3.5]
         );
         Ok(())
     }
