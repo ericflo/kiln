@@ -17,6 +17,7 @@ static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static CUDA_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
@@ -40,6 +41,14 @@ pub fn linear_prefill_success_counts() -> (u64, u64) {
 pub fn reset_linear_prefill_success_counts() {
     CUDA_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
     CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
+}
+
+pub fn flash_attn_tracked_decline_count() -> u64 {
+    CUDA_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
+}
+
+pub fn reset_flash_attn_tracked_decline_count() {
+    CUDA_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
 }
 
 fn any_tracks_op(tensors: &[&Tensor]) -> bool {
@@ -308,7 +317,11 @@ impl BackendRuntime for CudaBackend {
         // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
         // the caller falls back to the portable path instead of bubbling a
         // hard error up for non-BF16 test configs.
-        if any_tracks_op(&[q, k, v]) || q.dtype() != DType::BF16 {
+        if any_tracks_op(&[q, k, v]) {
+            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if q.dtype() != DType::BF16 {
             return Ok(None);
         }
         let out = kiln_flash_attn::flash_attn(q, k, v, softmax_scale, causal)

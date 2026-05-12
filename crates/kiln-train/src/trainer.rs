@@ -5373,6 +5373,7 @@ mod tests {
                 .expect("KILN_CUDA_FLCE=1 should build a CUDA backend FLCE provider");
 
             kiln_model::backend::cuda::reset_linear_prefill_success_counts();
+            kiln_model::backend::cuda::reset_flash_attn_tracked_decline_count();
             let (_loss, grads) = standard_forward_backward(
                 &*backend,
                 &input_ids,
@@ -5385,6 +5386,8 @@ mod tests {
             )?;
             let (linear_count, offset_count) =
                 kiln_model::backend::cuda::linear_prefill_success_counts();
+            let flash_tracked_declines =
+                kiln_model::backend::cuda::flash_attn_tracked_decline_count();
             assert!(
                 offset_count > 0,
                 "CUDA FLCE provider must dispatch at least one offset chunk matmul"
@@ -5393,6 +5396,10 @@ mod tests {
                 linear_count > offset_count,
                 "CUDA training forward should dispatch non-FLCE projection matmuls too: \
                  linear_count={linear_count} offset_count={offset_count}"
+            );
+            assert!(
+                flash_tracked_declines > 0,
+                "CUDA full-attention training should offer FlashAttention and decline tracked tensors"
             );
             assert!(
                 params
