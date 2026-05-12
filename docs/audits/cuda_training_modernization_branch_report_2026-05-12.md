@@ -41,6 +41,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `d57d499d` | CUDA training autograd scaffold | Adds a CUDA backward-op trait, reverse-topology traversal, per-`TensorId` grad store, and CUDA tensor gradient accumulation for synthetic training graphs. |
 | `23efaecb` | CUDA training add backward op | Adds a CUDA tensor add op with a backward rule proving gradients route to both parameters and accumulate through shared inputs. |
 | `0edef988` | CUDA training mul backward op | Adds a CUDA tensor multiply op with product-rule backward coverage using saved input values. |
+| `3e0e32be` | CUDA training sum backward op | Adds scalar `cuda_sum_all` reduction with broadcast-gradient backward coverage, including `sum(x * x)` graph validation. |
 
 Local validation so far:
 
@@ -79,6 +80,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA autograd scaffolding
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA add backward coverage
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA multiply backward coverage
+  - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA sum backward coverage
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -99,10 +101,11 @@ lightweight TensorId residency registry, autograd-safe candle-CUDA LoRA/projecti
 attention training declines, and resident in-place SGD/AdamW kernels for registered CUDA tensors.
 It also now has an initial CUDA-only training tensor boundary over candle CUDA storage, including
 parameter metadata, detach semantics, a backward-op trait, reverse-topology traversal, and a
-per-`TensorId` gradient store for a future CUDA autograd graph. CUDA add and multiply ops prove that
-the tape can propagate and accumulate gradients through real CUDA tensor ops, including a product
-rule that uses saved inputs. It still does **not** have native CUDA Qwen forward/backward ops or an
-allocator/arena equivalent to the Vulkan native training path.
+per-`TensorId` gradient store for a future CUDA autograd graph. CUDA add, multiply, and sum
+reduction ops prove that the tape can propagate and accumulate gradients through real CUDA tensor
+ops, including a product rule that uses saved inputs and scalar-loss reductions. It still does
+**not** have native CUDA Qwen forward/backward ops or an allocator/arena equivalent to the Vulkan
+native training path.
 
 The CUDA port should therefore not copy Vulkan's buffer-upload mechanics blindly. CUDA candle tensors
 already live on the device, so the first useful parity target is to make CUDA training decisions
@@ -126,7 +129,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/mul backward ops, and resident optimizer-kernel delegation. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a training arena. | Initial tensor/autograd boundary present; full native stack missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/mul/sum backward ops, and resident optimizer-kernel delegation. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a training arena. | Initial tensor/autograd boundary present; full native stack missing. |
 
 ## Phase Plan
 
