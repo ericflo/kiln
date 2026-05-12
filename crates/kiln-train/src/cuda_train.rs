@@ -9,8 +9,8 @@ use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaLayerWeights, CudaModelWeights,
-    CudaOwnedFullAttentionLayer, CudaRopeTables, CudaTrainArena, CudaTrainTensor,
-    cuda_adamw_step_from_store, cuda_add, cuda_backward, cuda_embedding_lookup,
+    CudaOwnedFullAttentionLayer, CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena,
+    CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_backward, cuda_embedding_lookup,
     cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_narrow_last_dim, cuda_reshape,
     cuda_rmsnorm, cuda_rope, cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu,
     cuda_sum_all, cuda_transpose2d,
@@ -127,6 +127,67 @@ pub fn allocate_cuda_lora_adamw_state(lora_layers: &[CudaLoraLayer]) -> Result<C
         states.insert(pair.b_id, CudaAdamWState::zeros_like(&pair.b)?);
     }
     Ok(states)
+}
+
+fn cuda_lora_for_weight(
+    device: &Device,
+    weight: &CudaTrainTensor,
+    rank: usize,
+    alpha: f32,
+    seed: u64,
+    name: &str,
+) -> Result<CudaLoraPair> {
+    ensure!(
+        weight.dims().len() == 2,
+        "cuda_lora_for_weight {name}: expected rank-2 [in,out] weight, got {:?}",
+        weight.dims()
+    );
+    CudaLoraPair::init_kaiming(device, weight.dims()[0], weight.dims()[1], rank, alpha, seed)
+        .with_context(|| format!("initialize CUDA LoRA pair for {name}"))
+}
+
+pub fn cuda_init_lora_layers(
+    model: &CudaModelWeights,
+    rank: usize,
+    alpha: f32,
+    seed: u64,
+) -> Result<Vec<CudaLoraLayer>> {
+    let device = model.token_embedding.as_tensor().device();
+    let mut out = Vec::with_capacity(model.layers.len());
+    for (idx, layer) in model.layers.iter().enumerate() {
+        let layer_seed = seed
+            .wrapping_mul(0x9e3779b97f4a7c15)
+            .wrapping_add((idx as u64).wrapping_mul(13));
+        let mk = |slot: u64, weight: &CudaTrainTensor, name: &str| -> Result<CudaLoraPair> {
+            cuda_lora_for_weight(
+                device,
+                weight,
+                rank,
+                alpha,
+                layer_seed.wrapping_add(slot),
+                name,
+            )
+        };
+        match layer {
+            CudaLayerWeights::FullAttention(full) => out.push(CudaLoraLayer {
+                q_proj: Some(mk(1, &full.q_weight, "q_proj")?),
+                k_proj: Some(mk(2, &full.k_weight, "k_proj")?),
+                v_proj: Some(mk(3, &full.v_weight, "v_proj")?),
+                o_proj: Some(mk(4, &full.o_weight, "o_proj")?),
+                gate_proj: Some(mk(5, &full.gate_weight, "gate_proj")?),
+                up_proj: Some(mk(6, &full.up_weight, "up_proj")?),
+                down_proj: Some(mk(7, &full.down_weight, "down_proj")?),
+                ..Default::default()
+            }),
+            CudaLayerWeights::LinearAttention(linear) => out.push(CudaLoraLayer {
+                in_proj_qkv: Some(mk(8, &linear.in_proj_qkv_weight, "in_proj_qkv")?),
+                in_proj_z: Some(mk(9, &linear.in_proj_z_weight, "in_proj_z")?),
+                gdn_out_proj: Some(mk(10, &linear.out_proj_weight, "gdn_out_proj")?),
+                ..Default::default()
+            }),
+        }
+    }
+    Ok(out)
 }
 
 /// Apply `input @ base_weight + scale * input @ A.T @ B.T`.
@@ -1005,6 +1066,148 @@ mod tests {
             assert_ne!(param.to_vec_f32()?, *old);
             assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 1);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_init_lora_layers_populates_full_attention_and_gdn_slots() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda LoRA init smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let full = CudaOwnedFullAttentionLayer {
+            input_norm_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize,),
+                DType::F32,
+                &device,
+            )?)?,
+            q_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?,
+            k_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?,
+            v_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?,
+            q_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
+            k_norm_weight: CudaTrainTensor::new(Tensor::zeros((2usize,), DType::F32, &device)?)?,
+            o_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 2usize), DType::F32, &device)?)?,
+            post_norm_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize,),
+                DType::F32,
+                &device,
+            )?)?,
+            gate_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 4usize),
+                DType::F32,
+                &device,
+            )?)?,
+            up_weight: CudaTrainTensor::new(Tensor::zeros((2usize, 4usize), DType::F32, &device)?)?,
+            down_weight: CudaTrainTensor::new(Tensor::zeros(
+                (4usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            heads_q: 1,
+            heads_kv: 1,
+            head_dim: 2,
+            eps: 1e-6,
+            attn_output_gate: false,
+        };
+        let linear = CudaOwnedLinearAttentionLayer {
+            layer_norm_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize,),
+                DType::F32,
+                &device,
+            )?)?,
+            in_proj_qkv_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 6usize),
+                DType::F32,
+                &device,
+            )?)?,
+            in_proj_z_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            in_proj_a_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            in_proj_b_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            conv1d_weight: CudaTrainTensor::new(Tensor::zeros(
+                (1usize, 1usize, 4usize),
+                DType::F32,
+                &device,
+            )?)?,
+            a_log: CudaTrainTensor::new(Tensor::zeros((1usize,), DType::F32, &device)?)?,
+            a_log_gates: CudaTrainTensor::new(Tensor::zeros((1usize,), DType::F32, &device)?)?,
+            dt_bias: CudaTrainTensor::new(Tensor::zeros((1usize,), DType::F32, &device)?)?,
+            gated_norm_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize,),
+                DType::F32,
+                &device,
+            )?)?,
+            out_proj_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            heads_k: 1,
+            heads_v: 1,
+            head_dim_k: 2,
+            head_dim_v: 2,
+            conv_kernel: 4,
+            eps: 1e-6,
+        };
+        let model = CudaModelWeights {
+            token_embedding: CudaTrainTensor::new(Tensor::zeros(
+                (4usize, 2usize),
+                DType::F32,
+                &device,
+            )?)?,
+            final_norm_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize,),
+                DType::F32,
+                &device,
+            )?)?,
+            lm_head_weight: CudaTrainTensor::new(Tensor::zeros(
+                (2usize, 4usize),
+                DType::F32,
+                &device,
+            )?)?,
+            layers: vec![
+                CudaLayerWeights::FullAttention(full),
+                CudaLayerWeights::LinearAttention(linear),
+            ],
+            rotary_inv_freq: Vec::new(),
+            rotary_dim: 0,
+            vocab: 4,
+            hidden: 2,
+        };
+
+        let lora_layers = cuda_init_lora_layers(&model, 2, 4.0, 0xC0DA_1A7E)?;
+        assert_eq!(lora_layers.len(), 2);
+        assert!(lora_layers[0].q_proj.is_some());
+        assert!(lora_layers[0].down_proj.is_some());
+        assert!(lora_layers[1].in_proj_qkv.is_some());
+        assert!(lora_layers[1].in_proj_z.is_some());
+        assert!(lora_layers[1].gdn_out_proj.is_some());
+        assert_eq!(
+            lora_layers[1]
+                .in_proj_qkv
+                .as_ref()
+                .expect("in_proj_qkv")
+                .b
+                .dims(),
+            &[6, 2]
+        );
+        let adamw = allocate_cuda_lora_adamw_state(&lora_layers)?;
+        assert_eq!(adamw.len(), 20);
         Ok(())
     }
 
