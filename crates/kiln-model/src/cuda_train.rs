@@ -242,6 +242,75 @@ impl CudaGradStore {
     }
 }
 
+#[derive(Debug)]
+pub struct CudaTrainArena {
+    device: Device,
+    allocations: Vec<CudaTrainTensor>,
+    allocated_bytes: usize,
+}
+
+impl CudaTrainArena {
+    pub fn new(device: &Device) -> Result<Self> {
+        ensure!(
+            matches!(device, Device::Cuda(_)),
+            "CudaTrainArena requires a CUDA device, got {device:?}"
+        );
+        Ok(Self {
+            device: device.clone(),
+            allocations: Vec::new(),
+            allocated_bytes: 0,
+        })
+    }
+
+    pub fn zeros(&mut self, dims: &[usize], dtype: DType) -> Result<CudaTrainTensor> {
+        let tensor = Tensor::zeros(dims.to_vec(), dtype, &self.device)
+            .context("CudaTrainArena::zeros")?;
+        let train_tensor = CudaTrainTensor::new(tensor)?;
+        self.track(train_tensor)
+    }
+
+    pub fn track(&mut self, tensor: CudaTrainTensor) -> Result<CudaTrainTensor> {
+        ensure!(
+            matches!(tensor.as_tensor().device(), Device::Cuda(_)),
+            "CudaTrainArena can only track CUDA tensors, got {:?}",
+            tensor.as_tensor().device()
+        );
+        self.allocated_bytes = self
+            .allocated_bytes
+            .checked_add(approx_tensor_bytes(&tensor)?)
+            .context("CudaTrainArena byte accounting overflow")?;
+        self.allocations.push(tensor.clone());
+        Ok(tensor)
+    }
+
+    pub fn allocation_count(&self) -> usize {
+        self.allocations.len()
+    }
+
+    pub fn allocated_bytes(&self) -> usize {
+        self.allocated_bytes
+    }
+
+    pub fn clear(&mut self) {
+        self.allocations.clear();
+        self.allocated_bytes = 0;
+    }
+}
+
+fn approx_tensor_bytes(tensor: &CudaTrainTensor) -> Result<usize> {
+    let elems: usize = tensor.dims().iter().product();
+    let elem_bytes = match tensor.dtype() {
+        DType::U8 => 1,
+        DType::U32 | DType::F32 => 4,
+        DType::I64 | DType::F64 => 8,
+        DType::BF16 | DType::F16 => 2,
+        other => anyhow::bail!("CudaTrainArena does not support byte accounting for {other:?}"),
+    };
+    elems
+        .checked_mul(elem_bytes)
+        .context("CudaTrainArena tensor byte accounting overflow")
+}
+
 /// Walk the CUDA training graph rooted at `loss` and return per-parameter gradients.
 pub fn cuda_backward(loss: &CudaTrainTensor) -> Result<CudaGradStore> {
     ensure!(
@@ -744,6 +813,33 @@ mod tests {
         assert_eq!(detached.param_id(), None);
         assert!(detached.op_id() > param.op_id());
         assert_eq!(detached.to_vec_f32()?, vec![1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_train_arena_tracks_allocations_and_clear() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_train_arena smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let mut arena = CudaTrainArena::new(&device)?;
+        let a = arena.zeros(&[2, 3], DType::F32)?;
+        assert_eq!(a.dims(), &[2, 3]);
+        assert_eq!(arena.allocation_count(), 1);
+        assert_eq!(arena.allocated_bytes(), 24);
+
+        let b = arena.zeros(&[4], DType::BF16)?;
+        assert_eq!(b.dims(), &[4]);
+        assert_eq!(arena.allocation_count(), 2);
+        assert_eq!(arena.allocated_bytes(), 32);
+
+        arena.clear();
+        assert_eq!(arena.allocation_count(), 0);
+        assert_eq!(arena.allocated_bytes(), 0);
         Ok(())
     }
 
