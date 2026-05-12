@@ -94,6 +94,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `955bdad4` | CUDA train row narrow op | Adds autograd-safe CUDA row slicing with backward zero-padding, a building block for causal conv/chunk windows. |
 | `cad62355` | CUDA train row concat op | Adds autograd-safe CUDA row concatenation with backward gradient splitting, needed for causal conv padding/window composition. |
 | `1dc880ad` | CUDA train zero-state causal conv1d | Adds a native CUDA training-shell causal depthwise conv1d composition for fresh-state prefill windows. |
+| `40b7f943` | CUDA train zero-state conv1d state update | Adds CUDA-native next-state construction for fresh-state causal conv prefill. |
 
 Local validation so far:
 
@@ -189,6 +190,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_narrow_rows_backward_pads_zero_gradients --lib --quiet` passed after adding CUDA train row slicing.
   - `cargo test --release -p kiln-model --features cuda cuda_cat_rows_backward_splits_gradients --lib --quiet` passed after adding CUDA train row concatenation.
   - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_prefill_zero_state_matches_reference --lib --quiet` passed after adding CUDA train zero-state causal depthwise conv1d.
+  - `cargo test --release -p kiln-model --features cuda cuda_causal_depthwise_conv1d_next_state_zero_state_tracks_tail --lib --quiet` passed after adding CUDA train zero-state conv next-state construction.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
