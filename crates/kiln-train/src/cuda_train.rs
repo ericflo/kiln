@@ -561,6 +561,45 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
     Ok(loss_value)
 }
 
+pub fn cuda_full_attention_lora_train_token_sequences(
+    model: &CudaModelWeights,
+    lora_layers: &[CudaLoraLayer],
+    token_sequences: &[Vec<usize>],
+    epochs: usize,
+    adamw_state: &mut CudaAdamWBook,
+    cfg: CudaAdamWConfig,
+) -> Result<Vec<f32>> {
+    ensure!(
+        epochs > 0,
+        "cuda_full_attention_lora_train_token_sequences requires at least one epoch"
+    );
+    ensure!(
+        !token_sequences.is_empty(),
+        "cuda_full_attention_lora_train_token_sequences requires token sequences"
+    );
+    let device = model.token_embedding.as_tensor().device();
+    let mut losses = Vec::with_capacity(epochs * token_sequences.len());
+    for _epoch in 0..epochs {
+        for token_ids in token_sequences {
+            let mut arena = CudaTrainArena::new(device)?;
+            let loss = cuda_full_attention_lora_model_adamw_step_with_arena(
+                model,
+                lora_layers,
+                token_ids,
+                adamw_state,
+                cfg,
+                &mut arena,
+            )?;
+            ensure!(
+                loss.is_finite(),
+                "cuda_full_attention_lora_train_token_sequences encountered non-finite loss {loss}"
+            );
+            losses.push(loss);
+        }
+    }
+    Ok(losses)
+}
+
 /// Save named CUDA training tensors to safetensors after one CUDA-to-CPU readback.
 pub fn save_cuda_training_tensors(
     weights: &[(&str, CudaTrainTensor)],
@@ -1065,6 +1104,23 @@ mod tests {
         for (param, old) in trainable.iter().zip(before.iter()) {
             assert_ne!(param.to_vec_f32()?, *old);
             assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 1);
+        }
+
+        let losses = cuda_full_attention_lora_train_token_sequences(
+            &model,
+            &lora_layers,
+            &[vec![2, 0], vec![1, 3]],
+            1,
+            &mut adamw,
+            CudaAdamWConfig {
+                lr: 0.01,
+                ..CudaAdamWConfig::default()
+            },
+        )?;
+        assert_eq!(losses.len(), 2);
+        assert!(losses.iter().all(|loss| loss.is_finite() && *loss > 0.0));
+        for param in &trainable {
+            assert_eq!(adamw.get(&param.param_id().expect("param id")).expect("state").step, 3);
         }
         Ok(())
     }
