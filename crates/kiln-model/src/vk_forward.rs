@@ -571,87 +571,26 @@ fn vk_gdn_layer_forward(
     let k_flat = vk_narrow_lastdim(&conv_3d, qk_dim, qk_dim)?;
     let v_flat = vk_narrow_lastdim(&conv_3d, 2 * qk_dim, v_dim)?;
 
-    // 5. Reshape to [B, nv, T, dk] / [B, nv, T, dv]; for GQA expand K → nv heads.
-    // First [B*T, qk_dim] → [B, T, nk, dk]; permute → [B, nk, T, dk]
-    let q_4 = vk_reshape(&q_flat, &[batch, t, nk, dk])?;
-    let k_4 = vk_reshape(&k_flat, &[batch, t, nk, dk])?;
-    let v_4 = vk_reshape(&v_flat, &[batch, t, nv, dv])?;
-    // CPU permute (B, T, H, D) → (B, H, T, D) for q/k/v
-    let permute_bth_to_bht = |t_in: &VkTensor, nh: usize, d: usize| -> Result<VkTensor> {
-        let data = t_in.to_vec_f32()?;
-        let mut out = vec![0.0_f32; batch * nh * t * d];
-        for b in 0..batch {
-            for tt in 0..t {
-                for h in 0..nh {
-                    for dd in 0..d {
-                        out[((b * nh + h) * t + tt) * d + dd] =
-                            data[((b * t + tt) * nh + h) * d + dd];
-                    }
-                }
-            }
-        }
-        let device = t_in.device();
-        let bytes: Vec<u8> = out.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.len().max(4) as u64,
-        )?;
-        kiln_vulkan_kernel::VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buf,
-            &bytes,
-        )?;
-        Ok(VkTensor::from_buffer(
-            Arc::new(buf),
-            vec![batch, nh, t, d],
-            VkDType::F32,
-            Arc::clone(device),
-        ))
-    };
-    let q_bnvtd = permute_bth_to_bht(&q_4, nk, dk)?;
-    let k_bnvtd = permute_bth_to_bht(&k_4, nk, dk)?;
-    let v_bnvtd = permute_bth_to_bht(&v_4, nv, dv)?;
-    // GQA expand for K (replicate nk → nv) — matches candle
+    // 5. Reshape + permute to [B, H, T, D] for chunkwise input.
+    //    With B=1, [T, H, D] → [H, T, D] is exactly vk_permute_rh_to_hr_no_grad.
+    use kiln_vulkan_kernel::vk_ops::permute::vk_permute_rh_to_hr_no_grad;
+    let q_thd = vk_reshape(&q_flat, &[t, nk, dk])?;
+    let k_thd = vk_reshape(&k_flat, &[t, nk, dk])?;
+    let v_thd = vk_reshape(&v_flat, &[t, nv, dv])?;
+    let q_htd = vk_permute_rh_to_hr_no_grad(&q_thd)?; // [nk, T, dk]
+    let k_htd = vk_permute_rh_to_hr_no_grad(&k_thd)?;
+    let v_htd = vk_permute_rh_to_hr_no_grad(&v_thd)?; // [nv, T, dv]
+    let q_bnvtd = vk_reshape(&q_htd, &[batch, nk, t, dk])?;
+    let k_bnvtd = vk_reshape(&k_htd, &[batch, nk, t, dk])?;
+    let v_bnvtd = vk_reshape(&v_htd, &[batch, nv, t, dv])?;
+    // GQA expand for K (replicate nk → nv heads). Use the existing
+    // vk_repeat_kv_heads_no_grad which expects [heads_kv, rows, head_dim].
+    use kiln_vulkan_kernel::vk_ops::permute::vk_repeat_kv_heads_no_grad;
     let k_expanded = if nk < nv {
-        let group = nv / nk;
-        let kdata = k_bnvtd.to_vec_f32()?;
-        let mut expanded = vec![0.0_f32; batch * nv * t * dk];
-        for b in 0..batch {
-            for h in 0..nv {
-                let src_h = h / group;
-                for tt in 0..t {
-                    for dd in 0..dk {
-                        expanded[((b * nv + h) * t + tt) * dk + dd] =
-                            kdata[((b * nk + src_h) * t + tt) * dk + dd];
-                    }
-                }
-            }
-        }
-        let device = k_bnvtd.device();
-        let bytes: Vec<u8> = expanded.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.len().max(4) as u64,
-        )?;
-        kiln_vulkan_kernel::VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buf,
-            &bytes,
-        )?;
-        VkTensor::from_buffer(
-            Arc::new(buf),
-            vec![batch, nv, t, dk],
-            VkDType::F32,
-            Arc::clone(device),
-        )
+        let groups = nv / nk;
+        let k_3d = vk_reshape(&k_bnvtd, &[nk, t, dk])?;
+        let k_repeated = vk_repeat_kv_heads_no_grad(&k_3d, groups)?;
+        vk_reshape(&k_repeated, &[batch, nv, t, dk])?
     } else {
         k_bnvtd
     };
@@ -681,43 +620,13 @@ fn vk_gdn_layer_forward(
     // Save updated recurrent state back
     state.layers[gdn_layer_idx].recurrent_state = Arc::clone(state_t.buffer());
 
-    // 9. Permute back [B, nv, T, dv] → [B, T, nv*dv]
-    let out_data = out_chunkwise.to_vec_f32()?;
-    let mut flat = vec![0.0_f32; batch * t * v_dim];
-    for b in 0..batch {
-        for tt in 0..t {
-            for h in 0..nv {
-                for dd in 0..dv {
-                    flat[(b * t + tt) * v_dim + h * dv + dd] =
-                        out_data[((b * nv + h) * t + tt) * dv + dd];
-                }
-            }
-        }
-    }
-    let flat_t = {
-        use kiln_vulkan_kernel::VulkanBuffer;
-        let device = out_chunkwise.device();
-        let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let buf = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.len().max(4) as u64,
-        )?;
-        VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buf,
-            &bytes,
-        )?;
-        VkTensor::from_buffer(
-            Arc::new(buf),
-            vec![batch * t, v_dim],
-            VkDType::F32,
-            Arc::clone(device),
-        )
-    };
+    // 9. Permute back [B, nv, T, dv] → [B, T, nv*dv].
+    //    With B=1, [nv, T, dv] → [T, nv, dv] (= vk_permute_hr_to_rh_no_grad)
+    //    then reshape to [T, nv*dv]. Pure GPU.
+    use kiln_vulkan_kernel::vk_ops::permute::vk_permute_hr_to_rh_no_grad;
+    let out_3 = vk_reshape(&out_chunkwise, &[nv, t, dv])?; // [H, T, D]
+    let out_t_nv_dv = vk_permute_hr_to_rh_no_grad(&out_3)?; // [T, H, D]
+    let flat_t = vk_reshape(&out_t_nv_dv, &[batch * t, v_dim])?;
 
     // 10. Gated RMSNorm: out = (out / rms(out)) · silu(z) · gated_norm
     let z_2 = vk_reshape(&z_raw, &[batch * t, v_dim])?;
