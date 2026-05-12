@@ -109,6 +109,7 @@ training process changes on `main`; remaining work is still incremental and vali
 | `223230dd` | CUDA native SFT GDN-state routing | Routes `cuda_native_sft_train` through the mixed GDN-state model step when imported CUDA weights contain LinearAttention/GDN layers. |
 | `15ba059c` | Mainline CUDA modernization merge | Merges the CUDA modernization stack onto `main` at `ab0963af`, preserving current exact SFT labeling, long-context checkpoint/preflight, Metal FLCE, and Metal GDN tile synchronization work. |
 | `7b4b2b78` | Stable CUDA native Qwen smoke | Adds stable CUDA train softplus, native-CUDA bench/smoke routing, and GDN q/k L2 normalization before recurrence; fixes the real Qwen native CUDA SFT NaN. |
+| `858f83ee` | Latest main remerge | Merges the newest Metal/Candle cache work from `github/main` (`ffef3bfd`, `c168b367`, `bd57e81a`) after CUDA stabilization and revalidates CUDA release tests/smoke. |
 
 Local validation so far:
 
@@ -223,6 +224,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_lora_model_step_with_gdn_state_threads_gdn_state --lib --quiet` re-run after adding CUDA-native GDN q/k L2 normalization before recurrence.
   - `cargo test --release -p kiln-server --features cuda native_training_env_enabled --lib --quiet` re-run after mainline merge and native CUDA bench/smoke routing.
   - `KILN_CUDA_ARCHS=86 scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --native-cuda` passed on A6000 after q/k normalization: native CUDA SFT produced `loss=69478864.000000`, `53.26s/step`, `41384 MB` peak VRAM, and non-null JSON `"training": {"num_steps": 1, ...}`.
+  - After merging latest `github/main` (`858f83ee`), the same focused release tests passed again and `KILN_CUDA_ARCHS=86 scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --native-cuda` passed again with `loss=69478864.000000`, `53.08s/step`, `41384 MB` peak VRAM, and non-null training JSON.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
