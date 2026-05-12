@@ -1944,6 +1944,19 @@ fn flce_auto_engage(active_count: usize) -> bool {
     active_count >= ACTIVE_COUNT_FLOOR
 }
 
+fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
+    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
+    {
+        return forced;
+    }
+    let threshold = std::env::var("KILN_RECOMPUTE_BOUNDARY_THRESHOLD_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(8192);
+    seq_len >= threshold
+}
+
 /// Phase 3.2 helper: get the per-segment recompute input either from
 /// the resident activation registry (preferred) or by cloning the
 /// candle CPU mirror (fallback). Centralised so both
@@ -3197,29 +3210,19 @@ fn checkpointed_forward_backward(
         "checkpointed SFT called with no supervised shifted-label positions"
     );
 
-    // Step 1: Run one full detached forward pass to collect layer-segment
-    // boundary values. LoRA values are included, but detached from autograd,
-    // because gradients are produced by the reverse recompute below.
-    let (embed_hidden, positions) = model_forward_embed(input_ids, weights)?;
+    let positions: Vec<u32> = (0..input_ids.len()).map(|position| position as u32).collect();
     let lora_detached = lora_weights_detached(params);
-
-    let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
-    boundary_states.push(embed_hidden.detach());
-    // Phase 3.1 hook: register the embedding boundary as
-    // resident-on-device. Skipped entirely on backends that don't
-    // implement the registry (default no-op trait impls) so we don't
-    // pay an `extract_tensor_bytes` round-trip per boundary on CPU.
-    // On Vulkan it copies the bytes into RESIDENT_ACTIVATION_REGISTRY
-    // keyed by `tensor.id()`. Phase 3.2 will use these entries to
-    // skip the candle-CPU recompute-input upload.
     let resident_activation = backend.supports_resident_activation();
-    if resident_activation {
-        backend.register_resident_activation(boundary_states.last().unwrap())?;
-    }
+    let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
 
-    {
-        let mut current = boundary_states[0].clone();
-        for &(start, end) in segments.iter() {
+    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
+        anyhow::ensure!(
+            boundary_idx <= num_segments,
+            "checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
+        );
+        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+        let mut current = embed_hidden.detach();
+        for &(start, end) in segments.iter().take(boundary_idx) {
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
             current = model_forward_segment(
                 backend,
@@ -3232,26 +3235,70 @@ fn checkpointed_forward_backward(
                 Some(&mut linear_state),
                 Some(&lora_detached),
             )?;
-            boundary_states.push(current.detach());
-            if resident_activation {
-                backend.register_resident_activation(boundary_states.last().unwrap())?;
-            }
-            current = boundary_states.last().unwrap().clone();
+            current = current.detach();
         }
-    }
+        Ok(current)
+    };
+
+    // Step 1: Run one full detached forward pass to obtain the final hidden
+    // value. In normal mode we also cache segment boundaries. In long-context
+    // mode we keep only the final boundary and recompute segment inputs on
+    // demand in the reverse pass, avoiding `(num_segments + 1) * T * H`
+    // resident boundary memory while preserving exact full-context values.
+    let mut boundary_states: Vec<Tensor> = Vec::new();
+    let final_hidden = if recompute_boundaries {
+        detached_boundary(num_segments)?
+    } else {
+        let first_boundary = detached_boundary(0)?;
+        boundary_states = Vec::with_capacity(num_segments + 1);
+        boundary_states.push(first_boundary);
+        // Phase 3.1 hook: register the embedding boundary as
+        // resident-on-device. Skipped entirely on backends that don't
+        // implement the registry (default no-op trait impls) so we don't
+        // pay an `extract_tensor_bytes` round-trip per boundary on CPU.
+        // On Vulkan it copies the bytes into RESIDENT_ACTIVATION_REGISTRY
+        // keyed by `tensor.id()`. Phase 3.2 will use these entries to
+        // skip the candle-CPU recompute-input upload.
+        if resident_activation {
+            backend.register_resident_activation(boundary_states.last().unwrap())?;
+        }
+
+        {
+            let mut current = boundary_states[0].clone();
+            for &(start, end) in segments.iter() {
+                let mut linear_state = LinearAttentionState::new(model_config, device)?;
+                current = model_forward_segment(
+                    backend,
+                    current,
+                    weights,
+                    model_config,
+                    &positions,
+                    start,
+                    end,
+                    Some(&mut linear_state),
+                    Some(&lora_detached),
+                )?;
+                boundary_states.push(current.detach());
+                if resident_activation {
+                    backend.register_resident_activation(boundary_states.last().unwrap())?;
+                }
+                current = boundary_states.last().unwrap().clone();
+            }
+        }
+        segment_input_via_registry_or_clone(
+            backend,
+            boundary_states
+                .last()
+                .context("missing final checkpoint boundary")?,
+            resident_activation,
+        )?
+    };
 
     // Step 2: Compute the real loss once at the final boundary, then seed the
     // reverse pass with the exact analytic gradient through final RMSNorm +
     // tied LM head + masked next-token cross-entropy. This avoids the old
     // per-segment tail forward, which retained later-layer graphs and was not
     // viable for long examples.
-    let final_hidden = segment_input_via_registry_or_clone(
-        backend,
-        boundary_states
-            .last()
-            .context("missing final checkpoint boundary")?,
-        resident_activation,
-    )?;
     let loss = if use_flce() {
         let normed = model_forward_final_norm(&final_hidden, weights, model_config)?;
         fused_linear_cross_entropy_dispatch_with_provider(
@@ -3299,11 +3346,15 @@ fn checkpointed_forward_backward(
         // Start from the detached boundary state for this segment. Wrapping it
         // in a fresh Var lets Candle return d(loss)/d(segment_input), which
         // becomes the upstream gradient for the previous segment.
-        let seg_input = segment_input_via_registry_or_clone(
-            backend,
-            &boundary_states[seg_idx],
-            resident_activation,
-        )?;
+        let seg_input = if recompute_boundaries {
+            detached_boundary(seg_idx)?
+        } else {
+            segment_input_via_registry_or_clone(
+                backend,
+                &boundary_states[seg_idx],
+                resident_activation,
+            )?
+        };
         // Phase 3.2 sub-step: once seg_input has been resolved (or
         // cloned), the candle CPU mirror in `boundary_states[seg_idx]`
         // is no longer needed by this function — the recompute will
@@ -3314,7 +3365,10 @@ fn checkpointed_forward_backward(
         // 1-element stub. On Vulkan with the default Qwen3.5-4B
         // boundary shape, this releases ~9 MB of candle CPU storage
         // per boundary.
-        if resident_activation && backend.has_resident_activation(&boundary_states[seg_idx]) {
+        if !recompute_boundaries
+            && resident_activation
+            && backend.has_resident_activation(&boundary_states[seg_idx])
+        {
             backend.evict_resident_activation(&boundary_states[seg_idx]);
             boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
                 .context("phase3.2: alloc boundary stub")?;
@@ -3364,7 +3418,7 @@ fn checkpointed_forward_backward(
     // RESIDENT_ACTIVATION_REGISTRY's Arc<VulkanBuffer> refcount.
     // Skipped when the backend's registry is the no-op default so we
     // don't iterate just to call no-ops.
-    if resident_activation {
+    if !recompute_boundaries && resident_activation {
         for boundary in &boundary_states {
             backend.evict_resident_activation(boundary);
         }
