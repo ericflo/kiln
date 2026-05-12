@@ -3813,6 +3813,103 @@ pub fn swiglu_ffn(
     swiglu_ffn_impl(None, x, mlp, lora, false, None)
 }
 
+/// SwiGLU gate/up half used by exact training-time split backprop.
+///
+/// Returns `silu(gate_proj(x)) * up_proj(x)` without applying the down
+/// projection. This mirrors the unfused path inside [`swiglu_ffn`] so callers
+/// can backprop the large MLP block as two smaller exact subgraphs.
+pub fn swiglu_ffn_gated_hidden(
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let gate = {
+        kiln_nvtx::range!(c"kiln/mlp/gate");
+        mlp_proj_forward_decode_if(
+            None,
+            false,
+            x,
+            &mlp.gate_proj_t,
+            mlp.gate_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.gate_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    let up = {
+        kiln_nvtx::range!(c"kiln/mlp/up");
+        mlp_proj_forward_decode_if(
+            None,
+            false,
+            x,
+            &mlp.up_proj_t,
+            mlp.up_proj_marlin.as_ref(),
+            lora_layer.and_then(|l| l.up_proj.as_ref()),
+            lora_scale,
+        )?
+    };
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_mlp_silu_mul_supports(&gate, &up) {
+            return crate::backend::metal::metal_mlp_silu_mul_bf16(&gate, &up)
+                .context("metal mlp silu*mul kernel failed");
+        }
+    }
+    let gate = cuda_silu(&gate)?;
+    (gate * up).map_err(Into::into)
+}
+
+/// SwiGLU down projection half used by exact training-time split backprop.
+pub fn swiglu_ffn_down_from_gated(
+    gated: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    mlp_proj_forward_decode_if(
+        None,
+        false,
+        gated,
+        &mlp.down_proj_t,
+        mlp.down_proj_marlin.as_ref(),
+        lora_layer.and_then(|l| l.down_proj.as_ref()),
+        lora_scale,
+    )
+}
+
+/// Transformer MLP gate/up half from a post-attention residual state.
+pub fn transformer_mlp_gated_hidden(
+    hidden: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let normed_post = {
+        kiln_nvtx::range!(c"kiln/norm/pre_mlp");
+        rms_norm(
+            hidden,
+            &layer.post_attention_layernorm,
+            config.rms_norm_eps,
+        )?
+    };
+    swiglu_ffn_gated_hidden(&normed_post, &layer.mlp, lora)
+}
+
+/// Transformer MLP down half from a precomputed SwiGLU gated hidden.
+pub fn transformer_mlp_down_from_gated(
+    gated: &Tensor,
+    layer: &GpuLayerWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    swiglu_ffn_down_from_gated(gated, &layer.mlp, lora)
+}
+
 fn swiglu_ffn_metal_decode(
     x: &Tensor,
     mlp: &GpuFfnWeights,
@@ -5318,6 +5415,39 @@ pub fn gated_deltanet_forward(
         true,
         lora,
     )
+}
+
+/// GDN attention subblock through its residual add, excluding the following
+/// MLP. Used by exact training-time split backprop to keep the recurrent GDN
+/// graph separate from the MLP graph while preserving full-context state.
+pub fn gdn_attention_residual_block(
+    backend: &dyn BackendRuntime,
+    hidden: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    recurrent_state: &mut Tensor,
+    conv_state: &mut Tensor,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let GpuAttentionWeights::Linear(lin_weights) = &layer.attention else {
+        anyhow::bail!("gdn_attention_residual_block called on a non-GDN layer");
+    };
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn");
+        rms_norm(hidden, &layer.input_layernorm, config.rms_norm_eps)?
+    };
+    let attn_out = gated_deltanet_forward(
+        backend,
+        &normed,
+        lin_weights,
+        config,
+        recurrent_state,
+        conv_state,
+        false,
+        false,
+        lora,
+    )?;
+    (hidden + &attn_out).map_err(Into::into)
 }
 
 /// Streaming/tiled wrapper around [`gated_deltanet_forward`] for the

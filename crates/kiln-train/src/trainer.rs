@@ -21,9 +21,11 @@ use kiln_flce_kernel::{
 };
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState, model_forward,
-    model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
-    model_forward_segment, streaming_prefill_enabled_for, streaming_tile_tokens_for,
+    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState,
+    gdn_attention_residual_block, model_forward, model_forward_embed, model_forward_final_norm,
+    model_forward_head, model_forward_no_head, model_forward_segment,
+    streaming_prefill_enabled_for, streaming_tile_tokens_for, transformer_mlp_down_from_gated,
+    transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
@@ -222,6 +224,9 @@ const DEFAULT_TARGET_MODULES: &[&str] = &[
     "gate_proj",
     "up_proj",
     "down_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
 ];
 
 /// Trainable LoRA parameters as candle `Var`s.
@@ -357,6 +362,8 @@ impl TrainableLoraParams {
                                     _ => unreachable!(),
                                 }
                             }
+                            // Full-attention layers use o_proj; these names are
+                            // reserved for GDN/LinearAttention PEFT adapters.
                             kiln_model::forward::GpuAttentionWeights::Full(_) => {
                                 continue;
                             }
@@ -369,7 +376,8 @@ impl TrainableLoraParams {
                         );
                         let in_features = dims[0];
                         let out_features = dims[1];
-                        (in_features, out_features, (1.0 / in_features as f64).sqrt())
+                        let bound = (1.0 / in_features as f64).sqrt();
+                        (in_features, out_features, bound)
                     }
                     "gate_proj" => (hidden, intermediate, bound_hidden),
                     "up_proj" => (hidden, intermediate, bound_hidden),
@@ -2821,6 +2829,7 @@ fn exact_gdn_single_layer_tiled_reverse(
     let linear_attn_idx = (0..layer_idx)
         .filter(|&idx| matches!(weights.layers[idx].attention, GpuAttentionWeights::Linear(_)))
         .count();
+    let layer = &weights.layers[layer_idx];
     let num_tiles = total_tokens.div_ceil(tile_size);
 
     tracing::info!(
@@ -2842,7 +2851,6 @@ fn exact_gdn_single_layer_tiled_reverse(
         let tile_start = tile_idx * tile_size;
         let tile_end = (tile_start + tile_size).min(total_tokens);
         let tile_len = tile_end - tile_start;
-        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
         let tile_input = seg_input
             .narrow(1, tile_start, tile_len)
             .with_context(|| format!("GDN tiled reverse boundary input tile {tile_idx}"))?
@@ -2853,23 +2861,25 @@ fn exact_gdn_single_layer_tiled_reverse(
             recurrent_boundaries[tile_idx].clone();
         tile_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
 
-        let tile_output = model_forward_segment(
+        let detached_layer_lora = lora_detached
+            .layers
+            .get(layer_idx)
+            .map(|layer| (layer, lora_detached.scale));
+        let after_attn = gdn_attention_residual_block(
             backend,
-            tile_input,
-            weights,
+            &tile_input,
+            layer,
             model_config,
-            &tile_positions,
-            layer_idx,
-            layer_idx + 1,
-            Some(&mut tile_state),
-            Some(lora_detached),
+            &mut tile_state.recurrent_states[linear_attn_idx],
+            &mut tile_state.conv_states[linear_attn_idx],
+            detached_layer_lora,
         )
         .with_context(|| {
             format!(
                 "exact tiled GDN boundary forward layer {layer_idx} tile [{tile_start}, {tile_end})"
             )
         })?;
-        drop(tile_output);
+        drop(after_attn);
 
         recurrent_boundaries.push(tile_state.recurrent_states[linear_attn_idx].detach());
         conv_boundaries.push(tile_state.conv_states[linear_attn_idx].detach());
@@ -2883,7 +2893,6 @@ fn exact_gdn_single_layer_tiled_reverse(
         }
     }
 
-    let lora_weights_for_seg = params.as_lora_weights();
     let all_vars = params.all_vars();
     let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
     let mut next_recurrent_grad: Option<Tensor> = None;
@@ -2893,11 +2902,126 @@ fn exact_gdn_single_layer_tiled_reverse(
         let tile_start = tile_idx * tile_size;
         let tile_end = (tile_start + tile_size).min(total_tokens);
         let tile_len = tile_end - tile_start;
-        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
 
         let tile_input = seg_input
             .narrow(1, tile_start, tile_len)
             .with_context(|| format!("GDN tiled reverse input tile {tile_idx}"))?;
+        let tile_grad_out = upstream_grad
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
+        let tile_grad_out_f32 = tile_grad_out.to_dtype(DType::F32)?;
+
+        let lora_weights_for_seg = params.as_lora_weights();
+        let layer_lora = lora_weights_for_seg
+            .layers
+            .get(layer_idx)
+            .map(|layer| (layer, lora_weights_for_seg.scale));
+        let detached_layer_lora = lora_detached
+            .layers
+            .get(layer_idx)
+            .map(|layer| (layer, lora_detached.scale));
+
+        let after_attn_value = {
+            let mut value_state = LinearAttentionState::new(model_config, device)?;
+            value_state.recurrent_states[linear_attn_idx] =
+                recurrent_boundaries[tile_idx].clone();
+            value_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
+            gdn_attention_residual_block(
+                backend,
+                &tile_input.detach(),
+                layer,
+                model_config,
+                &mut value_state.recurrent_states[linear_attn_idx],
+                &mut value_state.conv_states[linear_attn_idx],
+                detached_layer_lora,
+            )
+            .with_context(|| {
+                format!(
+                    "exact tiled GDN reverse after-attn value layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?
+            .detach()
+        };
+
+        let gated_value = transformer_mlp_gated_hidden(
+            &after_attn_value,
+            layer,
+            model_config,
+            detached_layer_lora,
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN reverse MLP gated value layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?
+        .detach();
+        let gated_var = Var::from_tensor(&gated_value)?;
+        let down_out =
+            transformer_mlp_down_from_gated(gated_var.as_tensor(), layer, layer_lora)
+                .with_context(|| {
+                    format!(
+                        "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
+                    )
+                })?;
+        let down_out_f32 = down_out.to_dtype(DType::F32)?;
+        let down_scalar = (&down_out_f32 * &tile_grad_out_f32)?
+            .sum_all()
+            .with_context(|| format!("exact tiled GDN MLP down injection tile {tile_idx}"))?;
+        let down_grads = down_scalar
+            .backward()
+            .with_context(|| format!("exact tiled GDN MLP down backward tile {tile_idx}"))?;
+        accumulate_grads(accumulated_grads, &down_grads, &all_vars)?;
+        let grad_gated = down_grads
+            .get(gated_var.as_tensor())
+            .ok_or_else(|| {
+                anyhow::anyhow!("exact tiled GDN MLP down missing gated grad tile {tile_idx}")
+            })?
+            .detach();
+        drop(down_grads);
+        drop(down_scalar);
+        drop(down_out_f32);
+        drop(down_out);
+        drop(gated_var);
+        drop(gated_value);
+
+        let after_attn_var = Var::from_tensor(&after_attn_value)?;
+        let gated_tracked = transformer_mlp_gated_hidden(
+            after_attn_var.as_tensor(),
+            layer,
+            model_config,
+            layer_lora,
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?;
+        let gated_tracked_f32 = gated_tracked.to_dtype(DType::F32)?;
+        let grad_gated_f32 = grad_gated.to_dtype(DType::F32)?;
+        let gate_scalar = (&gated_tracked_f32 * &grad_gated_f32)?
+            .sum_all()
+            .with_context(|| format!("exact tiled GDN MLP gate/up injection tile {tile_idx}"))?;
+        let gate_grads = gate_scalar
+            .backward()
+            .with_context(|| format!("exact tiled GDN MLP gate/up backward tile {tile_idx}"))?;
+        accumulate_grads(accumulated_grads, &gate_grads, &all_vars)?;
+        let grad_after_mlp = match gate_grads.get(after_attn_var.as_tensor()) {
+            Some(grad) => grad.detach(),
+            None => Tensor::zeros((1, tile_len, hidden_size), DType::F32, device)
+                .with_context(|| format!("alloc zero GDN tiled MLP after-attn grad tile {tile_idx}"))?,
+        }
+        .to_dtype(DType::F32)?;
+        let upstream_after_attn = (&tile_grad_out_f32 + &grad_after_mlp)?.detach();
+        drop(gate_grads);
+        drop(gate_scalar);
+        drop(grad_gated_f32);
+        drop(gated_tracked_f32);
+        drop(gated_tracked);
+        drop(after_attn_var);
+        drop(after_attn_value);
+        drop(grad_after_mlp);
+        drop(grad_gated);
+
         let tile_input_var = Var::from_tensor(&tile_input)?;
         let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
         let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
@@ -2907,27 +3031,22 @@ fn exact_gdn_single_layer_tiled_reverse(
             recurrent_var.as_tensor().clone();
         tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
 
-        let tile_output = model_forward_segment(
+        let after_attn = gdn_attention_residual_block(
             backend,
-            tile_input_var.as_tensor().clone(),
-            weights,
+            tile_input_var.as_tensor(),
+            layer,
             model_config,
-            &tile_positions,
-            layer_idx,
-            layer_idx + 1,
-            Some(&mut tile_state),
-            Some(&lora_weights_for_seg),
+            &mut tile_state.recurrent_states[linear_attn_idx],
+            &mut tile_state.conv_states[linear_attn_idx],
+            layer_lora,
         )
         .with_context(|| {
             format!("exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})")
         })?;
 
-        let tile_grad_out = upstream_grad
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
-        let tile_output_f32 = tile_output.to_dtype(DType::F32)?;
-        let tile_grad_out_f32 = tile_grad_out.to_dtype(DType::F32)?;
-        let mut scalar = (&tile_output_f32 * &tile_grad_out_f32)?
+        let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
+        let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
+        let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
             .sum_all()
             .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
 
@@ -2967,10 +3086,12 @@ fn exact_gdn_single_layer_tiled_reverse(
 
         drop(tile_grads);
         drop(scalar);
+        drop(upstream_after_attn_f32);
+        drop(after_attn_f32);
+        drop(upstream_after_attn);
         drop(tile_grad_out_f32);
-        drop(tile_output_f32);
         drop(tile_grad_out);
-        drop(tile_output);
+        drop(after_attn);
         drop(tile_state);
         drop(conv_var);
         drop(recurrent_var);
@@ -4707,6 +4828,29 @@ mod tests {
         assert_pair(&layer.k_proj, config.hidden_size, kv_out)?;
         assert_pair(&layer.v_proj, config.hidden_size, kv_out)?;
         assert_pair(&layer.o_proj, o_in, config.hidden_size)?;
+
+        let mut config = tiny_config();
+        config.hidden_size = 48;
+        config.intermediate_size = 80;
+        config.vocab_size = 64;
+        config.num_layers = 1;
+        config.num_full_attention_layers = 0;
+        config.full_attention_interval = config.num_layers + 1;
+        config.linear_num_key_heads = 2;
+        config.linear_key_head_dim = 12;
+        config.linear_num_value_heads = 4;
+        config.linear_value_head_dim = 12;
+
+        let weights = tiny_weights(&config, &device)?;
+        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
+        let layer = &params.layers[0];
+        assert_pair(
+            &layer.in_proj_qkv,
+            config.hidden_size,
+            config.linear_qkv_dim(),
+        )?;
+        assert_pair(&layer.in_proj_z, config.hidden_size, config.linear_v_dim())?;
+        assert_pair(&layer.gdn_out_proj, config.linear_v_dim(), config.hidden_size)?;
 
         Ok(())
     }
