@@ -8,8 +8,8 @@
 use anyhow::{Context, Result, ensure};
 use candle_core::TensorId;
 use kiln_model::cuda_train::{
-    CudaAdamWConfig, CudaAdamWState, CudaTrainTensor, cuda_adamw_step_from_store, cuda_backward,
-    cuda_matmul, cuda_mul, cuda_sum_all,
+    CudaAdamWConfig, CudaAdamWState, CudaTrainArena, CudaTrainTensor,
+    cuda_adamw_step_from_store, cuda_backward, cuda_matmul, cuda_mul, cuda_sum_all,
 };
 use std::collections::HashMap;
 
@@ -33,13 +33,25 @@ pub fn cuda_linear_sum_square_adamw_step(
     adamw_state: &mut CudaAdamWBook,
     cfg: CudaAdamWConfig,
 ) -> Result<f32> {
+    let mut arena = CudaTrainArena::new(input.as_tensor().device())?;
+    cuda_linear_sum_square_adamw_step_with_arena(input, weight, adamw_state, cfg, &mut arena)
+}
+
+/// Run one native CUDA linear training step using caller-owned arena accounting.
+pub fn cuda_linear_sum_square_adamw_step_with_arena(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+    adamw_state: &mut CudaAdamWBook,
+    cfg: CudaAdamWConfig,
+    arena: &mut CudaTrainArena,
+) -> Result<f32> {
     ensure!(
         weight.param_id().is_some(),
         "cuda_linear_sum_square_adamw_step requires a parameter weight"
     );
-    let output = cuda_matmul(input, weight).context("cuda linear forward")?;
-    let squared = cuda_mul(&output, &output).context("cuda linear square loss")?;
-    let loss = cuda_sum_all(&squared).context("cuda linear reduce loss")?;
+    let output = arena.track(cuda_matmul(input, weight).context("cuda linear forward")?)?;
+    let squared = arena.track(cuda_mul(&output, &output).context("cuda linear square loss")?)?;
+    let loss = arena.track(cuda_sum_all(&squared).context("cuda linear reduce loss")?)?;
     let loss_value = loss.to_vec_f32()?[0];
     let grads = cuda_backward(&loss).context("cuda linear backward")?;
     let updated = cuda_adamw_step_from_store(&[weight.clone()], &grads, adamw_state, cfg)
@@ -87,6 +99,45 @@ mod tests {
             "expected native CUDA linear AdamW loss to decrease: first={first} second={second}"
         );
         assert_eq!(adamw.get(&weight_id).expect("state").step, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_linear_adamw_train_step_uses_arena_accounting() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda linear arena smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 2.0],
+            (1usize, 2usize),
+            &device,
+        )?)?;
+        let weight_tensor = Tensor::from_vec(vec![1.0f32, -2.0], (2usize, 1usize), &device)?;
+        let weight_id = weight_tensor.id();
+        let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
+        let mut adamw = allocate_cuda_adamw_state(&[weight.clone()])?;
+        let mut arena = CudaTrainArena::new(&device)?;
+
+        let loss = cuda_linear_sum_square_adamw_step_with_arena(
+            &input,
+            &weight,
+            &mut adamw,
+            CudaAdamWConfig {
+                lr: 0.1,
+                ..CudaAdamWConfig::default()
+            },
+            &mut arena,
+        )?;
+        assert!(loss > 0.0);
+        assert_eq!(arena.allocation_count(), 3);
+        assert!(arena.allocated_bytes() >= 12);
+        arena.clear();
+        assert_eq!(arena.allocation_count(), 0);
         Ok(())
     }
 }
