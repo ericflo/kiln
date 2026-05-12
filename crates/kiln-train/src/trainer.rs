@@ -2721,6 +2721,248 @@ fn tiled_training_tile_size(
     Some(tile)
 }
 
+fn exact_gdn_reverse_tile_size(
+    weights: &GpuWeights,
+    device: &Device,
+    seq_len: usize,
+    seg_start: usize,
+    seg_end: usize,
+) -> Option<usize> {
+    if !kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_TILE_BACKWARD").unwrap_or(true) {
+        return None;
+    }
+    if seg_end != seg_start + 1 {
+        return None;
+    }
+    if !matches!(weights.layers[seg_start].attention, GpuAttentionWeights::Linear(_)) {
+        return None;
+    }
+    if !streaming_prefill_enabled_for(device, seq_len) {
+        return None;
+    }
+    let tile = streaming_tile_tokens_for(device);
+    if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
+        return None;
+    }
+    Some(tile)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_gdn_single_layer_tiled_reverse(
+    backend: &dyn BackendRuntime,
+    layer_idx: usize,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    params: &TrainableLoraParams,
+    lora_detached: &LoraWeights,
+    tile_size: usize,
+    device: &Device,
+    accumulated_grads: &mut HashMap<candle_core::TensorId, Tensor>,
+) -> Result<Tensor> {
+    let (_, total_tokens, hidden_size) = seg_input.dims3()?;
+    anyhow::ensure!(
+        total_tokens == positions.len(),
+        "GDN tiled reverse positions length mismatch: {} positions for {} tokens",
+        positions.len(),
+        total_tokens
+    );
+    anyhow::ensure!(
+        upstream_grad.dims() == seg_input.dims(),
+        "GDN tiled reverse upstream/input shape mismatch: {:?} vs {:?}",
+        upstream_grad.dims(),
+        seg_input.dims()
+    );
+
+    let linear_attn_idx = (0..layer_idx)
+        .filter(|&idx| matches!(weights.layers[idx].attention, GpuAttentionWeights::Linear(_)))
+        .count();
+    let num_tiles = total_tokens.div_ceil(tile_size);
+
+    tracing::info!(
+        layer = layer_idx,
+        linear_attn_idx,
+        num_tiles,
+        tile_size,
+        total_tokens,
+        "exact tiled GDN reverse begin"
+    );
+
+    let boundary_state = LinearAttentionState::new(model_config, device)?;
+    let mut recurrent_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
+    let mut conv_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
+    recurrent_boundaries.push(boundary_state.recurrent_states[linear_attn_idx].detach());
+    conv_boundaries.push(boundary_state.conv_states[linear_attn_idx].detach());
+
+    for tile_idx in 0..num_tiles {
+        let tile_start = tile_idx * tile_size;
+        let tile_end = (tile_start + tile_size).min(total_tokens);
+        let tile_len = tile_end - tile_start;
+        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
+        let tile_input = seg_input
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| format!("GDN tiled reverse boundary input tile {tile_idx}"))?
+            .detach();
+
+        let mut tile_state = LinearAttentionState::new(model_config, device)?;
+        tile_state.recurrent_states[linear_attn_idx] =
+            recurrent_boundaries[tile_idx].clone();
+        tile_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
+
+        let tile_output = model_forward_segment(
+            backend,
+            tile_input,
+            weights,
+            model_config,
+            &tile_positions,
+            layer_idx,
+            layer_idx + 1,
+            Some(&mut tile_state),
+            Some(lora_detached),
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN boundary forward layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?;
+        drop(tile_output);
+
+        recurrent_boundaries.push(tile_state.recurrent_states[linear_attn_idx].detach());
+        conv_boundaries.push(tile_state.conv_states[linear_attn_idx].detach());
+
+        if matches!(device, Device::Metal(_)) {
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize exact tiled GDN boundary layer {layer_idx} tile {tile_idx}"
+                )
+            })?;
+        }
+    }
+
+    let lora_weights_for_seg = params.as_lora_weights();
+    let all_vars = params.all_vars();
+    let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
+    let mut next_recurrent_grad: Option<Tensor> = None;
+    let mut next_conv_grad: Option<Tensor> = None;
+
+    for tile_idx in (0..num_tiles).rev() {
+        let tile_start = tile_idx * tile_size;
+        let tile_end = (tile_start + tile_size).min(total_tokens);
+        let tile_len = tile_end - tile_start;
+        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
+
+        let tile_input = seg_input
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| format!("GDN tiled reverse input tile {tile_idx}"))?;
+        let tile_input_var = Var::from_tensor(&tile_input)?;
+        let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
+        let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
+
+        let mut tile_state = LinearAttentionState::new(model_config, device)?;
+        tile_state.recurrent_states[linear_attn_idx] =
+            recurrent_var.as_tensor().clone();
+        tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+
+        let tile_output = model_forward_segment(
+            backend,
+            tile_input_var.as_tensor().clone(),
+            weights,
+            model_config,
+            &tile_positions,
+            layer_idx,
+            layer_idx + 1,
+            Some(&mut tile_state),
+            Some(&lora_weights_for_seg),
+        )
+        .with_context(|| {
+            format!("exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})")
+        })?;
+
+        let tile_grad_out = upstream_grad
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
+        let tile_output_f32 = tile_output.to_dtype(DType::F32)?;
+        let tile_grad_out_f32 = tile_grad_out.to_dtype(DType::F32)?;
+        let mut scalar = (&tile_output_f32 * &tile_grad_out_f32)?
+            .sum_all()
+            .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
+
+        if let Some(grad) = next_recurrent_grad.as_ref() {
+            let exit_state_f32 =
+                tile_state.recurrent_states[linear_attn_idx].to_dtype(DType::F32)?;
+            let grad_f32 = grad.to_dtype(DType::F32)?;
+            let state_scalar = (&exit_state_f32 * &grad_f32)?
+                .sum_all()
+                .with_context(|| format!("exact tiled GDN recurrent-state injection tile {tile_idx}"))?;
+            scalar = (scalar + state_scalar)?;
+        }
+        if let Some(grad) = next_conv_grad.as_ref() {
+            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_dtype(DType::F32)?;
+            let grad_f32 = grad.to_dtype(DType::F32)?;
+            let state_scalar = (&exit_state_f32 * &grad_f32)?
+                .sum_all()
+                .with_context(|| format!("exact tiled GDN conv-state injection tile {tile_idx}"))?;
+            scalar = (scalar + state_scalar)?;
+        }
+
+        let tile_grads = scalar
+            .backward()
+            .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
+        accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
+
+        let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
+            Some(grad) => grad.detach(),
+            None => Tensor::zeros((1, tile_len, hidden_size), seg_input.dtype(), device)
+                .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
+        };
+        input_grad_chunks[tile_idx] = Some(input_grad);
+        next_recurrent_grad = tile_grads
+            .get(recurrent_var.as_tensor())
+            .map(Tensor::detach);
+        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
+
+        drop(tile_grads);
+        drop(scalar);
+        drop(tile_grad_out_f32);
+        drop(tile_output_f32);
+        drop(tile_grad_out);
+        drop(tile_output);
+        drop(tile_state);
+        drop(conv_var);
+        drop(recurrent_var);
+        drop(tile_input_var);
+        drop(tile_input);
+
+        if matches!(device, Device::Metal(_)) {
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx}")
+            })?;
+        }
+    }
+
+    let mut grad_refs: Vec<&Tensor> = Vec::with_capacity(num_tiles);
+    for (tile_idx, grad) in input_grad_chunks.iter().enumerate() {
+        grad_refs.push(
+            grad.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing GDN tiled input grad tile {tile_idx}"))?,
+        );
+    }
+    let input_grad = Tensor::cat(&grad_refs, 1)
+        .context("concatenate exact tiled GDN input gradients")?
+        .detach();
+    tracing::info!(
+        layer = layer_idx,
+        linear_attn_idx,
+        num_tiles,
+        tile_size,
+        total_tokens,
+        "exact tiled GDN reverse complete"
+    );
+    Ok(input_grad)
+}
+
 /// Compute the per-tile contribution to the next-token cross-entropy loss
 /// using the same loss math as the monolithic path, returning a scalar
 /// tensor `sum_NLL_tile / total_active` so the per-tile contributions sum to
@@ -3651,6 +3893,48 @@ fn checkpointed_forward_backward(
             boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
                 .context("phase3.2: alloc boundary stub")?;
         }
+
+        if let Some(tile_size) = exact_gdn_reverse_tile_size(
+            weights,
+            device,
+            input_ids.len(),
+            seg_start,
+            seg_end,
+        ) {
+            upstream_grad = exact_gdn_single_layer_tiled_reverse(
+                backend,
+                seg_start,
+                &seg_input,
+                &upstream_grad,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &lora_detached,
+                tile_size,
+                device,
+                &mut accumulated_grads,
+            )
+            .with_context(|| {
+                format!(
+                    "exact tiled GDN reverse segment {seg_idx} layer {seg_start} tile_size={tile_size}"
+                )
+            })?;
+            drop(seg_input);
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize checkpointed tiled GDN reverse segment {seg_idx} cleanup")
+            })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = seg_start,
+                end_layer = seg_end,
+                tile_size,
+                "checkpointed tiled GDN reverse segment complete"
+            );
+            continue;
+        }
+
         let seg_input_var = Var::from_tensor(&seg_input)?;
 
         let lora_weights_for_seg = params.as_lora_weights();
@@ -3980,6 +4264,16 @@ mod tests {
     /// "monolithic baseline" forward pass. `cargo nextest run` runs each
     /// test in its own process, so this mutex is a no-op there.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn restore_env(key: &str, prior: Option<String>) {
+        unsafe {
+            if let Some(value) = prior {
+                std::env::set_var(key, value);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
 
     fn minimal_training_tokenizer(template: &str) -> KilnTokenizer {
         let json = br#"{
@@ -4734,6 +5028,118 @@ mod tests {
                 std::env::remove_var("KILN_USE_FLCE");
             }
         }
+
+        result
+    }
+
+    #[test]
+    fn test_exact_gdn_tiled_reverse_gradients_match_standard_cpu() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_flce = std::env::var("KILN_USE_FLCE").ok();
+        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
+        let prior_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
+        let prior_exact = std::env::var("KILN_EXACT_GDN_TILE_BACKWARD").ok();
+        unsafe {
+            std::env::set_var("KILN_USE_FLCE", "0");
+            std::env::set_var("KILN_STREAMING_PREFILL", "1");
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
+            std::env::set_var("KILN_EXACT_GDN_TILE_BACKWARD", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let device = Device::Cpu;
+            let config = tiny_config();
+            let weights = tiny_weights(&config, &device)?;
+            let backend = backend::for_device(&device);
+
+            let input_ids: Vec<u32> = (0..96).map(|idx| (idx % 31 + 1) as u32).collect();
+            let label_mask: Vec<bool> = (0..input_ids.len())
+                .map(|idx| idx > 0 && idx % 3 == 0)
+                .collect();
+            let seed = 0x6d1f_f00d_u64;
+
+            let params_std = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+            let params_ckpt = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+
+            let (loss_std, grads_std) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params_std,
+                &label_mask,
+                &device,
+                None,
+            )?;
+            let segments = compute_segment_boundaries(config.num_layers, config.num_layers);
+            let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params_ckpt,
+                &label_mask,
+                &segments,
+                &device,
+                None,
+            )?;
+
+            let loss_diff = (loss_std - loss_ckpt).abs();
+            assert!(
+                loss_diff < 1e-5,
+                "exact GDN tiled reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
+            );
+
+            let std_vars = params_std.all_vars();
+            let ckpt_vars = params_ckpt.all_vars();
+            assert_eq!(std_vars.len(), ckpt_vars.len());
+            let mut compared = 0usize;
+            for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
+                let g_std = grads_std.get(std_var.as_tensor());
+                let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
+                match (g_std, g_ckpt) {
+                    (Some(a), Some(b)) => {
+                        let diff = (a - b)?
+                            .abs()?
+                            .max_all()?
+                            .to_dtype(DType::F32)?
+                            .to_scalar::<f32>()?;
+                        assert!(
+                            diff < 1e-3,
+                            "exact GDN tiled reverse grad differs from standard: max_abs_diff={diff:e}"
+                        );
+                        compared += 1;
+                    }
+                    (None, None) => {}
+                    (std_some, ckpt_some) => panic!(
+                        "gradient presence mismatch: standard={} checkpointed={}",
+                        std_some.is_some(),
+                        ckpt_some.is_some()
+                    ),
+                }
+            }
+            assert!(compared > 0, "test compared no LoRA gradients");
+            Ok(())
+        })();
+
+        restore_env("KILN_USE_FLCE", prior_flce);
+        restore_env("KILN_STREAMING_PREFILL", prior_streaming);
+        restore_env("KILN_STREAMING_TILE_TOKENS", prior_tile);
+        restore_env("KILN_EXACT_GDN_TILE_BACKWARD", prior_exact);
 
         result
     }
