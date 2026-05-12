@@ -1520,41 +1520,59 @@ pub(crate) fn tokenize_for_training(
         anyhow::bail!("empty tokenization result");
     }
 
-    let mut label_mask = vec![false; input_ids.len()];
-    let mut prefix_messages: Vec<kiln_core::tokenizer::ChatMessage> = Vec::new();
-    for msg in &core_messages {
-        if msg.role == "assistant" {
-            let before_text = if prefix_messages.is_empty() {
-                String::new()
-            } else {
-                tokenizer
+    let assistant_count = core_messages
+        .iter()
+        .filter(|message| message.role == "assistant")
+        .count();
+    let mut label_mask = label_mask_from_rendered_assistant_spans(
+        &full_text,
+        &offsets,
+        input_ids.len(),
+        assistant_count,
+    )
+    .unwrap_or_else(|| vec![false; input_ids.len()]);
+    // ChatML/Qwen-style templates are handled directly from the single rendered
+    // full example. This avoids prefix renders that are not stable when
+    // templates append generation prompts or rewrite post-tool turns.
+    if !label_mask.iter().any(|&marked| marked) {
+        let mut prefix_messages: Vec<kiln_core::tokenizer::ChatMessage> = Vec::new();
+        for msg in &core_messages {
+            if msg.role == "assistant" {
+                let before_text = if prefix_messages.is_empty() {
+                    String::new()
+                } else {
+                    tokenizer
+                        .apply_chat_template(&prefix_messages)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?
+                };
+
+                prefix_messages.push(msg.clone());
+                let prefix_text = tokenizer
                     .apply_chat_template(&prefix_messages)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
-            };
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            prefix_messages.push(msg.clone());
-            let prefix_text = tokenizer
-                .apply_chat_template(&prefix_messages)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-            if !full_text.starts_with(&prefix_text) || before_text.len() > prefix_text.len() {
-                label_mask =
-                    label_mask_by_prefix_tokenization(input_ids.len(), &core_messages, tokenizer)?;
-                break;
-            }
-
-            let start = before_text.len();
-            let end = prefix_text.len().min(full_text.len());
-            for (i, &(token_start, token_end)) in offsets.iter().enumerate() {
-                if token_start == token_end {
-                    continue;
+                if !full_text.starts_with(&prefix_text) || before_text.len() > prefix_text.len() {
+                    label_mask = label_mask_by_prefix_tokenization(
+                        input_ids.len(),
+                        &core_messages,
+                        tokenizer,
+                    )?;
+                    break;
                 }
-                if token_start < end && token_end > start {
-                    label_mask[i] = true;
+
+                let start = before_text.len();
+                let end = prefix_text.len().min(full_text.len());
+                for (i, &(token_start, token_end)) in offsets.iter().enumerate() {
+                    if token_start == token_end {
+                        continue;
+                    }
+                    if token_start < end && token_end > start {
+                        label_mask[i] = true;
+                    }
                 }
+            } else {
+                prefix_messages.push(msg.clone());
             }
-        } else {
-            prefix_messages.push(msg.clone());
         }
     }
 
@@ -1567,6 +1585,58 @@ pub(crate) fn tokenize_for_training(
     }
 
     Ok((input_ids, label_mask))
+}
+
+fn label_mask_from_rendered_assistant_spans(
+    full_text: &str,
+    offsets: &[(usize, usize)],
+    input_len: usize,
+    expected_assistant_spans: usize,
+) -> Option<Vec<bool>> {
+    const ASSISTANT_START: &str = "<|im_start|>assistant\n";
+    const MESSAGE_END: &str = "<|im_end|>";
+
+    if expected_assistant_spans == 0 {
+        return Some(vec![false; input_len]);
+    }
+
+    let mut label_mask = vec![false; input_len];
+    let mut search_from = 0usize;
+    let mut found = 0usize;
+
+    while let Some(relative_start) = full_text[search_from..].find(ASSISTANT_START) {
+        let start = search_from + relative_start;
+        let content_start = start + ASSISTANT_START.len();
+        let Some(relative_end) = full_text[content_start..].find(MESSAGE_END) else {
+            break;
+        };
+        let mut end = content_start + relative_end + MESSAGE_END.len();
+        if full_text[end..].starts_with('\n') {
+            end += 1;
+        }
+
+        mark_offsets_overlapping_span(&mut label_mask, offsets, start, end);
+        found += 1;
+        search_from = end;
+    }
+
+    (found == expected_assistant_spans).then_some(label_mask)
+}
+
+fn mark_offsets_overlapping_span(
+    label_mask: &mut [bool],
+    offsets: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) {
+    for (index, &(token_start, token_end)) in offsets.iter().enumerate() {
+        if index >= label_mask.len() || token_start == token_end {
+            continue;
+        }
+        if token_start < end && token_end > start {
+            label_mask[index] = true;
+        }
+    }
 }
 
 fn label_mask_by_prefix_tokenization(
@@ -3812,6 +3882,41 @@ mod tests {
             )?
         );
         Ok(())
+    }
+
+    #[test]
+    fn rendered_assistant_span_mask_excludes_trailing_generation_prompt() {
+        let full_text = concat!(
+            "<|im_start|>user\n",
+            "a",
+            "<|im_end|>\n",
+            "<|im_start|>assistant\n",
+            "bb",
+            "<|im_end|>\n",
+            "<|im_start|>assistant\n",
+            "<think>\n",
+        );
+        let offsets: Vec<(usize, usize)> =
+            (0..full_text.len()).map(|idx| (idx, idx + 1)).collect();
+        let label_mask =
+            label_mask_from_rendered_assistant_spans(full_text, &offsets, offsets.len(), 1)
+                .expect("one closed assistant span should be found");
+        let start = full_text.find("<|im_start|>assistant\n").unwrap();
+        let closed_end = start
+            + full_text[start..]
+                .find("<|im_end|>\n")
+                .expect("closed assistant message")
+            + "<|im_end|>\n".len();
+        let generation_prompt_start = closed_end;
+
+        assert!(label_mask[start]);
+        assert!(label_mask[closed_end - 1]);
+        assert!(label_mask[start..closed_end].iter().all(|&marked| marked));
+        assert!(
+            label_mask[generation_prompt_start..]
+                .iter()
+                .all(|&marked| !marked)
+        );
     }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
