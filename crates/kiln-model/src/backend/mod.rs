@@ -1079,6 +1079,8 @@ mod tests {
             caps.resident_activation,
             "TensorId lifecycle registry; candle CUDA tensors are canonical"
         );
+        assert!(caps.sgd_step.contains("explicit CUDA backend decline"));
+        assert!(caps.adamw_step.contains("explicit CUDA backend decline"));
         assert_eq!(caps.native_training, "not implemented");
     }
 }

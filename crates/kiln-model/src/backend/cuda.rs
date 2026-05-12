@@ -94,8 +94,8 @@ impl CudaBackend {
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
             resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
             lora_delta_training: "registered candle CUDA autograd; fused lora_decode_add declines tracked tensors",
-            sgd_step: "candle CUDA Var::set fallback",
-            adamw_step: "candle CUDA Var::set fallback",
+            sgd_step: "explicit CUDA backend decline; candle CUDA Var::set fallback",
+            adamw_step: "explicit CUDA backend decline; candle CUDA Var::set fallback",
             native_training: "not implemented",
         }
     }
@@ -140,6 +140,58 @@ impl BackendRuntime for CudaBackend {
 
     fn has_resident_activation(&self, tensor: &Tensor) -> bool {
         with_cuda_resident_ids(|ids| ids.contains(&tensor.id()))
+    }
+
+    fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
+        static FIRST_CUDA_SGD_DECLINE_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_SGD_DECLINE_LOGGED.get_or_init(|| {
+            tracing::info!(
+                param_shape = ?param.dims(),
+                grad_shape = ?grad.dims(),
+                param_resident = self.has_resident_activation(param),
+                grad_resident = self.has_resident_activation(grad),
+                lr,
+                "CudaBackend::dispatch_sgd_step declined (no CUDA-owned optimizer kernel yet)"
+            );
+        });
+        Ok(false)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_adamw_step(
+        &self,
+        param: &Tensor,
+        grad: &Tensor,
+        first_moment: &Tensor,
+        second_moment: &Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        static FIRST_CUDA_ADAMW_DECLINE_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_ADAMW_DECLINE_LOGGED.get_or_init(|| {
+            tracing::info!(
+                param_shape = ?param.dims(),
+                grad_shape = ?grad.dims(),
+                first_moment_shape = ?first_moment.dims(),
+                second_moment_shape = ?second_moment.dims(),
+                param_resident = self.has_resident_activation(param),
+                grad_resident = self.has_resident_activation(grad),
+                first_moment_resident = self.has_resident_activation(first_moment),
+                second_moment_resident = self.has_resident_activation(second_moment),
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+                "CudaBackend::dispatch_adamw_step declined (no CUDA-owned optimizer kernel yet)"
+            );
+        });
+        Ok(false)
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -763,6 +815,40 @@ mod tests {
 
         backend.update_resident_activation(&tensor)?;
         assert!(backend.has_resident_activation(&tensor));
+
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_optimizer_dispatch_hooks_decline_until_owned_kernel_exists() -> Result<()> {
+        let backend = test_backend();
+        let param = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+        let grad = Tensor::ones((2, 3), DType::F32, &Device::Cpu)?;
+        let m = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+        let v = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
+
+        assert!(
+            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
+            "CUDA must not claim SGD dispatch before it owns an in-place optimizer update"
+        );
+        assert!(
+            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            "CUDA must not claim AdamW dispatch before it owns an in-place optimizer update"
+        );
+
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+        backend.register_resident_activation(&m)?;
+        backend.register_resident_activation(&v)?;
+
+        assert!(
+            !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
+            "TensorId residency alone is not enough for CUDA to claim SGD ownership"
+        );
+        assert!(
+            !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
+            "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
+        );
 
         Ok(())
     }
