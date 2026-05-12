@@ -177,12 +177,32 @@ fn any_tensor_tracks_op(tensors: &[&Tensor]) -> bool {
 }
 
 fn env_truthy_for_profile(name: &str) -> bool {
+    env_truthy(name)
+}
+
+fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
             !matches!(value.as_str(), "" | "0" | "false" | "off" | "no")
         })
         .unwrap_or(false)
+}
+
+#[cfg(feature = "metal")]
+fn metal_streaming_gdn_forward_only_fastpaths_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| env_truthy("KILN_ENABLE_METAL_GDN_STREAMING_FASTPATHS"))
+}
+
+fn streaming_gdn_forward_only_fastpaths_allowed(_device: &Device) -> bool {
+    #[cfg(feature = "metal")]
+    {
+        if matches!(_device, Device::Metal(_)) {
+            return metal_streaming_gdn_forward_only_fastpaths_enabled();
+        }
+    }
+    true
 }
 
 fn profile_paged_layers_enabled() -> bool {
@@ -5163,13 +5183,13 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
 
     for ci in 0..(seq_len / chunk_size) {
         let t_start = ci * chunk_size;
-        let q_c = q.narrow(2, t_start, chunk_size)?;
-        let k_c = k.narrow(2, t_start, chunk_size)?;
-        let v_c = v.narrow(2, t_start, chunk_size)?;
-        let beta_c = beta.narrow(2, t_start, chunk_size)?;
-        let g_c = g.narrow(2, t_start, chunk_size)?;
+        let q_c = q.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let k_c = k.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let v_c = v.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let beta_c = beta.narrow(2, t_start, chunk_size)?.contiguous()?;
+        let g_c = g.narrow(2, t_start, chunk_size)?.contiguous()?;
 
-        let k_t_mat = k_c.transpose(2, 3)?; // [B, nv, dk, C]
+        let k_t_mat = k_c.transpose(2, 3)?.contiguous()?; // [B, nv, dk, C]
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
         let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
         let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
@@ -5266,6 +5286,8 @@ pub fn gated_deltanet_forward(
         true,
         false,
         None,
+        true,
+        true,
     )
 }
 
@@ -5333,9 +5355,12 @@ pub fn gated_deltanet_forward_streaming(
     while cursor < total {
         let end = (cursor + tile_size).min(total);
         let len = end - cursor;
+        let allow_forward_only_fastpaths =
+            streaming_gdn_forward_only_fastpaths_allowed(tile_device);
+        let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
-            gated_deltanet_forward(
+            gated_deltanet_forward_decode_if(
                 backend,
                 &tile_in,
                 weights,
@@ -5344,6 +5369,11 @@ pub fn gated_deltanet_forward_streaming(
                 conv_state,
                 false,
                 false,
+                true,
+                false,
+                None,
+                allow_forward_only_fastpaths,
+                allow_prefill_recurrent_kernel,
             )
             .with_context(|| {
                 format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
@@ -5388,6 +5418,8 @@ fn gated_deltanet_forward_decode_if(
     use_fused_gdn_gates: bool,
     use_metal_decode_gemv: bool,
     profile_context: Option<(usize, usize)>,
+    allow_forward_only_fastpaths: bool,
+    allow_prefill_recurrent_kernel: bool,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -5400,7 +5432,7 @@ fn gated_deltanet_forward_decode_if(
     let v_dim = config.linear_v_dim();
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
-    let gdn_forward_only_fastpaths = !x.track_op();
+    let gdn_forward_only_fastpaths = allow_forward_only_fastpaths && !x.track_op();
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
@@ -6435,8 +6467,16 @@ fn gated_deltanet_forward_decode_if(
                 (q, k, v, beta, g)
             };
 
-            if let Some(attn_out) =
-                gdn_recurrent_prefill_head_last(backend, &q, &k, &v, &beta, &g, recurrent_state)?
+            if allow_prefill_recurrent_kernel
+                && let Some(attn_out) = gdn_recurrent_prefill_head_last(
+                    backend,
+                    &q,
+                    &k,
+                    &v,
+                    &beta,
+                    &g,
+                    recurrent_state,
+                )?
             {
                 (attn_out, true, false) // [B, T, nv, dv], contiguous
             } else {
@@ -9352,6 +9392,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     use_metal_decode_ffn,
                     use_metal_decode_ffn,
                     profile_gdn_stages.then_some((i, max_start_pos)),
+                    true,
+                    true,
                 )
                 .with_context(|| {
                     format!("batched gated deltanet layer {i} (linear attention, paged)")
@@ -9553,6 +9595,8 @@ pub fn model_forward(
                     /* use_fused_gdn_gates = */ true,
                     use_metal_decode_ffn,
                     None,
+                    true,
+                    true,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -10186,6 +10230,8 @@ pub fn model_forward_paged_batched_decode_hidden(
                     true,
                     false,
                     None,
+                    true,
+                    true,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
 
@@ -11209,6 +11255,8 @@ fn model_forward_paged_inner(
                     true,
                     use_metal_decode_ffn,
                     profile_gdn_stages.then_some((i, start_pos)),
+                    true,
+                    true,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
