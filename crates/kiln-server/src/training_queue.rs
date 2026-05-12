@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
 use kiln_train::{self, GrpoRequest, SftRequest, TrainingState};
@@ -248,9 +249,9 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
 ///
 /// The candle path takes a `replay_ctx` (request_body + lineage
 /// tracking); native paths don't yet plumb replay so they drop the context.
-/// When the binary is built without the requested backend feature, the native
-/// flag falls through to the candle path with a warning (the env flag was a
-/// no-op for this build).
+/// When the binary is built without an explicitly requested backend feature,
+/// the native flag falls through to the candle path with a warning. Vulkan SFT
+/// also auto-engages on the Vulkan backend when the flag is unset.
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
     cuda_native: bool,
@@ -336,10 +337,24 @@ fn run_sft(
 }
 
 fn native_training_env_enabled(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .filter(|v| !v.is_empty() && v != "0")
-        .is_some()
+    env_tristate(name).unwrap_or(false)
+}
+
+fn vk_native_sft_enabled(backend_name: &str) -> bool {
+    match env_tristate("KILN_VK_NATIVE_TRAINING") {
+        Some(enabled) => enabled,
+        None => {
+            #[cfg(feature = "vulkan")]
+            {
+                backend_name == "vulkan"
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                let _ = backend_name;
+                false
+            }
+        }
+    }
 }
 
 /// Execute a single training job (runs on a blocking thread).
@@ -426,11 +441,12 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
+            let backend_name = guard.backend_name();
             // Native CUDA/Vulkan training keeps forward intermediates and
             // grads in backend memory. Replay context is candle-trainer-specific,
             // so native paths drop it until that integration is added.
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
-            let vk_native = native_training_env_enabled("KILN_VK_NATIVE_TRAINING");
+            let vk_native = vk_native_sft_enabled(backend_name);
             run_sft(
                 cuda_native,
                 vk_native,

@@ -603,6 +603,7 @@ impl TrainableLoraParams {
                     gate_proj: make_proj(&lp.gate_proj),
                     up_proj: make_proj(&lp.up_proj),
                     down_proj: make_proj(&lp.down_proj),
+                    ..Default::default()
                 }
             })
             .collect();
@@ -2628,6 +2629,7 @@ fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights {
                 gate_proj: make_proj(&lp.gate_proj),
                 up_proj: make_proj(&lp.up_proj),
                 down_proj: make_proj(&lp.down_proj),
+                ..Default::default()
             }
         })
         .collect();

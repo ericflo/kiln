@@ -55,7 +55,7 @@ fn bf16w_row_tile_len() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(256)
+        .unwrap_or(128)
 }
 
 fn dispatch_fwd_rows(

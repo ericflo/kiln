@@ -67,7 +67,7 @@ pub(crate) fn vk_exp_tile_elements() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or_else(vk_1d_tile_elements)
+        .unwrap_or_else(|| vk_1d_tile_elements().min(65_536))
         .clamp(256, u32::MAX as usize)
 }
 

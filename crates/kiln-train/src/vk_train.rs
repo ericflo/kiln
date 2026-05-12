@@ -113,6 +113,9 @@ pub fn allocate_adamw_state(
             layer.gate_proj.as_ref(),
             layer.up_proj.as_ref(),
             layer.down_proj.as_ref(),
+            layer.in_proj_qkv.as_ref(),
+            layer.in_proj_z.as_ref(),
+            layer.gdn_out_proj.as_ref(),
         ]
         .iter()
         .flatten()
@@ -161,6 +164,9 @@ fn lora_pairs<'a>(layers: &'a [VkLoraLayer]) -> impl Iterator<Item = &'a VkLoraP
             l.gate_proj.as_ref(),
             l.up_proj.as_ref(),
             l.down_proj.as_ref(),
+            l.in_proj_qkv.as_ref(),
+            l.in_proj_z.as_ref(),
+            l.gdn_out_proj.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -244,6 +250,34 @@ fn parameter_like(t: &VkTensor) -> Result<(VkTensor, TensorId)> {
         ),
         id,
     ))
+}
+
+fn accumulate_grad(
+    shared_grads: &mut HashMap<TensorId, VkTensor>,
+    pid: TensorId,
+    grad: &VkTensor,
+) -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::elementwise::vk_add_no_grad;
+    if let Some(existing) = shared_grads.get(&pid).cloned() {
+        let summed = vk_add_no_grad(&existing, grad)?;
+        shared_grads.insert(pid, summed);
+    } else {
+        shared_grads.insert(pid, grad.clone());
+    }
+    Ok(())
+}
+
+fn accumulate_grads_except(
+    shared_grads: &mut HashMap<TensorId, VkTensor>,
+    grads: &kiln_vulkan_kernel::vk_autograd::VkGradStore,
+    skip_id: TensorId,
+) -> Result<()> {
+    for (pid, grad) in grads.iter() {
+        if *pid != skip_id {
+            accumulate_grad(shared_grads, *pid, grad)?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,12 +439,13 @@ fn gdn_compute_h_norm(x: &VkTensor, w: &VkLinearAttentionWeights) -> Result<VkTe
 fn gdn_compute_normed_no_grad(
     x: &VkTensor,
     w: &VkLinearAttentionWeights,
+    lora: &VkLoraLayer,
     state: &VkLinearAttentionState,
     gdn_layer_idx: usize,
 ) -> Result<VkTensor> {
     let h_norm = gdn_compute_h_norm(x, w)?;
-    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, None)?;
-    let z_raw = vk_linear_with_lora(&h_norm, &w.in_proj_z, None)?;
+    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, lora.in_proj_qkv.as_ref())?;
+    let z_raw = vk_linear_with_lora(&h_norm, &w.in_proj_z, lora.in_proj_z.as_ref())?;
     let a_proj = vk_linear_with_lora(&h_norm, &w.in_proj_a, None)?;
     let b_proj = vk_linear_with_lora(&h_norm, &w.in_proj_b, None)?;
     let (q, k, v) = gdn_qkv_from_mixed(&mixed_qkv, w, state, gdn_layer_idx)?;
@@ -427,26 +462,30 @@ fn vk_gdn_layer_backward_split(
     lora: &VkLoraLayer,
     state: &VkLinearAttentionState,
     gdn_layer_idx: usize,
+    shared_grads: &mut HashMap<TensorId, VkTensor>,
 ) -> Result<VkTensor> {
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::vk_add_no_grad;
     use kiln_vulkan_kernel::vk_ops::shape::vk_reshape;
 
-    anyhow::ensure!(
-        lora.in_proj_qkv.is_none() && lora.in_proj_z.is_none() && lora.gdn_out_proj.is_none(),
-        "vk_gdn_layer_backward_split: GDN LoRA is not wired yet"
-    );
+    let detached_lora = VkLoraLayer {
+        in_proj_qkv: lora.in_proj_qkv.as_ref().map(detach_lora_pair),
+        in_proj_z: lora.in_proj_z.as_ref().map(detach_lora_pair),
+        gdn_out_proj: lora.gdn_out_proj.as_ref().map(detach_lora_pair),
+        ..Default::default()
+    };
 
-    // 1. Residual + frozen out_proj. Capture dL/d(normed).
-    let normed = gdn_compute_normed_no_grad(boundary, w, state, gdn_layer_idx)?;
+    // 1. Residual + out_proj. Capture dL/d(normed) and any out_proj LoRA grads.
+    let normed = gdn_compute_normed_no_grad(boundary, w, &detached_lora, state, gdn_layer_idx)?;
     let (normed_param, normed_id) = parameter_like(&normed)?;
-    let out_proj = vk_linear_with_lora(&normed_param, &w.out_proj, None)?;
+    let out_proj = vk_linear_with_lora(&normed_param, &w.out_proj, lora.gdn_out_proj.as_ref())?;
     let scalar = scalar_product_sum(&out_proj, upstream)?;
     let grads = vk_backward(&scalar).context("vk_gdn_layer_backward_split: out_proj")?;
     let grad_normed = grads
         .get(normed_id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("missing normed grad for GDN layer"))?;
+    accumulate_grads_except(shared_grads, &grads, normed_id)?;
     drop(grads);
     drop(out_proj);
     drop(normed_param);
@@ -454,8 +493,9 @@ fn vk_gdn_layer_backward_split(
 
     // 2. Gated RMSNorm. Capture dL/d(chunkwise_out) and dL/d(z_raw).
     let h_norm = gdn_compute_h_norm(boundary, w)?;
-    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, None)?;
-    let z_raw = vk_linear_with_lora(&h_norm, &w.in_proj_z, None)?;
+    let mixed_qkv =
+        vk_linear_with_lora(&h_norm, &w.in_proj_qkv, detached_lora.in_proj_qkv.as_ref())?;
+    let z_raw = vk_linear_with_lora(&h_norm, &w.in_proj_z, detached_lora.in_proj_z.as_ref())?;
     let a_proj = vk_linear_with_lora(&h_norm, &w.in_proj_a, None)?;
     let b_proj = vk_linear_with_lora(&h_norm, &w.in_proj_b, None)?;
     let (q, k, v) = gdn_qkv_from_mixed(&mixed_qkv, w, state, gdn_layer_idx)?;
@@ -493,7 +533,8 @@ fn vk_gdn_layer_backward_split(
 
     // 3. Chunkwise recurrence. Capture dL/d(q,k,v,beta,g).
     let h_norm = gdn_compute_h_norm(boundary, w)?;
-    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, None)?;
+    let mixed_qkv =
+        vk_linear_with_lora(&h_norm, &w.in_proj_qkv, detached_lora.in_proj_qkv.as_ref())?;
     let a_proj = vk_linear_with_lora(&h_norm, &w.in_proj_a, None)?;
     let b_proj = vk_linear_with_lora(&h_norm, &w.in_proj_b, None)?;
     let (q, k, v) = gdn_qkv_from_mixed(&mixed_qkv, w, state, gdn_layer_idx)?;
@@ -554,9 +595,10 @@ fn vk_gdn_layer_backward_split(
     drop(h_norm);
 
     // 4. Conv/split/repeat path. Capture dL/d(mixed_qkv), then project
-    // that back through the frozen qkv linear to h_norm.
+    // that back through the qkv linear to h_norm and qkv LoRA.
     let h_norm = gdn_compute_h_norm(boundary, w)?;
-    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, None)?;
+    let mixed_qkv =
+        vk_linear_with_lora(&h_norm, &w.in_proj_qkv, detached_lora.in_proj_qkv.as_ref())?;
     let (mixed_param, mixed_id) = parameter_like(&mixed_qkv)?;
     let (q_2, k_2, v_2) = gdn_qkv_from_mixed(&mixed_param, w, state, gdn_layer_idx)?;
     let mut scalar = None;
@@ -579,7 +621,7 @@ fn vk_gdn_layer_backward_split(
 
     let h_norm = gdn_compute_h_norm(boundary, w)?;
     let (h_param, h_id) = parameter_like(&h_norm)?;
-    let mixed_from_h = vk_linear_with_lora(&h_param, &w.in_proj_qkv, None)?;
+    let mixed_from_h = vk_linear_with_lora(&h_param, &w.in_proj_qkv, lora.in_proj_qkv.as_ref())?;
     let scalar = scalar_product_sum(&mixed_from_h, &grad_mixed)?;
     let grads =
         vk_backward(&scalar).context("vk_gdn_layer_backward_split: qkv projection to h_norm")?;
@@ -587,6 +629,7 @@ fn vk_gdn_layer_backward_split(
         .get(h_id)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("missing h_norm qkv grad for GDN layer"))?;
+    accumulate_grads_except(shared_grads, &grads, h_id)?;
     drop(grads);
     drop(mixed_from_h);
     drop(h_param);
@@ -641,10 +684,10 @@ fn vk_gdn_layer_backward_split(
     drop(h_param);
     drop(h_norm);
 
-    // 6. z projection -> h_norm.
+    // 6. z projection -> h_norm and z LoRA.
     let h_norm = gdn_compute_h_norm(boundary, w)?;
     let (h_param, h_id) = parameter_like(&h_norm)?;
-    let z_from_h = vk_linear_with_lora(&h_param, &w.in_proj_z, None)?;
+    let z_from_h = vk_linear_with_lora(&h_param, &w.in_proj_z, lora.in_proj_z.as_ref())?;
     let scalar = scalar_product_sum(&z_from_h, &grad_z)?;
     let grads =
         vk_backward(&scalar).context("vk_gdn_layer_backward_split: z projection to h_norm")?;
@@ -653,6 +696,7 @@ fn vk_gdn_layer_backward_split(
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("missing h_norm z grad for GDN layer"))?;
     grad_h_norm = vk_add_no_grad(&grad_h_norm, &grad_h_z)?;
+    accumulate_grads_except(shared_grads, &grads, h_id)?;
     drop(grads);
     drop(z_from_h);
     drop(h_param);
@@ -941,12 +985,48 @@ fn vk_forward_layer_boundaries(
 }
 
 fn recompute_boundary_cache_limit_bytes() -> usize {
-    std::env::var("KILN_VK_RECOMPUTE_BOUNDARY_CACHE_GB")
+    if let Some(limit) = std::env::var("KILN_VK_RECOMPUTE_BOUNDARY_CACHE_GB")
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .filter(|value| *value > 0.0)
         .map(|gb| (gb * 1024.0 * 1024.0 * 1024.0) as usize)
-        .unwrap_or(0)
+    {
+        return limit;
+    }
+    auto_recompute_boundary_cache_limit_bytes()
+}
+
+#[cfg(target_os = "linux")]
+fn auto_recompute_boundary_cache_limit_bytes() -> usize {
+    let raw = match std::fs::read_to_string("/proc/meminfo") {
+        Ok(raw) => raw,
+        Err(_) => return 0,
+    };
+    let mut mem_available = None;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            mem_available = rest
+                .split_whitespace()
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .map(|kib| kib.saturating_mul(1024));
+            break;
+        }
+    }
+    let Some(available) = mem_available else {
+        return 0;
+    };
+    const GIB: usize = 1024 * 1024 * 1024;
+    // Keep at least 4 GiB outside the optional boundary cache for the
+    // compositor, driver, base model buffers, and transient dispatch scratch.
+    // Cap at 10 GiB because larger examples can always fall back to exact
+    // layerwise recompute instead of pinning every boundary.
+    available.saturating_sub(4 * GIB).min(10 * GIB)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn auto_recompute_boundary_cache_limit_bytes() -> usize {
+    0
 }
 
 /// Gradient-checkpointed training step.
@@ -1244,7 +1324,6 @@ pub fn vk_recompute_train_step_with_state_masked(
     use kiln_model::vk_forward::{
         vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
         vk_full_attention_mlp_down_from_gated, vk_full_attention_mlp_gated,
-        vk_transformer_layer_with_state,
     };
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add_no_grad, vk_mul};
@@ -1296,10 +1375,10 @@ pub fn vk_recompute_train_step_with_state_masked(
         .saturating_mul(input_ids.len())
         .saturating_mul(weights.hidden)
         .saturating_mul(std::mem::size_of::<f32>());
-    let use_boundary_cache =
-        env_flag("KILN_VK_RECOMPUTE_BOUNDARY_CACHE", false)
-            && boundary_cache_limit > 0
-            && boundary_cache_bytes <= boundary_cache_limit;
+    let use_boundary_cache = kiln_core::env_flag::env_tristate("KILN_VK_RECOMPUTE_BOUNDARY_CACHE")
+        .unwrap_or(true)
+        && boundary_cache_limit > 0
+        && boundary_cache_bytes <= boundary_cache_limit;
 
     // Seed upstream with d(loss)/d(pre_final_norm_hidden).
     if profile {
@@ -1393,16 +1472,13 @@ pub fn vk_recompute_train_step_with_state_masked(
                 "vk-native recompute reverse layer begin"
             );
         }
-        let (boundary, mut state) = if let Some(boundaries) = boundary_cache.as_ref() {
+        let (boundary, state) = if let Some(boundaries) = boundary_cache.as_ref() {
             let boundary = boundaries
                 .get(layer_idx)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("missing cached boundary for layer {layer_idx}"))?;
-            let state = fresh_gdn_state(
-                weights.embed_tokens.device(),
-                model_config,
-                num_gdn_layers,
-            )?;
+            let state =
+                fresh_gdn_state(weights.embed_tokens.device(), model_config, num_gdn_layers)?;
             (boundary, state)
         } else {
             vk_forward_to_layer_input(
@@ -1591,6 +1667,7 @@ pub fn vk_recompute_train_step_with_state_masked(
                     &lora_layers[layer_idx],
                     s,
                     gdn_idx,
+                    &mut shared_grads,
                 )
                 .with_context(|| {
                     format!("vk_recompute_train_step: split backward GDN layer {layer_idx}")
@@ -1778,13 +1855,9 @@ pub fn vk_train_step_with_state_masked(
 
 /// Initialize LoRA params for every layer in the model.
 ///
-/// Targets the canonical SFT modules (q/k/v/o + gate/up/down) on
-/// FullAttention layers. LinearAttention (GDN) layers currently get
-/// empty LoRA — Phase 5 will populate `in_proj_qkv` / `in_proj_z` /
-/// `gdn_out_proj`. Callers using a pure-FullAttn model (e.g.
-/// synthetic test or a non-hybrid Qwen variant) get full LoRA
-/// coverage; hybrid Qwen3.5-4B will train only the 8 FullAttn layers
-/// until Phase 5.
+/// Targets the canonical SFT modules on every attention block:
+/// q/k/v/o + gate/up/down on FullAttention layers, and
+/// in_proj_qkv/in_proj_z/out_proj on LinearAttention (GDN) layers.
 pub fn vk_init_lora_layers(
     device: &Arc<VulkanDevice>,
     model_weights: &VkModelWeights,
@@ -1827,12 +1900,25 @@ pub fn vk_init_lora_layers(
                     ..Default::default()
                 });
             }
-            VkLayerWeights::LinearAttention(_) => {
-                // Phase 5 will populate in_proj_qkv / in_proj_z /
-                // gdn_out_proj LoRA. For now GDN layers get no LoRA —
-                // they still forward (once Phase 5 wires it) but
-                // train no params.
-                out.push(VkLoraLayer::default());
+            VkLayerWeights::LinearAttention(gdn) => {
+                let dims = |name: &str, weight: &VkTensor| -> Result<(usize, usize)> {
+                    let shape = weight.shape();
+                    anyhow::ensure!(
+                        shape.len() == 2,
+                        "expected rank-2 {name} for layer {li}, got {:?}",
+                        shape
+                    );
+                    Ok((shape[1], shape[0]))
+                };
+                let (qkv_in, qkv_out) = dims("in_proj_qkv", &gdn.in_proj_qkv)?;
+                let (z_in, z_out) = dims("in_proj_z", &gdn.in_proj_z)?;
+                let (out_in, out_out) = dims("out_proj", &gdn.out_proj)?;
+                out.push(VkLoraLayer {
+                    in_proj_qkv: Some(mk(8, qkv_in, qkv_out)?),
+                    in_proj_z: Some(mk(9, z_in, z_out)?),
+                    gdn_out_proj: Some(mk(10, out_in, out_out)?),
+                    ..Default::default()
+                });
             }
         }
     }
@@ -1918,23 +2004,25 @@ pub fn vk_native_sft_train(
     };
 
     // Tokenize all examples up front. The Vulkan-native path never truncates
-    // or windows examples; length sorting only changes step order when
-    // explicitly enabled so proof runs can reach finite progress on shorter
-    // full-context examples before the longest O(T^2) attention examples.
+    // or windows examples; length sorting only changes step order so long
+    // runs reach finite progress on shorter full-context examples before the
+    // longest O(T^2) attention examples.
     let mut tokenized: Vec<TokenizedSftExample> = examples
         .iter()
         .enumerate()
-        .filter_map(|(original_index, ex)| match tokenize_for_training(ex, tokenizer) {
-            Ok((input_ids, label_mask)) => Some(TokenizedSftExample {
-                input_ids,
-                label_mask,
-                original_index,
-            }),
-            Err(e) => {
-                tracing::warn!("vk_native: skipping example: {e}");
-                None
-            }
-        })
+        .filter_map(
+            |(original_index, ex)| match tokenize_for_training(ex, tokenizer) {
+                Ok((input_ids, label_mask)) => Some(TokenizedSftExample {
+                    input_ids,
+                    label_mask,
+                    original_index,
+                }),
+                Err(e) => {
+                    tracing::warn!("vk_native: skipping example: {e}");
+                    None
+                }
+            },
+        )
         .collect();
     if tokenized.is_empty() {
         bail!("vk_native_sft_train: no valid training examples after tokenization");
@@ -1949,7 +2037,8 @@ pub fn vk_native_sft_train(
         .map(|ex| ex.input_ids.len())
         .max()
         .unwrap_or(0);
-    let length_sorted = env_flag("KILN_VK_LENGTH_SORT_SFT", false);
+    let length_sorted = kiln_core::env_flag::env_tristate("KILN_VK_LENGTH_SORT_SFT")
+        .unwrap_or(max_seq_len >= 8192 && tokenized.len() > 1);
     if length_sorted {
         tokenized.sort_by_key(|ex| (ex.input_ids.len(), ex.original_index));
     }
@@ -2176,7 +2265,8 @@ fn write_vk_adapter_config(output_dir: &Path, rank: usize, alpha: f32) -> Result
         "task_type": "CAUSAL_LM",
         "target_modules": [
             "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj"
+            "gate_proj", "up_proj", "down_proj",
+            "in_proj_qkv", "in_proj_z", "out_proj"
         ],
     });
     let path = output_dir.join("adapter_config.json");
@@ -2199,29 +2289,32 @@ pub fn save_vk_lora_adapter(
     use std::collections::HashMap;
     let mut tensors: HashMap<String, Tensor> = HashMap::new();
     for (li, layer) in lora_layers.iter().enumerate() {
-        for (name, proj) in [
-            ("q_proj", layer.q_proj.as_ref()),
-            ("k_proj", layer.k_proj.as_ref()),
-            ("v_proj", layer.v_proj.as_ref()),
-            ("o_proj", layer.o_proj.as_ref()),
-            ("gate_proj", layer.gate_proj.as_ref()),
-            ("up_proj", layer.up_proj.as_ref()),
-            ("down_proj", layer.down_proj.as_ref()),
+        for (submodule, name, proj) in [
+            ("self_attn", "q_proj", layer.q_proj.as_ref()),
+            ("self_attn", "k_proj", layer.k_proj.as_ref()),
+            ("self_attn", "v_proj", layer.v_proj.as_ref()),
+            ("self_attn", "o_proj", layer.o_proj.as_ref()),
+            ("mlp", "gate_proj", layer.gate_proj.as_ref()),
+            ("mlp", "up_proj", layer.up_proj.as_ref()),
+            ("mlp", "down_proj", layer.down_proj.as_ref()),
+            ("self_attn", "in_proj_qkv", layer.in_proj_qkv.as_ref()),
+            ("self_attn", "in_proj_z", layer.in_proj_z.as_ref()),
+            ("self_attn", "out_proj", layer.gdn_out_proj.as_ref()),
         ] {
             let Some(p) = proj else { continue };
             let a_t = p.a.to_candle()?.to_device(&Device::Cpu)?;
             let b_t = p.b.to_candle()?.to_device(&Device::Cpu)?;
             tensors.insert(
                 format!(
-                    "base_model.model.model.layers.{}.{}.lora_A.weight",
-                    li, name
+                    "base_model.model.model.layers.{}.{}.{}.lora_A.weight",
+                    li, submodule, name
                 ),
                 a_t,
             );
             tensors.insert(
                 format!(
-                    "base_model.model.model.layers.{}.{}.lora_B.weight",
-                    li, name
+                    "base_model.model.model.layers.{}.{}.{}.lora_B.weight",
+                    li, submodule, name
                 ),
                 b_t,
             );

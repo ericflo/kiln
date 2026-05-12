@@ -214,7 +214,7 @@ fn active_flce_chunk_len() -> usize {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(4096)
+        .unwrap_or(128)
 }
 
 /// LoRA params + their gradients, F32 for both.
@@ -488,7 +488,10 @@ fn query_linux_mem_available_bytes() -> Option<u64> {
 /// If `tokenizer` is provided, use the real chat-template token count for
 /// each example. If tokenization is unavailable, fall back to a chars/4
 /// estimate plus template-envelope overhead.
-pub fn approximate_max_seq_len_sft(examples: &[SftExample], tokenizer: Option<&KilnTokenizer>) -> usize {
+pub fn approximate_max_seq_len_sft(
+    examples: &[SftExample],
+    tokenizer: Option<&KilnTokenizer>,
+) -> usize {
     examples
         .iter()
         .map(|ex| approximate_tokens_for_messages(&ex.messages, tokenizer))
@@ -526,7 +529,10 @@ pub fn recompute_checkpoint_boundaries_for_seq_len(max_seq_len: usize) -> bool {
     max_seq_len >= threshold
 }
 
-pub fn approximate_max_seq_len_grpo(groups: &[GrpoGroup], tokenizer: Option<&KilnTokenizer>) -> usize {
+pub fn approximate_max_seq_len_grpo(
+    groups: &[GrpoGroup],
+    tokenizer: Option<&KilnTokenizer>,
+) -> usize {
     groups
         .iter()
         .map(|g| {
@@ -669,7 +675,8 @@ mod tests {
     #[test]
     fn estimator_uses_supervised_tokens_for_flce() {
         let cfg = qwen_4b();
-        let full_prompt = estimate_step_working_set(&cfg, 8192, 16, 8, WeightResidency::SingleCopy, false);
+        let full_prompt =
+            estimate_step_working_set(&cfg, 8192, 16, 8, WeightResidency::SingleCopy, false);
         let sparse_labels = estimate_step_working_set_with_options(
             &cfg,
             8192,
@@ -708,7 +715,8 @@ mod tests {
     #[test]
     fn estimator_recompute_boundaries_does_not_scale_with_segment_count() {
         let cfg = qwen_4b();
-        let cached = estimate_step_working_set(&cfg, 8192, 16, 32, WeightResidency::SingleCopy, false);
+        let cached =
+            estimate_step_working_set(&cfg, 8192, 16, 32, WeightResidency::SingleCopy, false);
         let recompute = estimate_step_working_set_with_options(
             &cfg,
             8192,
@@ -935,14 +943,8 @@ mod tests {
             source: VramSource::NvidiaSmi,
         };
         let available = available_for_training_bytes_with_meminfo(&a6000_vram, None);
-        let est = estimate_step_working_set(
-            &cfg,
-            65_536,
-            16,
-            4,
-            WeightResidency::SingleCopy,
-            false,
-        );
+        let est =
+            estimate_step_working_set(&cfg, 65_536, 16, 4, WeightResidency::SingleCopy, false);
         assert!(
             est.total_bytes > available,
             "64k-token Qwen3.5-4B SFT must be rejected on an A6000 CUDA budget; \

@@ -12,6 +12,7 @@ use kiln_server::device::select_device_with_options;
 use kiln_server::state;
 
 use kiln_core::config::ModelConfig;
+use kiln_core::env_flag::env_tristate;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::ModelRunner;
@@ -381,15 +382,12 @@ fn spawn_backend_prewarm(state: AppState) {
         return;
     };
 
-    let (is_gpu, device) = {
+    let (is_gpu, is_vulkan, device) = {
         let runner_guard = runner.read().unwrap();
         let device = runner_guard.weights.embed_tokens.device().clone();
         let is_metal = matches!(device, candle_core::Device::Metal(_));
-        #[cfg(feature = "vulkan")]
-        let is_vulkan = kiln_model::backend::vulkan::vulkan_is_available();
-        #[cfg(not(feature = "vulkan"))]
-        let is_vulkan = false;
-        (is_metal || is_vulkan, device)
+        let is_vulkan = runner_guard.backend_name() == "vulkan";
+        (is_metal || is_vulkan, is_vulkan, device)
     };
     if !is_gpu {
         return;
@@ -401,9 +399,9 @@ fn spawn_backend_prewarm(state: AppState) {
     let gpu_lock = state.gpu_lock.clone();
     let prewarm_complete = state.inference_prewarm_complete.clone();
 
-    if vk_native_training_enabled() {
+    if vk_native_training_enabled(is_vulkan) {
         tracing::info!(
-            "skipping background inference prewarm because KILN_VK_NATIVE_TRAINING is enabled"
+            "skipping background inference prewarm because Vulkan-native SFT is enabled"
         );
         prewarm_complete.store(true, Ordering::Release);
         return;
@@ -486,14 +484,18 @@ fn spawn_backend_prewarm(state: AppState) {
     });
 }
 
-fn vk_native_training_enabled() -> bool {
-    std::env::var("KILN_VK_NATIVE_TRAINING")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            !v.is_empty() && !matches!(v.as_str(), "0" | "false" | "no")
-        })
-        .unwrap_or(false)
+fn vk_native_training_enabled(is_vulkan: bool) -> bool {
+    env_tristate("KILN_VK_NATIVE_TRAINING").unwrap_or_else(|| {
+        #[cfg(feature = "vulkan")]
+        {
+            is_vulkan
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let _ = is_vulkan;
+            false
+        }
+    })
 }
 
 fn spawn_tokenizer_warmup(tokenizer: Arc<KilnTokenizer>) {

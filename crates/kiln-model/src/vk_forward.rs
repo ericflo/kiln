@@ -115,7 +115,7 @@ impl VkLoraPair {
 ///
 /// FullAttention layers use `q_proj` / `k_proj` / `v_proj` / `o_proj`
 /// plus the MLP triple (`gate_proj` / `up_proj` / `down_proj`). GDN
-/// layers (Phase 5) will use the linear-attention slots
+/// layers use the linear-attention slots
 /// (`in_proj_qkv`, `in_proj_z`, `out_proj`); the MLP slots are unused
 /// because GDN layers have no MLP block.
 #[derive(Clone, Default)]
@@ -127,7 +127,7 @@ pub struct VkLoraLayer {
     pub gate_proj: Option<VkLoraPair>,
     pub up_proj: Option<VkLoraPair>,
     pub down_proj: Option<VkLoraPair>,
-    // GDN-only LoRA slots — populated in Phase 5
+    // GDN-only LoRA slots.
     pub in_proj_qkv: Option<VkLoraPair>,
     pub in_proj_z: Option<VkLoraPair>,
     pub gdn_out_proj: Option<VkLoraPair>,
@@ -172,10 +172,8 @@ pub struct VkFullAttentionWeights {
 
 /// Frozen base weights for one Gated-DeltaNet (linear-attention) layer.
 ///
-/// Phase 5 wires this into `vk_transformer_layer`. For Phase 1 the
-/// only consumer is `VkModelWeights::from_gpu_weights`, which uploads
-/// the buffers but `vk_transformer_layer` bails when it sees this
-/// variant.
+/// Used by `vk_transformer_layer_with_state`, which threads the per-example
+/// recurrent and convolution state required by GDN.
 pub struct VkLinearAttentionWeights {
     pub layer_norm: VkTensor,  // [hidden]
     pub in_proj_qkv: VkTensor, // [2*nk*dk + nv*dv, hidden]

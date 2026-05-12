@@ -2106,9 +2106,10 @@ fn keep_projection_originals_enabled() -> bool {
     // come back as zeros and the bf16w matmul silently outputs zero —
     // the model then collapses to "embedding + residuals" and the loss
     // is bit-identical across epochs because LoRA gradients vanish.
-    // Auto-engage projection-original retention when the vk-native
-    // trainer is enabled, so users don't have to set both env vars.
-    if env_enabled("KILN_VK_NATIVE_TRAINING") {
+    // Keep originals automatically whenever the process has selected the
+    // Vulkan backend. Training may be submitted later, after weights are
+    // loaded, so this cannot depend only on KILN_VK_NATIVE_TRAINING.
+    if crate::backend::vulkan_active() || env_enabled("KILN_VK_NATIVE_TRAINING") {
         return true;
     }
     matches!(
@@ -2123,7 +2124,8 @@ fn keep_projection_originals_enabled() -> bool {
 }
 
 fn drop_projection_transposes_enabled() -> bool {
-    env_enabled("KILN_VK_NATIVE_TRAINING") && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
+    (crate::backend::vulkan_active() || env_enabled("KILN_VK_NATIVE_TRAINING"))
+        && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
 }
 
 fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
@@ -5298,6 +5300,7 @@ pub fn gated_deltanet_forward(
     conv_state: &mut Tensor,
     capture_b11_taps: bool,
     capture_c41_taps: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     gated_deltanet_forward_decode_if(
         backend,
@@ -5313,6 +5316,7 @@ pub fn gated_deltanet_forward(
         None,
         true,
         true,
+        lora,
     )
 }
 
@@ -5347,6 +5351,7 @@ pub fn gated_deltanet_forward_streaming(
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
     tile_size: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
         anyhow::bail!(
@@ -5370,6 +5375,7 @@ pub fn gated_deltanet_forward_streaming(
             conv_state,
             false,
             false,
+            lora,
         );
     }
 
@@ -5399,6 +5405,7 @@ pub fn gated_deltanet_forward_streaming(
                 None,
                 allow_forward_only_fastpaths,
                 allow_prefill_recurrent_kernel,
+                lora,
             )
             .with_context(|| {
                 format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
@@ -5445,6 +5452,7 @@ fn gated_deltanet_forward_decode_if(
     profile_context: Option<(usize, usize)>,
     allow_forward_only_fastpaths: bool,
     allow_prefill_recurrent_kernel: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -5458,13 +5466,22 @@ fn gated_deltanet_forward_decode_if(
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
     let gdn_forward_only_fastpaths = allow_forward_only_fastpaths && !x.track_op();
+    let (lora_layer, lora_scale) = match lora {
+        Some((layer, scale)) => (Some(layer), scale),
+        None => (None, 0.0),
+    };
+    let in_proj_qkv_lora = lora_layer.and_then(|l| l.in_proj_qkv.as_ref());
+    let in_proj_z_lora = lora_layer.and_then(|l| l.in_proj_z.as_ref());
+    let gdn_out_lora = lora_layer.and_then(|l| l.gdn_out_proj.as_ref());
+    let has_gdn_in_lora = in_proj_qkv_lora.is_some() || in_proj_z_lora.is_some();
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let (mixed_qkv, z, a, b, prefill_ab_for_gates) = {
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
-        if gdn_forward_only_fastpaths
+        if !has_gdn_in_lora
+            && gdn_forward_only_fastpaths
             && let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
                 x,
                 &weights.in_proj_qkv_t,
@@ -5475,8 +5492,22 @@ fn gated_deltanet_forward_decode_if(
         {
             (mixed_qkv, z, a, b, None::<Tensor>)
         } else {
-            let mixed_qkv = gdn_in_proj_matmul(backend, x, &weights.in_proj_qkv_t)?; // [B, T, qkv_dim]
-            let z = gdn_in_proj_matmul(backend, x, &weights.in_proj_z_t)?; // [B, T, v_dim]
+            let mixed_qkv = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &weights.in_proj_qkv_t,
+                in_proj_qkv_lora,
+                lora_scale,
+            )?; // [B, T, qkv_dim]
+            let z = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &weights.in_proj_z_t,
+                in_proj_z_lora,
+                lora_scale,
+            )?; // [B, T, v_dim]
             let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
                 #[cfg(any(feature = "cuda", feature = "metal"))]
                 {
@@ -6626,8 +6657,8 @@ fn gated_deltanet_forward_decode_if(
             use_metal_decode_gemv,
             &attn_out,
             &weights.out_proj_t,
-            None,
-            0.0,
+            gdn_out_lora,
+            lora_scale,
         )?
     };
     finish_gdn_stage_profile(
@@ -9419,6 +9450,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     profile_gdn_stages.then_some((i, max_start_pos)),
                     true,
                     true,
+                    layer_lora,
                 )
                 .with_context(|| {
                     format!("batched gated deltanet layer {i} (linear attention, paged)")
@@ -9622,6 +9654,7 @@ pub fn model_forward(
                     None,
                     true,
                     true,
+                    layer_lora,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention)"))?;
                 hidden = {
@@ -9759,6 +9792,7 @@ pub fn model_forward_segment(
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
                         stream_tile,
+                        layer_lora,
                     )
                     .with_context(|| format!("segment streaming gated deltanet layer {i}"))?
                 } else {
@@ -9771,6 +9805,7 @@ pub fn model_forward_segment(
                         &mut state.conv_states[linear_attn_idx],
                         /* capture_b11_taps = */ false,
                         /* capture_c41_taps = */ false,
+                        layer_lora,
                     )
                     .with_context(|| format!("segment gated deltanet layer {i}"))?
                 };
@@ -10257,6 +10292,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                     true,
                     true,
+                    layer_lora,
                 )
                 .with_context(|| format!("batched GDN layer {layer_idx}"))?;
 
@@ -11282,6 +11318,7 @@ fn model_forward_paged_inner(
                     profile_gdn_stages.then_some((i, start_pos)),
                     true,
                     true,
+                    layer_lora,
                 )
                 .with_context(|| format!("gated deltanet layer {i} (linear attention, paged)"))?;
                 hidden = {
@@ -17925,6 +17962,7 @@ mod tests {
             &mut mono_state.conv_states[0],
             false,
             false,
+            None,
         )?;
 
         // Streaming/tiled.
@@ -17937,6 +17975,7 @@ mod tests {
             &mut stream_state.recurrent_states[0],
             &mut stream_state.conv_states[0],
             tile,
+            None,
         )?;
 
         assert_eq!(mono_out.dims(), stream_out.dims());

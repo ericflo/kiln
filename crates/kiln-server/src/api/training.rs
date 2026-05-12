@@ -10,6 +10,7 @@ use axum::{
     routing::{delete, get, post},
 };
 
+use kiln_core::env_flag::env_tristate;
 use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus};
 
 use std::sync::atomic::Ordering;
@@ -18,9 +19,9 @@ use crate::error::ApiError;
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::state::{AppState, ModelBackend, TrainingJobInfo, TrainingJobType};
 use crate::training_preflight::{
-    self, EstimateOptions, available_for_training_bytes, estimate_step_working_set_with_options,
-    estimate_vk_native_recompute_working_set, format_oom_message_with_source,
-    WeightResidency,
+    self, EstimateOptions, WeightResidency, available_for_training_bytes,
+    estimate_step_working_set_with_options, estimate_vk_native_recompute_working_set,
+    format_oom_message_with_source,
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
@@ -35,6 +36,7 @@ fn enforce_training_preflight(
     max_seq_len: usize,
     options: EstimateOptions,
     lora_rank: usize,
+    vk_native_sft: bool,
 ) -> Result<(), ApiError> {
     if max_seq_len == 0 {
         return Ok(());
@@ -70,12 +72,8 @@ fn enforce_training_preflight(
             | kiln_core::vram::VramSource::AppleSilicon
             | kiln_core::vram::VramSource::EnvOverride
     );
-    let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
-        .ok()
-        .filter(|v| !v.is_empty() && v != "0")
-        .is_some();
     let hybrid_model = state.model_config.num_full_attention_layers < state.model_config.num_layers;
-    let estimate = if vk_native && hybrid_model {
+    let estimate = if vk_native_sft && hybrid_model {
         estimate_vk_native_recompute_working_set(
             &state.model_config,
             max_seq_len,
@@ -105,6 +103,26 @@ fn enforce_training_preflight(
         return Err(ApiError::training_will_not_fit(msg));
     }
     Ok(())
+}
+
+fn vk_native_sft_enabled(state: &AppState) -> bool {
+    match env_tristate("KILN_VK_NATIVE_TRAINING") {
+        Some(enabled) => enabled,
+        None => {
+            #[cfg(feature = "vulkan")]
+            {
+                let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
+                    return false;
+                };
+                runner.read().unwrap().backend_name() == "vulkan"
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                let _ = state;
+                false
+            }
+        }
+    }
 }
 
 /// Response for queue listing.
@@ -190,6 +208,7 @@ async fn submit_sft(
             ),
         },
         req.config.lora_rank,
+        vk_native_sft_enabled(&state),
     )?;
 
     tracing::info!(
@@ -286,7 +305,13 @@ async fn submit_grpo(
         &req.groups,
         Some(state.tokenizer.as_ref()),
     );
-    enforce_training_preflight(&state, max_seq_len, EstimateOptions::default(), req.config.lora_rank)?;
+    enforce_training_preflight(
+        &state,
+        max_seq_len,
+        EstimateOptions::default(),
+        req.config.lora_rank,
+        false,
+    )?;
 
     // Register the job in the tracking map
     let info = TrainingJobInfo {

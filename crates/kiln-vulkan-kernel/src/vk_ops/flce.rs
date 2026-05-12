@@ -336,7 +336,7 @@ fn extract_weight_chunk_rows(
 /// `chunk_len`-column chunks along the vocab axis and processes each
 /// chunk sequentially, so peak working-set scales with
 /// `num_active * chunk_len * 4` (F32 logits) — NOT with vocab.
-pub const FLCE_DEFAULT_CHUNK: usize = 4096;
+pub const FLCE_DEFAULT_CHUNK: usize = 128;
 
 /// Returns the active FLCE chunk length, honoring `KILN_VK_FLCE_CHUNK_LEN`
 /// when set. Used by both the runtime kernel and the preflight memory

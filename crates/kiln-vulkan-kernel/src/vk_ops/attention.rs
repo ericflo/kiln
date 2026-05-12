@@ -50,7 +50,7 @@ fn flash_rows_tile(rows: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(256)
+        .unwrap_or(2048)
         .clamp(1, rows.max(1))
 }
 
@@ -59,7 +59,7 @@ fn flash_row_work_budget(rows: usize, row_tile: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or_else(|| row_tile.saturating_mul(rows.max(1)))
+        .unwrap_or_else(|| row_tile.saturating_mul(rows.max(1)).min(10_000_000))
         .max(1)
 }
 

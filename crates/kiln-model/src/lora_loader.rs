@@ -41,6 +41,9 @@ pub struct LoraLayerWeights {
     pub gate_proj: Option<LoraProjectionWeights>,
     pub up_proj: Option<LoraProjectionWeights>,
     pub down_proj: Option<LoraProjectionWeights>,
+    pub in_proj_qkv: Option<LoraProjectionWeights>,
+    pub in_proj_z: Option<LoraProjectionWeights>,
+    pub gdn_out_proj: Option<LoraProjectionWeights>,
 }
 
 impl LoraLayerWeights {
@@ -52,9 +55,13 @@ impl LoraLayerWeights {
         self.gate_proj.is_some() || self.up_proj.is_some()
     }
 
+    pub fn has_gdn_attention(&self) -> bool {
+        self.in_proj_qkv.is_some() || self.in_proj_z.is_some() || self.gdn_out_proj.is_some()
+    }
+
     /// Iterate over every present `LoraProjectionWeights` in this
     /// layer, calling `f` with each. Order matches
-    /// `DEFAULT_TARGET_MODULES` (q, k, v, o, gate, up, down).
+    /// the train/save target order.
     pub fn for_each_projection<F: FnMut(&LoraProjectionWeights)>(&self, mut f: F) {
         for proj in [
             self.q_proj.as_ref(),
@@ -64,6 +71,9 @@ impl LoraLayerWeights {
             self.gate_proj.as_ref(),
             self.up_proj.as_ref(),
             self.down_proj.as_ref(),
+            self.in_proj_qkv.as_ref(),
+            self.in_proj_z.as_ref(),
+            self.gdn_out_proj.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -207,6 +217,9 @@ impl LoraWeights {
                         "gate_proj" => layer.gate_proj = Some(proj),
                         "up_proj" => layer.up_proj = Some(proj),
                         "down_proj" => layer.down_proj = Some(proj),
+                        "in_proj_qkv" => layer.in_proj_qkv = Some(proj),
+                        "in_proj_z" => layer.in_proj_z = Some(proj),
+                        "out_proj" => layer.gdn_out_proj = Some(proj),
                         _ => {
                             tracing::warn!("unknown LoRA target module: {module}, skipping");
                         }
