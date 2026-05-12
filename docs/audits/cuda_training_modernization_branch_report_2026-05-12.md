@@ -22,6 +22,8 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `86291129` | CUDA optimizer dispatch explicit decline | Adds CUDA SGD/AdamW dispatch hooks that log first use and return `false` until CUDA owns a real in-place optimizer update. |
 | `6a0824bd` | CUDA attention fast-path training guard | CUDA FlashAttention prefill/paged decode decline autograd-tracked tensors until a CUDA attention op with backward is wired. |
 | `4d60b0a9` | CUDA A6000 preflight rejection coverage | Adds a discrete CUDA/A6000 long-context rejection test for the shared fit-before-run estimator. |
+| `e1b45394` | CUDA resident optimizer kernels | Adds CUDA SGD and AdamW in-place kernels for registered contiguous CUDA F32/BF16 tensors. |
+| `51e1d727` | CUDA optimizer support check | Tightens optimizer dispatch support detection so CUDA only claims supported registered device tensors. |
 
 Local validation so far:
 
@@ -44,6 +46,10 @@ Local validation so far:
   - `KILN_CUDA_FLCE=1 cargo test --release -p kiln-train --features cuda test_flce_parity_vs_naive_loss --lib --quiet`
   - `cargo test --release -p kiln-model --features cuda cuda_optimizer_dispatch_hooks_decline_until_owned_kernel_exists --lib --quiet`
   - `cargo test --release -p kiln-model --features cuda cuda_flash_attention_declines_tracked_training_tensors --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_sgd_step_resident_round_trip_f32 --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_adamw_step_resident_round_trip_f32 --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_sgd_and_adamw_resident_round_trip_bf16 --lib --quiet`
+  - `cargo test --release -p kiln-train --features cuda test_checkpointed_loss_matches_standard --lib --quiet` re-run after optimizer kernel wiring
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -59,9 +65,11 @@ The Vulkan training modernization branch established the target shape for backen
 
 CUDA starts from a different place than Vulkan. The current CUDA backend already benefits from
 candle CUDA tensors, FlashAttention, GDN kernels, fused RMSNorm, FLCE Phase B, BF16 LoRA storage,
-and several inference/decode fusions. It does **not** yet have the Vulkan branch's explicit resident
-training registry, autograd-safe backend-owned projection wrapper, backend-resident LoRA optimizer
-state, or native CUDA tensor/autograd stack.
+and several inference/decode fusions. This branch has added CUDA training capability telemetry, a
+lightweight TensorId residency registry, autograd-safe candle-CUDA LoRA/projection hooks, explicit
+attention training declines, and resident in-place SGD/AdamW kernels for registered CUDA tensors.
+It still does **not** have a native CUDA tensor/autograd stack or an end-to-end real-model proof that
+adapter saves observe every backend-resident optimizer update.
 
 The CUDA port should therefore not copy Vulkan's buffer-upload mechanics blindly. CUDA candle tensors
 already live on the device, so the first useful parity target is to make CUDA training decisions
@@ -82,9 +90,9 @@ explicit, testable, and observable:
 | Attention training | CUDA FlashAttention prefill/paged-decode hooks now decline tracked tensors; no CUDA attention backward op is claimed yet. | Honest decline present; CUDA attention training op still missing. |
 | LoRA precision | `compute_lora_delta` casts A/B to `x.dtype()`; LoRA Vars initialize as BF16. `PHASE10_LORA_PRECISION_STUDY.md` closed performance as null but accepted parity/safety. | Present. |
 | CUDA decode LoRA | `CudaBackend::lora_decode_add` declines tracked tensors and only runs the forward-only fused add for inference. | Correct for safety, not a training acceleration. |
-| Resident activation registry | `BackendRuntime` has hooks; CUDA inherits the no-op defaults. | Missing. |
-| Device optimizer dispatch | CUDA implements explicit `dispatch_sgd_step` / `dispatch_adamw_step` decline hooks with first-use telemetry; trainer falls back to candle CUDA `Var::set`. | Honest decline present; real CUDA in-place optimizer still missing. |
-| Autograd-safe projection backend op | CUDA has many inference kernels, but `linear_prefill_apply` inherits `Ok(None)`. Training falls through to candle CUDA matmul. | Missing as explicit backend hook. |
+| Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
+| Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry and fallback declines for unsupported tensors. | Kernel path present; trainer-level engagement and adapter-save readback still need end-to-end proof. |
+| Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd. | Present for tested shapes; broader layer-routing proof still pending. |
 | Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
 
 ## Phase Plan
