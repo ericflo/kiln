@@ -153,7 +153,31 @@ fn lora_pairs<'a>(layers: &'a [VkLoraLayer]) -> impl Iterator<Item = &'a VkLoraP
     })
 }
 
-/// Run one training step end-to-end on the GPU.
+/// Recommended number of gradient-checkpoint segments for a given
+/// model layer count. Mirrors `trainer::compute_segment_boundaries`'s
+/// default (clamps to 1..=num_layers).
+///
+/// Phase 1.5 stub: the actual segmented forward+backward isn't wired
+/// yet. The function exists so callers can probe it before the real
+/// checkpointing path lands. See doc comment on
+/// `vk_checkpointed_train_step` for the design.
+pub fn vk_recommended_checkpoint_segments(num_layers: usize) -> usize {
+    std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.clamp(1, num_layers))
+        .unwrap_or_else(|| {
+            // Same heuristic as the candle path's
+            // kiln_core::vram::recommended_checkpoint_segments default.
+            // 4 segments fits comfortably under 22 GB at T=918 for
+            // Qwen3.5-4B if the per-segment intermediate budget is
+            // ~5 GB.
+            4.min(num_layers).max(1)
+        })
+}
+
+/// Single-step training (no gradient checkpointing — full forward
+/// tape held in GPU memory).
 ///
 /// Returns the scalar loss value.
 pub fn vk_train_step(
