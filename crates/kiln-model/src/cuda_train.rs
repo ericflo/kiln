@@ -516,6 +516,50 @@ pub fn cuda_add(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_add_last_dim_bias(
+    input: &CudaTrainTensor,
+    bias: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_add_last_dim_bias: expected non-empty input shape"
+    );
+    ensure!(
+        bias.dims().len() == 1,
+        "cuda_add_last_dim_bias: expected rank-1 bias, got {:?}",
+        bias.dims()
+    );
+    let last_dim = *input.dims().last().expect("checked non-empty shape");
+    ensure!(
+        bias.dims()[0] == last_dim,
+        "cuda_add_last_dim_bias: bias dim {} must match input last dim {}",
+        bias.dims()[0],
+        last_dim
+    );
+    ensure!(
+        input.dtype() == bias.dtype(),
+        "cuda_add_last_dim_bias: dtype mismatch input={:?} bias={:?}",
+        input.dtype(),
+        bias.dtype()
+    );
+    let out = input
+        .as_tensor()
+        .broadcast_add(bias.as_tensor())
+        .context("cuda_add_last_dim_bias: candle CUDA broadcast_add")?;
+    let needs_grad = input.requires_grad()
+        || input.grad_fn().is_some()
+        || input.param_id().is_some()
+        || bias.requires_grad()
+        || bias.grad_fn().is_some()
+        || bias.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(AddLastDimBiasBackward {
+            inputs: vec![input.clone(), bias.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_sub(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -1898,6 +1942,44 @@ impl CudaBackwardOp for AddBackward {
 }
 
 #[derive(Debug)]
+struct AddLastDimBiasBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for AddLastDimBiasBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_add_last_dim_bias"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_add_last_dim_bias backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let input_grad = grad_out.clone();
+        let mut bias_grad = grad_out.as_tensor().clone();
+        while bias_grad.dims().len() > 1 {
+            bias_grad = bias_grad
+                .sum(0)
+                .context("cuda_add_last_dim_bias backward: reduce leading dim")?;
+        }
+        Ok(vec![
+            Some(input_grad),
+            Some(CudaTrainTensor::new(
+                bias_grad
+                    .contiguous()
+                    .context("cuda_add_last_dim_bias backward: contiguous bias grad")?,
+            )?),
+        ])
+    }
+}
+
+#[derive(Debug)]
 struct SubBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -2981,6 +3063,42 @@ mod tests {
         assert_eq!(detached.param_id(), None);
         assert!(detached.op_id() > param.op_id());
         assert_eq!(detached.to_vec_f32()?, vec![1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_add_last_dim_bias_backward_reduces_leading_dims() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda add-bias smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let bias_tensor = Tensor::from_vec(vec![0.5f32, -0.25, 1.5], (3usize,), &device)?;
+        let bias_id = bias_tensor.id();
+        let bias = CudaTrainTensor::parameter(bias_tensor, bias_id)?;
+
+        let out = cuda_add_last_dim_bias(&input, &bias)?;
+        assert_eq!(out.to_vec_f32()?, vec![1.5, 1.75, 4.5, 4.5, 4.75, 7.5]);
+        let loss = cuda_sum_all(&out)?;
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            vec![1.0; 6]
+        );
+        assert_eq!(
+            grads.get(bias_id).context("missing bias grad")?.to_vec_f32()?,
+            vec![2.0; 3]
+        );
         Ok(())
     }
 
