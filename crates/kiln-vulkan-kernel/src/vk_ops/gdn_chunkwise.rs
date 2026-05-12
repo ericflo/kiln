@@ -250,6 +250,8 @@ fn vk_broadcast_mul_lastdim_no_grad(a: &VkTensor, b: &VkTensor, n: usize) -> Res
 }
 
 /// State update: S_new = p_last·S + k^T · w_weighted.
+/// Pure GPU: vk_broadcast_mul_lastdim for the p_last broadcast,
+/// vk_matmul_batched + vk_add for the rest.
 fn state_update(
     state: &VkTensor,    // [B, nv, dk, dv]
     p_last: &VkTensor,   // [B, nv]
@@ -261,43 +263,18 @@ fn state_update(
     dv: usize,
     chunk: usize,
 ) -> Result<VkTensor> {
-    // p_last broadcast to state shape
-    let p_data = p_last.to_vec_f32()?;
-    let s_data = state.to_vec_f32()?;
-    let mut s_scaled = vec![0.0_f32; batch * nv * dk * dv];
-    for b in 0..batch {
-        for h in 0..nv {
-            let p = p_data[b * nv + h];
-            let off = (b * nv + h) * dk * dv;
-            for i in 0..dk * dv {
-                s_scaled[off + i] = s_data[off + i] * p;
-            }
-        }
-    }
-    let device = state.device();
-    let s_scaled_buf = alloc_f32(device, batch * nv * dk * dv)?;
-    let raw: Vec<u8> = s_scaled.iter().flat_map(|f| f.to_le_bytes()).collect();
-    VulkanBuffer::upload_data(
-        device.device(),
-        device.host_visible_mem_type(),
-        device.queue(),
-        device.queue_family_index(),
-        &s_scaled_buf,
-        &raw,
-    )?;
-    let s_scaled_t = VkTensor::from_buffer(
-        s_scaled_buf,
-        vec![batch, nv, dk, dv],
-        VkDType::F32,
-        Arc::clone(device),
-    );
-
-    // delta_state = k_t @ w_weighted, k_t: [B*nv, dk, C], w_weighted reshape to [B*nv, C, dv]
+    // s_scaled[bn, ix] = state[bn, ix] · p_last[bn]   (broadcast over dk*dv)
     let bh = batch * nv;
+    let s_2d = vk_reshape(state, &[bh, dk * dv])?;
+    let p_2d = vk_reshape(p_last, &[bh, 1])?;
+    let s_scaled_2d = vk_broadcast_mul_lastdim_no_grad(&s_2d, &p_2d, dk * dv)?;
+    let s_scaled_4d = vk_reshape(&s_scaled_2d, &[batch, nv, dk, dv])?;
+
+    // delta_state = k_t @ w_weighted
     let w_3 = vk_reshape(w_weighted, &[bh, chunk, dv])?;
     let delta_3 = vk_matmul_batched_no_grad(k_t, &w_3)?;
     let delta_4 = vk_reshape(&delta_3, &[batch, nv, dk, dv])?;
-    vk_add_no_grad(&s_scaled_t, &delta_4)
+    vk_add_no_grad(&s_scaled_4d, &delta_4)
 }
 
 /// Forward chunkwise GDN recurrence.
