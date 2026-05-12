@@ -61,6 +61,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `fe357495` | CUDA train narrow last-dim op | Adds F32 last-dimension narrow with backward zero-padding scatter for native routing and chunk slicing. |
 | `0eee38b1` | CUDA train row index-select op | Adds F32 rank-2 row gather with backward scatter-add, including duplicate-index accumulation coverage. |
 | `65491a70` | CUDA train attention permute ops | Adds F32 rank-3 `rows,heads -> heads,rows` and inverse permutes with inverse-backward coverage for native SDPA composition. |
+| `9d2e945d` | CUDA train last-two transpose op | Adds rank-N last-two-dimension transpose with inverse-backward coverage for native `Q @ K.T` SDPA composition. |
 
 Local validation so far:
 
@@ -123,6 +124,7 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA narrow-last-dim backward coverage; 30 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA row index-select backward coverage; 31 CUDA train-shell tests passed.
   - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA attention permute backward coverage; 33 CUDA train-shell tests passed.
+  - `cargo test --release -p kiln-model --features cuda cuda_train --lib --quiet` re-run after adding CUDA last-two transpose backward coverage; 34 CUDA train-shell tests passed.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -144,14 +146,14 @@ attention training declines, and resident in-place SGD/AdamW kernels for registe
 It also now has an initial CUDA-only training tensor boundary over candle CUDA storage, including
 parameter metadata, detach semantics, a backward-op trait, reverse-topology traversal, and a
 per-`TensorId` gradient store for a future CUDA autograd graph. CUDA add, subtract, multiply,
-division, scalar scale, F32/BF16 dtype casts, sum and mean reductions, reshape, 2D transpose, 2D
-matmul, exact-batch batched matmul, F32 softmax-last-dim, F32 sigmoid, F32 SiLU, rank-3
+division, scalar scale, F32/BF16 dtype casts, sum and mean reductions, reshape, 2D transpose,
+last-two transpose, 2D matmul, exact-batch batched matmul, F32 softmax-last-dim, F32 sigmoid, F32 SiLU, rank-3
 repeat-KV-heads, last-dim narrow, rank-2 row index-select, and rank-3 attention permute ops prove
 that the tape can propagate and accumulate gradients through real CUDA tensor ops, including product
 and quotient rules, mixed-precision passthrough casts, scalar-loss reductions, shape/view movement,
 projection/attention-shaped matmul, softmax Jacobian-vector products, sigmoid gates, SwiGLU
 activation derivatives, GQA head-repeat gradient summation, slice-gradient scattering, row gather
-scatter-add, and inverse attention-layout permutes
+scatter-add, inverse attention-layout permutes, and inverse last-two transposes for `Q @ K.T`
 gradients. Native SGD and AdamW helpers now apply those gradients through resident optimizer kernels
 and prove tiny loss decreases, and `kiln-train` has a minimal CUDA-native linear AdamW train-step
 bridge. A conservative CUDA training arena now owns step-lifetime tensor handles and tracks
@@ -183,7 +185,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/attention-permute backward ops, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with op IDs, parameter `TensorId`, `requires_grad`, detach semantics, a backward-op trait, reverse-topology traversal, per-parameter grad storage, CUDA add/sub/mul/div/scale/cast/sum/mean/reshape/transpose/last-two-transpose/matmul/batched-matmul/softmax/sigmoid/SiLU/repeat-KV/narrow/index-select/attention-permute backward ops, resident SGD/AdamW optimizer delegation, tiny optimizer loss-decrease proofs, and conservative arena allocation accounting. `crates/kiln-train/src/cuda_train.rs` adds a minimal linear AdamW train-step bridge with caller-owned arena support plus a safetensors save-boundary helper for named CUDA training tensors. There is still no CUDA equivalent of `vk_train.rs`, native Qwen forward/backward ops, or a custom pooled training allocator. | Initial tensor/autograd/optimizer/arena/save boundary and train-crate bridge present; full native stack missing. |
 
 ## Phase Plan
 
