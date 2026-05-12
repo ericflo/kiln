@@ -827,6 +827,28 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_sigmoid: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    let neg = input.as_tensor().neg().context("cuda_sigmoid: neg")?;
+    let exp_neg = neg.exp().context("cuda_sigmoid: exp")?;
+    let one_plus = (exp_neg + 1.0).context("cuda_sigmoid: add one")?;
+    let out = one_plus.recip().context("cuda_sigmoid: reciprocal")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let output_for_backward = CudaTrainTensor::new(out.clone())?;
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SigmoidBackward {
+            output: output_for_backward,
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         input.dtype() == DType::F32,
@@ -1089,6 +1111,39 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct SigmoidBackward {
+    output: CudaTrainTensor,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SigmoidBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_sigmoid"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_sigmoid backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let one_minus = self
+            .output
+            .as_tensor()
+            .affine(-1.0, 1.0)
+            .context("cuda_sigmoid backward: one minus output")?;
+        let deriv =
+            (self.output.as_tensor() * &one_minus).context("cuda_sigmoid backward: derivative")?;
+        let grad = (grad_out.as_tensor() * &deriv).context("cuda_sigmoid backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -2031,6 +2086,52 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "softmax grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sigmoid_backward_matches_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sigmoid backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let data = vec![-2.0f32, 0.0, 2.0];
+        let param_tensor = Tensor::new(data.clone(), &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let sigmoid = cuda_sigmoid(&param)?;
+        let loss = cuda_sum_all(&sigmoid)?;
+
+        let mut expected_out = Vec::new();
+        let mut expected_grad = Vec::new();
+        for x in data {
+            let y = 1.0 / (1.0 + (-x).exp());
+            expected_out.push(y);
+            expected_grad.push(y * (1.0 - y));
+        }
+
+        let actual_out = sigmoid.to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_out.iter().zip(expected_out.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "sigmoid output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_loss: f32 = expected_out.iter().sum();
+        assert!((loss.to_vec_f32()?[0] - expected_loss).abs() < 1e-5);
+
+        let grads = cuda_backward(&loss)?;
+        let actual_grad = grads.get(param_id).expect("param grad").to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "sigmoid grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
