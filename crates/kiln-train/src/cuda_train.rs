@@ -7,6 +7,8 @@
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, TensorId};
+use kiln_core::config::ModelConfig;
+use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaLayerWeights, CudaModelWeights,
     CudaOwnedFullAttentionLayer, CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena,
@@ -15,8 +17,12 @@ use kiln_model::cuda_train::{
     cuda_rmsnorm, cuda_rope, cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu,
     cuda_sum_all, cuda_transpose2d,
 };
+use kiln_model::forward::GpuWeights;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
+use crate::{SftConfig, SftExample};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
 
@@ -627,6 +633,155 @@ pub fn cuda_full_attention_lora_train_token_sequences_to_adapter(
     let adapter_dir = save_cuda_lora_adapter_dir(&lora_layers, rank, alpha, output_dir)
         .context("save CUDA FullAttention LoRA token adapter")?;
     Ok((adapter_dir, losses))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn cuda_native_sft_train(
+    examples: &[SftExample],
+    config: &SftConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    tracing::info!(
+        num_examples = examples.len(),
+        epochs = config.epochs,
+        lr = config.learning_rate,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting cuda-native SFT training"
+    );
+
+    let model = CudaModelWeights::from_gpu_weights(weights, model_config)
+        .context("cuda_native_sft_train: import CUDA model weights")?;
+    let effective_seed = config.seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xC0DA_5EED)
+    });
+    let lora_layers = cuda_init_lora_layers(
+        &model,
+        config.lora_rank,
+        config.lora_alpha,
+        effective_seed,
+    )
+    .context("cuda_native_sft_train: initialize LoRA layers")?;
+    let mut adamw = allocate_cuda_lora_adamw_state(&lora_layers)
+        .context("cuda_native_sft_train: allocate AdamW state")?;
+    let cfg = CudaAdamWConfig {
+        lr: config.learning_rate as f32,
+        ..Default::default()
+    };
+
+    let tokenized: Vec<Vec<usize>> = examples
+        .iter()
+        .filter_map(|example| match tokenize_for_training(example, tokenizer) {
+            Ok((ids, _mask)) => Some(ids.into_iter().map(|id| id as usize).collect()),
+            Err(err) => {
+                tracing::warn!("cuda-native: skipping example: {err}");
+                None
+            }
+        })
+        .collect();
+    ensure!(
+        !tokenized.is_empty(),
+        "cuda_native_sft_train: no valid training examples after tokenization"
+    );
+
+    let total_steps = config.epochs * tokenized.len();
+    let mut global_step = 0usize;
+    let mut last_loss = 0.0f32;
+    for epoch in 0..config.epochs {
+        let mut epoch_loss = 0.0f32;
+        for token_ids in &tokenized {
+            global_step += 1;
+            let mut arena = CudaTrainArena::new(model.token_embedding.as_tensor().device())?;
+            let loss = cuda_full_attention_lora_model_adamw_step_with_arena(
+                &model,
+                &lora_layers,
+                token_ids,
+                &mut adamw,
+                cfg,
+                &mut arena,
+            )
+            .with_context(|| {
+                format!(
+                    "cuda_native_sft_train step {} epoch {}",
+                    global_step,
+                    epoch + 1
+                )
+            })?;
+            ensure!(
+                loss.is_finite(),
+                "cuda_native_sft_train: non-finite loss {loss} at step {global_step}"
+            );
+            epoch_loss += loss;
+            last_loss = loss;
+
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0 && global_step % interval == 0 && global_step < total_steps {
+                    let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    if let Err(err) = save_cuda_lora_adapter_dir(
+                        &lora_layers,
+                        config.lora_rank,
+                        config.lora_alpha,
+                        &ckpt_dir,
+                    ) {
+                        tracing::warn!(step = global_step, error = %err, "save cuda-native checkpoint failed");
+                    }
+                }
+            }
+
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: epoch + 1,
+                    total_epochs: config.epochs,
+                    step: global_step,
+                    total_steps,
+                    loss: loss as f64,
+                    progress: global_step as f32 / total_steps as f32,
+                });
+            }
+
+            if global_step % 10 == 0 || global_step == total_steps {
+                tracing::info!(
+                    epoch = epoch + 1,
+                    step = global_step,
+                    total_steps,
+                    loss = format!("{loss:.6}"),
+                    "cuda-native training step"
+                );
+            }
+        }
+        let avg = epoch_loss / (tokenized.len() as f32);
+        tracing::info!(
+            epoch = epoch + 1,
+            avg_loss = format!("{avg:.6}"),
+            "cuda-native epoch complete"
+        );
+    }
+
+    let output_dir = adapter_dir.join(adapter_name);
+    save_cuda_lora_adapter_dir(
+        &lora_layers,
+        config.lora_rank,
+        config.lora_alpha,
+        &output_dir,
+    )
+    .with_context(|| format!("save final CUDA adapter to {}", output_dir.display()))?;
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        "cuda-native SFT training complete"
+    );
+    Ok(output_dir)
 }
 
 /// Save named CUDA training tensors to safetensors after one CUDA-to-CPU readback.
