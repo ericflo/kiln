@@ -349,6 +349,56 @@ pub fn cuda_gdn_gate_outputs(
     Ok(CudaGdnGateOutputs { beta, g })
 }
 
+pub fn cuda_gdn_gated_rmsnorm(
+    input: &CudaTrainTensor,
+    gate: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+    eps: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims() == gate.dims(),
+        "cuda_gdn_gated_rmsnorm: input/gate shape mismatch {:?} vs {:?}",
+        input.dims(),
+        gate.dims()
+    );
+    let hidden = *input
+        .dims()
+        .last()
+        .context("cuda_gdn_gated_rmsnorm: input must have rank > 0")?;
+    ensure!(
+        weight.dims() == [hidden],
+        "cuda_gdn_gated_rmsnorm: weight shape {:?} does not match hidden {}",
+        weight.dims(),
+        hidden
+    );
+
+    // `cuda_rmsnorm` applies Qwen's (1 + weight) convention. GDN gated norm
+    // uses the stored norm weight directly, so shift the frozen weight here.
+    let shifted_weight = (weight.as_tensor() - 1.0f64)
+        .context("cuda_gdn_gated_rmsnorm: shift norm weight")?;
+    let shifted_weight =
+        CudaTrainTensor::new(shifted_weight).context("cuda_gdn_gated_rmsnorm: wrap weight")?;
+    let normed = cuda_rmsnorm(input, &shifted_weight, eps)?;
+    let activated_gate = cuda_silu(gate)?;
+    cuda_mul(&normed, &activated_gate)
+}
+
+pub fn cuda_gdn_lora_output_projection(
+    recurrent_out: &CudaTrainTensor,
+    z: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+    lora: &CudaLoraLayer,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        recurrent_out.dims().len() == 2,
+        "cuda_gdn_lora_output_projection: expected rank-2 [rows, hidden], got {:?}",
+        recurrent_out.dims()
+    );
+    let gated = cuda_gdn_gated_rmsnorm(recurrent_out, z, &weights.gated_norm_weight, weights.eps)?;
+    cuda_lora_linear(&gated, &weights.out_proj_weight, lora.gdn_out_proj.as_ref())
+        .context("cuda GDN output projection")
+}
+
 fn cuda_lora_per_head_rmsnorm_flat(
     input: &CudaTrainTensor,
     weight: &CudaTrainTensor,
@@ -1684,6 +1734,25 @@ mod tests {
         let gate_loss = cuda_add(&cuda_sum_all(&gates.beta)?, &cuda_sum_all(&gates.g)?)?;
         let gate_grads = cuda_backward(&gate_loss)?;
         assert!(gate_grads.get(input_id).is_some());
+
+        let recurrent_out = CudaTrainTensor::new(
+            Tensor::from_vec(
+                vec![0.15f32, -0.2, 0.35, 0.45],
+                (2usize, 2usize),
+                &device,
+            )?,
+        )?;
+        let out = cuda_gdn_lora_output_projection(
+            &recurrent_out,
+            &projections.z,
+            linear_layer,
+            &lora_layers[1],
+        )?;
+        assert_eq!(out.dims(), &[2, 2]);
+        let out_loss = cuda_sum_all(&out)?;
+        let out_grads = cuda_backward(&out_loss)?;
+        let out_pair = lora_layers[1].gdn_out_proj.as_ref().expect("gdn out lora");
+        assert!(out_grads.get(out_pair.b_id).is_some());
         Ok(())
     }
 
