@@ -18,10 +18,13 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `6dba1644` | CUDA training projection hook | `CudaBackend::linear_prefill_apply` routes compatible CUDA projection matmuls through the backend seam using candle CUDA autograd. |
 | `89926670` | CUDA runtime hook parity tests | Adds A6000-runnable tests for the projection hook and registered LoRA delta hook. |
 | `4aee22f9` | CUDA offset training matmul hook | Adds `linear_prefill_apply_offset` for chunked CUDA matmuls, tested but not yet wired into FLCE auto-routing. |
+| `b53602df` | CUDA FLCE backend provider gate | Wires CUDA FLCE backend chunk matmul behind `KILN_CUDA_FLCE=1`; default CUDA SFT remains on the existing candle CUDA Phase B chunked loss path until benchmarks justify auto-on. |
 
 Local validation so far:
 
 - `cargo test -p kiln-model backend::tests::portable_training_capabilities_are_conservative --lib --quiet` passed after each code slice.
+- `cargo test -p kiln-train flce_provider --lib --quiet` passed for the CUDA opt-in gate and Vulkan auto-heuristic tests.
+- `cargo test -p kiln-train flce_auto --lib --quiet` passed for the FLCE active-token floor tests.
 - `git diff --check` passed before each code commit.
 - `cargo fmt --all --check` is blocked in this workspace because the active musl Rust toolchain lacks `rustfmt`.
 - Local CUDA-feature tests are blocked in this workspace because `cudarc` cannot find `nvcc`.
@@ -33,6 +36,8 @@ Local validation so far:
   - `cargo test --release -p kiln-model --features cuda cuda_registered_lora_delta_matches_candle_cuda_reference --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda test_checkpointed_loss_matches_standard --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda test_flce_parity_vs_naive_loss --lib --quiet`
+  - `cargo test --release -p kiln-train --features cuda flce_provider --lib --quiet`
+  - `KILN_CUDA_FLCE=1 cargo test --release -p kiln-train --features cuda test_flce_parity_vs_naive_loss --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
