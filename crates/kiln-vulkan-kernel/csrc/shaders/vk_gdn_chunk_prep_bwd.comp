@@ -1,0 +1,197 @@
+// vk_gdn_chunk_prep_bwd — fused backward of the chunk_prep stage.
+//
+// Inputs (12, all F32):
+//   d_a_strict     [B*nv, C, C]
+//   d_b_mask       [B*nv, C, C]
+//   d_v_prime      [B*nv, C, dv]
+//   d_q_s_scaled   [B*nv, C, dv]
+//   d_decay_last   [B*nv, C]
+//   d_p_last       [B*nv]
+//   g              [B*nv, C]      (saved input)
+//   v              [B*nv, C, dv]  (saved input)
+//   kkt            [B*nv, C, C]
+//   qkt            [B*nv, C, C]
+//   ks_entry       [B*nv, C, dv]
+//   q_s            [B*nv, C, dv]
+//
+// Outputs (6):
+//   d_g            [B*nv, C]      (after reverse cumsum: dg[t] = Σ_{s≥t} dG[s])
+//   d_v            [B*nv, C, dv]
+//   d_kkt          [B*nv, C, C]
+//   d_qkt          [B*nv, C, C]
+//   d_ks_entry     [B*nv, C, dv]
+//   d_q_s          [B*nv, C, dv]
+//
+// Layout: ONE workgroup per (b*nv). 64 threads, each owns row t in
+// [0, C). All dG[t] accumulation happens in shared memory; thread t
+// owns the final value of dG[t] / dg[t].
+//
+// Push: batch_heads (= B*nv), chunk (≤ 64), dv.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint bh_count;
+    uint chunk;
+    uint dv;
+};
+
+// inputs
+layout(binding = 0)  readonly buffer DAStrict { float data_d_a_strict[]; };
+layout(binding = 1)  readonly buffer DBMask   { float data_d_b_mask[]; };
+layout(binding = 2)  readonly buffer DVPrime  { float data_d_v_prime[]; };
+layout(binding = 3)  readonly buffer DQSScale { float data_d_q_s_scaled[]; };
+layout(binding = 4)  readonly buffer DDecLast { float data_d_decay_last[]; };
+layout(binding = 5)  readonly buffer DPLast   { float data_d_p_last[]; };
+layout(binding = 6)  readonly buffer GBuf     { float data_g[]; };
+layout(binding = 7)  readonly buffer VBuf     { float data_v[]; };
+layout(binding = 8)  readonly buffer KktBuf   { float data_kkt[]; };
+layout(binding = 9)  readonly buffer QktBuf   { float data_qkt[]; };
+layout(binding = 10) readonly buffer KsEntry  { float data_ks_entry[]; };
+layout(binding = 11) readonly buffer QSBuf    { float data_q_s[]; };
+// outputs
+layout(binding = 12) writeonly buffer DGOut       { float data_d_g[]; };
+layout(binding = 13) writeonly buffer DVOut       { float data_d_v[]; };
+layout(binding = 14) writeonly buffer DKktOut     { float data_d_kkt[]; };
+layout(binding = 15) writeonly buffer DQktOut     { float data_d_qkt[]; };
+layout(binding = 16) writeonly buffer DKsEntryOut { float data_d_ks_entry[]; };
+layout(binding = 17) writeonly buffer DQSOut      { float data_d_q_s[]; };
+
+shared float sBigG[64];   // cumsum(g)[t]
+shared float sP[64];      // exp(big_g[t])
+shared float sDG[64];     // accumulated dG[t]
+
+void main() {
+    uint bh = gl_WorkGroupID.x;
+    if (bh >= bh_count) return;
+    uint t = gl_LocalInvocationID.x;
+    bool is_active = t < chunk;
+    // CRITICAL: do NOT return early for threads beyond chunk — they
+    // must participate in barriers (Vulkan requires all threads in a
+    // workgroup to reach each barrier). They just skip per-element
+    // work via the `active` flag.
+
+    uint c_base = bh * chunk;
+    uint cv_base = bh * chunk * dv;
+    uint cc_base = bh * chunk * chunk;
+
+    // ---- Pass 1: compute big_g via prefix scan on shared memory.
+    // For chunk ≤ 64 this is a small scan. Using sequential scan from
+    // thread 0 is simplest (chunk-1 sequential adds, all other threads
+    // wait at barrier).
+    if (t == 0u) {
+        float acc = 0.0;
+        for (uint i = 0u; i < chunk; ++i) {
+            acc += data_g[c_base + i];
+            sBigG[i] = acc;
+            sP[i] = exp(acc);
+        }
+    }
+    if (is_active) sDG[t] = 0.0;
+    barrier();
+
+    float p_t = is_active ? sP[t] : 0.0;
+
+    // ---- v_prime branch:
+    if (is_active) {
+        float dG_local = 0.0;
+        for (uint d = 0u; d < dv; ++d) {
+            float dv_v = data_d_v_prime[cv_base + t * dv + d];
+            data_d_v[cv_base + t * dv + d] = dv_v;
+            data_d_ks_entry[cv_base + t * dv + d] = -p_t * dv_v;
+            dG_local += -data_ks_entry[cv_base + t * dv + d] * p_t * dv_v;
+        }
+        sDG[t] += dG_local;
+    }
+
+    // ---- q_s_scaled branch:
+    if (is_active) {
+        float dG_local = 0.0;
+        for (uint d = 0u; d < dv; ++d) {
+            float dqs_v = data_d_q_s_scaled[cv_base + t * dv + d];
+            data_d_q_s[cv_base + t * dv + d] = p_t * dqs_v;
+            dG_local += data_q_s[cv_base + t * dv + d] * p_t * dqs_v;
+        }
+        sDG[t] += dG_local;
+    }
+
+    barrier();
+
+    // ---- a_strict branch (i < t):
+    if (is_active) {
+        float dG_local_t = 0.0;
+        for (uint i = 0u; i < t; ++i) {
+            float decay = exp(sBigG[t] - sBigG[i]);
+            float das_v = data_d_a_strict[cc_base + t * chunk + i];
+            data_d_kkt[cc_base + t * chunk + i] = decay * das_v;
+            dG_local_t += decay * data_kkt[cc_base + t * chunk + i] * das_v;
+        }
+        for (uint j = t + 1u; j < chunk; ++j) {
+            data_d_kkt[cc_base + t * chunk + j] = 0.0;
+        }
+        data_d_kkt[cc_base + t * chunk + t] = 0.0;
+        for (uint tp = t + 1u; tp < chunk; ++tp) {
+            float decay = exp(sBigG[tp] - sBigG[t]);
+            float das_v = data_d_a_strict[cc_base + tp * chunk + t];
+            dG_local_t -= decay * data_kkt[cc_base + tp * chunk + t] * das_v;
+        }
+        sDG[t] += dG_local_t;
+    }
+
+    // ---- b_mask branch (i ≤ t for d_qkt, i < t for dG to skip diagonal):
+    if (is_active) {
+        float dG_local_t = 0.0;
+        // d_qkt write: i ≤ t (causal lower including diagonal)
+        for (uint i = 0u; i <= t; ++i) {
+            float decay = exp(sBigG[t] - sBigG[i]);
+            float dbm_v = data_d_b_mask[cc_base + t * chunk + i];
+            data_d_qkt[cc_base + t * chunk + i] = decay * dbm_v;
+        }
+        // dG[t] from row: only i < t (i==t cancels with itself)
+        for (uint i = 0u; i < t; ++i) {
+            float decay = exp(sBigG[t] - sBigG[i]);
+            float dbm_v = data_d_b_mask[cc_base + t * chunk + i];
+            dG_local_t += decay * data_qkt[cc_base + t * chunk + i] * dbm_v;
+        }
+        for (uint j = t + 1u; j < chunk; ++j) {
+            data_d_qkt[cc_base + t * chunk + j] = 0.0;
+        }
+        for (uint tp = t + 1u; tp < chunk; ++tp) {
+            float decay = exp(sBigG[tp] - sBigG[t]);
+            float dbm_v = data_d_b_mask[cc_base + tp * chunk + t];
+            dG_local_t -= decay * data_qkt[cc_base + tp * chunk + t] * dbm_v;
+        }
+        sDG[t] += dG_local_t;
+    }
+
+    // ---- decay_last_col branch (per-thread self-subtract):
+    if (is_active) {
+        float decay_t_at_last = exp(sBigG[chunk - 1u] - sBigG[t]);
+        float ddec_t = data_d_decay_last[c_base + t];
+        sDG[t] -= decay_t_at_last * ddec_t;
+    }
+    barrier();
+
+    if (t == chunk - 1u) {
+        float dG_last = 0.0;
+        for (uint i = 0u; i < chunk; ++i) {
+            float decay = exp(sBigG[chunk - 1u] - sBigG[i]);
+            dG_last += decay * data_d_decay_last[c_base + i];
+        }
+        sDG[chunk - 1u] += dG_last;
+        sDG[chunk - 1u] += sP[chunk - 1u] * data_d_p_last[bh];
+    }
+    barrier();
+
+    // ---- Reverse cumsum: dg[t] = Σ_{s ≥ t} dG[s]
+    if (t == 0u) {
+        float acc = 0.0;
+        for (int s = int(chunk) - 1; s >= 0; --s) {
+            acc += sDG[s];
+            data_d_g[c_base + uint(s)] = acc;
+        }
+    }
+}

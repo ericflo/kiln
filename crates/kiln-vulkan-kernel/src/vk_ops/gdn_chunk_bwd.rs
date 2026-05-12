@@ -412,22 +412,100 @@ fn cpu_state_exit_bwd(
     ))
 }
 
-/// Backward of the chunk_prep stage. The most complex backward in the
-/// GDN pipeline. Given gradients of (a_strict, b_mask, v_prime,
-/// q_s_scaled, decay_last_col, p_last), produces gradients w.r.t. the
-/// chunk_prep inputs (g, v, kkt, qkt, ks_entry, q_s) AND helps build
-/// the chunk-level dq, dk, dv (via the matmul-prep step on the caller
-/// side: dq comes from dqkt + d(q_s); dk comes from dkkt + d(qkt) +
-/// d(ks_entry); dv directly from d(v_prime) and dV).
-///
-/// This function returns the direct gradients of the 6 chunk_prep
-/// outputs propagated to the 6 inputs. The caller stitches them into
-/// the broader chunk-level dq/dk/dv via the matmul-prep adjoint
-/// (which is just transposed batched matmul of the same operations
-/// done forward).
+/// Backward of the chunk_prep stage. GPU shader path with bounded
+/// shared memory (3 × 64 floats = 768 bytes); CPU fallback for
+/// debugging.
 ///
 /// Returns: d_g, d_v, d_kkt, d_qkt, d_ks_entry, d_q_s.
 pub fn vk_gdn_chunk_prep_bwd_no_grad(
+    d_a_strict: &VkTensor,
+    d_b_mask: &VkTensor,
+    d_v_prime: &VkTensor,
+    d_q_s_scaled: &VkTensor,
+    d_decay_last_col: &VkTensor,
+    d_p_last: &VkTensor,
+    g: &VkTensor,
+    v: &VkTensor,
+    kkt: &VkTensor,
+    qkt: &VkTensor,
+    ks_entry: &VkTensor,
+    q_s: &VkTensor,
+    batch: usize,
+    nv: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor, VkTensor, VkTensor)> {
+    if std::env::var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU").is_ok() {
+        return cpu_chunk_prep_bwd(
+            d_a_strict,
+            d_b_mask,
+            d_v_prime,
+            d_q_s_scaled,
+            d_decay_last_col,
+            d_p_last,
+            g,
+            v,
+            kkt,
+            qkt,
+            ks_entry,
+            q_s,
+            batch,
+            nv,
+            chunk,
+            dv,
+        );
+    }
+    anyhow::ensure!(chunk <= 64, "vk_gdn_chunk_prep_bwd: chunk ≤ 64 (shader cap)");
+
+    let device = g.device();
+    let bh = batch * nv;
+    let d_g_buf = alloc_f32(device, bh * chunk)?;
+    let d_v_buf = alloc_f32(device, bh * chunk * dv)?;
+    let d_kkt_buf = alloc_f32(device, bh * chunk * chunk)?;
+    let d_qkt_buf = alloc_f32(device, bh * chunk * chunk)?;
+    let d_ks_buf = alloc_f32(device, bh * chunk * dv)?;
+    let d_qs_buf = alloc_f32(device, bh * chunk * dv)?;
+
+    let workgroups = bh as u32;
+    let push = [bh as u32, chunk as u32, dv as u32];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_gdn_chunk_prep_bwd",
+        &[
+            d_a_strict.buffer().handle(),
+            d_b_mask.buffer().handle(),
+            d_v_prime.buffer().handle(),
+            d_q_s_scaled.buffer().handle(),
+            d_decay_last_col.buffer().handle(),
+            d_p_last.buffer().handle(),
+            g.buffer().handle(),
+            v.buffer().handle(),
+            kkt.buffer().handle(),
+            qkt.buffer().handle(),
+            ks_entry.buffer().handle(),
+            q_s.buffer().handle(),
+            d_g_buf.handle(),
+            d_v_buf.handle(),
+            d_kkt_buf.handle(),
+            d_qkt_buf.handle(),
+            d_ks_buf.handle(),
+            d_qs_buf.handle(),
+        ],
+        &push,
+        workgroups,
+    )?;
+
+    Ok((
+        VkTensor::from_buffer(d_g_buf, vec![batch, nv, chunk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_v_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_kkt_buf, vec![batch, nv, chunk, chunk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_qkt_buf, vec![batch, nv, chunk, chunk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_ks_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_qs_buf, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
+    ))
+}
+
+fn cpu_chunk_prep_bwd(
     d_a_strict: &VkTensor,      // [B, nv, C, C]
     d_b_mask: &VkTensor,        // [B, nv, C, C]
     d_v_prime: &VkTensor,       // [B, nv, C, dv]

@@ -516,6 +516,182 @@ fn vk_gdn_chunk_prep_bwd_matches_finite_diff() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn vk_gdn_chunk_prep_bwd_per_branch_isolation() -> Result<()> {
+    // Run with only ONE branch's input non-zero. If GPU ≠ CPU on dg
+    // for one branch, that branch's logic is wrong.
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 1;
+    let nv = 1;
+    let chunk = 4;
+    let dv = 2;
+
+    let g_data: Vec<f32> = (0..chunk).map(|i| -0.05 + (i as f32) * 0.01).collect();
+    let v_data = vec![0.1_f32; chunk * dv];
+    let kkt_data = vec![0.05_f32; chunk * chunk];
+    let qkt_data = vec![0.07_f32; chunk * chunk];
+    let ks_data = vec![0.03_f32; chunk * dv];
+    let qs_data = vec![0.02_f32; chunk * dv];
+
+    let g = upload(&dev, &g_data, &[batch, nv, chunk])?;
+    let v = upload(&dev, &v_data, &[batch, nv, chunk, dv])?;
+    let kkt = upload(&dev, &kkt_data, &[batch, nv, chunk, chunk])?;
+    let qkt = upload(&dev, &qkt_data, &[batch, nv, chunk, chunk])?;
+    let ks_e = upload(&dev, &ks_data, &[batch, nv, chunk, dv])?;
+    let qs = upload(&dev, &qs_data, &[batch, nv, chunk, dv])?;
+
+    let zero_cc = vec![0.0_f32; chunk * chunk];
+    let zero_cv = vec![0.0_f32; chunk * dv];
+    let zero_c = vec![0.0_f32; chunk];
+    let zero_bh = vec![0.0_f32; batch * nv];
+    let unit_dvp = vec![0.1_f32; chunk * dv];
+
+    // Test ONLY v_prime branch enabled
+    let dvp = upload(&dev, &unit_dvp, &[batch, nv, chunk, dv])?;
+    let zero_das = upload(&dev, &zero_cc, &[batch, nv, chunk, chunk])?;
+    let zero_dbm = upload(&dev, &zero_cc, &[batch, nv, chunk, chunk])?;
+    let zero_dqss = upload(&dev, &zero_cv, &[batch, nv, chunk, dv])?;
+    let zero_ddec = upload(&dev, &zero_c, &[batch, nv, chunk])?;
+    let zero_dpl = upload(&dev, &zero_bh, &[batch, nv])?;
+
+    let me = |a: &[f32], b: &[f32]| -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+    };
+
+    let test_branch = |name: &str,
+                       das: &VkTensor,
+                       dbm: &VkTensor,
+                       dvp: &VkTensor,
+                       dqss: &VkTensor,
+                       ddec: &VkTensor,
+                       dpl: &VkTensor|
+     -> Result<()> {
+        let (g_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
+            das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
+        )?;
+        unsafe { std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1"); }
+        let (c_dg, _, _, _, _, _) = vk_gdn_chunk_prep_bwd_no_grad(
+            das, dbm, dvp, dqss, ddec, dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
+        )?;
+        unsafe { std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU"); }
+        let g_data = g_dg.to_vec_f32()?;
+        let c_data = c_dg.to_vec_f32()?;
+        println!("Branch {name}: GPU dg={:?}", g_data);
+        println!("Branch {name}: CPU dg={:?}", c_data);
+        println!("Branch {name}: max err = {}", me(&g_data, &c_data));
+        Ok(())
+    };
+
+    test_branch("zero_all", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
+    test_branch("v_prime_only", &zero_das, &zero_dbm, &dvp, &zero_dqss, &zero_ddec, &zero_dpl)?;
+
+    let dqss_t = upload(&dev, &unit_dvp, &[batch, nv, chunk, dv])?;
+    test_branch("q_s_only", &zero_das, &zero_dbm, &zero_dqss, &dqss_t, &zero_ddec, &zero_dpl)?;
+
+    let unit_cc = vec![0.01_f32; chunk * chunk];
+    let das_t = upload(&dev, &unit_cc, &[batch, nv, chunk, chunk])?;
+    test_branch("a_strict_only", &das_t, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
+
+    let dbm_t = upload(&dev, &unit_cc, &[batch, nv, chunk, chunk])?;
+    test_branch("b_mask_only", &zero_das, &dbm_t, &zero_dqss, &zero_dqss, &zero_ddec, &zero_dpl)?;
+
+    let unit_c = vec![0.01_f32; chunk];
+    let ddec_t = upload(&dev, &unit_c, &[batch, nv, chunk])?;
+    test_branch("decay_last_only", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &ddec_t, &zero_dpl)?;
+
+    let dpl_t = upload(&dev, &vec![0.01_f32; batch * nv], &[batch, nv])?;
+    test_branch("p_last_only", &zero_das, &zero_dbm, &zero_dqss, &zero_dqss, &zero_ddec, &dpl_t)?;
+
+    Ok(())
+}
+
+#[test]
+fn vk_gdn_chunk_prep_bwd_gpu_matches_cpu() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_chunk_prep_bwd_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 1;
+    let nv = 1;
+    let chunk = 4;
+    let dv = 2;
+
+    let mk = |seed: u64, n: usize, scale: f32| -> Vec<f32> {
+        let mut state = seed.wrapping_mul(0x9e3779b97f4a7c15) ^ 0xdeadbeefcafef00d;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let normalized = ((state >> 33) as f32) / (u32::MAX as f32);
+                (normalized - 0.5) * 2.0 * scale
+            })
+            .collect()
+    };
+
+    let g_data = mk(1, batch * nv * chunk, 0.05);
+    let v_data = mk(2, batch * nv * chunk * dv, 0.3);
+    let kkt_data = mk(3, batch * nv * chunk * chunk, 0.2);
+    let qkt_data = mk(4, batch * nv * chunk * chunk, 0.3);
+    let ks_data = mk(5, batch * nv * chunk * dv, 0.1);
+    let qs_data = mk(6, batch * nv * chunk * dv, 0.15);
+    let das_data = mk(7, batch * nv * chunk * chunk, 0.01);
+    let dbm_data = mk(8, batch * nv * chunk * chunk, 0.01);
+    let dvp_data = mk(9, batch * nv * chunk * dv, 0.01);
+    let dqss_data = mk(10, batch * nv * chunk * dv, 0.01);
+    let ddec_data = mk(11, batch * nv * chunk, 0.01);
+    let dpl_data = mk(12, batch * nv, 0.01);
+
+    let g = upload(&dev, &g_data, &[batch, nv, chunk])?;
+    let v = upload(&dev, &v_data, &[batch, nv, chunk, dv])?;
+    let kkt = upload(&dev, &kkt_data, &[batch, nv, chunk, chunk])?;
+    let qkt = upload(&dev, &qkt_data, &[batch, nv, chunk, chunk])?;
+    let ks_e = upload(&dev, &ks_data, &[batch, nv, chunk, dv])?;
+    let qs = upload(&dev, &qs_data, &[batch, nv, chunk, dv])?;
+    let das = upload(&dev, &das_data, &[batch, nv, chunk, chunk])?;
+    let dbm = upload(&dev, &dbm_data, &[batch, nv, chunk, chunk])?;
+    let dvp = upload(&dev, &dvp_data, &[batch, nv, chunk, dv])?;
+    let dqss = upload(&dev, &dqss_data, &[batch, nv, chunk, dv])?;
+    let ddec = upload(&dev, &ddec_data, &[batch, nv, chunk])?;
+    let dpl = upload(&dev, &dpl_data, &[batch, nv])?;
+
+    // GPU
+    let (g_dg, g_dv, g_dkkt, g_dqkt, g_dks, g_dqs) = vk_gdn_chunk_prep_bwd_no_grad(
+        &das, &dbm, &dvp, &dqss, &ddec, &dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
+    )?;
+
+    // CPU
+    unsafe {
+        std::env::set_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU", "1");
+    }
+    let (c_dg, c_dv, c_dkkt, c_dqkt, c_dks, c_dqs) = vk_gdn_chunk_prep_bwd_no_grad(
+        &das, &dbm, &dvp, &dqss, &ddec, &dpl, &g, &v, &kkt, &qkt, &ks_e, &qs, batch, nv, chunk, dv,
+    )?;
+    unsafe {
+        std::env::remove_var("KILN_VK_GDN_CHUNK_PREP_BWD_CPU");
+    }
+
+    let g_data = g_dg.to_vec_f32()?;
+    let c_data = c_dg.to_vec_f32()?;
+    println!("GPU dg = {:?}", g_data);
+    println!("CPU dg = {:?}", c_data);
+    let me = |a: &[f32], b: &[f32]| -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+    };
+    println!("dg max err = {}", me(&g_data, &c_data));
+    println!("dv max err = {}", me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?));
+    println!("dkkt max err = {}", me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?));
+    println!("dqkt max err = {}", me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?));
+    println!("dks max err = {}", me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?));
+    println!("dqs max err = {}", me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?));
+    assert!(me(&g_data, &c_data) < 1e-4, "dg mismatch");
+    assert!(me(&g_dv.to_vec_f32()?, &c_dv.to_vec_f32()?) < 1e-4, "dv mismatch");
+    assert!(me(&g_dkkt.to_vec_f32()?, &c_dkkt.to_vec_f32()?) < 1e-4, "dkkt mismatch");
+    assert!(me(&g_dqkt.to_vec_f32()?, &c_dqkt.to_vec_f32()?) < 1e-4, "dqkt mismatch");
+    assert!(me(&g_dks.to_vec_f32()?, &c_dks.to_vec_f32()?) < 1e-4, "dks mismatch");
+    assert!(me(&g_dqs.to_vec_f32()?, &c_dqs.to_vec_f32()?) < 1e-4, "dqs mismatch");
+    Ok(())
+}
+
 // ---------------- vk_solve_tri_transpose ----------------
 
 #[test]
