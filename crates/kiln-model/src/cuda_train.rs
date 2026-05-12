@@ -510,6 +510,34 @@ pub fn cuda_add(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_sub(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        lhs.as_tensor().shape() == rhs.as_tensor().shape(),
+        "cuda_sub: shape mismatch lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dtype() == rhs.dtype(),
+        "cuda_sub: dtype mismatch lhs={:?} rhs={:?}",
+        lhs.dtype(),
+        rhs.dtype()
+    );
+    let out = (lhs.as_tensor() - rhs.as_tensor()).context("cuda_sub: candle CUDA sub")?;
+    let needs_grad = lhs.requires_grad()
+        || lhs.grad_fn().is_some()
+        || lhs.param_id().is_some()
+        || rhs.requires_grad()
+        || rhs.grad_fn().is_some()
+        || rhs.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SubBackward {
+            inputs: vec![lhs.clone(), rhs.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_mul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -547,6 +575,21 @@ pub fn cuda_sum_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
         input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
         Arc::new(SumAllBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_mean_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    let out = input
+        .as_tensor()
+        .mean_all()
+        .context("cuda_mean_all: candle CUDA mean_all")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MeanAllBackward {
             inputs: vec![input.clone()],
         }) as Arc<dyn CudaBackwardOp>
     });
@@ -610,6 +653,37 @@ impl CudaBackwardOp for AddBackward {
 }
 
 #[derive(Debug)]
+struct SubBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SubBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_sub"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_sub backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let rhs_grad = grad_out
+            .as_tensor()
+            .affine(-1.0, 0.0)
+            .context("cuda_sub backward: rhs neg grad")?;
+        Ok(vec![
+            Some(grad_out.clone()),
+            Some(CudaTrainTensor::new(rhs_grad)?),
+        ])
+    }
+}
+
+#[derive(Debug)]
 struct MulBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -665,6 +739,38 @@ impl CudaBackwardOp for SumAllBackward {
             .as_tensor()
             .broadcast_as(input.as_tensor().shape())
             .context("cuda_sum_all backward: broadcast scalar grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct MeanAllBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for MeanAllBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_mean_all"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_mean_all backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let scale = 1.0 / input.num_elements() as f64;
+        let grad = grad_out
+            .as_tensor()
+            .broadcast_as(input.as_tensor().shape())
+            .context("cuda_mean_all backward: broadcast scalar grad")?
+            .affine(scale, 0.0)
+            .context("cuda_mean_all backward: scale grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -975,6 +1081,39 @@ mod tests {
     }
 
     #[test]
+    fn cuda_sub_backward_negates_rhs_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sub backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let lhs_tensor = Tensor::new(vec![5.0f32, 7.0], &device)?;
+        let rhs_tensor = Tensor::new(vec![2.0f32, 11.0], &device)?;
+        let lhs_id = lhs_tensor.id();
+        let rhs_id = rhs_tensor.id();
+        let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
+        let rhs = CudaTrainTensor::parameter(rhs_tensor, rhs_id)?;
+        let diff = cuda_sub(&lhs, &rhs)?;
+        let loss = cuda_sum_all(&diff)?;
+
+        assert_eq!(diff.to_vec_f32()?, vec![3.0, -4.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![-1.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![1.0, 1.0]
+        );
+        assert_eq!(
+            grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
+            vec![-1.0, -1.0]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn cuda_mul_backward_uses_saved_inputs() -> Result<()> {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
@@ -1043,6 +1182,30 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![1.0, 1.0, 1.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_mean_all_backward_scales_scalar_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_mean_all backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![2.0f32, 4.0, 6.0, 8.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let loss = cuda_mean_all(&param)?;
+
+        assert_eq!(loss.to_vec_f32()?, vec![5.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![0.25, 0.25, 0.25, 0.25]
         );
         Ok(())
     }
