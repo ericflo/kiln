@@ -35,6 +35,8 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `e4fdb98e` | CUDA attention fallback validation ledger | Records A6000 release-mode validation for tracked FlashAttention decline plus candle-CUDA training fallback. |
 | `84f29526` | Real Qwen3.5-4B CUDA SFT smoke ledger | Records A6000 release-mode `kiln-bench` validation on downloaded Qwen3.5-4B weights. |
 | `1142aabf` | CUDA Qwen SFT smoke script | Adds `scripts/cuda_qwen_sft_smoke.sh` so the real Qwen3.5-4B CUDA one-step SFT validation is repeatable. |
+| `d12fcafd` | CUDA Qwen smoke script validation ledger | Records A6000 release-mode validation of the repeatable real Qwen3.5-4B SFT smoke script. |
+| `de34a2ee` | CUDA training tensor shell | Adds a CUDA-only `CudaTrainTensor` boundary that rejects CPU tensors and delegates resident SGD/AdamW updates to CUDA kernels. |
 
 Local validation so far:
 
@@ -67,6 +69,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet` re-run after adding tracked FlashAttention-decline assertion
   - `KILN_SPEC_METHOD=off KILN_USE_FLCE=1 cargo run --release --features cuda --bin kiln-bench -- --model-path /workspace/qwen3.5-4b --prompt-tokens 8 --max-output-tokens 1 --training-steps 1 --paged --quiet` passed after downloading `Qwen/Qwen3.5-4B` with `hf download`; CUDA backend loaded the real model, completed one SFT step with `loss=1.598035`, `2.85s/step`, and `18952 MB` peak VRAM.
   - `scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build` passed on the same A6000/model checkout with `loss=1.598035`, `2.65s/step`, and `18952 MB` peak VRAM.
+  - `cargo test --release -p kiln-model --features cuda cuda_train_tensor --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -85,8 +88,9 @@ candle CUDA tensors, FlashAttention, GDN kernels, fused RMSNorm, FLCE Phase B, B
 and several inference/decode fusions. This branch has added CUDA training capability telemetry, a
 lightweight TensorId residency registry, autograd-safe candle-CUDA LoRA/projection hooks, explicit
 attention training declines, and resident in-place SGD/AdamW kernels for registered CUDA tensors.
-It still does **not** have a native CUDA tensor/autograd stack or an end-to-end real-model proof that
-adapter saves observe every backend-resident optimizer update.
+It also now has an initial CUDA-only training tensor boundary over candle CUDA storage. It still does
+**not** have a native CUDA autograd stack, native Qwen forward, or allocator/arena equivalent to the
+Vulkan native training path.
 
 The CUDA port should therefore not copy Vulkan's buffer-upload mechanics blindly. CUDA candle tensors
 already live on the device, so the first useful parity target is to make CUDA training decisions
@@ -110,7 +114,7 @@ explicit, testable, and observable:
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, saved adapter contents, and one-step real Qwen3.5-4B SFT smoke proven. |
 | Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests, trainer-level projection/FLCE routing, and one-step real-model smoke. |
-| Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
+| Native CUDA training stack | `crates/kiln-model/src/cuda_train.rs` provides an initial CUDA-only tensor shell over candle CUDA storage with resident optimizer-kernel delegation. There is still no CUDA equivalent of `vk_train.rs`, native autograd, native Qwen forward, or a training arena. | Initial shell present; full native stack missing. |
 
 ## Phase Plan
 
