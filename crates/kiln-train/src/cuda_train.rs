@@ -100,6 +100,9 @@ fn cuda_lora_pairs<'a>(
             layer.gate_proj.as_ref(),
             layer.up_proj.as_ref(),
             layer.down_proj.as_ref(),
+            layer.in_proj_qkv.as_ref(),
+            layer.in_proj_z.as_ref(),
+            layer.gdn_out_proj.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -535,6 +538,9 @@ pub fn save_cuda_lora_adapter(
             ("gate_proj", layer.gate_proj.as_ref()),
             ("up_proj", layer.up_proj.as_ref()),
             ("down_proj", layer.down_proj.as_ref()),
+            ("in_proj_qkv", layer.in_proj_qkv.as_ref()),
+            ("in_proj_z", layer.in_proj_z.as_ref()),
+            ("gdn_out_proj", layer.gdn_out_proj.as_ref()),
         ] {
             let Some(pair) = proj else { continue };
             tensors.insert(
@@ -584,7 +590,8 @@ pub fn write_cuda_adapter_config(output_dir: &Path, rank: usize, alpha: f32) -> 
         "task_type": "CAUSAL_LM",
         "target_modules": [
             "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj"
+            "gate_proj", "up_proj", "down_proj",
+            "in_proj_qkv", "in_proj_z", "gdn_out_proj"
         ],
     });
     let path = output_dir.join("adapter_config.json");
@@ -1400,6 +1407,68 @@ mod tests {
         assert_eq!(config["r"], 2);
         assert_eq!(config["lora_alpha"], 4.0);
         let _ = std::fs::remove_dir_all(&saved_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_lora_adapter_save_includes_gdn_slots() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda GDN LoRA save smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let in_proj_qkv = test_lora_pair(&device, 2, 6, 2, 2.0, 0.04)?;
+        let in_proj_z = test_lora_pair(&device, 2, 2, 2, 2.0, 0.05)?;
+        let gdn_out_proj = test_lora_pair(&device, 2, 2, 2, 2.0, 0.06)?;
+        let in_proj_qkv_a_expected = in_proj_qkv.a.to_vec_f32()?;
+        let in_proj_z_b_expected = in_proj_z.b.to_vec_f32()?;
+        let gdn_out_proj_a_expected = gdn_out_proj.a.to_vec_f32()?;
+        let layers = vec![CudaLoraLayer {
+            in_proj_qkv: Some(in_proj_qkv),
+            in_proj_z: Some(in_proj_z),
+            gdn_out_proj: Some(gdn_out_proj),
+            ..Default::default()
+        }];
+        let adamw = allocate_cuda_lora_adamw_state(&layers)?;
+        assert_eq!(adamw.len(), 6);
+
+        let out_dir = std::env::temp_dir().join(format!(
+            "kiln-cuda-gdn-lora-adapter-dir-{}",
+            std::process::id()
+        ));
+        save_cuda_lora_adapter_dir(&layers, 2, 4.0, &out_dir)?;
+        let loaded = candle_core::safetensors::load(
+            out_dir.join("adapter_model.safetensors"),
+            &Device::Cpu,
+        )?;
+        let in_proj_qkv_a = loaded
+            .get("base_model.model.model.layers.0.in_proj_qkv.lora_A.weight")
+            .context("missing in_proj_qkv lora_A")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let in_proj_z_b = loaded
+            .get("base_model.model.model.layers.0.in_proj_z.lora_B.weight")
+            .context("missing in_proj_z lora_B")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let gdn_out_proj_a = loaded
+            .get("base_model.model.model.layers.0.gdn_out_proj.lora_A.weight")
+            .context("missing gdn_out_proj lora_A")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(in_proj_qkv_a, in_proj_qkv_a_expected);
+        assert_eq!(in_proj_z_b, in_proj_z_b_expected);
+        assert_eq!(gdn_out_proj_a, gdn_out_proj_a_expected);
+        assert_eq!(loaded.len(), 6);
+
+        let config_text = std::fs::read_to_string(out_dir.join("adapter_config.json"))?;
+        assert!(config_text.contains("in_proj_qkv"));
+        assert!(config_text.contains("in_proj_z"));
+        assert!(config_text.contains("gdn_out_proj"));
+        let _ = std::fs::remove_dir_all(&out_dir);
         Ok(())
     }
 }
