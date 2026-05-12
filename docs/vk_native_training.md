@@ -31,16 +31,10 @@ validation on a real model + adapter run.
   6 GDN-chunkwise.
 
 **Known gaps** (Phase 7+ follow-ups):
-- Some helper paths still readback through CPU for layout transforms
-  (chunk concatenation, head-permute in the GDN layer). Correctness-
-  first; perf optimization is a separate plan.
-- `solve_tri.comp` requests 192 KB shared memory and SIGFPEs at
-  pipeline creation on Strix Halo — replaced with a CPU forward-
-  substitution fallback. A correctly-sized GLSL shader is queued.
-- `chunk_prep_bwd`, `chunk_scan_bwd`, `state_exit_bwd`,
-  `solve_tri_transpose`, `gated_rms_norm_bwd` are CPU implementations.
-  GLSL replacements would speed up training but are not on the
-  critical path for correctness.
+- `chunk_prep_bwd` is the only remaining CPU implementation in the
+  GDN backward pipeline. The math is the most complex (cumsum + exp
+  + per-pair masked outer products); a fused GLSL shader is queued
+  but the CPU version is parity-tested via finite-diff and works.
 - Gradient checkpointing for hybrid (GDN) models needs per-segment
   recurrent-state snapshots — the current path bypasses checkpointing
   when GDN layers are present. For Qwen3.5-4B, set
@@ -49,6 +43,18 @@ validation on a real model + adapter run.
 - Per-LoRA-param gradient parity vs the candle reference at T=64 has
   not been measured. The math is parity-tested per-shader / per-op,
   but the end-to-end Qwen3.5-4B numerical bar is the Phase 7 gate.
+
+**GPU residency status** (post-optimization sweep):
+
+The vk-native training step is now GPU-resident end-to-end except for
+chunk_prep_bwd. CPU touchpoints in a step are: (1) input_ids upload
+at the start, (2) loss scalar readback for logging, (3) adapter
+safetensors save at the end of the run. Everything else — embedding,
+RMSNorm, projections (Q/K/V/O + gate/up/down), SDPA, RoPE, FLCE
+loss, GDN chunkwise forward (chunk_prep + solve_tri_v2 + matmul +
+state_update), GDN backward (solve_tri_transpose + chunk_scan_bwd +
+state_exit_bwd + gated_rms_norm_bwd + reverse_cumsum + gates_bwd +
+conv1d_bwd), AdamW step — runs as Vulkan dispatches.
 
 See `docs/vk_native_gdn.md` for the GDN math derivation.
 
