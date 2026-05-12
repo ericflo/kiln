@@ -1853,6 +1853,72 @@ pub fn cuda_cat_rows(parts: &[CudaTrainTensor]) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_causal_depthwise_conv1d_prefill_zero_state(
+    input: &CudaTrainTensor,
+    weight: &CudaTrainTensor,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32 && weight.dtype() == DType::F32,
+        "cuda_causal_depthwise_conv1d_prefill_zero_state: expected F32 input/weight, got {:?}/{:?}",
+        input.dtype(),
+        weight.dtype()
+    );
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_causal_depthwise_conv1d_prefill_zero_state: expected input [rows, channels], got {:?}",
+        input.dims()
+    );
+    ensure!(
+        weight.dims().len() == 2 || weight.dims().len() == 3,
+        "cuda_causal_depthwise_conv1d_prefill_zero_state: expected weight [channels,k] or [channels,1,k], got {:?}",
+        weight.dims()
+    );
+    let rows = input.dims()[0];
+    let channels = input.dims()[1];
+    let kernel = *weight
+        .dims()
+        .last()
+        .context("cuda_causal_depthwise_conv1d_prefill_zero_state: empty weight shape")?;
+    ensure!(
+        kernel > 0,
+        "cuda_causal_depthwise_conv1d_prefill_zero_state: kernel must be non-zero"
+    );
+    ensure!(
+        weight.dims()[0] == channels,
+        "cuda_causal_depthwise_conv1d_prefill_zero_state: weight channels {} != input channels {}",
+        weight.dims()[0],
+        channels
+    );
+    if weight.dims().len() == 3 {
+        ensure!(
+            weight.dims()[1] == 1,
+            "cuda_causal_depthwise_conv1d_prefill_zero_state: rank-3 weight middle dim must be 1, got {}",
+            weight.dims()[1]
+        );
+    }
+
+    let weight_2d = cuda_reshape(weight, &[channels, kernel])?;
+    let prefix = CudaTrainTensor::new(Tensor::zeros(
+        (kernel.saturating_sub(1), channels),
+        DType::F32,
+        input.as_tensor().device(),
+    )?)?;
+    let padded = cuda_cat_rows(&[prefix, input.clone()])?;
+    let mut output = CudaTrainTensor::new(Tensor::zeros(
+        (rows, channels),
+        DType::F32,
+        input.as_tensor().device(),
+    )?)?;
+    for j in 0..kernel {
+        let x_slice = cuda_narrow_rows(&padded, j, rows)?;
+        let w_col_2d = cuda_narrow_last_dim(&weight_2d, j, 1)?;
+        let w_col = cuda_reshape(&w_col_2d, &[channels])?;
+        let term = cuda_mul_last_dim_weight(&x_slice, &w_col)?;
+        output = cuda_add(&output, &term)?;
+    }
+    Ok(output)
+}
+
 pub fn cuda_index_select_rows(
     input: &CudaTrainTensor,
     indices: &[usize],
@@ -4859,6 +4925,53 @@ mod tests {
                 .context("missing second grad")?
                 .to_vec_f32()?,
             vec![3.0, 30.0, 4.0, 40.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_causal_depthwise_conv1d_prefill_zero_state_matches_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda conv1d prefill smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (3usize, 2usize),
+            &device,
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
+        let weight_tensor = Tensor::from_vec(
+            vec![1.0f32, 10.0, 100.0, 2.0, 20.0, 200.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let weight_id = weight_tensor.id();
+        let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
+        let output = cuda_causal_depthwise_conv1d_prefill_zero_state(&input, &weight)?;
+        let loss = cuda_sum_all(&output)?;
+
+        assert_eq!(output.dims(), &[3, 2]);
+        assert_eq!(
+            output.to_vec_f32()?,
+            vec![100.0, 400.0, 310.0, 840.0, 531.0, 1284.0]
+        );
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(input_id).context("missing input grad")?.to_vec_f32()?,
+            vec![111.0, 222.0, 110.0, 220.0, 100.0, 200.0]
+        );
+        assert_eq!(
+            grads
+                .get(weight_id)
+                .context("missing weight grad")?
+                .to_vec_f32()?,
+            vec![1.0, 4.0, 9.0, 2.0, 6.0, 12.0]
         );
         Ok(())
     }
