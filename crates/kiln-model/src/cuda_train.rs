@@ -374,6 +374,21 @@ pub fn cuda_mul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_sum_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    let out = input
+        .as_tensor()
+        .sum_all()
+        .context("cuda_sum_all: candle CUDA sum_all")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SumAllBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -421,6 +436,35 @@ impl CudaBackwardOp for MulBackward {
             Some(CudaTrainTensor::new(lhs_grad)?),
             Some(CudaTrainTensor::new(rhs_grad)?),
         ])
+    }
+}
+
+#[derive(Debug)]
+struct SumAllBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SumAllBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_sum_all"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_sum_all backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let input = &self.inputs[0];
+        let grad = grad_out
+            .as_tensor()
+            .broadcast_as(input.as_tensor().shape())
+            .context("cuda_sum_all backward: broadcast scalar grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
 
@@ -696,6 +740,55 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![8.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sum_all_backward_broadcasts_scalar_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sum_all backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let loss = cuda_sum_all(&param)?;
+
+        assert_eq!(loss.to_vec_f32()?, vec![6.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![1.0, 1.0, 1.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sum_of_square_graph_matches_expected_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sum square graph smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![1.0f32, 2.0, 3.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let squared = cuda_mul(&param, &param)?;
+        let loss = cuda_sum_all(&squared)?;
+
+        assert_eq!(loss.to_vec_f32()?, vec![14.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![2.0, 4.0, 6.0]
         );
         Ok(())
     }
