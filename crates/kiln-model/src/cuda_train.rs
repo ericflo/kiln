@@ -2080,6 +2080,11 @@ pub struct CudaGdnSingleTokenOutput {
     pub next_state: CudaTrainTensor,
 }
 
+pub struct CudaGdnSingleHeadSequenceOutput {
+    pub out: CudaTrainTensor,
+    pub next_state: CudaTrainTensor,
+}
+
 pub fn cuda_gdn_single_token_recurrence(
     q: &CudaTrainTensor,
     k: &CudaTrainTensor,
@@ -2149,6 +2154,77 @@ pub fn cuda_gdn_single_token_recurrence(
     let next_state = cuda_add(&state_scaled, &delta_state)?;
 
     Ok(CudaGdnSingleTokenOutput { out, next_state })
+}
+
+pub fn cuda_gdn_single_head_sequence_recurrence(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    beta: &CudaTrainTensor,
+    g: &CudaTrainTensor,
+    state: &CudaTrainTensor,
+) -> Result<CudaGdnSingleHeadSequenceOutput> {
+    ensure!(
+        q.dtype() == DType::F32
+            && k.dtype() == DType::F32
+            && v.dtype() == DType::F32
+            && beta.dtype() == DType::F32
+            && g.dtype() == DType::F32
+            && state.dtype() == DType::F32,
+        "cuda_gdn_single_head_sequence_recurrence: expected F32 tensors"
+    );
+    ensure!(
+        q.dims().len() == 2
+            && k.dims().len() == 2
+            && v.dims().len() == 2
+            && beta.dims().len() == 2
+            && g.dims().len() == 2
+            && state.dims().len() == 2,
+        "cuda_gdn_single_head_sequence_recurrence: expected q/k/v/beta/g/state ranks 2, got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+    let rows = q.dims()[0];
+    let dk = q.dims()[1];
+    let dv = v.dims()[1];
+    ensure!(
+        rows > 0
+            && k.dims() == [rows, dk]
+            && v.dims()[0] == rows
+            && beta.dims() == [rows, 1]
+            && g.dims() == [rows, 1]
+            && state.dims() == [dk, dv],
+        "cuda_gdn_single_head_sequence_recurrence: expected q/k=[rows,dk], v=[rows,dv], beta/g=[rows,1], state=[dk,dv], got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+
+    let mut current_state = state.clone();
+    let mut outs = Vec::with_capacity(rows);
+    for row in 0..rows {
+        let q_t = cuda_narrow_rows(q, row, 1)?;
+        let k_t = cuda_narrow_rows(k, row, 1)?;
+        let v_t = cuda_narrow_rows(v, row, 1)?;
+        let beta_t = cuda_narrow_rows(beta, row, 1)?;
+        let g_t = cuda_narrow_rows(g, row, 1)?;
+        let step =
+            cuda_gdn_single_token_recurrence(&q_t, &k_t, &v_t, &beta_t, &g_t, &current_state)?;
+        outs.push(step.out);
+        current_state = step.next_state;
+    }
+    let out = cuda_cat_rows(&outs)?;
+    Ok(CudaGdnSingleHeadSequenceOutput {
+        out,
+        next_state: current_state,
+    })
 }
 
 pub fn cuda_index_select_rows(
@@ -5441,6 +5517,86 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "GDN single-token state mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+
+        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let grads = cuda_backward(&loss)?;
+        assert!(grads.get(q_id).is_some());
+        assert!(grads.get(k_id).is_some());
+        assert!(grads.get(v_id).is_some());
+        assert!(grads.get(beta_id).is_some());
+        assert!(grads.get(g_id).is_some());
+        assert!(grads.get(state_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_gdn_single_head_sequence_recurrence_threads_state() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda GDN sequence smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let q_tensor =
+            Tensor::from_vec(vec![0.5f32, -1.0, 0.25, 0.75], (2usize, 2usize), &device)?;
+        let k_tensor =
+            Tensor::from_vec(vec![1.5f32, 0.25, -0.5, 1.0], (2usize, 2usize), &device)?;
+        let v_tensor = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.3, 0.4, 0.2, -0.1],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let beta_tensor = Tensor::from_vec(vec![0.4f32, 0.6], (2usize, 1usize), &device)?;
+        let g_tensor = Tensor::from_vec(vec![0.0f32, 0.0], (2usize, 1usize), &device)?;
+        let state_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let beta_id = beta_tensor.id();
+        let g_id = g_tensor.id();
+        let state_id = state_tensor.id();
+        let q = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v = CudaTrainTensor::parameter(v_tensor, v_id)?;
+        let beta = CudaTrainTensor::parameter(beta_tensor, beta_id)?;
+        let g = CudaTrainTensor::parameter(g_tensor, g_id)?;
+        let state = CudaTrainTensor::parameter(state_tensor, state_id)?;
+
+        let result = cuda_gdn_single_head_sequence_recurrence(&q, &k, &v, &beta, &g, &state)?;
+        assert_eq!(result.out.dims(), &[2, 3]);
+        assert_eq!(result.next_state.dims(), &[2, 3]);
+        let expected_out = [-3.98f32, -4.89, -5.64, 1.3675, 1.49, 1.815];
+        for (idx, (actual, expected)) in result
+            .out
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_out.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN sequence out mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_state = [0.634f32, 0.737, 1.302, 1.612, 1.741, 1.986];
+        for (idx, (actual, expected)) in result
+            .next_state
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_state.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN sequence state mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
 
