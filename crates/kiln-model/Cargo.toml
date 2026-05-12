@@ -30,6 +30,7 @@ rayon = { workspace = true }
 indicatif = "0.18"
 console = "0.16"
 half = { version = "2", optional = true }
+objc2 = { version = "0.6", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 
 
@@ -37,7 +38,7 @@ objc2-metal = { version = "0.3", optional = true }
 cuda = ["candle-core/cuda", "candle-nn/cuda", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:half"]
 # Enable candle's Metal backend on Apple Silicon. Pulls in candle-metal-kernels
 # (JIT-compiled MSL shaders cached in the MetalDevice); no Xcode required.
-metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
+metal = ["candle-core/metal", "candle-nn/metal", "dep:candle-metal-kernels", "dep:objc2", "dep:objc2-metal"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.

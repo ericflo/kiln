@@ -1814,6 +1814,7 @@ dependencies = [
  "kiln-rmsnorm-kernel",
  "kiln-vulkan-kernel",
  "memmap2",
+ "objc2",
  "objc2-metal",
  "rand 0.10.1",
  "rayon",
