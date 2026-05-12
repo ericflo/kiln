@@ -11,8 +11,8 @@ use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaGdnLayerState, CudaLayerWeights,
-    CudaLinearAttentionState, CudaModelWeights, CudaOwnedFullAttentionLayer,
-    CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena, CudaTrainTensor,
+    CudaLinearAttentionState, CudaModelWeights, CudaOwnedLinearAttentionLayer, CudaRopeTables,
+    CudaTrainArena, CudaTrainTensor,
     cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
     cuda_causal_depthwise_conv1d_prefill_with_state, cuda_embedding_lookup, cuda_exp,
     cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_matmul, cuda_mul,
@@ -1220,21 +1220,6 @@ fn ensure_cuda_native_sft_supported(model: &CudaModelWeights) -> Result<()> {
         !model.layers.is_empty(),
         "cuda_native_sft_train: model has no transformer layers"
     );
-    let unsupported: Vec<usize> = model
-        .layers
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, layer)| match layer {
-            CudaLayerWeights::FullAttention(_) => None,
-            CudaLayerWeights::LinearAttention(_) => Some(idx),
-        })
-        .collect();
-    ensure!(
-        unsupported.is_empty(),
-        "cuda_native_sft_train currently supports FullAttention-only models; \
-         LinearAttention/GDN layers are not wired yet at indices {:?}",
-        unsupported
-    );
     Ok(())
 }
 
@@ -1299,6 +1284,10 @@ pub fn cuda_native_sft_train(
     );
 
     let total_steps = config.epochs * tokenized.len();
+    let has_gdn = model
+        .layers
+        .iter()
+        .any(|layer| matches!(layer, CudaLayerWeights::LinearAttention(_)));
     let mut global_step = 0usize;
     let mut last_loss = 0.0f32;
     for epoch in 0..config.epochs {
@@ -1306,14 +1295,27 @@ pub fn cuda_native_sft_train(
         for token_ids in &tokenized {
             global_step += 1;
             let mut arena = CudaTrainArena::new(model.token_embedding.as_tensor().device())?;
-            let loss = cuda_full_attention_lora_model_adamw_step_with_arena(
-                &model,
-                &lora_layers,
-                token_ids,
-                &mut adamw,
-                cfg,
-                &mut arena,
-            )
+            let loss = if has_gdn {
+                let mut gdn_state = cuda_linear_attention_state_zeros_for_model(&model, 1)?;
+                cuda_lora_model_adamw_step_with_gdn_state_with_arena(
+                    &model,
+                    &lora_layers,
+                    token_ids,
+                    &mut gdn_state,
+                    &mut adamw,
+                    cfg,
+                    &mut arena,
+                )
+            } else {
+                cuda_full_attention_lora_model_adamw_step_with_arena(
+                    &model,
+                    &lora_layers,
+                    token_ids,
+                    &mut adamw,
+                    cfg,
+                    &mut arena,
+                )
+            }
             .with_context(|| {
                 format!(
                     "cuda_native_sft_train step {} epoch {}",
@@ -1510,6 +1512,7 @@ pub fn save_cuda_lora_adapter_dir(
 mod tests {
     use super::*;
     use candle_core::{Device, Tensor};
+    use kiln_model::cuda_train::CudaOwnedFullAttentionLayer;
 
     fn test_lora_pair(
         device: &Device,
@@ -2060,11 +2063,7 @@ mod tests {
             hidden: 2,
         };
 
-        let err = ensure_cuda_native_sft_supported(&model).expect_err("mixed GDN model rejects");
-        assert!(
-            err.to_string().contains("FullAttention-only models"),
-            "unexpected error: {err:#}"
-        );
+        ensure_cuda_native_sft_supported(&model)?;
 
         let lora_layers = cuda_init_lora_layers(&model, 2, 4.0, 0xC0DA_1A7E)?;
         assert_eq!(lora_layers.len(), 2);
