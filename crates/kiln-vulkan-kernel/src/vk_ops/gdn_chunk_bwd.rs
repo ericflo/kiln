@@ -47,8 +47,9 @@ fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: Vec<usize>) -> Result
 
 /// Solve M^T · dr = dW where M = (I + diag(β) · A_strict).
 ///
-/// Upper-triangular back-substitution (M^T is upper-tri unit-diag scaled
-/// by β). Implemented per-(B*H) on CPU for v1.
+/// Upper-triangular back-substitution. Uses the GPU shader
+/// `vk_solve_tri_transpose.comp` with bounded shared memory (32 KB
+/// at chunk=64, DV_PER_WG=64).
 ///
 /// Inputs:
 ///   a_strict: [B, nv, C, C]  (strict-lower)
@@ -66,17 +67,52 @@ pub fn vk_solve_tri_transpose_no_grad(
     dv: usize,
 ) -> Result<VkTensor> {
     let device = a_strict.device();
+    let out = alloc_f32(device, batch * nv * chunk * dv)?;
+
+    if std::env::var("KILN_VK_SOLVE_TRI_TRANSPOSE_CPU").is_ok() {
+        return cpu_solve_tri_transpose(a_strict, beta, dw, out, batch, nv, chunk, dv);
+    }
+
+    let dv_per_wg = 64u32;
+    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let push = [batch as u32, nv as u32, chunk as u32, dv as u32];
+    crate::vk_ops::dispatch_simple_2d(
+        device,
+        "vk_solve_tri_transpose",
+        &[
+            a_strict.buffer().handle(),
+            beta.buffer().handle(),
+            dw.buffer().handle(),
+            out.handle(),
+        ],
+        &push,
+        ((batch * nv) as u32, dv_tiles),
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, nv, chunk, dv],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+/// CPU fallback for vk_solve_tri_transpose, accessible via
+/// KILN_VK_SOLVE_TRI_TRANSPOSE_CPU=1 for debugging.
+fn cpu_solve_tri_transpose(
+    a_strict: &VkTensor,
+    beta: &VkTensor,
+    dw: &VkTensor,
+    out: Arc<VulkanBuffer>,
+    batch: usize,
+    nv: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<VkTensor> {
+    let device = a_strict.device();
     let a = a_strict.to_vec_f32()?;
     let b = beta.to_vec_f32()?;
     let dw_d = dw.to_vec_f32()?;
     let mut dr = vec![0.0_f32; batch * nv * chunk * dv];
-
-    // M[t, i] = δ_{ti} + β[t] · A_strict[t, i]
-    // M^T[t, i] = δ_{ti} + β[i] · A_strict[i, t]
-    //
-    // Solve M^T · dr = dW for dr (upper-tri back-sub):
-    //   For t from C-1 down to 0:
-    //     dr[t, d] = dW[t, d] - Σ_{i > t} β[i] · A_strict[i, t] · dr[i, d]
     for bh in 0..batch * nv {
         let a_base = bh * chunk * chunk;
         let v_base = bh * chunk * dv;
@@ -91,7 +127,21 @@ pub fn vk_solve_tri_transpose_no_grad(
             }
         }
     }
-    upload(device, &dr, vec![batch, nv, chunk, dv])
+    let raw: Vec<u8> = dr.iter().flat_map(|f| f.to_le_bytes()).collect();
+    VulkanBuffer::upload_data(
+        device.device(),
+        device.host_visible_mem_type(),
+        device.queue(),
+        device.queue_family_index(),
+        &out,
+        &raw,
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, nv, chunk, dv],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
 }
 
 /// Backward of the chunk_scan stage:

@@ -1,0 +1,87 @@
+// vk_solve_tri_transpose — upper-triangular back-substitution that
+// solves M^T · dr = dW where M = (I + diag(β) · A_strict).
+//
+// Adjoint of vk_solve_tri_v2 used in the GDN backward pass.
+//
+//   M^T[t, i] = δ_{ti} + β[i] · A_strict[i, t]    (note swapped indices)
+//
+// Solve:  for t from C-1 down to 0:
+//           dr[t, d] = dW[t, d] - Σ_{i>t} β[i] · A_strict[i, t] · dr[i, d]
+//
+// Bindings (4): a_strict, beta, dW → dr.
+// Push constants: batch, heads, chunk (≤ 64), dv.
+//
+// Same shared-memory layout as vk_solve_tri_v2:
+//   sA: chunk × chunk floats (loaded once)
+//   sR: chunk × DV_PER_WG floats (running dr in shared mem)
+// Total: 32 KB at chunk=64, DV_PER_WG=64.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
+layout(binding = 1) readonly buffer BetaBuf    { float data_beta[]; };
+layout(binding = 2) readonly buffer DWBuf      { float data_dw[]; };
+layout(binding = 3) writeonly buffer DRBuf     { float data_dr[]; };
+
+shared float sA[4096];   // 64 × 64 max
+shared float sR[4096];   // 64 × 64 max  (chunk × DV_PER_WG)
+
+void main() {
+    const uint DV_PER_WG = 64u;
+    uint bh = gl_WorkGroupID.x;
+    uint dv_tile = gl_WorkGroupID.y;
+    if (bh >= batch * heads) return;
+    uint dv_start = dv_tile * DV_PER_WG;
+    if (dv_start >= dv) return;
+    uint dv_end = min(dv_start + DV_PER_WG, dv);
+    uint dv_count = dv_end - dv_start;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint blk = gl_WorkGroupSize.x;
+
+    uint base_a = bh * chunk * chunk;
+    uint base_v = bh * chunk * dv;
+
+    // Load A_strict once.
+    uint total_a = chunk * chunk;
+    for (uint i = tid; i < total_a; i += blk) {
+        sA[i] = data_a_strict[base_a + i];
+    }
+    barrier();
+
+    // Reverse-order scan: t = C-1 down to 0.
+    for (int t = int(chunk) - 1; t >= 0; --t) {
+        uint dw_base = base_v + uint(t) * dv + dv_start;
+        uint sr_row_base = uint(t) * DV_PER_WG;
+
+        if (tid < dv_count) {
+            float acc = 0.0;
+            // Σ_{i>t} β[i] · A_strict[i, t] · sR[i, d]
+            for (uint i = uint(t) + 1u; i < chunk; ++i) {
+                float beta_i = data_beta[bh * chunk + i];
+                float a_it = sA[i * chunk + uint(t)];
+                acc += beta_i * a_it * sR[i * DV_PER_WG + tid];
+            }
+            sR[sr_row_base + tid] = data_dw[dw_base + tid] - acc;
+        }
+        barrier();
+    }
+
+    // Write dr from shared memory back to the output buffer.
+    for (uint t = 0; t < chunk; ++t) {
+        uint out_base = base_v + t * dv + dv_start;
+        if (tid < dv_count) {
+            data_dr[out_base + tid] = sR[t * DV_PER_WG + tid];
+        }
+    }
+}
