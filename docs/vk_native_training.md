@@ -5,6 +5,47 @@ autograd with a native `VkTensor` type and eager autograd tape so
 every forward intermediate, every gradient, and every optimizer state
 lives in Vulkan device memory.
 
+## Status (2026-05-11)
+
+End-to-end vk-native training is **wired together for hybrid
+Qwen3.5-4B** (24 GDN + 8 FullAttn layers). Subject to runtime
+validation on a real model + adapter run.
+
+**Ready to use** (gated behind `KILN_VK_NATIVE_TRAINING=1`):
+- `vk_native_sft_train` (multi-epoch loop, LoRA init, AdamW, adapter
+  save in PEFT format) — wired into `kiln-server`'s training queue.
+- FullAttn layer with Qwen3.5 specifics: per-head Q/K-norm,
+  `attn_output_gate` (q_proj fused with [Q, gate], sigmoid·attn).
+- GDN layer (chunkwise forward + backward, conv1d, gates,
+  gated_rms_norm, full state plumbing).
+- `VkModelWeights::from_gpu_weights`: candle `GpuWeights` →
+  vk-native, dispatching FullAttention vs LinearAttention.
+- 25 parity tests passing (9 smoke + 4 GDN-foundation +
+  6 GDN-backward + 6 GDN-chunkwise).
+
+**Known gaps** (Phase 7+ follow-ups):
+- Some helper paths still readback through CPU for layout transforms
+  (chunk concatenation, head-permute in the GDN layer). Correctness-
+  first; perf optimization is a separate plan.
+- `solve_tri.comp` requests 192 KB shared memory and SIGFPEs at
+  pipeline creation on Strix Halo — replaced with a CPU forward-
+  substitution fallback. A correctly-sized GLSL shader is queued.
+- `chunk_prep_bwd`, `chunk_scan_bwd`, `state_exit_bwd`,
+  `solve_tri_transpose`, `gated_rms_norm_bwd` are CPU implementations.
+  GLSL replacements would speed up training but are not on the
+  critical path for correctness.
+- Gradient checkpointing (`vk_checkpointed_forward_backward`) is not
+  yet wired — single-step forward+backward only. For T=918 the peak
+  memory may exceed 22 GB without checkpointing.
+- RoPE is not yet wired into `vk_full_attention_layer` — the FullAttn
+  arm currently runs SDPA without rotary. `vk_rope` exists in vk_ops
+  with autograd; just needs the cos/sin precompute + reshape glue.
+- Per-LoRA-param gradient parity vs the candle reference at T=64 has
+  not been measured. The math is parity-tested per-shader / per-op,
+  but the end-to-end Qwen3.5-4B numerical bar is the Phase 7 gate.
+
+See `docs/vk_native_gdn.md` for the GDN math derivation.
+
 On unified-memory hardware (AMD Strix Halo APUs, Intel iGPUs, etc.)
 the bytes never physically move — they just stop being accounted as
 anon-rss by the kernel, eliminating the OOM ceiling that candle's

@@ -1,5 +1,48 @@
 # Vulkan-native Gated DeltaNet (GDN) — design + math
 
+## Shipped state (2026-05-11)
+
+The math + phasing in this document has been substantially implemented:
+
+| Phase | Component | Status | Files |
+|-------|-----------|--------|-------|
+| G1 | VkLinearAttentionState | ✅ | `vk_ops/gdn_state.rs` |
+| G1 | conv1d forward (existing kernel wrapper) | ✅ | `vk_ops/conv1d.rs` |
+| G1 | conv1d backward (new shader) | ✅ | `csrc/shaders/vk_causal_conv1d_bwd.comp` |
+| G1 | gates forward | ✅ | `vk_ops/gdn_gates.rs` |
+| G1 | gates backward (new shader) | ✅ | `csrc/shaders/vk_gdn_gates_bwd.comp` |
+| G1 | gated RMSNorm forward | ✅ | `vk_ops/gdn_gated_rms_norm.rs` |
+| G1 | gated RMSNorm backward (CPU) | ✅ | same file |
+| G2 | chunk_prep wrapper | ✅ | `vk_ops/gdn_chunk_prep.rs` |
+| G2 | solve_tri (CPU fallback — see note below) | ✅ | `vk_ops/solve_tri.rs` |
+| G2 | chunkwise forward composition | ✅ | `vk_ops/gdn_chunkwise.rs` |
+| G3 | solve_tri_transpose (CPU) | ✅ | `vk_ops/gdn_chunk_bwd.rs` |
+| G3 | chunk_scan_bwd (CPU) | ✅ | same file |
+| G3 | state_exit_bwd (CPU) | ✅ | same file |
+| G4 | reverse_cumsum (new shader) | ✅ | `csrc/shaders/vk_reverse_cumsum.comp` |
+| G4 | chunk_prep_bwd (CPU) | ✅ | `vk_ops/gdn_chunk_bwd.rs` |
+| G5 | cross-chunk autograd composition | ✅ | `vk_ops/gdn_chunkwise.rs::vk_gdn_chunkwise` |
+| G6 | full GDN layer + dispatch | ✅ | `kiln-model/src/vk_forward.rs::vk_gdn_layer_forward` |
+| G7 | trainer integration + state plumbing | ✅ | `vk_train.rs::vk_native_sft_train` |
+
+**Note on solve_tri**: The existing inference shader `solve_tri.comp`
+requests 192 KB of shared memory which exceeds typical per-workgroup
+limits and SIGFPEs at pipeline creation on Strix Halo. The vk-native
+chunkwise forward currently uses a CPU forward-substitution fallback
+for the W solve (sizes are bounded — ~16 KB per layer per chunk). A
+correctly-sized GLSL replacement is a follow-up.
+
+Per-piece parity tests live in:
+- `tests/vk_gdn_foundation_parity.rs` (4 forward tests)
+- `tests/vk_gdn_backward_parity.rs` (6 backward tests, finite-diff
+  validated for the analytic backward pieces)
+- `tests/vk_gdn_chunkwise_parity.rs` (6 tests, includes T=128 vs CPU
+  per-token reference within 7.45e-8)
+
+End-to-end Qwen3.5-4B run on `/tmp/sft.jsonl` is the next validation
+gate (no code changes needed — just runtime).
+
+
 Qwen3.5-4B is a hybrid: 24 of its 32 layers are Gated DeltaNet (linear
 recurrent attention with a chunkwise-parallel forward), 8 are full GQA.
 For vk-native end-to-end training of this model the GDN layers must
