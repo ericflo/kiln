@@ -566,6 +566,53 @@ pub fn cuda_mul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_div(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        lhs.as_tensor().shape() == rhs.as_tensor().shape(),
+        "cuda_div: shape mismatch lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dtype() == rhs.dtype(),
+        "cuda_div: dtype mismatch lhs={:?} rhs={:?}",
+        lhs.dtype(),
+        rhs.dtype()
+    );
+    let out = lhs
+        .as_tensor()
+        .broadcast_div(rhs.as_tensor())
+        .context("cuda_div: candle CUDA div")?;
+    let needs_grad = lhs.requires_grad()
+        || lhs.grad_fn().is_some()
+        || lhs.param_id().is_some()
+        || rhs.requires_grad()
+        || rhs.grad_fn().is_some()
+        || rhs.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(DivBackward {
+            inputs: vec![lhs.clone(), rhs.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_scale(input: &CudaTrainTensor, scale: f32) -> Result<CudaTrainTensor> {
+    let out = input
+        .as_tensor()
+        .affine(scale as f64, 0.0)
+        .context("cuda_scale: candle CUDA scale")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(ScaleBackward {
+            inputs: vec![input.clone()],
+            scale,
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_sum_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     let out = input
         .as_tensor()
@@ -756,6 +803,78 @@ impl CudaBackwardOp for MulBackward {
             Some(CudaTrainTensor::new(lhs_grad)?),
             Some(CudaTrainTensor::new(rhs_grad)?),
         ])
+    }
+}
+
+#[derive(Debug)]
+struct DivBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for DivBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_div"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_div backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let lhs = &self.inputs[0];
+        let rhs = &self.inputs[1];
+        let lhs_grad = grad_out
+            .as_tensor()
+            .broadcast_div(rhs.as_tensor())
+            .context("cuda_div backward: lhs grad")?;
+        let rhs_sq = (rhs.as_tensor() * rhs.as_tensor()).context("cuda_div backward: rhs square")?;
+        let neg_lhs = lhs
+            .as_tensor()
+            .affine(-1.0, 0.0)
+            .context("cuda_div backward: neg lhs")?;
+        let rhs_factor = neg_lhs
+            .broadcast_div(&rhs_sq)
+            .context("cuda_div backward: rhs factor")?;
+        let rhs_grad =
+            (grad_out.as_tensor() * &rhs_factor).context("cuda_div backward: rhs grad")?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(lhs_grad)?),
+            Some(CudaTrainTensor::new(rhs_grad)?),
+        ])
+    }
+}
+
+#[derive(Debug)]
+struct ScaleBackward {
+    inputs: Vec<CudaTrainTensor>,
+    scale: f32,
+}
+
+impl CudaBackwardOp for ScaleBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_scale"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_scale backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let grad = grad_out
+            .as_tensor()
+            .affine(self.scale as f64, 0.0)
+            .context("cuda_scale backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
 
@@ -1262,6 +1381,65 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![8.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_div_backward_uses_quotient_rule() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_div backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let lhs_tensor = Tensor::new(vec![6.0f32, 8.0], &device)?;
+        let rhs_tensor = Tensor::new(vec![2.0f32, 4.0], &device)?;
+        let lhs_id = lhs_tensor.id();
+        let rhs_id = rhs_tensor.id();
+        let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
+        let rhs = CudaTrainTensor::parameter(rhs_tensor, rhs_id)?;
+        let quotient = cuda_div(&lhs, &rhs)?;
+        let loss = cuda_sum_all(&quotient)?;
+
+        assert_eq!(quotient.to_vec_f32()?, vec![3.0, 2.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![5.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![0.5, 0.25]
+        );
+        assert_eq!(
+            grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
+            vec![-1.5, -0.5]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_scale_backward_scales_grad() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_scale backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![1.0f32, -3.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let scaled = cuda_scale(&param, 2.5)?;
+        let loss = cuda_sum_all(&scaled)?;
+
+        assert_eq!(scaled.to_vec_f32()?, vec![2.5, -7.5]);
+        assert_eq!(loss.to_vec_f32()?, vec![-5.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(param_id).expect("param grad").to_vec_f32()?,
+            vec![2.5, 2.5]
         );
         Ok(())
     }
