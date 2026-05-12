@@ -1245,6 +1245,18 @@ pub fn cuda_index_select_rows(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_embedding_lookup(
+    table: &CudaTrainTensor,
+    token_ids: &[usize],
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        table.dims().len() == 2,
+        "cuda_embedding_lookup: expected rank-2 [vocab, hidden] table, got {:?}",
+        table.dims()
+    );
+    cuda_index_select_rows(table, token_ids)
+}
+
 pub fn cuda_permute_rh_to_hr(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         input.dtype() == DType::F32,
@@ -3370,6 +3382,43 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![20.0, 2.0, 0.0, 0.0, 40.0, 4.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_embedding_lookup_backward_scatter_adds_token_grads() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_embedding_lookup backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let table_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            (4usize, 2usize),
+            &device,
+        )?;
+        let table_id = table_tensor.id();
+        let table = CudaTrainTensor::parameter(table_tensor, table_id)?;
+        let embedded = cuda_embedding_lookup(&table, &[2, 0, 2])?;
+        let weights = CudaTrainTensor::new(Tensor::from_vec(
+            vec![10.0f32, 1.0, 20.0, 2.0, 30.0, 3.0],
+            (3usize, 2usize),
+            &device,
+        )?)?;
+        let weighted = cuda_mul(&embedded, &weights)?;
+        let loss = cuda_sum_all(&weighted)?;
+
+        assert_eq!(embedded.dims(), &[3, 2]);
+        assert_eq!(embedded.to_vec_f32()?, vec![5.0, 6.0, 1.0, 2.0, 5.0, 6.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![248.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(table_id).expect("table grad").to_vec_f32()?,
+            vec![20.0, 2.0, 0.0, 0.0, 40.0, 4.0, 0.0, 0.0]
         );
         Ok(())
     }
