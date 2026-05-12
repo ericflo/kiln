@@ -34,6 +34,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `39ef69c1` | CUDA attention training fallback proof | Counts tracked FlashAttention declines and extends the CUDA trainer routing test to prove differentiable candle-CUDA attention fallback. |
 | `e4fdb98e` | CUDA attention fallback validation ledger | Records A6000 release-mode validation for tracked FlashAttention decline plus candle-CUDA training fallback. |
 | `84f29526` | Real Qwen3.5-4B CUDA SFT smoke ledger | Records A6000 release-mode `kiln-bench` validation on downloaded Qwen3.5-4B weights. |
+| `1142aabf` | CUDA Qwen SFT smoke script | Adds `scripts/cuda_qwen_sft_smoke.sh` so the real Qwen3.5-4B CUDA one-step SFT validation is repeatable. |
 
 Local validation so far:
 
@@ -65,6 +66,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet` re-run after adding tracked FlashAttention-decline assertion
   - `KILN_SPEC_METHOD=off KILN_USE_FLCE=1 cargo run --release --features cuda --bin kiln-bench -- --model-path /workspace/qwen3.5-4b --prompt-tokens 8 --max-output-tokens 1 --training-steps 1 --paged --quiet` passed after downloading `Qwen/Qwen3.5-4B` with `hf download`; CUDA backend loaded the real model, completed one SFT step with `loss=1.598035`, `2.85s/step`, and `18952 MB` peak VRAM.
+  - `scripts/cuda_qwen_sft_smoke.sh --model-path /workspace/qwen3.5-4b --skip-build` passed on the same A6000/model checkout with `loss=1.598035`, `2.65s/step`, and `18952 MB` peak VRAM.
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
