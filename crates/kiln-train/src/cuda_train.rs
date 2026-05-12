@@ -14,9 +14,10 @@ use kiln_model::cuda_train::{
     CudaOwnedFullAttentionLayer, CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena,
     CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
     cuda_causal_depthwise_conv1d_prefill_with_state, cuda_embedding_lookup, cuda_exp,
-    cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_mul_last_dim_weight,
-    cuda_narrow_last_dim, cuda_reshape, cuda_rmsnorm, cuda_rope, cuda_scale,
-    cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
+    cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_matmul, cuda_mul,
+    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh,
+    cuda_permute_rh_to_hr, cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope,
+    cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
     cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
@@ -265,6 +266,7 @@ pub struct CudaGdnConvQkv {
     pub q: CudaTrainTensor,
     pub k: CudaTrainTensor,
     pub v: CudaTrainTensor,
+    pub z: CudaTrainTensor,
     pub next_conv_state: CudaTrainTensor,
 }
 
@@ -296,6 +298,7 @@ pub fn cuda_gdn_lora_conv_qkv(
         qkv.dims().last().copied().unwrap_or(0),
         expected_qkv_dim
     );
+    let z = cuda_lora_linear(&h_norm, &weights.in_proj_z_weight, lora.in_proj_z.as_ref())?;
     let (conv, next_conv_state) =
         cuda_causal_depthwise_conv1d_prefill_with_state(&qkv, &weights.conv1d_weight, conv_state)
             .context("cuda GDN qkv causal conv1d")?;
@@ -307,6 +310,7 @@ pub fn cuda_gdn_lora_conv_qkv(
         q,
         k,
         v,
+        z,
         next_conv_state,
     })
 }
@@ -394,9 +398,157 @@ pub fn cuda_gdn_lora_output_projection(
         "cuda_gdn_lora_output_projection: expected rank-2 [rows, hidden], got {:?}",
         recurrent_out.dims()
     );
-    let gated = cuda_gdn_gated_rmsnorm(recurrent_out, z, &weights.gated_norm_weight, weights.eps)?;
+    ensure!(
+        recurrent_out.dims() == z.dims(),
+        "cuda_gdn_lora_output_projection: recurrent/z shape mismatch {:?} vs {:?}",
+        recurrent_out.dims(),
+        z.dims()
+    );
+    let rows = recurrent_out.dims()[0];
+    let value_dim = weights.heads_v * weights.head_dim_v;
+    ensure!(
+        recurrent_out.dims()[1] == value_dim,
+        "cuda_gdn_lora_output_projection: recurrent last dim {} != heads_v*head_dim_v {}",
+        recurrent_out.dims()[1],
+        value_dim
+    );
+    let gated = if weights.gated_norm_weight.dims() == [value_dim] {
+        cuda_gdn_gated_rmsnorm(recurrent_out, z, &weights.gated_norm_weight, weights.eps)?
+    } else {
+        ensure!(
+            weights.gated_norm_weight.dims() == [weights.head_dim_v],
+            "cuda_gdn_lora_output_projection: gated norm weight {:?} must match value dim {} or head dim {}",
+            weights.gated_norm_weight.dims(),
+            value_dim,
+            weights.head_dim_v
+        );
+        let per_head = cuda_reshape(recurrent_out, &[rows * weights.heads_v, weights.head_dim_v])?;
+        let z_per_head = cuda_reshape(z, &[rows * weights.heads_v, weights.head_dim_v])?;
+        let normed =
+            cuda_gdn_gated_rmsnorm(&per_head, &z_per_head, &weights.gated_norm_weight, weights.eps)?;
+        cuda_reshape(&normed, &[rows, value_dim])?
+    };
     cuda_lora_linear(&gated, &weights.out_proj_weight, lora.gdn_out_proj.as_ref())
         .context("cuda GDN output projection")
+}
+
+pub struct CudaGdnLoraLayerOutput {
+    pub output: CudaTrainTensor,
+    pub next_recurrent_state: CudaTrainTensor,
+    pub next_conv_state: CudaTrainTensor,
+}
+
+fn cuda_gdn_flatten_token_major_heads(
+    input: &CudaTrainTensor,
+    rows: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims() == [rows, heads * head_dim],
+        "cuda_gdn_flatten_token_major_heads: expected [{},{}], got {:?}",
+        rows,
+        heads * head_dim,
+        input.dims()
+    );
+    let rhd = cuda_reshape(input, &[rows, heads, head_dim])?;
+    let hrd = cuda_permute_rh_to_hr(&rhd)?;
+    cuda_reshape(&hrd, &[heads * rows, head_dim])
+}
+
+fn cuda_gdn_unflatten_head_blocks(
+    input: &CudaTrainTensor,
+    rows: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dims() == [heads * rows, head_dim],
+        "cuda_gdn_unflatten_head_blocks: expected [{},{}], got {:?}",
+        heads * rows,
+        head_dim,
+        input.dims()
+    );
+    let hrd = cuda_reshape(input, &[heads, rows, head_dim])?;
+    let rhd = cuda_permute_hr_to_rh(&hrd)?;
+    cuda_reshape(&rhd, &[rows, heads * head_dim])
+}
+
+pub fn cuda_gdn_lora_layer(
+    input: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+    lora: &CudaLoraLayer,
+    recurrent_state: &CudaTrainTensor,
+    conv_state: &CudaTrainTensor,
+) -> Result<CudaGdnLoraLayerOutput> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_gdn_lora_layer: expected rank-2 [rows, hidden], got {:?}",
+        input.dims()
+    );
+    let rows = input.dims()[0];
+    ensure!(
+        weights.heads_v % weights.heads_k == 0,
+        "cuda_gdn_lora_layer: heads_v {} must be divisible by heads_k {}",
+        weights.heads_v,
+        weights.heads_k
+    );
+    ensure!(
+        recurrent_state.dims() == [weights.heads_v * weights.head_dim_k, weights.head_dim_v],
+        "cuda_gdn_lora_layer: recurrent state {:?} != [{},{}]",
+        recurrent_state.dims(),
+        weights.heads_v * weights.head_dim_k,
+        weights.head_dim_v
+    );
+
+    let conv_qkv = cuda_gdn_lora_conv_qkv(input, weights, lora, conv_state)?;
+    let gates = cuda_gdn_gate_outputs(input, weights)?;
+
+    let q_heads =
+        cuda_gdn_flatten_token_major_heads(&conv_qkv.q, rows, weights.heads_k, weights.head_dim_k)?;
+    let k_heads =
+        cuda_gdn_flatten_token_major_heads(&conv_qkv.k, rows, weights.heads_k, weights.head_dim_k)?;
+    let (q_heads, k_heads) = if weights.heads_k == weights.heads_v {
+        (q_heads, k_heads)
+    } else {
+        let groups = weights.heads_v / weights.heads_k;
+        let q_repeated = cuda_repeat_kv_heads(
+            &cuda_reshape(&q_heads, &[weights.heads_k, rows, weights.head_dim_k])?,
+            groups,
+        )?;
+        let k_repeated = cuda_repeat_kv_heads(
+            &cuda_reshape(&k_heads, &[weights.heads_k, rows, weights.head_dim_k])?,
+            groups,
+        )?;
+        (
+            cuda_reshape(&q_repeated, &[weights.heads_v * rows, weights.head_dim_k])?,
+            cuda_reshape(&k_repeated, &[weights.heads_v * rows, weights.head_dim_k])?,
+        )
+    };
+    let v_heads =
+        cuda_gdn_flatten_token_major_heads(&conv_qkv.v, rows, weights.heads_v, weights.head_dim_v)?;
+    let beta_heads = cuda_gdn_flatten_token_major_heads(&gates.beta, rows, weights.heads_v, 1)?;
+    let g_heads = cuda_gdn_flatten_token_major_heads(&gates.g, rows, weights.heads_v, 1)?;
+
+    let recurrent = cuda_gdn_multi_head_sequence_recurrence(
+        &q_heads,
+        &k_heads,
+        &v_heads,
+        &beta_heads,
+        &g_heads,
+        recurrent_state,
+        weights.heads_v,
+    )?;
+    let recurrent_token_major =
+        cuda_gdn_unflatten_head_blocks(&recurrent.out, rows, weights.heads_v, weights.head_dim_v)?;
+    let projected = cuda_gdn_lora_output_projection(&recurrent_token_major, &conv_qkv.z, weights, lora)?;
+    let output = cuda_add(input, &projected)?;
+
+    Ok(CudaGdnLoraLayerOutput {
+        output,
+        next_recurrent_state: recurrent.next_state,
+        next_conv_state: conv_qkv.next_conv_state,
+    })
 }
 
 fn cuda_lora_per_head_rmsnorm_flat(
@@ -1753,6 +1905,26 @@ mod tests {
         let out_grads = cuda_backward(&out_loss)?;
         let out_pair = lora_layers[1].gdn_out_proj.as_ref().expect("gdn out lora");
         assert!(out_grads.get(out_pair.b_id).is_some());
+
+        let recurrent_state = CudaTrainTensor::new(Tensor::zeros(
+            (2usize, 2usize),
+            DType::F32,
+            &device,
+        )?)?;
+        let layer_out = cuda_gdn_lora_layer(
+            &input,
+            linear_layer,
+            &lora_layers[1],
+            &recurrent_state,
+            &conv_state,
+        )?;
+        assert_eq!(layer_out.output.dims(), &[2, 2]);
+        assert_eq!(layer_out.next_recurrent_state.dims(), &[2, 2]);
+        assert_eq!(layer_out.next_conv_state.dims(), &[2, 6]);
+        let layer_loss = cuda_sum_all(&layer_out.output)?;
+        let layer_grads = cuda_backward(&layer_loss)?;
+        assert!(layer_grads.get(input_id).is_some());
+        assert!(layer_grads.get(out_pair.b_id).is_some());
         Ok(())
     }
 
