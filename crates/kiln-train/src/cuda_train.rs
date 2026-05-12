@@ -18,7 +18,7 @@ use kiln_model::cuda_train::{
     cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_matmul, cuda_mul,
     cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh,
     cuda_permute_rh_to_hr, cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope,
-    cuda_scale, cuda_sdpa_prefill_causal, cuda_shifted_cross_entropy_loss, cuda_sigmoid,
+    cuda_scale, cuda_sdpa_prefill_causal, cuda_shifted_linear_cross_entropy_loss, cuda_sigmoid,
     cuda_silu, cuda_softplus, cuda_sum_all, cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
@@ -29,6 +29,8 @@ use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
 use crate::{SftConfig, SftExample};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
+
+const CUDA_NATIVE_SFT_FLCE_CHUNK: usize = 8192;
 
 /// Trainable LoRA pair held as CUDA training tensors.
 #[derive(Clone)]
@@ -914,15 +916,22 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
         cuda_rmsnorm(&hidden, &model.final_norm_weight, 1e-6)
             .context("cuda FullAttention LoRA model final RMSNorm")?,
     )?;
-    let logits = arena.track(
-        cuda_matmul(&normed, &model.lm_head_weight).context("cuda FullAttention LoRA model LM head")?,
-    )?;
     let loss = if let Some(label_mask) = label_mask {
         arena.track(
-            cuda_shifted_cross_entropy_loss(&logits, token_ids, label_mask)
-                .context("cuda FullAttention LoRA model shifted CE loss")?,
+            cuda_shifted_linear_cross_entropy_loss(
+                &normed,
+                &model.lm_head_weight,
+                token_ids,
+                label_mask,
+                CUDA_NATIVE_SFT_FLCE_CHUNK,
+            )
+            .context("cuda FullAttention LoRA model shifted linear CE loss")?,
         )?
     } else {
+        let logits = arena.track(
+            cuda_matmul(&normed, &model.lm_head_weight)
+                .context("cuda FullAttention LoRA model LM head")?,
+        )?;
         let squared = arena.track(
             cuda_mul(&logits, &logits).context("cuda FullAttention LoRA model square")?,
         )?;
@@ -1053,15 +1062,21 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
         cuda_rmsnorm(&hidden, &model.final_norm_weight, 1e-6)
             .context("cuda LoRA model+GDN final RMSNorm")?,
     )?;
-    let logits = arena.track(
-        cuda_matmul(&normed, &model.lm_head_weight).context("cuda LoRA model+GDN LM head")?,
-    )?;
     let loss = if let Some(label_mask) = label_mask {
         arena.track(
-            cuda_shifted_cross_entropy_loss(&logits, token_ids, label_mask)
-                .context("cuda LoRA model+GDN shifted CE loss")?,
+            cuda_shifted_linear_cross_entropy_loss(
+                &normed,
+                &model.lm_head_weight,
+                token_ids,
+                label_mask,
+                CUDA_NATIVE_SFT_FLCE_CHUNK,
+            )
+            .context("cuda LoRA model+GDN shifted linear CE loss")?,
         )?
     } else {
+        let logits = arena.track(
+            cuda_matmul(&normed, &model.lm_head_weight).context("cuda LoRA model+GDN LM head")?,
+        )?;
         let squared =
             arena.track(cuda_mul(&logits, &logits).context("cuda LoRA model+GDN square")?)?;
         arena.track(cuda_sum_all(&squared).context("cuda LoRA model+GDN loss")?)?

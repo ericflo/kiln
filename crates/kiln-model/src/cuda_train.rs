@@ -1743,6 +1743,201 @@ pub fn cuda_shifted_cross_entropy_loss(
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_shifted_linear_cross_entropy_loss(
+    hidden: &CudaTrainTensor,
+    lm_head_weight: &CudaTrainTensor,
+    input_ids: &[usize],
+    label_mask: &[bool],
+    chunk_size: usize,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        hidden.dtype() == DType::F32 && lm_head_weight.dtype() == DType::F32,
+        "cuda_shifted_linear_cross_entropy_loss expects F32 hidden/head, got {:?}/{:?}",
+        hidden.dtype(),
+        lm_head_weight.dtype()
+    );
+    ensure!(
+        hidden.dims().len() == 2,
+        "cuda_shifted_linear_cross_entropy_loss expected [seq, hidden], got {:?}",
+        hidden.dims()
+    );
+    ensure!(
+        lm_head_weight.dims().len() == 2,
+        "cuda_shifted_linear_cross_entropy_loss expected [hidden, vocab] head, got {:?}",
+        lm_head_weight.dims()
+    );
+    let seq_len = input_ids.len();
+    ensure!(
+        seq_len >= 2,
+        "cuda_shifted_linear_cross_entropy_loss requires at least two tokens"
+    );
+    ensure!(
+        label_mask.len() == seq_len,
+        "cuda_shifted_linear_cross_entropy_loss input/mask length mismatch: {} vs {}",
+        seq_len,
+        label_mask.len()
+    );
+    ensure!(
+        hidden.dims()[0] == seq_len,
+        "cuda_shifted_linear_cross_entropy_loss hidden rows {} must match token count {}",
+        hidden.dims()[0],
+        seq_len
+    );
+    let hidden_size = hidden.dims()[1];
+    ensure!(
+        lm_head_weight.dims()[0] == hidden_size,
+        "cuda_shifted_linear_cross_entropy_loss head hidden dim {} must match {}",
+        lm_head_weight.dims()[0],
+        hidden_size
+    );
+    let vocab = lm_head_weight.dims()[1];
+    ensure!(
+        vocab > 0 && chunk_size > 0,
+        "cuda_shifted_linear_cross_entropy_loss requires non-empty vocab and chunk_size > 0"
+    );
+
+    let active_positions: Vec<usize> = label_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx))
+        .collect();
+    ensure!(
+        !active_positions.is_empty(),
+        "cuda_shifted_linear_cross_entropy_loss called with no supervised shifted-label positions"
+    );
+    let active_labels: Vec<usize> = active_positions
+        .iter()
+        .map(|&idx| input_ids[idx + 1])
+        .collect();
+    for &label in &active_labels {
+        ensure!(
+            label < vocab,
+            "cuda_shifted_linear_cross_entropy_loss label {label} outside vocab {vocab}"
+        );
+    }
+
+    let device = hidden.as_tensor().device();
+    let shift_hidden = hidden
+        .as_tensor()
+        .narrow(0, 0, seq_len - 1)
+        .context("cuda_shifted_linear_cross_entropy_loss: shift hidden")?;
+    let active_indices_u32: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
+    let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+        .context("cuda_shifted_linear_cross_entropy_loss: active indices")?;
+    let active_hidden = shift_hidden
+        .index_select(&active_indices, 0)
+        .context("cuda_shifted_linear_cross_entropy_loss: active hidden")?;
+
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab {
+        let chunk_len = chunk_size.min(vocab - chunk_start);
+        let head_chunk = lm_head_weight
+            .as_tensor()
+            .narrow(1, chunk_start, chunk_len)
+            .context("cuda_shifted_linear_cross_entropy_loss: head chunk")?
+            .contiguous()
+            .context("cuda_shifted_linear_cross_entropy_loss: contiguous head chunk")?;
+        let logits_chunk = active_hidden
+            .matmul(&head_chunk)
+            .context("cuda_shifted_linear_cross_entropy_loss: logits chunk")?;
+        let chunk_max = logits_chunk
+            .max_keepdim(D::Minus1)
+            .context("cuda_shifted_linear_cross_entropy_loss: chunk max")?;
+        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+            (None, None) => {
+                let shifted = logits_chunk
+                    .broadcast_sub(&chunk_max)
+                    .context("cuda_shifted_linear_cross_entropy_loss: initial shift")?;
+                let chunk_sumexp = shifted
+                    .exp()
+                    .context("cuda_shifted_linear_cross_entropy_loss: initial exp")?
+                    .sum_keepdim(D::Minus1)
+                    .context("cuda_shifted_linear_cross_entropy_loss: initial sum")?;
+                (chunk_max.detach(), chunk_sumexp.detach())
+            }
+            (Some(prev_max), Some(prev_sumexp)) => {
+                let new_max = prev_max
+                    .maximum(&chunk_max)
+                    .context("cuda_shifted_linear_cross_entropy_loss: running max")?;
+                let prev_scale = (prev_max - &new_max)
+                    .context("cuda_shifted_linear_cross_entropy_loss: previous scale logits")?
+                    .exp()
+                    .context("cuda_shifted_linear_cross_entropy_loss: previous scale")?;
+                let scaled_prev = prev_sumexp
+                    .broadcast_mul(&prev_scale)
+                    .context("cuda_shifted_linear_cross_entropy_loss: scale previous sum")?;
+                let shifted = logits_chunk
+                    .broadcast_sub(&new_max)
+                    .context("cuda_shifted_linear_cross_entropy_loss: chunk shift")?;
+                let chunk_sumexp = shifted
+                    .exp()
+                    .context("cuda_shifted_linear_cross_entropy_loss: chunk exp")?
+                    .sum_keepdim(D::Minus1)
+                    .context("cuda_shifted_linear_cross_entropy_loss: chunk sum")?;
+                let new_sumexp = (scaled_prev + chunk_sumexp)
+                    .context("cuda_shifted_linear_cross_entropy_loss: update sum")?;
+                (new_max.detach(), new_sumexp.detach())
+            }
+            _ => unreachable!("running max/sumexp are set together"),
+        };
+        running_max = Some(new_max);
+        running_sumexp = Some(new_sumexp);
+        chunk_start += chunk_len;
+    }
+    let running_max = running_max.context("cuda_shifted_linear_cross_entropy_loss: empty vocab")?;
+    let running_sumexp =
+        running_sumexp.context("cuda_shifted_linear_cross_entropy_loss: empty vocab")?;
+
+    let mut correct = Vec::with_capacity(active_labels.len());
+    for (row, &label) in active_labels.iter().enumerate() {
+        let row_hidden = active_hidden
+            .narrow(0, row, 1)
+            .context("cuda_shifted_linear_cross_entropy_loss: correct row")?;
+        let head_col = lm_head_weight
+            .as_tensor()
+            .narrow(1, label, 1)
+            .context("cuda_shifted_linear_cross_entropy_loss: correct head col")?
+            .contiguous()
+            .context("cuda_shifted_linear_cross_entropy_loss: contiguous correct head col")?;
+        correct.push(
+            row_hidden
+                .matmul(&head_col)
+                .context("cuda_shifted_linear_cross_entropy_loss: correct matmul")?
+                .squeeze(1)
+                .context("cuda_shifted_linear_cross_entropy_loss: correct squeeze")?,
+        );
+    }
+    let correct_refs: Vec<&Tensor> = correct.iter().collect();
+    let correct_logits = Tensor::cat(&correct_refs, 0)
+        .context("cuda_shifted_linear_cross_entropy_loss: cat correct logits")?;
+    let log_sum_exp = running_sumexp
+        .log()
+        .context("cuda_shifted_linear_cross_entropy_loss: log sumexp")?
+        .broadcast_add(&running_max)
+        .context("cuda_shifted_linear_cross_entropy_loss: add max")?
+        .squeeze(1)
+        .context("cuda_shifted_linear_cross_entropy_loss: squeeze lse")?;
+    let per_token =
+        (log_sum_exp - correct_logits).context("cuda_shifted_linear_cross_entropy_loss: loss")?;
+    let out = per_token
+        .mean_all()
+        .context("cuda_shifted_linear_cross_entropy_loss: mean")?;
+
+    let needs_grad =
+        hidden.requires_grad() || hidden.grad_fn().is_some() || hidden.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(ShiftedLinearCrossEntropyBackward {
+            input_ids: input_ids.to_vec(),
+            label_mask: label_mask.to_vec(),
+            chunk_size,
+            inputs: vec![hidden.clone(), lm_head_weight.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         input.dtype() == DType::F32,
@@ -3783,6 +3978,225 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
 }
 
 #[derive(Debug)]
+struct ShiftedLinearCrossEntropyBackward {
+    input_ids: Vec<usize>,
+    label_mask: Vec<bool>,
+    chunk_size: usize,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_shifted_linear_cross_entropy_loss"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_shifted_linear_cross_entropy_loss backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let hidden = &self.inputs[0];
+        let lm_head = &self.inputs[1];
+        ensure!(
+            hidden.dims().len() == 2 && lm_head.dims().len() == 2,
+            "cuda_shifted_linear_cross_entropy_loss backward expected hidden/head rank 2, got {:?}/{:?}",
+            hidden.dims(),
+            lm_head.dims()
+        );
+        let seq_len = self.input_ids.len();
+        ensure!(
+            seq_len >= 2 && self.label_mask.len() == seq_len && hidden.dims()[0] == seq_len,
+            "cuda_shifted_linear_cross_entropy_loss backward shape mismatch hidden={:?} tokens={} mask={}",
+            hidden.dims(),
+            seq_len,
+            self.label_mask.len()
+        );
+        let hidden_size = hidden.dims()[1];
+        ensure!(
+            lm_head.dims()[0] == hidden_size,
+            "cuda_shifted_linear_cross_entropy_loss backward head hidden dim {} must match {}",
+            lm_head.dims()[0],
+            hidden_size
+        );
+        let vocab = lm_head.dims()[1];
+        ensure!(
+            vocab > 0 && self.chunk_size > 0,
+            "cuda_shifted_linear_cross_entropy_loss backward requires non-empty vocab and chunk_size > 0"
+        );
+        let active_positions: Vec<usize> = self.label_mask[1..]
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &active)| active.then_some(idx))
+            .collect();
+        ensure!(
+            !active_positions.is_empty(),
+            "cuda_shifted_linear_cross_entropy_loss backward has no active positions"
+        );
+        let active_labels: Vec<usize> = active_positions
+            .iter()
+            .map(|&idx| self.input_ids[idx + 1])
+            .collect();
+        for &label in &active_labels {
+            ensure!(
+                label < vocab,
+                "cuda_shifted_linear_cross_entropy_loss backward label {label} outside vocab {vocab}"
+            );
+        }
+
+        let device = hidden.as_tensor().device();
+        let shift_hidden = hidden
+            .as_tensor()
+            .narrow(0, 0, seq_len - 1)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: shift hidden")?;
+        let active_indices_u32: Vec<u32> =
+            active_positions.iter().map(|&idx| idx as u32).collect();
+        let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: active indices")?;
+        let active_hidden = shift_hidden
+            .index_select(&active_indices, 0)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: active hidden")?;
+
+        let mut running_max: Option<Tensor> = None;
+        let mut running_sumexp: Option<Tensor> = None;
+        let mut chunk_start = 0usize;
+        while chunk_start < vocab {
+            let chunk_len = self.chunk_size.min(vocab - chunk_start);
+            let head_chunk = lm_head
+                .as_tensor()
+                .narrow(1, chunk_start, chunk_len)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: head chunk")?
+                .contiguous()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous head chunk")?;
+            let logits_chunk = active_hidden
+                .matmul(&head_chunk)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: logits chunk")?;
+            let chunk_max = logits_chunk
+                .max_keepdim(D::Minus1)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: chunk max")?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted = logits_chunk
+                        .broadcast_sub(&chunk_max)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial shift")?;
+                    let chunk_sumexp = shifted
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial exp")?
+                        .sum_keepdim(D::Minus1)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: initial sum")?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max
+                        .maximum(&chunk_max)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: running max")?;
+                    let prev_scale = (prev_max - &new_max)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale logits")?
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale")?;
+                    let scaled_prev = prev_sumexp
+                        .broadcast_mul(&prev_scale)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: scale previous sum")?;
+                    let shifted = logits_chunk
+                        .broadcast_sub(&new_max)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: chunk shift")?;
+                    let chunk_sumexp = shifted
+                        .exp()
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: chunk exp")?
+                        .sum_keepdim(D::Minus1)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: chunk sum")?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)
+                        .context("cuda_shifted_linear_cross_entropy_loss backward: update sum")?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running max/sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+            chunk_start += chunk_len;
+        }
+        let running_max =
+            running_max.context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
+        let running_sumexp =
+            running_sumexp.context("cuda_shifted_linear_cross_entropy_loss backward: empty vocab")?;
+
+        let mut grad_active_hidden =
+            Tensor::zeros((active_positions.len(), hidden_size), DType::F32, device)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: zero active grad")?;
+        let mut chunk_start = 0usize;
+        while chunk_start < vocab {
+            let chunk_len = self.chunk_size.min(vocab - chunk_start);
+            let head_chunk = lm_head
+                .as_tensor()
+                .narrow(1, chunk_start, chunk_len)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: grad head chunk")?
+                .contiguous()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous grad chunk")?;
+            let logits_chunk = active_hidden
+                .matmul(&head_chunk)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: grad logits chunk")?;
+            let shifted = logits_chunk
+                .broadcast_sub(&running_max)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: grad shift")?;
+            let exp_chunk = shifted
+                .exp()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: grad exp")?;
+            let softmax_chunk = exp_chunk
+                .broadcast_div(&running_sumexp)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: grad softmax")?;
+            let head_chunk_t = head_chunk
+                .t()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: head transpose")?
+                .contiguous()
+                .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous head transpose")?;
+            let chunk_contrib = softmax_chunk
+                .matmul(&head_chunk_t)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: chunk grad hidden")?;
+            grad_active_hidden = (&grad_active_hidden + chunk_contrib)
+                .context("cuda_shifted_linear_cross_entropy_loss backward: accumulate grad hidden")?;
+            chunk_start += chunk_len;
+        }
+
+        let mut correct_heads = Vec::with_capacity(active_labels.len());
+        for &label in &active_labels {
+            correct_heads.push(
+                lm_head
+                    .as_tensor()
+                    .narrow(1, label, 1)
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: correct head col")?
+                    .contiguous()
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head col")?
+                    .t()
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: correct head transpose")?
+                    .contiguous()
+                    .context("cuda_shifted_linear_cross_entropy_loss backward: contiguous correct head")?,
+            );
+        }
+        let correct_refs: Vec<&Tensor> = correct_heads.iter().collect();
+        let correct_head_rows = Tensor::cat(&correct_refs, 0)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: cat correct heads")?;
+        grad_active_hidden = (grad_active_hidden - correct_head_rows)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: subtract correct heads")?;
+        let inv_active = 1.0f64 / active_positions.len() as f64;
+        grad_active_hidden = grad_active_hidden
+            .affine(inv_active, 0.0)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: average")?
+            .broadcast_mul(grad_out.as_tensor())
+            .context("cuda_shifted_linear_cross_entropy_loss backward: scale upstream")?;
+
+        let grad_hidden = Tensor::zeros((seq_len, hidden_size), DType::F32, device)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: zero hidden grad")?
+            .index_add(&active_indices, &grad_active_hidden, 0)
+            .context("cuda_shifted_linear_cross_entropy_loss backward: scatter hidden grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad_hidden)?), None])
+    }
+}
+
+#[derive(Debug)]
 struct BatchedMatmulBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -5153,6 +5567,85 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_shifted_linear_cross_entropy_loss_matches_full_logits_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_shifted_linear_cross_entropy_loss smoke: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let hidden_data = vec![
+            0.2f32, -0.4, //
+            0.7, 0.1, //
+            -0.3, 0.5,
+        ];
+        let head_data = vec![
+            0.5f32, -0.2, 0.3, 0.9, //
+            -0.1, 0.4, 0.8, -0.6,
+        ];
+        let hidden_tensor = Tensor::from_vec(hidden_data.clone(), (3usize, 2usize), &device)?;
+        let hidden_id = hidden_tensor.id();
+        let hidden = CudaTrainTensor::parameter(hidden_tensor, hidden_id)?;
+        let head = CudaTrainTensor::new(Tensor::from_vec(
+            head_data.clone(),
+            (2usize, 4usize),
+            &device,
+        )?)?;
+        let input_ids = vec![0usize, 3, 2];
+        let label_mask = vec![false, true, true];
+
+        let loss =
+            cuda_shifted_linear_cross_entropy_loss(&hidden, &head, &input_ids, &label_mask, 2)?;
+        let loss_value = loss.to_vec_f32()?[0];
+        let grads = cuda_backward(&loss)?;
+        let grad = grads
+            .get(hidden_id)
+            .context("missing hidden gradient")?
+            .to_vec_f32()?;
+
+        let active = [(0usize, 3usize), (1usize, 2usize)];
+        let mut expected_loss = 0.0f32;
+        let mut expected_grad = vec![0.0f32; 6];
+        for &(row, label) in &active {
+            let h = &hidden_data[row * 2..row * 2 + 2];
+            let mut logits = [0.0f32; 4];
+            for vocab_idx in 0..4 {
+                logits[vocab_idx] = h[0] * head_data[vocab_idx] + h[1] * head_data[4 + vocab_idx];
+            }
+            let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exp: Vec<f32> = logits.iter().map(|v| (v - max).exp()).collect();
+            let sum: f32 = exp.iter().sum();
+            expected_loss += max + sum.ln() - logits[label];
+            for vocab_idx in 0..4 {
+                let mut g = exp[vocab_idx] / sum;
+                if vocab_idx == label {
+                    g -= 1.0;
+                }
+                expected_grad[row * 2] += g * head_data[vocab_idx] / active.len() as f32;
+                expected_grad[row * 2 + 1] +=
+                    g * head_data[4 + vocab_idx] / active.len() as f32;
+            }
+        }
+        expected_loss /= active.len() as f32;
+
+        assert!(
+            (loss_value - expected_loss).abs() < 1e-5,
+            "loss mismatch actual={loss_value} expected={expected_loss}"
+        );
+        for (idx, (actual, expected)) in grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "hidden grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
