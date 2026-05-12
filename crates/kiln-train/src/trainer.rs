@@ -3341,8 +3341,8 @@ fn checkpointed_forward_backward(
         );
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for &(start, end) in segments.iter().take(boundary_idx) {
-            let mut linear_state = LinearAttentionState::new(model_config, device)?;
             current = model_forward_segment(
                 backend,
                 current,
@@ -3384,8 +3384,8 @@ fn checkpointed_forward_backward(
 
         {
             let mut current = boundary_states[0].clone();
+            let mut linear_state = LinearAttentionState::new(model_config, device)?;
             for &(start, end) in segments.iter() {
-                let mut linear_state = LinearAttentionState::new(model_config, device)?;
                 current = model_forward_segment(
                     backend,
                     current,
