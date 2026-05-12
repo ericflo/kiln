@@ -2144,6 +2144,10 @@ fn spool_checkpoint_boundaries() -> bool {
     kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES").unwrap_or(false)
 }
 
+fn profile_checkpoint_segments() -> bool {
+    kiln_core::env_flag::env_tristate("KILN_PROFILE_CHECKPOINT_SEGMENTS").unwrap_or(false)
+}
+
 fn synchronize_checkpoint_boundary(device: &Device, context: impl FnOnce() -> String) -> Result<()> {
     if matches!(device, Device::Metal(_)) {
         device.synchronize().with_context(context)?;
@@ -3814,6 +3818,7 @@ fn checkpointed_forward_backward(
     let resident_activation = backend.supports_resident_activation();
     let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
     let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries();
+    let profile_checkpoint_segments = profile_checkpoint_segments();
 
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
@@ -3823,7 +3828,18 @@ fn checkpointed_forward_backward(
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
-        for &(start, end) in segments.iter().take(boundary_idx) {
+        for (seg_idx, &(start, end)) in segments.iter().take(boundary_idx).enumerate() {
+            let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
+            if profile_checkpoint_segments {
+                tracing::info!(
+                    boundary = boundary_idx,
+                    segment = seg_idx + 1,
+                    num_segments,
+                    start_layer = start,
+                    end_layer = end,
+                    "detached checkpoint boundary segment begin"
+                );
+            }
             current = model_forward_segment(
                 backend,
                 current,
@@ -3839,6 +3855,17 @@ fn checkpointed_forward_backward(
             synchronize_checkpoint_boundary(device, || {
                 format!("synchronize detached checkpoint boundary segment [{start}, {end})")
             })?;
+            if let Some(started_at) = segment_timer {
+                tracing::info!(
+                    boundary = boundary_idx,
+                    segment = seg_idx + 1,
+                    num_segments,
+                    start_layer = start,
+                    end_layer = end,
+                    elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
+                    "detached checkpoint boundary segment complete"
+                );
+            }
         }
         Ok(current)
     };
@@ -3934,7 +3961,17 @@ fn checkpointed_forward_backward(
         {
             let mut current = boundary_states[0].clone();
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
-            for &(start, end) in segments.iter() {
+            for (seg_idx, &(start, end)) in segments.iter().enumerate() {
+                let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
+                if profile_checkpoint_segments {
+                    tracing::info!(
+                        segment = seg_idx + 1,
+                        num_segments,
+                        start_layer = start,
+                        end_layer = end,
+                        "cached checkpoint boundary segment begin"
+                    );
+                }
                 current = model_forward_segment(
                     backend,
                     current,
@@ -3953,6 +3990,16 @@ fn checkpointed_forward_backward(
                 synchronize_checkpoint_boundary(device, || {
                     format!("synchronize cached checkpoint boundary segment [{start}, {end})")
                 })?;
+                if let Some(started_at) = segment_timer {
+                    tracing::info!(
+                        segment = seg_idx + 1,
+                        num_segments,
+                        start_layer = start,
+                        end_layer = end,
+                        elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
+                        "cached checkpoint boundary segment complete"
+                    );
+                }
                 current = boundary_states.last().unwrap().clone();
             }
         }

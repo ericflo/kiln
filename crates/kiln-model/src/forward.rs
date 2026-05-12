@@ -367,6 +367,21 @@ fn start_full_attn_stage_profile(
     }
 }
 
+fn start_named_full_attn_stage_profile(
+    device: &Device,
+    context: Option<(usize, usize)>,
+    stage: &str,
+    seq_len: usize,
+) -> Result<Option<std::time::Instant>> {
+    let start = start_full_attn_stage_profile(device, context)?;
+    if let Some((full_attn_layer, start_pos)) = context {
+        eprintln!(
+            "kiln_profile_full_attn_stage_begin full_attn_layer={full_attn_layer} stage={stage} seq_len={seq_len} start_pos={start_pos}"
+        );
+    }
+    Ok(start)
+}
+
 fn finish_full_attn_stage_profile(
     device: &Device,
     context: Option<(usize, usize)>,
@@ -6888,6 +6903,11 @@ pub fn gqa_attention(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
+    let profile_device = x.device();
+    let profile_context = profile_full_attn_stages_enabled().then_some((
+        full_attn_layer_idx,
+        positions.first().copied().unwrap_or(0) as usize,
+    ));
     let use_metal_decode_gemv = seq_len == 1
         && kv_cache.is_some()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
@@ -6901,46 +6921,108 @@ pub fn gqa_attention(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "qkv_proj", seq_len)?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        full_attn_qkv_proj_decode_if(
+        let out = full_attn_qkv_proj_decode_if(
             backend,
             use_metal_decode_gemv,
             x,
             attn_weights,
             lora_layer,
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
 
     // Split Q and gate if output gate is enabled
-    let (q, gate) = if attn_output_gate {
-        // q_raw: [batch, seq_len, num_heads * head_dim * 2]
-        // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
-        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
-        let q = q_raw.narrow(3, 0, head_dim)?;
-        let gate = q_raw.narrow(3, head_dim, head_dim)?;
-        // gate needs to be [batch, seq_len, num_heads * head_dim] for later
-        let gate = gate
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
-        (q.contiguous()?, Some(gate))
-    } else {
-        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
-        (q, None)
+    let (q, gate) = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "q_split", seq_len)?;
+        let out = if attn_output_gate {
+            // q_raw: [batch, seq_len, num_heads * head_dim * 2]
+            // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw.narrow(3, head_dim, head_dim)?;
+            // gate needs to be [batch, seq_len, num_heads * head_dim] for later
+            let gate = gate
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+            (q, None)
+        };
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_split",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
 
     // Reshape K, V to [batch, seq_len, num_heads, head_dim]
-    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let (k, v) = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "kv_reshape", seq_len)?;
+        let out = (
+            k.reshape(((), seq_len, num_kv_heads, head_dim))?,
+            v.reshape(((), seq_len, num_kv_heads, head_dim))?,
+        );
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_reshape",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Apply per-head RMSNorm to Q and K (Qwen3.5 uses QK-norm)
     // q_norm/k_norm are [head_dim] — broadcast over [batch, seq_len, num_heads, head_dim]
-    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
-    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+    let (q, k) = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "qk_norm", seq_len)?;
+        let out = (
+            rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?,
+            rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?,
+        );
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Apply RoPE (positions are absolute, so cached tokens get correct embeddings)
     // Only rotate first rotary_dim dimensions; the rest pass through unchanged.
-    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+    let (q, k) = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "rope", seq_len)?;
+        let out = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "rope",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Fused-attention path for prefill (seq_len > 1, no KV cache).
     // Takes [batch, seq_len, num_heads, head_dim] — the layout we already
@@ -6949,13 +7031,55 @@ pub fn gqa_attention(
     // Backend declines (returns None) on dtype mismatch so non-BF16 configs
     // (e.g. tests on F32) transparently fall back to naive softmax+matmul.
     if seq_len > 1 && kv_cache.is_none() && backend.supports_flash_attn_prefill() {
-        let q = q.contiguous()?;
-        let k = k.contiguous()?;
-        let v = v.contiguous()?;
-        if let Some(attn_output) =
-            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-        {
+        let (q, k, v) = {
+            let stage_profile = start_named_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_qkv_layout",
+                seq_len,
+            )?;
+            let out = (q.contiguous()?, k.contiguous()?, v.contiguous()?);
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "prefill_qkv_layout",
+                seq_len,
+                stage_profile,
+            )?;
+            out
+        };
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_attn",
+            seq_len,
+        )?;
+        let attn_output =
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "prefill_attn",
+            seq_len,
+            stage_profile,
+        )?;
+        if let Some(attn_output) = attn_output {
+            let stage_profile = start_named_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+            )?;
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "attn_gate",
+                seq_len,
+                stage_profile,
+            )?;
+            let stage_profile =
+                start_named_full_attn_stage_profile(profile_device, profile_context, "o_proj", seq_len)?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t_backend_decode_if(
@@ -6967,20 +7091,58 @@ pub fn gqa_attention(
                     lora_scale,
                 )?
             };
+            finish_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+                stage_profile,
+            )?;
             return Ok(out);
         }
     }
 
     // Transpose to [batch, heads, seq_len, head_dim] for naive attention
-    let q = q.transpose(1, 2)?.contiguous()?; // [batch, num_heads, seq_len, head_dim]
-    let k = k.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
-    let v = v.transpose(1, 2)?.contiguous()?; // [batch, num_kv_heads, seq_len, head_dim]
+    let (q, k, v) = {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_transpose",
+            seq_len,
+        )?;
+        let out = (
+            q.transpose(1, 2)?.contiguous()?,
+            k.transpose(1, 2)?.contiguous()?,
+            v.transpose(1, 2)?.contiguous()?,
+        );
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_transpose",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // If KV cache is provided, update it and use full cached K/V
     let (k, v, kv_len) = if let Some(cache) = kv_cache {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_cache_update",
+            seq_len,
+        )?;
         let (full_k, full_v) = cache
             .update(full_attn_layer_idx, &k, &v)
             .context("KV cache update failed")?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_cache_update",
+            seq_len,
+            stage_profile,
+        )?;
         let kv_len = full_k.dim(2)?;
         (full_k, full_v, kv_len)
     } else {
@@ -6991,18 +7153,31 @@ pub fn gqa_attention(
     let gqa_ratio = num_heads / num_kv_heads;
     let batch = k.dim(0)?;
     let (k, v) = if gqa_ratio > 1 {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "gqa_expand",
+            seq_len,
+        )?;
         // Expand [batch, num_kv_heads, kv_len, head_dim] -> [batch, num_heads, kv_len, head_dim]
-        let k = k
-            .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
-            .contiguous()?
-            .reshape((batch, num_heads, kv_len, head_dim))?;
-        let v = v
-            .unsqueeze(2)?
-            .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
-            .contiguous()?
-            .reshape((batch, num_heads, kv_len, head_dim))?;
-        (k, v)
+        let out = (
+            k.unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, kv_len, head_dim))?,
+            v.unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, kv_len, head_dim])?
+                .contiguous()?
+                .reshape((batch, num_heads, kv_len, head_dim))?,
+        );
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "gqa_expand",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     } else {
         (k.contiguous()?, v.contiguous()?)
     };
@@ -7012,37 +7187,133 @@ pub fn gqa_attention(
     // K: [batch, num_heads, kv_len, head_dim]
     // scores: [batch, num_heads, seq_len, kv_len]
     let scale = (head_dim as f64).sqrt();
-    let attn_scores = q.broadcast_matmul(&k.t()?)?;
-    let attn_scores = (attn_scores / scale)?;
+    let attn_scores = {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "score_matmul",
+            seq_len,
+        )?;
+        let out = q.broadcast_matmul(&k.t()?)?;
+        let out = (out / scale)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "score_matmul",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Apply causal mask (handles Q_len != KV_len for cached decoding)
     let past_len = kv_len - seq_len;
-    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+    let attn_scores = {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "causal_mask",
+            seq_len,
+        )?;
+        let out = apply_causal_mask_with_offset(&attn_scores, seq_len, kv_len, past_len)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "causal_mask",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
-    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
+    let attn_weights_softmax = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "softmax", seq_len)?;
+        let out = cuda_softmax_last_dim(&attn_scores)?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "softmax",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
+    let attn_output = {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "value_matmul",
+            seq_len,
+        )?;
+        let out = attn_weights_softmax.broadcast_matmul(&v)?; // [batch, num_heads, seq_len, head_dim]
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "value_matmul",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
-    let attn_output =
-        attn_output
+    let attn_output = {
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_output_layout",
+            seq_len,
+        )?;
+        let out = attn_output
             .transpose(1, 2)?
             .contiguous()?
             .reshape(((), seq_len, num_heads * head_dim))?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_output_layout",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
-    let attn_output =
-        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    let attn_output = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "attn_gate", seq_len)?;
+        let out = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_gate",
+            seq_len,
+            stage_profile,
+        )?;
+        out
+    };
 
     // Output projection
     let out = {
+        let stage_profile =
+            start_named_full_attn_stage_profile(profile_device, profile_context, "o_proj", seq_len)?;
         kiln_nvtx::range!(c"kiln/proj/o");
-        linear_with_lora_t_backend_decode_if(
+        let out = linear_with_lora_t_backend_decode_if(
             Some(backend),
             use_metal_decode_gemv,
             &attn_output,
             &attn_weights.o_proj_t,
             lora_layer.and_then(|l| l.o_proj.as_ref()),
             lora_scale,
-        )?
+        )?;
+        finish_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "o_proj",
+            seq_len,
+            stage_profile,
+        )?;
+        out
     };
     Ok(out)
 }
