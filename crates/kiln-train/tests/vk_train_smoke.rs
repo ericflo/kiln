@@ -103,6 +103,8 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
         final_norm_weight: upload_f32(dev, &final_norm, &[hidden])?,
         lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
         layers: vec![layer],
+        rotary_inv_freq: vec![],
+        rotary_dim: 0,
         vocab,
         hidden,
     })
@@ -416,6 +418,8 @@ fn build_tiny_qwen35_specific_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWe
         final_norm_weight: upload_f32(dev, &final_norm, &[hidden])?,
         lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
         layers: vec![layer],
+        rotary_inv_freq: vec![],
+        rotary_dim: 0,
         vocab,
         hidden,
     })
@@ -478,6 +482,36 @@ fn vk_qwen35_specific_backward_propagates_to_all_lora() -> Result<()> {
         "expected at least 8 LoRA grads (got {})",
         grads.len()
     );
+    Ok(())
+}
+
+#[test]
+fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
+    // Build the same Qwen3.5-specific model but populate
+    // rotary_inv_freq so the RoPE path activates. Verify the forward
+    // produces finite output (not NaN) and gradients flow.
+    use kiln_model::vk_forward::vk_step_backward;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let mut model = build_tiny_qwen35_specific_model(&dev)?;
+    // head_dim=16, partial_rotary_factor=0.5 → rotary_dim=8, half=4
+    let half = 4;
+    let rope_theta = 10000.0_f64;
+    model.rotary_inv_freq = (0..half)
+        .map(|i| 1.0 / (rope_theta.powf(2.0 * i as f64 / 8.0) as f32))
+        .collect();
+    model.rotary_dim = 8;
+
+    let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
+        .to_vec_f32()?[0];
+    assert!(loss.is_finite(), "RoPE-enabled forward produced non-finite loss {loss}");
+    println!("vk_rope_wired loss = {loss}");
+
+    let loss_t = vk_model_forward_loss(&model, &lora_layers, &input_ids)?;
+    let grads = vk_step_backward(&loss_t)?;
+    println!("vk_rope_wired: grads has {} entries", grads.len());
+    assert!(grads.len() >= 8);
     Ok(())
 }
 

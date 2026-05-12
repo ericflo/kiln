@@ -209,6 +209,10 @@ pub struct VkModelWeights {
     pub final_norm_weight: VkTensor, // [hidden]
     pub lm_head: VkTensor,           // [vocab, hidden] — typically tied with embed_tokens
     pub layers: Vec<VkLayerWeights>,
+    /// Rotary frequency table, shape [rotary_dim / 2], F32. Used to
+    /// compute cos/sin tables on the fly in `vk_full_attention_layer`.
+    pub rotary_inv_freq: Vec<f32>,
+    pub rotary_dim: usize,
     pub vocab: usize,
     pub hidden: usize,
 }
@@ -277,12 +281,69 @@ fn vk_per_head_rms_norm(
     vk_reshape(&normed, &[t, heads * head_dim])
 }
 
+/// Compute RoPE cos/sin tables for positions [0, T).
+///
+/// Returns (cos, sin) each with shape [T, rotary_dim / 2] as F32
+/// VkTensors. The tables are reused across Q and K within a single
+/// forward call.
+pub fn vk_compute_rope_tables(
+    device: &Arc<VulkanDevice>,
+    inv_freq: &[f32],
+    t: usize,
+) -> Result<(VkTensor, VkTensor)> {
+    let half = inv_freq.len();
+    let mut cos = vec![0.0_f32; t * half];
+    let mut sin = vec![0.0_f32; t * half];
+    for ti in 0..t {
+        for hi in 0..half {
+            let f = (ti as f32) * inv_freq[hi];
+            cos[ti * half + hi] = f.cos();
+            sin[ti * half + hi] = f.sin();
+        }
+    }
+    let cos_t = Tensor::from_vec(cos, (t, half), &Device::Cpu)?;
+    let sin_t = Tensor::from_vec(sin, (t, half), &Device::Cpu)?;
+    let cos_vk = VkTensor::from_candle(&cos_t, Arc::clone(device))?;
+    let sin_vk = VkTensor::from_candle(&sin_t, Arc::clone(device))?;
+    Ok((cos_vk, sin_vk))
+}
+
+/// Apply RoPE to a flat-rank-2 [T, heads*head_dim] tensor by reshaping
+/// to [T, heads, head_dim], rotating the first `rotary_dim` of
+/// head_dim, and reshaping back. Uses the autograd-aware vk_rope.
+fn vk_apply_rope_to_flat(
+    x: &VkTensor,
+    cos: &VkTensor,
+    sin: &VkTensor,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::rope::vk_rope;
+    let t = x.shape()[0];
+    debug_assert_eq!(x.shape()[1], heads * head_dim);
+    let x_3 = vk_reshape(x, &[t, heads, head_dim])?;
+    let rotated = vk_rope(&x_3, cos, sin, rotary_dim)?;
+    vk_reshape(&rotated, &[t, heads * head_dim])
+}
+
 /// Run one full-attention transformer layer end-to-end on VkTensor
-/// activations.
+/// activations. If `rope` is `Some((cos, sin, rotary_dim))`, applies
+/// rotary embedding to Q and K after QK-norm and before SDPA.
 pub fn vk_full_attention_layer(
     x: &VkTensor,
     w: &VkFullAttentionWeights,
     lora: &VkLoraLayer,
+) -> Result<VkTensor> {
+    vk_full_attention_layer_with_rope(x, w, lora, None)
+}
+
+/// Same as `vk_full_attention_layer` but with optional RoPE tables.
+pub fn vk_full_attention_layer_with_rope(
+    x: &VkTensor,
+    w: &VkFullAttentionWeights,
+    lora: &VkLoraLayer,
+    rope: Option<(&VkTensor, &VkTensor, usize)>,
 ) -> Result<VkTensor> {
     let t = x.shape()[0];
     let hidden = x.shape()[1];
@@ -326,9 +387,16 @@ pub fn vk_full_attention_layer(
         k
     };
 
-    // Causal SDPA, GQA-aware (does NOT apply RoPE — Phase 1 omits RoPE
-    // for the FullAttn smoke path; real Qwen3.5 plumbs RoPE in Phase 6
-    // via vk_rope before SDPA. Tracked as a Phase 1.3 follow-up.)
+    // RoPE on first rotary_dim of head_dim (if RoPE tables supplied)
+    let (q, k) = if let Some((cos, sin, rotary_dim)) = rope {
+        let q_rot = vk_apply_rope_to_flat(&q, cos, sin, w.heads_q, w.head_dim, rotary_dim)?;
+        let k_rot = vk_apply_rope_to_flat(&k, cos, sin, w.heads_kv, w.head_dim, rotary_dim)?;
+        (q_rot, k_rot)
+    } else {
+        (q, k)
+    };
+
+    // Causal SDPA, GQA-aware
     let scale = 1.0 / (w.head_dim as f32).sqrt();
     let attn = vk_sdpa_prefill_flat(&q, &k, &v, w.heads_q, w.heads_kv, w.head_dim, scale)?;
 
@@ -790,10 +858,28 @@ pub fn vk_model_forward_loss_with_state(
         }
     };
 
+    // Precompute RoPE cos/sin tables once per forward call. Reused
+    // across all FullAttention layers.
+    let t_rope = input_ids.len();
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(vk_compute_rope_tables(
+            device,
+            &weights.rotary_inv_freq,
+            t_rope,
+        )?)
+    } else {
+        None
+    };
+
     let mut gdn_layer_idx = 0usize;
     for (lw, ll) in weights.layers.iter().zip(lora_layers.iter()) {
         h = match lw {
-            VkLayerWeights::FullAttention(_) => vk_transformer_layer(&h, lw, ll)?,
+            VkLayerWeights::FullAttention(full) => {
+                let rope_arg = rope_tables
+                    .as_ref()
+                    .map(|(cos, sin)| (cos, sin, weights.rotary_dim));
+                vk_full_attention_layer_with_rope(&h, full, ll, rope_arg)?
+            }
             VkLayerWeights::LinearAttention(_) => {
                 let s = state
                     .as_mut()
@@ -984,12 +1070,22 @@ impl VkModelWeights {
             layers.push(layer);
         }
 
+        // Bridge rotary_inv_freq from candle (F32 vector — small).
+        let rotary_inv_freq_t = weights
+            .rotary_inv_freq
+            .to_dtype(candle_core::DType::F32)?
+            .to_device(&candle_core::Device::Cpu)?;
+        let rotary_inv_freq: Vec<f32> = rotary_inv_freq_t.flatten_all()?.to_vec1()?;
+        let rotary_dim = rotary_inv_freq.len() * 2;
+
         Ok(VkModelWeights {
             embed_tokens,
             embed_dtype,
             final_norm_weight,
             lm_head,
             layers,
+            rotary_inv_freq,
+            rotary_dim,
             vocab,
             hidden,
         })
