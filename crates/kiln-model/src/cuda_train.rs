@@ -8,9 +8,15 @@
 
 use anyhow::{Context, Result, ensure};
 use candle_core::{D, DType, Device, Tensor, TensorId};
+use kiln_core::config::ModelConfig;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::forward::{
+    GpuAttentionWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuLinearAttentionWeights,
+    GpuWeights,
+};
 
 /// Monotonic op-id allocator for the future CUDA-native training graph.
 static NEXT_CUDA_TRAIN_OP_ID: AtomicU64 = AtomicU64::new(1);
@@ -990,6 +996,205 @@ pub fn cuda_swiglu_mlp(
     let activated = cuda_silu(&gate)?;
     let hidden = cuda_mul(&activated, &up)?;
     cuda_matmul(&hidden, down_weight)
+}
+
+pub struct CudaOwnedFullAttentionLayer {
+    pub input_norm_weight: CudaTrainTensor,
+    pub q_weight: CudaTrainTensor,
+    pub k_weight: CudaTrainTensor,
+    pub v_weight: CudaTrainTensor,
+    pub q_norm_weight: CudaTrainTensor,
+    pub k_norm_weight: CudaTrainTensor,
+    pub o_weight: CudaTrainTensor,
+    pub post_norm_weight: CudaTrainTensor,
+    pub gate_weight: CudaTrainTensor,
+    pub up_weight: CudaTrainTensor,
+    pub down_weight: CudaTrainTensor,
+    pub heads_q: usize,
+    pub heads_kv: usize,
+    pub head_dim: usize,
+    pub eps: f32,
+    pub attn_output_gate: bool,
+}
+
+impl CudaOwnedFullAttentionLayer {
+    pub fn as_borrowed<'a>(
+        &'a self,
+        rope: Option<CudaRopeTables<'a>>,
+    ) -> CudaFullAttentionLayer<'a> {
+        CudaFullAttentionLayer {
+            input_norm_weight: &self.input_norm_weight,
+            q_weight: &self.q_weight,
+            k_weight: &self.k_weight,
+            v_weight: &self.v_weight,
+            q_norm_weight: Some(&self.q_norm_weight),
+            k_norm_weight: Some(&self.k_norm_weight),
+            o_weight: &self.o_weight,
+            post_norm_weight: &self.post_norm_weight,
+            gate_weight: &self.gate_weight,
+            up_weight: &self.up_weight,
+            down_weight: &self.down_weight,
+            heads_q: self.heads_q,
+            heads_kv: self.heads_kv,
+            head_dim: self.head_dim,
+            eps: self.eps,
+            attn_output_gate: self.attn_output_gate,
+            rope,
+        }
+    }
+}
+
+pub struct CudaOwnedLinearAttentionLayer {
+    pub layer_norm_weight: CudaTrainTensor,
+    pub in_proj_qkv_weight: CudaTrainTensor,
+    pub in_proj_z_weight: CudaTrainTensor,
+    pub in_proj_a_weight: CudaTrainTensor,
+    pub in_proj_b_weight: CudaTrainTensor,
+    pub conv1d_weight: CudaTrainTensor,
+    pub a_log: CudaTrainTensor,
+    pub a_log_gates: CudaTrainTensor,
+    pub dt_bias: CudaTrainTensor,
+    pub gated_norm_weight: CudaTrainTensor,
+    pub out_proj_weight: CudaTrainTensor,
+    pub heads_k: usize,
+    pub heads_v: usize,
+    pub head_dim_k: usize,
+    pub head_dim_v: usize,
+    pub conv_kernel: usize,
+    pub eps: f32,
+}
+
+pub enum CudaLayerWeights {
+    FullAttention(CudaOwnedFullAttentionLayer),
+    LinearAttention(CudaOwnedLinearAttentionLayer),
+}
+
+pub struct CudaModelWeights {
+    pub token_embedding: CudaTrainTensor,
+    pub final_norm_weight: CudaTrainTensor,
+    pub lm_head_weight: CudaTrainTensor,
+    pub layers: Vec<CudaLayerWeights>,
+    pub rotary_inv_freq: Vec<f32>,
+    pub rotary_dim: usize,
+    pub vocab: usize,
+    pub hidden: usize,
+}
+
+fn cuda_frozen_f32_tensor(tensor: &Tensor, name: &str) -> Result<CudaTrainTensor> {
+    ensure!(
+        matches!(tensor.device(), Device::Cuda(_)),
+        "CUDA native model import requires CUDA tensor for {name}, got {:?}",
+        tensor.device()
+    );
+    let tensor = tensor
+        .to_dtype(DType::F32)
+        .with_context(|| format!("convert CUDA native model weight {name} to f32"))?
+        .contiguous()
+        .with_context(|| format!("make CUDA native model weight {name} contiguous"))?;
+    CudaTrainTensor::new(tensor).with_context(|| format!("wrap CUDA native model weight {name}"))
+}
+
+fn cuda_full_attention_from_gpu(
+    weights: &GpuFullAttentionWeights,
+    layer: &GpuLayerWeights,
+    model_config: &ModelConfig,
+    layer_idx: usize,
+) -> Result<CudaOwnedFullAttentionLayer> {
+    let ctx = |name: &str| format!("layer {layer_idx} FullAttention {name}");
+    Ok(CudaOwnedFullAttentionLayer {
+        input_norm_weight: cuda_frozen_f32_tensor(&layer.input_layernorm, &ctx("input_norm"))?,
+        q_weight: cuda_frozen_f32_tensor(&weights.q_proj_t, &ctx("q_proj_t"))?,
+        k_weight: cuda_frozen_f32_tensor(&weights.k_proj_t, &ctx("k_proj_t"))?,
+        v_weight: cuda_frozen_f32_tensor(&weights.v_proj_t, &ctx("v_proj_t"))?,
+        q_norm_weight: cuda_frozen_f32_tensor(&weights.q_norm, &ctx("q_norm"))?,
+        k_norm_weight: cuda_frozen_f32_tensor(&weights.k_norm, &ctx("k_norm"))?,
+        o_weight: cuda_frozen_f32_tensor(&weights.o_proj_t, &ctx("o_proj_t"))?,
+        post_norm_weight: cuda_frozen_f32_tensor(
+            &layer.post_attention_layernorm,
+            &ctx("post_attention_norm"),
+        )?,
+        gate_weight: cuda_frozen_f32_tensor(&layer.mlp.gate_proj_t, &ctx("gate_proj_t"))?,
+        up_weight: cuda_frozen_f32_tensor(&layer.mlp.up_proj_t, &ctx("up_proj_t"))?,
+        down_weight: cuda_frozen_f32_tensor(&layer.mlp.down_proj_t, &ctx("down_proj_t"))?,
+        heads_q: model_config.num_attention_heads,
+        heads_kv: model_config.num_kv_heads,
+        head_dim: model_config.head_dim,
+        eps: model_config.rms_norm_eps as f32,
+        attn_output_gate: model_config.attn_output_gate,
+    })
+}
+
+fn cuda_linear_attention_from_gpu(
+    weights: &GpuLinearAttentionWeights,
+    layer: &GpuLayerWeights,
+    model_config: &ModelConfig,
+    layer_idx: usize,
+) -> Result<CudaOwnedLinearAttentionLayer> {
+    let ctx = |name: &str| format!("layer {layer_idx} LinearAttention {name}");
+    let conv_kernel = *weights
+        .conv1d
+        .dims()
+        .last()
+        .context("CUDA native model import: conv1d must have rank > 0")?;
+    Ok(CudaOwnedLinearAttentionLayer {
+        layer_norm_weight: cuda_frozen_f32_tensor(&layer.input_layernorm, &ctx("input_norm"))?,
+        in_proj_qkv_weight: cuda_frozen_f32_tensor(&weights.in_proj_qkv_t, &ctx("in_proj_qkv_t"))?,
+        in_proj_z_weight: cuda_frozen_f32_tensor(&weights.in_proj_z_t, &ctx("in_proj_z_t"))?,
+        in_proj_a_weight: cuda_frozen_f32_tensor(&weights.in_proj_a_t, &ctx("in_proj_a_t"))?,
+        in_proj_b_weight: cuda_frozen_f32_tensor(&weights.in_proj_b_t, &ctx("in_proj_b_t"))?,
+        conv1d_weight: cuda_frozen_f32_tensor(&weights.conv1d, &ctx("conv1d"))?,
+        a_log: cuda_frozen_f32_tensor(&weights.a_log, &ctx("a_log"))?,
+        a_log_gates: cuda_frozen_f32_tensor(&weights.a_log_gates, &ctx("a_log_gates"))?,
+        dt_bias: cuda_frozen_f32_tensor(&weights.dt_bias, &ctx("dt_bias"))?,
+        gated_norm_weight: cuda_frozen_f32_tensor(&weights.norm, &ctx("gated_norm"))?,
+        out_proj_weight: cuda_frozen_f32_tensor(&weights.out_proj_t, &ctx("out_proj_t"))?,
+        heads_k: model_config.linear_num_key_heads,
+        heads_v: model_config.linear_num_value_heads,
+        head_dim_k: model_config.linear_key_head_dim,
+        head_dim_v: model_config.linear_value_head_dim,
+        conv_kernel,
+        eps: model_config.rms_norm_eps as f32,
+    })
+}
+
+impl CudaModelWeights {
+    pub fn from_gpu_weights(weights: &GpuWeights, model_config: &ModelConfig) -> Result<Self> {
+        let token_embedding = cuda_frozen_f32_tensor(&weights.embed_tokens, "embed_tokens")?;
+        let lm_head_weight = cuda_frozen_f32_tensor(&weights.embed_tokens_t, "embed_tokens_t")?;
+        let final_norm_weight = cuda_frozen_f32_tensor(&weights.final_norm, "final_norm")?;
+        let mut layers = Vec::with_capacity(weights.layers.len());
+        for (idx, layer) in weights.layers.iter().enumerate() {
+            let imported = match &layer.attention {
+                GpuAttentionWeights::Full(full) => CudaLayerWeights::FullAttention(
+                    cuda_full_attention_from_gpu(full, layer, model_config, idx)?,
+                ),
+                GpuAttentionWeights::Linear(linear) => CudaLayerWeights::LinearAttention(
+                    cuda_linear_attention_from_gpu(linear, layer, model_config, idx)?,
+                ),
+            };
+            layers.push(imported);
+        }
+        let rotary_inv_freq = weights
+            .rotary_inv_freq
+            .to_dtype(DType::F32)
+            .context("convert CUDA native model rotary_inv_freq to f32")?
+            .to_device(&Device::Cpu)
+            .context("read CUDA native model rotary_inv_freq to CPU")?
+            .flatten_all()
+            .context("flatten CUDA native model rotary_inv_freq")?
+            .to_vec1::<f32>()
+            .context("read CUDA native model rotary_inv_freq values")?;
+        Ok(Self {
+            token_embedding,
+            final_norm_weight,
+            lm_head_weight,
+            layers,
+            rotary_dim: rotary_inv_freq.len() * 2,
+            rotary_inv_freq,
+            vocab: model_config.vocab_size,
+            hidden: model_config.hidden_size,
+        })
+    }
 }
 
 pub struct CudaRopeTables<'a> {
@@ -2506,6 +2711,116 @@ fn collect_topo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_cuda_model_config() -> ModelConfig {
+        ModelConfig {
+            hidden_size: 2,
+            num_layers: 1,
+            num_attention_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 2,
+            intermediate_size: 2,
+            vocab_size: 4,
+            max_position_embeddings: 16,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            dtype: kiln_core::config::DType::FP32,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: 1,
+            linear_key_head_dim: 2,
+            linear_num_value_heads: 1,
+            linear_value_head_dim: 2,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        }
+    }
+
+    #[test]
+    fn cuda_model_weights_from_gpu_weights_imports_full_attention_layer() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda model weight import smoke: {err}");
+                return Ok(());
+            }
+        };
+        let config = tiny_cuda_model_config();
+        let embed_tokens = Tensor::from_vec(
+            vec![0.1f32, -0.2, 0.3, 0.4, 0.5, -0.6, 0.7, 0.8],
+            (4usize, 2usize),
+            &device,
+        )?;
+        let embed_tokens_t = embed_tokens.t()?.contiguous()?;
+        let q_proj = Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
+        let k_proj = Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
+        let v_proj = Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
+        let o_proj = Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
+        let gate_proj =
+            Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
+        let up_proj = Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+        let down_proj =
+            Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
+        let weights = GpuWeights {
+            embed_tokens,
+            embed_tokens_t,
+            layers: vec![GpuLayerWeights {
+                input_layernorm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                post_attention_layernorm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj_t: q_proj.t()?.contiguous()?,
+                    k_proj_t: k_proj.t()?.contiguous()?,
+                    v_proj_t: v_proj.t()?.contiguous()?,
+                    o_proj_t: o_proj.t()?.contiguous()?,
+                    q_proj,
+                    k_proj,
+                    v_proj,
+                    o_proj,
+                    q_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                    k_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
+                    qkv_proj_t: None,
+                    q_proj_marlin: None,
+                }),
+                mlp: crate::forward::GpuFfnWeights {
+                    gate_proj_t: gate_proj.t()?.contiguous()?,
+                    up_proj_t: up_proj.t()?.contiguous()?,
+                    down_proj_t: down_proj.t()?.contiguous()?,
+                    gate_proj,
+                    up_proj,
+                    down_proj,
+                    gate_proj_marlin: None,
+                    up_proj_marlin: None,
+                    down_proj_marlin: None,
+                },
+            }],
+            final_norm: Tensor::zeros((2usize,), DType::F32, &device)?,
+            rotary_inv_freq: Tensor::from_vec(vec![1.0f32], (1usize,), &device)?,
+            mtp: None,
+        };
+
+        let imported = CudaModelWeights::from_gpu_weights(&weights, &config)?;
+        assert_eq!(imported.vocab, 4);
+        assert_eq!(imported.hidden, 2);
+        assert_eq!(imported.rotary_dim, 2);
+        assert_eq!(imported.token_embedding.dims(), &[4, 2]);
+        assert_eq!(imported.lm_head_weight.dims(), &[2, 4]);
+        let CudaLayerWeights::FullAttention(layer) = &imported.layers[0] else {
+            panic!("expected imported FullAttention layer");
+        };
+        assert_eq!(layer.q_weight.dims(), &[2, 2]);
+        assert_eq!(layer.heads_q, 1);
+        assert!(!layer.q_weight.requires_grad());
+
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            vec![0.1f32, 0.2, -0.3, 0.4],
+            (2usize, 2usize),
+            &device,
+        )?)?;
+        let output = cuda_full_attention_layer(&input, &layer.as_borrowed(None))?;
+        assert_eq!(output.dims(), &[2, 2]);
+        Ok(())
+    }
 
     #[test]
     fn cuda_train_tensor_rejects_cpu_tensor() -> Result<()> {
