@@ -6,12 +6,13 @@
 //! Vulkan `vk_train` module without claiming full model coverage yet.
 
 use anyhow::{Context, Result, ensure};
-use candle_core::TensorId;
+use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaTrainArena, CudaTrainTensor,
     cuda_adamw_step_from_store, cuda_backward, cuda_matmul, cuda_mul, cuda_sum_all,
 };
 use std::collections::HashMap;
+use std::path::Path;
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
 
@@ -61,6 +62,27 @@ pub fn cuda_linear_sum_square_adamw_step_with_arena(
         "cuda_linear_sum_square_adamw_step expected one updated parameter, got {updated}"
     );
     Ok(loss_value)
+}
+
+/// Save named CUDA training tensors to safetensors after one CUDA-to-CPU readback.
+pub fn save_cuda_training_tensors(
+    weights: &[(&str, CudaTrainTensor)],
+    output_path: &Path,
+) -> Result<()> {
+    let mut tensors: HashMap<String, Tensor> = HashMap::new();
+    for (name, weight) in weights {
+        ensure!(!name.is_empty(), "CUDA training safetensors key must not be empty");
+        let tensor = weight
+            .as_tensor()
+            .to_dtype(DType::F32)
+            .with_context(|| format!("convert CUDA training tensor {name} to f32"))?
+            .to_device(&Device::Cpu)
+            .with_context(|| format!("read CUDA training tensor {name} to CPU"))?;
+        tensors.insert((*name).to_string(), tensor);
+    }
+    candle_core::safetensors::save(&tensors, output_path)
+        .with_context(|| format!("save CUDA training tensors {}", output_path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -138,6 +160,60 @@ mod tests {
         assert!(arena.allocated_bytes() >= 12);
         arena.clear();
         assert_eq!(arena.allocation_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_linear_weight_save_reflects_updated_cuda_tensor() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda linear save smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let input = CudaTrainTensor::new(Tensor::from_vec(
+            vec![1.0f32, 2.0],
+            (1usize, 2usize),
+            &device,
+        )?)?;
+        let weight_tensor = Tensor::from_vec(vec![1.0f32, -2.0], (2usize, 1usize), &device)?;
+        let weight_id = weight_tensor.id();
+        let weight = CudaTrainTensor::parameter(weight_tensor, weight_id)?;
+        let mut adamw = allocate_cuda_adamw_state(&[weight.clone()])?;
+        let mut arena = CudaTrainArena::new(&device)?;
+
+        for _ in 0..2 {
+            let loss = cuda_linear_sum_square_adamw_step_with_arena(
+                &input,
+                &weight,
+                &mut adamw,
+                CudaAdamWConfig {
+                    lr: 0.1,
+                    ..CudaAdamWConfig::default()
+                },
+                &mut arena,
+            )?;
+            assert!(loss.is_finite());
+            arena.clear();
+        }
+
+        let expected = weight.to_vec_f32()?;
+        let tmp = std::env::temp_dir().join(format!(
+            "kiln-cuda-linear-weight-{}.safetensors",
+            std::process::id()
+        ));
+        save_cuda_training_tensors(&[("linear.weight", weight.clone())], &tmp)?;
+
+        let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
+        let saved = loaded
+            .get("linear.weight")
+            .context("missing saved linear.weight")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(saved, expected);
+        let _ = std::fs::remove_file(&tmp);
         Ok(())
     }
 }
