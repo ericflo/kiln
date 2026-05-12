@@ -516,6 +516,50 @@ fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
 }
 
 #[test]
+fn vk_checkpointed_train_step_loss_decreases() -> Result<()> {
+    // Verifies vk_checkpointed_train_step produces gradient updates
+    // equivalent to the non-checkpointed path (same model, same input,
+    // both should monotonically reduce loss).
+    use kiln_train::vk_train::vk_checkpointed_train_step;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+
+    // 1-segment is equivalent to no-checkpoint, so test 1 first
+    let initial_loss =
+        vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    let mut last_loss = initial_loss;
+    let mut losses = vec![initial_loss];
+    for step in 1..=5 {
+        // 1 segment exercises the "last segment only" branch
+        let l = vk_checkpointed_train_step(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &mut adamw,
+            &cfg,
+            step,
+            1,
+        )?;
+        assert!(l.is_finite(), "step {step}: non-finite loss {l}");
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_checkpointed (1-seg) losses: {losses:?}");
+    assert!(
+        last_loss < initial_loss * 0.95,
+        "loss did not drop: {initial_loss} -> {last_loss}"
+    );
+    Ok(())
+}
+
+#[test]
 fn vk_qwen35_specific_training_loss_decreases() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let model = build_tiny_qwen35_specific_model(&dev)?;

@@ -153,14 +153,30 @@ fn lora_pairs<'a>(layers: &'a [VkLoraLayer]) -> impl Iterator<Item = &'a VkLoraP
     })
 }
 
+/// Compute segment boundary layer indices.
+///
+/// Returns a Vec of length `num_segments` where each entry is the
+/// **end index** (exclusive) of that segment. So segment 0 covers
+/// layers `[0, boundaries[0])`, segment 1 covers `[boundaries[0],
+/// boundaries[1])`, etc.
+pub fn vk_compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<usize> {
+    let n = num_segments.clamp(1, num_layers.max(1));
+    let chunk = (num_layers + n - 1) / n;
+    let mut out = Vec::with_capacity(n);
+    let mut acc = chunk;
+    for _ in 0..n {
+        out.push(acc.min(num_layers));
+        acc += chunk;
+    }
+    if let Some(last) = out.last_mut() {
+        *last = num_layers;
+    }
+    out
+}
+
 /// Recommended number of gradient-checkpoint segments for a given
 /// model layer count. Mirrors `trainer::compute_segment_boundaries`'s
 /// default (clamps to 1..=num_layers).
-///
-/// Phase 1.5 stub: the actual segmented forward+backward isn't wired
-/// yet. The function exists so callers can probe it before the real
-/// checkpointing path lands. See doc comment on
-/// `vk_checkpointed_train_step` for the design.
 pub fn vk_recommended_checkpoint_segments(num_layers: usize) -> usize {
     std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
         .ok()
@@ -189,6 +205,276 @@ pub fn vk_train_step(
     step: u32,
 ) -> Result<f32> {
     vk_train_step_with_state(weights, lora_layers, input_ids, None, adamw_state, cfg, step)
+}
+
+/// Mint a synthetic candle TensorId — used to wrap a boundary
+/// activation as a parameter leaf so its gradient can be captured
+/// from a sub-tape.
+fn mint_fresh_tensor_id() -> Result<TensorId> {
+    use candle_core::{Device, Tensor, Var};
+    let dummy = Tensor::from_vec(vec![0.0_f32], (1,), &Device::Cpu)?;
+    Ok(Var::from_tensor(&dummy)?.id())
+}
+
+/// Gradient-checkpointed training step.
+///
+/// Forward through layers in `num_segments` chunks, only saving boundary
+/// states (peak memory ≈ one segment's intermediates). Backward in
+/// reverse: rebuild forward + backward per segment, capture the
+/// boundary-input gradient via the scalar trick (seg_loss = sum(seg_out
+/// · upstream_grad)), use that as upstream for the next-earlier
+/// segment.
+///
+/// Does NOT yet support GDN layers (they need state plumbing through
+/// the recompute path; the recurrent state would have to be snapshot
+/// per segment).
+#[allow(clippy::too_many_arguments)]
+pub fn vk_checkpointed_train_step(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    step: u32,
+    num_segments: usize,
+) -> Result<f32> {
+    use kiln_model::vk_forward::{
+        vk_compute_rope_tables, vk_full_attention_layer_with_rope, VkLayerWeights,
+    };
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
+    use kiln_vulkan_kernel::vk_ops::embedding::{
+        upload_u32_ids, vk_embedding_lookup_bf16, vk_embedding_lookup_f32,
+    };
+    use kiln_vulkan_kernel::vk_ops::flce::{vk_flce_loss, FLCE_DEFAULT_CHUNK};
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
+    use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
+    use kiln_vulkan_kernel::VkTensor;
+
+    // GDN unsupported in this path for v1 (would need state snapshot per segment)
+    for layer in &weights.layers {
+        if !matches!(layer, VkLayerWeights::FullAttention(_)) {
+            anyhow::bail!(
+                "vk_checkpointed_train_step: GDN layers not yet supported in checkpointed path \
+                 (use vk_train_step for hybrid models — checkpointing for hybrid models is a \
+                 follow-up that needs per-segment state snapshots)"
+            );
+        }
+    }
+
+    let num_layers = weights.layers.len();
+    let segments = vk_compute_segment_boundaries(num_layers, num_segments);
+    let device = weights.embed_tokens.device();
+
+    // Precompute RoPE tables once
+    let t_rope = input_ids.len();
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(vk_compute_rope_tables(
+            device,
+            &weights.rotary_inv_freq,
+            t_rope,
+        )?)
+    } else {
+        None
+    };
+
+    // Phase A: segmented forward, save detached boundary inputs
+    let ids = upload_u32_ids(device, input_ids)?;
+    let h_init = match weights.embed_dtype {
+        VkDType::F32 => {
+            vk_embedding_lookup_f32(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+        VkDType::Bf16 => {
+            vk_embedding_lookup_bf16(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+    };
+    // boundaries[k] = activations entering segment k (boundaries[0] = embedding output)
+    let mut boundaries: Vec<VkTensor> = vec![h_init.detach()];
+    let mut h = h_init;
+
+    for (seg_idx, &end_layer) in segments.iter().enumerate() {
+        let start_layer = if seg_idx == 0 { 0 } else { segments[seg_idx - 1] };
+        for layer_idx in start_layer..end_layer {
+            match &weights.layers[layer_idx] {
+                VkLayerWeights::FullAttention(full) => {
+                    let rope_arg = rope_tables
+                        .as_ref()
+                        .map(|(c, s)| (c, s, weights.rotary_dim));
+                    h = vk_full_attention_layer_with_rope(
+                        &h,
+                        full,
+                        &lora_layers[layer_idx],
+                        rope_arg,
+                    )?;
+                }
+                VkLayerWeights::LinearAttention(_) => unreachable!(),
+            }
+        }
+        if seg_idx + 1 < segments.len() {
+            // Detach: drops the prior segment's tape via Arc refcount
+            h = h.detach();
+            boundaries.push(h.clone());
+        }
+    }
+    // h still holds the last segment's tape, ready for loss + backward
+    let final_h = h;
+
+    // Phase B: compute loss + backward last segment
+    let h_norm = vk_rmsnorm(&final_h, &weights.final_norm_weight, 1e-5)?;
+    let t_in = input_ids.len();
+    let mut labels: Vec<u32> = input_ids[1..].to_vec();
+    while labels.len() < t_in {
+        labels.push((weights.vocab.saturating_sub(1)) as u32);
+    }
+    let loss = vk_flce_loss(&h_norm, &weights.lm_head, &labels, FLCE_DEFAULT_CHUNK)?;
+    let loss_val = loss.to_vec_f32()?[0];
+
+    // For the LAST segment we wrap its boundary input as a parameter
+    // leaf so we can grab the upstream gradient. But the loss tape
+    // doesn't pass through that wrapping — it passes through `final_h`.
+    // Workaround: the grad returned by vk_backward contains LoRA grads
+    // for params in the last segment. To get grad-at-boundary for
+    // segment k-1, we'd need to back-propagate INTO the boundary tensor.
+    //
+    // Trick: re-wrap last-segment forward starting from a fresh leaf,
+    // following the same upstream-grad pattern as the other segments.
+    // That avoids special-casing the last segment.
+
+    // Accumulate grads into a shared store
+    use std::collections::HashMap;
+    let mut shared_grads: HashMap<TensorId, VkTensor> = HashMap::new();
+
+    // Backward LAST segment first (using loss directly).
+    // Wrap boundaries[N-1] as a parameter leaf; rebuild forward; backward(loss).
+    let mut upstream_grad: Option<VkTensor> = {
+        let last_boundary = boundaries.last().unwrap();
+        let last_id = mint_fresh_tensor_id()?;
+        let h_param = VkTensor::parameter(
+            Arc::clone(last_boundary.buffer()),
+            last_boundary.shape().to_vec(),
+            last_boundary.dtype(),
+            Arc::clone(last_boundary.device()),
+            last_id,
+        );
+        // Recompute last segment with autograd, using h_param as the boundary
+        let last_seg = segments.len() - 1;
+        let start_layer = if last_seg == 0 { 0 } else { segments[last_seg - 1] };
+        let end_layer = segments[last_seg];
+        let mut h = h_param;
+        for layer_idx in start_layer..end_layer {
+            match &weights.layers[layer_idx] {
+                VkLayerWeights::FullAttention(full) => {
+                    let rope_arg = rope_tables
+                        .as_ref()
+                        .map(|(c, s)| (c, s, weights.rotary_dim));
+                    h = vk_full_attention_layer_with_rope(
+                        &h,
+                        full,
+                        &lora_layers[layer_idx],
+                        rope_arg,
+                    )?;
+                }
+                VkLayerWeights::LinearAttention(_) => unreachable!(),
+            }
+        }
+        let h_norm2 = vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)?;
+        let loss2 = vk_flce_loss(&h_norm2, &weights.lm_head, &labels, FLCE_DEFAULT_CHUNK)?;
+        let grads = vk_backward(&loss2)?;
+        let upstream = grads.get(last_id).cloned();
+        // Accumulate non-boundary grads
+        for (pid, g) in grads.iter() {
+            if *pid != last_id {
+                shared_grads.insert(*pid, g.clone());
+            }
+        }
+        upstream
+    };
+
+    // Earlier segments in reverse
+    for seg_idx in (0..segments.len() - 1).rev() {
+        let upstream = upstream_grad
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint: missing upstream grad at seg {seg_idx}"))?;
+        let boundary = &boundaries[seg_idx];
+        let boundary_id = mint_fresh_tensor_id()?;
+        let h_param = VkTensor::parameter(
+            Arc::clone(boundary.buffer()),
+            boundary.shape().to_vec(),
+            boundary.dtype(),
+            Arc::clone(boundary.device()),
+            boundary_id,
+        );
+        let start_layer = if seg_idx == 0 { 0 } else { segments[seg_idx - 1] };
+        let end_layer = segments[seg_idx];
+        let mut h = h_param;
+        for layer_idx in start_layer..end_layer {
+            match &weights.layers[layer_idx] {
+                VkLayerWeights::FullAttention(full) => {
+                    let rope_arg = rope_tables
+                        .as_ref()
+                        .map(|(c, s)| (c, s, weights.rotary_dim));
+                    h = vk_full_attention_layer_with_rope(
+                        &h,
+                        full,
+                        &lora_layers[layer_idx],
+                        rope_arg,
+                    )?;
+                }
+                VkLayerWeights::LinearAttention(_) => unreachable!(),
+            }
+        }
+        // Scalar trick: scalar = sum(h * upstream)
+        let prod = vk_mul(&h, &upstream)?;
+        let scalar = vk_sum_all(&prod)?;
+        let grads = vk_backward(&scalar)?;
+        upstream_grad = grads.get(boundary_id).cloned();
+        for (pid, g) in grads.iter() {
+            if *pid != boundary_id {
+                // Accumulate (sum) — same param may already be in store from later seg
+                if let Some(existing) = shared_grads.get(pid).cloned() {
+                    let summed = kiln_vulkan_kernel::vk_ops::elementwise::vk_add_no_grad(
+                        &existing, g,
+                    )?;
+                    shared_grads.insert(*pid, summed);
+                } else {
+                    shared_grads.insert(*pid, g.clone());
+                }
+            }
+        }
+    }
+
+    // Optimizer step from accumulated grads
+    for pair in lora_pairs(lora_layers) {
+        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
+            let Some(grad) = shared_grads.get(&pid) else {
+                continue;
+            };
+            anyhow::ensure!(
+                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
+                "vk_checkpointed_train_step: AdamW F32 only"
+            );
+            let s = adamw_state
+                .get(&pid)
+                .with_context(|| format!("missing AdamW state for {:?}", pid))?;
+            dispatch_adamw_step_f32(
+                weights.embed_tokens.device(),
+                param.buffer(),
+                grad.buffer(),
+                &s.m,
+                &s.v,
+                param.num_elements(),
+                cfg.lr,
+                cfg.beta1,
+                cfg.beta2,
+                cfg.eps,
+                cfg.weight_decay,
+                step,
+            )
+            .context("dispatch_adamw_step_f32 (checkpointed)")?;
+        }
+    }
+
+    Ok(loss_val)
 }
 
 /// Same as `vk_train_step` but threads optional GDN state. For
