@@ -1083,6 +1083,61 @@ pub fn cuda_permute_hr_to_rh(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_sdpa_unmasked(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    scale: f32,
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        q.dtype() == DType::F32 && k.dtype() == DType::F32 && v.dtype() == DType::F32,
+        "cuda_sdpa_unmasked: expected F32 inputs, got q={:?} k={:?} v={:?}",
+        q.dtype(),
+        k.dtype(),
+        v.dtype()
+    );
+    ensure!(
+        q.dims().len() == 3 && k.dims().len() == 3 && v.dims().len() == 3,
+        "cuda_sdpa_unmasked: expected rank-3 inputs, got q={:?} k={:?} v={:?}",
+        q.dims(),
+        k.dims(),
+        v.dims()
+    );
+    let rows = q.dims()[0];
+    let heads_q = q.dims()[1];
+    let head_dim = q.dims()[2];
+    let heads_kv = k.dims()[1];
+    ensure!(
+        k.dims() == [rows, heads_kv, head_dim],
+        "cuda_sdpa_unmasked: k shape {:?} mismatch with q {:?}",
+        k.dims(),
+        q.dims()
+    );
+    ensure!(
+        v.dims() == [rows, heads_kv, head_dim],
+        "cuda_sdpa_unmasked: v shape {:?} mismatch with q {:?}",
+        v.dims(),
+        q.dims()
+    );
+    ensure!(
+        heads_q % heads_kv == 0,
+        "cuda_sdpa_unmasked: heads_q ({heads_q}) must be a multiple of heads_kv ({heads_kv})"
+    );
+    let groups = heads_q / heads_kv;
+
+    let q_perm = cuda_permute_rh_to_hr(q)?;
+    let k_perm = cuda_permute_rh_to_hr(k)?;
+    let v_perm = cuda_permute_rh_to_hr(v)?;
+    let k_bcast = cuda_repeat_kv_heads(&k_perm, groups)?;
+    let v_bcast = cuda_repeat_kv_heads(&v_perm, groups)?;
+    let k_t = cuda_transpose_last_two(&k_bcast)?;
+    let scores = cuda_batched_matmul(&q_perm, &k_t)?;
+    let scaled = cuda_scale(&scores, scale)?;
+    let attn = cuda_softmax_last_dim(&scaled)?;
+    let out_perm = cuda_batched_matmul(&attn, &v_bcast)?;
+    cuda_permute_hr_to_rh(&out_perm)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -2852,6 +2907,63 @@ mod tests {
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![10.0, 20.0, 30.0, 1.0, 2.0, 3.0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sdpa_unmasked_backward_reaches_qkv() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sdpa_unmasked backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let q_tensor = Tensor::from_vec(
+            vec![0.2f32, -0.1, 0.4, 0.3, 0.0, 0.5, -0.3, 0.7],
+            (2usize, 2usize, 2usize),
+            &device,
+        )?;
+        let k_tensor = Tensor::from_vec(
+            vec![0.1f32, 0.6, 0.8, -0.2],
+            (2usize, 1usize, 2usize),
+            &device,
+        )?;
+        let v_tensor = Tensor::from_vec(
+            vec![1.0f32, -0.5, 0.25, 0.75],
+            (2usize, 1usize, 2usize),
+            &device,
+        )?;
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let q = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v = CudaTrainTensor::parameter(v_tensor, v_id)?;
+
+        let out = cuda_sdpa_unmasked(&q, &k, &v, 1.0)?;
+        let loss = cuda_sum_all(&out)?;
+
+        assert_eq!(out.dims(), &[2, 2, 2]);
+        let out_values = out.to_vec_f32()?;
+        assert!(
+            out_values.iter().all(|value| value.is_finite()),
+            "SDPA output should stay finite: {out_values:?}"
+        );
+        let grads = cuda_backward(&loss)?;
+        for (name, id, expected_len) in [("q", q_id, 8usize), ("k", k_id, 4usize), ("v", v_id, 4usize)] {
+            let values = grads
+                .get(id)
+                .with_context(|| format!("missing {name} grad"))?
+                .to_vec_f32()?;
+            assert_eq!(values.len(), expected_len, "{name} grad length mismatch");
+            assert!(
+                values.iter().all(|value| value.is_finite())
+                    && values.iter().any(|value| value.abs() > 1e-6),
+                "{name} grad should be finite and non-zero: {values:?}"
+            );
+        }
         Ok(())
     }
 
