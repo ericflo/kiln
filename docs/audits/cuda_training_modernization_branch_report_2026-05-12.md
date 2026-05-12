@@ -33,7 +33,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `bee4af4f` | CUDA projection routing validation ledger | Records A6000 release-mode validation for CUDA projection/FLCE trainer routing. |
 | `39ef69c1` | CUDA attention training fallback proof | Counts tracked FlashAttention declines and extends the CUDA trainer routing test to prove differentiable candle-CUDA attention fallback. |
 | `e4fdb98e` | CUDA attention fallback validation ledger | Records A6000 release-mode validation for tracked FlashAttention decline plus candle-CUDA training fallback. |
-| `c5440c6f` | Real Qwen3.5-4B CUDA SFT smoke ledger | Records A6000 release-mode `kiln-bench` validation on downloaded Qwen3.5-4B weights. |
+| `84f29526` | Real Qwen3.5-4B CUDA SFT smoke ledger | Records A6000 release-mode `kiln-bench` validation on downloaded Qwen3.5-4B weights. |
 
 Local validation so far:
 
