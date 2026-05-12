@@ -1581,6 +1581,47 @@ pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_exp: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    let out = input.as_tensor().exp().context("cuda_exp: candle CUDA exp")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(ExpBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
+pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_softplus: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    let out = (input
+        .as_tensor()
+        .exp()
+        .context("cuda_softplus: exp input")?
+        + 1.0)
+        .context("cuda_softplus: add one")?
+        .log()
+        .context("cuda_softplus: log")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SoftplusBackward {
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         input.dtype() == DType::F32,
@@ -2576,6 +2617,71 @@ impl CudaBackwardOp for SigmoidBackward {
         let deriv =
             (self.output.as_tensor() * &one_minus).context("cuda_sigmoid backward: derivative")?;
         let grad = (grad_out.as_tensor() * &deriv).context("cuda_sigmoid backward: input grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct ExpBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for ExpBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_exp"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_exp backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let exp = self.inputs[0]
+            .as_tensor()
+            .exp()
+            .context("cuda_exp backward: exp input")?;
+        let grad = (grad_out.as_tensor() * &exp).context("cuda_exp backward: input grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct SoftplusBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SoftplusBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_softplus"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_softplus backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let exp_neg = self.inputs[0]
+            .as_tensor()
+            .neg()
+            .context("cuda_softplus backward: negate input")?
+            .exp()
+            .context("cuda_softplus backward: exp -input")?;
+        let sigmoid = (exp_neg + 1.0)
+            .context("cuda_softplus backward: add one")?
+            .recip()
+            .context("cuda_softplus backward: reciprocal")?;
+        let grad =
+            (grad_out.as_tensor() * &sigmoid).context("cuda_softplus backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -3928,6 +4034,87 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "sigmoid grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_exp_and_softplus_backward_match_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda exp/softplus smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let data = vec![-1.0f32, 0.0, 1.5];
+        let exp_tensor = Tensor::new(data.clone(), &device)?;
+        let exp_id = exp_tensor.id();
+        let exp_param = CudaTrainTensor::parameter(exp_tensor, exp_id)?;
+        let exp_out = cuda_exp(&exp_param)?;
+        let exp_loss = cuda_sum_all(&exp_out)?;
+        let exp_grads = cuda_backward(&exp_loss)?;
+
+        let expected_exp: Vec<f32> = data.iter().map(|x| x.exp()).collect();
+        for (idx, (actual, expected)) in exp_out
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_exp.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "exp output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        for (idx, (actual, expected)) in exp_grads
+            .get(exp_id)
+            .expect("exp grad")
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_exp.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "exp grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+
+        let softplus_tensor = Tensor::new(data.clone(), &device)?;
+        let softplus_id = softplus_tensor.id();
+        let softplus_param = CudaTrainTensor::parameter(softplus_tensor, softplus_id)?;
+        let softplus_out = cuda_softplus(&softplus_param)?;
+        let softplus_loss = cuda_sum_all(&softplus_out)?;
+        let softplus_grads = cuda_backward(&softplus_loss)?;
+
+        let expected_softplus: Vec<f32> = data.iter().map(|x| (1.0 + x.exp()).ln()).collect();
+        let expected_softplus_grad: Vec<f32> =
+            data.iter().map(|x| 1.0 / (1.0 + (-x).exp())).collect();
+        for (idx, (actual, expected)) in softplus_out
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_softplus.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "softplus output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        for (idx, (actual, expected)) in softplus_grads
+            .get(softplus_id)
+            .expect("softplus grad")
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_softplus_grad.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "softplus grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
