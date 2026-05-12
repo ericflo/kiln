@@ -28,6 +28,8 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `8f7041fa` | CUDA trainer optimizer dispatch proof | Adds backend dispatch counters and a CUDA trainer test proving `optimizer_step_from_map` reaches resident SGD/AdamW kernels. |
 | `a60ed1e5` | CUDA trainer dispatch validation ledger | Records A6000 release-mode validation for trainer-level optimizer dispatch. |
 | `0db3490b` | CUDA optimizer adapter-save proof | Extends the CUDA trainer test to save PEFT safetensors after resident optimizer dispatch and compare saved weights to updated CUDA Vars. |
+| `accff468` | CUDA optimizer adapter-save validation ledger | Records A6000 release-mode validation for CUDA optimizer adapter-save behavior. |
+| `8ea44f01` | CUDA training projection routing proof | Adds CUDA linear/offset dispatch counters and a trainer test proving projection matmuls plus FLCE chunk matmuls reach backend hooks. |
 
 Local validation so far:
 
@@ -56,6 +58,7 @@ Local validation so far:
   - `cargo test --release -p kiln-train --features cuda test_checkpointed_loss_matches_standard --lib --quiet` re-run after optimizer kernel wiring
   - `cargo test --release -p kiln-train --features cuda cuda_optimizer_step_from_map_engages_backend_kernels --lib --quiet`
   - `cargo test --release -p kiln-train --features cuda cuda_optimizer_step_from_map_engages_backend_kernels --lib --quiet` re-run after adding adapter-save safetensors comparison
+  - `cargo test --release -p kiln-train --features cuda cuda_training_forward_uses_projection_and_flce_backend_hooks --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
@@ -98,7 +101,7 @@ explicit, testable, and observable:
 | CUDA decode LoRA | `CudaBackend::lora_decode_add` declines tracked tensors and only runs the forward-only fused add for inference. | Correct for safety, not a training acceleration. |
 | Resident activation registry | CUDA implements `register`, `has`, `update`, and `evict` TensorId metadata hooks while keeping `resolve` conservative unless a caller already owns the tensor. | Present as lifecycle/telemetry registry; no false side-buffer ownership claimed. |
 | Device optimizer dispatch | CUDA implements resident in-place SGD and AdamW kernels for registered contiguous CUDA F32/BF16 tensors, with first-use telemetry, dispatch counters, and fallback declines for unsupported tensors. | Kernel path, trainer-level engagement, and saved adapter contents proven on CUDA synthetic LoRA params; real-model SFT still pending. |
-| Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd. | Present for tested shapes; broader layer-routing proof still pending. |
+| Autograd-safe projection backend op | `CudaBackend::linear_prefill_apply` and `linear_prefill_apply_offset` route compatible CUDA matmuls through candle CUDA autograd and expose dispatch counters. | Present for direct parity tests and trainer-level projection/FLCE routing; broader real-model layer coverage still pending. |
 | Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
 
 ## Phase Plan
