@@ -12,10 +12,11 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaLayerWeights, CudaModelWeights,
     CudaOwnedFullAttentionLayer, CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena,
-    CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_backward, cuda_embedding_lookup,
-    cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_narrow_last_dim, cuda_reshape,
-    cuda_rmsnorm, cuda_rope, cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu,
-    cuda_sum_all, cuda_transpose2d,
+    CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
+    cuda_embedding_lookup, cuda_exp, cuda_full_attention_layer, cuda_matmul, cuda_mul,
+    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_reshape, cuda_rmsnorm, cuda_rope,
+    cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
+    cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
 use std::collections::HashMap;
@@ -257,6 +258,44 @@ pub fn cuda_gdn_lora_input_projections(
     let k = cuda_narrow_last_dim(&qkv, qk_dim, qk_dim)?;
     let v = cuda_narrow_last_dim(&qkv, qk_dim * 2, v_dim)?;
     Ok(CudaGdnInputProjections { q, k, v, z })
+}
+
+pub struct CudaGdnGateOutputs {
+    pub beta: CudaTrainTensor,
+    pub g: CudaTrainTensor,
+}
+
+/// Native CUDA GDN gate composition:
+/// beta = sigmoid(b), g = -exp(a_log) * softplus(a + dt_bias).
+pub fn cuda_gdn_gate_outputs(
+    input: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+) -> Result<CudaGdnGateOutputs> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_gdn_gate_outputs: expected rank-2 [rows, hidden], got {:?}",
+        input.dims()
+    );
+    let h_norm = cuda_rmsnorm(input, &weights.layer_norm_weight, weights.eps)?;
+    let a = cuda_matmul(&h_norm, &weights.in_proj_a_weight).context("cuda GDN a projection")?;
+    let b = cuda_matmul(&h_norm, &weights.in_proj_b_weight).context("cuda GDN b projection")?;
+    ensure!(
+        a.dims() == b.dims(),
+        "cuda_gdn_gate_outputs: a/b shape mismatch {:?} vs {:?}",
+        a.dims(),
+        b.dims()
+    );
+    let beta = cuda_sigmoid(&b).context("cuda GDN beta sigmoid")?;
+    let a_biased =
+        cuda_add_last_dim_bias(&a, &weights.dt_bias).context("cuda GDN dt bias add")?;
+    let softplus = cuda_softplus(&a_biased).context("cuda GDN softplus")?;
+    let decay = cuda_scale(
+        &cuda_exp(&weights.a_log).context("cuda GDN exp a_log")?,
+        -1.0,
+    )
+    .context("cuda GDN negative decay")?;
+    let g = cuda_mul_last_dim_weight(&softplus, &decay).context("cuda GDN decay scale")?;
+    Ok(CudaGdnGateOutputs { beta, g })
 }
 
 fn cuda_lora_per_head_rmsnorm_flat(
@@ -1465,12 +1504,12 @@ mod tests {
                 &device,
             )?)?,
             in_proj_a_weight: CudaTrainTensor::new(Tensor::zeros(
-                (2usize, 2usize),
+                (2usize, 1usize),
                 DType::F32,
                 &device,
             )?)?,
             in_proj_b_weight: CudaTrainTensor::new(Tensor::zeros(
-                (2usize, 2usize),
+                (2usize, 1usize),
                 DType::F32,
                 &device,
             )?)?,
@@ -1553,11 +1592,13 @@ mod tests {
         let CudaLayerWeights::LinearAttention(linear_layer) = &model.layers[1] else {
             panic!("expected LinearAttention layer");
         };
-        let input = CudaTrainTensor::new(Tensor::from_vec(
+        let input_tensor = Tensor::from_vec(
             vec![0.25f32, -0.5, 0.75, 1.0],
             (2usize, 2usize),
             &device,
-        )?)?;
+        )?;
+        let input_id = input_tensor.id();
+        let input = CudaTrainTensor::parameter(input_tensor, input_id)?;
         let projections = cuda_gdn_lora_input_projections(&input, linear_layer, &lora_layers[1])?;
         assert_eq!(projections.q.dims(), &[2, 2]);
         assert_eq!(projections.k.dims(), &[2, 2]);
@@ -1573,6 +1614,13 @@ mod tests {
         let z_pair = lora_layers[1].in_proj_z.as_ref().expect("z lora");
         assert!(grads.get(qkv_pair.b_id).is_some());
         assert!(grads.get(z_pair.b_id).is_some());
+
+        let gates = cuda_gdn_gate_outputs(&input, linear_layer)?;
+        assert_eq!(gates.beta.dims(), &[2, 1]);
+        assert_eq!(gates.g.dims(), &[2, 1]);
+        let gate_loss = cuda_add(&cuda_sum_all(&gates.beta)?, &cuda_sum_all(&gates.g)?)?;
+        let gate_grads = cuda_backward(&gate_loss)?;
+        assert!(gate_grads.get(input_id).is_some());
         Ok(())
     }
 
