@@ -13,9 +13,10 @@ use kiln_model::cuda_train::{
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaLayerWeights, CudaModelWeights,
     CudaOwnedFullAttentionLayer, CudaOwnedLinearAttentionLayer, CudaRopeTables, CudaTrainArena,
     CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
-    cuda_embedding_lookup, cuda_exp, cuda_full_attention_layer, cuda_matmul, cuda_mul,
-    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_reshape, cuda_rmsnorm, cuda_rope,
-    cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
+    cuda_causal_depthwise_conv1d_prefill_with_state, cuda_embedding_lookup, cuda_exp,
+    cuda_full_attention_layer, cuda_matmul, cuda_mul, cuda_mul_last_dim_weight,
+    cuda_narrow_last_dim, cuda_reshape, cuda_rmsnorm, cuda_rope, cuda_scale,
+    cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
     cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
@@ -258,6 +259,56 @@ pub fn cuda_gdn_lora_input_projections(
     let k = cuda_narrow_last_dim(&qkv, qk_dim, qk_dim)?;
     let v = cuda_narrow_last_dim(&qkv, qk_dim * 2, v_dim)?;
     Ok(CudaGdnInputProjections { q, k, v, z })
+}
+
+pub struct CudaGdnConvQkv {
+    pub q: CudaTrainTensor,
+    pub k: CudaTrainTensor,
+    pub v: CudaTrainTensor,
+    pub next_conv_state: CudaTrainTensor,
+}
+
+/// Native CUDA GDN q/k/v path through LoRA projection, causal conv, and SiLU.
+pub fn cuda_gdn_lora_conv_qkv(
+    input: &CudaTrainTensor,
+    weights: &CudaOwnedLinearAttentionLayer,
+    lora: &CudaLoraLayer,
+    conv_state: &CudaTrainTensor,
+) -> Result<CudaGdnConvQkv> {
+    ensure!(
+        input.dims().len() == 2,
+        "cuda_gdn_lora_conv_qkv: expected rank-2 [rows, hidden], got {:?}",
+        input.dims()
+    );
+    let qk_dim = weights.heads_k * weights.head_dim_k;
+    let v_dim = weights.heads_v * weights.head_dim_v;
+    let expected_qkv_dim = qk_dim * 2 + v_dim;
+
+    let h_norm = cuda_rmsnorm(input, &weights.layer_norm_weight, weights.eps)?;
+    let qkv = cuda_lora_linear(
+        &h_norm,
+        &weights.in_proj_qkv_weight,
+        lora.in_proj_qkv.as_ref(),
+    )?;
+    ensure!(
+        qkv.dims().last() == Some(&expected_qkv_dim),
+        "cuda_gdn_lora_conv_qkv: qkv projection last dim {} != expected {}",
+        qkv.dims().last().copied().unwrap_or(0),
+        expected_qkv_dim
+    );
+    let (conv, next_conv_state) =
+        cuda_causal_depthwise_conv1d_prefill_with_state(&qkv, &weights.conv1d_weight, conv_state)
+            .context("cuda GDN qkv causal conv1d")?;
+    let mixed = cuda_silu(&conv).context("cuda GDN qkv conv SiLU")?;
+    let q = cuda_narrow_last_dim(&mixed, 0, qk_dim)?;
+    let k = cuda_narrow_last_dim(&mixed, qk_dim, qk_dim)?;
+    let v = cuda_narrow_last_dim(&mixed, qk_dim * 2, v_dim)?;
+    Ok(CudaGdnConvQkv {
+        q,
+        k,
+        v,
+        next_conv_state,
+    })
 }
 
 pub struct CudaGdnGateOutputs {
@@ -1514,7 +1565,7 @@ mod tests {
                 &device,
             )?)?,
             conv1d_weight: CudaTrainTensor::new(Tensor::zeros(
-                (1usize, 1usize, 4usize),
+                (6usize, 1usize, 3usize),
                 DType::F32,
                 &device,
             )?)?,
@@ -1535,7 +1586,7 @@ mod tests {
             heads_v: 1,
             head_dim_k: 2,
             head_dim_v: 2,
-            conv_kernel: 4,
+            conv_kernel: 3,
             eps: 1e-6,
         };
         let model = CudaModelWeights {
@@ -1614,6 +1665,18 @@ mod tests {
         let z_pair = lora_layers[1].in_proj_z.as_ref().expect("z lora");
         assert!(grads.get(qkv_pair.b_id).is_some());
         assert!(grads.get(z_pair.b_id).is_some());
+
+        let conv_state = CudaTrainTensor::new(Tensor::zeros(
+            (2usize, 6usize),
+            DType::F32,
+            &device,
+        )?)?;
+        let conv_qkv =
+            cuda_gdn_lora_conv_qkv(&input, linear_layer, &lora_layers[1], &conv_state)?;
+        assert_eq!(conv_qkv.q.dims(), &[2, 2]);
+        assert_eq!(conv_qkv.k.dims(), &[2, 2]);
+        assert_eq!(conv_qkv.v.dims(), &[2, 2]);
+        assert_eq!(conv_qkv.next_conv_state.dims(), &[2, 6]);
 
         let gates = cuda_gdn_gate_outputs(&input, linear_layer)?;
         assert_eq!(gates.beta.dims(), &[2, 1]);
