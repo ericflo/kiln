@@ -1989,9 +1989,15 @@ impl FlceMatmulProvider for BackendFlceProvider {
     }
 }
 
-/// Build a provider when the supplied backend is a Vulkan instance and
-/// the payload shape suggests that chunked dispatch is the better choice
-/// than the unfused lm_head matmul + cross-entropy path.
+/// Build a backend chunk-matmul provider for FLCE.
+///
+/// Vulkan auto-enables when the payload shape suggests that chunked dispatch is
+/// the better choice than the unfused lm_head matmul + cross-entropy path.
+/// The `model_config` argument is retained for call-site stability and for a
+/// future CUDA/Vulkan crossover rule that may need vocab or hidden size again.
+/// CUDA currently exposes the same provider only through `KILN_CUDA_FLCE=1`
+/// while the offset hook is under validation; default CUDA FLCE still uses
+/// Phase B's candle CUDA chunk matmul path.
 ///
 /// The crossover used to be measured against the pre-Phase-2 baseline
 /// (CPU-only `broadcast_matmul` for the unfused path); on Strix Halo the
@@ -2012,14 +2018,23 @@ impl FlceMatmulProvider for BackendFlceProvider {
 /// × 2 = ~12 GFLOP), so the unfused path is fine and FLCE's per-chunk
 /// fixed cost actually dominates.
 ///
-/// `KILN_VULKAN_FLCE=1` forces the provider on; `KILN_VULKAN_FLCE=0`
-/// forces it off; otherwise the auto-heuristic decides based on
-/// `label_mask`.
+/// `KILN_VULKAN_FLCE=1` forces the Vulkan provider on; `KILN_VULKAN_FLCE=0`
+/// forces it off; otherwise the auto-heuristic decides based on `label_mask`.
+/// `KILN_CUDA_FLCE=1` forces the CUDA provider on; unset/false keeps the
+/// existing candle CUDA Phase B behavior until a benchmark justifies auto-on.
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
     label_mask: &[bool],
     _model_config: &ModelConfig,
 ) -> Option<FlceProvider> {
+    if backend.name() == "cuda" {
+        return match kiln_core::env_flag::env_tristate("KILN_CUDA_FLCE") {
+            Some(true) => Some(std::sync::Arc::new(BackendFlceProvider {
+                backend: backend.clone(),
+            })),
+            Some(false) | None => None,
+        };
+    }
     if backend.name() != "vulkan" {
         return None;
     }
@@ -3797,7 +3812,8 @@ mod tests {
     /// Serializes tests in this binary that mutate process-global env vars
     /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
     /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
-    /// `KILN_DISABLE_RMSNORM_BACKWARD`). `cargo test` runs tests in this
+    /// `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_CUDA_FLCE`,
+    /// `KILN_VULKAN_FLCE`). `cargo test` runs tests in this
     /// binary as parallel threads in a single process, so without this
     /// mutex one test's `set_var` can leak into another test's
     /// "monolithic baseline" forward pass. `cargo nextest run` runs each
@@ -3930,6 +3946,31 @@ mod tests {
                 .iter()
                 .all(|&marked| !marked)
         );
+    }
+
+    #[derive(Debug)]
+    struct NamedTestBackend {
+        name: &'static str,
+        device: Device,
+    }
+
+    impl NamedTestBackend {
+        fn runtime(name: &'static str) -> std::sync::Arc<dyn BackendRuntime> {
+            std::sync::Arc::new(Self {
+                name,
+                device: Device::Cpu,
+            })
+        }
+    }
+
+    impl BackendRuntime for NamedTestBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn device(&self) -> &Device {
+            &self.device
+        }
     }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
@@ -5316,6 +5357,79 @@ mod tests {
         assert!(!flce_auto_engage(15));
     }
 
+    #[test]
+    fn cuda_flce_provider_requires_explicit_opt_in() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
+
+        let backend = NamedTestBackend::runtime("cuda");
+        let config = tiny_config();
+        let label_mask = vec![true; 128];
+
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_none(),
+            "CUDA FLCE must not auto-engage while the offset hook remains opt-in"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_CUDA_FLCE", "0");
+        }
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_none(),
+            "KILN_CUDA_FLCE=0 must force the CUDA backend provider off"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_CUDA_FLCE", "1");
+        }
+        assert!(
+            build_flce_provider(&backend, &label_mask, &config).is_some(),
+            "KILN_CUDA_FLCE=1 must opt into the CUDA backend provider"
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+        }
+    }
+
+    #[test]
+    fn vulkan_flce_provider_keeps_auto_heuristic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::remove_var("KILN_CUDA_FLCE");
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
+
+        let backend = NamedTestBackend::runtime("vulkan");
+        let config = tiny_config();
+        let active_label_mask = vec![true; 128];
+        let trivial_label_mask = vec![true; 8];
+
+        assert!(
+            build_flce_provider(&backend, &active_label_mask, &config).is_some(),
+            "Vulkan should still auto-engage for non-trivial supervised batches"
+        );
+        assert!(
+            build_flce_provider(&backend, &trivial_label_mask, &config).is_none(),
+            "Vulkan should still skip trivial supervised batches"
+        );
+
+        unsafe {
+            std::env::set_var("KILN_VULKAN_FLCE", "0");
+        }
+        assert!(
+            build_flce_provider(&backend, &active_label_mask, &config).is_none(),
+            "KILN_VULKAN_FLCE=0 must keep forcing the Vulkan provider off"
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_VULKAN_FLCE");
+        }
+    }
+
     /// AdamW CPU fallback path: build a tiny `TrainableLoraParams`,
     /// allocate optimizer state, hand a synthetic grad through
     /// `optimizer_step_from_map`, and verify Vars actually change
@@ -5490,5 +5604,186 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_optimizer_step_from_map_engages_backend_kernels() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping trainer optimizer dispatch test: {err}");
+                return Ok(());
+            }
+        };
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device(&device);
+        assert_eq!(backend.name(), "cuda");
+
+        let params = TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(0xC0FFEE),
+        )?;
+        params.register_with_backend(&*backend)?;
+
+        let mut grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+        for var in params.all_vars() {
+            let t = var.as_tensor();
+            let grad = Tensor::ones(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
+            grads.insert(t.id(), grad);
+        }
+
+        kiln_model::backend::cuda::reset_optimizer_dispatch_success_counts();
+        sgd_step_from_map(&*backend, &params, &grads, 0.5)?;
+        let (sgd_count, adamw_count) = kiln_model::backend::cuda::optimizer_dispatch_success_counts();
+        assert!(
+            sgd_count > 0,
+            "trainer SGD step must dispatch at least one CUDA optimizer kernel"
+        );
+        assert_eq!(adamw_count, 0, "SGD step must not increment AdamW dispatches");
+
+        let mut opt_state = params.allocate_adamw_state(&device)?;
+        opt_state.register_with_backend(&*backend)?;
+        kiln_model::backend::cuda::reset_optimizer_dispatch_success_counts();
+        optimizer_step_from_map(
+            &*backend,
+            &params,
+            &grads,
+            0.01,
+            Optimizer::AdamW {
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                weight_decay: 0.0,
+            },
+            Some(&mut opt_state),
+        )?;
+        let (sgd_count, adamw_count) = kiln_model::backend::cuda::optimizer_dispatch_success_counts();
+        assert_eq!(sgd_count, 0, "AdamW step must not increment SGD dispatches");
+        assert!(
+            adamw_count > 0,
+            "trainer AdamW step must dispatch at least one CUDA optimizer kernel"
+        );
+        assert_eq!(opt_state.step, 1, "AdamW state should advance exactly once");
+
+        let adapter_dir = tempfile::tempdir()?;
+        params.save_peft(adapter_dir.path(), config.num_layers)?;
+        let saved = candle_core::safetensors::load(
+            &adapter_dir.path().join("adapter_model.safetensors"),
+            &Device::Cpu,
+        )?;
+        let saved_key = "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight";
+        let saved_a = saved
+            .get(saved_key)
+            .ok_or_else(|| anyhow::anyhow!("saved adapter missing {saved_key}"))?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let current_a = params.layers[0]
+            .gate_proj
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing layer 0 gate_proj LoRA params"))?
+            .0
+            .as_tensor()
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(saved_a.len(), current_a.len());
+        for (idx, (saved, current)) in saved_a.iter().zip(current_a.iter()).enumerate() {
+            assert!(
+                (saved - current).abs() < 1e-6,
+                "saved adapter value diverged from updated CUDA Var at index {idx}: \
+                 saved={saved} current={current}"
+            );
+        }
+
+        opt_state.evict_from_backend(&*backend);
+        params.evict_from_backend(&*backend);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_training_forward_uses_projection_and_flce_backend_hooks() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("KILN_USE_FLCE", "1");
+            std::env::set_var("KILN_CUDA_FLCE", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let device = match Device::new_cuda(0) {
+                Ok(device) => device,
+                Err(err) => {
+                    eprintln!("CUDA unavailable, skipping CUDA projection routing test: {err}");
+                    return Ok(());
+                }
+            };
+            let config = tiny_config();
+            let weights = tiny_weights(&config, &device)?;
+            let params = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(0xC0FFEE),
+            )?;
+            let backend = backend::for_device(&device);
+            assert_eq!(backend.name(), "cuda");
+            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
+            let label_mask = vec![false, false, true, true, true, true, true, false];
+            let flce_provider = build_flce_provider(&backend, &label_mask, &config)
+                .expect("KILN_CUDA_FLCE=1 should build a CUDA backend FLCE provider");
+
+            kiln_model::backend::cuda::reset_linear_prefill_success_counts();
+            kiln_model::backend::cuda::reset_flash_attn_tracked_decline_count();
+            let (_loss, grads) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &device,
+                Some(flce_provider),
+            )?;
+            let (linear_count, offset_count) =
+                kiln_model::backend::cuda::linear_prefill_success_counts();
+            let flash_tracked_declines =
+                kiln_model::backend::cuda::flash_attn_tracked_decline_count();
+            assert!(
+                offset_count > 0,
+                "CUDA FLCE provider must dispatch at least one offset chunk matmul"
+            );
+            assert!(
+                linear_count > offset_count,
+                "CUDA training forward should dispatch non-FLCE projection matmuls too: \
+                 linear_count={linear_count} offset_count={offset_count}"
+            );
+            assert!(
+                flash_tracked_declines > 0,
+                "CUDA full-attention training should offer FlashAttention and decline tracked tensors"
+            );
+            assert!(
+                params
+                    .all_vars()
+                    .iter()
+                    .any(|var| grads.get(var.as_tensor()).is_some()),
+                "CUDA training forward/backward should produce at least one LoRA gradient"
+            );
+            Ok(())
+        })();
+
+        unsafe {
+            std::env::remove_var("KILN_USE_FLCE");
+            std::env::remove_var("KILN_CUDA_FLCE");
+        }
+        result
     }
 }
