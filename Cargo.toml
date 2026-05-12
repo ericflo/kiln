@@ -117,3 +117,6 @@ kiln-model = { path = "crates/kiln-model" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }
 kiln-train = { path = "crates/kiln-train" }
+
+[patch.crates-io]
+candle-core = { path = "vendor/candle-core" }

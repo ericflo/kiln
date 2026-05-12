@@ -248,6 +248,14 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "metal")]
+fn metal_autoreleasepool<T, F>(f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    objc2::rc::autoreleasepool(|_| f())
+}
+
 fn log_paged_layer_profile(
     layer: usize,
     kind: &str,
@@ -5317,26 +5325,41 @@ pub fn gated_deltanet_forward_streaming(
     while cursor < total {
         let end = (cursor + tile_size).min(total);
         let len = end - cursor;
-        let tile_in = x.narrow(1, cursor, len)?;
-        let tile_out = gated_deltanet_forward(
-            backend,
-            &tile_in,
-            weights,
-            config,
-            recurrent_state,
-            conv_state,
-            false,
-            false,
-        )
-        .with_context(|| {
-            format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
-        })?;
+        let mut run_tile = || -> Result<Tensor> {
+            let tile_in = x.narrow(1, cursor, len)?;
+            gated_deltanet_forward(
+                backend,
+                &tile_in,
+                weights,
+                config,
+                recurrent_state,
+                conv_state,
+                false,
+                false,
+            )
+            .with_context(|| {
+                format!("streaming GDN tile [{cursor}, {end}) of {total} (tile_size={tile_size})")
+            })
+        };
+        let tile_out = {
+            #[cfg(feature = "metal")]
+            {
+                if matches!(tile_device, Device::Metal(_)) {
+                    let tile_out = metal_autoreleasepool(|| run_tile())?;
+                    tile_device.synchronize().with_context(|| {
+                        format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
+                    })?;
+                    tile_out
+                } else {
+                    run_tile()?
+                }
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                run_tile()?
+            }
+        };
         tile_outs.push(tile_out);
-        if matches!(tile_device, Device::Metal(_)) {
-            tile_device.synchronize().with_context(|| {
-                format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
-            })?;
-        }
         cursor = end;
     }
 
