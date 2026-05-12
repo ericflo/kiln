@@ -516,6 +516,50 @@ fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
 }
 
 #[test]
+fn vk_native_full_pipeline_saves_loadable_adapter() -> Result<()> {
+    // Drives the full vk-native training inner-loop pattern:
+    //   - build VkModelWeights (synthetic)
+    //   - init LoRA layers
+    //   - allocate AdamW state
+    //   - run 10 training steps
+    //   - save adapter via save_vk_lora_adapter
+    //   - verify adapter safetensors loads with the expected PEFT key
+    //     names
+    use kiln_train::vk_train::save_vk_lora_adapter;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    for step in 1..=10 {
+        let l = vk_train_step(&model, &lora_layers, &input_ids, &mut adamw, &cfg, step)?;
+        assert!(l.is_finite());
+    }
+    let tmp = std::env::temp_dir().join(format!("kiln-vk-test-adapter-{}.safetensors", std::process::id()));
+    let rank = 4;
+    let alpha = 8.0;
+    save_vk_lora_adapter(&lora_layers, rank, alpha, &tmp)?;
+    // Read it back via candle safetensors and verify keys
+    let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+    println!("vk_native_full_pipeline saved {} tensors", loaded.len());
+    // PEFT convention: at least q_proj.lora_A and q_proj.lora_B should exist
+    let has_q_a = loaded
+        .keys()
+        .any(|k| k.contains("q_proj.lora_A.weight"));
+    let has_q_b = loaded
+        .keys()
+        .any(|k| k.contains("q_proj.lora_B.weight"));
+    assert!(has_q_a, "missing q_proj.lora_A in saved adapter");
+    assert!(has_q_b, "missing q_proj.lora_B in saved adapter");
+    let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+#[test]
 fn vk_checkpointed_train_step_loss_decreases() -> Result<()> {
     // Verifies vk_checkpointed_train_step produces gradient updates
     // equivalent to the non-checkpointed path (same model, same input,

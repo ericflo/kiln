@@ -15,13 +15,20 @@ validation on a real model + adapter run.
 - `vk_native_sft_train` (multi-epoch loop, LoRA init, AdamW, adapter
   save in PEFT format) — wired into `kiln-server`'s training queue.
 - FullAttn layer with Qwen3.5 specifics: per-head Q/K-norm,
-  `attn_output_gate` (q_proj fused with [Q, gate], sigmoid·attn).
+  `attn_output_gate` (q_proj fused with [Q, gate], sigmoid·attn),
+  RoPE precomputed from `rotary_inv_freq` + applied between QK-norm
+  and SDPA.
 - GDN layer (chunkwise forward + backward, conv1d, gates,
   gated_rms_norm, full state plumbing).
 - `VkModelWeights::from_gpu_weights`: candle `GpuWeights` →
   vk-native, dispatching FullAttention vs LinearAttention.
-- 25 parity tests passing (9 smoke + 4 GDN-foundation +
-  6 GDN-backward + 6 GDN-chunkwise).
+- Gradient checkpointing for FullAttn-only models
+  (`vk_checkpointed_train_step` — segmented forward + per-segment
+  backward via the scalar trick `seg_loss = sum(seg_out · upstream)`).
+  Auto-enabled via `KILN_GRAD_CHECKPOINT_SEGMENTS` (default 4).
+- 27 parity / smoke tests across 4 suites: 11 smoke (incl. full-
+  pipeline adapter-save test), 4 GDN-foundation, 6 GDN-backward,
+  6 GDN-chunkwise.
 
 **Known gaps** (Phase 7+ follow-ups):
 - Some helper paths still readback through CPU for layout transforms
@@ -34,12 +41,11 @@ validation on a real model + adapter run.
   `solve_tri_transpose`, `gated_rms_norm_bwd` are CPU implementations.
   GLSL replacements would speed up training but are not on the
   critical path for correctness.
-- Gradient checkpointing (`vk_checkpointed_forward_backward`) is not
-  yet wired — single-step forward+backward only. For T=918 the peak
-  memory may exceed 22 GB without checkpointing.
-- RoPE is not yet wired into `vk_full_attention_layer` — the FullAttn
-  arm currently runs SDPA without rotary. `vk_rope` exists in vk_ops
-  with autograd; just needs the cos/sin precompute + reshape glue.
+- Gradient checkpointing for hybrid (GDN) models needs per-segment
+  recurrent-state snapshots — the current path bypasses checkpointing
+  when GDN layers are present. For Qwen3.5-4B, set
+  `KILN_NO_GRAD_CHECKPOINT=1` and accept the single-step memory
+  budget for v1 validation.
 - Per-LoRA-param gradient parity vs the candle reference at T=64 has
   not been measured. The math is parity-tested per-shader / per-op,
   but the end-to-end Qwen3.5-4B numerical bar is the Phase 7 gate.
