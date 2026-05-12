@@ -339,6 +339,80 @@ pub fn cuda_sgd_step_from_store(
     Ok(updated)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct CudaAdamWConfig {
+    pub lr: f32,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub weight_decay: f32,
+}
+
+impl Default for CudaAdamWConfig {
+    fn default() -> Self {
+        Self {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CudaAdamWState {
+    pub first_moment: CudaTrainTensor,
+    pub second_moment: CudaTrainTensor,
+    pub step: u32,
+}
+
+impl CudaAdamWState {
+    pub fn zeros_like(param: &CudaTrainTensor) -> Result<Self> {
+        Ok(Self {
+            first_moment: CudaTrainTensor::zeros_like(param.as_tensor())?,
+            second_moment: CudaTrainTensor::zeros_like(param.as_tensor())?,
+            step: 0,
+        })
+    }
+}
+
+pub fn cuda_adamw_step_from_store(
+    params: &[CudaTrainTensor],
+    grads: &CudaGradStore,
+    states: &mut HashMap<TensorId, CudaAdamWState>,
+    cfg: CudaAdamWConfig,
+) -> Result<usize> {
+    let mut updated = 0usize;
+    for param in params {
+        let Some(param_id) = param.param_id() else {
+            continue;
+        };
+        let Some(grad) = grads.get(param_id) else {
+            continue;
+        };
+        let state = states
+            .get_mut(&param_id)
+            .with_context(|| format!("cuda_adamw_step_from_store: missing state for {:?}", param_id))?;
+        state.step = state.step.saturating_add(1);
+        param
+            .adamw_step_inplace(
+                grad,
+                &state.first_moment,
+                &state.second_moment,
+                cfg.lr,
+                cfg.beta1,
+                cfg.beta2,
+                cfg.eps,
+                cfg.weight_decay,
+                state.step,
+            )
+            .with_context(|| format!("cuda_adamw_step_from_store: param {:?}", param_id))?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
 pub fn cuda_add(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         lhs.as_tensor().shape() == rhs.as_tensor().shape(),
@@ -974,6 +1048,50 @@ mod tests {
         assert!(
             after_loss < before_loss,
             "expected SGD to reduce loss: before={before_loss} after={after_loss}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_native_adamw_step_decreases_sum_square_loss() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda native AdamW smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let param_tensor = Tensor::new(vec![2.0f32, -4.0], &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let mut states = HashMap::new();
+        states.insert(param_id, CudaAdamWState::zeros_like(&param)?);
+
+        let before = cuda_sum_all(&cuda_mul(&param, &param)?)?;
+        let before_loss = before.to_vec_f32()?[0];
+        let grads = cuda_backward(&before)?;
+        let updated = cuda_adamw_step_from_store(
+            &[param.clone()],
+            &grads,
+            &mut states,
+            CudaAdamWConfig {
+                lr: 0.1,
+                ..CudaAdamWConfig::default()
+            },
+        )?;
+        assert_eq!(updated, 1);
+
+        let state = states.get(&param_id).expect("adamw state");
+        assert_eq!(state.step, 1);
+        assert!(state.first_moment.to_vec_f32()?.iter().any(|v| v.abs() > 0.0));
+        assert!(state.second_moment.to_vec_f32()?.iter().any(|v| v.abs() > 0.0));
+
+        let after = cuda_sum_all(&cuda_mul(&param, &param)?)?;
+        let after_loss = after.to_vec_f32()?[0];
+        assert!(
+            after_loss < before_loss,
+            "expected AdamW to reduce loss: before={before_loss} after={after_loss}"
         );
         Ok(())
     }
