@@ -2085,6 +2085,11 @@ pub struct CudaGdnSingleHeadSequenceOutput {
     pub next_state: CudaTrainTensor,
 }
 
+pub struct CudaGdnMultiHeadSequenceOutput {
+    pub out: CudaTrainTensor,
+    pub next_state: CudaTrainTensor,
+}
+
 pub fn cuda_gdn_single_token_recurrence(
     q: &CudaTrainTensor,
     k: &CudaTrainTensor,
@@ -2224,6 +2229,91 @@ pub fn cuda_gdn_single_head_sequence_recurrence(
     Ok(CudaGdnSingleHeadSequenceOutput {
         out,
         next_state: current_state,
+    })
+}
+
+pub fn cuda_gdn_multi_head_sequence_recurrence(
+    q: &CudaTrainTensor,
+    k: &CudaTrainTensor,
+    v: &CudaTrainTensor,
+    beta: &CudaTrainTensor,
+    g: &CudaTrainTensor,
+    state: &CudaTrainTensor,
+    heads: usize,
+) -> Result<CudaGdnMultiHeadSequenceOutput> {
+    ensure!(
+        heads > 0,
+        "cuda_gdn_multi_head_sequence_recurrence: heads must be > 0"
+    );
+    ensure!(
+        q.dtype() == DType::F32
+            && k.dtype() == DType::F32
+            && v.dtype() == DType::F32
+            && beta.dtype() == DType::F32
+            && g.dtype() == DType::F32
+            && state.dtype() == DType::F32,
+        "cuda_gdn_multi_head_sequence_recurrence: expected F32 tensors"
+    );
+    ensure!(
+        q.dims().len() == 2
+            && k.dims().len() == 2
+            && v.dims().len() == 2
+            && beta.dims().len() == 2
+            && g.dims().len() == 2
+            && state.dims().len() == 2,
+        "cuda_gdn_multi_head_sequence_recurrence: expected rank-2 tensors, got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+    ensure!(
+        q.dims()[0] % heads == 0,
+        "cuda_gdn_multi_head_sequence_recurrence: q rows {} not divisible by heads {}",
+        q.dims()[0],
+        heads
+    );
+    let rows = q.dims()[0] / heads;
+    let dk = q.dims()[1];
+    let dv = v.dims()[1];
+    ensure!(
+        rows > 0
+            && k.dims() == [heads * rows, dk]
+            && v.dims()[0] == heads * rows
+            && beta.dims() == [heads * rows, 1]
+            && g.dims() == [heads * rows, 1]
+            && state.dims() == [heads * dk, dv],
+        "cuda_gdn_multi_head_sequence_recurrence: expected q/k=[heads*rows,dk], v=[heads*rows,dv], beta/g=[heads*rows,1], state=[heads*dk,dv], got {:?}/{:?}/{:?}/{:?}/{:?}/{:?}",
+        q.dims(),
+        k.dims(),
+        v.dims(),
+        beta.dims(),
+        g.dims(),
+        state.dims()
+    );
+
+    let mut out_parts = Vec::with_capacity(heads);
+    let mut state_parts = Vec::with_capacity(heads);
+    for head in 0..heads {
+        let row_start = head * rows;
+        let state_start = head * dk;
+        let q_h = cuda_narrow_rows(q, row_start, rows)?;
+        let k_h = cuda_narrow_rows(k, row_start, rows)?;
+        let v_h = cuda_narrow_rows(v, row_start, rows)?;
+        let beta_h = cuda_narrow_rows(beta, row_start, rows)?;
+        let g_h = cuda_narrow_rows(g, row_start, rows)?;
+        let state_h = cuda_narrow_rows(state, state_start, dk)?;
+        let result =
+            cuda_gdn_single_head_sequence_recurrence(&q_h, &k_h, &v_h, &beta_h, &g_h, &state_h)?;
+        out_parts.push(result.out);
+        state_parts.push(result.next_state);
+    }
+
+    Ok(CudaGdnMultiHeadSequenceOutput {
+        out: cuda_cat_rows(&out_parts)?,
+        next_state: cuda_cat_rows(&state_parts)?,
     })
 }
 
@@ -5597,6 +5687,101 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "GDN sequence state mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+
+        let loss = cuda_add(&cuda_sum_all(&result.out)?, &cuda_sum_all(&result.next_state)?)?;
+        let grads = cuda_backward(&loss)?;
+        assert!(grads.get(q_id).is_some());
+        assert!(grads.get(k_id).is_some());
+        assert!(grads.get(v_id).is_some());
+        assert!(grads.get(beta_id).is_some());
+        assert!(grads.get(g_id).is_some());
+        assert!(grads.get(state_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_gdn_multi_head_sequence_recurrence_threads_head_blocks() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda GDN multi-head smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let q_tensor = Tensor::from_vec(
+            vec![0.5f32, -1.0, 0.25, 0.75, 1.0, 0.0, 0.0, 1.0],
+            (4usize, 2usize),
+            &device,
+        )?;
+        let k_tensor = Tensor::from_vec(
+            vec![1.5f32, 0.25, -0.5, 1.0, 0.5, 0.5, 1.0, -0.5],
+            (4usize, 2usize),
+            &device,
+        )?;
+        let v_tensor = Tensor::from_vec(
+            vec![
+                0.1f32, -0.2, 0.3, 0.4, 0.2, -0.1, 0.2, 0.4, -0.2, -0.3, 0.1, 0.5,
+            ],
+            (4usize, 3usize),
+            &device,
+        )?;
+        let beta_tensor =
+            Tensor::from_vec(vec![0.4f32, 0.6, 0.5, 0.25], (4usize, 1usize), &device)?;
+        let g_tensor = Tensor::from_vec(vec![0.0f32, 0.0, 0.0, 0.0], (4usize, 1usize), &device)?;
+        let state_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 0.5, -0.5, 1.0, 1.5, 0.25, -1.0],
+            (4usize, 3usize),
+            &device,
+        )?;
+        let q_id = q_tensor.id();
+        let k_id = k_tensor.id();
+        let v_id = v_tensor.id();
+        let beta_id = beta_tensor.id();
+        let g_id = g_tensor.id();
+        let state_id = state_tensor.id();
+        let q = CudaTrainTensor::parameter(q_tensor, q_id)?;
+        let k = CudaTrainTensor::parameter(k_tensor, k_id)?;
+        let v = CudaTrainTensor::parameter(v_tensor, v_id)?;
+        let beta = CudaTrainTensor::parameter(beta_tensor, beta_id)?;
+        let g = CudaTrainTensor::parameter(g_tensor, g_id)?;
+        let state = CudaTrainTensor::parameter(state_tensor, state_id)?;
+
+        let result = cuda_gdn_multi_head_sequence_recurrence(&q, &k, &v, &beta, &g, &state, 2)?;
+        assert_eq!(result.out.dims(), &[4, 3]);
+        assert_eq!(result.next_state.dims(), &[4, 3]);
+        let expected_out = [
+            -3.98f32, -4.89, -5.64, 1.3675, 1.49, 1.815, 0.3, -0.36875, 0.95, 1.29375,
+            0.29882812, -0.928125,
+        ];
+        for (idx, (actual, expected)) in result
+            .out
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_out.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN multi-head out mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_state = [
+            0.634f32, 0.737, 1.302, 1.612, 1.741, 1.986, 0.3125, -0.20390625, 0.70625,
+            1.29375, 0.29882812, -0.928125,
+        ];
+        for (idx, (actual, expected)) in result
+            .next_state
+            .to_vec_f32()?
+            .iter()
+            .zip(expected_state.iter())
+            .enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "GDN multi-head state mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
 
