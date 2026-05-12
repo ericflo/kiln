@@ -16,6 +16,7 @@ each CUDA training slice must land with tests and a pushed commit before the nex
 | `0b1b8d2f` | CUDA TensorId residency lifecycle registry | CUDA implements register/has/update/evict metadata hooks; no side-buffer ownership claimed. |
 | `c67de64f` | Registered CUDA LoRA delta path | `CudaBackend::lora_delta_resident` engages for registered CUDA A/B and delegates to candle CUDA autograd. |
 | `6dba1644` | CUDA training projection hook | `CudaBackend::linear_prefill_apply` routes compatible CUDA projection matmuls through the backend seam using candle CUDA autograd. |
+| `89926670` | CUDA runtime hook parity tests | Adds A6000-runnable tests for the projection hook and registered LoRA delta hook. |
 
 Local validation so far:
 
@@ -26,6 +27,8 @@ Local validation so far:
 - RunPod A6000 validation on pod `pdauarcdn9k62l`, release mode with `KILN_CUDA_ARCHS=86`, passed:
   - `cargo test --release -p kiln-model --features cuda cuda_training_capabilities_do_not_overclaim_native_training --lib --quiet`
   - `cargo test --release -p kiln-model --features cuda cuda_resident_activation_registry_lifecycle --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_linear_prefill_apply_matches_candle_cuda_matmul --lib --quiet`
+  - `cargo test --release -p kiln-model --features cuda cuda_registered_lora_delta_matches_candle_cuda_reference --lib --quiet`
   - Debug-mode CUDA test was intentionally rejected after `nvcc -G` hit exit 137 in `kiln-flash-attn`; release mode is the required kiln CUDA path.
 
 ## Executive Summary
