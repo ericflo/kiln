@@ -7,7 +7,7 @@
 //! accepting CPU tensors by accident.
 
 use anyhow::{Context, Result, ensure};
-use candle_core::{DType, Device, Tensor, TensorId};
+use candle_core::{D, DType, Device, Tensor, TensorId};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -790,6 +790,43 @@ pub fn cuda_batched_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Resu
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        input.dtype() == DType::F32,
+        "cuda_softmax_last_dim: expected F32 input, got {:?}",
+        input.dtype()
+    );
+    ensure!(
+        !input.dims().is_empty(),
+        "cuda_softmax_last_dim: expected non-empty shape"
+    );
+    let max_val = input
+        .as_tensor()
+        .max_keepdim(D::Minus1)
+        .context("cuda_softmax_last_dim: max_keepdim")?;
+    let shifted = input
+        .as_tensor()
+        .broadcast_sub(&max_val)
+        .context("cuda_softmax_last_dim: shift")?;
+    let exp_shifted = shifted.exp().context("cuda_softmax_last_dim: exp")?;
+    let sum_exp = exp_shifted
+        .sum_keepdim(D::Minus1)
+        .context("cuda_softmax_last_dim: sum_keepdim")?;
+    let out = exp_shifted
+        .broadcast_div(&sum_exp)
+        .context("cuda_softmax_last_dim: normalize")?;
+    let needs_grad =
+        input.requires_grad() || input.grad_fn().is_some() || input.param_id().is_some();
+    let output_for_backward = CudaTrainTensor::new(out.clone())?;
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(SoftmaxLastDimBackward {
+            output: output_for_backward,
+            inputs: vec![input.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -1029,6 +1066,42 @@ impl CudaBackwardOp for MeanAllBackward {
             .context("cuda_mean_all backward: broadcast scalar grad")?
             .affine(scale, 0.0)
             .context("cuda_mean_all backward: scale grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct SoftmaxLastDimBackward {
+    output: CudaTrainTensor,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for SoftmaxLastDimBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_softmax_last_dim"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_softmax_last_dim backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let weighted = (self.output.as_tensor() * grad_out.as_tensor())
+            .context("cuda_softmax_last_dim backward: y * grad_out")?;
+        let row_dot = weighted
+            .sum_keepdim(D::Minus1)
+            .context("cuda_softmax_last_dim backward: row dot")?;
+        let centered = grad_out
+            .as_tensor()
+            .broadcast_sub(&row_dot)
+            .context("cuda_softmax_last_dim backward: center grad")?;
+        let grad = (self.output.as_tensor() * &centered)
+            .context("cuda_softmax_last_dim backward: input grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
     }
 }
@@ -1846,6 +1919,58 @@ mod tests {
             grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
             vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0, 2.0, 2.0, -1.0, -1.0, 6.0, 6.0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_softmax_last_dim_backward_matches_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_softmax_last_dim backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let data = vec![0.0f32, 1.0, 2.0, -1.0, 0.5, 3.0];
+        let param_tensor = Tensor::from_vec(data.clone(), (2usize, 3usize), &device)?;
+        let param_id = param_tensor.id();
+        let param = CudaTrainTensor::parameter(param_tensor, param_id)?;
+        let probs = cuda_softmax_last_dim(&param)?;
+        let squared = cuda_mul(&probs, &probs)?;
+        let loss = cuda_sum_all(&squared)?;
+
+        let mut expected_probs = Vec::new();
+        let mut expected_grad = Vec::new();
+        for row in data.chunks(3) {
+            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exp: Vec<f32> = row.iter().map(|v| (v - max).exp()).collect();
+            let sum: f32 = exp.iter().sum();
+            let probs: Vec<f32> = exp.iter().map(|v| v / sum).collect();
+            let dot: f32 = probs.iter().map(|p| p * (2.0 * p)).sum();
+            expected_probs.extend(probs.iter().copied());
+            expected_grad.extend(probs.iter().map(|p| p * (2.0 * p - dot)));
+        }
+
+        let actual_probs = probs.to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_probs.iter().zip(expected_probs.iter()).enumerate()
+        {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "softmax output mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        let expected_loss: f32 = expected_probs.iter().map(|p| p * p).sum();
+        assert!((loss.to_vec_f32()?[0] - expected_loss).abs() < 1e-5);
+
+        let grads = cuda_backward(&loss)?;
+        let actual_grad = grads.get(param_id).expect("param grad").to_vec_f32()?;
+        for (idx, (actual, expected)) in actual_grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "softmax grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
         Ok(())
     }
 
