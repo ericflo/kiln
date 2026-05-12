@@ -18,8 +18,8 @@ use kiln_model::cuda_train::{
     cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_matmul, cuda_mul,
     cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh,
     cuda_permute_rh_to_hr, cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope,
-    cuda_scale, cuda_sdpa_prefill_causal, cuda_sigmoid, cuda_silu, cuda_softplus, cuda_sum_all,
-    cuda_transpose2d,
+    cuda_scale, cuda_sdpa_prefill_causal, cuda_shifted_cross_entropy_loss, cuda_sigmoid,
+    cuda_silu, cuda_softplus, cuda_sum_all, cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
 use std::collections::HashMap;
@@ -861,6 +861,7 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
     model: &CudaModelWeights,
     lora_layers: &[CudaLoraLayer],
     token_ids: &[usize],
+    label_mask: Option<&[bool]>,
     adamw_state: &mut CudaAdamWBook,
     cfg: CudaAdamWConfig,
     arena: &mut CudaTrainArena,
@@ -916,8 +917,17 @@ pub fn cuda_full_attention_lora_model_adamw_step_with_arena(
     let logits = arena.track(
         cuda_matmul(&normed, &model.lm_head_weight).context("cuda FullAttention LoRA model LM head")?,
     )?;
-    let squared = arena.track(cuda_mul(&logits, &logits).context("cuda FullAttention LoRA model square")?)?;
-    let loss = arena.track(cuda_sum_all(&squared).context("cuda FullAttention LoRA model loss")?)?;
+    let loss = if let Some(label_mask) = label_mask {
+        arena.track(
+            cuda_shifted_cross_entropy_loss(&logits, token_ids, label_mask)
+                .context("cuda FullAttention LoRA model shifted CE loss")?,
+        )?
+    } else {
+        let squared = arena.track(
+            cuda_mul(&logits, &logits).context("cuda FullAttention LoRA model square")?,
+        )?;
+        arena.track(cuda_sum_all(&squared).context("cuda FullAttention LoRA model loss")?)?
+    };
     let loss_value = loss.to_vec_f32()?[0];
     let grads = cuda_backward(&loss).context("cuda FullAttention LoRA model backward")?;
     let updated = cuda_adamw_step_from_store(&trainable, &grads, adamw_state, cfg)
@@ -934,6 +944,7 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
     model: &CudaModelWeights,
     lora_layers: &[CudaLoraLayer],
     token_ids: &[usize],
+    label_mask: Option<&[bool]>,
     gdn_state: &mut CudaLinearAttentionState,
     adamw_state: &mut CudaAdamWBook,
     cfg: CudaAdamWConfig,
@@ -1045,8 +1056,16 @@ pub fn cuda_lora_model_adamw_step_with_gdn_state_with_arena(
     let logits = arena.track(
         cuda_matmul(&normed, &model.lm_head_weight).context("cuda LoRA model+GDN LM head")?,
     )?;
-    let squared = arena.track(cuda_mul(&logits, &logits).context("cuda LoRA model+GDN square")?)?;
-    let loss = arena.track(cuda_sum_all(&squared).context("cuda LoRA model+GDN loss")?)?;
+    let loss = if let Some(label_mask) = label_mask {
+        arena.track(
+            cuda_shifted_cross_entropy_loss(&logits, token_ids, label_mask)
+                .context("cuda LoRA model+GDN shifted CE loss")?,
+        )?
+    } else {
+        let squared =
+            arena.track(cuda_mul(&logits, &logits).context("cuda LoRA model+GDN square")?)?;
+        arena.track(cuda_sum_all(&squared).context("cuda LoRA model+GDN loss")?)?
+    };
     let loss_value = loss.to_vec_f32()?[0];
     let grads = cuda_backward(&loss).context("cuda LoRA model+GDN backward")?;
     let updated = cuda_adamw_step_from_store(&trainable, &grads, adamw_state, cfg)
@@ -1128,6 +1147,7 @@ pub fn cuda_lora_train_token_sequences_with_gdn_state(
                 model,
                 lora_layers,
                 token_ids,
+                None,
                 &mut gdn_state,
                 adamw_state,
                 cfg,
@@ -1197,6 +1217,7 @@ pub fn cuda_full_attention_lora_train_token_sequences(
                 model,
                 lora_layers,
                 token_ids,
+                None,
                 adamw_state,
                 cfg,
                 &mut arena,
@@ -1293,10 +1314,10 @@ pub fn cuda_native_sft_train(
         ..Default::default()
     };
 
-    let tokenized: Vec<Vec<usize>> = examples
+    let tokenized: Vec<(Vec<usize>, Vec<bool>)> = examples
         .iter()
         .filter_map(|example| match tokenize_for_training(example, tokenizer) {
-            Ok((ids, _mask)) => Some(ids.into_iter().map(|id| id as usize).collect()),
+            Ok((ids, mask)) => Some((ids.into_iter().map(|id| id as usize).collect(), mask)),
             Err(err) => {
                 tracing::warn!("cuda-native: skipping example: {err}");
                 None
@@ -1317,7 +1338,7 @@ pub fn cuda_native_sft_train(
     let mut last_loss = 0.0f32;
     for epoch in 0..config.epochs {
         let mut epoch_loss = 0.0f32;
-        for token_ids in &tokenized {
+        for (token_ids, label_mask) in &tokenized {
             global_step += 1;
             let mut arena = CudaTrainArena::new(model.token_embedding.as_tensor().device())?;
             let loss = if has_gdn {
@@ -1326,6 +1347,7 @@ pub fn cuda_native_sft_train(
                     &model,
                     &lora_layers,
                     token_ids,
+                    Some(label_mask),
                     &mut gdn_state,
                     &mut adamw,
                     cfg,
@@ -1336,6 +1358,7 @@ pub fn cuda_native_sft_train(
                     &model,
                     &lora_layers,
                     token_ids,
+                    Some(label_mask),
                     &mut adamw,
                     cfg,
                     &mut arena,
@@ -1907,6 +1930,7 @@ mod tests {
             &model,
             &lora_layers,
             &[2, 0],
+            None,
             &mut adamw,
             CudaAdamWConfig {
                 lr: 0.01,
@@ -2294,6 +2318,7 @@ mod tests {
             &model,
             &lora_layers,
             &[0, 1],
+            None,
             &mut gdn_state,
             &mut adamw,
             CudaAdamWConfig {

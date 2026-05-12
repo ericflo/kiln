@@ -1648,6 +1648,101 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_shifted_cross_entropy_loss(
+    logits: &CudaTrainTensor,
+    input_ids: &[usize],
+    label_mask: &[bool],
+) -> Result<CudaTrainTensor> {
+    ensure!(
+        logits.dtype() == DType::F32,
+        "cuda_shifted_cross_entropy_loss: expected F32 logits, got {:?}",
+        logits.dtype()
+    );
+    ensure!(
+        logits.dims().len() == 2,
+        "cuda_shifted_cross_entropy_loss: expected [seq, vocab] logits, got {:?}",
+        logits.dims()
+    );
+    let seq_len = input_ids.len();
+    ensure!(
+        seq_len >= 2,
+        "cuda_shifted_cross_entropy_loss requires at least two tokens"
+    );
+    ensure!(
+        label_mask.len() == seq_len,
+        "cuda_shifted_cross_entropy_loss input/mask length mismatch: {} vs {}",
+        seq_len,
+        label_mask.len()
+    );
+    ensure!(
+        logits.dims()[0] == seq_len,
+        "cuda_shifted_cross_entropy_loss logits rows {} must match token count {}",
+        logits.dims()[0],
+        seq_len
+    );
+    let vocab = logits.dims()[1];
+    ensure!(vocab > 0, "cuda_shifted_cross_entropy_loss empty vocab");
+
+    let active_positions: Vec<usize> = label_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx))
+        .collect();
+    ensure!(
+        !active_positions.is_empty(),
+        "cuda_shifted_cross_entropy_loss called with no supervised shifted-label positions"
+    );
+    let active_labels: Vec<usize> = active_positions
+        .iter()
+        .map(|&idx| input_ids[idx + 1])
+        .collect();
+    for &label in &active_labels {
+        ensure!(
+            label < vocab,
+            "cuda_shifted_cross_entropy_loss label {label} outside vocab {vocab}"
+        );
+    }
+
+    let shift_logits = logits
+        .as_tensor()
+        .narrow(0, 0, seq_len - 1)
+        .context("cuda_shifted_cross_entropy_loss: shift logits")?;
+    let active_indices: Vec<u32> = active_positions.iter().map(|&idx| idx as u32).collect();
+    let indices = Tensor::new(active_indices.as_slice(), logits.as_tensor().device())
+        .context("cuda_shifted_cross_entropy_loss: active indices")?;
+    let active_logits = shift_logits
+        .index_select(&indices, 0)
+        .context("cuda_shifted_cross_entropy_loss: active logits")?;
+    let log_sum_exp = active_logits
+        .log_sum_exp(D::Minus1)
+        .context("cuda_shifted_cross_entropy_loss: log_sum_exp")?;
+    let labels_u32: Vec<u32> = active_labels.iter().map(|&label| label as u32).collect();
+    let labels = Tensor::new(labels_u32.as_slice(), logits.as_tensor().device())
+        .context("cuda_shifted_cross_entropy_loss: labels")?
+        .unsqueeze(1)
+        .context("cuda_shifted_cross_entropy_loss: labels unsqueeze")?;
+    let correct = active_logits
+        .gather(&labels, 1)
+        .context("cuda_shifted_cross_entropy_loss: gather correct logits")?
+        .squeeze(1)
+        .context("cuda_shifted_cross_entropy_loss: squeeze correct logits")?;
+    let per_token = (log_sum_exp - correct).context("cuda_shifted_cross_entropy_loss: per-token")?;
+    let out = per_token
+        .mean_all()
+        .context("cuda_shifted_cross_entropy_loss: mean")?;
+
+    let needs_grad =
+        logits.requires_grad() || logits.grad_fn().is_some() || logits.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(ShiftedCrossEntropyBackward {
+            input_ids: input_ids.to_vec(),
+            label_mask: label_mask.to_vec(),
+            inputs: vec![logits.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     ensure!(
         input.dtype() == DType::F32,
@@ -3561,6 +3656,133 @@ impl CudaBackwardOp for SoftmaxLastDimBackward {
 }
 
 #[derive(Debug)]
+struct ShiftedCrossEntropyBackward {
+    input_ids: Vec<usize>,
+    label_mask: Vec<bool>,
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for ShiftedCrossEntropyBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_shifted_cross_entropy_loss"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 1,
+            "cuda_shifted_cross_entropy_loss backward expected one input, got {}",
+            self.inputs.len()
+        );
+        let logits = &self.inputs[0];
+        ensure!(
+            logits.dims().len() == 2,
+            "cuda_shifted_cross_entropy_loss backward expected [seq, vocab], got {:?}",
+            logits.dims()
+        );
+        let seq_len = self.input_ids.len();
+        ensure!(
+            seq_len >= 2 && self.label_mask.len() == seq_len && logits.dims()[0] == seq_len,
+            "cuda_shifted_cross_entropy_loss backward shape mismatch logits={:?} tokens={} mask={}",
+            logits.dims(),
+            seq_len,
+            self.label_mask.len()
+        );
+        let vocab = logits.dims()[1];
+        let active_positions: Vec<usize> = self.label_mask[1..]
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &active)| active.then_some(idx))
+            .collect();
+        ensure!(
+            !active_positions.is_empty(),
+            "cuda_shifted_cross_entropy_loss backward has no active positions"
+        );
+        let active_labels: Vec<usize> = active_positions
+            .iter()
+            .map(|&idx| self.input_ids[idx + 1])
+            .collect();
+        for &label in &active_labels {
+            ensure!(
+                label < vocab,
+                "cuda_shifted_cross_entropy_loss backward label {label} outside vocab {vocab}"
+            );
+        }
+
+        let device = logits.as_tensor().device();
+        let shift_logits = logits
+            .as_tensor()
+            .narrow(0, 0, seq_len - 1)
+            .context("cuda_shifted_cross_entropy_loss backward: shift logits")?;
+        let active_indices_u32: Vec<u32> =
+            active_positions.iter().map(|&idx| idx as u32).collect();
+        let active_indices = Tensor::new(active_indices_u32.as_slice(), device)
+            .context("cuda_shifted_cross_entropy_loss backward: active indices")?;
+        let active_logits = shift_logits
+            .index_select(&active_indices, 0)
+            .context("cuda_shifted_cross_entropy_loss backward: active logits")?;
+        let max_val = active_logits
+            .max_keepdim(D::Minus1)
+            .context("cuda_shifted_cross_entropy_loss backward: max")?;
+        let shifted = active_logits
+            .broadcast_sub(&max_val)
+            .context("cuda_shifted_cross_entropy_loss backward: shift")?;
+        let exp_shifted = shifted
+            .exp()
+            .context("cuda_shifted_cross_entropy_loss backward: exp")?;
+        let sum_exp = exp_shifted
+            .sum_keepdim(D::Minus1)
+            .context("cuda_shifted_cross_entropy_loss backward: sum")?;
+        let mut grad_active = exp_shifted
+            .broadcast_div(&sum_exp)
+            .context("cuda_shifted_cross_entropy_loss backward: softmax")?;
+
+        let one = Tensor::new(&[1.0f32], device)
+            .context("cuda_shifted_cross_entropy_loss backward: one")?
+            .reshape((1usize, 1usize))
+            .context("cuda_shifted_cross_entropy_loss backward: one reshape")?;
+        let mut rows = Vec::with_capacity(active_labels.len());
+        for (row, &label) in active_labels.iter().enumerate() {
+            let label_index = Tensor::new(&[label as u32], device)
+                .context("cuda_shifted_cross_entropy_loss backward: label index")?;
+            let one_hot = Tensor::zeros((1usize, vocab), DType::F32, device)
+                .context("cuda_shifted_cross_entropy_loss backward: one-hot zeros")?
+                .index_add(&label_index, &one, 1)
+                .context("cuda_shifted_cross_entropy_loss backward: one-hot scatter")?;
+            let row_probs = grad_active
+                .narrow(0, row, 1)
+                .context("cuda_shifted_cross_entropy_loss backward: row probs")?;
+            rows.push(
+                (row_probs - one_hot)
+                    .context("cuda_shifted_cross_entropy_loss backward: row grad")?,
+            );
+        }
+        let row_refs: Vec<&Tensor> = rows.iter().collect();
+        grad_active = Tensor::cat(&row_refs, 0)
+            .context("cuda_shifted_cross_entropy_loss backward: cat active grads")?;
+        let inv_active = 1.0f64 / active_positions.len() as f64;
+        grad_active = grad_active
+            .affine(inv_active, 0.0)
+            .context("cuda_shifted_cross_entropy_loss backward: average")?
+            .broadcast_mul(grad_out.as_tensor())
+            .context("cuda_shifted_cross_entropy_loss backward: scale by upstream")?;
+
+        let grad_shift = Tensor::zeros((seq_len - 1, vocab), DType::F32, device)
+            .context("cuda_shifted_cross_entropy_loss backward: zero shifted grad")?
+            .index_add(&active_indices, &grad_active, 0)
+            .context("cuda_shifted_cross_entropy_loss backward: scatter active grads")?;
+        let final_zero = Tensor::zeros((1usize, vocab), DType::F32, device)
+            .context("cuda_shifted_cross_entropy_loss backward: final row")?;
+        let grad = Tensor::cat(&[&grad_shift, &final_zero], 0)
+            .context("cuda_shifted_cross_entropy_loss backward: cat final grad")?;
+        Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
 struct BatchedMatmulBackward {
     inputs: Vec<CudaTrainTensor>,
 }
@@ -4868,6 +5090,69 @@ mod tests {
             assert!(
                 (actual - expected).abs() < 1e-5,
                 "softmax grad mismatch at {idx}: actual={actual} expected={expected}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_shifted_cross_entropy_loss_matches_cpu_reference() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_shifted_cross_entropy_loss smoke: {err}"
+                );
+                return Ok(());
+            }
+        };
+
+        let logits_data = vec![
+            1.0f32, 0.0, -1.0, 0.5, //
+            -0.5, 0.25, 1.25, -0.25, //
+            0.1, 0.2, 0.3, 0.4,
+        ];
+        let logits_tensor = Tensor::from_vec(logits_data.clone(), (3usize, 4usize), &device)?;
+        let logits_id = logits_tensor.id();
+        let logits = CudaTrainTensor::parameter(logits_tensor, logits_id)?;
+        let input_ids = vec![0usize, 3, 2];
+        let label_mask = vec![false, true, true];
+
+        let loss = cuda_shifted_cross_entropy_loss(&logits, &input_ids, &label_mask)?;
+        let loss_value = loss.to_vec_f32()?[0];
+        let grads = cuda_backward(&loss)?;
+        let grad = grads
+            .get(logits_id)
+            .context("missing logits gradient")?
+            .to_vec_f32()?;
+
+        let active = [(0usize, 3usize), (1usize, 2usize)];
+        let mut expected_loss = 0.0f32;
+        let mut expected_grad = vec![0.0f32; 12];
+        for &(row, label) in &active {
+            let row_vals = &logits_data[row * 4..row * 4 + 4];
+            let max = row_vals.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let exp: Vec<f32> = row_vals.iter().map(|v| (v - max).exp()).collect();
+            let sum: f32 = exp.iter().sum();
+            expected_loss += max + sum.ln() - row_vals[label];
+            for col in 0..4 {
+                let mut g = exp[col] / sum;
+                if col == label {
+                    g -= 1.0;
+                }
+                expected_grad[row * 4 + col] = g / active.len() as f32;
+            }
+        }
+        expected_loss /= active.len() as f32;
+
+        assert!(
+            (loss_value - expected_loss).abs() < 1e-5,
+            "loss mismatch actual={loss_value} expected={expected_loss}"
+        );
+        for (idx, (actual, expected)) in grad.iter().zip(expected_grad.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1e-5,
+                "grad mismatch at {idx}: actual={actual} expected={expected}"
             );
         }
         Ok(())
