@@ -476,17 +476,18 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
             let vk_native = native_training_env_enabled("KILN_VK_NATIVE_TRAINING");
-            if cuda_native || vk_native {
-                let flag = if cuda_native {
-                    "KILN_CUDA_NATIVE_TRAINING"
-                } else {
-                    "KILN_VK_NATIVE_TRAINING"
-                };
+            if cuda_native {
                 Err(format!(
-                    "{flag}=1 does not yet support GRPO - unset it for GRPO jobs \
+                    "KILN_CUDA_NATIVE_TRAINING=1 does not yet support GRPO - unset it for GRPO jobs \
                      (native GRPO is a follow-on plan)"
                 ))
             } else {
+                if vk_native {
+                    tracing::warn!(
+                        "KILN_VK_NATIVE_TRAINING=1 is SFT-only today; routing GRPO \
+                         through exact targeted-layer LoRA training"
+                    );
+                }
                 let _gpu_guard = state.gpu_lock.write().unwrap();
                 let guard = runner_arc.read().unwrap();
                 trainer::grpo_train(

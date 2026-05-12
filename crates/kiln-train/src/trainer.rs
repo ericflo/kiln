@@ -216,6 +216,9 @@ const DEFAULT_TARGET_MODULES: &[&str] = &[
     "k_proj",
     "v_proj",
     "o_proj",
+    "in_proj_qkv",
+    "in_proj_z",
+    "out_proj",
     "gate_proj",
     "up_proj",
     "down_proj",
@@ -241,6 +244,9 @@ pub struct TrainableLoraLayerParams {
     pub k_proj: Option<(Var, Var)>,
     pub v_proj: Option<(Var, Var)>,
     pub o_proj: Option<(Var, Var)>,
+    pub in_proj_qkv: Option<(Var, Var)>,
+    pub in_proj_z: Option<(Var, Var)>,
+    pub gdn_out_proj: Option<(Var, Var)>,
     pub gate_proj: Option<(Var, Var)>,
     pub up_proj: Option<(Var, Var)>,
     pub down_proj: Option<(Var, Var)>,
@@ -341,6 +347,30 @@ impl TrainableLoraParams {
                         // Transposed weight is [in_features, out_features].
                         (dims[0], dims[1], bound_hidden)
                     }
+                    "in_proj_qkv" | "in_proj_z" | "out_proj" => {
+                        let w_t = match &layer_weights.attention {
+                            kiln_model::forward::GpuAttentionWeights::Linear(linear) => {
+                                match module {
+                                    "in_proj_qkv" => &linear.in_proj_qkv_t,
+                                    "in_proj_z" => &linear.in_proj_z_t,
+                                    "out_proj" => &linear.out_proj_t,
+                                    _ => unreachable!(),
+                                }
+                            }
+                            kiln_model::forward::GpuAttentionWeights::Full(_) => {
+                                continue;
+                            }
+                        };
+                        let dims = w_t.dims();
+                        anyhow::ensure!(
+                            dims.len() == 2,
+                            "expected rank-2 {module}_t for layer {layer_idx}, got {:?}",
+                            dims
+                        );
+                        let in_features = dims[0];
+                        let out_features = dims[1];
+                        (in_features, out_features, (1.0 / in_features as f64).sqrt())
+                    }
                     "gate_proj" => (hidden, intermediate, bound_hidden),
                     "up_proj" => (hidden, intermediate, bound_hidden),
                     "down_proj" => (intermediate, hidden, bound_intermediate),
@@ -368,6 +398,9 @@ impl TrainableLoraParams {
                     "k_proj" => layer_params.k_proj = Some((a, b)),
                     "v_proj" => layer_params.v_proj = Some((a, b)),
                     "o_proj" => layer_params.o_proj = Some((a, b)),
+                    "in_proj_qkv" => layer_params.in_proj_qkv = Some((a, b)),
+                    "in_proj_z" => layer_params.in_proj_z = Some((a, b)),
+                    "out_proj" => layer_params.gdn_out_proj = Some((a, b)),
                     "gate_proj" => layer_params.gate_proj = Some((a, b)),
                     "up_proj" => layer_params.up_proj = Some((a, b)),
                     "down_proj" => layer_params.down_proj = Some((a, b)),
@@ -402,8 +435,8 @@ impl TrainableLoraParams {
     /// existing fall-through logic handles the not-resident case
     /// transparently.
     ///
-    /// Memory cost: one DMA upload per Var (~9 MB total for
-    /// Qwen3.5-4B at rank=8: 224 Vars × 40 KB each). On
+    /// Memory cost: one DMA upload per Var (~16 MB total for
+    /// Qwen3.5-4B at rank=8 when GDN targets are present). On
     /// non-resident-supporting backends (CPU/Metal/CUDA today) the
     /// hook is a no-op.
     ///
@@ -600,6 +633,9 @@ impl TrainableLoraParams {
                     k_proj: make_proj(&lp.k_proj),
                     v_proj: make_proj(&lp.v_proj),
                     o_proj: make_proj(&lp.o_proj),
+                    in_proj_qkv: make_proj(&lp.in_proj_qkv),
+                    in_proj_z: make_proj(&lp.in_proj_z),
+                    gdn_out_proj: make_proj(&lp.gdn_out_proj),
                     gate_proj: make_proj(&lp.gate_proj),
                     up_proj: make_proj(&lp.up_proj),
                     down_proj: make_proj(&lp.down_proj),
@@ -620,11 +656,14 @@ impl TrainableLoraParams {
     pub fn all_vars(&self) -> Vec<&Var> {
         let mut vars = Vec::new();
         for layer in &self.layers {
-            let pairs: [&Option<(Var, Var)>; 7] = [
+            let pairs: [&Option<(Var, Var)>; 10] = [
                 &layer.q_proj,
                 &layer.k_proj,
                 &layer.v_proj,
                 &layer.o_proj,
+                &layer.in_proj_qkv,
+                &layer.in_proj_z,
+                &layer.gdn_out_proj,
                 &layer.gate_proj,
                 &layer.up_proj,
                 &layer.down_proj,
@@ -676,6 +715,9 @@ impl TrainableLoraParams {
             save_proj("k_proj", &layer.k_proj, true);
             save_proj("v_proj", &layer.v_proj, true);
             save_proj("o_proj", &layer.o_proj, true);
+            save_proj("in_proj_qkv", &layer.in_proj_qkv, true);
+            save_proj("in_proj_z", &layer.in_proj_z, true);
+            save_proj("out_proj", &layer.gdn_out_proj, true);
             save_proj("gate_proj", &layer.gate_proj, false);
             save_proj("up_proj", &layer.up_proj, false);
             save_proj("down_proj", &layer.down_proj, false);
@@ -2626,6 +2668,9 @@ fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights {
                 k_proj: make_proj(&lp.k_proj),
                 v_proj: make_proj(&lp.v_proj),
                 o_proj: make_proj(&lp.o_proj),
+                in_proj_qkv: make_proj(&lp.in_proj_qkv),
+                in_proj_z: make_proj(&lp.in_proj_z),
+                gdn_out_proj: make_proj(&lp.gdn_out_proj),
                 gate_proj: make_proj(&lp.gate_proj),
                 up_proj: make_proj(&lp.up_proj),
                 down_proj: make_proj(&lp.down_proj),
@@ -4667,6 +4712,105 @@ mod tests {
     }
 
     #[test]
+    fn test_grpo_trainable_lora_params_include_exact_gdn_targets() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let params = TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(0x6172_706f),
+        )?;
+
+        let gdn_layer_idx = 0usize;
+        let full_attn_layer_idx = config.num_layers - 1;
+        let gdn_params = &params.layers[gdn_layer_idx];
+        let full_params = &params.layers[full_attn_layer_idx];
+        let kiln_model::forward::GpuAttentionWeights::Linear(gdn_weights) =
+            &weights.layers[gdn_layer_idx].attention
+        else {
+            anyhow::bail!("test setup expected layer {gdn_layer_idx} to be GDN");
+        };
+
+        let assert_pair_matches_weight =
+            |name: &str, pair: &Option<(Var, Var)>, w_t: &Tensor| -> Result<()> {
+                let dims = w_t.dims();
+                anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
+                let (a, b) = pair.as_ref().with_context(|| format!("missing {name} LoRA pair"))?;
+                assert_eq!(a.as_tensor().dims(), &[params.rank, dims[0]]);
+                assert_eq!(b.as_tensor().dims(), &[dims[1], params.rank]);
+                Ok(())
+            };
+
+        assert_pair_matches_weight(
+            "in_proj_qkv",
+            &gdn_params.in_proj_qkv,
+            &gdn_weights.in_proj_qkv_t,
+        )?;
+        assert_pair_matches_weight("in_proj_z", &gdn_params.in_proj_z, &gdn_weights.in_proj_z_t)?;
+        assert_pair_matches_weight(
+            "out_proj",
+            &gdn_params.gdn_out_proj,
+            &gdn_weights.out_proj_t,
+        )?;
+        assert!(
+            gdn_params.q_proj.is_none()
+                && gdn_params.k_proj.is_none()
+                && gdn_params.v_proj.is_none()
+                && gdn_params.o_proj.is_none(),
+            "GDN layers must not receive full-attention q/k/v/o LoRA"
+        );
+        assert!(
+            full_params.in_proj_qkv.is_none()
+                && full_params.in_proj_z.is_none()
+                && full_params.gdn_out_proj.is_none(),
+            "full-attention layers must not receive GDN LoRA"
+        );
+
+        let lora = params.as_lora_weights();
+        assert!(lora.layers[gdn_layer_idx].has_gdn_attention());
+        assert!(lora.layers[full_attn_layer_idx].q_proj.is_some());
+        assert!(lora.layers[full_attn_layer_idx].in_proj_qkv.is_none());
+
+        let detached = lora_weights_detached(&params);
+        assert!(detached.layers[gdn_layer_idx].has_gdn_attention());
+
+        let adapter_dir = tempfile::tempdir()?;
+        params.save_peft(adapter_dir.path(), config.num_layers)?;
+
+        let adapter_config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+            adapter_dir.path().join("adapter_config.json"),
+        )?)?;
+        let target_modules = adapter_config["target_modules"]
+            .as_array()
+            .context("adapter_config target_modules should be an array")?;
+        for expected in ["in_proj_qkv", "in_proj_z", "out_proj"] {
+            assert!(
+                target_modules
+                    .iter()
+                    .any(|value| value.as_str() == Some(expected)),
+                "adapter_config target_modules missing {expected}"
+            );
+        }
+
+        let saved = candle_core::safetensors::load(
+            &adapter_dir.path().join("adapter_model.safetensors"),
+            &Device::Cpu,
+        )?;
+        for module in ["in_proj_qkv", "in_proj_z", "out_proj"] {
+            let key = format!(
+                "base_model.model.model.layers.{gdn_layer_idx}.self_attn.{module}.lora_A.weight"
+            );
+            assert!(saved.contains_key(&key), "saved adapter missing {key}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_cross_entropy_loss_basic() -> Result<()> {
         let device = Device::Cpu;
 
@@ -5299,20 +5443,22 @@ mod tests {
     }
 
     /// Helper: enumerate which LoRA Var corresponds to which projection
-    /// kind so the layer-pair parity test can apply different tolerances
-    /// to MLP-LoRA grads (bit-exact across tile boundaries because MLP is
-    /// per-position) and full-attention LoRA grads (q/k/v/o; can drift
-    /// slightly under truncated-BPTT through GDN states upstream).
+    /// kind so the layer-pair parity test covers every exact targeted
+    /// module family: MLP, full-attention q/k/v/o, and GDN in/out
+    /// projections.
     fn classify_lora_vars(
         params: &TrainableLoraParams,
     ) -> Vec<(candle_core::Var, &'static str, String)> {
         let mut out: Vec<(candle_core::Var, &'static str, String)> = Vec::new();
         for (layer_idx, layer) in params.layers.iter().enumerate() {
-            let pairs: [(&Option<(Var, Var)>, &str, &str); 7] = [
+            let pairs: [(&Option<(Var, Var)>, &str, &str); 10] = [
                 (&layer.q_proj, "fa", "q"),
                 (&layer.k_proj, "fa", "k"),
                 (&layer.v_proj, "fa", "v"),
                 (&layer.o_proj, "fa", "o"),
+                (&layer.in_proj_qkv, "gdn", "in_qkv"),
+                (&layer.in_proj_z, "gdn", "in_z"),
+                (&layer.gdn_out_proj, "gdn", "out"),
                 (&layer.gate_proj, "mlp", "gate"),
                 (&layer.up_proj, "mlp", "up"),
                 (&layer.down_proj, "mlp", "down"),
@@ -5350,8 +5496,8 @@ mod tests {
     /// * Total loss within `1e-3` of standard (loss values are dominated
     ///   by the chain-rule-equivalent forward; matches expected
     ///   monolithic-checkpointed loss as well).
-    /// * MLP-LoRA grads bit-exact (atol `1e-5`) — MLP is per-position so
-    ///   per-tile state-thread truncation does not affect MLP-LoRA.
+    /// * MLP and GDN LoRA grads within `1e-3` — BF16 LoRA Var storage
+    ///   contributes small absolute noise.
     /// * Full-attention LoRA grads within `1e-3` — the gradient-injection
     ///   chain through this PR's per-block backward goes through
     ///   different f32 reduction orders than the standard single
@@ -5510,6 +5656,7 @@ mod tests {
         let classified = classify_lora_vars(&params);
         let mut compared_mlp = 0usize;
         let mut compared_fa = 0usize;
+        let mut compared_gdn = 0usize;
         for (var, kind, name) in &classified {
             let g_s = grad_or_zero(&grads_std, var)?;
             let g_p = grad_or_zero(&grads_layer_pair, var)?;
@@ -5522,6 +5669,7 @@ mod tests {
             let tol: f32 = match *kind {
                 "mlp" => 1e-3,
                 "fa" => 1e-3,
+                "gdn" => 1e-3,
                 _ => 1e-3,
             };
             assert!(
@@ -5532,6 +5680,7 @@ mod tests {
             match *kind {
                 "mlp" => compared_mlp += 1,
                 "fa" => compared_fa += 1,
+                "gdn" => compared_gdn += 1,
                 _ => {}
             }
         }
@@ -5543,6 +5692,11 @@ mod tests {
             compared_fa > 0,
             "no FA-LoRA gradients were compared — test config must include \
              at least one full-attention layer with q/k/v/o LoRA",
+        );
+        assert!(
+            compared_gdn > 0,
+            "no GDN-LoRA gradients were compared — test config must include \
+             at least one linear-attention layer with GDN LoRA",
         );
 
         Ok(())
