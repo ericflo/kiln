@@ -1,0 +1,192 @@
+# CUDA Training Modernization Branch Report
+
+**Date:** 2026-05-12
+**Branch:** `cuda-training-modernization`
+**Reference report:** `docs/audits/vulkan_training_branch_report_2026-05-11.md`
+**Baseline:** `844492ab` - `Update Vulkan training branch audit`
+**Status:** Phase ledger and first implementation target. This branch is intentionally incremental:
+each CUDA training slice must land with tests and a pushed commit before the next larger slice.
+
+## Executive Summary
+
+The Vulkan training modernization branch established the target shape for backend training:
+
+1. reject jobs that cannot fit before training starts;
+2. route training math through autograd-safe GPU paths, not decode-only fast paths;
+3. chunk vocab, row, batch, and sequence work before dispatch;
+4. keep trainable and checkpoint state backend-resident between steps;
+5. read back trainable state only at adapter-save/checkpoint boundaries;
+6. eventually replace candle's host-storage training contract with a native tensor/autograd stack.
+
+CUDA starts from a different place than Vulkan. The current CUDA backend already benefits from
+candle CUDA tensors, FlashAttention, GDN kernels, fused RMSNorm, FLCE Phase B, BF16 LoRA storage,
+and several inference/decode fusions. It does **not** yet have the Vulkan branch's explicit resident
+training registry, autograd-safe backend-owned projection wrapper, backend-resident LoRA optimizer
+state, or native CUDA tensor/autograd stack.
+
+The CUDA port should therefore not copy Vulkan's buffer-upload mechanics blindly. CUDA candle tensors
+already live on the device, so the first useful parity target is to make CUDA training decisions
+explicit, testable, and observable:
+
+- decline inference-only kernels for tracked tensors unless they preserve autograd;
+- expose CUDA training capabilities separately from decode capabilities;
+- add device-resident optimizer/LoRA hooks only when they truly avoid host synchronization;
+- preserve the existing long-context safety gates that Phase 10 proved necessary.
+
+## Current CUDA Training Baseline
+
+| Area | Current evidence | Status |
+| --- | --- | --- |
+| Fit gate | `crates/kiln-server/src/training_preflight.rs` has a shared working-set estimator and treats CUDA/discrete devices as `WeightResidency::SingleCopy`. | Present, shared with Vulkan. Needs CUDA-specific rejection runbook. |
+| FLCE | `crates/kiln-flce-kernel` implements Phase B chunked-vocab CustomOp; `PHASE10_CLOSURE.md` records T=8192 A40 closure and A6000 prediction. | Present. Must remain default for SFT. |
+| RMSNorm training | `forward.rs::rms_norm` routes autograd tensors to `fused_rmsnorm_with_autograd` only behind the 47 GiB gate; small GPUs fall back. | Present with safety gate. |
+| LoRA precision | `compute_lora_delta` casts A/B to `x.dtype()`; LoRA Vars initialize as BF16. `PHASE10_LORA_PRECISION_STUDY.md` closed performance as null but accepted parity/safety. | Present. |
+| CUDA decode LoRA | `CudaBackend::lora_decode_add` declines tracked tensors and only runs the forward-only fused add for inference. | Correct for safety, not a training acceleration. |
+| Resident activation registry | `BackendRuntime` has hooks; CUDA inherits the no-op defaults. | Missing. |
+| Device optimizer dispatch | `dispatch_sgd_step` / `dispatch_adamw_step` exist in the trait; CUDA inherits decline defaults. | Missing. |
+| Autograd-safe projection backend op | CUDA has many inference kernels, but `linear_prefill_apply` inherits `Ok(None)`. Training falls through to candle CUDA matmul. | Missing as explicit backend hook. |
+| Native CUDA training stack | No CUDA equivalent of `vk_train.rs`, `vk_tensor.rs`, or `vk_forward.rs`. | Missing. |
+
+## Phase Plan
+
+### Phase C0: Capability and Telemetry Baseline
+
+Goal: make the CUDA training surface explicit before changing math.
+
+Tasks:
+
+- add CUDA training capability logging at startup or first backend use;
+- expose which training paths are CUDA-native, candle-CUDA, or declined;
+- add tests that CUDA inference-only hooks decline tracked tensors;
+- document the exact completion criteria copied from the Vulkan report.
+
+Acceptance:
+
+- CPU-host tests can verify default trait declines without requiring a GPU;
+- CUDA-feature builds compile with the new capability surface;
+- operator logs can distinguish "safe candle CUDA training path" from "backend-owned CUDA training
+  kernel engaged."
+
+### Phase C1: CUDA Resident Registry Semantics
+
+Goal: implement the `BackendRuntime` resident hooks for CUDA without adding false host-copy claims.
+
+Design constraint: candle CUDA tensors are already device-resident. A CUDA "registry" should key
+logical training tensors and provide lifecycle/telemetry first; it should only add side buffers when
+we need pointer stability, stale-host semantics, or custom kernels.
+
+Tasks:
+
+- implement `supports_resident_activation`, `register_resident_activation`, `has`, `evict`, and
+  `update` for CUDA as a lightweight TensorId registry;
+- keep `resolve_resident_activation` conservative until there is a real custom buffer source;
+- add lifecycle tests that run without a CUDA device if possible, and CUDA-feature tests otherwise;
+- wire first-dispatch logs for LoRA and optimizer hooks.
+
+Acceptance:
+
+- register/has/evict/re-register semantics match Vulkan's caller contract;
+- no training path silently claims stale candle storage unless CUDA owns an alternate buffer;
+- checkpointed training tests still pass with CUDA hooks compiled in.
+
+### Phase C2: Autograd-Safe CUDA LoRA Delta Path
+
+Goal: make CUDA LoRA training engagement explicit and preserve gradients.
+
+Current fallthrough already uses candle CUDA `broadcast_matmul`, which is autograd-safe. The first
+CUDA implementation should wrap or report this path rather than replacing it with a leaf tensor.
+
+Tasks:
+
+- implement a CUDA `lora_delta_resident` path only if it returns a tensor connected to `x`, `A`, and
+  `B`;
+- if the implementation delegates to candle CUDA matmul, label it honestly as candle-CUDA resident;
+- add gradient parity and nonzero-LoRA-gradient tests;
+- preserve `lora_decode_add` as inference-only.
+
+Acceptance:
+
+- loss backward produces gradients for `A` and `B`;
+- forced CUDA resident path matches `compute_lora_delta`;
+- tracked tensors never route through `kiln_rmsnorm_kernel::lora_decode_add`.
+
+### Phase C3: Device Optimizer Dispatch
+
+Goal: update trainable state without requiring a host readback between steps.
+
+Tasks:
+
+- add custom CUDA SGD and AdamW kernels or a candle-CUDA in-place equivalent that updates the actual
+  canonical tensor storage;
+- only return `true` from `dispatch_sgd_step` / `dispatch_adamw_step` when the backend really owns
+  the update;
+- add F32/BF16 parity, shape-mismatch error, missing-residency decline, and lazy-sync tests.
+
+Acceptance:
+
+- CUDA optimizer step matches CPU reference for F32 and BF16;
+- stale-host/current-after-sync behavior is explicit if a side buffer is introduced;
+- adapter save sees current LoRA weights.
+
+### Phase C4: Projection and LM-Head Training Dispatch
+
+Goal: add the CUDA equivalent of Vulkan's autograd-safe projection and offset matmul hooks.
+
+Tasks:
+
+- implement `linear_prefill_apply` for training tensors with backward;
+- implement `linear_prefill_apply_offset` for FLCE chunks without re-uploading or slicing into
+  dangerous submits;
+- add output-dim and row chunking ceilings;
+- prove q/k/v/o, GDN in-proj, gate/up/down, and lm_head route correctly.
+
+Acceptance:
+
+- forward/backward parity for projection shapes;
+- long-shape dispatch is chunked, not monolithic;
+- FLCE never materializes `[tokens, vocab]` logits.
+
+### Phase C5: Native CUDA Training Stack
+
+Goal: converge on the same end state as `vk_native_sft_train`, but for CUDA.
+
+Tasks:
+
+- add a CUDA-native tensor/autograd module only after C1-C4 establish the contracts;
+- wire Qwen3.5 FullAttention and GDN forward/backward;
+- add checkpointed SFT, AdamW, adapter save, and real-model server routing;
+- add an arena/pool to avoid allocation churn.
+
+Acceptance:
+
+- one-layer native CUDA smoke loss decreases;
+- hybrid Qwen3.5-4B SFT succeeds on a real model;
+- planned hot-path readbacks are limited to scalar loss logging and adapter/checkpoint save.
+
+## Commit Discipline
+
+This branch is expected to be long-lived and multi-commit. Each commit should include:
+
+- one phase-sized behavior change or one audit/runbook update;
+- a test or compile gate that actually covers the changed behavior;
+- a push to the configured remote before starting the next phase.
+
+Current configured `origin` in this workspace is `/data/repo-cache/ericflo/kiln.git`, not a GitHub
+HTTPS/SSH remote. Push evidence should therefore record the exact remote used until a GitHub remote
+is configured.
+
+## Completion Criteria
+
+CUDA should not be called equivalent to the Vulkan training modernization until the branch proves:
+
+- impossible training jobs are rejected before allocation;
+- default SFT uses FLCE or equivalent chunked loss;
+- training projections and LoRA deltas are autograd-safe;
+- RMSNorm and attention training paths are on GPU for production shapes;
+- checkpoint boundaries and trainable LoRA state have explicit CUDA residency semantics;
+- SGD and AdamW update CUDA-resident state in place or honestly decline;
+- adapter save is the only required trainable-state readback;
+- a hybrid Qwen3.5-4B SFT job succeeds on real CUDA hardware;
+- operator logs prove the CUDA training paths that engaged;
+- parity tests cover forward, backward, fallback, shape errors, BF16/F32, and end-to-end loss
+  decrease.
