@@ -98,8 +98,8 @@ impl CudaBackend {
             rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
             resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
             lora_delta_training: "registered candle CUDA autograd; fused lora_decode_add declines tracked tensors",
-            sgd_step: "explicit CUDA backend decline; candle CUDA Var::set fallback",
-            adamw_step: "explicit CUDA backend decline; candle CUDA Var::set fallback",
+            sgd_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
+            adamw_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
         }
     }
@@ -147,18 +147,25 @@ impl BackendRuntime for CudaBackend {
     }
 
     fn dispatch_sgd_step(&self, param: &Tensor, grad: &Tensor, lr: f32) -> Result<bool> {
-        static FIRST_CUDA_SGD_DECLINE_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_SGD_DECLINE_LOGGED.get_or_init(|| {
+        if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
+            return Ok(false);
+        }
+        if !kiln_rmsnorm_kernel::supports_optimizer_step(&[param, grad]) {
+            return Ok(false);
+        }
+        kiln_rmsnorm_kernel::sgd_step_inplace(param, grad, lr)
+            .context("cuda dispatch_sgd_step kernel failed")?;
+        static FIRST_CUDA_SGD_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_SGD_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
-                param_resident = self.has_resident_activation(param),
-                grad_resident = self.has_resident_activation(grad),
+                dtype = ?param.dtype(),
                 lr,
-                "CudaBackend::dispatch_sgd_step declined (no CUDA-owned optimizer kernel yet)"
+                "CudaBackend::dispatch_sgd_step first call"
             );
         });
-        Ok(false)
+        Ok(true)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -175,27 +182,52 @@ impl BackendRuntime for CudaBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        static FIRST_CUDA_ADAMW_DECLINE_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_ADAMW_DECLINE_LOGGED.get_or_init(|| {
+        if !self.has_resident_activation(param)
+            || !self.has_resident_activation(grad)
+            || !self.has_resident_activation(first_moment)
+            || !self.has_resident_activation(second_moment)
+        {
+            return Ok(false);
+        }
+        if !kiln_rmsnorm_kernel::supports_optimizer_step(&[
+            param,
+            grad,
+            first_moment,
+            second_moment,
+        ]) {
+            return Ok(false);
+        }
+        kiln_rmsnorm_kernel::adamw_step_inplace(
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
+        .context("cuda dispatch_adamw_step kernel failed")?;
+        static FIRST_CUDA_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_CUDA_ADAMW_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
                 first_moment_shape = ?first_moment.dims(),
                 second_moment_shape = ?second_moment.dims(),
-                param_resident = self.has_resident_activation(param),
-                grad_resident = self.has_resident_activation(grad),
-                first_moment_resident = self.has_resident_activation(first_moment),
-                second_moment_resident = self.has_resident_activation(second_moment),
+                dtype = ?param.dtype(),
                 lr,
                 beta1,
                 beta2,
                 eps,
                 weight_decay,
                 step,
-                "CudaBackend::dispatch_adamw_step declined (no CUDA-owned optimizer kernel yet)"
+                "CudaBackend::dispatch_adamw_step first call"
             );
         });
-        Ok(false)
+        Ok(true)
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -825,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_optimizer_dispatch_hooks_decline_until_owned_kernel_exists() -> Result<()> {
+    fn cuda_optimizer_dispatch_declines_without_cuda_tensors() -> Result<()> {
         let backend = test_backend();
         let param = Tensor::zeros((2, 3), DType::F32, &Device::Cpu)?;
         let grad = Tensor::ones((2, 3), DType::F32, &Device::Cpu)?;
@@ -834,11 +866,11 @@ mod tests {
 
         assert!(
             !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
-            "CUDA must not claim SGD dispatch before it owns an in-place optimizer update"
+            "CUDA must not claim SGD dispatch for non-CUDA tensors"
         );
         assert!(
             !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
-            "CUDA must not claim AdamW dispatch before it owns an in-place optimizer update"
+            "CUDA must not claim AdamW dispatch for non-CUDA tensors"
         );
 
         backend.register_resident_activation(&param)?;
@@ -855,6 +887,140 @@ mod tests {
             "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
+        let grad = Tensor::from_slice(&[0.1f32, -0.2, 0.5, 1.0], (4,), &device)?;
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+
+        assert!(backend.dispatch_sgd_step(&param, &grad, 0.25)?);
+        let actual = param.to_vec1::<f32>()?;
+        let expected = [0.975f32, -1.95, 0.375, 2.75];
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert!((a - e).abs() < 1e-6, "actual={actual:?} expected={expected:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
+        let grad = Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?;
+        let m = Tensor::zeros((4,), DType::F32, &device)?;
+        let v = Tensor::zeros((4,), DType::F32, &device)?;
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+        backend.register_resident_activation(&m)?;
+        backend.register_resident_activation(&v)?;
+
+        let lr = 0.01;
+        let beta1 = 0.9;
+        let beta2 = 0.999;
+        let eps = 1e-8;
+        let weight_decay = 0.1;
+        assert!(backend.dispatch_adamw_step(
+            &param,
+            &grad,
+            &m,
+            &v,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            1,
+        )?);
+
+        let actual = param.to_vec1::<f32>()?;
+        let before = [1.0f32, -2.0, 0.5, 3.0];
+        let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
+        for ((a, p0), g) in actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
+            let p_after_wd = *p0 * (1.0 - lr * weight_decay);
+            let expected = p_after_wd - lr * (*g / (g.abs() + eps));
+            assert!((a - expected).abs() < 1e-5, "actual={actual:?}");
+        }
+        let m_actual = m.to_vec1::<f32>()?;
+        let v_actual = v.to_vec1::<f32>()?;
+        for ((m_i, v_i), g) in m_actual.iter().zip(v_actual.iter()).zip(grad_vals.iter()) {
+            assert!((m_i - (1.0 - beta1) * g).abs() < 1e-6);
+            assert!((v_i - (1.0 - beta2) * g * g).abs() < 1e-6);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16: {err}");
+                return Ok(());
+            }
+        };
+        let backend = CudaBackend::new(device.clone());
+
+        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?
+            .to_dtype(DType::BF16)?;
+        let grad = Tensor::from_slice(&[0.25f32, -0.5, 0.5, -0.25], (4,), &device)?
+            .to_dtype(DType::BF16)?;
+        backend.register_resident_activation(&param)?;
+        backend.register_resident_activation(&grad)?;
+        assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
+        let sgd_actual = param.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
+        for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
+            assert!((a - e).abs() < 0.02, "actual={sgd_actual:?} expected={sgd_expected:?}");
+        }
+
+        let adam_param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?
+            .to_dtype(DType::BF16)?;
+        let adam_grad = Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?
+            .to_dtype(DType::BF16)?;
+        let m = Tensor::zeros((4,), DType::BF16, &device)?;
+        let v = Tensor::zeros((4,), DType::BF16, &device)?;
+        backend.register_resident_activation(&adam_param)?;
+        backend.register_resident_activation(&adam_grad)?;
+        backend.register_resident_activation(&m)?;
+        backend.register_resident_activation(&v)?;
+        assert!(backend.dispatch_adamw_step(
+            &adam_param,
+            &adam_grad,
+            &m,
+            &v,
+            0.01,
+            0.9,
+            0.999,
+            1e-8,
+            0.1,
+            1,
+        )?);
+        let adam_actual = adam_param.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let before = [1.0f32, -2.0, 0.5, 3.0];
+        let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
+        for ((a, p0), g) in adam_actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
+            let expected = *p0 * (1.0 - 0.01 * 0.1) - 0.01 * (*g / (g.abs() + 1e-8));
+            assert!((a - expected).abs() < 0.03, "actual={adam_actual:?}");
+        }
         Ok(())
     }
 

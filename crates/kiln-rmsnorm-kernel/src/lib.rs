@@ -209,6 +209,54 @@ unsafe extern "C" {
         rank: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_sgd_step_f32(
+        param: *mut f32,
+        grad: *const f32,
+        lr: f32,
+        n: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_sgd_step_bf16(
+        param: *mut core::ffi::c_void,
+        grad: *const core::ffi::c_void,
+        lr: f32,
+        n: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_adamw_step_f32(
+        param: *mut f32,
+        grad: *const f32,
+        first_moment: *mut f32,
+        second_moment: *mut f32,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        bias_correction1: f32,
+        bias_correction2: f32,
+        n: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_adamw_step_bf16(
+        param: *mut core::ffi::c_void,
+        grad: *const core::ffi::c_void,
+        first_moment: *mut core::ffi::c_void,
+        second_moment: *mut core::ffi::c_void,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        bias_correction1: f32,
+        bias_correction2: f32,
+        n: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 fn cuda_empty_kernel_outputs_enabled() -> bool {
@@ -1875,6 +1923,216 @@ pub fn supports_lora_decode_add(base: &Tensor, x: &Tensor, a: &Tensor, b: &Tenso
         && in_dim <= i32::MAX as usize
         && out_dim <= i32::MAX as usize
         && rank <= i32::MAX as usize
+}
+
+fn optimizer_tensors_supported(tensors: &[&Tensor]) -> bool {
+    let Some(first) = tensors.first() else {
+        return false;
+    };
+    matches!(first.device(), Device::Cuda(_))
+        && matches!(first.dtype(), DType::F32 | DType::BF16)
+        && first.is_contiguous()
+        && tensors.iter().all(|tensor| {
+            tensor.device() == first.device()
+                && tensor.dtype() == first.dtype()
+                && tensor.shape().elem_count() == first.shape().elem_count()
+                && tensor.is_contiguous()
+        })
+}
+
+pub fn supports_optimizer_step(tensors: &[&Tensor]) -> bool {
+    optimizer_tensors_supported(tensors)
+}
+
+pub fn sgd_step_inplace(param: &Tensor, grad: &Tensor, lr: f32) -> Result<()> {
+    if !optimizer_tensors_supported(&[param, grad]) {
+        candle_core::bail!(
+            "sgd_step_inplace unsupported param={:?} grad={:?} dtypes=({:?},{:?})",
+            param.shape(),
+            grad.shape(),
+            param.dtype(),
+            grad.dtype()
+        );
+    }
+    let n = param.shape().elem_count() as i64;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let (param_storage, param_layout) = param.storage_and_layout();
+    let (grad_storage, grad_layout) = grad.storage_and_layout();
+    let param_cuda = match &*param_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("sgd_step_inplace: param must be CUDA"),
+    };
+    let grad_cuda = match &*grad_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("sgd_step_inplace: grad must be CUDA"),
+    };
+    let stream = param_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let status = match param.dtype() {
+        DType::F32 => {
+            let p = param_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(param_layout.start_offset()..);
+            let g = grad_cuda
+                .as_cuda_slice::<f32>()?
+                .slice(grad_layout.start_offset()..);
+            unsafe {
+                let (p_ptr, _p_guard) = p.device_ptr(&stream);
+                let (g_ptr, _g_guard) = g.device_ptr(&stream);
+                kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream)
+            }
+        }
+        DType::BF16 => {
+            let p = param_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(param_layout.start_offset()..);
+            let g = grad_cuda
+                .as_cuda_slice::<bf16>()?
+                .slice(grad_layout.start_offset()..);
+            unsafe {
+                let (p_ptr, _p_guard) = p.device_ptr(&stream);
+                let (g_ptr, _g_guard) = g.device_ptr(&stream);
+                kiln_sgd_step_bf16(
+                    p_ptr as *mut core::ffi::c_void,
+                    g_ptr as *const core::ffi::c_void,
+                    lr,
+                    n,
+                    raw_stream,
+                )
+            }
+        }
+        dtype => candle_core::bail!("sgd_step_inplace unsupported dtype {dtype:?}"),
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_sgd_step failed with status {status}");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn adamw_step_inplace(
+    param: &Tensor,
+    grad: &Tensor,
+    first_moment: &Tensor,
+    second_moment: &Tensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    if step == 0 {
+        candle_core::bail!("adamw_step_inplace: step must be >= 1");
+    }
+    if !optimizer_tensors_supported(&[param, grad, first_moment, second_moment]) {
+        candle_core::bail!(
+            "adamw_step_inplace unsupported param={:?} grad={:?} m={:?} v={:?} dtypes=({:?},{:?},{:?},{:?})",
+            param.shape(),
+            grad.shape(),
+            first_moment.shape(),
+            second_moment.shape(),
+            param.dtype(),
+            grad.dtype(),
+            first_moment.dtype(),
+            second_moment.dtype()
+        );
+    }
+    let n = param.shape().elem_count() as i64;
+    if n == 0 {
+        return Ok(());
+    }
+    let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
+    let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
+
+    let (p_storage, p_layout) = param.storage_and_layout();
+    let (g_storage, g_layout) = grad.storage_and_layout();
+    let (m_storage, m_layout) = first_moment.storage_and_layout();
+    let (v_storage, v_layout) = second_moment.storage_and_layout();
+    let p_cuda = match &*p_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("adamw_step_inplace: param must be CUDA"),
+    };
+    let g_cuda = match &*g_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("adamw_step_inplace: grad must be CUDA"),
+    };
+    let m_cuda = match &*m_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("adamw_step_inplace: first_moment must be CUDA"),
+    };
+    let v_cuda = match &*v_storage {
+        candle_core::Storage::Cuda(c) => c,
+        _ => candle_core::bail!("adamw_step_inplace: second_moment must be CUDA"),
+    };
+    let stream = p_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let status = match param.dtype() {
+        DType::F32 => {
+            let p = p_cuda.as_cuda_slice::<f32>()?.slice(p_layout.start_offset()..);
+            let g = g_cuda.as_cuda_slice::<f32>()?.slice(g_layout.start_offset()..);
+            let m = m_cuda.as_cuda_slice::<f32>()?.slice(m_layout.start_offset()..);
+            let v = v_cuda.as_cuda_slice::<f32>()?.slice(v_layout.start_offset()..);
+            unsafe {
+                let (p_ptr, _p_guard) = p.device_ptr(&stream);
+                let (g_ptr, _g_guard) = g.device_ptr(&stream);
+                let (m_ptr, _m_guard) = m.device_ptr(&stream);
+                let (v_ptr, _v_guard) = v.device_ptr(&stream);
+                kiln_adamw_step_f32(
+                    p_ptr as *mut f32,
+                    g_ptr as *const f32,
+                    m_ptr as *mut f32,
+                    v_ptr as *mut f32,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                    n,
+                    raw_stream,
+                )
+            }
+        }
+        DType::BF16 => {
+            let p = p_cuda.as_cuda_slice::<bf16>()?.slice(p_layout.start_offset()..);
+            let g = g_cuda.as_cuda_slice::<bf16>()?.slice(g_layout.start_offset()..);
+            let m = m_cuda.as_cuda_slice::<bf16>()?.slice(m_layout.start_offset()..);
+            let v = v_cuda.as_cuda_slice::<bf16>()?.slice(v_layout.start_offset()..);
+            unsafe {
+                let (p_ptr, _p_guard) = p.device_ptr(&stream);
+                let (g_ptr, _g_guard) = g.device_ptr(&stream);
+                let (m_ptr, _m_guard) = m.device_ptr(&stream);
+                let (v_ptr, _v_guard) = v.device_ptr(&stream);
+                kiln_adamw_step_bf16(
+                    p_ptr as *mut core::ffi::c_void,
+                    g_ptr as *const core::ffi::c_void,
+                    m_ptr as *mut core::ffi::c_void,
+                    v_ptr as *mut core::ffi::c_void,
+                    lr,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    bias_correction1,
+                    bias_correction2,
+                    n,
+                    raw_stream,
+                )
+            }
+        }
+        dtype => candle_core::bail!("adamw_step_inplace unsupported dtype {dtype:?}"),
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_adamw_step failed with status {status}");
+    }
+    Ok(())
 }
 
 /// Run fused forward-only LoRA delta/add for decode.
