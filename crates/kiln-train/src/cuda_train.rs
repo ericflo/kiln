@@ -635,6 +635,29 @@ pub fn cuda_full_attention_lora_train_token_sequences_to_adapter(
     Ok((adapter_dir, losses))
 }
 
+fn ensure_cuda_native_sft_supported(model: &CudaModelWeights) -> Result<()> {
+    ensure!(
+        !model.layers.is_empty(),
+        "cuda_native_sft_train: model has no transformer layers"
+    );
+    let unsupported: Vec<usize> = model
+        .layers
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, layer)| match layer {
+            CudaLayerWeights::FullAttention(_) => None,
+            CudaLayerWeights::LinearAttention(_) => Some(idx),
+        })
+        .collect();
+    ensure!(
+        unsupported.is_empty(),
+        "cuda_native_sft_train currently supports FullAttention-only models; \
+         LinearAttention/GDN layers are not wired yet at indices {:?}",
+        unsupported
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cuda_native_sft_train(
     examples: &[SftExample],
@@ -658,6 +681,7 @@ pub fn cuda_native_sft_train(
 
     let model = CudaModelWeights::from_gpu_weights(weights, model_config)
         .context("cuda_native_sft_train: import CUDA model weights")?;
+    ensure_cuda_native_sft_supported(&model)?;
     let effective_seed = config.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
@@ -1455,6 +1479,12 @@ mod tests {
             vocab: 4,
             hidden: 2,
         };
+
+        let err = ensure_cuda_native_sft_supported(&model).expect_err("mixed GDN model rejects");
+        assert!(
+            err.to_string().contains("FullAttention-only models"),
+            "unexpected error: {err:#}"
+        );
 
         let lora_layers = cuda_init_lora_layers(&model, 2, 4.0, 0xC0DA_1A7E)?;
         assert_eq!(lora_layers.len(), 2);
