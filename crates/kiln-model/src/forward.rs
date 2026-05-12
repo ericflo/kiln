@@ -2987,7 +2987,10 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     }
     #[cfg(feature = "metal")]
     {
-        if crate::backend::metal::metal_rms_norm_supports(x, weight) {
+        if !x.track_op()
+            && !weight.track_op()
+            && crate::backend::metal::metal_rms_norm_supports(x, weight)
+        {
             return crate::backend::metal::metal_rms_norm_bf16(x, weight, eps as f32)
                 .context("metal rms_norm kernel failed");
         }

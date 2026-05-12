@@ -1569,8 +1569,15 @@ pub(crate) fn tokenize_for_training(
     if input_ids.len() < 2 {
         anyhow::bail!("example too short ({} tokens)", input_ids.len());
     }
+    if !has_supervised_shifted_labels(&label_mask) {
+        anyhow::bail!("example has no supervised assistant tokens after next-token shift");
+    }
 
     Ok((input_ids, label_mask))
+}
+
+fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
+    label_mask.get(1..).is_some_and(|m| m.iter().any(|&v| v))
 }
 
 /// Compute cross-entropy loss on masked positions.
@@ -1604,10 +1611,10 @@ fn cross_entropy_loss(
         .filter_map(|(i, &m)| if m { Some(i) } else { None })
         .collect();
 
-    if active_positions.is_empty() {
-        // No assistant tokens to train on — return zero loss
-        return Tensor::new(0.0f32, device).map_err(Into::into);
-    }
+    anyhow::ensure!(
+        !active_positions.is_empty(),
+        "cross_entropy_loss called with no supervised shifted-label positions"
+    );
 
     // Gather active logits and labels
     let indices = Tensor::new(
@@ -1892,7 +1899,7 @@ impl FlceMatmulProvider for BackendFlceProvider {
 fn build_flce_provider(
     backend: &std::sync::Arc<dyn BackendRuntime>,
     label_mask: &[bool],
-    model_config: &ModelConfig,
+    _model_config: &ModelConfig,
 ) -> Option<FlceProvider> {
     if backend.name() != "vulkan" {
         return None;
@@ -2382,6 +2389,7 @@ fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(us
 /// later full-attention layers under tiling — which would also break parity.
 /// The cleanest correctness invariant is therefore "no full-attention layers
 /// anywhere in the model".
+#[allow(dead_code)]
 fn model_is_gdn_only(weights: &GpuWeights) -> bool {
     weights
         .layers
@@ -2489,6 +2497,7 @@ fn partition_segment_layers_by_attn_type(
 ///   each segment into contiguous-attention-type blocks and processes them
 ///   with gradient injection so the tiled path can fire on production
 ///   models like Qwen3.5-4B (24 GDN + 8 full-attn).
+#[allow(dead_code)]
 fn tiled_training_tile_size(
     weights: &GpuWeights,
     device: &Device,
@@ -2524,7 +2533,7 @@ fn tiled_training_tile_size(
 /// scaled by `(num_tile_active / total_active)` because the helpers
 /// internally divide by `num_tile_active` while the per-tile contribution to
 /// the monolithic mean is `sum_NLL_tile / total_active`.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn tile_loss_explicit(
     weights: &GpuWeights,
     model_config: &ModelConfig,
@@ -2608,7 +2617,7 @@ fn tile_loss_explicit(
 ///   tile's hidden by one position so all `L` logits (or `L-1` for the last
 ///   tile) participate in the loss; the per-tile contributions sum to the
 ///   monolithic mean exactly.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn tiled_segment_recompute_and_backward(
     backend: &dyn BackendRuntime,
     seg_idx: usize,
@@ -2824,7 +2833,7 @@ fn tiled_segment_recompute_and_backward(
 /// the larger of those two, and the per-segment peak does not include all
 /// `seg_end - seg_start` layers' saved tensors at full seq_len (which is
 /// what the existing monolithic path holds for hybrid models).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn layer_pair_tiled_segment_recompute_and_backward(
     backend: &dyn BackendRuntime,
     seg_idx: usize,
@@ -3176,10 +3185,23 @@ fn checkpointed_forward_backward(
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
+    anyhow::ensure!(num_segments > 0, "checkpointed SFT requires at least one segment");
+    anyhow::ensure!(
+        input_ids.len() == label_mask.len(),
+        "input_ids/label_mask length mismatch: {} vs {}",
+        input_ids.len(),
+        label_mask.len()
+    );
+    anyhow::ensure!(
+        has_supervised_shifted_labels(label_mask),
+        "checkpointed SFT called with no supervised shifted-label positions"
+    );
 
-    // Step 1: Run full forward pass with detached boundaries to get boundary hidden states.
+    // Step 1: Run one full detached forward pass to collect layer-segment
+    // boundary values. LoRA values are included, but detached from autograd,
+    // because gradients are produced by the reverse recompute below.
     let (embed_hidden, positions) = model_forward_embed(input_ids, weights)?;
-    let lora_weights = params.as_lora_weights();
+    let lora_detached = lora_weights_detached(params);
 
     let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
     boundary_states.push(embed_hidden.detach());
@@ -3208,7 +3230,7 @@ fn checkpointed_forward_backward(
                 start,
                 end,
                 Some(&mut linear_state),
-                Some(&lora_weights),
+                Some(&lora_detached),
             )?;
             boundary_states.push(current.detach());
             if resident_activation {
@@ -3218,100 +3240,65 @@ fn checkpointed_forward_backward(
         }
     }
 
-    // Step 2: For each segment, recompute with grad tracking and backprop.
+    // Step 2: Compute the real loss once at the final boundary, then seed the
+    // reverse pass with the exact analytic gradient through final RMSNorm +
+    // tied LM head + masked next-token cross-entropy. This avoids the old
+    // per-segment tail forward, which retained later-layer graphs and was not
+    // viable for long examples.
+    let final_hidden = segment_input_via_registry_or_clone(
+        backend,
+        boundary_states
+            .last()
+            .context("missing final checkpoint boundary")?,
+        resident_activation,
+    )?;
+    let loss = if use_flce() {
+        let normed = model_forward_final_norm(&final_hidden, weights, model_config)?;
+        fused_linear_cross_entropy_dispatch_with_provider(
+            &normed,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            device,
+            DEFAULT_CHUNK_SIZE,
+            flce_provider.clone(),
+        )
+        .context("fused linear cross-entropy (checkpointed final boundary)")?
+    } else {
+        let logits = model_forward_head(&final_hidden, weights, model_config)?;
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+    };
+    let loss_val = loss.to_scalar::<f32>()? as f64;
+
+    let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
+        &final_hidden,
+        &weights.final_norm,
+        &weights.embed_tokens_t,
+        input_ids,
+        label_mask,
+        model_config.rms_norm_eps,
+        DEFAULT_CHUNK_SIZE,
+    )
+    .context("analytic SFT tail gradient")?
+    .detach();
+    drop(loss);
+    drop(final_hidden);
+
+    // Step 3: Walk segments in reverse. Each segment is recomputed with
+    // autograd tracking only for that segment, and the incoming hidden-state
+    // gradient is injected with sum(segment_output * upstream_grad). This is
+    // exact reverse-mode checkpointing at segment boundaries: no token
+    // truncation, no cross-window context loss, and each LoRA parameter gets
+    // exactly one gradient contribution.
     let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
     let all_vars = params.all_vars();
-    let mut total_loss = 0.0;
 
-    // Tiling decision (made once per training step). When we tile, every
-    // segment iteration uses the per-tile path; otherwise, every segment
-    // uses the monolithic path.
-    //
-    // Two tiled implementations exist:
-    // * GDN-only models -> [`tiled_segment_recompute_and_backward`]
-    //   (PR #636). Bit-exact against monolithic; skips gradient injection.
-    // * Hybrid GDN + full-attn models ->
-    //   [`layer_pair_tiled_segment_recompute_and_backward`] (this PR).
-    //   Partitions each segment into contiguous-attention-type blocks and
-    //   processes them with gradient injection so the tiled path can fire
-    //   on production models like Qwen3.5-4B.
-    let tile_size = tiled_training_tile_size(weights, device, input_ids.len());
-    let use_layer_pair = tile_size.is_some() && !model_is_gdn_only(weights);
-    let total_active: usize = if tile_size.is_some() && !use_layer_pair {
-        // Same denominator as the monolithic path's `cross_entropy_loss` /
-        // `fused_linear_cross_entropy`: count of active label positions
-        // after the next-token shift (`label_mask[1..]`). Only used by the
-        // GDN-only fast path's [`tile_loss_explicit`] scaling; the
-        // layer-pair path computes the full chain loss directly so it
-        // doesn't need this count.
-        if label_mask.len() >= 2 {
-            label_mask[1..].iter().filter(|&&m| m).count()
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-
-    for seg_idx in 0..num_segments {
-        if let Some(tile) = tile_size {
-            let seg_loss = if use_layer_pair {
-                layer_pair_tiled_segment_recompute_and_backward(
-                    backend,
-                    seg_idx,
-                    segments,
-                    &boundary_states,
-                    input_ids,
-                    label_mask,
-                    weights,
-                    model_config,
-                    &positions,
-                    params,
-                    &mut accumulated_grads,
-                    tile,
-                    device,
-                )?
-            } else {
-                tiled_segment_recompute_and_backward(
-                    backend,
-                    seg_idx,
-                    segments,
-                    &boundary_states,
-                    input_ids,
-                    label_mask,
-                    weights,
-                    model_config,
-                    &positions,
-                    params,
-                    &mut accumulated_grads,
-                    total_active,
-                    tile,
-                    device,
-                )?
-            };
-            total_loss += seg_loss;
-            // Phase 3.2 sub-step (tiled): the tiled paths internally
-            // resolve their boundary input via the same registry-aware
-            // helper, so once they return we can drop boundary_states
-            // [seg_idx]'s candle CPU mirror. Same safety analysis as
-            // the monolithic-path drop below: the next iteration uses
-            // boundary_states[seg_idx + 1], not [seg_idx]; the
-            // end-of-function eviction loop iterates over stubs whose
-            // TensorIds aren't in the registry (no-op).
-            if resident_activation
-                && backend.has_resident_activation(&boundary_states[seg_idx])
-            {
-                backend.evict_resident_activation(&boundary_states[seg_idx]);
-                boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
-                    .context("phase3.2 tiled: alloc boundary stub")?;
-            }
-            continue;
-        }
-
+    for seg_idx in (0..num_segments).rev() {
         let (seg_start, seg_end) = segments[seg_idx];
 
-        // Start from the detached boundary state for this segment —
-        // resident-resolve fast path with candle-clone fallback.
+        // Start from the detached boundary state for this segment. Wrapping it
+        // in a fresh Var lets Candle return d(loss)/d(segment_input), which
+        // becomes the upstream gradient for the previous segment.
         let seg_input = segment_input_via_registry_or_clone(
             backend,
             &boundary_states[seg_idx],
@@ -3332,13 +3319,13 @@ fn checkpointed_forward_backward(
             boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
                 .context("phase3.2: alloc boundary stub")?;
         }
+        let seg_input_var = Var::from_tensor(&seg_input)?;
 
-        // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
-        let mut hidden = model_forward_segment(
+        let seg_output = model_forward_segment(
             backend,
-            seg_input,
+            seg_input_var.as_tensor().clone(),
             weights,
             model_config,
             &positions,
@@ -3348,49 +3335,27 @@ fn checkpointed_forward_backward(
             Some(&lora_weights_for_seg),
         )?;
 
-        // Run remaining segments DETACHED (no grad tracking for their LoRA params).
-        // We detach the hidden state so subsequent segments don't contribute to the graph.
-        for &(later_start, later_end) in &segments[seg_idx + 1..] {
-            hidden = hidden.detach();
-            let mut later_linear_state = LinearAttentionState::new(model_config, device)?;
-            // Use the original (non-Var) lora weights so they don't get tracked
-            let lora_for_later = params.as_lora_weights();
-            hidden = model_forward_segment(
-                backend,
-                hidden,
-                weights,
-                model_config,
-                &positions,
-                later_start,
-                later_end,
-                Some(&mut later_linear_state),
-                Some(&lora_for_later),
-            )?;
-        }
-
-        // LM head + loss (or fused LCE when KILN_USE_FLCE=1).
-        let loss = if use_flce() {
-            let normed = model_forward_final_norm(&hidden, weights, model_config)?;
-            fused_linear_cross_entropy_dispatch_with_provider(
-                &normed,
-                &weights.embed_tokens_t,
-                input_ids,
-                label_mask,
-                device,
-                DEFAULT_CHUNK_SIZE,
-                flce_provider.clone(),
-            )
-            .context("fused linear cross-entropy (checkpointed)")?
-        } else {
-            let logits = model_forward_head(&hidden, weights, model_config)?;
-            cross_entropy_loss(&logits, input_ids, label_mask, device)?
-        };
-        let loss_val = loss.to_scalar::<f32>()? as f64;
-        total_loss += loss_val;
-
-        // Backward — only the current segment's LoRA Vars contribute gradients
-        let grads = loss.backward().context("checkpointed backward pass")?;
+        let seg_output_f32 = seg_output.to_dtype(DType::F32)?;
+        let upstream_f32 = upstream_grad.to_dtype(DType::F32)?;
+        let injected = (&seg_output_f32 * &upstream_f32)?
+            .sum_all()
+            .with_context(|| format!("checkpointed gradient injection for segment {seg_idx}"))?;
+        let grads = injected
+            .backward()
+            .with_context(|| format!("checkpointed reverse backward for segment {seg_idx}"))?;
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
+
+        if seg_idx > 0 {
+            upstream_grad = grads
+                .get(seg_input_var.as_tensor())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "checkpointed reverse pass did not produce input gradient for segment {seg_idx}"
+                    )
+                })?
+                .clone()
+                .detach();
+        }
     }
 
     // Phase 3.1 hook: evict every boundary-state registry entry now
@@ -3405,13 +3370,7 @@ fn checkpointed_forward_backward(
         }
     }
 
-    // Average loss across segments. In both monolithic and tiled paths the
-    // per-iteration `total_loss` accumulates the same segment-equivalent
-    // value, so dividing by `num_segments` recovers the mean cross-entropy
-    // over active positions.
-    let avg_loss = total_loss / num_segments as f64;
-
-    Ok((avg_loss, accumulated_grads))
+    Ok((loss_val, accumulated_grads))
 }
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
@@ -4165,6 +4124,115 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn test_checkpointed_reverse_gradients_match_standard_cpu() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_flce = std::env::var("KILN_USE_FLCE").ok();
+        unsafe {
+            std::env::set_var("KILN_USE_FLCE", "0");
+        }
+
+        let result = (|| -> Result<()> {
+            let device = Device::Cpu;
+            let config = tiny_config();
+            let weights = tiny_weights(&config, &device)?;
+            let backend = backend::for_device(&device);
+
+            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 4];
+            let label_mask = vec![false, false, true, true, false, true, true, false];
+            let seed = 0x515f_7eed_u64;
+
+            let params_std = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+            let params_ckpt = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+
+            let (loss_std, grads_std) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params_std,
+                &label_mask,
+                &device,
+                None,
+            )?;
+            let segments = compute_segment_boundaries(config.num_layers, 2);
+            let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params_ckpt,
+                &label_mask,
+                &segments,
+                &device,
+                None,
+            )?;
+
+            let loss_diff = (loss_std - loss_ckpt).abs();
+            assert!(
+                loss_diff < 1e-5,
+                "checkpointed reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
+            );
+
+            let std_vars = params_std.all_vars();
+            let ckpt_vars = params_ckpt.all_vars();
+            assert_eq!(std_vars.len(), ckpt_vars.len());
+            let mut compared = 0usize;
+            for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
+                let g_std = grads_std.get(std_var.as_tensor());
+                let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
+                match (g_std, g_ckpt) {
+                    (Some(a), Some(b)) => {
+                        let diff = (a - b)?
+                            .abs()?
+                            .max_all()?
+                            .to_dtype(DType::F32)?
+                            .to_scalar::<f32>()?;
+                        assert!(
+                            diff < 1e-3,
+                            "checkpointed reverse grad differs from standard: max_abs_diff={diff:e}"
+                        );
+                        compared += 1;
+                    }
+                    (None, None) => {}
+                    (std_some, ckpt_some) => panic!(
+                        "gradient presence mismatch: standard={} checkpointed={}",
+                        std_some.is_some(),
+                        ckpt_some.is_some()
+                    ),
+                }
+            }
+            assert!(compared > 0, "test compared no LoRA gradients");
+            Ok(())
+        })();
+
+        if let Some(value) = prior_flce {
+            unsafe {
+                std::env::set_var("KILN_USE_FLCE", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("KILN_USE_FLCE");
+            }
+        }
+
+        result
     }
 
     /// CPU parity for the Phase 10 time-axis tile path: training-time
