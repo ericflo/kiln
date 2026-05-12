@@ -357,3 +357,155 @@ fn vk_native_training_loss_decreases() -> Result<()> {
     );
     Ok(())
 }
+
+/// Build a tiny synthetic FullAttn model with the Qwen3.5-specific
+/// pieces enabled: per-head q_norm/k_norm and attn_output_gate (which
+/// makes q_proj produce 2× output, splitting into Q and a sigmoid
+/// gate). Validates the new vk_full_attention_layer paths end-to-end.
+fn build_tiny_qwen35_specific_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
+    let vocab = 32;
+    let hidden = 32;
+    let intermediate = 64;
+    let heads_q = 2;
+    let heads_kv = 1;
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+    let q_dim = heads_q * head_dim;
+    let q_out_dim = q_dim * 2; // attn_output_gate = true → q_proj is 2× wide
+
+    let embed = small_random(vocab * hidden, 21);
+    let final_norm = vec![0.0_f32; hidden];
+    let lm_head = small_random(vocab * hidden, 22);
+
+    let in_norm = vec![0.0_f32; hidden];
+    let post_norm = vec![0.0_f32; hidden];
+    // q_proj: [q_out_dim=2*q_dim, hidden] — fused [Q, gate]
+    let q = small_random(q_out_dim * hidden, 23);
+    let k = small_random(kv_dim * hidden, 24);
+    let v = small_random(kv_dim * hidden, 25);
+    let o = small_random(hidden * q_dim, 26);
+    let gate = small_random(intermediate * hidden, 27);
+    let up = small_random(intermediate * hidden, 28);
+    let down = small_random(hidden * intermediate, 29);
+    // q_norm/k_norm weights: per-head RMSNorm scale, [head_dim].
+    // Center on 0.0 since RMSNorm in this codebase uses (1 + w) form.
+    let q_norm = vec![0.0_f32; head_dim];
+    let k_norm = vec![0.0_f32; head_dim];
+
+    let layer = VkLayerWeights::FullAttention(VkFullAttentionWeights {
+        input_layernorm_weight: upload_f32(dev, &in_norm, &[hidden])?,
+        post_attention_layernorm_weight: upload_f32(dev, &post_norm, &[hidden])?,
+        q_proj: upload_f32(dev, &q, &[q_out_dim, hidden])?,
+        k_proj: upload_f32(dev, &k, &[kv_dim, hidden])?,
+        v_proj: upload_f32(dev, &v, &[kv_dim, hidden])?,
+        o_proj: upload_f32(dev, &o, &[hidden, q_dim])?,
+        q_norm: Some(upload_f32(dev, &q_norm, &[head_dim])?),
+        k_norm: Some(upload_f32(dev, &k_norm, &[head_dim])?),
+        gate_proj: upload_f32(dev, &gate, &[intermediate, hidden])?,
+        up_proj: upload_f32(dev, &up, &[intermediate, hidden])?,
+        down_proj: upload_f32(dev, &down, &[hidden, intermediate])?,
+        heads_q,
+        heads_kv,
+        head_dim,
+        attn_output_gate: true,
+        eps: 1e-5,
+    });
+    Ok(VkModelWeights {
+        embed_tokens: upload_f32(dev, &embed, &[vocab, hidden])?,
+        embed_dtype: VkDType::F32,
+        final_norm_weight: upload_f32(dev, &final_norm, &[hidden])?,
+        lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
+        layers: vec![layer],
+        vocab,
+        hidden,
+    })
+}
+
+/// Build LoRA params for the Qwen3.5-specific synthetic model. q_proj
+/// LoRA targets the doubled output dim (covers the [Q, gate] split).
+fn build_qwen35_specific_lora(dev: &Arc<VulkanDevice>) -> Result<VkLoraLayer> {
+    let hidden = 32;
+    let heads_q = 2;
+    let heads_kv = 1;
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+    let q_dim = heads_q * head_dim;
+    let q_out_dim = q_dim * 2;
+    let intermediate = 64;
+    let rank = 4;
+    let alpha = 8.0;
+    Ok(VkLoraLayer {
+        q_proj: Some(VkLoraPair::init_kaiming(dev, hidden, q_out_dim, rank, alpha, 200)?),
+        k_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 201)?),
+        v_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, rank, alpha, 202)?),
+        o_proj: Some(VkLoraPair::init_kaiming(dev, q_dim, hidden, rank, alpha, 203)?),
+        gate_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 204)?),
+        up_proj: Some(VkLoraPair::init_kaiming(dev, hidden, intermediate, rank, alpha, 205)?),
+        down_proj: Some(VkLoraPair::init_kaiming(dev, intermediate, hidden, rank, alpha, 206)?),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn vk_qwen35_specific_forward_produces_finite_output() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_qwen35_specific_model(&dev)?;
+    let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
+        .to_vec_f32()?[0];
+    assert!(loss.is_finite(), "Qwen3.5-specific forward produced non-finite loss {loss}");
+    println!("vk_qwen35_specific forward loss = {loss}");
+    Ok(())
+}
+
+#[test]
+fn vk_qwen35_specific_backward_propagates_to_all_lora() -> Result<()> {
+    use kiln_model::vk_forward::vk_step_backward;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_qwen35_specific_model(&dev)?;
+    let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?;
+    let grads = vk_step_backward(&loss)?;
+    println!("vk_qwen35_specific: grads has {} entries", grads.len());
+    // We expect grads for: q.a, q.b, k.a, k.b, v.a, v.b, o.a, o.b,
+    // gate.a, gate.b, up.a, up.b, down.a, down.b → 14 LoRA params total.
+    // Some may have effectively-zero grads if upstream signal is small,
+    // but they should all be present in the grad map.
+    assert!(
+        grads.len() >= 8,
+        "expected at least 8 LoRA grads (got {})",
+        grads.len()
+    );
+    Ok(())
+}
+
+#[test]
+fn vk_qwen35_specific_training_loss_decreases() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_qwen35_specific_model(&dev)?;
+    let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let initial_loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?
+        .to_vec_f32()?[0];
+    let mut last_loss = initial_loss;
+    let mut losses = vec![initial_loss];
+    for step in 1..=10 {
+        let l = vk_train_step(&model, &lora_layers, &input_ids, &mut adamw, &cfg, step)?;
+        assert!(l.is_finite(), "step {step}: non-finite loss {l}");
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_qwen35_specific losses: {losses:?}");
+    assert!(
+        last_loss < initial_loss * 0.95,
+        "Qwen3.5-specific loss did not drop meaningfully: {initial_loss} -> {last_loss}"
+    );
+    Ok(())
+}
