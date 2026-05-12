@@ -11,7 +11,9 @@ use axum::{
 };
 
 use kiln_core::env_flag::env_tristate;
-use kiln_train::{GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus};
+use kiln_train::{
+    GrpoGroup, GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
+};
 
 use std::sync::atomic::Ordering;
 
@@ -25,6 +27,71 @@ use crate::training_preflight::{
 };
 use crate::training_queue::{QueueEntry, QueuedJob};
 
+struct GrpoSubmissionStats {
+    num_groups: usize,
+    total_completions: usize,
+    max_seq_len: usize,
+}
+
+fn scan_grpo_jsonl_submission(
+    dataset_path: &str,
+    tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
+) -> Result<GrpoSubmissionStats, ApiError> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(dataset_path).map_err(|e| {
+        ApiError::training_invalid_request(format!(
+            "failed to open GRPO dataset_path '{dataset_path}': {e}"
+        ))
+    })?;
+    let reader = BufReader::new(file);
+    let mut num_groups = 0usize;
+    let mut total_completions = 0usize;
+    let mut max_seq_len = 0usize;
+
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| {
+            ApiError::training_invalid_request(format!(
+                "failed to read GRPO dataset_path '{dataset_path}' line {}: {e}",
+                idx + 1
+            ))
+        })?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let group: GrpoGroup = serde_json::from_str(trimmed).map_err(|e| {
+            ApiError::training_invalid_request(format!(
+                "invalid GRPO JSONL group at line {} in '{dataset_path}': {e}",
+                idx + 1
+            ))
+        })?;
+        num_groups += 1;
+        total_completions += group.completions.len();
+        max_seq_len = max_seq_len.max(training_preflight::approximate_max_seq_len_grpo_group(
+            &group, tokenizer,
+        ));
+    }
+
+    if num_groups == 0 {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' contains no groups"
+        )));
+    }
+    if total_completions == 0 {
+        return Err(ApiError::training_invalid_request(format!(
+            "GRPO dataset_path '{dataset_path}' contains no completions"
+        )));
+    }
+
+    Ok(GrpoSubmissionStats {
+        num_groups,
+        total_completions,
+        max_seq_len,
+    })
+}
+
 /// Estimate the per-step working set against the corrected memory
 /// budget, and reject the submission with HTTP 413 if it cannot fit.
 ///
@@ -36,7 +103,7 @@ fn enforce_training_preflight(
     max_seq_len: usize,
     options: EstimateOptions,
     lora_rank: usize,
-    vk_native_sft: bool,
+    vk_native_recompute: bool,
 ) -> Result<(), ApiError> {
     if max_seq_len == 0 {
         return Ok(());
@@ -72,8 +139,7 @@ fn enforce_training_preflight(
             | kiln_core::vram::VramSource::AppleSilicon
             | kiln_core::vram::VramSource::EnvOverride
     );
-    let hybrid_model = state.model_config.num_full_attention_layers < state.model_config.num_layers;
-    let estimate = if vk_native_sft && hybrid_model {
+    let estimate = if vk_native_recompute {
         estimate_vk_native_recompute_working_set(
             &state.model_config,
             max_seq_len,
@@ -122,6 +188,13 @@ fn vk_native_sft_enabled(state: &AppState) -> bool {
                 false
             }
         }
+    }
+}
+
+fn vk_native_grpo_enabled(state: &AppState) -> bool {
+    match env_tristate("KILN_VK_NATIVE_GRPO") {
+        Some(enabled) => enabled,
+        None => vk_native_sft_enabled(state),
     }
 }
 
@@ -208,7 +281,8 @@ async fn submit_sft(
             ),
         },
         req.config.lora_rank,
-        vk_native_sft_enabled(&state),
+        vk_native_sft_enabled(&state)
+            && state.model_config.num_full_attention_layers < state.model_config.num_layers,
     )?;
 
     tracing::info!(
@@ -260,7 +334,7 @@ async fn submit_sft(
 
 async fn submit_grpo(
     State(state): State<AppState>,
-    Json(req): Json<GrpoRequest>,
+    Json(mut req): Json<GrpoRequest>,
 ) -> Result<Json<TrainingResponse>, ApiError> {
     // Reject new jobs during shutdown
     if state.shutdown.load(Ordering::Relaxed) {
@@ -283,8 +357,37 @@ async fn submit_grpo(
         return Err(ApiError::training_tracked_full(max_tracked));
     }
 
-    let num_groups = req.groups.len();
-    let total_completions: usize = req.groups.iter().map(|g| g.completions.len()).sum();
+    if let Some(path) = req.dataset_path.take() {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            req.dataset_path = Some(path);
+        }
+    }
+    if req.dataset_path.is_some() && !req.groups.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "GRPO request must use either groups or dataset_path, not both",
+        ));
+    }
+    if req.dataset_path.is_none() && req.groups.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "GRPO request needs either non-empty groups or dataset_path",
+        ));
+    }
+
+    let stats = if let Some(path) = req.dataset_path.as_deref() {
+        scan_grpo_jsonl_submission(path, Some(state.tokenizer.as_ref()))?
+    } else {
+        GrpoSubmissionStats {
+            num_groups: req.groups.len(),
+            total_completions: req.groups.iter().map(|g| g.completions.len()).sum(),
+            max_seq_len: training_preflight::approximate_max_seq_len_grpo(
+                &req.groups,
+                Some(state.tokenizer.as_ref()),
+            ),
+        }
+    };
+    let num_groups = stats.num_groups;
+    let total_completions = stats.total_completions;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
         .config
@@ -301,16 +404,13 @@ async fn submit_grpo(
     }
 
     // Working-set preflight (see submit_sft for rationale).
-    let max_seq_len = training_preflight::approximate_max_seq_len_grpo(
-        &req.groups,
-        Some(state.tokenizer.as_ref()),
-    );
+    let max_seq_len = stats.max_seq_len;
     enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions::default(),
         req.config.lora_rank,
-        false,
+        vk_native_grpo_enabled(&state),
     )?;
 
     // Register the job in the tracking map

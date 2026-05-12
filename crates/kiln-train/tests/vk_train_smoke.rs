@@ -17,14 +17,23 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::Result;
+use candle_core::shape::ShapeWithOneHole;
 use candle_core::{Device, Tensor};
 use kiln_core::config::{DType, ModelConfig};
+use kiln_core::tokenizer::KilnTokenizer;
+use kiln_model::forward::{
+    GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
+};
 use kiln_model::vk_forward::{
     VkFullAttentionWeights, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights, vk_model_forward_loss, vk_model_forward_loss_with_state,
+    VkModelWeights, vk_model_forward_final_norm_with_state, vk_model_forward_loss,
+    vk_model_forward_loss_with_state,
 };
+use kiln_train::GrpoConfig;
+use kiln_train::Optimizer;
 use kiln_train::vk_train::{
-    VkAdamWConfig, allocate_adamw_state, save_vk_lora_adapter,
+    VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
+    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
     vk_recompute_train_step_with_state_masked, vk_train_step,
 };
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
@@ -113,6 +122,119 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
         vocab,
         hidden,
     })
+}
+
+fn tiny_gpu_grpo_model_config() -> ModelConfig {
+    ModelConfig {
+        hidden_size: 8,
+        num_layers: 1,
+        num_attention_heads: 1,
+        num_kv_heads: 1,
+        head_dim: 8,
+        intermediate_size: 16,
+        vocab_size: 8,
+        max_position_embeddings: 128,
+        rms_norm_eps: 1e-5,
+        rope_theta: 10_000.0,
+        dtype: DType::FP32,
+        num_full_attention_layers: 1,
+        full_attention_interval: 1,
+        attn_output_gate: false,
+        linear_num_key_heads: 1,
+        linear_key_head_dim: 8,
+        linear_num_value_heads: 1,
+        linear_value_head_dim: 8,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 0.0,
+    }
+}
+
+fn cpu_tensor(data: Vec<f32>, shape: impl ShapeWithOneHole) -> Result<Tensor> {
+    Ok(Tensor::from_vec(data, shape, &Device::Cpu)?)
+}
+
+fn transpose_2d(t: &Tensor) -> Result<Tensor> {
+    Ok(t.transpose(0, 1)?.contiguous()?)
+}
+
+fn build_tiny_gpu_grpo_weights() -> Result<GpuWeights> {
+    let config = tiny_gpu_grpo_model_config();
+    let vocab = config.vocab_size;
+    let hidden = config.hidden_size;
+    let intermediate = config.intermediate_size;
+    let head_dim = config.head_dim;
+
+    let embed_tokens = cpu_tensor(small_random(vocab * hidden, 501), (vocab, hidden))?;
+    let embed_tokens_t = transpose_2d(&embed_tokens)?;
+    let q_proj = cpu_tensor(small_random(hidden * hidden, 502), (hidden, hidden))?;
+    let k_proj = cpu_tensor(small_random(hidden * hidden, 503), (hidden, hidden))?;
+    let v_proj = cpu_tensor(small_random(hidden * hidden, 504), (hidden, hidden))?;
+    let o_proj = cpu_tensor(small_random(hidden * hidden, 505), (hidden, hidden))?;
+    let gate_proj = cpu_tensor(
+        small_random(intermediate * hidden, 506),
+        (intermediate, hidden),
+    )?;
+    let up_proj = cpu_tensor(
+        small_random(intermediate * hidden, 507),
+        (intermediate, hidden),
+    )?;
+    let down_proj = cpu_tensor(
+        small_random(hidden * intermediate, 508),
+        (hidden, intermediate),
+    )?;
+
+    Ok(GpuWeights {
+        embed_tokens,
+        embed_tokens_t,
+        layers: vec![GpuLayerWeights {
+            input_layernorm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+            post_attention_layernorm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+            attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                q_proj: q_proj.clone(),
+                k_proj: k_proj.clone(),
+                v_proj: v_proj.clone(),
+                o_proj: o_proj.clone(),
+                q_norm: cpu_tensor(vec![0.0; head_dim], (head_dim,))?,
+                k_norm: cpu_tensor(vec![0.0; head_dim], (head_dim,))?,
+                q_proj_t: transpose_2d(&q_proj)?,
+                k_proj_t: transpose_2d(&k_proj)?,
+                v_proj_t: transpose_2d(&v_proj)?,
+                qkv_proj_t: None,
+                o_proj_t: transpose_2d(&o_proj)?,
+                q_proj_marlin: None,
+            }),
+            mlp: GpuFfnWeights {
+                gate_proj: gate_proj.clone(),
+                up_proj: up_proj.clone(),
+                down_proj: down_proj.clone(),
+                gate_proj_t: transpose_2d(&gate_proj)?,
+                up_proj_t: transpose_2d(&up_proj)?,
+                down_proj_t: transpose_2d(&down_proj)?,
+                gate_proj_marlin: None,
+                up_proj_marlin: None,
+                down_proj_marlin: None,
+            },
+        }],
+        final_norm: cpu_tensor(vec![0.0; hidden], (hidden,))?,
+        rotary_inv_freq: cpu_tensor(Vec::<f32>::new(), (0,))?,
+        mtp: None,
+    })
+}
+
+fn tiny_grpo_tokenizer() -> Result<KilnTokenizer> {
+    let json = br#"{
+        "version": "1.0",
+        "model": {
+            "type": "BPE",
+            "vocab": {"a": 0, "b": 1},
+            "merges": []
+        }
+    }"#;
+    Ok(
+        KilnTokenizer::from_bytes(json.as_slice())?.with_chat_template(
+            "{% for message in messages %}{{ message.content }}{% endfor %}".to_string(),
+        ),
+    )
 }
 
 fn build_lora_layer(
@@ -225,19 +347,44 @@ fn build_tiny_gdn_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
     let qkv_dim = 2 * nk * dk + nv * dv;
     let v_dim = nv * dv;
     let conv_kernel = config.linear_conv_kernel_dim;
+    let intermediate = config.intermediate_size;
 
     let layer = VkLayerWeights::LinearAttention(VkLinearAttentionWeights {
         layer_norm: upload_f32(dev, &vec![0.0_f32; hidden], &[hidden])?,
-        in_proj_qkv: upload_f32(dev, &small_random(qkv_dim * hidden, 301), &[qkv_dim, hidden])?,
+        in_proj_qkv: upload_f32(
+            dev,
+            &small_random(qkv_dim * hidden, 301),
+            &[qkv_dim, hidden],
+        )?,
         in_proj_z: upload_f32(dev, &small_random(v_dim * hidden, 302), &[v_dim, hidden])?,
         in_proj_a: upload_f32(dev, &small_random(nv * hidden, 303), &[nv, hidden])?,
         in_proj_b: upload_f32(dev, &small_random(nv * hidden, 304), &[nv, hidden])?,
-        conv1d: upload_f32(dev, &small_random(qkv_dim * conv_kernel, 305), &[qkv_dim, conv_kernel])?,
+        conv1d: upload_f32(
+            dev,
+            &small_random(qkv_dim * conv_kernel, 305),
+            &[qkv_dim, conv_kernel],
+        )?,
         a_log: upload_f32(dev, &vec![-0.5_f32; nv], &[nv])?,
         a_log_gates: upload_f32(dev, &vec![-0.5_f32; nv], &[nv])?,
         dt_bias: upload_f32(dev, &vec![0.1_f32; nv], &[nv])?,
         gated_norm: upload_f32(dev, &vec![1.0_f32; v_dim], &[v_dim])?,
         out_proj: upload_f32(dev, &small_random(hidden * v_dim, 306), &[hidden, v_dim])?,
+        post_attention_layernorm_weight: upload_f32(dev, &vec![0.0_f32; hidden], &[hidden])?,
+        gate_proj: upload_f32(
+            dev,
+            &small_random(intermediate * hidden, 308),
+            &[intermediate, hidden],
+        )?,
+        up_proj: upload_f32(
+            dev,
+            &small_random(intermediate * hidden, 309),
+            &[intermediate, hidden],
+        )?,
+        down_proj: upload_f32(
+            dev,
+            &small_random(hidden * intermediate, 310),
+            &[hidden, intermediate],
+        )?,
         heads_k: nk,
         heads_v: nv,
         head_dim_k: dk,
@@ -265,6 +412,7 @@ fn build_gdn_lora_layer(dev: &Arc<VulkanDevice>) -> Result<VkLoraLayer> {
     let qkv_dim = 2 * config.linear_num_key_heads * config.linear_key_head_dim
         + config.linear_num_value_heads * config.linear_value_head_dim;
     let v_dim = config.linear_num_value_heads * config.linear_value_head_dim;
+    let intermediate = config.intermediate_size;
     let rank = 4;
     let alpha = 8.0;
     Ok(VkLoraLayer {
@@ -276,6 +424,30 @@ fn build_gdn_lora_layer(dev: &Arc<VulkanDevice>) -> Result<VkLoraLayer> {
         )?),
         gdn_out_proj: Some(VkLoraPair::init_kaiming(
             dev, v_dim, hidden, rank, alpha, 403,
+        )?),
+        gate_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            404,
+        )?),
+        up_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            hidden,
+            intermediate,
+            rank,
+            alpha,
+            405,
+        )?),
+        down_proj: Some(VkLoraPair::init_kaiming(
+            dev,
+            intermediate,
+            hidden,
+            rank,
+            alpha,
+            406,
         )?),
         ..Default::default()
     })
@@ -298,7 +470,10 @@ fn tiny_gdn_state(dev: &Arc<VulkanDevice>) -> Result<VkLinearAttentionState> {
 }
 
 fn max_abs_tensor(t: &VkTensor) -> Result<f32> {
-    Ok(t.to_vec_f32()?.into_iter().map(f32::abs).fold(0.0, f32::max))
+    Ok(t.to_vec_f32()?
+        .into_iter()
+        .map(f32::abs)
+        .fold(0.0, f32::max))
 }
 
 #[test]
@@ -757,11 +932,20 @@ fn vk_native_full_pipeline_saves_loadable_adapter() -> Result<()> {
     // Read it back via candle safetensors and verify keys
     let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
     println!("vk_native_full_pipeline saved {} tensors", loaded.len());
-    // PEFT convention: at least q_proj.lora_A and q_proj.lora_B should exist
-    let has_q_a = loaded.keys().any(|k| k.contains("q_proj.lora_A.weight"));
-    let has_q_b = loaded.keys().any(|k| k.contains("q_proj.lora_B.weight"));
-    assert!(has_q_a, "missing q_proj.lora_A in saved adapter");
-    assert!(has_q_b, "missing q_proj.lora_B in saved adapter");
+    for key in [
+        "self_attn.q_proj.lora_A.weight",
+        "self_attn.k_proj.lora_A.weight",
+        "self_attn.v_proj.lora_A.weight",
+        "self_attn.o_proj.lora_A.weight",
+        "mlp.gate_proj.lora_A.weight",
+        "mlp.up_proj.lora_A.weight",
+        "mlp.down_proj.lora_A.weight",
+    ] {
+        assert!(
+            loaded.keys().any(|k| k.contains(key)),
+            "missing saved full-attn LoRA key containing {key}"
+        );
+    }
     let _ = std::fs::remove_file(&tmp);
     Ok(())
 }
@@ -850,6 +1034,206 @@ fn vk_recompute_train_step_loss_decreases() -> Result<()> {
 }
 
 #[test]
+fn vk_init_lora_layers_targets_full_attention_and_gdn_mlp() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+
+    let full_model = build_tiny_model(&dev)?;
+    let full_layers = vk_init_lora_layers(&dev, &full_model, &tiny_model_config(), 4, 8.0, 123)?;
+    let full = &full_layers[0];
+    assert!(full.q_proj.is_some(), "missing full-attn q_proj LoRA");
+    assert!(full.k_proj.is_some(), "missing full-attn k_proj LoRA");
+    assert!(full.v_proj.is_some(), "missing full-attn v_proj LoRA");
+    assert!(full.o_proj.is_some(), "missing full-attn o_proj LoRA");
+    assert!(full.gate_proj.is_some(), "missing full-attn gate_proj LoRA");
+    assert!(full.up_proj.is_some(), "missing full-attn up_proj LoRA");
+    assert!(full.down_proj.is_some(), "missing full-attn down_proj LoRA");
+    assert!(full.in_proj_qkv.is_none());
+    assert!(full.in_proj_z.is_none());
+    assert!(full.gdn_out_proj.is_none());
+
+    let gdn_model = build_tiny_gdn_model(&dev)?;
+    let gdn_layers = vk_init_lora_layers(&dev, &gdn_model, &tiny_gdn_model_config(), 4, 8.0, 456)?;
+    let gdn = &gdn_layers[0];
+    assert!(gdn.q_proj.is_none());
+    assert!(gdn.k_proj.is_none());
+    assert!(gdn.v_proj.is_none());
+    assert!(gdn.o_proj.is_none());
+    assert!(gdn.in_proj_qkv.is_some(), "missing GDN in_proj_qkv LoRA");
+    assert!(gdn.in_proj_z.is_some(), "missing GDN in_proj_z LoRA");
+    assert!(gdn.gdn_out_proj.is_some(), "missing GDN out_proj LoRA");
+    assert!(gdn.gate_proj.is_some(), "missing GDN gate_proj LoRA");
+    assert!(gdn.up_proj.is_some(), "missing GDN up_proj LoRA");
+    assert!(gdn.down_proj.is_some(), "missing GDN down_proj LoRA");
+    Ok(())
+}
+
+#[test]
+fn grpo_jsonl_stats_counts_large_file_without_retaining_groups() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-large-stats-{}.jsonl",
+        std::process::id()
+    ));
+    let mut body = String::new();
+    for idx in 0..512 {
+        body.push_str(&format!(
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"prompt {idx}\"}}],\"completions\":[{{\"text\":\"a\",\"reward\":1.0}},{{\"text\":\"b\",\"reward\":0.0}}]}}\n"
+        ));
+    }
+    std::fs::write(&path, body)?;
+    let stats = grpo_jsonl_stats(&path)?;
+    assert_eq!(stats, (512, 1024));
+    let _ = std::fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
+    let Some(_dev) = vk_dev() else { return Ok(()) };
+    let dataset = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-smoke-{}.jsonl",
+        std::process::id()
+    ));
+    let mut body = String::new();
+    for _ in 0..6 {
+        body.push_str(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"a\"}],\"completions\":[{\"text\":\"b\",\"reward\":1.0},{\"text\":\"a\",\"reward\":0.0}]}\n",
+        );
+    }
+    std::fs::write(&dataset, body)?;
+
+    let adapter_root = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-adapters-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&adapter_root);
+    std::fs::create_dir_all(&adapter_root)?;
+    let config = GrpoConfig {
+        learning_rate: 1e-2,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        checkpoint_interval: Some(5),
+        seed: Some(1234),
+        ..Default::default()
+    };
+    let model_config = tiny_gpu_grpo_model_config();
+    let weights = build_tiny_gpu_grpo_weights()?;
+    let tokenizer = tiny_grpo_tokenizer()?;
+    let out = vk_native_grpo_train_jsonl(
+        &dataset,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        &adapter_root,
+        "jsonl-smoke",
+        None,
+    )?;
+
+    let loaded =
+        candle_core::safetensors::load(out.join("adapter_model.safetensors"), &Device::Cpu)?;
+    for key in [
+        "self_attn.q_proj.lora_A.weight",
+        "self_attn.o_proj.lora_A.weight",
+        "mlp.gate_proj.lora_A.weight",
+        "mlp.down_proj.lora_A.weight",
+    ] {
+        assert!(
+            loaded.keys().any(|k| k.contains(key)),
+            "missing streamed GRPO adapter key containing {key}"
+        );
+    }
+    let checkpoint = adapter_root
+        .join("jsonl-smoke-checkpoint-5")
+        .join("adapter_model.safetensors");
+    assert!(
+        checkpoint.exists(),
+        "streamed GRPO checkpoint adapter was not written at {}",
+        checkpoint.display()
+    );
+    let checkpoint_loaded = candle_core::safetensors::load(&checkpoint, &Device::Cpu)?;
+    assert!(
+        checkpoint_loaded
+            .keys()
+            .any(|k| k.contains("self_attn.q_proj.lora_A.weight")),
+        "streamed GRPO checkpoint missing LoRA adapter tensors"
+    );
+    let _ = std::fs::remove_file(dataset);
+    let _ = std::fs::remove_dir_all(adapter_root);
+    Ok(())
+}
+
+fn grpo_ref_log_probs(
+    model: &VkModelWeights,
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    state: Option<&mut VkLinearAttentionState>,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::flce::vk_selected_log_probs;
+    use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
+
+    let no_lora = vec![VkLoraLayer::default(); model.layers.len()];
+    let h = vk_model_forward_final_norm_with_state(model, &no_lora, input_ids, state)?;
+    let active_h = vk_index_select_rows(&h, active_rows)?;
+    vk_selected_log_probs(&active_h, &model.lm_head, labels, 8)
+}
+
+#[test]
+fn vk_recompute_grpo_step_updates_full_attention_lora_targets() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let model_config = tiny_model_config();
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = vec![2, 3, 4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+    let ref_log_probs = grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, None)?;
+
+    let loss = vk_recompute_grpo_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        1.0,
+        0.2,
+        0.1,
+        &model_config,
+        0,
+        &mut adamw,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+    assert!(loss.is_finite(), "non-finite full-attn GRPO recompute loss");
+
+    let layer = &lora_layers[0];
+    for (name, pair) in [
+        ("q_proj", layer.q_proj.as_ref().unwrap()),
+        ("k_proj", layer.k_proj.as_ref().unwrap()),
+        ("v_proj", layer.v_proj.as_ref().unwrap()),
+        ("o_proj", layer.o_proj.as_ref().unwrap()),
+        ("gate_proj", layer.gate_proj.as_ref().unwrap()),
+        ("up_proj", layer.up_proj.as_ref().unwrap()),
+        ("down_proj", layer.down_proj.as_ref().unwrap()),
+    ] {
+        let max_abs = max_abs_tensor(&pair.b)?;
+        println!("full-attn GRPO {name}.B max_abs={max_abs:.6e}");
+        assert!(max_abs > 0.0, "full-attn GRPO did not update {name}.B");
+    }
+    Ok(())
+}
+
+#[test]
 fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
     let Some(dev) = vk_dev() else { return Ok(()) };
     let model = build_tiny_gdn_model(&dev)?;
@@ -858,20 +1242,30 @@ fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
     let qkv_b_before = max_abs_tensor(&lora.in_proj_qkv.as_ref().unwrap().b)?;
     let z_b_before = max_abs_tensor(&lora.in_proj_z.as_ref().unwrap().b)?;
     let out_b_before = max_abs_tensor(&lora.gdn_out_proj.as_ref().unwrap().b)?;
+    let gate_b_before = max_abs_tensor(&lora.gate_proj.as_ref().unwrap().b)?;
+    let up_b_before = max_abs_tensor(&lora.up_proj.as_ref().unwrap().b)?;
+    let down_b_before = max_abs_tensor(&lora.down_proj.as_ref().unwrap().b)?;
     assert_eq!(qkv_b_before, 0.0);
     assert_eq!(z_b_before, 0.0);
     assert_eq!(out_b_before, 0.0);
+    assert_eq!(gate_b_before, 0.0);
+    assert_eq!(up_b_before, 0.0);
+    assert_eq!(down_b_before, 0.0);
 
     let lora_layers = vec![lora];
     let mut state = tiny_gdn_state(&dev)?;
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
-    let loss = vk_model_forward_loss_with_state(&model, &lora_layers, &input_ids, Some(&mut state))?;
+    let loss =
+        vk_model_forward_loss_with_state(&model, &lora_layers, &input_ids, Some(&mut state))?;
     let grads = kiln_model::vk_forward::vk_step_backward(&loss)?;
     let layer = &lora_layers[0];
     for (name, pair) in [
         ("in_proj_qkv", layer.in_proj_qkv.as_ref().unwrap()),
         ("in_proj_z", layer.in_proj_z.as_ref().unwrap()),
         ("out_proj", layer.gdn_out_proj.as_ref().unwrap()),
+        ("gate_proj", layer.gate_proj.as_ref().unwrap()),
+        ("up_proj", layer.up_proj.as_ref().unwrap()),
+        ("down_proj", layer.down_proj.as_ref().unwrap()),
     ] {
         let max_abs = grads
             .get(pair.b_id)
@@ -907,12 +1301,18 @@ fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
     let qkv_b_after = max_abs_tensor(&lora_layers[0].in_proj_qkv.as_ref().unwrap().b)?;
     let z_b_after = max_abs_tensor(&lora_layers[0].in_proj_z.as_ref().unwrap().b)?;
     let out_b_after = max_abs_tensor(&lora_layers[0].gdn_out_proj.as_ref().unwrap().b)?;
+    let gate_b_after = max_abs_tensor(&lora_layers[0].gate_proj.as_ref().unwrap().b)?;
+    let up_b_after = max_abs_tensor(&lora_layers[0].up_proj.as_ref().unwrap().b)?;
+    let down_b_after = max_abs_tensor(&lora_layers[0].down_proj.as_ref().unwrap().b)?;
     println!(
-        "after recompute GDN B max_abs: qkv={qkv_b_after:.6e} z={z_b_after:.6e} out={out_b_after:.6e}"
+        "after recompute GDN B max_abs: qkv={qkv_b_after:.6e} z={z_b_after:.6e} out={out_b_after:.6e} gate={gate_b_after:.6e} up={up_b_after:.6e} down={down_b_after:.6e}"
     );
     assert!(qkv_b_after > 0.0, "GDN in_proj_qkv LoRA B was not updated");
     assert!(z_b_after > 0.0, "GDN in_proj_z LoRA B was not updated");
     assert!(out_b_after > 0.0, "GDN out_proj LoRA B was not updated");
+    assert!(gate_b_after > 0.0, "GDN gate_proj LoRA B was not updated");
+    assert!(up_b_after > 0.0, "GDN up_proj LoRA B was not updated");
+    assert!(down_b_after > 0.0, "GDN down_proj LoRA B was not updated");
 
     let tmp = std::env::temp_dir().join(format!(
         "kiln-vk-test-gdn-adapter-{}.safetensors",
@@ -924,6 +1324,9 @@ fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
         "self_attn.in_proj_qkv.lora_A.weight",
         "self_attn.in_proj_z.lora_A.weight",
         "self_attn.out_proj.lora_A.weight",
+        "mlp.gate_proj.lora_A.weight",
+        "mlp.up_proj.lora_A.weight",
+        "mlp.down_proj.lora_A.weight",
     ] {
         assert!(
             loaded.keys().any(|k| k.contains(key)),
@@ -931,6 +1334,67 @@ fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
         );
     }
     let _ = std::fs::remove_file(&tmp);
+    Ok(())
+}
+
+#[test]
+fn vk_recompute_grpo_step_updates_gdn_lora_targets() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_gdn_model(&dev)?;
+    let model_config = tiny_gdn_model_config();
+    let lora_layers = vec![build_gdn_lora_layer(&dev)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = vec![2, 3, 4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+    let mut ref_state = tiny_gdn_state(&dev)?;
+    let ref_log_probs = grpo_ref_log_probs(
+        &model,
+        &input_ids,
+        &active_rows,
+        &labels,
+        Some(&mut ref_state),
+    )?;
+
+    let loss = vk_recompute_grpo_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &ref_log_probs,
+        1.0,
+        0.2,
+        0.1,
+        &model_config,
+        1,
+        &mut adamw,
+        &cfg,
+        Optimizer::default(),
+        1,
+    )?;
+    assert!(loss.is_finite(), "non-finite GDN GRPO recompute loss");
+
+    let layer = &lora_layers[0];
+    for (name, pair) in [
+        ("in_proj_qkv", layer.in_proj_qkv.as_ref().unwrap()),
+        ("in_proj_z", layer.in_proj_z.as_ref().unwrap()),
+        ("out_proj", layer.gdn_out_proj.as_ref().unwrap()),
+        ("gate_proj", layer.gate_proj.as_ref().unwrap()),
+        ("up_proj", layer.up_proj.as_ref().unwrap()),
+        ("down_proj", layer.down_proj.as_ref().unwrap()),
+    ] {
+        let max_abs = max_abs_tensor(&pair.b)?;
+        println!("GDN GRPO {name}.B max_abs={max_abs:.6e}");
+        assert!(max_abs > 0.0, "GDN GRPO did not update {name}.B");
+    }
     Ok(())
 }
 

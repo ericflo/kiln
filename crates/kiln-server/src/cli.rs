@@ -86,7 +86,7 @@ const HEALTH_EXAMPLES: &str = r#"Examples:
 
 const TRAIN_OVERVIEW: &str = r#"Submit SFT or GRPO training jobs to the running Kiln server at http://localhost:8420 by default.
 
-SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads one JSON request/batch with groups; each group has prompt messages plus candidate completions containing text and reward scores.
+SFT reads JSONL: one chat correction example per line with a messages array. GRPO reads either one JSON request/batch with groups or JSONL with one group per line; each group has prompt messages plus candidate completions containing text and reward scores.
 
 Prefer http://127.0.0.1:8420/ui for guided submission and status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
@@ -96,7 +96,7 @@ const TRAIN_SFT_OVERVIEW: &str = r#"Train from SFT JSONL: one chat correction ex
 Open http://127.0.0.1:8420/ui for guided submission and training status.
 "#;
 
-const TRAIN_GRPO_OVERVIEW: &str = r#"Train from one GRPO JSON request/batch with groups; each group has prompt messages plus candidate completions containing text and reward scores.
+const TRAIN_GRPO_OVERVIEW: &str = r#"Train from GRPO data: either one JSON request/batch with groups, or JSONL with one group per line.
 
 Open http://127.0.0.1:8420/ui for guided submission and training status. See docs/GRPO_GUIDE.md or docs/site/grpo.html for reward-loop examples.
 "#;
@@ -106,7 +106,10 @@ const TRAIN_EXAMPLES: &str = r#"Examples:
       Train from SFT JSONL: one chat correction example per line with a messages array.
 
   kiln train grpo --file grpo-batch.json --adapter support-bot
-      Train from one GRPO JSON request/batch with groups; each group has prompt messages plus candidate completions containing text and reward scores.
+      Train from one GRPO JSON request/batch with groups.
+
+  kiln train grpo --file grpo-groups.jsonl --adapter support-bot
+      Train from GRPO JSONL, streaming one group per line through the Vulkan-native path.
 
   kiln train status
       Show the training queue and recent jobs on the running server.
@@ -374,7 +377,7 @@ pub enum TrainCommands {
     /// Train a LoRA adapter from scored GRPO completions
     #[command(long_about = TRAIN_GRPO_OVERVIEW)]
     Grpo {
-        /// Path to one GRPO JSON request/batch with groups, prompt messages, candidate completions, text, and reward scores
+        /// Path to one GRPO JSON request/batch, or JSONL with one group per line
         #[arg(long, short)]
         file: String,
 
@@ -1161,13 +1164,17 @@ pub async fn run_train_grpo(
     adapter: &str,
     lora_rank: Option<usize>,
 ) -> anyhow::Result<()> {
-    let content =
-        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
+    let body = if is_grpo_jsonl_path(file) {
+        build_grpo_jsonl_training_payload(file, adapter, lora_rank)?
+    } else {
+        let content = std::fs::read_to_string(file)
+            .map_err(|e| anyhow::anyhow!("Failed to read {file}: {e}"))?;
 
-    let body: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
+        let body: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in {file}: {e}"))?;
 
-    let body = build_grpo_training_payload(body, adapter, lora_rank)?;
+        build_grpo_training_payload(body, adapter, lora_rank)?
+    };
 
     println!(
         "{} Submitting GRPO training batch on adapter '{}'",
@@ -1211,6 +1218,37 @@ pub async fn run_train_grpo(
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn is_grpo_jsonl_path(file: &str) -> bool {
+    std::path::Path::new(file)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("jsonl") || ext.eq_ignore_ascii_case("ndjson"))
+        .unwrap_or(false)
+}
+
+fn build_grpo_jsonl_training_payload(
+    file: &str,
+    adapter: &str,
+    lora_rank: Option<usize>,
+) -> anyhow::Result<serde_json::Value> {
+    let dataset_path = std::fs::canonicalize(file)
+        .map_err(|e| anyhow::anyhow!("Failed to resolve GRPO JSONL file {file}: {e}"))?;
+    let dataset_path = dataset_path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("GRPO JSONL path is not valid UTF-8: {file}"))?
+        .to_string();
+    let mut config = serde_json::json!({
+        "output_name": adapter,
+    });
+    if let Some(rank) = lora_rank {
+        config["lora_rank"] = serde_json::json!(rank);
+    }
+    Ok(serde_json::json!({
+        "dataset_path": dataset_path,
+        "config": config,
+    }))
 }
 
 fn build_sft_training_payload(
@@ -1530,6 +1568,27 @@ mod tests {
 
         assert_eq!(body["config"]["output_name"], "grpo-adapter");
         assert!(body["config"].get("lora_rank").is_none());
+    }
+
+    #[test]
+    fn build_grpo_jsonl_training_payload_uses_dataset_path() {
+        let path =
+            std::env::temp_dir().join(format!("kiln-cli-grpo-jsonl-{}.jsonl", std::process::id()));
+        std::fs::write(
+            &path,
+            r#"{"messages":[{"role":"user","content":"hi"}],"completions":[{"text":"ok","reward":1.0}]}"#,
+        )
+        .unwrap();
+
+        assert!(is_grpo_jsonl_path(path.to_str().unwrap()));
+        let body =
+            build_grpo_jsonl_training_payload(path.to_str().unwrap(), "grpo-jsonl", Some(12))
+                .unwrap();
+        assert!(body.get("groups").is_none());
+        assert_eq!(body["config"]["output_name"], "grpo-jsonl");
+        assert_eq!(body["config"]["lora_rank"], 12);
+        assert!(body["dataset_path"].as_str().unwrap().ends_with(".jsonl"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

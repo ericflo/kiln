@@ -105,11 +105,8 @@ const BYTES_PER_GB: u64 = 1024 * 1024 * 1024;
 /// allocations the closed-form pieces don't model directly (DRM
 /// import buffers, allocator slack, kernel staging buffers).
 const SAFETY_MARGIN_BYTES: u64 = BYTES_PER_GB;
-/// Default chunk count for the FLCE forward pass. The Phase B kernel
-/// processes the LM head matmul in chunks so the [T, V] logits tensor
-/// is never materialized; the per-chunk working set scales with
-/// `T * V / chunks` in F32 (the reduce accumulator).
-pub const DEFAULT_FLCE_CHUNKS: u64 = 8;
+const FLCE_MAX_AUTO_CHUNK: usize = 4096;
+const FLCE_FALLBACK_SCRATCH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 fn dtype_bytes(dtype: DType) -> u64 {
     match dtype {
@@ -183,7 +180,7 @@ fn boundary_state_bytes(
 /// Peak working-set bytes for the FLCE chunked-head pass.
 ///
 /// The vk-native FLCE chunks the LM-head matmul along the VOCAB axis
-/// (`flce_active_chunk_len()` columns per chunk, processed sequentially).
+/// (shape-aware columns per chunk, processed sequentially).
 /// Peak memory at any moment is therefore approximately:
 ///
 ///   per-chunk logits `[num_active, chunk_len]` (F32, in-place reused as
@@ -192,15 +189,12 @@ fn boundary_state_bytes(
 ///   grad-hidden accumulator `[num_active, hidden]` (F32, lives across the
 ///       whole vocab loop).
 ///
-/// Honors `KILN_VK_FLCE_CHUNK_LEN` so callers tuning chunk size for
-/// long-context training stay under-budget. The legacy
-/// `DEFAULT_FLCE_CHUNKS=8` token-axis split modeled a different
-/// implementation (kiln-flce-kernel's Phase B) and over-counted by ~10×
-/// at high `max_seq_len`.
+/// Uses the same shape-aware default as the runtime path so long-context
+/// GRPO does not require the operator to tune `KILN_VK_FLCE_CHUNK_LEN`.
 fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
     let h = cfg.hidden_size as u64;
     let t = max_seq_len as u64;
-    let chunk_len = active_flce_chunk_len() as u64;
+    let chunk_len = active_flce_chunk_len(cfg, max_seq_len) as u64;
     let per_chunk_logits = t * chunk_len * 4; // F32 logits / grad-logits
     // FLCE now slices `[chunk_len, hidden]` and transposes only that
     // chunk to `[hidden, chunk_len]`; both buffers can be live at once.
@@ -209,12 +203,29 @@ fn flce_chunk_intermediate_bytes(cfg: &ModelConfig, max_seq_len: usize) -> u64 {
     per_chunk_logits + per_chunk_weight + grad_hidden
 }
 
-fn active_flce_chunk_len() -> usize {
-    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
+fn active_flce_chunk_len(cfg: &ModelConfig, max_active_tokens: usize) -> usize {
+    let forced = std::env::var("KILN_VK_FLCE_CHUNK_LEN")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(128)
+        .filter(|&v| v > 0);
+
+    let active = max_active_tokens.max(1) as u64;
+    let hidden = cfg.hidden_size.max(1) as u64;
+    let bytes_per_vocab_col = 4u64.saturating_mul(active.saturating_add(2 * hidden));
+    let by_memory = (FLCE_FALLBACK_SCRATCH_BUDGET_BYTES / bytes_per_vocab_col).max(1) as usize;
+    let raw = cfg
+        .vocab_size
+        .max(1)
+        .min(FLCE_MAX_AUTO_CHUNK)
+        .min(by_memory)
+        .max(1);
+    let rounded = if raw <= 1 {
+        1
+    } else {
+        1usize << (usize::BITS - 1 - raw.leading_zeros())
+    };
+    let safe = rounded.max(1).min(cfg.vocab_size.max(1));
+    forced.map(|v| v.clamp(1, safe)).unwrap_or(safe)
 }
 
 /// LoRA params + their gradients, F32 for both.
@@ -535,18 +546,23 @@ pub fn approximate_max_seq_len_grpo(
 ) -> usize {
     groups
         .iter()
-        .map(|g| {
-            let prompt = approximate_tokens_for_messages(&g.messages, tokenizer);
-            let max_completion = g
-                .completions
-                .iter()
-                .map(|c| approximate_tokens_for_text(&c.text, tokenizer))
-                .max()
-                .unwrap_or(0);
-            prompt + max_completion
-        })
+        .map(|g| approximate_max_seq_len_grpo_group(g, tokenizer))
         .max()
         .unwrap_or(0)
+}
+
+pub fn approximate_max_seq_len_grpo_group(
+    group: &GrpoGroup,
+    tokenizer: Option<&KilnTokenizer>,
+) -> usize {
+    let prompt = approximate_tokens_for_messages(&group.messages, tokenizer);
+    let max_completion = group
+        .completions
+        .iter()
+        .map(|c| approximate_tokens_for_text(&c.text, tokenizer))
+        .max()
+        .unwrap_or(0);
+    prompt + max_completion
 }
 
 fn approximate_tokens_for_messages(
@@ -641,6 +657,9 @@ mod tests {
     use super::*;
     use kiln_core::config::ModelConfig;
     use kiln_core::vram::{GpuVramInfo, VramSource};
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn qwen_4b() -> ModelConfig {
         ModelConfig::qwen3_5_4b()
@@ -693,6 +712,24 @@ mod tests {
             sparse_labels.breakdown.flce_intermediates < full_prompt.breakdown.flce_intermediates,
             "FLCE estimate should scale with supervised tokens"
         );
+    }
+
+    #[test]
+    fn flce_chunk_len_shrinks_for_long_context_without_env_tuning() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("KILN_VK_FLCE_CHUNK_LEN");
+        }
+
+        let cfg = qwen_4b();
+        let short = active_flce_chunk_len(&cfg, 512);
+        let long = active_flce_chunk_len(&cfg, 65_536);
+
+        assert!(
+            long < short,
+            "shape-aware FLCE chunking should reduce chunk size for long contexts: short={short}, long={long}"
+        );
+        assert!(long > 0);
     }
 
     #[test]

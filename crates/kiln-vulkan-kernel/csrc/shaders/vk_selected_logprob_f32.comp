@@ -1,0 +1,26 @@
+// Selected-token log-prob from FLCE forward stats:
+//   log_prob = correct_logit - (log(global_sumexp) + global_max)
+//
+// Push constants: [num_active]
+// Bindings: global_max, global_sumexp, correct, out_logprob
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+};
+
+layout(binding = 0) readonly  buffer GMaxBuf    { float global_max[]; };
+layout(binding = 1) readonly  buffer GSumExpBuf { float global_sumexp[]; };
+layout(binding = 2) readonly  buffer CorrectBuf { float correct[]; };
+layout(binding = 3) writeonly buffer OutBuf     { float logprob[]; };
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (row >= num_active) return;
+    float lse = log(global_sumexp[row]) + global_max[row];
+    logprob[row] = correct[row] - lse;
+}

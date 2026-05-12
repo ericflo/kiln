@@ -116,8 +116,7 @@ impl VkLoraPair {
 /// FullAttention layers use `q_proj` / `k_proj` / `v_proj` / `o_proj`
 /// plus the MLP triple (`gate_proj` / `up_proj` / `down_proj`). GDN
 /// layers use the linear-attention slots
-/// (`in_proj_qkv`, `in_proj_z`, `out_proj`); the MLP slots are unused
-/// because GDN layers have no MLP block.
+/// (`in_proj_qkv`, `in_proj_z`, `out_proj`) plus the same MLP triple.
 #[derive(Clone, Default)]
 pub struct VkLoraLayer {
     pub q_proj: Option<VkLoraPair>,
@@ -175,17 +174,21 @@ pub struct VkFullAttentionWeights {
 /// Used by `vk_transformer_layer_with_state`, which threads the per-example
 /// recurrent and convolution state required by GDN.
 pub struct VkLinearAttentionWeights {
-    pub layer_norm: VkTensor,  // [hidden]
-    pub in_proj_qkv: VkTensor, // [2*nk*dk + nv*dv, hidden]
-    pub in_proj_z: VkTensor,   // [nv*dv, hidden]
-    pub in_proj_a: VkTensor,   // [nv, hidden]
-    pub in_proj_b: VkTensor,   // [nv, hidden]
-    pub conv1d: VkTensor,      // [conv_channels, kernel_size]
-    pub a_log: VkTensor,       // [nv]
-    pub a_log_gates: VkTensor, // [nv]   (Qwen-specific gate-precompute)
-    pub dt_bias: VkTensor,     // [nv]
-    pub gated_norm: VkTensor,  // [nv*dv]
-    pub out_proj: VkTensor,    // [hidden, nv*dv]
+    pub layer_norm: VkTensor,                      // [hidden]
+    pub post_attention_layernorm_weight: VkTensor, // [hidden]
+    pub in_proj_qkv: VkTensor,                     // [2*nk*dk + nv*dv, hidden]
+    pub in_proj_z: VkTensor,                       // [nv*dv, hidden]
+    pub in_proj_a: VkTensor,                       // [nv, hidden]
+    pub in_proj_b: VkTensor,                       // [nv, hidden]
+    pub conv1d: VkTensor,                          // [conv_channels, kernel_size]
+    pub a_log: VkTensor,                           // [nv]
+    pub a_log_gates: VkTensor,                     // [nv]   (Qwen-specific gate-precompute)
+    pub dt_bias: VkTensor,                         // [nv]
+    pub gated_norm: VkTensor,                      // [nv*dv]
+    pub out_proj: VkTensor,                        // [hidden, nv*dv]
+    pub gate_proj: VkTensor,                       // [intermediate, hidden]
+    pub up_proj: VkTensor,                         // [intermediate, hidden]
+    pub down_proj: VkTensor,                       // [hidden, intermediate]
     pub heads_k: usize,
     pub heads_v: usize,
     pub head_dim_k: usize,
@@ -471,6 +474,39 @@ pub fn vk_full_attention_mlp_block(
     vk_add(&after_attn, &mlp_out)
 }
 
+/// Linear-attention (GDN) MLP subblock from the post-attention residual state.
+pub fn vk_linear_attention_mlp_gated(
+    after_attn: &VkTensor,
+    w: &VkLinearAttentionWeights,
+    lora: &VkLoraLayer,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::silu::vk_silu;
+
+    let h_norm2 = vk_rmsnorm(after_attn, &w.post_attention_layernorm_weight, w.eps)?;
+    let gate = vk_linear_with_lora(&h_norm2, &w.gate_proj, lora.gate_proj.as_ref())?;
+    let up = vk_linear_with_lora(&h_norm2, &w.up_proj, lora.up_proj.as_ref())?;
+    let silu_gate = vk_silu(&gate)?;
+    vk_mul(&silu_gate, &up)
+}
+
+pub fn vk_linear_attention_mlp_down_from_gated(
+    gated: &VkTensor,
+    w: &VkLinearAttentionWeights,
+    lora: &VkLoraLayer,
+) -> Result<VkTensor> {
+    vk_linear_with_lora(gated, &w.down_proj, lora.down_proj.as_ref())
+}
+
+pub fn vk_linear_attention_mlp_block(
+    after_attn: &VkTensor,
+    w: &VkLinearAttentionWeights,
+    lora: &VkLoraLayer,
+) -> Result<VkTensor> {
+    let gated = vk_linear_attention_mlp_gated(after_attn, w, lora)?;
+    let mlp_out = vk_linear_attention_mlp_down_from_gated(&gated, w, lora)?;
+    vk_add(after_attn, &mlp_out)
+}
+
 /// Same as `vk_full_attention_layer` but with optional RoPE tables.
 pub fn vk_full_attention_layer_with_rope(
     x: &VkTensor,
@@ -719,7 +755,8 @@ fn vk_gdn_layer_forward(
 
     // 11. Out projection + residual
     let out_proj_out = vk_linear_with_lora(&normed, &w.out_proj, _lora.gdn_out_proj.as_ref())?;
-    vk_add(x, &out_proj_out)
+    let after_attn = vk_add(x, &out_proj_out)?;
+    vk_linear_attention_mlp_block(&after_attn, w, _lora)
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,6 +1146,10 @@ impl VkModelWeights {
                 crate::forward::GpuAttentionWeights::Linear(attn) => {
                     let layer_norm = vk_from_candle_as_f32(&lw.input_layernorm, device)
                         .with_context(|| format!("layer {li} (GDN) input_layernorm"))?;
+                    let post_attention_layernorm_weight =
+                        vk_from_candle_as_f32(&lw.post_attention_layernorm, device).with_context(
+                            || format!("layer {li} (GDN) post_attention_layernorm"),
+                        )?;
                     let in_proj_qkv = pick_projection_weight(
                         &attn.in_proj_qkv,
                         &attn.in_proj_qkv_t,
@@ -1150,9 +1191,28 @@ impl VkModelWeights {
                         device,
                         &format!("layer {li} (GDN) out_proj"),
                     )?;
+                    let gate_proj = pick_projection_weight(
+                        &lw.mlp.gate_proj,
+                        &lw.mlp.gate_proj_t,
+                        device,
+                        &format!("layer {li} (GDN) mlp.gate_proj"),
+                    )?;
+                    let up_proj = pick_projection_weight(
+                        &lw.mlp.up_proj,
+                        &lw.mlp.up_proj_t,
+                        device,
+                        &format!("layer {li} (GDN) mlp.up_proj"),
+                    )?;
+                    let down_proj = pick_projection_weight(
+                        &lw.mlp.down_proj,
+                        &lw.mlp.down_proj_t,
+                        device,
+                        &format!("layer {li} (GDN) mlp.down_proj"),
+                    )?;
                     let conv_kernel = attn.conv1d.dim(attn.conv1d.dims().len() - 1)?;
                     VkLayerWeights::LinearAttention(VkLinearAttentionWeights {
                         layer_norm,
+                        post_attention_layernorm_weight,
                         in_proj_qkv,
                         in_proj_z,
                         in_proj_a,
@@ -1163,6 +1223,9 @@ impl VkModelWeights {
                         dt_bias,
                         gated_norm,
                         out_proj,
+                        gate_proj,
+                        up_proj,
+                        down_proj,
                         heads_k: model_config.linear_num_key_heads,
                         heads_v: model_config.linear_num_value_heads,
                         head_dim_k: model_config.linear_key_head_dim,

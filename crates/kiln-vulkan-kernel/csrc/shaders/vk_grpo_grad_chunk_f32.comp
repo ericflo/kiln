@@ -1,0 +1,42 @@
+// GRPO backward for one vocab chunk.
+//
+// For each selected row, coeff[row] = d(loss_row)/d(policy_logprob).
+// d logprob / d logits[j] = 1(j == label) - softmax[j].
+//
+// This shader overwrites logits_chunk with:
+//   grad_logits = (grad_out / num_active) * coeff[row]
+//                 * (onehot(label) - softmax)
+//
+// Push constants: [num_active, chunk_len, chunk_offset, scale_bits]
+// Bindings: labels, global_max, global_sumexp, coeff, logits_chunk
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_active;
+    uint chunk_len;
+    uint chunk_offset;
+    uint scale_bits;
+};
+
+layout(binding = 0) readonly buffer LabelsBuf   { uint  labels[]; };
+layout(binding = 1) readonly buffer GMaxBuf     { float global_max[]; };
+layout(binding = 2) readonly buffer GSumExpBuf  { float global_sumexp[]; };
+layout(binding = 3) readonly buffer CoeffBuf    { float coeff[]; };
+layout(binding = 4)          buffer LogitsBuf   { float logits[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = num_active * chunk_len;
+    if (linear >= total) return;
+
+    uint j = linear % chunk_len;
+    uint row = linear / chunk_len;
+    float scale = uintBitsToFloat(scale_bits);
+    float softmax = exp(logits[row * chunk_len + j] - global_max[row]) / global_sumexp[row];
+    float onehot = (chunk_offset + j == labels[row]) ? 1.0 : 0.0;
+    logits[row * chunk_len + j] = scale * coeff[row] * (onehot - softmax);
+}

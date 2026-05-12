@@ -266,6 +266,9 @@ fn run_sft(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    #[cfg(not(feature = "vulkan"))]
+    let _ = job_id;
+
     if cuda_native {
         #[cfg(feature = "cuda")]
         {
@@ -355,6 +358,121 @@ fn vk_native_sft_enabled(backend_name: &str) -> bool {
             }
         }
     }
+}
+
+fn vk_native_grpo_enabled(backend_name: &str) -> bool {
+    match env_tristate("KILN_VK_NATIVE_GRPO") {
+        Some(enabled) => enabled,
+        None => vk_native_sft_enabled(backend_name),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_grpo(
+    cuda_native: bool,
+    vk_native: bool,
+    req: &GrpoRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    replay_ctx: trainer::ReplayContext,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    #[cfg(not(feature = "vulkan"))]
+    let _ = job_id;
+
+    if cuda_native {
+        return Err(
+            "KILN_CUDA_NATIVE_TRAINING=1 does not yet support GRPO - unset it for GRPO jobs"
+                .to_string(),
+        );
+    }
+    if let Some(dataset_path) = req.dataset_path.as_deref() {
+        if dataset_path.trim().is_empty() {
+            return Err("GRPO dataset_path streaming requires a non-empty path".to_string());
+        }
+        if !req.groups.is_empty() {
+            return Err(
+                "GRPO request must use either groups or dataset_path, not both".to_string(),
+            );
+        }
+        if !vk_native {
+            return Err(
+                "GRPO dataset_path streaming requires Vulkan-native GRPO on a Vulkan backend"
+                    .to_string(),
+            );
+        }
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                dataset_path,
+                "routing streamed GRPO dataset to vk_native_grpo_train_jsonl"
+            );
+            return kiln_train::vk_train::vk_native_grpo_train_jsonl(
+                std::path::Path::new(dataset_path),
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                adapter_dir,
+                adapter_name,
+                Some(progress_cb),
+            )
+            .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            return Err(
+                "GRPO dataset_path streaming requested but kiln-server was built without \
+                 --features vulkan"
+                    .to_string(),
+            );
+        }
+    }
+    if vk_native {
+        #[cfg(feature = "vulkan")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                "routing GRPO to vk_native_grpo_train"
+            );
+            return kiln_train::vk_train::vk_native_grpo_train(
+                &req.groups,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                adapter_dir,
+                adapter_name,
+                Some(progress_cb),
+            )
+            .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            return Err(
+                "Vulkan-native GRPO requested but kiln-server was built without \
+                 --features vulkan"
+                    .to_string(),
+            );
+        }
+    }
+    trainer::grpo_train(
+        &req.groups,
+        &req.config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        adapter_name,
+        Some(progress_cb),
+        Some(replay_ctx),
+    )
+    .map_err(|e| format!("{e:#}"))
 }
 
 /// Execute a single training job (runs on a blocking thread).
@@ -474,35 +592,24 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            let backend_name = guard.backend_name();
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
-            let vk_native = native_training_env_enabled("KILN_VK_NATIVE_TRAINING");
-            if cuda_native {
-                Err(format!(
-                    "KILN_CUDA_NATIVE_TRAINING=1 does not yet support GRPO - unset it for GRPO jobs \
-                     (native GRPO is a follow-on plan)"
-                ))
-            } else {
-                if vk_native {
-                    tracing::warn!(
-                        "KILN_VK_NATIVE_TRAINING=1 is SFT-only today; routing GRPO \
-                         through exact targeted-layer LoRA training"
-                    );
-                }
-                let _gpu_guard = state.gpu_lock.write().unwrap();
-                let guard = runner_arc.read().unwrap();
-                trainer::grpo_train(
-                    &req.groups,
-                    &req.config,
-                    &state.model_config,
-                    &guard.weights,
-                    &state.tokenizer,
-                    &state.adapter_dir,
-                    &adapter_name,
-                    Some(progress_cb),
-                    Some(replay_ctx),
-                )
-                .map_err(|e| format!("{e:#}"))
-            }
+            let vk_native = vk_native_grpo_enabled(backend_name);
+            run_grpo(
+                cuda_native,
+                vk_native,
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                replay_ctx,
+                &job_id,
+            )
         }
     };
 
@@ -640,6 +747,34 @@ mod tests {
 
         unsafe {
             std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn vk_native_grpo_defaults_to_vulkan_backend_and_honors_override() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        unsafe {
+            std::env::remove_var("KILN_VK_NATIVE_TRAINING");
+            std::env::remove_var("KILN_VK_NATIVE_GRPO");
+        }
+
+        #[cfg(feature = "vulkan")]
+        assert!(vk_native_grpo_enabled("vulkan"));
+        assert!(!vk_native_grpo_enabled("cpu"));
+
+        unsafe {
+            std::env::set_var("KILN_VK_NATIVE_GRPO", "0");
+        }
+        assert!(!vk_native_grpo_enabled("vulkan"));
+
+        unsafe {
+            std::env::set_var("KILN_VK_NATIVE_GRPO", "1");
+        }
+        assert!(vk_native_grpo_enabled("cpu"));
+
+        unsafe {
+            std::env::remove_var("KILN_VK_NATIVE_GRPO");
         }
     }
 

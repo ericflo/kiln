@@ -345,6 +345,16 @@ impl ApiError {
         }
     }
 
+    pub fn training_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "training_invalid_request",
+            message: format!("Invalid training request: {detail}"),
+            hint: "For GRPO, submit either a groups array or a dataset_path JSONL file path. Do not send both.",
+            retry_after_seconds: None,
+        }
+    }
+
     pub fn training_job_not_found(job_id: impl std::fmt::Display) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,

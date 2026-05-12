@@ -29,7 +29,7 @@ use crate::vk_ops::reduce::vk_mean_all;
 use crate::vk_ops::shape::vk_transpose_2d_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
@@ -62,7 +62,7 @@ struct FlceState {
     global_sumexp: Arc<VulkanBuffer>,
     num_active: usize,
     vocab: usize,
-    hidden_dim: usize,
+    _hidden_dim: usize,
     chunk_len: usize,
 }
 
@@ -71,10 +71,15 @@ fn run_flce_forward(
     weight: &VkTensor,
     labels_buf: &Arc<VulkanBuffer>,
     num_active: usize,
-    hidden_dim: usize,
+    _hidden_dim: usize,
     vocab: usize,
     chunk_len: usize,
-) -> Result<(VkTensor, Arc<VulkanBuffer>, Arc<VulkanBuffer>)> {
+) -> Result<(
+    VkTensor,
+    Arc<VulkanBuffer>,
+    Arc<VulkanBuffer>,
+    Arc<VulkanBuffer>,
+)> {
     let device = hidden.device();
     let global_max = alloc_f32(device, num_active)?;
     let global_sumexp = alloc_f32(device, num_active)?;
@@ -167,7 +172,7 @@ fn run_flce_forward(
 
     let per_row_tensor =
         VkTensor::from_buffer(per_row, vec![num_active], VkDType::F32, Arc::clone(device));
-    Ok((per_row_tensor, global_max, global_sumexp))
+    Ok((per_row_tensor, global_max, global_sumexp, correct))
 }
 
 #[derive(Debug)]
@@ -310,6 +315,129 @@ impl VkBackwardOp for FlceBackward {
     }
 }
 
+#[derive(Debug)]
+pub struct GrpoBackward {
+    pub weight: VkTensor,
+    pub labels: Vec<u32>,
+    pub global_max: Arc<VulkanBuffer>,
+    pub global_sumexp: Arc<VulkanBuffer>,
+    pub coeff: Arc<VulkanBuffer>,
+    pub num_active: usize,
+    pub vocab: usize,
+    pub hidden_dim: usize,
+    pub chunk_len: usize,
+    pub inputs: [VkTensor; 1], // hidden
+}
+
+impl VkBackwardOp for GrpoBackward {
+    fn op_name(&self) -> &'static str {
+        "grpo"
+    }
+    fn input_refs(&self) -> &[VkTensor] {
+        &self.inputs
+    }
+    fn backward(&self, grad_out: &VkTensor) -> Result<Vec<Option<VkTensor>>> {
+        let hidden = &self.inputs[0];
+        let device = hidden.device();
+        let go = grad_out.to_vec_f32()?[0];
+        let scale = go / (self.num_active as f32);
+
+        let grad_hidden = alloc_f32(device, self.num_active * self.hidden_dim)?;
+        {
+            let workgroups = ((self.num_active * self.hidden_dim + 255) / 256) as u32;
+            let push = [
+                (self.num_active * self.hidden_dim) as u32,
+                0.0_f32.to_bits(),
+            ];
+            dispatch_simple(
+                device,
+                "vk_fill_f32",
+                &[grad_hidden.handle()],
+                &push,
+                workgroups,
+            )?;
+        }
+
+        let labels_buf = upload_u32(device, &self.labels)?;
+        let mut chunk_off = 0usize;
+        while chunk_off < self.vocab {
+            let cur_len = self.chunk_len.min(self.vocab - chunk_off);
+            let w_chunk = extract_weight_chunk_rows(&self.weight, chunk_off, cur_len)?;
+            let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
+            let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
+
+            let push = [
+                self.num_active as u32,
+                cur_len as u32,
+                chunk_off as u32,
+                scale.to_bits(),
+            ];
+            let workgroups = (((self.num_active * cur_len) + 255) / 256) as u32;
+            dispatch_simple(
+                device,
+                "vk_grpo_grad_chunk_f32",
+                &[
+                    labels_buf.handle(),
+                    self.global_max.handle(),
+                    self.global_sumexp.handle(),
+                    self.coeff.handle(),
+                    logits_chunk.buffer().handle(),
+                ],
+                &push,
+                workgroups,
+            )?;
+
+            let dh_chunk = vk_matmul_no_grad(&logits_chunk, &w_chunk)?;
+            let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
+            let push = [
+                (self.num_active * self.hidden_dim) as u32,
+                0u32, // OP_ADD
+            ];
+            let tmp = alloc_f32(device, self.num_active * self.hidden_dim)?;
+            dispatch_simple(
+                device,
+                "vk_elementwise_binary_f32",
+                &[
+                    grad_hidden.handle(),
+                    dh_chunk.buffer().handle(),
+                    tmp.handle(),
+                ],
+                &push,
+                workgroups,
+            )?;
+            let zero = alloc_f32(device, self.num_active * self.hidden_dim)?;
+            {
+                let push_zero = [
+                    (self.num_active * self.hidden_dim) as u32,
+                    0.0_f32.to_bits(),
+                ];
+                dispatch_simple(
+                    device,
+                    "vk_fill_f32",
+                    &[zero.handle()],
+                    &push_zero,
+                    workgroups,
+                )?;
+            }
+            dispatch_simple(
+                device,
+                "vk_elementwise_binary_f32",
+                &[tmp.handle(), zero.handle(), grad_hidden.handle()],
+                &push,
+                workgroups,
+            )?;
+            chunk_off += cur_len;
+        }
+
+        Ok(vec![Some(VkTensor::from_buffer(
+            grad_hidden,
+            vec![self.num_active, self.hidden_dim],
+            VkDType::F32,
+            Arc::clone(device),
+        ))])
+    }
+}
+
 fn extract_weight_chunk_rows(
     weight: &VkTensor,
     chunk_off: usize,
@@ -331,20 +459,21 @@ fn extract_weight_chunk_rows(
     crate::vk_ops::shape::vk_reshape(&sliced, &[cur_len, hidden_dim])
 }
 
-/// Default FLCE vocab-chunk length (matches the existing kiln-flce-kernel
-/// chunking heuristic). The loss path slices the LM-head weight into
-/// `chunk_len`-column chunks along the vocab axis and processes each
-/// chunk sequentially, so peak working-set scales with
-/// `num_active * chunk_len * 4` (F32 logits) — NOT with vocab.
+/// Conservative fallback FLCE vocab-chunk length for legacy callers that
+/// cannot provide tensor shape/device limits. Production Vulkan training uses
+/// `flce_recommended_chunk_len_for_tensors` instead.
 pub const FLCE_DEFAULT_CHUNK: usize = 128;
+const FLCE_MIN_CHUNK: usize = 1;
+const FLCE_MAX_AUTO_CHUNK: usize = 4096;
+const FLCE_FALLBACK_SCRATCH_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+const FLCE_MIN_SCRATCH_BUDGET_BYTES: u64 = 16 * 1024 * 1024;
+const FLCE_MAX_SCRATCH_BUDGET_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Returns the active FLCE chunk length, honoring `KILN_VK_FLCE_CHUNK_LEN`
-/// when set. Used by both the runtime kernel and the preflight memory
-/// estimator so they agree on the chunking strategy.
+/// when set.
 ///
-/// Lowering this trades a few extra dispatches for proportionally less
-/// peak memory at long sequence lengths (e.g. agent trajectories at
-/// T=76K where a 4096 chunk pins ~1.25 GB of F32 logits per chunk).
+/// Prefer `flce_recommended_chunk_len_for_tensors` for new Vulkan-native
+/// training code so ordinary use is shape/device-aware without manual tuning.
 pub fn flce_active_chunk_len() -> usize {
     std::env::var("KILN_VK_FLCE_CHUNK_LEN")
         .ok()
@@ -353,38 +482,274 @@ pub fn flce_active_chunk_len() -> usize {
         .unwrap_or(FLCE_DEFAULT_CHUNK)
 }
 
-pub fn vk_flce_loss(
+fn env_flce_chunk_len() -> Option<usize> {
+    std::env::var("KILN_VK_FLCE_CHUNK_LEN")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+}
+
+fn floor_power_of_two(n: usize) -> usize {
+    if n <= 1 {
+        1
+    } else {
+        1usize << (usize::BITS - 1 - n.leading_zeros())
+    }
+}
+
+/// Shape/limit-only chunking heuristic. Public for non-Vulkan preflight tests;
+/// runtime code should call `flce_recommended_chunk_len_for_tensors`.
+#[doc(hidden)]
+pub fn flce_recommended_chunk_len_from_limits(
+    num_active: usize,
+    hidden_dim: usize,
+    vocab: usize,
+    device_local_heap_bytes: u64,
+    max_workgroups_x: u32,
+) -> usize {
+    if vocab == 0 {
+        return FLCE_MIN_CHUNK;
+    }
+
+    let active = num_active.max(1) as u64;
+    let hidden = hidden_dim.max(1) as u64;
+    // Per vocab column, the peak chunk-dependent buffers are the active
+    // logits plus the LM-head slice and its transpose. Fixed per-token hidden
+    // accumulators are modeled by preflight, not by this per-chunk chooser.
+    let bytes_per_vocab_col = 4u64.saturating_mul(active.saturating_add(2 * hidden));
+    let scratch_budget = if device_local_heap_bytes > 0 {
+        (device_local_heap_bytes / 128)
+            .clamp(FLCE_MIN_SCRATCH_BUDGET_BYTES, FLCE_MAX_SCRATCH_BUDGET_BYTES)
+    } else {
+        FLCE_FALLBACK_SCRATCH_BUDGET_BYTES
+    };
+    let by_memory = (scratch_budget / bytes_per_vocab_col).max(1) as usize;
+
+    // 1D per-token shaders dispatch ceil(num_active * chunk_len / 256)
+    // workgroups. Keep the automatic chunk inside the device's x-axis limit.
+    let max_invocations = (max_workgroups_x as u64).saturating_mul(256).max(256);
+    let by_dispatch = (max_invocations / active).max(1) as usize;
+
+    let raw = vocab
+        .min(FLCE_MAX_AUTO_CHUNK)
+        .min(by_memory)
+        .min(by_dispatch)
+        .max(FLCE_MIN_CHUNK);
+    let safe = floor_power_of_two(raw).max(FLCE_MIN_CHUNK).min(vocab);
+    env_flce_chunk_len()
+        .map(|forced| forced.clamp(FLCE_MIN_CHUNK, safe))
+        .unwrap_or(safe)
+}
+
+pub fn flce_recommended_chunk_len(
+    device: &VulkanDevice,
+    num_active: usize,
+    hidden_dim: usize,
+    vocab: usize,
+) -> usize {
+    flce_recommended_chunk_len_from_limits(
+        num_active,
+        hidden_dim,
+        vocab,
+        device.device_local_heap_bytes(),
+        device.max_compute_work_group_count(0),
+    )
+}
+
+pub fn flce_recommended_chunk_len_for_tensors(hidden: &VkTensor, weight: &VkTensor) -> usize {
+    if hidden.shape().len() != 2 || weight.shape().len() != 2 {
+        return flce_active_chunk_len();
+    }
+    flce_recommended_chunk_len(
+        hidden.device(),
+        hidden.shape()[0],
+        hidden.shape()[1],
+        weight.shape()[0],
+    )
+}
+
+fn validate_lm_head_inputs(
     hidden: &VkTensor,
     weight: &VkTensor,
     labels: &[u32],
-    chunk_len: usize,
-) -> Result<VkTensor> {
+) -> Result<(usize, usize, usize)> {
     anyhow::ensure!(
         hidden.shape().len() == 2 && weight.shape().len() == 2,
-        "vk_flce: hidden and weight must be rank-2"
+        "vk lm-head loss/logprob: hidden and weight must be rank-2"
     );
     anyhow::ensure!(
         hidden.dtype() == VkDType::F32 && weight.dtype() == VkDType::F32,
-        "vk_flce: F32-only"
+        "vk lm-head loss/logprob: F32-only"
     );
     let num_active = hidden.shape()[0];
     let hidden_dim = hidden.shape()[1];
     let vocab = weight.shape()[0];
     anyhow::ensure!(
         weight.shape()[1] == hidden_dim,
-        "vk_flce: weight inner-dim {} != hidden_dim {hidden_dim}",
+        "vk lm-head loss/logprob: weight inner-dim {} != hidden_dim {hidden_dim}",
         weight.shape()[1]
     );
     anyhow::ensure!(
         labels.len() == num_active,
-        "vk_flce: labels.len() {} != num_active {num_active}",
+        "vk lm-head loss/logprob: labels.len() {} != num_active {num_active}",
         labels.len()
+    );
+    Ok((num_active, hidden_dim, vocab))
+}
+
+pub fn vk_selected_log_probs(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    chunk_len: usize,
+) -> Result<VkTensor> {
+    let (num_active, hidden_dim, vocab) = validate_lm_head_inputs(hidden, weight, labels)?;
+    let chunk_len = if chunk_len == 0 {
+        flce_recommended_chunk_len(hidden.device(), num_active, hidden_dim, vocab)
+    } else {
+        chunk_len.clamp(FLCE_MIN_CHUNK, vocab)
+    };
+    let dev = hidden.device();
+    let labels_buf = upload_u32(dev, labels)?;
+    let (_per_row, global_max, global_sumexp, correct) = run_flce_forward(
+        hidden,
+        weight,
+        &labels_buf,
+        num_active,
+        hidden_dim,
+        vocab,
+        chunk_len,
+    )?;
+
+    let out = alloc_f32(dev, num_active)?;
+    let push = [num_active as u32];
+    dispatch_simple(
+        dev,
+        "vk_selected_logprob_f32",
+        &[
+            global_max.handle(),
+            global_sumexp.handle(),
+            correct.handle(),
+            out.handle(),
+        ],
+        &push,
+        ((num_active + 255) / 256) as u32,
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![num_active],
+        VkDType::F32,
+        Arc::clone(dev),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn vk_grpo_loss(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    ref_log_probs: &VkTensor,
+    advantage: f32,
+    clip_epsilon: f32,
+    kl_coeff: f32,
+    chunk_len: usize,
+) -> Result<VkTensor> {
+    let (num_active, hidden_dim, vocab) = validate_lm_head_inputs(hidden, weight, labels)?;
+    let chunk_len = if chunk_len == 0 {
+        flce_recommended_chunk_len(hidden.device(), num_active, hidden_dim, vocab)
+    } else {
+        chunk_len.clamp(FLCE_MIN_CHUNK, vocab)
+    };
+    anyhow::ensure!(
+        ref_log_probs.shape() == [num_active],
+        "vk_grpo_loss: ref_log_probs shape {:?} != [{num_active}]",
+        ref_log_probs.shape()
+    );
+    anyhow::ensure!(
+        ref_log_probs.dtype() == VkDType::F32,
+        "vk_grpo_loss: ref_log_probs must be F32"
     );
 
     let dev = hidden.device();
     let labels_buf = upload_u32(dev, labels)?;
+    let (_ce_per_row, global_max, global_sumexp, correct) = run_flce_forward(
+        hidden,
+        weight,
+        &labels_buf,
+        num_active,
+        hidden_dim,
+        vocab,
+        chunk_len,
+    )?;
 
-    let (per_row, global_max, global_sumexp) = run_flce_forward(
+    let per_row = alloc_f32(dev, num_active)?;
+    let coeff = alloc_f32(dev, num_active)?;
+    let push = [
+        num_active as u32,
+        advantage.to_bits(),
+        clip_epsilon.to_bits(),
+        kl_coeff.to_bits(),
+    ];
+    dispatch_simple(
+        dev,
+        "vk_grpo_per_token_f32",
+        &[
+            global_max.handle(),
+            global_sumexp.handle(),
+            correct.handle(),
+            ref_log_probs.buffer().handle(),
+            per_row.handle(),
+            coeff.handle(),
+        ],
+        &push,
+        ((num_active + 255) / 256) as u32,
+    )?;
+
+    let per_row_tensor =
+        VkTensor::from_buffer(per_row, vec![num_active], VkDType::F32, Arc::clone(dev));
+    let loss = vk_mean_all(&per_row_tensor)?;
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if hidden.requires_grad() {
+        Some(Arc::new(GrpoBackward {
+            weight: weight.clone(),
+            labels: labels.to_vec(),
+            global_max,
+            global_sumexp,
+            coeff,
+            num_active,
+            vocab,
+            hidden_dim,
+            chunk_len,
+            inputs: [hidden.clone()],
+        }))
+    } else {
+        None
+    };
+    Ok(VkTensor::from_op(
+        Arc::clone(loss.buffer()),
+        vec![1],
+        VkDType::F32,
+        Arc::clone(dev),
+        grad_fn,
+    ))
+}
+
+pub fn vk_flce_loss(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    chunk_len: usize,
+) -> Result<VkTensor> {
+    let (num_active, hidden_dim, vocab) = validate_lm_head_inputs(hidden, weight, labels)?;
+    let chunk_len = if chunk_len == 0 {
+        flce_recommended_chunk_len(hidden.device(), num_active, hidden_dim, vocab)
+    } else {
+        chunk_len.clamp(FLCE_MIN_CHUNK, vocab)
+    };
+
+    let dev = hidden.device();
+    let labels_buf = upload_u32(dev, labels)?;
+
+    let (per_row, global_max, global_sumexp, _correct) = run_flce_forward(
         hidden,
         weight,
         &labels_buf,

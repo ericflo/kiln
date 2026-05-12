@@ -223,10 +223,7 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_gdn_gated_rms_norm_bwd",
         "SPIR_V_VK_GDN_GATED_RMS_NORM_BWD",
     ),
-    (
-        "vk_l2_norm_lastdim_f32",
-        "SPIR_V_VK_L2_NORM_LASTDIM_F32",
-    ),
+    ("vk_l2_norm_lastdim_f32", "SPIR_V_VK_L2_NORM_LASTDIM_F32"),
     (
         "vk_l2_norm_lastdim_bwd_f32",
         "SPIR_V_VK_L2_NORM_LASTDIM_BWD_F32",
@@ -284,6 +281,9 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_VK_FLCE_PER_TOKEN_LOSS_F32",
     ),
     ("vk_flce_grad_chunk_f32", "SPIR_V_VK_FLCE_GRAD_CHUNK_F32"),
+    ("vk_selected_logprob_f32", "SPIR_V_VK_SELECTED_LOGPROB_F32"),
+    ("vk_grpo_per_token_f32", "SPIR_V_VK_GRPO_PER_TOKEN_F32"),
+    ("vk_grpo_grad_chunk_f32", "SPIR_V_VK_GRPO_GRAD_CHUNK_F32"),
     ("vk_sigmoid_f32", "SPIR_V_VK_SIGMOID_F32"),
     ("vk_sigmoid_f32_offset", "SPIR_V_VK_SIGMOID_F32_OFFSET"),
     ("vk_sigmoid_bwd_f32", "SPIR_V_VK_SIGMOID_BWD_F32"),

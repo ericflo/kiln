@@ -4,10 +4,10 @@
 //! loop using candle autograd. Training runs in the same process as inference,
 //! operating on the already-loaded model weights. No Python sidecar needed.
 
-pub mod replay;
-pub mod trainer;
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
+pub mod replay;
+pub mod trainer;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
 
@@ -176,7 +176,13 @@ pub struct GrpoGroup {
 /// Request to run a GRPO training step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoRequest {
+    #[serde(default)]
     pub groups: Vec<GrpoGroup>,
+    /// Optional server-local JSONL dataset path. Each non-empty line is one
+    /// `GrpoGroup`. Used by Vulkan-native GRPO to stream large datasets without
+    /// retaining every group in memory.
+    #[serde(default)]
+    pub dataset_path: Option<String>,
     #[serde(default)]
     pub config: GrpoConfig,
 }

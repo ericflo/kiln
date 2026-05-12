@@ -18,7 +18,7 @@
 //!       lookup VkAdamWState by param_id
 //!       dispatch_adamw_step_f32 in place
 //! at end:
-//!   for each lora pair: VkTensor.to_candle() → safetensors save
+//!   for each lora pair: VkTensor readback → direct safetensors save
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -29,23 +29,136 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
     VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
-    vk_count_gdn_layers, vk_linear_with_lora, vk_model_forward_loss_masked_with_state,
-    vk_model_forward_loss_with_state, vk_step_backward,
+    vk_count_gdn_layers, vk_linear_with_lora, vk_model_forward_final_norm_with_state,
+    vk_model_forward_loss_masked_with_state, vk_model_forward_loss_with_state, vk_step_backward,
 };
-use kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32;
+use kiln_vulkan_kernel::kernels::{dispatch_adamw_step_f32, dispatch_sgd_step_f32};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
+use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanBuffer, VulkanDevice};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
-use crate::{SftConfig, SftExample};
+use crate::{GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
 
 struct TokenizedSftExample {
     input_ids: Vec<u32>,
     label_mask: Vec<bool>,
     original_index: usize,
+}
+
+struct TokenizedVkGrpoCompletion {
+    input_ids: Vec<u32>,
+    completion_mask: Vec<bool>,
+}
+
+struct TokenizedVkGrpoGroup {
+    completions: Vec<TokenizedVkGrpoCompletion>,
+    rewards: Vec<f64>,
+}
+
+fn to_core_messages(msgs: &[crate::ChatMessage]) -> Vec<kiln_core::tokenizer::ChatMessage> {
+    msgs.iter()
+        .map(|m| kiln_core::tokenizer::ChatMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+fn tokenize_vk_grpo_group(
+    group: &GrpoGroup,
+    tokenizer: &KilnTokenizer,
+) -> Result<TokenizedVkGrpoGroup> {
+    if group.completions.is_empty() {
+        bail!("GRPO group has no completions");
+    }
+
+    let prompt_messages = to_core_messages(&group.messages);
+    let prompt_text = tokenizer
+        .apply_chat_template(&prompt_messages)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let prompt_ids = tokenizer
+        .encode(&prompt_text)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let mut completions = Vec::with_capacity(group.completions.len());
+    let mut rewards = Vec::with_capacity(group.completions.len());
+    for scored in &group.completions {
+        let mut full_messages = prompt_messages.clone();
+        full_messages.push(kiln_core::tokenizer::ChatMessage {
+            role: "assistant".to_string(),
+            content: scored.text.clone(),
+            ..Default::default()
+        });
+        let full_text = tokenizer
+            .apply_chat_template(&full_messages)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let full_ids = tokenizer
+            .encode(&full_text)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if full_ids.len() < 2 {
+            bail!("GRPO completion tokenized to fewer than 2 tokens");
+        }
+        let mut mask = vec![false; full_ids.len()];
+        for slot in mask.iter_mut().skip(prompt_ids.len()) {
+            *slot = true;
+        }
+        completions.push(TokenizedVkGrpoCompletion {
+            input_ids: full_ids,
+            completion_mask: mask,
+        });
+        rewards.push(scored.reward);
+    }
+
+    Ok(TokenizedVkGrpoGroup {
+        completions,
+        rewards,
+    })
+}
+
+fn compute_vk_grpo_advantages(rewards: &[f64]) -> Vec<f64> {
+    let n = rewards.len() as f64;
+    if n <= 1.0 {
+        return vec![0.0; rewards.len()];
+    }
+    let mean = rewards.iter().sum::<f64>() / n;
+    let var = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let std = var.sqrt();
+    rewards.iter().map(|r| (r - mean) / (std + 1e-8)).collect()
+}
+
+fn grpo_active_rows_and_labels(
+    input_ids: &[u32],
+    completion_mask: &[bool],
+) -> Result<(Vec<u32>, Vec<u32>)> {
+    anyhow::ensure!(
+        input_ids.len() == completion_mask.len(),
+        "GRPO completion mask length {} != input length {}",
+        completion_mask.len(),
+        input_ids.len()
+    );
+    anyhow::ensure!(
+        input_ids.len() >= 2,
+        "GRPO completion needs at least 2 tokens"
+    );
+    let active_rows: Vec<u32> = completion_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx as u32))
+        .collect();
+    anyhow::ensure!(
+        !active_rows.is_empty(),
+        "GRPO completion has no active completion tokens"
+    );
+    let labels = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+    Ok((active_rows, labels))
 }
 
 /// Per-parameter AdamW state held entirely on the GPU.
@@ -280,6 +393,71 @@ fn accumulate_grads_except(
     Ok(())
 }
 
+fn vk_optimizer_step_from_grads(
+    device: &VulkanDevice,
+    lora_layers: &[VkLoraLayer],
+    grads: &HashMap<TensorId, VkTensor>,
+    adamw_state: &mut VkAdamWBook,
+    lr: f32,
+    optimizer: Optimizer,
+    step: u32,
+    context: &str,
+) -> Result<()> {
+    for pair in lora_pairs(lora_layers) {
+        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
+            let Some(grad) = grads.get(&pid) else {
+                continue;
+            };
+            anyhow::ensure!(
+                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
+                "{context}: optimizer F32 only"
+            );
+            anyhow::ensure!(
+                param.num_elements() == grad.num_elements(),
+                "{context}: param/grad element-count mismatch"
+            );
+            match optimizer {
+                Optimizer::Sgd => {
+                    dispatch_sgd_step_f32(
+                        device,
+                        param.buffer(),
+                        grad.buffer(),
+                        param.num_elements(),
+                        lr,
+                    )
+                    .with_context(|| format!("dispatch_sgd_step_f32 ({context})"))?;
+                }
+                Optimizer::AdamW {
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                } => {
+                    let state = adamw_state
+                        .get(&pid)
+                        .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
+                    dispatch_adamw_step_f32(
+                        device,
+                        param.buffer(),
+                        grad.buffer(),
+                        &state.m,
+                        &state.v,
+                        param.num_elements(),
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
+                    )
+                    .with_context(|| format!("dispatch_adamw_step_f32 ({context})"))?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gdn_qkv_from_mixed(
     mixed_qkv: &VkTensor,
@@ -452,6 +630,20 @@ fn gdn_compute_normed_no_grad(
     let (beta, g) = gdn_gates_from_ab(&a_proj, &b_proj, w)?;
     let out_chunk = gdn_chunkwise_from_parts(x, w, state, gdn_layer_idx, &q, &k, &v, &beta, &g)?;
     gdn_normed_from_chunk_and_z(&out_chunk, &z_raw, w)
+}
+
+fn gdn_attention_block_value(
+    x: &VkTensor,
+    w: &VkLinearAttentionWeights,
+    lora: &VkLoraLayer,
+    state: &VkLinearAttentionState,
+    gdn_layer_idx: usize,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::elementwise::vk_add;
+
+    let normed = gdn_compute_normed_no_grad(x, w, lora, state, gdn_layer_idx)?;
+    let out_proj = vk_linear_with_lora(&normed, &w.out_proj, lora.gdn_out_proj.as_ref())?;
+    vk_add(x, &out_proj)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1060,7 +1252,7 @@ pub fn vk_checkpointed_train_step(
     use kiln_vulkan_kernel::vk_ops::embedding::{
         upload_u32_ids, vk_embedding_lookup_bf16, vk_embedding_lookup_f32,
     };
-    use kiln_vulkan_kernel::vk_ops::flce::{flce_active_chunk_len, vk_flce_loss};
+    use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_flce_loss};
     use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
 
@@ -1143,7 +1335,12 @@ pub fn vk_checkpointed_train_step(
     while labels.len() < t_in {
         labels.push((weights.vocab.saturating_sub(1)) as u32);
     }
-    let loss = vk_flce_loss(&h_norm, &weights.lm_head, &labels, flce_active_chunk_len())?;
+    let loss = vk_flce_loss(
+        &h_norm,
+        &weights.lm_head,
+        &labels,
+        flce_recommended_chunk_len_for_tensors(&h_norm, &weights.lm_head),
+    )?;
     let loss_val = loss.to_vec_f32()?[0];
 
     // For the LAST segment we wrap its boundary input as a parameter
@@ -1199,7 +1396,12 @@ pub fn vk_checkpointed_train_step(
             }
         }
         let h_norm2 = vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)?;
-        let loss2 = vk_flce_loss(&h_norm2, &weights.lm_head, &labels, flce_active_chunk_len())?;
+        let loss2 = vk_flce_loss(
+            &h_norm2,
+            &weights.lm_head,
+            &labels,
+            flce_recommended_chunk_len_for_tensors(&h_norm2, &weights.lm_head),
+        )?;
         let grads = vk_backward(&loss2)?;
         let upstream = grads.get(last_id).cloned();
         // Accumulate non-boundary grads
@@ -1324,10 +1526,11 @@ pub fn vk_recompute_train_step_with_state_masked(
     use kiln_model::vk_forward::{
         vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
         vk_full_attention_mlp_down_from_gated, vk_full_attention_mlp_gated,
+        vk_linear_attention_mlp_down_from_gated, vk_linear_attention_mlp_gated,
     };
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add_no_grad, vk_mul};
-    use kiln_vulkan_kernel::vk_ops::flce::{flce_active_chunk_len, vk_flce_loss};
+    use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_flce_loss};
     use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
     use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
@@ -1442,7 +1645,7 @@ pub fn vk_recompute_train_step_with_state_masked(
         &active_h,
         &weights.lm_head,
         &labels,
-        flce_active_chunk_len(),
+        flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
     )?;
     let loss_val = loss.to_vec_f32()?[0];
     if profile {
@@ -1652,7 +1855,7 @@ pub fn vk_recompute_train_step_with_state_masked(
                         step,
                         layer_idx,
                         seq_len = input_ids.len(),
-                        "vk-native recompute reverse GDN split begin"
+                        "vk-native recompute reverse GDN layer begin"
                     );
                 }
                 let gdn_idx = gdn_map[layer_idx]
@@ -1660,9 +1863,84 @@ pub fn vk_recompute_train_step_with_state_masked(
                 let s = state
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("GDN layer {layer_idx} requires state"))?;
+
+                let after_attn_value = gdn_attention_block_value(
+                    &boundary,
+                    linear,
+                    &detached_lora[layer_idx],
+                    s,
+                    gdn_idx,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_train_step: GDN layer {layer_idx} attention value")
+                })?;
+
+                let gated_value = vk_linear_attention_mlp_gated(
+                    &after_attn_value,
+                    linear,
+                    &detached_lora[layer_idx],
+                )
+                .with_context(|| {
+                    format!("vk_recompute_train_step: GDN layer {layer_idx} MLP gated value")
+                })?;
+
+                let gated_id = mint_fresh_tensor_id()?;
+                let gated_param = VkTensor::parameter(
+                    Arc::clone(gated_value.buffer()),
+                    gated_value.shape().to_vec(),
+                    gated_value.dtype(),
+                    Arc::clone(gated_value.device()),
+                    gated_id,
+                );
+                let down_out = vk_linear_attention_mlp_down_from_gated(
+                    &gated_param,
+                    linear,
+                    &lora_layers[layer_idx],
+                )?;
+                let prod = vk_mul(&down_out, &upstream)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_train_step: backward GDN layer {layer_idx} MLP down")
+                })?;
+                let upstream_gated = grads.get(gated_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing gated grad for GDN layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid == gated_id {
+                        continue;
+                    }
+                    accumulate_grad(&mut shared_grads, *pid, grad)?;
+                }
+
+                let after_id = mint_fresh_tensor_id()?;
+                let after_param = VkTensor::parameter(
+                    Arc::clone(after_attn_value.buffer()),
+                    after_attn_value.shape().to_vec(),
+                    after_attn_value.dtype(),
+                    Arc::clone(after_attn_value.device()),
+                    after_id,
+                );
+                let gated =
+                    vk_linear_attention_mlp_gated(&after_param, linear, &lora_layers[layer_idx])?;
+                let prod = vk_mul(&gated, &upstream_gated)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_train_step: backward GDN layer {layer_idx} MLP gate/up")
+                })?;
+                let mlp_grad_after = grads.get(after_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing after-attn MLP grad for GDN layer {layer_idx}")
+                })?;
+                let upstream_after_attn = vk_add_no_grad(&upstream, &mlp_grad_after)?;
+                for (pid, grad) in grads.iter() {
+                    if *pid == after_id {
+                        continue;
+                    }
+                    accumulate_grad(&mut shared_grads, *pid, grad)?;
+                }
+
                 upstream = vk_gdn_layer_backward_split(
                     &boundary,
-                    &upstream,
+                    &upstream_after_attn,
                     linear,
                     &lora_layers[layer_idx],
                     s,
@@ -1677,7 +1955,7 @@ pub fn vk_recompute_train_step_with_state_masked(
                         step,
                         layer_idx,
                         seq_len = input_ids.len(),
-                        "vk-native recompute reverse GDN split done"
+                        "vk-native recompute reverse GDN layer done"
                     );
                 }
                 continue;
@@ -1718,6 +1996,451 @@ pub fn vk_recompute_train_step_with_state_masked(
             .context("dispatch_adamw_step_f32 (recompute)")?;
         }
     }
+
+    Ok(loss_val)
+}
+
+/// Exact layerwise reverse-recompute GRPO step.
+///
+/// This is the GRPO counterpart to `vk_recompute_train_step_with_state_masked`:
+/// reference log-probs are supplied by the caller, the final loss is the
+/// clipped GRPO objective plus KL penalty, and the transformer body is replayed
+/// one layer at a time so policy training does not keep a full long-context
+/// forward tape alive.
+#[allow(clippy::too_many_arguments)]
+pub fn vk_recompute_grpo_train_step_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    ref_log_probs: &VkTensor,
+    advantage: f32,
+    clip_epsilon: f32,
+    kl_coeff: f32,
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    optimizer: Optimizer,
+    step: u32,
+) -> Result<f32> {
+    use kiln_model::vk_forward::{
+        vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
+        vk_full_attention_mlp_down_from_gated, vk_full_attention_mlp_gated,
+        vk_linear_attention_mlp_down_from_gated, vk_linear_attention_mlp_gated,
+    };
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add_no_grad, vk_mul};
+    use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_grpo_loss};
+    use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
+    use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
+
+    anyhow::ensure!(
+        input_ids.len() >= 2,
+        "vk_recompute_grpo_train_step: need at least 2 tokens"
+    );
+    anyhow::ensure!(
+        active_rows.len() == labels.len(),
+        "vk_recompute_grpo_train_step: active row count {} != label count {}",
+        active_rows.len(),
+        labels.len()
+    );
+    anyhow::ensure!(
+        !active_rows.is_empty(),
+        "vk_recompute_grpo_train_step: no active GRPO tokens"
+    );
+    for &row in active_rows {
+        anyhow::ensure!(
+            (row as usize) + 1 < input_ids.len(),
+            "vk_recompute_grpo_train_step: active row {row} out of range for {} tokens",
+            input_ids.len()
+        );
+    }
+
+    let device = weights.embed_tokens.device();
+    let detached_lora = detach_lora_layers(lora_layers);
+    let gdn_map = gdn_layer_index_map(weights);
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(vk_compute_rope_tables(
+            device,
+            &weights.rotary_inv_freq,
+            input_ids.len(),
+        )?)
+    } else {
+        None
+    };
+    let rope_refs = rope_tables.as_ref().map(|(cos, sin)| (cos, sin));
+    let profile = env_flag("KILN_PROFILE_VK_RECOMPUTE", false);
+    let boundary_cache_limit = recompute_boundary_cache_limit_bytes();
+    let boundary_cache_bytes = (weights.layers.len() + 1)
+        .saturating_mul(input_ids.len())
+        .saturating_mul(weights.hidden)
+        .saturating_mul(std::mem::size_of::<f32>());
+    let use_boundary_cache = kiln_core::env_flag::env_tristate("KILN_VK_RECOMPUTE_BOUNDARY_CACHE")
+        .unwrap_or(true)
+        && boundary_cache_limit > 0
+        && boundary_cache_bytes <= boundary_cache_limit;
+
+    if profile {
+        tracing::info!(
+            step,
+            seq_len = input_ids.len(),
+            active_labels = active_rows.len(),
+            boundary_cache = use_boundary_cache,
+            boundary_cache_bytes,
+            boundary_cache_limit,
+            "vk-native GRPO recompute final forward begin"
+        );
+    }
+    let (final_hidden, boundary_cache) = if use_boundary_cache {
+        let (boundaries, _state) = vk_forward_layer_boundaries(
+            weights,
+            &detached_lora,
+            input_ids,
+            model_config,
+            num_gdn_layers,
+            &gdn_map,
+            rope_refs,
+        )?;
+        let final_hidden = boundaries
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("vk_recompute_grpo_train_step: empty boundary cache"))?;
+        (final_hidden, Some(boundaries))
+    } else {
+        let (final_hidden, _state) = vk_forward_to_layer_input(
+            weights,
+            &detached_lora,
+            input_ids,
+            weights.layers.len(),
+            model_config,
+            num_gdn_layers,
+            &gdn_map,
+            rope_refs,
+        )?;
+        (final_hidden, None)
+    };
+    if profile {
+        tracing::info!(
+            step,
+            seq_len = input_ids.len(),
+            boundary_cache = use_boundary_cache,
+            "vk-native GRPO recompute final forward done"
+        );
+    }
+
+    let final_id = mint_fresh_tensor_id()?;
+    let final_param = VkTensor::parameter(
+        Arc::clone(final_hidden.buffer()),
+        final_hidden.shape().to_vec(),
+        final_hidden.dtype(),
+        Arc::clone(final_hidden.device()),
+        final_id,
+    );
+    let h_norm = vk_rmsnorm(&final_param, &weights.final_norm_weight, 1e-5)?;
+    let active_h = vk_index_select_rows(&h_norm, active_rows)?;
+    let loss = vk_grpo_loss(
+        &active_h,
+        &weights.lm_head,
+        labels,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
+    )?;
+    let loss_val = loss.to_vec_f32()?[0];
+    if profile {
+        tracing::info!(
+            step,
+            seq_len = input_ids.len(),
+            active_labels = active_rows.len(),
+            loss = format!("{loss_val:.6}"),
+            "vk-native GRPO recompute finite loss computed"
+        );
+    }
+    let final_grads = vk_backward(&loss)?;
+    let mut upstream = final_grads.get(final_id).cloned().ok_or_else(|| {
+        anyhow::anyhow!("vk_recompute_grpo_train_step: missing final upstream grad")
+    })?;
+
+    let mut shared_grads: HashMap<TensorId, VkTensor> = HashMap::new();
+
+    for layer_idx in (0..weights.layers.len()).rev() {
+        if profile {
+            tracing::info!(
+                step,
+                layer_idx,
+                seq_len = input_ids.len(),
+                boundary_cache = use_boundary_cache,
+                "vk-native GRPO recompute reverse layer begin"
+            );
+        }
+        let (boundary, state) = if let Some(boundaries) = boundary_cache.as_ref() {
+            let boundary = boundaries
+                .get(layer_idx)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing cached boundary for layer {layer_idx}"))?;
+            let state =
+                fresh_gdn_state(weights.embed_tokens.device(), model_config, num_gdn_layers)?;
+            (boundary, state)
+        } else {
+            vk_forward_to_layer_input(
+                weights,
+                &detached_lora,
+                input_ids,
+                layer_idx,
+                model_config,
+                num_gdn_layers,
+                &gdn_map,
+                rope_refs,
+            )
+            .with_context(|| format!("vk_recompute_grpo_train_step: prefix to layer {layer_idx}"))?
+        };
+        if profile {
+            tracing::info!(
+                step,
+                layer_idx,
+                seq_len = input_ids.len(),
+                boundary_cache = use_boundary_cache,
+                "vk-native GRPO recompute reverse prefix done"
+            );
+        }
+        match &weights.layers[layer_idx] {
+            VkLayerWeights::FullAttention(full) => {
+                let rope_arg = rope_refs.map(|(cos, sin)| (cos, sin, weights.rotary_dim));
+                let after_attn_value = vk_full_attention_attention_block_with_rope(
+                    &boundary,
+                    full,
+                    &detached_lora[layer_idx],
+                    rope_arg,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_grpo_train_step: full-attn prefix block {layer_idx}")
+                })?;
+
+                let gated_value = vk_full_attention_mlp_gated(
+                    &after_attn_value,
+                    full,
+                    &detached_lora[layer_idx],
+                )
+                .with_context(|| {
+                    format!("vk_recompute_grpo_train_step: full layer {layer_idx} MLP gated value")
+                })?;
+
+                let gated_id = mint_fresh_tensor_id()?;
+                let gated_param = VkTensor::parameter(
+                    Arc::clone(gated_value.buffer()),
+                    gated_value.shape().to_vec(),
+                    gated_value.dtype(),
+                    Arc::clone(gated_value.device()),
+                    gated_id,
+                );
+                let down_out = vk_full_attention_mlp_down_from_gated(
+                    &gated_param,
+                    full,
+                    &lora_layers[layer_idx],
+                )?;
+                let prod = vk_mul(&down_out, &upstream)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_grpo_train_step: backward full layer {layer_idx} MLP down"
+                    )
+                })?;
+                let upstream_gated = grads.get(gated_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing gated grad for full layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != gated_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let after_id = mint_fresh_tensor_id()?;
+                let after_param = VkTensor::parameter(
+                    Arc::clone(after_attn_value.buffer()),
+                    after_attn_value.shape().to_vec(),
+                    after_attn_value.dtype(),
+                    Arc::clone(after_attn_value.device()),
+                    after_id,
+                );
+                let gated =
+                    vk_full_attention_mlp_gated(&after_param, full, &lora_layers[layer_idx])?;
+                let prod = vk_mul(&gated, &upstream_gated)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_grpo_train_step: backward full layer {layer_idx} MLP gate/up"
+                    )
+                })?;
+                let mlp_grad_after = grads.get(after_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing after-attn MLP grad for full layer {layer_idx}")
+                })?;
+                let upstream_after_attn = vk_add_no_grad(&upstream, &mlp_grad_after)?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != after_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let boundary_id = mint_fresh_tensor_id()?;
+                let h_param = VkTensor::parameter(
+                    Arc::clone(boundary.buffer()),
+                    boundary.shape().to_vec(),
+                    boundary.dtype(),
+                    Arc::clone(boundary.device()),
+                    boundary_id,
+                );
+                let after_attn = vk_full_attention_attention_block_with_rope(
+                    &h_param,
+                    full,
+                    &lora_layers[layer_idx],
+                    rope_arg,
+                )?;
+                let prod = vk_mul(&after_attn, &upstream_after_attn)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_grpo_train_step: backward full layer {layer_idx} attention"
+                    )
+                })?;
+                upstream = grads.get(boundary_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing boundary grad for full layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != boundary_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+                if profile {
+                    tracing::info!(
+                        step,
+                        layer_idx,
+                        seq_len = input_ids.len(),
+                        "vk-native GRPO recompute reverse full layer done"
+                    );
+                }
+                continue;
+            }
+            VkLayerWeights::LinearAttention(linear) => {
+                let gdn_idx = gdn_map[layer_idx]
+                    .ok_or_else(|| anyhow::anyhow!("missing GDN index for layer {layer_idx}"))?;
+                let s = state
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("GDN layer {layer_idx} requires state"))?;
+
+                let after_attn_value = gdn_attention_block_value(
+                    &boundary,
+                    linear,
+                    &detached_lora[layer_idx],
+                    s,
+                    gdn_idx,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_grpo_train_step: GDN layer {layer_idx} attention value")
+                })?;
+
+                let gated_value = vk_linear_attention_mlp_gated(
+                    &after_attn_value,
+                    linear,
+                    &detached_lora[layer_idx],
+                )
+                .with_context(|| {
+                    format!("vk_recompute_grpo_train_step: GDN layer {layer_idx} MLP gated value")
+                })?;
+
+                let gated_id = mint_fresh_tensor_id()?;
+                let gated_param = VkTensor::parameter(
+                    Arc::clone(gated_value.buffer()),
+                    gated_value.shape().to_vec(),
+                    gated_value.dtype(),
+                    Arc::clone(gated_value.device()),
+                    gated_id,
+                );
+                let down_out = vk_linear_attention_mlp_down_from_gated(
+                    &gated_param,
+                    linear,
+                    &lora_layers[layer_idx],
+                )?;
+                let prod = vk_mul(&down_out, &upstream)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_grpo_train_step: backward GDN layer {layer_idx} MLP down")
+                })?;
+                let upstream_gated = grads.get(gated_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing gated grad for GDN layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != gated_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let after_id = mint_fresh_tensor_id()?;
+                let after_param = VkTensor::parameter(
+                    Arc::clone(after_attn_value.buffer()),
+                    after_attn_value.shape().to_vec(),
+                    after_attn_value.dtype(),
+                    Arc::clone(after_attn_value.device()),
+                    after_id,
+                );
+                let gated =
+                    vk_linear_attention_mlp_gated(&after_param, linear, &lora_layers[layer_idx])?;
+                let prod = vk_mul(&gated, &upstream_gated)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_grpo_train_step: backward GDN layer {layer_idx} MLP gate/up"
+                    )
+                })?;
+                let mlp_grad_after = grads.get(after_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing after-attn MLP grad for GDN layer {layer_idx}")
+                })?;
+                let upstream_after_attn = vk_add_no_grad(&upstream, &mlp_grad_after)?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != after_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                upstream = vk_gdn_layer_backward_split(
+                    &boundary,
+                    &upstream_after_attn,
+                    linear,
+                    &lora_layers[layer_idx],
+                    s,
+                    gdn_idx,
+                    &mut shared_grads,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_grpo_train_step: split backward GDN layer {layer_idx}")
+                })?;
+                if profile {
+                    tracing::info!(
+                        step,
+                        layer_idx,
+                        seq_len = input_ids.len(),
+                        "vk-native GRPO recompute reverse GDN layer done"
+                    );
+                }
+                continue;
+            }
+        }
+    }
+
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        optimizer,
+        step,
+        "vk_recompute_grpo_train_step",
+    )?;
 
     Ok(loss_val)
 }
@@ -1849,6 +2572,82 @@ pub fn vk_train_step_with_state_masked(
     Ok(loss_val)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn vk_grpo_train_step_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    ref_log_probs: &VkTensor,
+    advantage: f32,
+    clip_epsilon: f32,
+    kl_coeff: f32,
+    gdn_state: Option<&mut VkLinearAttentionState>,
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    optimizer: Optimizer,
+    step: u32,
+) -> Result<f32> {
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_grpo_loss};
+
+    let h = vk_model_forward_final_norm_with_state(weights, lora_layers, input_ids, gdn_state)?;
+    let active_h = vk_index_select_rows(&h, active_rows)?;
+    let loss = vk_grpo_loss(
+        &active_h,
+        &weights.lm_head,
+        labels,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
+    )?;
+    let loss_val = loss.to_vec_f32()?[0];
+    let grads = vk_backward(&loss)?;
+    let mut shared_grads = HashMap::new();
+    for (pid, grad) in grads.iter() {
+        shared_grads.insert(*pid, grad.clone());
+    }
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        optimizer,
+        step,
+        "vk_grpo_train_step",
+    )?;
+    Ok(loss_val)
+}
+
+fn vk_grpo_reference_log_probs(
+    weights: &VkModelWeights,
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::flce::{
+        flce_recommended_chunk_len_for_tensors, vk_selected_log_probs,
+    };
+
+    let mut no_lora = Vec::with_capacity(weights.layers.len());
+    no_lora.resize_with(weights.layers.len(), VkLoraLayer::default);
+    let mut state = fresh_gdn_state(weights.embed_tokens.device(), model_config, num_gdn_layers)?;
+    let h = vk_model_forward_final_norm_with_state(weights, &no_lora, input_ids, state.as_mut())?;
+    let active_h = vk_index_select_rows(&h, active_rows)?;
+    vk_selected_log_probs(
+        &active_h,
+        &weights.lm_head,
+        labels,
+        flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // LoRA initialization (one VkLoraLayer per model layer)
 // ---------------------------------------------------------------------------
@@ -1857,7 +2656,8 @@ pub fn vk_train_step_with_state_masked(
 ///
 /// Targets the canonical SFT modules on every attention block:
 /// q/k/v/o + gate/up/down on FullAttention layers, and
-/// in_proj_qkv/in_proj_z/out_proj on LinearAttention (GDN) layers.
+/// in_proj_qkv/in_proj_z/out_proj + gate/up/down on LinearAttention (GDN)
+/// layers.
 pub fn vk_init_lora_layers(
     device: &Arc<VulkanDevice>,
     model_weights: &VkModelWeights,
@@ -1917,6 +2717,9 @@ pub fn vk_init_lora_layers(
                     in_proj_qkv: Some(mk(8, qkv_in, qkv_out)?),
                     in_proj_z: Some(mk(9, z_in, z_out)?),
                     gdn_out_proj: Some(mk(10, out_in, out_out)?),
+                    gate_proj: Some(mk(5, hidden, intermediate)?),
+                    up_proj: Some(mk(6, hidden, intermediate)?),
+                    down_proj: Some(mk(7, intermediate, hidden)?),
                     ..Default::default()
                 });
             }
@@ -1928,6 +2731,479 @@ pub fn vk_init_lora_layers(
 // ---------------------------------------------------------------------------
 // vk-native SFT trainer (multi-epoch, single-step optimizer)
 // ---------------------------------------------------------------------------
+
+fn parse_grpo_jsonl_group_line(line: &str, line_no: usize) -> Result<Option<GrpoGroup>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<GrpoGroup>(trimmed)
+        .map(Some)
+        .with_context(|| format!("parse GRPO JSONL group at line {line_no}"))
+}
+
+/// Return `(groups, completions)` for a GRPO JSONL file without retaining the
+/// parsed groups. Each non-empty line must be one `GrpoGroup`.
+pub fn grpo_jsonl_stats(path: &Path) -> Result<(usize, usize)> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file =
+        File::open(path).with_context(|| format!("open GRPO JSONL dataset {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut groups = 0usize;
+    let mut completions = 0usize;
+    for (idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "read GRPO JSONL dataset {} line {}",
+                path.display(),
+                idx + 1
+            )
+        })?;
+        if let Some(group) = parse_grpo_jsonl_group_line(&line, idx + 1)? {
+            groups += 1;
+            completions += group.completions.len();
+        }
+    }
+    anyhow::ensure!(
+        groups > 0,
+        "GRPO JSONL dataset {} has no groups",
+        path.display()
+    );
+    anyhow::ensure!(
+        completions > 0,
+        "GRPO JSONL dataset {} has no completions",
+        path.display()
+    );
+    Ok((groups, completions))
+}
+
+/// Vulkan-native GRPO training loop.
+///
+/// This path keeps reference forward, selected-token logprob extraction,
+/// GRPO loss/backward, gradient accumulation, optimizer updates, and adapter
+/// save in the vk-native tensor stack. Policy backward uses exact layerwise
+/// recompute so long completions do not require retaining the full forward
+/// tape.
+pub fn vk_native_grpo_train(
+    groups: &[GrpoGroup],
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    anyhow::ensure!(!groups.is_empty(), "vk_native_grpo_train: no GRPO groups");
+    if !VulkanDevice::probe() {
+        bail!(
+            "vk_native_grpo_train: no Vulkan device available - \
+             unset KILN_VK_NATIVE_TRAINING to use the candle path"
+        );
+    }
+    let vk_device = Arc::new(
+        VulkanDevice::new().context("vk_native_grpo_train: failed to create Vulkan device")?,
+    );
+
+    let effective_seed = config.seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x6752_504f)
+    });
+
+    let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
+        .context("vk_native_grpo_train: VkModelWeights::from_gpu_weights")?;
+    let lora_layers = vk_init_lora_layers(
+        &vk_device,
+        &vk_weights,
+        model_config,
+        config.lora_rank,
+        config.lora_alpha,
+        effective_seed,
+    )?;
+    let mut adamw = allocate_adamw_state(&vk_device, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: config.learning_rate as f32,
+        ..Default::default()
+    };
+    let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+    let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
+    tracing::info!(
+        num_groups = groups.len(),
+        total_completions,
+        lr = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        clip_epsilon = config.clip_epsilon,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting vk-native GRPO training"
+    );
+
+    let mut global_step = 0u32;
+    let mut last_loss = 0.0f32;
+
+    for (group_idx, group) in groups.iter().enumerate() {
+        let tgroup = tokenize_vk_grpo_group(group, tokenizer)
+            .with_context(|| format!("tokenize GRPO group {}", group_idx + 1))?;
+        let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
+        let mut group_loss_sum = 0.0f64;
+
+        for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+            global_step += 1;
+            let (active_rows, labels) =
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
+            let ref_log_probs = vk_grpo_reference_log_probs(
+                &vk_weights,
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                model_config,
+                num_gdn_layers,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO reference logprobs group {} completion {}",
+                    group_idx + 1,
+                    comp_idx + 1
+                )
+            })?;
+
+            let loss = vk_recompute_grpo_train_step_with_state(
+                &vk_weights,
+                &lora_layers,
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                &ref_log_probs,
+                advantages[comp_idx] as f32,
+                config.clip_epsilon as f32,
+                config.kl_coeff as f32,
+                model_config,
+                num_gdn_layers,
+                &mut adamw,
+                &cfg,
+                config.optimizer,
+                global_step,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO policy step group {} completion {}",
+                    group_idx + 1,
+                    comp_idx + 1
+                )
+            })?;
+            anyhow::ensure!(
+                loss.is_finite(),
+                "vk_native_grpo_train: non-finite loss {loss} at step {global_step}"
+            );
+            last_loss = loss;
+            group_loss_sum += loss as f64;
+
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0
+                    && (global_step as usize) % interval == 0
+                    && (global_step as usize) < total_completions
+                {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    std::fs::create_dir_all(&ckpt_dir).with_context(|| {
+                        format!(
+                            "create vk-native GRPO checkpoint dir {}",
+                            ckpt_dir.display()
+                        )
+                    })?;
+                    save_vk_lora_adapter(
+                        &lora_layers,
+                        config.lora_rank,
+                        config.lora_alpha,
+                        &ckpt_dir.join("adapter_model.safetensors"),
+                    )?;
+                    write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
+                }
+            }
+        }
+
+        let avg_group_loss = if tgroup.completions.is_empty() {
+            0.0
+        } else {
+            group_loss_sum / tgroup.completions.len() as f64
+        };
+        if let Some(ref cb) = progress_cb {
+            cb(TrainingProgress {
+                epoch: 1,
+                total_epochs: 1,
+                step: group_idx + 1,
+                total_steps: groups.len(),
+                loss: avg_group_loss,
+                progress: (group_idx + 1) as f32 / groups.len().max(1) as f32,
+            });
+        }
+        tracing::info!(
+            group = group_idx + 1,
+            total_groups = groups.len(),
+            completions = tgroup.completions.len(),
+            loss = format!("{avg_group_loss:.6}"),
+            "vk-native GRPO group step"
+        );
+    }
+
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "vk_native_grpo_train: create adapter dir {}",
+            output_dir.display()
+        )
+    })?;
+    save_vk_lora_adapter(
+        &lora_layers,
+        config.lora_rank,
+        config.lora_alpha,
+        &output_dir.join("adapter_model.safetensors"),
+    )?;
+    write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        "vk-native GRPO training complete"
+    );
+
+    Ok(output_dir)
+}
+
+/// Vulkan-native GRPO training loop over a JSONL dataset.
+///
+/// The file is scanned for counts, then streamed one non-empty line at a time.
+/// Each line is a `GrpoGroup`; no vector of all groups is retained during
+/// tokenization, reference forward, policy loss, backward, or optimizer update.
+pub fn vk_native_grpo_train_jsonl(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+) -> Result<PathBuf> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let (total_groups, total_completions) = grpo_jsonl_stats(dataset_path)?;
+    if !VulkanDevice::probe() {
+        bail!(
+            "vk_native_grpo_train_jsonl: no Vulkan device available - \
+             unset KILN_VK_NATIVE_TRAINING to use the candle path"
+        );
+    }
+    let vk_device = Arc::new(
+        VulkanDevice::new()
+            .context("vk_native_grpo_train_jsonl: failed to create Vulkan device")?,
+    );
+
+    let effective_seed = config.seed.unwrap_or_else(|| {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x6752_504f)
+    });
+
+    let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
+        .context("vk_native_grpo_train_jsonl: VkModelWeights::from_gpu_weights")?;
+    let lora_layers = vk_init_lora_layers(
+        &vk_device,
+        &vk_weights,
+        model_config,
+        config.lora_rank,
+        config.lora_alpha,
+        effective_seed,
+    )?;
+    let mut adamw = allocate_adamw_state(&vk_device, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: config.learning_rate as f32,
+        ..Default::default()
+    };
+    let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+    tracing::info!(
+        dataset = %dataset_path.display(),
+        total_groups,
+        total_completions,
+        lr = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        clip_epsilon = config.clip_epsilon,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting streamed vk-native GRPO training"
+    );
+
+    let file = File::open(dataset_path)
+        .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut global_step = 0u32;
+    let mut last_loss = 0.0f32;
+    let mut processed_groups = 0usize;
+
+    for (line_idx, line) in reader.lines().enumerate() {
+        let line = line.with_context(|| {
+            format!(
+                "read GRPO JSONL dataset {} line {}",
+                dataset_path.display(),
+                line_idx + 1
+            )
+        })?;
+        let Some(group) = parse_grpo_jsonl_group_line(&line, line_idx + 1)? else {
+            continue;
+        };
+        processed_groups += 1;
+        let tgroup = tokenize_vk_grpo_group(&group, tokenizer).with_context(|| {
+            format!(
+                "tokenize GRPO JSONL group {} at line {}",
+                processed_groups,
+                line_idx + 1
+            )
+        })?;
+        let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
+        let mut group_loss_sum = 0.0f64;
+
+        for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+            global_step += 1;
+            let (active_rows, labels) =
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
+            let ref_log_probs = vk_grpo_reference_log_probs(
+                &vk_weights,
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                model_config,
+                num_gdn_layers,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO JSONL reference logprobs group {} completion {}",
+                    processed_groups,
+                    comp_idx + 1
+                )
+            })?;
+
+            let loss = vk_recompute_grpo_train_step_with_state(
+                &vk_weights,
+                &lora_layers,
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                &ref_log_probs,
+                advantages[comp_idx] as f32,
+                config.clip_epsilon as f32,
+                config.kl_coeff as f32,
+                model_config,
+                num_gdn_layers,
+                &mut adamw,
+                &cfg,
+                config.optimizer,
+                global_step,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO JSONL policy step group {} completion {}",
+                    processed_groups,
+                    comp_idx + 1
+                )
+            })?;
+            anyhow::ensure!(
+                loss.is_finite(),
+                "vk_native_grpo_train_jsonl: non-finite loss {loss} at step {global_step}"
+            );
+            last_loss = loss;
+            group_loss_sum += loss as f64;
+
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0
+                    && (global_step as usize) % interval == 0
+                    && (global_step as usize) < total_completions
+                {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
+                    std::fs::create_dir_all(&ckpt_dir).with_context(|| {
+                        format!(
+                            "create streamed vk-native GRPO checkpoint dir {}",
+                            ckpt_dir.display()
+                        )
+                    })?;
+                    save_vk_lora_adapter(
+                        &lora_layers,
+                        config.lora_rank,
+                        config.lora_alpha,
+                        &ckpt_dir.join("adapter_model.safetensors"),
+                    )?;
+                    write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
+                }
+            }
+        }
+
+        let avg_group_loss = if tgroup.completions.is_empty() {
+            0.0
+        } else {
+            group_loss_sum / tgroup.completions.len() as f64
+        };
+        if let Some(ref cb) = progress_cb {
+            cb(TrainingProgress {
+                epoch: 1,
+                total_epochs: 1,
+                step: processed_groups,
+                total_steps: total_groups,
+                loss: avg_group_loss,
+                progress: processed_groups as f32 / total_groups.max(1) as f32,
+            });
+        }
+        tracing::info!(
+            group = processed_groups,
+            total_groups,
+            completions = tgroup.completions.len(),
+            loss = format!("{avg_group_loss:.6}"),
+            "streamed vk-native GRPO group step"
+        );
+    }
+
+    anyhow::ensure!(
+        processed_groups > 0 && global_step > 0,
+        "vk_native_grpo_train_jsonl: no valid GRPO groups in {}",
+        dataset_path.display()
+    );
+
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).with_context(|| {
+        format!(
+            "vk_native_grpo_train_jsonl: create adapter dir {}",
+            output_dir.display()
+        )
+    })?;
+    save_vk_lora_adapter(
+        &lora_layers,
+        config.lora_rank,
+        config.lora_alpha,
+        &output_dir.join("adapter_model.safetensors"),
+    )?;
+    write_vk_adapter_config(&output_dir, config.lora_rank, config.lora_alpha)?;
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        processed_groups,
+        total_groups,
+        "streamed vk-native GRPO training complete"
+    );
+
+    Ok(output_dir)
+}
 
 /// Vulkan-native SFT training loop.
 ///
@@ -2277,17 +3553,29 @@ fn write_vk_adapter_config(output_dir: &Path, rank: usize, alpha: f32) -> Result
     Ok(())
 }
 
-/// Save LoRA adapter to safetensors via candle. Each VkTensor is read
-/// back to CPU once.
+/// Save LoRA adapter to safetensors. Each VkTensor is read back to CPU once
+/// for file serialization, but no Candle tensors or autograd path are used.
 pub fn save_vk_lora_adapter(
     lora_layers: &[VkLoraLayer],
     rank: usize,
     alpha: f32,
     output_path: &std::path::Path,
 ) -> Result<()> {
-    use candle_core::{Device, Tensor};
-    use std::collections::HashMap;
-    let mut tensors: HashMap<String, Tensor> = HashMap::new();
+    use safetensors::tensor::{Dtype, TensorView};
+
+    let mut byte_storage: Vec<(String, Vec<usize>, Vec<u8>)> = Vec::new();
+    let mut push_tensor = |name: String, tensor: &VkTensor| -> Result<()> {
+        let data = tensor
+            .to_vec_f32()
+            .with_context(|| format!("read back Vulkan adapter tensor {name}"))?;
+        let mut bytes = Vec::with_capacity(data.len() * std::mem::size_of::<f32>());
+        for v in data {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        byte_storage.push((name, tensor.shape().to_vec(), bytes));
+        Ok(())
+    };
+
     for (li, layer) in lora_layers.iter().enumerate() {
         for (submodule, name, proj) in [
             ("self_attn", "q_proj", layer.q_proj.as_ref()),
@@ -2302,25 +3590,39 @@ pub fn save_vk_lora_adapter(
             ("self_attn", "out_proj", layer.gdn_out_proj.as_ref()),
         ] {
             let Some(p) = proj else { continue };
-            let a_t = p.a.to_candle()?.to_device(&Device::Cpu)?;
-            let b_t = p.b.to_candle()?.to_device(&Device::Cpu)?;
-            tensors.insert(
+            push_tensor(
                 format!(
                     "base_model.model.model.layers.{}.{}.{}.lora_A.weight",
                     li, submodule, name
                 ),
-                a_t,
-            );
-            tensors.insert(
+                &p.a,
+            )?;
+            push_tensor(
                 format!(
                     "base_model.model.model.layers.{}.{}.{}.lora_B.weight",
                     li, submodule, name
                 ),
-                b_t,
-            );
+                &p.b,
+            )?;
         }
     }
-    candle_core::safetensors::save(&tensors, output_path)
+    drop(push_tensor);
+
+    let views: Vec<(String, TensorView<'_>)> = byte_storage
+        .iter()
+        .map(|(name, shape, bytes)| {
+            let view = TensorView::new(Dtype::F32, shape.clone(), bytes)
+                .map_err(|e| anyhow::anyhow!("building safetensors view for {name}: {e}"))?;
+            Ok::<_, anyhow::Error>((name.clone(), view))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let refs: Vec<(&str, TensorView<'_>)> = views
+        .iter()
+        .map(|(name, view)| (name.as_str(), view.clone()))
+        .collect();
+    let serialized =
+        safetensors::tensor::serialize(refs, None).context("serialize Vulkan LoRA safetensors")?;
+    std::fs::write(output_path, serialized)
         .with_context(|| format!("save_vk_lora_adapter: {}", output_path.display()))?;
     let _ = (rank, alpha); // adapter_config.json could be written here if desired
     Ok(())

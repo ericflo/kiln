@@ -43,6 +43,10 @@ pub struct VulkanDevice {
     device_name: String,
     device_local_mem_type: u32,
     host_visible_mem_type: u32,
+    /// Sum of device-local memory heap sizes reported by the physical device.
+    /// Used by memory-bounded kernels to choose conservative defaults without
+    /// requiring operator tuning.
+    device_local_heap_bytes: u64,
     /// Maximum shared memory per workgroup (from VkPhysicalDeviceLimits).
     /// Used by PR2 to decide whether solve_tri can run without exceeding device limits.
     max_compute_shared_memory_size: vk::DeviceSize,
@@ -74,6 +78,7 @@ impl std::fmt::Debug for VulkanDevice {
                 "max_compute_shared_memory_size",
                 &self.max_compute_shared_memory_size,
             )
+            .field("device_local_heap_bytes", &self.device_local_heap_bytes)
             .field(
                 "pipeline_cache_len",
                 &self
@@ -245,6 +250,12 @@ impl VulkanDevice {
 
         // Get memory properties and find memory types
         let mem_props = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let device_local_heap_bytes = mem_props
+            .memory_heaps
+            .iter()
+            .filter(|heap| heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .map(|heap| heap.size)
+            .sum::<vk::DeviceSize>() as u64;
         let device_local_mem_type =
             Self::find_memory_type(&mem_props, vk::MemoryPropertyFlags::DEVICE_LOCAL)
                 .ok_or_else(|| anyhow!("no device-local memory type found"))?;
@@ -325,6 +336,7 @@ impl VulkanDevice {
             device_name,
             device_local_mem_type,
             host_visible_mem_type,
+            device_local_heap_bytes,
             max_compute_shared_memory_size,
             max_compute_work_group_count,
             pipeline_cache: Mutex::new(HashMap::new()),
@@ -449,6 +461,13 @@ impl VulkanDevice {
     /// Get the device name.
     pub fn device_name(&self) -> &str {
         &self.device_name
+    }
+
+    /// Sum of all device-local heaps in bytes. Drivers that do not expose a
+    /// useful heap size return 0; callers should then fall back to conservative
+    /// shape-only heuristics.
+    pub fn device_local_heap_bytes(&self) -> u64 {
+        self.device_local_heap_bytes
     }
 
     /// Get the maximum shared memory available per compute workgroup.
