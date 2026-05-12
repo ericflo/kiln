@@ -243,16 +243,17 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
     removed
 }
 
-/// Dispatch one SFT job to either the candle trainer or the
-/// vk-native trainer.
+/// Dispatch one SFT job to either the candle trainer, the CUDA-native trainer,
+/// or the vk-native trainer.
 ///
 /// The candle path takes a `replay_ctx` (request_body + lineage
-/// tracking); the vk-native path doesn't yet plumb replay so it drops
-/// the context. When the binary is built without `--features vulkan`,
-/// `vk_native=true` falls through to the candle path with a warning
-/// (the env flag was a no-op for this build).
+/// tracking); native paths don't yet plumb replay so they drop the context.
+/// When the binary is built without the requested backend feature, the native
+/// flag falls through to the candle path with a warning (the env flag was a
+/// no-op for this build).
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
+    cuda_native: bool,
     vk_native: bool,
     req: &SftRequest,
     model_config: &kiln_core::config::ModelConfig,
@@ -264,6 +265,34 @@ fn run_sft(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
+    if cuda_native {
+        #[cfg(feature = "cuda")]
+        {
+            tracing::info!(
+                job_id = %job_id,
+                "KILN_CUDA_NATIVE_TRAINING=1 - routing to cuda_native_sft_train"
+            );
+            return kiln_train::cuda_train::cuda_native_sft_train(
+                &req.examples,
+                &req.config,
+                model_config,
+                weights,
+                tokenizer,
+                adapter_dir,
+                adapter_name,
+                Some(progress_cb),
+            )
+            .map_err(|e| format!("{e:#}"));
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            tracing::warn!(
+                job_id = %job_id,
+                "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
+                 --features cuda - falling back to candle SFT trainer"
+            );
+        }
+    }
     if vk_native {
         #[cfg(feature = "vulkan")]
         {
@@ -304,6 +333,13 @@ fn run_sft(
         Some(replay_ctx),
     )
     .map_err(|e| format!("{e:#}"))
+}
+
+fn native_training_env_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty() && v != "0")
+        .is_some()
 }
 
 /// Execute a single training job (runs on a blocking thread).
@@ -390,16 +426,13 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
-            // KILN_VK_NATIVE_TRAINING=1 routes to the vk-native trainer
-            // (every forward intermediate + grad lives in GPU memory,
-            // bypassing candle's CpuStorage 23 GB anon-rss ceiling).
-            // Replay context is candle-trainer-specific, so we drop it
-            // on the vk-native path until that integration is added.
-            let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
-                .ok()
-                .filter(|v| !v.is_empty() && v != "0")
-                .is_some();
+            // Native CUDA/Vulkan training keeps forward intermediates and
+            // grads in backend memory. Replay context is candle-trainer-specific,
+            // so native paths drop it until that integration is added.
+            let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
+            let vk_native = native_training_env_enabled("KILN_VK_NATIVE_TRAINING");
             run_sft(
+                cuda_native,
                 vk_native,
                 &req,
                 &state.model_config,
@@ -425,16 +458,18 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
-            let vk_native = std::env::var("KILN_VK_NATIVE_TRAINING")
-                .ok()
-                .filter(|v| !v.is_empty() && v != "0")
-                .is_some();
-            if vk_native {
-                Err(
-                    "KILN_VK_NATIVE_TRAINING=1 does not yet support GRPO — \
-                     unset it for GRPO jobs (vk-native GRPO is a follow-on plan)"
-                        .to_string(),
-                )
+            let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
+            let vk_native = native_training_env_enabled("KILN_VK_NATIVE_TRAINING");
+            if cuda_native || vk_native {
+                let flag = if cuda_native {
+                    "KILN_CUDA_NATIVE_TRAINING"
+                } else {
+                    "KILN_VK_NATIVE_TRAINING"
+                };
+                Err(format!(
+                    "{flag}=1 does not yet support GRPO - unset it for GRPO jobs \
+                     (native GRPO is a follow-on plan)"
+                ))
             } else {
                 let _gpu_guard = state.gpu_lock.write().unwrap();
                 let guard = runner_arc.read().unwrap();
@@ -557,6 +592,39 @@ fn auto_load_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn native_training_env_enabled_treats_empty_and_zero_as_disabled() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        const VAR: &str = "KILN_TEST_NATIVE_TRAINING_FLAG";
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        assert!(!native_training_env_enabled(VAR));
+
+        unsafe {
+            std::env::set_var(VAR, "");
+        }
+        assert!(!native_training_env_enabled(VAR));
+
+        unsafe {
+            std::env::set_var(VAR, "0");
+        }
+        assert!(!native_training_env_enabled(VAR));
+
+        unsafe {
+            std::env::set_var(VAR, "1");
+        }
+        assert!(native_training_env_enabled(VAR));
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+    }
 
     #[test]
     fn test_queue_fifo_order() {
