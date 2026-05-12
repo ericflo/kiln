@@ -107,6 +107,18 @@ impl KilnTokenizer {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// Encode text into token IDs plus byte offsets into the original string.
+    pub fn encode_with_offsets(
+        &self,
+        text: &str,
+    ) -> Result<(Vec<TokenId>, Vec<(usize, usize)>), TokenizerError> {
+        let encoding = self
+            .inner
+            .encode(text, false)
+            .map_err(|e| TokenizerError::Encode(e.to_string()))?;
+        Ok((encoding.get_ids().to_vec(), encoding.get_offsets().to_vec()))
+    }
+
     /// Decode token IDs back to text.
     pub fn decode(&self, ids: &[TokenId]) -> Result<String, TokenizerError> {
         self.inner

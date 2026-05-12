@@ -60,11 +60,14 @@ fn enforce_training_preflight(
     // so the model is already deducted; including base weights again
     // double-counts and over-rejects every job. On discrete GPUs the
     // available number is a static pre-deduction reserve, so weights
-    // ARE still pending and must be counted.
+    // ARE still pending and must be counted. `KILN_GPU_MEMORY_GB` is
+    // an explicit operator override for this already-loaded server
+    // process, so treat it as a post-load budget as well.
     let weights_already_resident = matches!(
         vram.source,
         kiln_core::vram::VramSource::LinuxDrmSysfsUnified
             | kiln_core::vram::VramSource::AppleSilicon
+            | kiln_core::vram::VramSource::EnvOverride
     );
     let estimate = estimate_step_working_set_with_options(
         &state.model_config,

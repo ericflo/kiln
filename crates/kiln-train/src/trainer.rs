@@ -1512,26 +1512,73 @@ pub(crate) fn tokenize_for_training(
     let full_text = tokenizer
         .apply_chat_template(&core_messages)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    let input_ids = tokenizer
-        .encode(&full_text)
+    let (input_ids, offsets) = tokenizer
+        .encode_with_offsets(&full_text)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if input_ids.is_empty() {
         anyhow::bail!("empty tokenization result");
     }
 
-    // Find which tokens correspond to assistant responses.
-    // Strategy: tokenize the conversation up to each assistant turn, then mark
-    // the difference as assistant tokens.
     let mut label_mask = vec![false; input_ids.len()];
-
-    // Simple approach: find assistant content boundaries by tokenizing
-    // prefix conversations and computing the diff.
     let mut prefix_messages: Vec<kiln_core::tokenizer::ChatMessage> = Vec::new();
     for msg in &core_messages {
+        if msg.role == "assistant" {
+            let before_text = if prefix_messages.is_empty() {
+                String::new()
+            } else {
+                tokenizer
+                    .apply_chat_template(&prefix_messages)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+            };
+
+            prefix_messages.push(msg.clone());
+            let prefix_text = tokenizer
+                .apply_chat_template(&prefix_messages)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            if !full_text.starts_with(&prefix_text) || before_text.len() > prefix_text.len() {
+                label_mask =
+                    label_mask_by_prefix_tokenization(input_ids.len(), &core_messages, tokenizer)?;
+                break;
+            }
+
+            let start = before_text.len();
+            let end = prefix_text.len().min(full_text.len());
+            for (i, &(token_start, token_end)) in offsets.iter().enumerate() {
+                if token_start == token_end {
+                    continue;
+                }
+                if token_start < end && token_end > start {
+                    label_mask[i] = true;
+                }
+            }
+        } else {
+            prefix_messages.push(msg.clone());
+        }
+    }
+
+    // For next-token prediction, we need at least 2 tokens
+    if input_ids.len() < 2 {
+        anyhow::bail!("example too short ({} tokens)", input_ids.len());
+    }
+    if !has_supervised_shifted_labels(&label_mask) {
+        anyhow::bail!("example has no supervised assistant tokens after next-token shift");
+    }
+
+    Ok((input_ids, label_mask))
+}
+
+fn label_mask_by_prefix_tokenization(
+    input_len: usize,
+    core_messages: &[kiln_core::tokenizer::ChatMessage],
+    tokenizer: &KilnTokenizer,
+) -> Result<Vec<bool>> {
+    let mut label_mask = vec![false; input_len];
+    let mut prefix_messages: Vec<kiln_core::tokenizer::ChatMessage> = Vec::new();
+    for msg in core_messages {
         prefix_messages.push(msg.clone());
         if msg.role == "assistant" {
-            // Tokenize everything up to and including this assistant message
             let prefix_text = tokenizer
                 .apply_chat_template(&prefix_messages)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1539,7 +1586,6 @@ pub(crate) fn tokenize_for_training(
                 .encode(&prefix_text)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            // Tokenize everything before this assistant message
             let before_messages: Vec<_> = prefix_messages[..prefix_messages.len() - 1].to_vec();
             let before_text = if before_messages.is_empty() {
                 String::new()
@@ -1556,24 +1602,14 @@ pub(crate) fn tokenize_for_training(
                     .map_err(|e| anyhow::anyhow!("{e}"))?
             };
 
-            // Mark the assistant tokens (shifted by 1 for next-token prediction)
             let start = before_ids.len();
-            let end = prefix_ids.len().min(input_ids.len());
+            let end = prefix_ids.len().min(input_len);
             for i in start..end {
                 label_mask[i] = true;
             }
         }
     }
-
-    // For next-token prediction, we need at least 2 tokens
-    if input_ids.len() < 2 {
-        anyhow::bail!("example too short ({} tokens)", input_ids.len());
-    }
-    if !has_supervised_shifted_labels(&label_mask) {
-        anyhow::bail!("example has no supervised assistant tokens after next-token shift");
-    }
-
-    Ok((input_ids, label_mask))
+    Ok(label_mask)
 }
 
 fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
@@ -3684,6 +3720,99 @@ mod tests {
     /// "monolithic baseline" forward pass. `cargo nextest run` runs each
     /// test in its own process, so this mutex is a no-op there.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn minimal_training_tokenizer(template: &str) -> KilnTokenizer {
+        let json = br#"{
+            "version": "1.0",
+            "model": {
+                "type": "BPE",
+                "vocab": {"a": 0, "b": 1, "1": 2, "2": 3, "3": 4, "4": 5},
+                "merges": []
+            }
+        }"#;
+        KilnTokenizer::from_bytes(json)
+            .unwrap()
+            .with_chat_template(template.to_string())
+    }
+
+    #[test]
+    fn tokenize_for_training_labels_assistant_spans_from_offsets() -> Result<()> {
+        let tokenizer =
+            minimal_training_tokenizer("{% for message in messages %}{{ message.content }}{% endfor %}");
+        let example = SftExample {
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "a".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "bb".to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "a".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "b".to_string(),
+                },
+            ],
+        };
+
+        let (input_ids, label_mask) = tokenize_for_training(&example, &tokenizer)?;
+
+        assert_eq!(input_ids, vec![0, 1, 1, 0, 1]);
+        assert_eq!(label_mask, vec![false, true, true, false, true]);
+        assert_eq!(
+            label_mask,
+            label_mask_by_prefix_tokenization(
+                input_ids.len(),
+                &to_core_messages(&example.messages),
+                &tokenizer,
+            )?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tokenize_for_training_falls_back_for_non_prefix_stable_templates() -> Result<()> {
+        let tokenizer = minimal_training_tokenizer(
+            "{{ messages | length }}{% for message in messages %}{{ message.content }}{% endfor %}",
+        );
+        let example = SftExample {
+            messages: vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "a".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "bb".to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "a".to_string(),
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "b".to_string(),
+                },
+            ],
+        };
+
+        let (input_ids, label_mask) = tokenize_for_training(&example, &tokenizer)?;
+
+        assert_eq!(
+            label_mask,
+            label_mask_by_prefix_tokenization(
+                input_ids.len(),
+                &to_core_messages(&example.messages),
+                &tokenizer,
+            )?
+        );
+        Ok(())
+    }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
