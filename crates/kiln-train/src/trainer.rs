@@ -5302,6 +5302,37 @@ mod tests {
         );
         assert_eq!(opt_state.step, 1, "AdamW state should advance exactly once");
 
+        let adapter_dir = tempfile::tempdir()?;
+        params.save_peft(adapter_dir.path(), config.num_layers)?;
+        let saved = candle_core::safetensors::load(
+            &adapter_dir.path().join("adapter_model.safetensors"),
+            &Device::Cpu,
+        )?;
+        let saved_key = "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight";
+        let saved_a = saved
+            .get(saved_key)
+            .ok_or_else(|| anyhow::anyhow!("saved adapter missing {saved_key}"))?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let current_a = params.layers[0]
+            .gate_proj
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing layer 0 gate_proj LoRA params"))?
+            .0
+            .as_tensor()
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(saved_a.len(), current_a.len());
+        for (idx, (saved, current)) in saved_a.iter().zip(current_a.iter()).enumerate() {
+            assert!(
+                (saved - current).abs() < 1e-6,
+                "saved adapter value diverged from updated CUDA Var at index {idx}: \
+                 saved={saved} current={current}"
+            );
+        }
+
         opt_state.evict_from_backend(&*backend);
         params.evict_from_backend(&*backend);
         Ok(())
