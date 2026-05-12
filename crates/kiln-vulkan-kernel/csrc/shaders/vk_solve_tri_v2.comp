@@ -1,0 +1,100 @@
+// vk_solve_tri_v2 — forward-substitution triangular solve with bounded
+// shared memory. Replaces the EXPERIMENTAL solve_tri.comp (which
+// requested 192 KB of shared memory and SIGFPEs at pipeline creation
+// on Strix Halo).
+//
+// Computes W = (I + diag(β) · A_strict)^{-1} · diag(β) · V'
+//   A_strict: [B, H, C, C]   strict-lower triangular
+//   V_prime:  [B, H, C, dv]  F32
+//   beta:     [B, H, C]      F32
+// Output:
+//   W:        [B, H, C, dv]  F32
+//
+// Layout: ONE workgroup per (B, H, dv-tile). Threads in the workgroup
+// each handle a single d in [0, dv). For dv > local_size, the kernel
+// loops over dv-tiles. The C-loop runs SEQUENTIALLY in shared memory:
+// each iteration writes the row of W into shared memory before the
+// next iteration reads it.
+//
+// Shared memory budget per workgroup:
+//   sW: C × DV_PER_WG  floats   (DV_PER_WG = local_size_x = 64)
+//   sA: C × C floats             (the strict-lower A row segments,
+//                                  loaded once per workgroup)
+//
+// For C = 64 and DV_PER_WG = 64:
+//   sW = 64 × 64 × 4 = 16 KB
+//   sA = 64 × 64 × 4 = 16 KB
+//   Total = 32 KB. Comfortably within Strix Halo's 32–48 KB cap.
+//
+// Push constants: batch, heads, chunk (≤ 64), dv.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint heads;
+    uint chunk;
+    uint dv;
+};
+
+layout(binding = 0) readonly buffer AStrictBuf { float data_a_strict[]; };
+layout(binding = 1) readonly buffer VPrimeBuf  { float data_v_prime[]; };
+layout(binding = 2) readonly buffer BetaBuf    { float data_beta[]; };
+layout(binding = 3) writeonly buffer OutBuf    { float data_out[]; };
+
+shared float sA[4096];   // 64 × 64 max
+shared float sW[4096];   // 64 × 64 max  (chunk × DV_PER_WG)
+
+void main() {
+    const uint DV_PER_WG = 64u;
+    uint bh = gl_WorkGroupID.x;
+    uint dv_tile = gl_WorkGroupID.y;
+    if (bh >= batch * heads) return;
+    uint dv_start = dv_tile * DV_PER_WG;
+    if (dv_start >= dv) return;
+    uint dv_end = min(dv_start + DV_PER_WG, dv);
+    uint dv_count = dv_end - dv_start;
+
+    uint tid = gl_LocalInvocationID.x;
+    uint blk = gl_WorkGroupSize.x;
+
+    uint base_a = bh * chunk * chunk;
+    uint base_v = bh * chunk * dv;
+
+    // Cooperative load A_strict for this (B, H) into shared memory.
+    // chunk*chunk ≤ 64*64 = 4096; with 64 threads each loads 64.
+    uint total_a = chunk * chunk;
+    for (uint i = tid; i < total_a; i += blk) {
+        sA[i] = data_a_strict[base_a + i];
+    }
+    barrier();
+
+    // Sequential row scan; each thread handles one local d in dv-tile.
+    for (uint t = 0; t < chunk; ++t) {
+        float beta_t = data_beta[bh * chunk + t];
+        uint a_row_base = t * chunk;
+        uint vp_base = base_v + t * dv + dv_start;
+        uint w_row_base = t * DV_PER_WG;
+
+        if (tid < dv_count) {
+            float acc = 0.0;
+            for (uint j = 0; j < t; ++j) {
+                acc += sA[a_row_base + j] * sW[j * DV_PER_WG + tid];
+            }
+            float vp_val = data_v_prime[vp_base + tid];
+            sW[w_row_base + tid] = beta_t * (vp_val - acc);
+        }
+        barrier();
+    }
+
+    // Write W from shared memory back to the output buffer.
+    for (uint t = 0; t < chunk; ++t) {
+        uint out_base = base_v + t * dv + dv_start;
+        if (tid < dv_count) {
+            data_out[out_base + tid] = sW[t * DV_PER_WG + tid];
+        }
+    }
+}

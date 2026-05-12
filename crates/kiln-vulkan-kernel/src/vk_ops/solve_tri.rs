@@ -1,15 +1,19 @@
 //! Forward-substitution triangular solve that produces
 //! W = (I + diag(β) · A_strict)^{-1} · diag(β) · V'.
 //!
-//! NOTE: The existing inference shader `solve_tri.comp` requests 192 KB
-//! of shared memory (16384 + 32768 floats), exceeding most devices'
-//! per-workgroup shared-memory limit. It SIGFPEs at pipeline creation
-//! on Strix Halo. Until a fresh shader is written (Phase 4 critical
-//! path), Phase 3 falls back to a CPU implementation: read inputs to
-//! host, compute forward sub, upload W. Slow but correct, and the
-//! sizes are small (C ≤ 64, dv ≤ 256, ~16 KB per layer per chunk) so
-//! the readback cost is bounded.
+//! Uses `vk_solve_tri_v2.comp` — a fresh GLSL shader with bounded
+//! shared memory (32 KB total: 64×64 sA + 64×DV_PER_WG=64 sW). Replaces
+//! the inference codebase's `solve_tri.comp` which requested 192 KB
+//! of shared memory and SIGFPEd at pipeline creation on Strix Halo.
+//!
+//! The dispatch is 2D: one workgroup per (B*H, dv-tile). For
+//! C ≤ 64 and dv ≤ 256 (the Qwen3.5-4B envelope) we tile dv in
+//! 64-element chunks. Larger dv just runs more workgroups.
+//!
+//! A CPU fallback is kept around (`vk_solve_tri_cpu_fallback`) for
+//! debugging or when the shader path is disabled via env.
 
+use crate::vk_ops::dispatch_simple_2d;
 use crate::vk_tensor::{VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
@@ -64,7 +68,52 @@ pub fn vk_solve_tri_no_grad(
     );
 
     let device = a_strict.device();
-    // CPU forward substitution. Inputs to host:
+    let out = alloc_f32(device, batch * heads * chunk * dv)?;
+
+    // Use CPU fallback if explicitly disabled via env (debug aid).
+    if std::env::var("KILN_VK_SOLVE_TRI_CPU").is_ok() {
+        return vk_solve_tri_cpu_fallback(a_strict, v_prime, beta, out, batch, heads, chunk, dv);
+    }
+
+    // GPU path: vk_solve_tri_v2.comp (32 KB shared mem, well within
+    // Strix Halo's per-workgroup cap).
+    let dv_per_wg = 64u32;
+    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
+    dispatch_simple_2d(
+        device,
+        "vk_solve_tri_v2",
+        &[
+            a_strict.buffer().handle(),
+            v_prime.buffer().handle(),
+            beta.buffer().handle(),
+            out.handle(),
+        ],
+        &push,
+        ((batch * heads) as u32, dv_tiles),
+    )?;
+
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, heads, chunk, dv],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+/// CPU forward-substitution fallback. Used when the GPU shader path
+/// is disabled or for testing.
+fn vk_solve_tri_cpu_fallback(
+    a_strict: &VkTensor,
+    v_prime: &VkTensor,
+    beta: &VkTensor,
+    out: Arc<VulkanBuffer>,
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<VkTensor> {
+    let device = a_strict.device();
     let a_data = a_strict.to_vec_f32()?;
     let v_data = v_prime.to_vec_f32()?;
     let b_data = beta.to_vec_f32()?;
@@ -86,7 +135,6 @@ pub fn vk_solve_tri_no_grad(
             }
         }
     }
-    let out = alloc_f32(device, w.len())?;
     let raw: Vec<u8> = w.iter().flat_map(|f| f.to_le_bytes()).collect();
     VulkanBuffer::upload_data(
         device.device(),
@@ -96,7 +144,6 @@ pub fn vk_solve_tri_no_grad(
         &out,
         &raw,
     )?;
-
     Ok(VkTensor::from_buffer(
         out,
         vec![batch, heads, chunk, dv],
