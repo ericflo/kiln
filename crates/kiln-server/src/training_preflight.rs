@@ -640,6 +640,36 @@ mod tests {
     }
 
     #[test]
+    fn preflight_rejects_long_context_on_a6000_cuda_budget() {
+        // CUDA/discrete GPUs use SingleCopy residency, but the same
+        // fit-before-run gate must still reject payloads whose activations
+        // and FLCE chunk working set exceed the post-reserve A6000 budget.
+        let cfg = qwen_4b();
+        let a6000_vram = GpuVramInfo {
+            total_bytes: 48 * BYTES_PER_GB,
+            source: VramSource::NvidiaSmi,
+        };
+        let available = available_for_training_bytes_with_meminfo(&a6000_vram, None);
+        let est = estimate_step_working_set(
+            &cfg,
+            65_536,
+            16,
+            4,
+            WeightResidency::SingleCopy,
+            false,
+        );
+        assert!(
+            est.total_bytes > available,
+            "64k-token Qwen3.5-4B SFT must be rejected on an A6000 CUDA budget; \
+             estimate={} ({:.2} GB), available={} ({:.2} GB)",
+            est.total_bytes,
+            est.total_bytes as f64 / BYTES_PER_GB as f64,
+            available,
+            available as f64 / BYTES_PER_GB as f64,
+        );
+    }
+
+    #[test]
     fn available_for_training_handles_unknown_vram() {
         let none = GpuVramInfo {
             total_bytes: 0,
