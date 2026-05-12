@@ -7,6 +7,23 @@
 **Status:** Phase ledger and first implementation target. This branch is intentionally incremental:
 each CUDA training slice must land with tests and a pushed commit before the next larger slice.
 
+## Branch Progress
+
+| Commit | Slice | Evidence |
+| --- | --- | --- |
+| `c782a854` | Baseline CUDA modernization ledger | This report, derived from the Vulkan branch completion criteria. |
+| `6ad88446` | Backend training capability telemetry | `BackendRuntime::training_capabilities`, CUDA/Vulkan profiles, `ModelRunner` startup log. |
+| `0b1b8d2f` | CUDA TensorId residency lifecycle registry | CUDA implements register/has/update/evict metadata hooks; no side-buffer ownership claimed. |
+| `c67de64f` | Registered CUDA LoRA delta path | `CudaBackend::lora_delta_resident` engages for registered CUDA A/B and delegates to candle CUDA autograd. |
+| `6dba1644` | CUDA training projection hook | `CudaBackend::linear_prefill_apply` routes compatible CUDA projection matmuls through the backend seam using candle CUDA autograd. |
+
+Local validation so far:
+
+- `cargo test -p kiln-model backend::tests::portable_training_capabilities_are_conservative --lib --quiet` passed after each code slice.
+- `git diff --check` passed before each code commit.
+- `cargo fmt --all --check` is blocked in this workspace because the active musl Rust toolchain lacks `rustfmt`.
+- CUDA-feature tests are blocked in this workspace because `cudarc` cannot find `nvcc`; they must run on the standard CUDA build host/pod.
+
 ## Executive Summary
 
 The Vulkan training modernization branch established the target shape for backend training:
