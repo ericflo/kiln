@@ -366,8 +366,12 @@ pub fn vk_full_attention_layer(
     vk_add(&after_attn, &mlp_out)
 }
 
-/// Dispatch one transformer layer: Full vs Linear (GDN). Phase 1
-/// only handles Full; Linear bails until Phase 5 lands.
+/// Dispatch one transformer layer: Full vs Linear (GDN).
+///
+/// LinearAttention requires the per-example GDN state to be threaded
+/// through. Use `vk_transformer_layer_with_state` when training on a
+/// hybrid model; the no-state variant bails on GDN layers (synthetic
+/// FullAttn-only tests don't need the state plumbing).
 pub fn vk_transformer_layer(
     x: &VkTensor,
     w: &VkLayerWeights,
@@ -376,10 +380,349 @@ pub fn vk_transformer_layer(
     match w {
         VkLayerWeights::FullAttention(full) => vk_full_attention_layer(x, full, lora),
         VkLayerWeights::LinearAttention(_) => bail!(
-            "vk_transformer_layer: LinearAttention (GDN) layer encountered — vk-native GDN \
-             forward+backward is Phase 5; not yet implemented"
+            "vk_transformer_layer: LinearAttention (GDN) layer requires state — \
+             use vk_transformer_layer_with_state and pass &mut VkLinearAttentionState"
         ),
     }
+}
+
+/// Run one transformer layer with optional GDN state plumbing.
+///
+/// `gdn_layer_idx` is the index of this layer within the
+/// `VkLinearAttentionState::layers` vec — caller must maintain a
+/// mapping from absolute layer idx to GDN-only layer idx.
+pub fn vk_transformer_layer_with_state(
+    x: &VkTensor,
+    w: &VkLayerWeights,
+    lora: &VkLoraLayer,
+    state: Option<(
+        &mut kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState,
+        usize,
+    )>,
+) -> Result<VkTensor> {
+    match w {
+        VkLayerWeights::FullAttention(full) => vk_full_attention_layer(x, full, lora),
+        VkLayerWeights::LinearAttention(linear) => {
+            let (state, layer_idx) = state.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "vk_transformer_layer_with_state: LinearAttention layer needs state"
+                )
+            })?;
+            vk_gdn_layer_forward(x, linear, lora, state, layer_idx)
+        }
+    }
+}
+
+/// Forward pass for one GDN (LinearAttention) layer.
+///
+/// Pipeline (mirrors candle's gdn_chunkwise_recurrence orchestration
+/// in forward.rs):
+///   1. RMSNorm(x)
+///   2. in_proj_qkv → mixed_qkv [B, T, 2*nk*dk + nv*dv]
+///      in_proj_z   → z         [B, T, nv*dv]
+///      in_proj_a/b → a, b      [B, T, nv]   (gate inputs)
+///   3. conv1d on mixed_qkv along the time axis (depthwise + SiLU)
+///   4. Split conv1d output into Q [B,T,nk*dk], K [B,T,nk*dk], V [B,T,nv*dv]
+///   5. Reshape Q,K → [B, nk, T, dk]; V → [B, nv, T, dv]; permute to
+///      [B, nv, T, *] (replicate K-heads to V-head count for GQA when nv > nk)
+///   6. Per-head q_norm/k_norm if present (Qwen3.5 GDN variant — TODO)
+///   7. (β, g) = vk_gdn_gates(a, b, a_log, dt_bias)
+///   8. out_chunkwise = vk_gdn_chunkwise(q, k, v, β, g, &state, C=64)
+///      → [B, nv, T, dv]
+///   9. Reshape to [B, T, nv*dv]
+///  10. out = vk_gdn_gated_rms_norm(out_chunkwise_flat, z, gated_norm)
+///  11. residual + out_proj → x_out
+///
+/// Phase 5.3: this is the v1 composition. Real Qwen3.5-4B has 8
+/// FullAttn + 24 GDN layers; this enables training the 24 GDN ones
+/// once VkModelWeights::from_gpu_weights is exercised end-to-end.
+#[allow(clippy::too_many_arguments)]
+fn vk_gdn_layer_forward(
+    x: &VkTensor,
+    w: &VkLinearAttentionWeights,
+    _lora: &VkLoraLayer,
+    state: &mut kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState,
+    gdn_layer_idx: usize,
+) -> Result<VkTensor> {
+    use kiln_vulkan_kernel::vk_ops::conv1d::vk_causal_conv1d_no_grad;
+    use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise;
+    use kiln_vulkan_kernel::vk_ops::gdn_gated_rms_norm::vk_gdn_gated_rms_norm_no_grad;
+    use kiln_vulkan_kernel::vk_ops::gdn_gates::vk_gdn_gates_no_grad;
+
+    anyhow::ensure!(
+        gdn_layer_idx < state.layers.len(),
+        "vk_gdn_layer_forward: gdn_layer_idx {} out of range",
+        gdn_layer_idx
+    );
+    let t = x.shape()[0];
+    let _hidden = x.shape()[1];
+    let dk = w.head_dim_k;
+    let dv = w.head_dim_v;
+    let nk = w.heads_k;
+    let nv = w.heads_v;
+    let qk_dim = nk * dk;
+    let v_dim = nv * dv;
+    let qkv_dim = 2 * qk_dim + v_dim;
+    let conv_kernel = w.conv_kernel;
+
+    // 1. Pre-mixer RMSNorm
+    let h_norm = vk_rmsnorm(x, &w.layer_norm, w.eps)?;
+
+    // 2. In-projections
+    let mixed_qkv = vk_linear_with_lora(&h_norm, &w.in_proj_qkv, _lora.in_proj_qkv.as_ref())?;
+    let z_raw = vk_linear_with_lora(&h_norm, &w.in_proj_z, _lora.in_proj_z.as_ref())?;
+    let a_proj = vk_linear_with_lora(&h_norm, &w.in_proj_a, None)?;
+    let b_proj = vk_linear_with_lora(&h_norm, &w.in_proj_b, None)?;
+
+    // 3. conv1d expects [B, channels, seq_len] — our mixed_qkv is
+    //    [T, qkv_dim] (B=1 implicit for SFT). Reshape: assume B=1, then
+    //    [T, qkv_dim] → [1, qkv_dim, T] requires permute. Use a small
+    //    helper.
+    let batch = 1; // SFT examples are processed one at a time
+    let mixed_3d = vk_reshape(&mixed_qkv, &[batch, t, qkv_dim])?;
+    // permute (B, T, C) → (B, C, T): use vk_permute_rh_to_hr from the
+    // existing op surface (it does row-head transpose). For now do a
+    // CPU permute since this is correctness-first.
+    let mixed_data = mixed_3d.to_vec_f32()?;
+    let mut chw = vec![0.0_f32; batch * qkv_dim * t];
+    for b in 0..batch {
+        for tt in 0..t {
+            for c in 0..qkv_dim {
+                chw[b * qkv_dim * t + c * t + tt] = mixed_data[b * t * qkv_dim + tt * qkv_dim + c];
+            }
+        }
+    }
+    let mixed_chw_t = {
+        use kiln_vulkan_kernel::VulkanBuffer;
+        let device = mixed_qkv.device();
+        let bytes: Vec<u8> = chw.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            &bytes,
+        )?;
+        VkTensor::from_buffer(
+            Arc::new(buf),
+            vec![batch, qkv_dim, t],
+            VkDType::F32,
+            Arc::clone(device),
+        )
+    };
+    // Conv1d (depthwise + SiLU)
+    let conv_out = vk_causal_conv1d_no_grad(
+        &mixed_chw_t,
+        &w.conv1d,
+        &state.layers[gdn_layer_idx].conv_state,
+        batch,
+        qkv_dim,
+        t,
+        conv_kernel,
+    )?;
+    // Permute back (B, C, T) → (B, T, C)
+    let conv_data = conv_out.to_vec_f32()?;
+    let mut conv_btc = vec![0.0_f32; batch * t * qkv_dim];
+    for b in 0..batch {
+        for tt in 0..t {
+            for c in 0..qkv_dim {
+                conv_btc[b * t * qkv_dim + tt * qkv_dim + c] =
+                    conv_data[b * qkv_dim * t + c * t + tt];
+            }
+        }
+    }
+    let conv_btc_t = {
+        use kiln_vulkan_kernel::VulkanBuffer;
+        let device = conv_out.device();
+        let bytes: Vec<u8> = conv_btc.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            &bytes,
+        )?;
+        VkTensor::from_buffer(
+            Arc::new(buf),
+            vec![batch, t, qkv_dim],
+            VkDType::F32,
+            Arc::clone(device),
+        )
+    };
+
+    // 4. Split into Q / K / V along channel axis
+    let conv_3d = vk_reshape(&conv_btc_t, &[batch * t, qkv_dim])?;
+    let q_flat = vk_narrow_lastdim(&conv_3d, 0, qk_dim)?;
+    let k_flat = vk_narrow_lastdim(&conv_3d, qk_dim, qk_dim)?;
+    let v_flat = vk_narrow_lastdim(&conv_3d, 2 * qk_dim, v_dim)?;
+
+    // 5. Reshape to [B, nv, T, dk] / [B, nv, T, dv]; for GQA expand K → nv heads.
+    // First [B*T, qk_dim] → [B, T, nk, dk]; permute → [B, nk, T, dk]
+    let q_4 = vk_reshape(&q_flat, &[batch, t, nk, dk])?;
+    let k_4 = vk_reshape(&k_flat, &[batch, t, nk, dk])?;
+    let v_4 = vk_reshape(&v_flat, &[batch, t, nv, dv])?;
+    // CPU permute (B, T, H, D) → (B, H, T, D) for q/k/v
+    let permute_bth_to_bht = |t_in: &VkTensor, nh: usize, d: usize| -> Result<VkTensor> {
+        let data = t_in.to_vec_f32()?;
+        let mut out = vec![0.0_f32; batch * nh * t * d];
+        for b in 0..batch {
+            for tt in 0..t {
+                for h in 0..nh {
+                    for dd in 0..d {
+                        out[((b * nh + h) * t + tt) * d + dd] =
+                            data[((b * t + tt) * nh + h) * d + dd];
+                    }
+                }
+            }
+        }
+        let device = t_in.device();
+        let bytes: Vec<u8> = out.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            &bytes,
+        )?;
+        Ok(VkTensor::from_buffer(
+            Arc::new(buf),
+            vec![batch, nh, t, d],
+            VkDType::F32,
+            Arc::clone(device),
+        ))
+    };
+    let q_bnvtd = permute_bth_to_bht(&q_4, nk, dk)?;
+    let k_bnvtd = permute_bth_to_bht(&k_4, nk, dk)?;
+    let v_bnvtd = permute_bth_to_bht(&v_4, nv, dv)?;
+    // GQA expand for K (replicate nk → nv) — matches candle
+    let k_expanded = if nk < nv {
+        let group = nv / nk;
+        let kdata = k_bnvtd.to_vec_f32()?;
+        let mut expanded = vec![0.0_f32; batch * nv * t * dk];
+        for b in 0..batch {
+            for h in 0..nv {
+                let src_h = h / group;
+                for tt in 0..t {
+                    for dd in 0..dk {
+                        expanded[((b * nv + h) * t + tt) * dk + dd] =
+                            kdata[((b * nk + src_h) * t + tt) * dk + dd];
+                    }
+                }
+            }
+        }
+        let device = k_bnvtd.device();
+        let bytes: Vec<u8> = expanded.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        kiln_vulkan_kernel::VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            &bytes,
+        )?;
+        VkTensor::from_buffer(
+            Arc::new(buf),
+            vec![batch, nv, t, dk],
+            VkDType::F32,
+            Arc::clone(device),
+        )
+    } else {
+        k_bnvtd
+    };
+
+    // 6. (Per-head q_norm/k_norm) — Qwen3.5 GDN variant. Currently
+    //    VkLinearAttentionWeights doesn't carry q_norm/k_norm yet
+    //    (the inventory shows GDN inference uses `gdn_qk_norm` helper
+    //    that doesn't have a learned weight in this codebase).
+    //    Skip for v1.
+
+    // 7. Gates
+    let a_3 = vk_reshape(&a_proj, &[batch, t, nv])?;
+    let b_3 = vk_reshape(&b_proj, &[batch, t, nv])?;
+    let (beta, g_gates) =
+        vk_gdn_gates_no_grad(&a_3, &b_3, &w.a_log, &w.dt_bias, nv)?;
+
+    // 8. Chunkwise recurrence (autograd-aware)
+    let recurrent_state = state.layers[gdn_layer_idx].recurrent_state.clone();
+    let mut state_t = VkTensor::from_buffer(
+        recurrent_state,
+        vec![batch, nv, dk, dv],
+        VkDType::F32,
+        Arc::clone(x.device()),
+    );
+    let chunk_c = if t < 64 { t.max(1) } else { 64 };
+    let out_chunkwise = vk_gdn_chunkwise(&q_bnvtd, &k_expanded, &v_bnvtd, &beta, &g_gates, &mut state_t, chunk_c)?;
+    // Save updated recurrent state back
+    state.layers[gdn_layer_idx].recurrent_state = Arc::clone(state_t.buffer());
+
+    // 9. Permute back [B, nv, T, dv] → [B, T, nv*dv]
+    let out_data = out_chunkwise.to_vec_f32()?;
+    let mut flat = vec![0.0_f32; batch * t * v_dim];
+    for b in 0..batch {
+        for tt in 0..t {
+            for h in 0..nv {
+                for dd in 0..dv {
+                    flat[(b * t + tt) * v_dim + h * dv + dd] =
+                        out_data[((b * nv + h) * t + tt) * dv + dd];
+                }
+            }
+        }
+    }
+    let flat_t = {
+        use kiln_vulkan_kernel::VulkanBuffer;
+        let device = out_chunkwise.device();
+        let bytes: Vec<u8> = flat.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            &bytes,
+        )?;
+        VkTensor::from_buffer(
+            Arc::new(buf),
+            vec![batch * t, v_dim],
+            VkDType::F32,
+            Arc::clone(device),
+        )
+    };
+
+    // 10. Gated RMSNorm: out = (out / rms(out)) · silu(z) · gated_norm
+    let z_2 = vk_reshape(&z_raw, &[batch * t, v_dim])?;
+    let normed = vk_gdn_gated_rms_norm_no_grad(&flat_t, &z_2, &w.gated_norm, w.eps)?;
+
+    // 11. Out projection + residual
+    let out_proj_out = vk_linear_with_lora(&normed, &w.out_proj, _lora.gdn_out_proj.as_ref())?;
+    vk_add(x, &out_proj_out)
 }
 
 fn vk_swiglu_mlp_with_lora(
