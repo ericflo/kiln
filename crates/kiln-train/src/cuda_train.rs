@@ -17,6 +17,92 @@ use std::path::Path;
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
 
+/// Trainable LoRA pair held as CUDA training tensors.
+#[derive(Clone)]
+pub struct CudaLoraPair {
+    pub a: CudaTrainTensor,
+    pub b: CudaTrainTensor,
+    pub a_id: TensorId,
+    pub b_id: TensorId,
+    pub scale: f32,
+}
+
+impl CudaLoraPair {
+    /// Initialize a fresh LoRA pair on the CUDA device.
+    ///
+    /// A is Kaiming-uniform and B is zero, matching the existing trainer and
+    /// Vulkan-native initialization contract.
+    pub fn init_kaiming(
+        device: &Device,
+        in_features: usize,
+        out_features: usize,
+        rank: usize,
+        alpha: f32,
+        seed: u64,
+    ) -> Result<Self> {
+        use rand::rngs::StdRng;
+        use rand::{RngExt, SeedableRng};
+
+        ensure!(rank > 0, "CudaLoraPair rank must be non-zero");
+        ensure!(
+            in_features > 0 && out_features > 0,
+            "CudaLoraPair feature dimensions must be non-zero"
+        );
+
+        let mut rng = StdRng::seed_from_u64(seed);
+        let bound = (1.0_f32 / (in_features as f32)).sqrt();
+        let a_data: Vec<f32> = (0..(rank * in_features))
+            .map(|_| rng.random_range(-bound..bound))
+            .collect();
+        let b_data: Vec<f32> = vec![0.0_f32; out_features * rank];
+
+        let a_tensor = Tensor::from_vec(a_data, (rank, in_features), device)?;
+        let a_id = a_tensor.id();
+        let b_tensor = Tensor::from_vec(b_data, (out_features, rank), device)?;
+        let b_id = b_tensor.id();
+        Ok(Self {
+            a: CudaTrainTensor::parameter(a_tensor, a_id)?,
+            b: CudaTrainTensor::parameter(b_tensor, b_id)?,
+            a_id,
+            b_id,
+            scale: alpha / (rank as f32),
+        })
+    }
+}
+
+/// Trainable LoRA params for one transformer layer.
+#[derive(Clone, Default)]
+pub struct CudaLoraLayer {
+    pub q_proj: Option<CudaLoraPair>,
+    pub k_proj: Option<CudaLoraPair>,
+    pub v_proj: Option<CudaLoraPair>,
+    pub o_proj: Option<CudaLoraPair>,
+    pub gate_proj: Option<CudaLoraPair>,
+    pub up_proj: Option<CudaLoraPair>,
+    pub down_proj: Option<CudaLoraPair>,
+    pub in_proj_qkv: Option<CudaLoraPair>,
+    pub in_proj_z: Option<CudaLoraPair>,
+    pub gdn_out_proj: Option<CudaLoraPair>,
+}
+
+fn cuda_lora_pairs<'a>(
+    layers: &'a [CudaLoraLayer],
+) -> impl Iterator<Item = &'a CudaLoraPair> + 'a {
+    layers.iter().flat_map(|layer| {
+        [
+            layer.q_proj.as_ref(),
+            layer.k_proj.as_ref(),
+            layer.v_proj.as_ref(),
+            layer.o_proj.as_ref(),
+            layer.gate_proj.as_ref(),
+            layer.up_proj.as_ref(),
+            layer.down_proj.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+    })
+}
+
 pub fn allocate_cuda_adamw_state(params: &[CudaTrainTensor]) -> Result<CudaAdamWBook> {
     let mut states = HashMap::new();
     for param in params {
@@ -24,6 +110,15 @@ pub fn allocate_cuda_adamw_state(params: &[CudaTrainTensor]) -> Result<CudaAdamW
             continue;
         };
         states.insert(param_id, CudaAdamWState::zeros_like(param)?);
+    }
+    Ok(states)
+}
+
+pub fn allocate_cuda_lora_adamw_state(lora_layers: &[CudaLoraLayer]) -> Result<CudaAdamWBook> {
+    let mut states = HashMap::new();
+    for pair in cuda_lora_pairs(lora_layers) {
+        states.insert(pair.a_id, CudaAdamWState::zeros_like(&pair.a)?);
+        states.insert(pair.b_id, CudaAdamWState::zeros_like(&pair.b)?);
     }
     Ok(states)
 }
@@ -171,6 +266,57 @@ pub fn save_cuda_training_tensors(
     }
     candle_core::safetensors::save(&tensors, output_path)
         .with_context(|| format!("save CUDA training tensors {}", output_path.display()))?;
+    Ok(())
+}
+
+/// Save CUDA-native LoRA adapter tensors using PEFT-compatible safetensors keys.
+pub fn save_cuda_lora_adapter(
+    lora_layers: &[CudaLoraLayer],
+    rank: usize,
+    alpha: f32,
+    output_path: &Path,
+) -> Result<()> {
+    let mut tensors: HashMap<String, Tensor> = HashMap::new();
+    for (li, layer) in lora_layers.iter().enumerate() {
+        for (name, proj) in [
+            ("q_proj", layer.q_proj.as_ref()),
+            ("k_proj", layer.k_proj.as_ref()),
+            ("v_proj", layer.v_proj.as_ref()),
+            ("o_proj", layer.o_proj.as_ref()),
+            ("gate_proj", layer.gate_proj.as_ref()),
+            ("up_proj", layer.up_proj.as_ref()),
+            ("down_proj", layer.down_proj.as_ref()),
+        ] {
+            let Some(pair) = proj else { continue };
+            tensors.insert(
+                format!(
+                    "base_model.model.model.layers.{}.{}.lora_A.weight",
+                    li, name
+                ),
+                pair.a
+                    .as_tensor()
+                    .to_dtype(DType::F32)
+                    .with_context(|| format!("convert CUDA LoRA layer {li} {name} A to f32"))?
+                    .to_device(&Device::Cpu)
+                    .with_context(|| format!("read CUDA LoRA layer {li} {name} A to CPU"))?,
+            );
+            tensors.insert(
+                format!(
+                    "base_model.model.model.layers.{}.{}.lora_B.weight",
+                    li, name
+                ),
+                pair.b
+                    .as_tensor()
+                    .to_dtype(DType::F32)
+                    .with_context(|| format!("convert CUDA LoRA layer {li} {name} B to f32"))?
+                    .to_device(&Device::Cpu)
+                    .with_context(|| format!("read CUDA LoRA layer {li} {name} B to CPU"))?,
+            );
+        }
+    }
+    candle_core::safetensors::save(&tensors, output_path)
+        .with_context(|| format!("save CUDA LoRA adapter {}", output_path.display()))?;
+    let _ = (rank, alpha);
     Ok(())
 }
 
@@ -575,6 +721,66 @@ mod tests {
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(saved, expected);
+        let _ = std::fs::remove_file(&tmp);
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_lora_adapter_save_uses_peft_keys() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda LoRA adapter save smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let q_proj = CudaLoraPair::init_kaiming(&device, 3, 2, 2, 4.0, 0xC0DA_10AA)?;
+        let up_proj = CudaLoraPair::init_kaiming(&device, 3, 4, 2, 4.0, 0xC0DA_10BB)?;
+        let q_a_expected = q_proj.a.to_vec_f32()?;
+        let q_b_expected = q_proj.b.to_vec_f32()?;
+        let up_a_expected = up_proj.a.to_vec_f32()?;
+        let up_b_expected = up_proj.b.to_vec_f32()?;
+        let layers = vec![CudaLoraLayer {
+            q_proj: Some(q_proj),
+            up_proj: Some(up_proj),
+            ..Default::default()
+        }];
+        let adamw = allocate_cuda_lora_adamw_state(&layers)?;
+        assert_eq!(adamw.len(), 4);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "kiln-cuda-lora-adapter-{}.safetensors",
+            std::process::id()
+        ));
+        save_cuda_lora_adapter(&layers, 2, 4.0, &tmp)?;
+
+        let loaded = candle_core::safetensors::load(&tmp, &Device::Cpu)?;
+        let q_a = loaded
+            .get("base_model.model.model.layers.0.q_proj.lora_A.weight")
+            .context("missing q_proj lora_A")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let q_b = loaded
+            .get("base_model.model.model.layers.0.q_proj.lora_B.weight")
+            .context("missing q_proj lora_B")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let up_a = loaded
+            .get("base_model.model.model.layers.0.up_proj.lora_A.weight")
+            .context("missing up_proj lora_A")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let up_b = loaded
+            .get("base_model.model.model.layers.0.up_proj.lora_B.weight")
+            .context("missing up_proj lora_B")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        assert_eq!(q_a, q_a_expected);
+        assert_eq!(q_b, q_b_expected);
+        assert_eq!(up_a, up_a_expected);
+        assert_eq!(up_b, up_b_expected);
+        assert_eq!(loaded.len(), 4);
         let _ = std::fs::remove_file(&tmp);
         Ok(())
     }
