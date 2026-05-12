@@ -389,6 +389,43 @@ pub fn cuda_sum_all(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     CudaTrainTensor::from_op(out, grad_fn)
 }
 
+pub fn cuda_matmul(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrainTensor> {
+    ensure!(
+        lhs.dims().len() == 2 && rhs.dims().len() == 2,
+        "cuda_matmul: expected 2D inputs, got lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dims()[1] == rhs.dims()[0],
+        "cuda_matmul: inner-dim mismatch lhs={:?} rhs={:?}",
+        lhs.dims(),
+        rhs.dims()
+    );
+    ensure!(
+        lhs.dtype() == rhs.dtype(),
+        "cuda_matmul: dtype mismatch lhs={:?} rhs={:?}",
+        lhs.dtype(),
+        rhs.dtype()
+    );
+    let out = lhs
+        .as_tensor()
+        .matmul(rhs.as_tensor())
+        .context("cuda_matmul: candle CUDA matmul")?;
+    let needs_grad = lhs.requires_grad()
+        || lhs.grad_fn().is_some()
+        || lhs.param_id().is_some()
+        || rhs.requires_grad()
+        || rhs.grad_fn().is_some()
+        || rhs.param_id().is_some();
+    let grad_fn = needs_grad.then(|| {
+        Arc::new(MatmulBackward {
+            inputs: vec![lhs.clone(), rhs.clone()],
+        }) as Arc<dyn CudaBackwardOp>
+    });
+    CudaTrainTensor::from_op(out, grad_fn)
+}
+
 #[derive(Debug)]
 struct AddBackward {
     inputs: Vec<CudaTrainTensor>,
@@ -465,6 +502,57 @@ impl CudaBackwardOp for SumAllBackward {
             .broadcast_as(input.as_tensor().shape())
             .context("cuda_sum_all backward: broadcast scalar grad")?;
         Ok(vec![Some(CudaTrainTensor::new(grad)?)])
+    }
+}
+
+#[derive(Debug)]
+struct MatmulBackward {
+    inputs: Vec<CudaTrainTensor>,
+}
+
+impl CudaBackwardOp for MatmulBackward {
+    fn op_name(&self) -> &'static str {
+        "cuda_matmul"
+    }
+
+    fn input_refs(&self) -> &[CudaTrainTensor] {
+        &self.inputs
+    }
+
+    fn backward(&self, grad_out: &CudaTrainTensor) -> Result<Vec<Option<CudaTrainTensor>>> {
+        ensure!(
+            self.inputs.len() == 2,
+            "cuda_matmul backward expected two inputs, got {}",
+            self.inputs.len()
+        );
+        let lhs = &self.inputs[0];
+        let rhs = &self.inputs[1];
+        let grad = grad_out
+            .as_tensor()
+            .contiguous()
+            .context("cuda_matmul backward: grad_out contiguous")?;
+        let rhs_t = rhs
+            .as_tensor()
+            .t()
+            .context("cuda_matmul backward: rhs transpose")?
+            .contiguous()
+            .context("cuda_matmul backward: rhs_t contiguous")?;
+        let lhs_t = lhs
+            .as_tensor()
+            .t()
+            .context("cuda_matmul backward: lhs transpose")?
+            .contiguous()
+            .context("cuda_matmul backward: lhs_t contiguous")?;
+        let lhs_grad = grad
+            .matmul(&rhs_t)
+            .context("cuda_matmul backward: lhs grad")?;
+        let rhs_grad = lhs_t
+            .matmul(&grad)
+            .context("cuda_matmul backward: rhs grad")?;
+        Ok(vec![
+            Some(CudaTrainTensor::new(lhs_grad)?),
+            Some(CudaTrainTensor::new(rhs_grad)?),
+        ])
     }
 }
 
@@ -789,6 +877,47 @@ mod tests {
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
             vec![2.0, 4.0, 6.0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cuda_matmul_sum_backward_matches_expected_grads() -> Result<()> {
+        let device = match Device::new_cuda(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!("CUDA unavailable, skipping cuda_matmul backward smoke: {err}");
+                return Ok(());
+            }
+        };
+
+        let lhs_tensor = Tensor::from_vec(
+            vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0],
+            (2usize, 3usize),
+            &device,
+        )?;
+        let rhs_tensor = Tensor::from_vec(
+            vec![5.0f32, 6.0, 7.0, 8.0, 9.0, 10.0],
+            (3usize, 2usize),
+            &device,
+        )?;
+        let lhs_id = lhs_tensor.id();
+        let rhs_id = rhs_tensor.id();
+        let lhs = CudaTrainTensor::parameter(lhs_tensor, lhs_id)?;
+        let rhs = CudaTrainTensor::parameter(rhs_tensor, rhs_id)?;
+        let product = cuda_matmul(&lhs, &rhs)?;
+        let loss = cuda_sum_all(&product)?;
+
+        assert_eq!(product.to_vec_f32()?, vec![46.0, 52.0, 109.0, 124.0]);
+        assert_eq!(loss.to_vec_f32()?, vec![331.0]);
+        let grads = cuda_backward(&loss)?;
+        assert_eq!(
+            grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
+            vec![11.0, 15.0, 19.0, 11.0, 15.0, 19.0]
+        );
+        assert_eq!(
+            grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
+            vec![5.0, 5.0, 7.0, 7.0, 9.0, 9.0]
         );
         Ok(())
     }
