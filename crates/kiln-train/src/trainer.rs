@@ -2424,9 +2424,9 @@ fn accumulate_grads(
         if let Some(grad) = src.get(var.as_tensor()) {
             let id = var.as_tensor().id();
             if let Some(existing) = dst.get(&id) {
-                dst.insert(id, (existing + grad)?);
+                dst.insert(id, (existing + grad)?.detach());
             } else {
-                dst.insert(id, grad.clone());
+                dst.insert(id, grad.detach());
             }
         }
     }
@@ -3457,6 +3457,13 @@ fn checkpointed_forward_backward(
         })?;
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = start,
+                end_layer = end,
+                "spooling checkpoint boundary segment"
+            );
             current = model_forward_segment(
                 backend,
                 current,
@@ -3476,6 +3483,13 @@ fn checkpointed_forward_backward(
             synchronize_checkpoint_boundary(device, || {
                 format!("synchronize spooled checkpoint boundary {} after save", seg_idx + 1)
             })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = start,
+                end_layer = end,
+                "spooled checkpoint boundary segment"
+            );
         }
         spooled_final_hidden = Some(current);
         tracing::info!(
@@ -3582,6 +3596,9 @@ fn checkpointed_forward_backward(
     .detach();
     drop(loss);
     drop(final_hidden);
+    synchronize_checkpoint_boundary(device, || {
+        "synchronize checkpointed final-boundary loss cleanup".to_string()
+    })?;
 
     // Step 3: Walk segments in reverse. Each segment is recomputed with
     // autograd tracking only for that segment, and the incoming hidden-state
@@ -3594,6 +3611,13 @@ fn checkpointed_forward_backward(
 
     for seg_idx in (0..num_segments).rev() {
         let (seg_start, seg_end) = segments[seg_idx];
+        tracing::info!(
+            segment = seg_idx + 1,
+            num_segments,
+            start_layer = seg_start,
+            end_layer = seg_end,
+            "checkpointed reverse segment begin"
+        );
 
         // Start from the detached boundary state for this segment. Wrapping it
         // in a fresh Var lets Candle return d(loss)/d(segment_input), which
@@ -3664,6 +3688,23 @@ fn checkpointed_forward_backward(
                 .clone()
                 .detach();
         }
+        drop(grads);
+        drop(injected);
+        drop(upstream_f32);
+        drop(seg_output_f32);
+        drop(seg_output);
+        drop(seg_input_var);
+        drop(seg_input);
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize checkpointed reverse segment {seg_idx} cleanup")
+        })?;
+        tracing::info!(
+            segment = seg_idx + 1,
+            num_segments,
+            start_layer = seg_start,
+            end_layer = seg_end,
+            "checkpointed reverse segment complete"
+        );
     }
 
     // Phase 3.1 hook: evict every boundary-state registry entry now
