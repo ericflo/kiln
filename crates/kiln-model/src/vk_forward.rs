@@ -543,47 +543,12 @@ fn vk_gdn_layer_forward(
     let b_proj = vk_linear_with_lora(&h_norm, &w.in_proj_b, None)?;
 
     // 3. conv1d expects [B, channels, seq_len] — our mixed_qkv is
-    //    [T, qkv_dim] (B=1 implicit for SFT). Reshape: assume B=1, then
-    //    [T, qkv_dim] → [1, qkv_dim, T] requires permute. Use a small
-    //    helper.
+    //    [T, qkv_dim] (B=1 implicit for SFT). Use vk_transpose_2d for
+    //    the (T, C) → (C, T) permute, then reshape to [1, C, T].
     let batch = 1; // SFT examples are processed one at a time
-    let mixed_3d = vk_reshape(&mixed_qkv, &[batch, t, qkv_dim])?;
-    // permute (B, T, C) → (B, C, T): use vk_permute_rh_to_hr from the
-    // existing op surface (it does row-head transpose). For now do a
-    // CPU permute since this is correctness-first.
-    let mixed_data = mixed_3d.to_vec_f32()?;
-    let mut chw = vec![0.0_f32; batch * qkv_dim * t];
-    for b in 0..batch {
-        for tt in 0..t {
-            for c in 0..qkv_dim {
-                chw[b * qkv_dim * t + c * t + tt] = mixed_data[b * t * qkv_dim + tt * qkv_dim + c];
-            }
-        }
-    }
-    let mixed_chw_t = {
-        use kiln_vulkan_kernel::VulkanBuffer;
-        let device = mixed_qkv.device();
-        let bytes: Vec<u8> = chw.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let buf = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.len().max(4) as u64,
-        )?;
-        VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buf,
-            &bytes,
-        )?;
-        VkTensor::from_buffer(
-            Arc::new(buf),
-            vec![batch, qkv_dim, t],
-            VkDType::F32,
-            Arc::clone(device),
-        )
-    };
+    use kiln_vulkan_kernel::vk_ops::shape::vk_transpose_2d_no_grad;
+    let mixed_ct = vk_transpose_2d_no_grad(&mixed_qkv)?; // [qkv_dim, T]
+    let mixed_chw_t = vk_reshape(&mixed_ct, &[batch, qkv_dim, t])?;
     // Conv1d (depthwise + SiLU)
     let conv_out = vk_causal_conv1d_no_grad(
         &mixed_chw_t,
@@ -594,41 +559,11 @@ fn vk_gdn_layer_forward(
         t,
         conv_kernel,
     )?;
-    // Permute back (B, C, T) → (B, T, C)
-    let conv_data = conv_out.to_vec_f32()?;
-    let mut conv_btc = vec![0.0_f32; batch * t * qkv_dim];
-    for b in 0..batch {
-        for tt in 0..t {
-            for c in 0..qkv_dim {
-                conv_btc[b * t * qkv_dim + tt * qkv_dim + c] =
-                    conv_data[b * qkv_dim * t + c * t + tt];
-            }
-        }
-    }
-    let conv_btc_t = {
-        use kiln_vulkan_kernel::VulkanBuffer;
-        let device = conv_out.device();
-        let bytes: Vec<u8> = conv_btc.iter().flat_map(|f| f.to_le_bytes()).collect();
-        let buf = VulkanBuffer::create_device_local(
-            device.device(),
-            device.device_local_mem_type(),
-            bytes.len().max(4) as u64,
-        )?;
-        VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &buf,
-            &bytes,
-        )?;
-        VkTensor::from_buffer(
-            Arc::new(buf),
-            vec![batch, t, qkv_dim],
-            VkDType::F32,
-            Arc::clone(device),
-        )
-    };
+    // Permute back (B, C, T) → (B, T, C). Reshape to [C, T] for B=1,
+    // then transpose_2d to [T, C], reshape to [B, T, C].
+    let conv_ct = vk_reshape(&conv_out, &[qkv_dim, t])?;
+    let conv_tc = vk_transpose_2d_no_grad(&conv_ct)?;
+    let conv_btc_t = vk_reshape(&conv_tc, &[batch, t, qkv_dim])?;
 
     // 4. Split into Q / K / V along channel axis
     let conv_3d = vk_reshape(&conv_btc_t, &[batch * t, qkv_dim])?;
