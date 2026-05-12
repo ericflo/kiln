@@ -1,0 +1,113 @@
+// vk_gdn_state_exit_bwd — backward of:
+//   S_new = p_last·S_in + k^T · (decay_last_col · W)
+//
+// Per (b, h):
+//   dS_in[kk, d]   += p_last · dS_exit[kk, d]
+//   dW[i, d]       += decay_last_col[i] · Σ_kk k[i, kk] · dS_exit[kk, d]
+//   dk[i, kk]      += decay_last_col[i] · Σ_d  W[i, d] · dS_exit[kk, d]
+//   d_decay[i]     += Σ_kk Σ_d k[i, kk] · W[i, d] · dS_exit[kk, d]
+//   d_p_last       += Σ_kk Σ_d S_in[kk, d] · dS_exit[kk, d]
+//
+// Layout: ONE workgroup per (b, h). Threads parallel across (i, d) or
+// (i, kk) sub-grids. Reductions for d_p_last and d_decay use shared
+// memory.
+//
+// Push: batch, nv, chunk, dk, dv.
+//
+// Bindings (11):
+//   in:  d_s_exit, decay_last_col, k_chunk, w, s_in, p_last
+//   out: d_s_in, d_w, d_k, d_decay, d_p_last
+//
+// All F32. Outputs are PARTIAL (the GdnChunkwiseBackward composer
+// adds them to running totals).
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint nv;
+    uint chunk;
+    uint dk;
+    uint dv;
+};
+
+layout(binding = 0)  readonly buffer DSExitBuf  { float data_d_s_exit[]; };
+layout(binding = 1)  readonly buffer DLCBuf     { float data_decay_last_col[]; };
+layout(binding = 2)  readonly buffer KChunkBuf  { float data_k[]; };
+layout(binding = 3)  readonly buffer WBuf       { float data_w[]; };
+layout(binding = 4)  readonly buffer SInBuf     { float data_s_in[]; };
+layout(binding = 5)  readonly buffer PLastBuf   { float data_p_last[]; };
+layout(binding = 6)  writeonly buffer DSInBuf   { float data_d_s_in[]; };
+layout(binding = 7)  writeonly buffer DWBuf     { float data_d_w[]; };
+layout(binding = 8)  writeonly buffer DKBuf     { float data_d_k[]; };
+layout(binding = 9)  writeonly buffer DDecBuf   { float data_d_decay[]; };
+layout(binding = 10) writeonly buffer DPLastBuf { float data_d_p_last[]; };
+
+shared float dpl_partial[64];
+
+void main() {
+    uint bh = gl_WorkGroupID.x;
+    if (bh >= batch * nv) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint blk = gl_WorkGroupSize.x;
+
+    uint s_base   = bh * dk * dv;
+    uint k_base   = bh * chunk * dk;
+    uint w_base   = bh * chunk * dv;
+    uint dlc_base = bh * chunk;
+    float p = data_p_last[bh];
+
+    // ---- dS_in += p · dS_exit, plus reduce d_p_last partial
+    float local_dpl = 0.0;
+    uint sb_total = dk * dv;
+    for (uint ix = tid; ix < sb_total; ix += blk) {
+        float dse_v = data_d_s_exit[s_base + ix];
+        data_d_s_in[s_base + ix] = p * dse_v;
+        local_dpl += data_s_in[s_base + ix] * dse_v;
+    }
+    dpl_partial[tid] = local_dpl;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1) {
+        if (tid < s) dpl_partial[tid] += dpl_partial[tid + s];
+        barrier();
+    }
+    if (tid == 0u) {
+        data_d_p_last[bh] = dpl_partial[0];
+    }
+
+    // ---- For each chunk position i in parallel:
+    //   compute decay_i, then build dW[i,:], dk[i,:], d_decay[i]
+    for (uint i = tid; i < chunk; i += blk) {
+        float dlc_i = data_decay_last_col[dlc_base + i];
+
+        // dW[i,d] = dlc_i · Σ_kk k[i,kk] · dS_exit[kk,d]
+        for (uint d = 0; d < dv; ++d) {
+            float acc = 0.0;
+            for (uint kk = 0; kk < dk; ++kk) {
+                acc += data_k[k_base + i * dk + kk] * data_d_s_exit[s_base + kk * dv + d];
+            }
+            data_d_w[w_base + i * dv + d] = dlc_i * acc;
+        }
+        // dk[i,kk] = dlc_i · Σ_d W[i,d] · dS_exit[kk,d]
+        for (uint kk = 0; kk < dk; ++kk) {
+            float acc = 0.0;
+            for (uint d = 0; d < dv; ++d) {
+                acc += data_w[w_base + i * dv + d] * data_d_s_exit[s_base + kk * dv + d];
+            }
+            data_d_k[k_base + i * dk + kk] = dlc_i * acc;
+        }
+        // d_decay[i] = Σ_kk Σ_d k[i,kk] · W[i,d] · dS_exit[kk,d]
+        float dec_acc = 0.0;
+        for (uint kk = 0; kk < dk; ++kk) {
+            for (uint d = 0; d < dv; ++d) {
+                dec_acc += data_k[k_base + i * dk + kk]
+                         * data_w[w_base + i * dv + d]
+                         * data_d_s_exit[s_base + kk * dv + d];
+            }
+        }
+        data_d_decay[dlc_base + i] = dec_acc;
+    }
+}

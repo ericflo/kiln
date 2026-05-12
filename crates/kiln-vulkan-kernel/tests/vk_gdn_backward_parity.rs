@@ -340,6 +340,72 @@ fn vk_gdn_chunk_scan_bwd_matches_cpu() -> Result<()> {
     Ok(())
 }
 
+// ---------------- vk_gdn_state_exit_bwd ----------------
+
+#[test]
+fn vk_gdn_state_exit_bwd_matches_cpu() -> Result<()> {
+    // Compare GPU shader to the CPU fallback (set via env var).
+    use kiln_vulkan_kernel::vk_ops::gdn_chunk_bwd::vk_gdn_state_exit_bwd_no_grad;
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let batch = 1;
+    let nv = 2;
+    let chunk = 4;
+    let dk = 4;
+    let dv = 3;
+
+    let dse: Vec<f32> = (0..(batch * nv * dk * dv))
+        .map(|i| ((i as f32) * 0.07).sin() * 0.2)
+        .collect();
+    let dlc: Vec<f32> = (0..(batch * nv * chunk))
+        .map(|i| 0.5 + ((i as f32) * 0.05).cos() * 0.1)
+        .collect();
+    let kc: Vec<f32> = (0..(batch * nv * chunk * dk))
+        .map(|i| ((i as f32) * 0.04 - 0.1).sin())
+        .collect();
+    let wd: Vec<f32> = (0..(batch * nv * chunk * dv))
+        .map(|i| ((i as f32) * 0.03 + 0.2).cos())
+        .collect();
+    let s: Vec<f32> = (0..(batch * nv * dk * dv))
+        .map(|i| ((i as f32) * 0.05 + 0.1).sin())
+        .collect();
+    let pl: Vec<f32> = (0..(batch * nv)).map(|i| 0.9 + (i as f32) * 0.01).collect();
+
+    let dse_t = upload(&dev, &dse, &[batch, nv, dk, dv])?;
+    let dlc_t = upload(&dev, &dlc, &[batch, nv, chunk])?;
+    let k_t = upload(&dev, &kc, &[batch, nv, chunk, dk])?;
+    let w_t = upload(&dev, &wd, &[batch, nv, chunk, dv])?;
+    let s_t = upload(&dev, &s, &[batch, nv, dk, dv])?;
+    let pl_t = upload(&dev, &pl, &[batch, nv])?;
+
+    // GPU path
+    let (gd_si, gd_w, gd_k, gd_dec, gd_pl) = vk_gdn_state_exit_bwd_no_grad(
+        &dse_t, &dlc_t, &k_t, &w_t, &s_t, &pl_t, batch, nv, chunk, dk, dv,
+    )?;
+
+    // CPU reference (run via env var). SAFETY: serial test execution
+    // (--test-threads=1 from CI command line), no concurrent
+    // access to the env. The env var is scoped to this test.
+    unsafe {
+        std::env::set_var("KILN_VK_GDN_STATE_EXIT_BWD_CPU", "1");
+    }
+    let (cd_si, cd_w, cd_k, cd_dec, cd_pl) = vk_gdn_state_exit_bwd_no_grad(
+        &dse_t, &dlc_t, &k_t, &w_t, &s_t, &pl_t, batch, nv, chunk, dk, dv,
+    )?;
+    unsafe {
+        std::env::remove_var("KILN_VK_GDN_STATE_EXIT_BWD_CPU");
+    }
+
+    let max_err = |a: &[f32], b: &[f32]| -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).fold(0.0_f32, f32::max)
+    };
+    assert!(max_err(&gd_si.to_vec_f32()?, &cd_si.to_vec_f32()?) < 1e-5);
+    assert!(max_err(&gd_w.to_vec_f32()?, &cd_w.to_vec_f32()?) < 1e-5);
+    assert!(max_err(&gd_k.to_vec_f32()?, &cd_k.to_vec_f32()?) < 1e-5);
+    assert!(max_err(&gd_dec.to_vec_f32()?, &cd_dec.to_vec_f32()?) < 1e-5);
+    assert!(max_err(&gd_pl.to_vec_f32()?, &cd_pl.to_vec_f32()?) < 1e-5);
+    Ok(())
+}
+
 // ---------------- vk_gdn_chunk_prep_bwd (most complex) ----------------
 
 #[test]

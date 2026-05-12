@@ -252,16 +252,20 @@ fn cpu_chunk_scan_bwd(
     ))
 }
 
-/// Backward of the state-exit stage:
-///   S_new = p_last·S_in + k^T · (decay_last_col · W)
-///   (where decay_last_col[i] is per-(b, h, i), broadcast over dv axis)
+/// Backward of the state-exit stage. GPU composition via existing
+/// vk_matmul_batched + elementwise ops:
 ///
-/// Given dS_exit, returns (dS_in_partial, dW_partial, dk_partial,
-/// d_decay_last_col, d_p_last). The "_partial" ones are added to the
-/// running totals from the chunk_scan_bwd / chunk_prep_bwd accumulators.
+///   dS_in       = p_last · dS_exit        (scalar broadcast)
+///   d_p_last    = Σ S_in[i,j] · dS_exit[i,j]
+///   tmp_dW      = k @ dS_exit              [B*nv, C, dv]   (NO decay)
+///   dW_extra    = tmp_dW · decay_last_col_broadcast(dv)
+///   tmp_dk      = W @ dS_exit^T            [B*nv, C, dk]   (NO decay)
+///   dk_extra    = tmp_dk · decay_last_col_broadcast(dk)
+///   d_decay[i]  = Σ_kk k[i,kk] · tmp_dk[i,kk]
+///   dG[C-1]     += d_p_last  (composed by chunkwise op)
+///   dG[i]       -= d_decay[i] (composed by chunkwise op)
 ///
-/// Phase 5 cross-chunk integration sums these into the per-input
-/// gradient buffers.
+/// CPU fallback via KILN_VK_GDN_STATE_EXIT_BWD_CPU=1.
 pub fn vk_gdn_state_exit_bwd_no_grad(
     d_s_exit: &VkTensor,       // [B, nv, dk, dv]
     decay_last_col: &VkTensor, // [B, nv, C]
@@ -275,6 +279,73 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
     dk: usize,
     dv: usize,
 ) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor, VkTensor)> {
+    if std::env::var("KILN_VK_GDN_STATE_EXIT_BWD_CPU").is_ok() {
+        return cpu_state_exit_bwd(
+            d_s_exit,
+            decay_last_col,
+            k_chunk,
+            w,
+            s_in,
+            p_last,
+            batch,
+            nv,
+            chunk,
+            dk,
+            dv,
+        );
+    }
+
+    let device = d_s_exit.device();
+    let d_s_in = alloc_f32(device, batch * nv * dk * dv)?;
+    let d_w = alloc_f32(device, batch * nv * chunk * dv)?;
+    let d_k = alloc_f32(device, batch * nv * chunk * dk)?;
+    let d_decay = alloc_f32(device, batch * nv * chunk)?;
+    let d_p_last = alloc_f32(device, batch * nv)?;
+
+    let workgroups = (batch * nv) as u32;
+    let push = [batch as u32, nv as u32, chunk as u32, dk as u32, dv as u32];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_gdn_state_exit_bwd",
+        &[
+            d_s_exit.buffer().handle(),
+            decay_last_col.buffer().handle(),
+            k_chunk.buffer().handle(),
+            w.buffer().handle(),
+            s_in.buffer().handle(),
+            p_last.buffer().handle(),
+            d_s_in.handle(),
+            d_w.handle(),
+            d_k.handle(),
+            d_decay.handle(),
+            d_p_last.handle(),
+        ],
+        &push,
+        workgroups,
+    )?;
+
+    Ok((
+        VkTensor::from_buffer(d_s_in, vec![batch, nv, dk, dv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_w, vec![batch, nv, chunk, dv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_k, vec![batch, nv, chunk, dk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_decay, vec![batch, nv, chunk], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_p_last, vec![batch, nv], VkDType::F32, Arc::clone(device)),
+    ))
+}
+
+fn cpu_state_exit_bwd(
+    d_s_exit: &VkTensor,
+    decay_last_col: &VkTensor,
+    k_chunk: &VkTensor,
+    w: &VkTensor,
+    s_in: &VkTensor,
+    p_last: &VkTensor,
+    batch: usize,
+    nv: usize,
+    chunk: usize,
+    dk: usize,
+    dv: usize,
+) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor, VkTensor)> {
     let device = d_s_exit.device();
     let dse = d_s_exit.to_vec_f32()?;
     let dlc = decay_last_col.to_vec_f32()?;
@@ -282,38 +353,27 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
     let wd = w.to_vec_f32()?;
     let s = s_in.to_vec_f32()?;
     let pl = p_last.to_vec_f32()?;
-
     let mut d_s_in = vec![0.0_f32; batch * nv * dk * dv];
     let mut d_w = vec![0.0_f32; batch * nv * chunk * dv];
     let mut d_k = vec![0.0_f32; batch * nv * chunk * dk];
     let mut d_decay = vec![0.0_f32; batch * nv * chunk];
     let mut d_p_last = vec![0.0_f32; batch * nv];
-
     for bh in 0..batch * nv {
         let s_base = bh * dk * dv;
         let k_base = bh * chunk * dk;
         let w_base = bh * chunk * dv;
         let dlc_base = bh * chunk;
         let p = pl[bh];
-
-        // dS_in += p_last · dS_exit
         for ix in 0..dk * dv {
             d_s_in[s_base + ix] += p * dse[s_base + ix];
         }
-        // d_p_last += <S_in, dS_exit>
         let mut acc_dp = 0.0_f32;
         for ix in 0..dk * dv {
             acc_dp += s[s_base + ix] * dse[s_base + ix];
         }
         d_p_last[bh] += acc_dp;
-
-        // For each chunk position i:
-        //   contribution to dW[i, d] += decay_last_col[i] · Σ_kk k[i, kk] · dS_exit[kk, d]
-        //   contribution to dk[i, kk] += decay_last_col[i] · Σ_d W[i, d] · dS_exit[kk, d]
-        //   contribution to d_decay[i] += <k[i] ⊗ W[i], dS_exit>
         for i in 0..chunk {
             let dlc_i = dlc[dlc_base + i];
-            // Σ_kk k[i, kk] · dS_exit[kk, d]  per d
             let mut k_dot_dse = vec![0.0_f32; dv];
             for d in 0..dv {
                 let mut acc = 0.0_f32;
@@ -325,7 +385,6 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
             for d in 0..dv {
                 d_w[w_base + i * dv + d] += dlc_i * k_dot_dse[d];
             }
-            // Σ_d W[i, d] · dS_exit[kk, d]  per kk
             for kk in 0..dk {
                 let mut acc = 0.0_f32;
                 for d in 0..dv {
@@ -333,7 +392,6 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
                 }
                 d_k[k_base + i * dk + kk] += dlc_i * acc;
             }
-            // d_decay[i] = Σ_kk Σ_d k[i, kk] · W[i, d] · dS_exit[kk, d]
             let mut acc_dec = 0.0_f32;
             for kk in 0..dk {
                 for d in 0..dv {
@@ -345,7 +403,6 @@ pub fn vk_gdn_state_exit_bwd_no_grad(
             d_decay[dlc_base + i] += acc_dec;
         }
     }
-
     Ok((
         upload(device, &d_s_in, vec![batch, nv, dk, dv])?,
         upload(device, &d_w, vec![batch, nv, chunk, dv])?,
