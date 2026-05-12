@@ -26,10 +26,10 @@ use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_train::trainer::sft_train;
 use kiln_train::{ChatMessage, SftConfig, SftExample};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -184,6 +184,7 @@ fn run_one(
         auto_load: false,
         checkpoint_interval: None,
         seed: None,
+        optimizer: kiln_train::Optimizer::default(),
     };
     let adapter_dir = std::env::temp_dir().join("kiln-flce-preflight");
     let _ = std::fs::create_dir_all(&adapter_dir);
