@@ -94,3 +94,106 @@ pub fn vk_gdn_gates_no_grad(
         VkTensor::from_buffer(g_out, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
     ))
 }
+
+/// Backward GDN gates.
+///
+/// Inputs:
+///   d_beta, d_g: [B, T, nv]
+///   a, b:        [B, T, nv]
+///   a_log, dt_bias: [nv]
+/// Returns:
+///   d_a, d_b: [B, T, nv]
+///   d_a_log, d_dt_bias: [nv]   (sum-reduced along B,T per nv)
+pub fn vk_gdn_gates_bwd_no_grad(
+    d_beta: &VkTensor,
+    d_g: &VkTensor,
+    a: &VkTensor,
+    b: &VkTensor,
+    a_log: &VkTensor,
+    dt_bias: &VkTensor,
+    nv: usize,
+) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor)> {
+    let total = a.num_elements();
+    anyhow::ensure!(total % nv == 0, "gates_bwd: total not divisible by nv");
+
+    let device = a.device();
+    let d_a = alloc_f32(device, total)?;
+    let d_b = alloc_f32(device, total)?;
+    let red_dalog_buf = alloc_f32(device, total)?;
+    let red_ddt_buf = alloc_f32(device, total)?;
+
+    let workgroups = ((total + 255) / 256) as u32;
+    let push = [total as u32, nv as u32];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_gdn_gates_bwd",
+        &[
+            d_beta.buffer().handle(),
+            d_g.buffer().handle(),
+            a.buffer().handle(),
+            b.buffer().handle(),
+            a_log.buffer().handle(),
+            dt_bias.buffer().handle(),
+            d_a.handle(),
+            d_b.handle(),
+            red_dalog_buf.handle(),
+            red_ddt_buf.handle(),
+        ],
+        &push,
+        workgroups,
+    )?;
+
+    // CPU reduce per-nv (small reduction; nv ≤ 32 typical, total ≤ 1M)
+    let dalog_partial = {
+        let t = VkTensor::from_buffer(
+            Arc::clone(&red_dalog_buf),
+            a.shape().to_vec(),
+            VkDType::F32,
+            Arc::clone(device),
+        );
+        t.to_vec_f32()?
+    };
+    let ddt_partial = {
+        let t = VkTensor::from_buffer(
+            Arc::clone(&red_ddt_buf),
+            a.shape().to_vec(),
+            VkDType::F32,
+            Arc::clone(device),
+        );
+        t.to_vec_f32()?
+    };
+    let mut dalog = vec![0.0_f32; nv];
+    let mut ddt = vec![0.0_f32; nv];
+    for i in 0..total {
+        let n = i % nv;
+        dalog[n] += dalog_partial[i];
+        ddt[n] += ddt_partial[i];
+    }
+    let dalog_buf = alloc_f32(device, nv)?;
+    let ddt_buf = alloc_f32(device, nv)?;
+    let raw_dalog: Vec<u8> = dalog.iter().flat_map(|f| f.to_le_bytes()).collect();
+    let raw_ddt: Vec<u8> = ddt.iter().flat_map(|f| f.to_le_bytes()).collect();
+    VulkanBuffer::upload_data(
+        device.device(),
+        device.host_visible_mem_type(),
+        device.queue(),
+        device.queue_family_index(),
+        &dalog_buf,
+        &raw_dalog,
+    )?;
+    VulkanBuffer::upload_data(
+        device.device(),
+        device.host_visible_mem_type(),
+        device.queue(),
+        device.queue_family_index(),
+        &ddt_buf,
+        &raw_ddt,
+    )?;
+
+    Ok((
+        VkTensor::from_buffer(d_a, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(d_b, a.shape().to_vec(), VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(dalog_buf, vec![nv], VkDType::F32, Arc::clone(device)),
+        VkTensor::from_buffer(ddt_buf, vec![nv], VkDType::F32, Arc::clone(device)),
+    ))
+}

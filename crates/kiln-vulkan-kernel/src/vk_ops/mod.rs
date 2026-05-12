@@ -31,6 +31,7 @@ pub mod mlp;
 pub mod narrow;
 pub mod permute;
 pub mod reduce;
+pub mod reverse_cumsum;
 pub mod rmsnorm;
 pub mod rope;
 pub mod shape;

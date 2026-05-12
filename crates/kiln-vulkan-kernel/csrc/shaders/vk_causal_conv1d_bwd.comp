@@ -1,0 +1,61 @@
+// Causal Conv1d backward (without fused SiLU — separate the SiLU
+// backward via vk_silu_bwd composition in Rust).
+//
+// Forward: out[b,c,t] = Σ_k weight[c,k] · padded[b,c,t+k]
+//          where padded = concat(conv_state, x)  (length state_len + seq_len)
+// Backward inputs: d_out[b,c,t]
+// Backward outputs:
+//   d_x[b,c,τ_x]      where τ_x ∈ [0, seq_len)
+//   d_weight[c,k]     summed across (b, t)
+//   d_conv_state[b,c,τ_s]  where τ_s ∈ [0, state_len)
+//
+// Push: batch, channels, seq_len, kernel_size.
+//
+// Each thread handles ONE element of d_x (the dominant output by size).
+// d_weight reductions and d_conv_state are computed per-element with
+// a separate dispatch helper or via CPU reduce in Rust glue.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint channels;
+    uint seq_len;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer DOutBuf  { float data_d_out[]; };
+layout(binding = 1) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 2) writeonly buffer DXBuf    { float data_d_x[]; };
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = batch * channels * seq_len;
+    if (idx >= total) return;
+
+    uint b = idx / (channels * seq_len);
+    uint c = (idx / seq_len) % channels;
+    uint tx = idx % seq_len;
+    uint state_len = kernel_size - 1u;
+
+    // padded[b, c, tx + state_len] = x[b, c, tx]
+    // For each (t, k) with t + k = tx + state_len, t in [0, seq_len), k in [0, K):
+    //   contribution to d_x[b, c, tx] = d_out[b, c, t] · weight[c, k]
+    float acc = 0.0;
+    // t + k = tx + state_len  ⇒  t = tx + state_len - k
+    // k in [0, K), t in [0, seq_len) ⇒
+    //   k_min = max(0, state_len - tx) — but state_len >= 0 always, so k can start from 0
+    //   ... simplifying: iterate k=0..K, compute t, skip if out of range
+    uint padded_idx = tx + state_len;
+    for (uint k = 0u; k < kernel_size; ++k) {
+        // Need t such that t + k = padded_idx, i.e. t = padded_idx - k
+        if (k > padded_idx) continue;
+        uint t = padded_idx - k;
+        if (t >= seq_len) continue;
+        acc += data_d_out[(b * channels + c) * seq_len + t] * data_weight[c * kernel_size + k];
+    }
+    data_d_x[(b * channels + c) * seq_len + tx] = acc;
+}

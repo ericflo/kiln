@@ -1,0 +1,35 @@
+// Reverse cumulative sum along the last axis.
+//   out[..., t] = Σ_{s ≥ t} in[..., s]
+//
+// One workgroup per "row" (everything but the last axis flattened);
+// per-row sequential O(C) scan within the workgroup.
+//
+// Push: rows, cols.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+
+layout(binding = 0) readonly buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    if (row >= rows) return;
+    uint tid = gl_LocalInvocationID.x;
+    if (tid != 0u) return;  // sequential scan; one thread does it all
+
+    uint base = row * cols;
+    float acc = 0.0;
+    // Iterate cols-1 down to 0 (inclusive)
+    for (int t = int(cols) - 1; t >= 0; --t) {
+        acc += data_in[base + uint(t)];
+        data_out[base + uint(t)] = acc;
+    }
+}

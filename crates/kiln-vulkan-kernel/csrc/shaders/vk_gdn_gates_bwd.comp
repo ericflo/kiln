@@ -1,0 +1,71 @@
+// GDN gates backward — per-element pass.
+//
+// Computes:
+//   d_a[idx] = d_g[idx] · dg_dap                 (= -exp(a_log[nv]) · sigmoid(a+dt))
+//   d_b[idx] = d_beta[idx] · sigmoid(b) · (1 - sigmoid(b))
+//   reduction_dalog[idx]  = d_g[idx] · dg_dalog  (= -exp(a_log) · softplus(a+dt))
+//   reduction_ddtbias[idx] = d_g[idx] · dg_dap   (= same as d_a but kept for the per-nv sum)
+//
+// The two reduction buffers are reduced along the (B*T) axis on the
+// CPU side to produce d_a_log[nv] and d_dt_bias[nv]. Avoids needing
+// VK_EXT_shader_atomic_float and keeps the kernel simple.
+//
+// Push: (total, nv).
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint total;
+    uint nv;
+};
+
+layout(binding = 0) readonly buffer DBetaBuf  { float data_d_beta[]; };
+layout(binding = 1) readonly buffer DGBuf     { float data_d_g[]; };
+layout(binding = 2) readonly buffer ABuf      { float data_a[]; };
+layout(binding = 3) readonly buffer BBuf      { float data_b[]; };
+layout(binding = 4) readonly buffer ALogBuf   { float data_a_log[]; };
+layout(binding = 5) readonly buffer DtBiasBuf { float data_dt_bias[]; };
+layout(binding = 6) writeonly buffer DABuf    { float data_d_a[]; };
+layout(binding = 7) writeonly buffer DBBuf    { float data_d_b[]; };
+layout(binding = 8) writeonly buffer ReducDAlogBuf  { float data_red_dalog[]; };
+layout(binding = 9) writeonly buffer ReducDDtBuf    { float data_red_ddt[]; };
+
+float stable_sigmoid(float x) {
+    return x >= 0.0 ? 1.0 / (1.0 + exp(-x)) : exp(x) / (1.0 + exp(x));
+}
+
+float stable_softplus(float x) {
+    if (x > 20.0) return x;
+    return log(1.0 + exp(x));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint nv_idx = idx % nv;
+
+    float a_v = data_a[idx];
+    float b_v = data_b[idx];
+    float a_log_v = data_a_log[nv_idx];
+    float dt_v = data_dt_bias[nv_idx];
+
+    // d_b = d_beta · sigmoid(b) · (1 - sigmoid(b))
+    float sig_b = stable_sigmoid(b_v);
+    data_d_b[idx] = data_d_beta[idx] * sig_b * (1.0 - sig_b);
+
+    // g = -exp(a_log) · softplus(a + dt_bias)
+    float a_plus = a_v + dt_v;
+    float sig_apd = stable_sigmoid(a_plus);
+    float sp = stable_softplus(a_plus);
+    float minus_exp_alog = -exp(a_log_v);
+    float dg_dap = minus_exp_alog * sig_apd;
+    float dg_dalog = minus_exp_alog * sp;
+    float d_g_v = data_d_g[idx];
+
+    data_d_a[idx] = d_g_v * dg_dap;
+    data_red_dalog[idx] = d_g_v * dg_dalog;
+    data_red_ddt[idx]   = d_g_v * dg_dap;
+}
