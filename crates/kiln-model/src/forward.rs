@@ -3907,11 +3907,7 @@ pub fn transformer_mlp_gated_hidden(
 ) -> Result<Tensor> {
     let normed_post = {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-        rms_norm(
-            hidden,
-            &layer.post_attention_layernorm,
-            config.rms_norm_eps,
-        )?
+        rms_norm(hidden, &layer.post_attention_layernorm, config.rms_norm_eps)?
     };
     swiglu_ffn_gated_hidden(&normed_post, &layer.mlp, lora)
 }
@@ -5465,6 +5461,563 @@ pub fn gdn_attention_residual_block(
     (hidden + &attn_out).map_err(Into::into)
 }
 
+/// Pre-attention RMSNorm for a GDN layer.
+pub fn gdn_attention_input_norm(
+    hidden: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    rms_norm(hidden, &layer.input_layernorm, config.rms_norm_eps)
+}
+
+/// Input-projection outputs for the GDN attention subblock.
+pub struct GdnInputProjectionParts {
+    pub mixed_qkv: Tensor,
+    pub z: Tensor,
+    pub a: Tensor,
+    pub b: Tensor,
+}
+
+pub fn gdn_attention_in_projections(
+    backend: &dyn BackendRuntime,
+    normed: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<GdnInputProjectionParts> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((layer, scale)) => (Some(layer), scale),
+        None => (None, 0.0),
+    };
+    let mixed_qkv = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        normed,
+        &weights.in_proj_qkv_t,
+        lora_layer.and_then(|layer| layer.in_proj_qkv.as_ref()),
+        lora_scale,
+    )?;
+    let z = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        normed,
+        &weights.in_proj_z_t,
+        lora_layer.and_then(|layer| layer.in_proj_z.as_ref()),
+        lora_scale,
+    )?;
+    let a = gdn_in_proj_matmul(backend, normed, &weights.in_proj_a_t)?;
+    let b = gdn_in_proj_matmul(backend, normed, &weights.in_proj_b_t)?;
+    Ok(GdnInputProjectionParts { mixed_qkv, z, a, b })
+}
+
+/// Q/K/V tensors in `[B, nv, T, *]` layout after causal conv, GQA expansion,
+/// and Q/K L2 normalization.
+pub struct GdnQkvParts {
+    pub q: Tensor,
+    pub k: Tensor,
+    pub v: Tensor,
+}
+
+pub fn gdn_qkv_from_mixed_training(
+    _backend: &dyn BackendRuntime,
+    mixed_qkv: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+    conv_state: &mut Tensor,
+) -> Result<GdnQkvParts> {
+    let (batch, seq_len, _) = mixed_qkv.dims3()?;
+    let input_dtype = mixed_qkv.dtype();
+    let nk = config.linear_num_key_heads;
+    let dk = config.linear_key_head_dim;
+    let nv = config.linear_num_value_heads;
+    let dv = config.linear_value_head_dim;
+    let qk_dim = config.linear_qk_dim();
+    let v_dim = config.linear_v_dim();
+    let kernel_size = config.linear_conv_kernel_dim;
+    let gqa_ratio = nv / nk;
+    let scale = 1.0 / (dk as f64).sqrt();
+
+    let mixed_qkv_ct = mixed_qkv.transpose(1, 2)?.contiguous()?;
+    let post_silu = if seq_len > 1 {
+        let y = causal_conv1d_prefill(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
+        cuda_silu(&y)?
+    } else {
+        let y = causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
+        cuda_silu(&y.to_dtype(DType::F32)?)?
+    };
+    let mixed_qkv = post_silu.transpose(1, 2)?;
+    let q = mixed_qkv
+        .narrow(2, 0, qk_dim)?
+        .reshape((batch, seq_len, nk, dk))?;
+    let k = mixed_qkv
+        .narrow(2, qk_dim, qk_dim)?
+        .reshape((batch, seq_len, nk, dk))?;
+    let v = mixed_qkv
+        .narrow(2, 2 * qk_dim, v_dim)?
+        .reshape((batch, seq_len, nv, dv))?
+        .to_dtype(input_dtype)?;
+    let (q, k) = if gqa_ratio > 1 {
+        let q = q
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, nv, dk))?;
+        let k = k
+            .unsqueeze(3)?
+            .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+            .contiguous()?
+            .reshape((batch, seq_len, nv, dk))?;
+        (q, k)
+    } else {
+        (q.contiguous()?, k.contiguous()?)
+    };
+    let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
+    Ok(GdnQkvParts {
+        q: q.transpose(1, 2)?,
+        k: k.transpose(1, 2)?,
+        v: v.transpose(1, 2)?,
+    })
+}
+
+pub fn gdn_gates_from_ab_training(
+    a: &Tensor,
+    b: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    input_dtype: DType,
+) -> Result<(Tensor, Tensor)> {
+    let (beta, g) = gated_deltanet_gates_fallback(a, b, weights, input_dtype)?;
+    Ok((beta.transpose(1, 2)?, g.transpose(1, 2)?))
+}
+
+pub fn gdn_recurrent_forward_from_parts(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    recurrent_state: &mut Tensor,
+) -> Result<Tensor> {
+    let input_dtype = q.dtype();
+    let state_external_dtype = recurrent_state.dtype();
+    if state_external_dtype != input_dtype {
+        *recurrent_state = recurrent_state.to_dtype(input_dtype)?;
+    }
+
+    let (out, head_last) = if let Some(attn_out) =
+        gdn_recurrent_prefill_head_last(backend, q, k, v, beta, g, recurrent_state)?
+    {
+        (attn_out, true)
+    } else {
+        match gdn_chunkwise_recurrence_head_last_full_chunks(
+            backend,
+            q,
+            k,
+            v,
+            beta,
+            g,
+            recurrent_state,
+            GDN_CHUNK_SIZE,
+        )? {
+            Some(attn_out) => (attn_out, true),
+            None => (
+                gdn_chunkwise_recurrence(
+                    backend,
+                    q,
+                    k,
+                    v,
+                    beta,
+                    g,
+                    recurrent_state,
+                    GDN_CHUNK_SIZE,
+                )?,
+                false,
+            ),
+        }
+    };
+
+    if state_external_dtype != input_dtype {
+        *recurrent_state = recurrent_state.to_dtype(state_external_dtype)?;
+    }
+
+    if head_last {
+        Ok(out.transpose(1, 2)?)
+    } else {
+        Ok(out)
+    }
+}
+
+pub fn gdn_gated_norm_from_recurrent(
+    backend: &dyn BackendRuntime,
+    recurrent_out_head_major: &Tensor,
+    z: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    let (batch, heads, seq_len, dv) = recurrent_out_head_major.dims4()?;
+    let attn_out = recurrent_out_head_major.transpose(1, 2)?;
+    let z = z.reshape((batch, seq_len, heads, dv))?;
+    Ok(
+        gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?
+            .reshape((batch, seq_len, heads * dv))?
+            .to_dtype(z.dtype())?,
+    )
+}
+
+pub fn gdn_out_proj_from_gated_norm(
+    backend: &dyn BackendRuntime,
+    normed: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((layer, scale)) => (Some(layer), scale),
+        None => (None, 0.0),
+    };
+    linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        normed,
+        &weights.out_proj_t,
+        lora_layer.and_then(|layer| layer.gdn_out_proj.as_ref()),
+        lora_scale,
+    )
+}
+
+pub struct GdnRecurrentBackwardGrads {
+    pub dq: Tensor,
+    pub dk: Tensor,
+    pub dv: Tensor,
+    pub dbeta: Tensor,
+    pub dg: Tensor,
+    pub d_state: Option<Tensor>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gdn_chunk_prep_f32(
+    g: &Tensor,
+    v: &Tensor,
+    kkt: &Tensor,
+    qkt: &Tensor,
+    ks_entry: &Tensor,
+    q_s: &Tensor,
+) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    let (batch, heads, chunk, _) = v.dims4()?;
+    let device = v.device();
+    let g_f32 = g.to_dtype(DType::F32)?;
+    let big_g = g_f32.cumsum(candle_core::D::Minus1)?;
+    let big_g_col = big_g.unsqueeze(3)?;
+    let big_g_row = big_g.unsqueeze(2)?;
+    let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
+    let zero_delta = Tensor::zeros_like(&decay_delta)?;
+    let strict_bool = strict_lower_tri_bool(chunk, device)?
+        .reshape((1, 1, chunk, chunk))?
+        .broadcast_as((batch, heads, chunk, chunk))?;
+    let causal_bool = causal_lower_tri_bool(chunk, device)?
+        .reshape((1, 1, chunk, chunk))?
+        .broadcast_as((batch, heads, chunk, chunk))?;
+    let strict_decay = strict_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
+    let causal_decay = causal_bool.where_cond(&decay_delta, &zero_delta)?.exp()?;
+    let p = big_g.exp()?;
+    let p_col = p.unsqueeze(3)?;
+    let strict_mask = strict_bool.to_dtype(DType::F32)?;
+    let causal_mask = causal_bool.to_dtype(DType::F32)?;
+
+    let v_f32 = v.to_dtype(DType::F32)?;
+    let kkt_f32 = kkt.to_dtype(DType::F32)?;
+    let qkt_f32 = qkt.to_dtype(DType::F32)?;
+    let ks_entry_f32 = ks_entry.to_dtype(DType::F32)?;
+    let q_s_f32 = q_s.to_dtype(DType::F32)?;
+    let v_prime = (&v_f32 - ks_entry_f32.broadcast_mul(&p_col)?)?;
+    let a_strict = kkt_f32
+        .broadcast_mul(&strict_decay)?
+        .broadcast_mul(&strict_mask)?
+        .contiguous()?;
+    let b_mask = qkt_f32
+        .broadcast_mul(&causal_decay)?
+        .broadcast_mul(&causal_mask)?
+        .contiguous()?;
+    let q_s_scaled = q_s_f32.broadcast_mul(&p_col)?;
+    let g_last = big_g.narrow(2, chunk - 1, 1)?;
+    let decay_last_col = g_last.broadcast_sub(&big_g)?.exp()?;
+    let p_last = g_last.exp()?.squeeze(2)?;
+    Ok((
+        a_strict,
+        b_mask,
+        v_prime,
+        q_s_scaled,
+        decay_last_col,
+        p_last,
+    ))
+}
+
+fn solve_tri_transpose_f32(a_strict: &Tensor, beta: &Tensor, dw: &Tensor) -> Result<Tensor> {
+    let (_, _, chunk, _) = dw.dims4()?;
+    let mut rows_rev: Vec<Tensor> = Vec::with_capacity(chunk);
+    for t in (0..chunk).rev() {
+        let dw_t = dw.narrow(2, t, 1)?;
+        let dr_t = if rows_rev.is_empty() {
+            dw_t
+        } else {
+            let future_len = chunk - t - 1;
+            let mut future_refs: Vec<&Tensor> = Vec::with_capacity(future_len);
+            for row in rows_rev.iter().rev() {
+                future_refs.push(row);
+            }
+            let dr_future = Tensor::cat(&future_refs, 2)?;
+            let a_col = a_strict.narrow(2, t + 1, future_len)?.narrow(3, t, 1)?;
+            let beta_future = beta.narrow(2, t + 1, future_len)?.unsqueeze(3)?;
+            let weights = a_col.broadcast_mul(&beta_future)?;
+            let acc = dr_future.broadcast_mul(&weights)?.sum(2)?.unsqueeze(2)?;
+            (dw_t - acc)?
+        };
+        rows_rev.push(dr_t);
+    }
+    rows_rev.reverse();
+    let refs: Vec<&Tensor> = rows_rev.iter().collect();
+    Ok(Tensor::cat(&refs, 2)?)
+}
+
+fn reverse_cumsum_time(x: &Tensor) -> Result<Tensor> {
+    let chunk = x.dim(2)?;
+    let mut rows_rev: Vec<Tensor> = Vec::with_capacity(chunk);
+    let mut acc: Option<Tensor> = None;
+    for t in (0..chunk).rev() {
+        let x_t = x.narrow(2, t, 1)?;
+        let next = match acc {
+            Some(prev) => (&prev + &x_t)?,
+            None => x_t,
+        };
+        rows_rev.push(next.clone());
+        acc = Some(next);
+    }
+    rows_rev.reverse();
+    let refs: Vec<&Tensor> = rows_rev.iter().collect();
+    Ok(Tensor::cat(&refs, 2)?)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_backward_no_grad(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    entry_state: &Tensor,
+    grad_out: &Tensor,
+    grad_exit_state: Option<&Tensor>,
+    chunk_size: usize,
+) -> Result<GdnRecurrentBackwardGrads> {
+    let (batch, heads, seq_len, _dk) = q.dims4()?;
+    let full_chunks = seq_len / chunk_size;
+    let tail = seq_len - full_chunks * chunk_size;
+    let total_chunks = full_chunks + if tail > 0 { 1 } else { 0 };
+
+    let q = q.to_dtype(DType::F32)?;
+    let k = k.to_dtype(DType::F32)?;
+    let v = v.to_dtype(DType::F32)?;
+    let beta = beta.to_dtype(DType::F32)?;
+    let g = g.to_dtype(DType::F32)?;
+    let grad_out = grad_out.to_dtype(DType::F32)?;
+    let mut state = entry_state.to_dtype(DType::F32)?;
+    let mut state_snapshots: Vec<Tensor> = Vec::with_capacity(total_chunks);
+
+    for ci in 0..total_chunks {
+        let chunk = if ci >= full_chunks { tail } else { chunk_size };
+        let t_off = ci * chunk_size;
+        state_snapshots.push(state.clone());
+        let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
+        let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
+        let v_c = v.narrow(2, t_off, chunk)?.contiguous()?;
+        let beta_c = beta.narrow(2, t_off, chunk)?.contiguous()?;
+        let g_c = g.narrow(2, t_off, chunk)?.contiguous()?;
+        let k_t = k_c.transpose(2, 3)?.contiguous()?;
+        let ks_entry = k_c.matmul(&state)?;
+        let q_s = q_c.matmul(&state)?;
+        let kkt = k_c.matmul(&k_t)?;
+        let qkt = q_c.matmul(&k_t)?;
+        let (a_strict, _b_mask, v_prime, _q_s_scaled, decay_last_col, p_last) =
+            gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
+        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?;
+        let state_scaled = state.broadcast_mul(&p_last.unsqueeze(2)?.unsqueeze(3)?)?;
+        let w_weighted = w.broadcast_mul(&decay_last_col.unsqueeze(3)?)?;
+        let delta_state = k_t.matmul(&w_weighted)?;
+        state = (state_scaled + delta_state)?;
+    }
+
+    let mut dq_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
+    let mut dk_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
+    let mut dv_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
+    let mut dbeta_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
+    let mut dg_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
+    let mut d_s_carry = match grad_exit_state {
+        Some(grad) => Some(grad.to_dtype(DType::F32)?),
+        None => None,
+    };
+
+    for ci in (0..total_chunks).rev() {
+        let chunk = if ci >= full_chunks { tail } else { chunk_size };
+        let t_off = ci * chunk_size;
+        let s_in = &state_snapshots[ci];
+        let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
+        let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
+        let v_c = v.narrow(2, t_off, chunk)?.contiguous()?;
+        let beta_c = beta.narrow(2, t_off, chunk)?.contiguous()?;
+        let g_c = g.narrow(2, t_off, chunk)?.contiguous()?;
+        let d_out = grad_out.narrow(2, t_off, chunk)?.contiguous()?;
+        let k_t = k_c.transpose(2, 3)?.contiguous()?;
+        let ks_entry = k_c.matmul(s_in)?;
+        let q_s = q_c.matmul(s_in)?;
+        let kkt = k_c.matmul(&k_t)?;
+        let qkt = q_c.matmul(&k_t)?;
+        let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
+            gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
+        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?;
+
+        let dq_s_scaled = d_out.clone();
+        let d_w_scan = b_mask.transpose(2, 3)?.matmul(&d_out)?;
+        let d_b_mask = d_out.matmul(&w.transpose(2, 3)?)?;
+
+        let mut d_w_acc = d_w_scan;
+        let mut d_decay_last_col_acc =
+            Tensor::zeros((batch, heads, chunk), DType::F32, q.device())?;
+        let mut d_p_last_acc = Tensor::zeros((batch, heads), DType::F32, q.device())?;
+        let mut dk_state_extra: Option<Tensor> = None;
+        let mut ds_state_extra: Option<Tensor> = None;
+
+        if let Some(d_s_exit) = d_s_carry.as_ref() {
+            let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?;
+            ds_state_extra = Some(d_s_exit.broadcast_mul(&p_last_u)?);
+            d_p_last_acc = (s_in * d_s_exit)?.sum(3)?.sum(2)?;
+            let tmp_dw = k_c.matmul(d_s_exit)?;
+            d_w_acc = (&d_w_acc + &tmp_dw.broadcast_mul(&decay_last_col.unsqueeze(3)?)?)?;
+            let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?)?;
+            dk_state_extra = Some(tmp_dk.broadcast_mul(&decay_last_col.unsqueeze(3)?)?);
+            d_decay_last_col_acc = (&k_c * &tmp_dk)?.sum(candle_core::D::Minus1)?;
+        }
+
+        let dr = solve_tri_transpose_f32(&a_strict, &beta_c, &d_w_acc)?;
+        let a_w = a_strict.matmul(&w)?;
+        let pre_beta = (&v_prime - &a_w)?;
+        let d_v_prime = dr.broadcast_mul(&beta_c.unsqueeze(3)?)?;
+        let d_beta = (&pre_beta * &dr)?.sum(candle_core::D::Minus1)?;
+        let dr_w_t = dr.matmul(&w.transpose(2, 3)?)?;
+        let strict_mask = strict_lower_tri_bool(chunk, q.device())?
+            .reshape((1, 1, chunk, chunk))?
+            .broadcast_as((batch, heads, chunk, chunk))?
+            .to_dtype(DType::F32)?;
+        let d_a_strict = dr_w_t
+            .broadcast_mul(&beta_c.neg()?.unsqueeze(3)?)?
+            .broadcast_mul(&strict_mask)?;
+
+        let big_g = g_c.cumsum(candle_core::D::Minus1)?;
+        let p = big_g.exp()?;
+        let p_col = p.unsqueeze(3)?;
+        let d_v = d_v_prime.clone();
+        let d_ks_entry = d_v_prime.broadcast_mul(&p_col)?.neg()?;
+        let mut d_g_acc = (&ks_entry * &d_ks_entry)?.sum(candle_core::D::Minus1)?;
+        let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?;
+        d_g_acc = (&d_g_acc
+            + &(&q_s * &dq_s_scaled)?
+                .broadcast_mul(&p_col)?
+                .sum(candle_core::D::Minus1)?)?;
+
+        let big_g_col = big_g.unsqueeze(3)?;
+        let big_g_row = big_g.unsqueeze(2)?;
+        let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
+        let zero_delta = Tensor::zeros_like(&decay_delta)?;
+        let strict_bool = strict_lower_tri_bool(chunk, q.device())?
+            .reshape((1, 1, chunk, chunk))?
+            .broadcast_as((batch, heads, chunk, chunk))?;
+        let causal_bool = causal_lower_tri_bool(chunk, q.device())?
+            .reshape((1, 1, chunk, chunk))?
+            .broadcast_as((batch, heads, chunk, chunk))?;
+        let strict_decay = strict_bool
+            .where_cond(&decay_delta, &zero_delta)?
+            .exp()?
+            .broadcast_mul(&strict_bool.to_dtype(DType::F32)?)?;
+        let causal_decay = causal_bool
+            .where_cond(&decay_delta, &zero_delta)?
+            .exp()?
+            .broadcast_mul(&causal_bool.to_dtype(DType::F32)?)?;
+        let d_kkt = d_a_strict.broadcast_mul(&strict_decay)?;
+        let d_qkt = d_b_mask.broadcast_mul(&causal_decay)?;
+        let term_a = d_a_strict
+            .broadcast_mul(&strict_decay)?
+            .broadcast_mul(&kkt)?;
+        let term_b = d_b_mask.broadcast_mul(&causal_decay)?.broadcast_mul(&qkt)?;
+        let term = (&term_a + &term_b)?;
+        let row_sum = term.sum(candle_core::D::Minus1)?;
+        let col_sum = term.sum(2)?;
+        d_g_acc = (&d_g_acc + &row_sum)?;
+        d_g_acc = (&d_g_acc - &col_sum)?;
+
+        let decay_term = decay_last_col.broadcast_mul(&d_decay_last_col_acc)?;
+        let decay_sum = decay_term.sum(candle_core::D::Minus1)?.unsqueeze(2)?;
+        let last_mask = Tensor::arange(0u32, chunk as u32, q.device())?
+            .eq((chunk - 1) as u32)?
+            .to_dtype(DType::F32)?
+            .reshape((1, 1, chunk))?
+            .broadcast_as((batch, heads, chunk))?;
+        d_g_acc = (&d_g_acc - &decay_term)?;
+        d_g_acc = (&d_g_acc + &decay_sum.broadcast_mul(&last_mask)?)?;
+        let p_last_term = p
+            .narrow(2, chunk - 1, 1)?
+            .squeeze(2)?
+            .broadcast_mul(&d_p_last_acc)?
+            .unsqueeze(2)?
+            .broadcast_mul(&last_mask)?;
+        d_g_acc = (&d_g_acc + &p_last_term)?;
+        let d_g = reverse_cumsum_time(&d_g_acc)?;
+
+        let s_t = s_in.transpose(2, 3)?;
+        let d_k_from_kkt = (&d_kkt.matmul(&k_c)? + &d_kkt.transpose(2, 3)?.matmul(&k_c)?)?;
+        let d_k_from_qkt = d_qkt.transpose(2, 3)?.matmul(&q_c)?;
+        let d_k_from_ks = d_ks_entry.matmul(&s_t)?;
+        let mut d_k = (&(&d_k_from_kkt + &d_k_from_qkt)? + &d_k_from_ks)?;
+        if let Some(extra) = dk_state_extra.as_ref() {
+            d_k = (&d_k + extra)?;
+        }
+        let d_q = (&d_qkt.matmul(&k_c)? + &d_q_s.matmul(&s_t)?)?;
+        let d_s_from_ks = k_c.transpose(2, 3)?.matmul(&d_ks_entry)?;
+        let d_s_from_qs = q_c.transpose(2, 3)?.matmul(&d_q_s)?;
+        let mut d_s_in = (&d_s_from_ks + &d_s_from_qs)?;
+        if let Some(extra) = ds_state_extra.as_ref() {
+            d_s_in = (&d_s_in + extra)?;
+        }
+
+        dq_chunks[ci] = Some(d_q);
+        dk_chunks[ci] = Some(d_k);
+        dv_chunks[ci] = Some(d_v);
+        dbeta_chunks[ci] = Some(d_beta);
+        dg_chunks[ci] = Some(d_g);
+        d_s_carry = Some(d_s_in);
+
+        let _ = q_s_scaled;
+    }
+
+    let collect = |chunks: &[Option<Tensor>], name: &str| -> Result<Tensor> {
+        let mut refs = Vec::with_capacity(chunks.len());
+        for (idx, chunk) in chunks.iter().enumerate() {
+            refs.push(
+                chunk
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing {name} chunk {idx}"))?,
+            );
+        }
+        Ok(Tensor::cat(&refs, 2)?)
+    };
+
+    Ok(GdnRecurrentBackwardGrads {
+        dq: collect(&dq_chunks, "dq")?,
+        dk: collect(&dk_chunks, "dk")?,
+        dv: collect(&dv_chunks, "dv")?,
+        dbeta: collect(&dbeta_chunks, "dbeta")?,
+        dg: collect(&dg_chunks, "dg")?,
+        d_state: d_s_carry,
+    })
+}
+
 /// Streaming/tiled wrapper around [`gated_deltanet_forward`] for the
 /// training-time forward path.
 ///
@@ -6921,8 +7474,12 @@ pub fn gqa_attention(
         None => (None, 0.0),
     };
     let (q_raw, k, v) = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "qkv_proj", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qkv_proj",
+            seq_len,
+        )?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
         let out = full_attn_qkv_proj_decode_if(
             backend,
@@ -6944,8 +7501,12 @@ pub fn gqa_attention(
 
     // Split Q and gate if output gate is enabled
     let (q, gate) = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "q_split", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "q_split",
+            seq_len,
+        )?;
         let out = if attn_output_gate {
             // q_raw: [batch, seq_len, num_heads * head_dim * 2]
             // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
@@ -6973,8 +7534,12 @@ pub fn gqa_attention(
 
     // Reshape K, V to [batch, seq_len, num_heads, head_dim]
     let (k, v) = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "kv_reshape", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "kv_reshape",
+            seq_len,
+        )?;
         let out = (
             k.reshape(((), seq_len, num_kv_heads, head_dim))?,
             v.reshape(((), seq_len, num_kv_heads, head_dim))?,
@@ -6992,8 +7557,12 @@ pub fn gqa_attention(
     // Apply per-head RMSNorm to Q and K (Qwen3.5 uses QK-norm)
     // q_norm/k_norm are [head_dim] — broadcast over [batch, seq_len, num_heads, head_dim]
     let (q, k) = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "qk_norm", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "qk_norm",
+            seq_len,
+        )?;
         let out = (
             rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?,
             rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?,
@@ -7078,8 +7647,12 @@ pub fn gqa_attention(
                 seq_len,
                 stage_profile,
             )?;
-            let stage_profile =
-                start_named_full_attn_stage_profile(profile_device, profile_context, "o_proj", seq_len)?;
+            let stage_profile = start_named_full_attn_stage_profile(
+                profile_device,
+                profile_context,
+                "o_proj",
+                seq_len,
+            )?;
             let out = {
                 kiln_nvtx::range!(c"kiln/proj/o");
                 linear_with_lora_t_backend_decode_if(
@@ -7227,8 +7800,12 @@ pub fn gqa_attention(
     };
 
     let attn_weights_softmax = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "softmax", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "softmax",
+            seq_len,
+        )?;
         let out = cuda_softmax_last_dim(&attn_scores)?;
         finish_full_attn_stage_profile(
             profile_device,
@@ -7265,10 +7842,11 @@ pub fn gqa_attention(
             "attn_output_layout",
             seq_len,
         )?;
-        let out = attn_output
-            .transpose(1, 2)?
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
+        let out = attn_output.transpose(1, 2)?.contiguous()?.reshape((
+            (),
+            seq_len,
+            num_heads * head_dim,
+        ))?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -7280,9 +7858,14 @@ pub fn gqa_attention(
     };
 
     let attn_output = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "attn_gate", seq_len)?;
-        let out = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "attn_gate",
+            seq_len,
+        )?;
+        let out =
+            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -7295,8 +7878,12 @@ pub fn gqa_attention(
 
     // Output projection
     let out = {
-        let stage_profile =
-            start_named_full_attn_stage_profile(profile_device, profile_context, "o_proj", seq_len)?;
+        let stage_profile = start_named_full_attn_stage_profile(
+            profile_device,
+            profile_context,
+            "o_proj",
+            seq_len,
+        )?;
         kiln_nvtx::range!(c"kiln/proj/o");
         let out = linear_with_lora_t_backend_decode_if(
             Some(backend),
@@ -12142,6 +12729,7 @@ pub fn model_forward_paged_streaming_with(
 mod tests {
     use super::*;
     use crate::backend::cpu::CpuBackend;
+    use candle_core::Var;
 
     /// Module-local mutex for tests that mutate process-wide env vars
     /// (residency kill-switches, projection drop overrides). Serialises
@@ -16476,6 +17064,134 @@ mod tests {
             assert!(d < 1e-3, "chunkwise(cs={cs}) output diff {d}");
             assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_gdn_recurrent_backward_no_grad_matches_autograd_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        let b = 1;
+        let nv = 2;
+        let t = 5;
+        let dk = 3;
+        let dv = 4;
+        let chunk_size = 4;
+
+        let q = det_tensor(&[b, nv, t, dk], 0.35, 0.02, &device)?.to_dtype(dtype)?;
+        let k = det_tensor(&[b, nv, t, dk], 0.30, -0.01, &device)?.to_dtype(dtype)?;
+        let v = det_tensor(&[b, nv, t, dv], 0.25, 0.03, &device)?.to_dtype(dtype)?;
+        let beta_raw = det_tensor(&[b, nv, t], 1.0, 0.0, &device)?.to_dtype(dtype)?;
+        let beta = {
+            let ones = Tensor::ones_like(&beta_raw)?;
+            (&ones / (&ones + &beta_raw.neg()?.exp()?)?)?
+        };
+        let g = det_tensor(&[b, nv, t], 0.08, -0.12, &device)?
+            .to_dtype(dtype)?
+            .neg()?
+            .abs()?
+            .neg()?;
+        let state = det_tensor(&[b, nv, dk, dv], 0.10, 0.01, &device)?.to_dtype(dtype)?;
+        let upstream = det_tensor(&[b, nv, t, dv], 0.20, -0.02, &device)?.to_dtype(dtype)?;
+        let grad_exit_state = det_tensor(&[b, nv, dk, dv], 0.15, 0.04, &device)?.to_dtype(dtype)?;
+        let backend = test_backend(&device);
+
+        let q_var = Var::from_tensor(&q)?;
+        let k_var = Var::from_tensor(&k)?;
+        let v_var = Var::from_tensor(&v)?;
+        let beta_var = Var::from_tensor(&beta)?;
+        let g_var = Var::from_tensor(&g)?;
+        let state_var = Var::from_tensor(&state)?;
+        let mut state_for_autograd = state_var.as_tensor().clone();
+        let out = gdn_chunkwise_recurrence(
+            &backend,
+            q_var.as_tensor(),
+            k_var.as_tensor(),
+            v_var.as_tensor(),
+            beta_var.as_tensor(),
+            g_var.as_tensor(),
+            &mut state_for_autograd,
+            chunk_size,
+        )?;
+        let out_term = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let state_term =
+            (&state_for_autograd.to_dtype(DType::F32)? * &grad_exit_state)?.sum_all()?;
+        let loss = (&out_term + &state_term)?;
+        let grads = loss.backward()?;
+
+        let manual = gdn_recurrent_backward_no_grad(
+            &backend,
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &state,
+            &upstream,
+            Some(&grad_exit_state),
+            chunk_size,
+        )?;
+
+        fn assert_grad_close(
+            name: &str,
+            actual: &Tensor,
+            expected: &Tensor,
+            tol: f32,
+        ) -> Result<()> {
+            let diff = (actual - expected)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(
+                diff < tol,
+                "{name} gradient diff too large: {diff} >= {tol}"
+            );
+            Ok(())
+        }
+
+        assert_grad_close(
+            "q",
+            &manual.dq,
+            grads.get(q_var.as_tensor()).context("missing q grad")?,
+            1e-4,
+        )?;
+        assert_grad_close(
+            "k",
+            &manual.dk,
+            grads.get(k_var.as_tensor()).context("missing k grad")?,
+            1e-4,
+        )?;
+        assert_grad_close(
+            "v",
+            &manual.dv,
+            grads.get(v_var.as_tensor()).context("missing v grad")?,
+            1e-4,
+        )?;
+        assert_grad_close(
+            "beta",
+            &manual.dbeta,
+            grads
+                .get(beta_var.as_tensor())
+                .context("missing beta grad")?,
+            1e-4,
+        )?;
+        assert_grad_close(
+            "g",
+            &manual.dg,
+            grads.get(g_var.as_tensor()).context("missing g grad")?,
+            1e-4,
+        )?;
+        assert_grad_close(
+            "state",
+            manual.d_state.as_ref().context("missing state grad")?,
+            grads
+                .get(state_var.as_tensor())
+                .context("missing state grad")?,
+            1e-4,
+        )?;
 
         Ok(())
     }

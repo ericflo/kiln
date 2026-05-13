@@ -23,10 +23,12 @@ use kiln_flce_kernel::{
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState,
-    gdn_attention_residual_block, model_forward, model_forward_embed, model_forward_final_norm,
-    model_forward_head, model_forward_no_head, model_forward_segment,
-    streaming_prefill_enabled_for, streaming_tile_tokens_for, transformer_mlp_down_from_gated,
-    transformer_mlp_gated_hidden,
+    gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
+    gdn_gated_norm_from_recurrent, gdn_gates_from_ab_training, gdn_out_proj_from_gated_norm,
+    gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
+    model_forward, model_forward_embed, model_forward_final_norm, model_forward_head,
+    model_forward_no_head, model_forward_segment, streaming_prefill_enabled_for,
+    streaming_tile_tokens_for, transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
@@ -1913,7 +1915,8 @@ fn analytic_sft_tail_grad_pre_final_norm(
             let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
             let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
                 (None, None) => {
-                    let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
                     let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
                     (chunk_max.detach(), chunk_sumexp.detach())
                 }
@@ -2149,7 +2152,10 @@ fn profile_checkpoint_segments() -> bool {
     kiln_core::env_flag::env_tristate("KILN_PROFILE_CHECKPOINT_SEGMENTS").unwrap_or(false)
 }
 
-fn synchronize_checkpoint_boundary(device: &Device, context: impl FnOnce() -> String) -> Result<()> {
+fn synchronize_checkpoint_boundary(
+    device: &Device,
+    context: impl FnOnce() -> String,
+) -> Result<()> {
     if matches!(device, Device::Metal(_)) {
         device.synchronize().with_context(context)?;
     }
@@ -2177,14 +2183,12 @@ impl SpooledCheckpointBoundaries {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        tensor
-            .save_safetensors("hidden", path)
-            .with_context(|| {
-                format!(
-                    "save checkpoint boundary {boundary_idx} to {}",
-                    path.display()
-                )
-            })
+        tensor.save_safetensors("hidden", path).with_context(|| {
+            format!(
+                "save checkpoint boundary {boundary_idx} to {}",
+                path.display()
+            )
+        })
     }
 
     fn load(&self, boundary_idx: usize, device: &Device) -> Result<Tensor> {
@@ -2197,11 +2201,9 @@ impl SpooledCheckpointBoundaries {
                 path.display()
             )
         })?;
-        tensors
-            .remove("hidden")
-            .ok_or_else(|| {
-                anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
-            })
+        tensors.remove("hidden").ok_or_else(|| {
+            anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
+        })
     }
 }
 
@@ -2482,6 +2484,17 @@ fn accumulate_grads(
         }
     }
     Ok(())
+}
+
+fn grad_or_zeros_like(
+    grads: &candle_core::backprop::GradStore,
+    key: &Tensor,
+    like: &Tensor,
+) -> Result<Tensor> {
+    match grads.get(key) {
+        Some(grad) => Ok(grad.detach()),
+        None => Tensor::zeros_like(like).map_err(Into::into),
+    }
 }
 
 /// SGD update from accumulated gradient map (not GradStore).
@@ -2789,7 +2802,10 @@ fn exact_gdn_reverse_tile_size(
     if seg_end != seg_start + 1 {
         return None;
     }
-    if !matches!(weights.layers[seg_start].attention, GpuAttentionWeights::Linear(_)) {
+    if !matches!(
+        weights.layers[seg_start].attention,
+        GpuAttentionWeights::Linear(_)
+    ) {
         return None;
     }
     if !streaming_prefill_enabled_for(device, seq_len) {
@@ -2821,6 +2837,10 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 
 fn profile_exact_gdn_reverse_tiles() -> bool {
     kiln_core::env_flag::env_tristate("KILN_PROFILE_EXACT_GDN_REVERSE_TILES").unwrap_or(false)
+}
+
+fn exact_gdn_split_recurrent_backward_enabled() -> bool {
+    kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2887,7 +2907,12 @@ fn exact_gdn_single_layer_tiled_reverse(
     );
 
     let linear_attn_idx = (0..layer_idx)
-        .filter(|&idx| matches!(weights.layers[idx].attention, GpuAttentionWeights::Linear(_)))
+        .filter(|&idx| {
+            matches!(
+                weights.layers[idx].attention,
+                GpuAttentionWeights::Linear(_)
+            )
+        })
         .count();
     let layer = &weights.layers[layer_idx];
     let num_tiles = total_tokens.div_ceil(tile_size);
@@ -2919,8 +2944,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             .detach();
 
         let mut tile_state = LinearAttentionState::new(model_config, device)?;
-        tile_state.recurrent_states[linear_attn_idx] =
-            recurrent_boundaries[tile_idx].clone();
+        tile_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
         tile_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
 
         let detached_layer_lora = lora_detached
@@ -2948,9 +2972,7 @@ fn exact_gdn_single_layer_tiled_reverse(
 
         if matches!(device, Device::Metal(_)) {
             synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize exact tiled GDN boundary layer {layer_idx} tile {tile_idx}"
-                )
+                format!("synchronize exact tiled GDN boundary layer {layer_idx} tile {tile_idx}")
             })?;
         }
         if profile_tiles {
@@ -3020,8 +3042,7 @@ fn exact_gdn_single_layer_tiled_reverse(
 
         let after_attn_value = {
             let mut value_state = LinearAttentionState::new(model_config, device)?;
-            value_state.recurrent_states[linear_attn_idx] =
-                recurrent_boundaries[tile_idx].clone();
+            value_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
             value_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
             gdn_attention_residual_block(
                 backend,
@@ -3137,8 +3158,9 @@ fn exact_gdn_single_layer_tiled_reverse(
         accumulate_grads(accumulated_grads, &gate_grads, &all_vars)?;
         let grad_after_mlp = match gate_grads.get(after_attn_var.as_tensor()) {
             Some(grad) => grad.detach(),
-            None => Tensor::zeros((1, tile_len, hidden_size), DType::F32, device)
-                .with_context(|| format!("alloc zero GDN tiled MLP after-attn grad tile {tile_idx}"))?,
+            None => Tensor::zeros((1, tile_len, hidden_size), DType::F32, device).with_context(
+                || format!("alloc zero GDN tiled MLP after-attn grad tile {tile_idx}"),
+            )?,
         }
         .to_dtype(DType::F32)?;
         let upstream_after_attn = (&tile_grad_out_f32 + &grad_after_mlp)?.detach();
@@ -3163,104 +3185,475 @@ fn exact_gdn_single_layer_tiled_reverse(
         drop(grad_after_mlp);
         drop(grad_gated);
 
-        let tile_input_var = Var::from_tensor(&tile_input)?;
-        let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
-        let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
+        if exact_gdn_split_recurrent_backward_enabled() {
+            let GpuAttentionWeights::Linear(linear_weights) = &layer.attention else {
+                anyhow::bail!("exact split GDN backward called on non-GDN layer {layer_idx}");
+            };
 
-        let mut tile_state = LinearAttentionState::new(model_config, device)?;
-        tile_state.recurrent_states[linear_attn_idx] =
-            recurrent_var.as_tensor().clone();
-        tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+            let normed_value =
+                gdn_attention_input_norm(&tile_input.detach(), layer, model_config)?.detach();
+            let parts_value = gdn_attention_in_projections(
+                backend,
+                &normed_value,
+                linear_weights,
+                detached_layer_lora,
+            )?;
+            let mixed_qkv_value = parts_value.mixed_qkv.detach();
+            let z_value = parts_value.z.detach();
+            let a_value = parts_value.a.detach();
+            let b_value = parts_value.b.detach();
+            let mut value_conv_state = conv_boundaries[tile_idx].clone();
+            let qkv_value = gdn_qkv_from_mixed_training(
+                backend,
+                &mixed_qkv_value,
+                linear_weights,
+                model_config,
+                &mut value_conv_state,
+            )?;
+            let q_value = qkv_value.q.detach();
+            let k_value = qkv_value.k.detach();
+            let v_value = qkv_value.v.detach();
+            let (beta_value, g_value) =
+                gdn_gates_from_ab_training(&a_value, &b_value, linear_weights, tile_input.dtype())?;
+            let beta_value = beta_value.detach();
+            let g_value = g_value.detach();
+            let mut value_recurrent_state = recurrent_boundaries[tile_idx].clone();
+            let recurrent_value = gdn_recurrent_forward_from_parts(
+                backend,
+                &q_value,
+                &k_value,
+                &v_value,
+                &beta_value,
+                &g_value,
+                &mut value_recurrent_state,
+            )?
+            .detach();
+            let gated_norm_value = gdn_gated_norm_from_recurrent(
+                backend,
+                &recurrent_value,
+                &z_value,
+                linear_weights,
+                model_config,
+            )?
+            .detach();
 
-        let after_attn = gdn_attention_residual_block(
-            backend,
-            tile_input_var.as_tensor(),
-            layer,
-            model_config,
-            &mut tile_state.recurrent_states[linear_attn_idx],
-            &mut tile_state.conv_states[linear_attn_idx],
-            layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
+            let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
+            let gated_norm_var = Var::from_tensor(&gated_norm_value)?;
+            let attn_out = gdn_out_proj_from_gated_norm(
+                backend,
+                gated_norm_var.as_tensor(),
+                linear_weights,
+                layer_lora,
             )
-        })?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "attention_forward",
-            stage_started,
-        )?;
-
-        let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
-        let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
-        let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
-            .sum_all()
-            .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
-
-        if let Some(grad) = next_recurrent_grad.as_ref() {
-            let exit_state_f32 =
-                tile_state.recurrent_states[linear_attn_idx].to_dtype(DType::F32)?;
-            let grad_f32 = grad.to_dtype(DType::F32)?;
-            let state_scalar = (&exit_state_f32 * &grad_f32)?
+            .with_context(|| {
+                format!(
+                    "exact split GDN out-proj layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            let out_scalar = (&attn_out.to_dtype(DType::F32)? * &upstream_after_attn_f32)?
                 .sum_all()
-                .with_context(|| format!("exact tiled GDN recurrent-state injection tile {tile_idx}"))?;
-            scalar = (scalar + state_scalar)?;
-        }
-        if let Some(grad) = next_conv_grad.as_ref() {
-            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_dtype(DType::F32)?;
-            let grad_f32 = grad.to_dtype(DType::F32)?;
-            let state_scalar = (&exit_state_f32 * &grad_f32)?
+                .with_context(|| format!("exact split GDN out-proj injection tile {tile_idx}"))?;
+            let out_grads = out_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN out-proj backward tile {tile_idx}"))?;
+            accumulate_grads(accumulated_grads, &out_grads, &all_vars)?;
+            let grad_gated_norm =
+                grad_or_zeros_like(&out_grads, gated_norm_var.as_tensor(), &gated_norm_value)?
+                    .to_dtype(DType::F32)?;
+            drop(out_grads);
+            drop(out_scalar);
+            drop(attn_out);
+            drop(gated_norm_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_out_proj_backward",
+                stage_started,
+            )?;
+
+            let recurrent_var = Var::from_tensor(&recurrent_value)?;
+            let z_var = Var::from_tensor(&z_value)?;
+            let gated_norm = gdn_gated_norm_from_recurrent(
+                backend,
+                recurrent_var.as_tensor(),
+                z_var.as_tensor(),
+                linear_weights,
+                model_config,
+            )
+            .with_context(|| {
+                format!(
+                    "exact split GDN gated-norm layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            let gated_norm_scalar = (&gated_norm.to_dtype(DType::F32)? * &grad_gated_norm)?
                 .sum_all()
-                .with_context(|| format!("exact tiled GDN conv-state injection tile {tile_idx}"))?;
-            scalar = (scalar + state_scalar)?;
+                .with_context(|| format!("exact split GDN gated-norm injection tile {tile_idx}"))?;
+            let gated_norm_grads = gated_norm_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN gated-norm backward tile {tile_idx}"))?;
+            let grad_recurrent = grad_or_zeros_like(
+                &gated_norm_grads,
+                recurrent_var.as_tensor(),
+                &recurrent_value,
+            )?
+            .to_dtype(DType::F32)?;
+            let grad_z = grad_or_zeros_like(&gated_norm_grads, z_var.as_tensor(), &z_value)?
+                .to_dtype(DType::F32)?;
+            drop(gated_norm_grads);
+            drop(gated_norm_scalar);
+            drop(gated_norm);
+            drop(z_var);
+            drop(recurrent_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_gated_norm_backward",
+                stage_started,
+            )?;
+
+            let recurrent_grads = gdn_recurrent_backward_no_grad(
+                backend,
+                &q_value,
+                &k_value,
+                &v_value,
+                &beta_value,
+                &g_value,
+                &recurrent_boundaries[tile_idx],
+                &grad_recurrent,
+                next_recurrent_grad.as_ref(),
+                GDN_CHUNK_SIZE,
+            )
+            .with_context(|| {
+                format!(
+                    "exact split GDN recurrent backward layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(Tensor::detach);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_recurrent_backward",
+                stage_started,
+            )?;
+
+            let mixed_qkv_var = Var::from_tensor(&mixed_qkv_value)?;
+            let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
+            let mut tracked_conv_state = conv_var.as_tensor().clone();
+            let qkv_tracked = gdn_qkv_from_mixed_training(
+                backend,
+                mixed_qkv_var.as_tensor(),
+                linear_weights,
+                model_config,
+                &mut tracked_conv_state,
+            )
+            .with_context(|| {
+                format!(
+                    "exact split GDN qkv/conv layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            let mut qkv_scalar = (&qkv_tracked.q.to_dtype(DType::F32)? * &recurrent_grads.dq)?
+                .sum_all()
+                .with_context(|| format!("exact split GDN q grad injection tile {tile_idx}"))?;
+            qkv_scalar = (qkv_scalar
+                + (&qkv_tracked.k.to_dtype(DType::F32)? * &recurrent_grads.dk)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN k grad injection tile {tile_idx}")
+                    })?)?;
+            qkv_scalar = (qkv_scalar
+                + (&qkv_tracked.v.to_dtype(DType::F32)? * &recurrent_grads.dv)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN v grad injection tile {tile_idx}")
+                    })?)?;
+            if let Some(grad) = next_conv_grad.as_ref() {
+                qkv_scalar = (qkv_scalar
+                    + (&tracked_conv_state.to_dtype(DType::F32)?
+                        * &grad.to_dtype(DType::F32)?)?
+                        .sum_all()
+                        .with_context(|| {
+                            format!("exact split GDN conv-state injection tile {tile_idx}")
+                        })?)?;
+            }
+            let qkv_grads = qkv_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN qkv/conv backward tile {tile_idx}"))?;
+            let grad_mixed_qkv =
+                grad_or_zeros_like(&qkv_grads, mixed_qkv_var.as_tensor(), &mixed_qkv_value)?
+                    .to_dtype(DType::F32)?;
+            next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(Tensor::detach);
+            drop(qkv_grads);
+            drop(qkv_scalar);
+            drop(qkv_tracked);
+            drop(tracked_conv_state);
+            drop(conv_var);
+            drop(mixed_qkv_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_qkv_conv_backward",
+                stage_started,
+            )?;
+
+            let a_var = Var::from_tensor(&a_value)?;
+            let b_var = Var::from_tensor(&b_value)?;
+            let (beta_tracked, g_tracked) = gdn_gates_from_ab_training(
+                a_var.as_tensor(),
+                b_var.as_tensor(),
+                linear_weights,
+                tile_input.dtype(),
+            )?;
+            let mut gates_scalar = (&beta_tracked.to_dtype(DType::F32)? * &recurrent_grads.dbeta)?
+                .sum_all()
+                .with_context(|| format!("exact split GDN beta grad injection tile {tile_idx}"))?;
+            gates_scalar = (gates_scalar
+                + (&g_tracked.to_dtype(DType::F32)? * &recurrent_grads.dg)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN decay grad injection tile {tile_idx}")
+                    })?)?;
+            let gates_grads = gates_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN gates backward tile {tile_idx}"))?;
+            let grad_a = grad_or_zeros_like(&gates_grads, a_var.as_tensor(), &a_value)?
+                .to_dtype(DType::F32)?;
+            let grad_b = grad_or_zeros_like(&gates_grads, b_var.as_tensor(), &b_value)?
+                .to_dtype(DType::F32)?;
+            drop(gates_grads);
+            drop(gates_scalar);
+            drop(g_tracked);
+            drop(beta_tracked);
+            drop(b_var);
+            drop(a_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_gates_backward",
+                stage_started,
+            )?;
+
+            let normed_var = Var::from_tensor(&normed_value)?;
+            let parts_tracked = gdn_attention_in_projections(
+                backend,
+                normed_var.as_tensor(),
+                linear_weights,
+                layer_lora,
+            )
+            .with_context(|| {
+                format!("exact split GDN in-proj layer {layer_idx} tile [{tile_start}, {tile_end})")
+            })?;
+            let mut proj_scalar = (&parts_tracked.mixed_qkv.to_dtype(DType::F32)?
+                * &grad_mixed_qkv)?
+                .sum_all()
+                .with_context(|| {
+                    format!("exact split GDN mixed-qkv grad injection tile {tile_idx}")
+                })?;
+            proj_scalar = (proj_scalar
+                + (&parts_tracked.z.to_dtype(DType::F32)? * &grad_z)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN z grad injection tile {tile_idx}")
+                    })?)?;
+            proj_scalar = (proj_scalar
+                + (&parts_tracked.a.to_dtype(DType::F32)? * &grad_a)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN a grad injection tile {tile_idx}")
+                    })?)?;
+            proj_scalar = (proj_scalar
+                + (&parts_tracked.b.to_dtype(DType::F32)? * &grad_b)?
+                    .sum_all()
+                    .with_context(|| {
+                        format!("exact split GDN b grad injection tile {tile_idx}")
+                    })?)?;
+            let proj_grads = proj_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN in-proj backward tile {tile_idx}"))?;
+            accumulate_grads(accumulated_grads, &proj_grads, &all_vars)?;
+            let grad_normed =
+                grad_or_zeros_like(&proj_grads, normed_var.as_tensor(), &normed_value)?
+                    .to_dtype(DType::F32)?;
+            drop(proj_grads);
+            drop(proj_scalar);
+            drop(parts_tracked);
+            drop(normed_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_in_proj_backward",
+                stage_started,
+            )?;
+
+            let tile_input_var = Var::from_tensor(&tile_input)?;
+            let normed_tracked = gdn_attention_input_norm(
+                tile_input_var.as_tensor(),
+                layer,
+                model_config,
+            )
+            .with_context(|| {
+                format!(
+                    "exact split GDN input norm layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            let norm_scalar = (&normed_tracked.to_dtype(DType::F32)? * &grad_normed)?
+                .sum_all()
+                .with_context(|| format!("exact split GDN input norm injection tile {tile_idx}"))?;
+            let norm_grads = norm_scalar
+                .backward()
+                .with_context(|| format!("exact split GDN input norm backward tile {tile_idx}"))?;
+            let grad_attention_input = match norm_grads.get(tile_input_var.as_tensor()) {
+                Some(grad) => grad.detach(),
+                None => Tensor::zeros((1, tile_len, hidden_size), DType::F32, device)?,
+            }
+            .to_dtype(DType::F32)?;
+            let input_grad = (&upstream_after_attn_f32 + &grad_attention_input)?.detach();
+            input_grad_chunks[tile_idx] = Some(input_grad);
+            drop(norm_grads);
+            drop(norm_scalar);
+            drop(normed_tracked);
+            drop(tile_input_var);
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attn_input_norm_backward",
+                stage_started,
+            )?;
+        } else {
+            let tile_input_var = Var::from_tensor(&tile_input)?;
+            let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
+            let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
+
+            let mut tile_state = LinearAttentionState::new(model_config, device)?;
+            tile_state.recurrent_states[linear_attn_idx] = recurrent_var.as_tensor().clone();
+            tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+
+            let after_attn = gdn_attention_residual_block(
+                backend,
+                tile_input_var.as_tensor(),
+                layer,
+                model_config,
+                &mut tile_state.recurrent_states[linear_attn_idx],
+                &mut tile_state.conv_states[linear_attn_idx],
+                layer_lora,
+            )
+            .with_context(|| {
+                format!(
+                    "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attention_forward",
+                stage_started,
+            )?;
+
+            let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
+            let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
+            let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
+                .sum_all()
+                .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
+
+            if let Some(grad) = next_recurrent_grad.as_ref() {
+                let exit_state_f32 =
+                    tile_state.recurrent_states[linear_attn_idx].to_dtype(DType::F32)?;
+                let grad_f32 = grad.to_dtype(DType::F32)?;
+                let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
+                    format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
+                })?;
+                scalar = (scalar + state_scalar)?;
+            }
+            if let Some(grad) = next_conv_grad.as_ref() {
+                let exit_state_f32 =
+                    tile_state.conv_states[linear_attn_idx].to_dtype(DType::F32)?;
+                let grad_f32 = grad.to_dtype(DType::F32)?;
+                let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
+                    format!("exact tiled GDN conv-state injection tile {tile_idx}")
+                })?;
+                scalar = (scalar + state_scalar)?;
+            }
+
+            let tile_grads = scalar
+                .backward()
+                .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
+            accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
+            stage_started = finish_exact_gdn_reverse_tile_stage(
+                device,
+                profile_tiles,
+                layer_idx,
+                tile_idx,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "attention_backward",
+                stage_started,
+            )?;
+
+            let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
+                Some(grad) => grad.detach(),
+                None => Tensor::zeros((1, tile_len, hidden_size), seg_input.dtype(), device)
+                    .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
+            };
+            input_grad_chunks[tile_idx] = Some(input_grad);
+            next_recurrent_grad = tile_grads
+                .get(recurrent_var.as_tensor())
+                .map(Tensor::detach);
+            next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
+
+            drop(tile_grads);
+            drop(scalar);
+            drop(upstream_after_attn_f32);
+            drop(after_attn_f32);
+            drop(after_attn);
+            drop(tile_state);
+            drop(conv_var);
+            drop(recurrent_var);
+            drop(tile_input_var);
         }
 
-        let tile_grads = scalar
-            .backward()
-            .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
-        accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "attention_backward",
-            stage_started,
-        )?;
-
-        let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
-            Some(grad) => grad.detach(),
-            None => Tensor::zeros((1, tile_len, hidden_size), seg_input.dtype(), device)
-                .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
-        };
-        input_grad_chunks[tile_idx] = Some(input_grad);
-        next_recurrent_grad = tile_grads
-            .get(recurrent_var.as_tensor())
-            .map(Tensor::detach);
-        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
-
-        drop(tile_grads);
-        drop(scalar);
-        drop(upstream_after_attn_f32);
-        drop(after_attn_f32);
         drop(upstream_after_attn);
         drop(tile_grad_out_f32);
         drop(tile_grad_out);
-        drop(after_attn);
-        drop(tile_state);
-        drop(conv_var);
-        drop(recurrent_var);
-        drop(tile_input_var);
         drop(tile_input);
 
         if matches!(device, Device::Metal(_)) {
@@ -3974,7 +4367,10 @@ fn checkpointed_forward_backward(
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
-    anyhow::ensure!(num_segments > 0, "checkpointed SFT requires at least one segment");
+    anyhow::ensure!(
+        num_segments > 0,
+        "checkpointed SFT requires at least one segment"
+    );
     anyhow::ensure!(
         input_ids.len() == label_mask.len(),
         "input_ids/label_mask length mismatch: {} vs {}",
@@ -3986,7 +4382,9 @@ fn checkpointed_forward_backward(
         "checkpointed SFT called with no supervised shifted-label positions"
     );
 
-    let positions: Vec<u32> = (0..input_ids.len()).map(|position| position as u32).collect();
+    let positions: Vec<u32> = (0..input_ids.len())
+        .map(|position| position as u32)
+        .collect();
     let lora_detached = lora_weights_detached(params);
     let resident_activation = backend.supports_resident_activation();
     let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
@@ -4082,11 +4480,17 @@ fn checkpointed_forward_backward(
             )?;
             current = current.detach();
             synchronize_checkpoint_boundary(device, || {
-                format!("synchronize spooled checkpoint boundary {} before save", seg_idx + 1)
+                format!(
+                    "synchronize spooled checkpoint boundary {} before save",
+                    seg_idx + 1
+                )
             })?;
             spool.save(seg_idx + 1, &current)?;
             synchronize_checkpoint_boundary(device, || {
-                format!("synchronize spooled checkpoint boundary {} after save", seg_idx + 1)
+                format!(
+                    "synchronize spooled checkpoint boundary {} after save",
+                    seg_idx + 1
+                )
             })?;
             tracing::info!(
                 segment = seg_idx + 1,
@@ -4277,13 +4681,9 @@ fn checkpointed_forward_backward(
                 .context("phase3.2: alloc boundary stub")?;
         }
 
-        if let Some(tile_size) = exact_gdn_reverse_tile_size(
-            weights,
-            device,
-            input_ids.len(),
-            seg_start,
-            seg_end,
-        ) {
+        if let Some(tile_size) =
+            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end)
+        {
             upstream_grad = exact_gdn_single_layer_tiled_reverse(
                 backend,
                 seg_start,
@@ -4696,8 +5096,9 @@ mod tests {
 
     #[test]
     fn tokenize_for_training_labels_assistant_spans_from_offsets() -> Result<()> {
-        let tokenizer =
-            minimal_training_tokenizer("{% for message in messages %}{{ message.content }}{% endfor %}");
+        let tokenizer = minimal_training_tokenizer(
+            "{% for message in messages %}{{ message.content }}{% endfor %}",
+        );
         let example = SftExample {
             messages: vec![
                 ChatMessage {
@@ -4785,8 +5186,7 @@ mod tests {
             "<|im_start|>assistant\n",
             "<think>\n",
         );
-        let offsets: Vec<(usize, usize)> =
-            (0..full_text.len()).map(|idx| (idx, idx + 1)).collect();
+        let offsets: Vec<(usize, usize)> = (0..full_text.len()).map(|idx| (idx, idx + 1)).collect();
         let label_mask =
             label_mask_from_rendered_assistant_spans(full_text, &offsets, offsets.len(), 1)
                 .expect("one closed assistant span should be found");
@@ -5092,7 +5492,11 @@ mod tests {
             config.linear_qkv_dim(),
         )?;
         assert_pair(&layer.in_proj_z, config.hidden_size, config.linear_v_dim())?;
-        assert_pair(&layer.gdn_out_proj, config.linear_v_dim(), config.hidden_size)?;
+        assert_pair(
+            &layer.gdn_out_proj,
+            config.linear_v_dim(),
+            config.hidden_size,
+        )?;
 
         Ok(())
     }
@@ -5125,7 +5529,9 @@ mod tests {
             |name: &str, pair: &Option<(Var, Var)>, w_t: &Tensor| -> Result<()> {
                 let dims = w_t.dims();
                 anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
-                let (a, b) = pair.as_ref().with_context(|| format!("missing {name} LoRA pair"))?;
+                let (a, b) = pair
+                    .as_ref()
+                    .with_context(|| format!("missing {name} LoRA pair"))?;
                 assert_eq!(a.as_tensor().dims(), &[params.rank, dims[0]]);
                 assert_eq!(b.as_tensor().dims(), &[dims[1], params.rank]);
                 Ok(())
@@ -5560,19 +5966,21 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_gdn_tiled_reverse_gradients_match_standard_cpu() -> Result<()> {
+    fn test_exact_gdn_split_recurrent_reverse_gradients_match_standard_cpu() -> Result<()> {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prior_flce = std::env::var("KILN_USE_FLCE").ok();
         let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
         let prior_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
         let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
         let prior_exact = std::env::var("KILN_EXACT_GDN_TILE_BACKWARD").ok();
+        let prior_split = std::env::var("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").ok();
         unsafe {
             std::env::set_var("KILN_USE_FLCE", "0");
             std::env::set_var("KILN_STREAMING_PREFILL", "1");
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
             std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
             std::env::set_var("KILN_EXACT_GDN_TILE_BACKWARD", "1");
+            std::env::set_var("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD", "1");
         }
 
         let result = (|| -> Result<()> {
@@ -5630,7 +6038,7 @@ mod tests {
             let loss_diff = (loss_std - loss_ckpt).abs();
             assert!(
                 loss_diff < 1e-5,
-                "exact GDN tiled reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
+                "exact split GDN tiled reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
             );
 
             let std_vars = params_std.all_vars();
@@ -5649,7 +6057,7 @@ mod tests {
                             .to_scalar::<f32>()?;
                         assert!(
                             diff < 1e-3,
-                            "exact GDN tiled reverse grad differs from standard: max_abs_diff={diff:e}"
+                            "exact split GDN tiled reverse grad differs from standard: max_abs_diff={diff:e}"
                         );
                         compared += 1;
                     }
@@ -5670,6 +6078,7 @@ mod tests {
         restore_env("KILN_STREAMING_TILE_TOKENS", prior_tile);
         restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
         restore_env("KILN_EXACT_GDN_TILE_BACKWARD", prior_exact);
+        restore_env("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD", prior_split);
 
         result
     }
@@ -6768,12 +7177,16 @@ mod tests {
 
         kiln_model::backend::cuda::reset_optimizer_dispatch_success_counts();
         sgd_step_from_map(&*backend, &params, &grads, 0.5)?;
-        let (sgd_count, adamw_count) = kiln_model::backend::cuda::optimizer_dispatch_success_counts();
+        let (sgd_count, adamw_count) =
+            kiln_model::backend::cuda::optimizer_dispatch_success_counts();
         assert!(
             sgd_count > 0,
             "trainer SGD step must dispatch at least one CUDA optimizer kernel"
         );
-        assert_eq!(adamw_count, 0, "SGD step must not increment AdamW dispatches");
+        assert_eq!(
+            adamw_count, 0,
+            "SGD step must not increment AdamW dispatches"
+        );
 
         let mut opt_state = params.allocate_adamw_state(&device)?;
         opt_state.register_with_backend(&*backend)?;
@@ -6791,7 +7204,8 @@ mod tests {
             },
             Some(&mut opt_state),
         )?;
-        let (sgd_count, adamw_count) = kiln_model::backend::cuda::optimizer_dispatch_success_counts();
+        let (sgd_count, adamw_count) =
+            kiln_model::backend::cuda::optimizer_dispatch_success_counts();
         assert_eq!(sgd_count, 0, "AdamW step must not increment SGD dispatches");
         assert!(
             adamw_count > 0,
