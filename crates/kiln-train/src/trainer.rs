@@ -1233,18 +1233,23 @@ pub fn grpo_train(
                 // This is cheap memory-wise since nothing is tracked.
                 let ref_log_probs = {
                     let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
-                    let ref_logits = model_forward(
+                    let ref_hidden = model_forward_no_head(
                         &*backend,
                         &comp.input_ids,
                         weights,
                         model_config,
-                        None,
                         Some(&mut ref_linear_state),
                         None, // no LoRA = reference model
                     )
                     .context("GRPO reference forward pass")?;
-                    token_log_probs(&ref_logits, &comp.input_ids, &comp.completion_mask, &device)?
-                        .detach()
+                    selected_log_probs_from_normed_hidden_chunked(
+                        &ref_hidden,
+                        &weights.embed_tokens_t,
+                        &comp.input_ids,
+                        &comp.completion_mask,
+                        DEFAULT_CHUNK_SIZE,
+                    )?
+                    .detach()
                 };
 
                 // Step 2: Policy forward pass + GRPO loss + backward
@@ -1567,6 +1572,132 @@ fn token_log_probs(
     let log_probs = (correct_logits - log_sum_exp)?;
 
     Ok(log_probs)
+}
+
+/// Compute selected next-token log-probs from post-final-RMSNorm hidden states
+/// without materializing the full `[seq_len, vocab_size]` logits tensor.
+fn selected_log_probs_from_normed_hidden_chunked(
+    normed_hidden: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    mask: &[bool],
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let device = normed_hidden.device();
+    let seq_len = input_ids.len();
+    if seq_len < 2 {
+        anyhow::bail!("selected log-probs require at least 2 tokens");
+    }
+    if mask.len() != seq_len {
+        anyhow::bail!(
+            "selected log-prob mask length {} does not match input length {}",
+            mask.len(),
+            seq_len
+        );
+    }
+    if chunk_size == 0 {
+        anyhow::bail!("selected log-prob chunk_size must be > 0");
+    }
+
+    let dims = normed_hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != seq_len {
+        anyhow::bail!(
+            "normed_hidden must have shape [1, seq_len, hidden_size], got {:?}",
+            dims
+        );
+    }
+    let hidden_size = dims[2];
+    if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
+        anyhow::bail!(
+            "head_t must have shape [hidden_size, vocab_size], got {:?}",
+            head_t.dims()
+        );
+    }
+
+    let active_positions: Vec<u32> = mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    if active_positions.is_empty() {
+        return Tensor::zeros(1, DType::F32, device).map_err(Into::into);
+    }
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| input_ids[i as usize + 1])
+        .collect();
+    let num_active = active_positions.len();
+
+    let hidden_2d = normed_hidden.squeeze(0)?;
+    let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
+    let active_indices = Tensor::new(active_positions.as_slice(), device)?;
+    let active_hidden = shift_hidden
+        .index_select(&active_indices, 0)?
+        .to_dtype(DType::F32)?;
+
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let vocab_size = head_t_f32.dim(1)?;
+    if vocab_size == 0 {
+        anyhow::bail!("head_t vocab dimension is zero");
+    }
+
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let chunk_end = chunk_start + chunk_len;
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_hidden.matmul(&head_chunk)?;
+            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running max/sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+
+            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+                } else if label >= vocab_size {
+                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
+                }
+            }
+            let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            correct_logits = Some(match correct_logits.as_ref() {
+                Some(prev) => (prev + chunk_correct)?.detach(),
+                None => chunk_correct.detach(),
+            });
+        }
+        synchronize_metal_tail_chunk(device, "synchronize selected log-prob chunk")?;
+        chunk_start = chunk_end;
+    }
+
+    let running_max = running_max.context("vocab_size was zero")?;
+    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
+    let correct_logits = correct_logits.context("vocab_size was zero")?;
+    let log_sum_exp = (running_max + running_sumexp.log()?)?;
+    Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
 }
 
 /// Tokenize a training example into (input_ids, label_mask).
@@ -6792,6 +6923,49 @@ mod tests {
             "vk GRPO hidden gradient diverged from existing trainer: {grad_mad:e}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn chunked_selected_log_probs_match_full_logits() -> Result<()> {
+        let device = Device::Cpu;
+        let normed_hidden = Tensor::from_vec(
+            vec![
+                0.10f32, -0.20, 0.30, 0.40, 0.50, -0.60, -0.70, 0.80, 0.90, 1.00, -1.10, 1.20,
+                1.30, 1.40, -1.50,
+            ],
+            (1, 5, 3),
+            &device,
+        )?;
+        let head_t = Tensor::from_vec(
+            vec![
+                0.20f32, -0.10, 0.30, -0.40, 0.50, -0.60, 0.70, 0.80, -0.90, 1.00, -1.10, 1.20,
+                -1.30, 1.40, 1.50, -1.60, 1.70, -1.80,
+            ],
+            (3, 6),
+            &device,
+        )?;
+        let input_ids = vec![0, 2, 5, 1, 4];
+        let mask = vec![false, true, false, true, true];
+
+        let logits = normed_hidden.squeeze(0)?.matmul(&head_t)?.unsqueeze(0)?;
+        let full = token_log_probs(&logits, &input_ids, &mask, &device)?;
+        let chunked = selected_log_probs_from_normed_hidden_chunked(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &mask,
+            2,
+        )?;
+        let max_diff = (&full - &chunked)?
+            .abs()?
+            .max_all()?
+            .to_dtype(DType::F32)?
+            .to_scalar::<f32>()?;
+        assert!(
+            max_diff < 1e-6,
+            "chunked selected log-probs differ from full logits: max_diff={max_diff:e}"
+        );
         Ok(())
     }
 
