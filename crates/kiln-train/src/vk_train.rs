@@ -2853,12 +2853,13 @@ pub fn vk_native_grpo_train(
         "starting vk-native GRPO training"
     );
 
-    let mut global_step = 0u32;
+    let mut optimizer_step = 0u32;
     let mut last_loss = 0.0f32;
 
     for (group_idx, group) in groups.iter().enumerate() {
+        let group_step = group_idx + 1;
         let tgroup = tokenize_vk_grpo_group(group, tokenizer)
-            .with_context(|| format!("tokenize GRPO group {}", group_idx + 1))?;
+            .with_context(|| format!("tokenize GRPO group {group_step}"))?;
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
         let mut group_loss_sum = 0.0f64;
         let ref_prefix = vk_grpo_reference_prefill_prompt(
@@ -2870,12 +2871,12 @@ pub fn vk_native_grpo_train(
         .with_context(|| {
             format!(
                 "vk-native GRPO reference prompt prefill group {}",
-                group_idx + 1
+                group_step
             )
         })?;
 
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
-            global_step += 1;
+            optimizer_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
             ensure_grpo_prefix_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
@@ -2884,7 +2885,7 @@ pub fn vk_native_grpo_train(
                     .with_context(|| {
                         format!(
                             "vk-native GRPO reference logprobs group {} completion {}",
-                            group_idx + 1,
+                            group_step,
                             comp_idx + 1
                         )
                     })?;
@@ -2904,44 +2905,21 @@ pub fn vk_native_grpo_train(
                 &mut adamw,
                 &cfg,
                 config.optimizer,
-                global_step,
+                optimizer_step,
             )
             .with_context(|| {
                 format!(
                     "vk-native GRPO policy step group {} completion {}",
-                    group_idx + 1,
+                    group_step,
                     comp_idx + 1
                 )
             })?;
             anyhow::ensure!(
                 loss.is_finite(),
-                "vk_native_grpo_train: non-finite loss {loss} at step {global_step}"
+                "vk_native_grpo_train: non-finite loss {loss} at optimizer step {optimizer_step}"
             );
             last_loss = loss;
             group_loss_sum += loss as f64;
-
-            if let Some(interval) = config.checkpoint_interval {
-                if interval > 0
-                    && (global_step as usize) % interval == 0
-                    && (global_step as usize) < total_completions
-                {
-                    let ckpt_dir =
-                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    std::fs::create_dir_all(&ckpt_dir).with_context(|| {
-                        format!(
-                            "create vk-native GRPO checkpoint dir {}",
-                            ckpt_dir.display()
-                        )
-                    })?;
-                    save_vk_lora_adapter(
-                        &lora_layers,
-                        config.lora_rank,
-                        config.lora_alpha,
-                        &ckpt_dir.join("adapter_model.safetensors"),
-                    )?;
-                    write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
-                }
-            }
         }
 
         let avg_group_loss = if tgroup.completions.is_empty() {
@@ -2953,19 +2931,38 @@ pub fn vk_native_grpo_train(
             cb(TrainingProgress {
                 epoch: 1,
                 total_epochs: 1,
-                step: group_idx + 1,
+                step: group_step,
                 total_steps: groups.len(),
                 loss: avg_group_loss,
-                progress: (group_idx + 1) as f32 / groups.len().max(1) as f32,
+                progress: group_step as f32 / groups.len().max(1) as f32,
             });
         }
         tracing::info!(
-            group = group_idx + 1,
+            group = group_step,
             total_groups = groups.len(),
             completions = tgroup.completions.len(),
             loss = format!("{avg_group_loss:.6}"),
             "vk-native GRPO group step"
         );
+
+        if let Some(interval) = config.checkpoint_interval {
+            if interval > 0 && group_step % interval == 0 && group_step < groups.len() {
+                let ckpt_dir = adapter_dir.join(format!("{adapter_name}-checkpoint-{group_step}"));
+                std::fs::create_dir_all(&ckpt_dir).with_context(|| {
+                    format!(
+                        "create vk-native GRPO checkpoint dir {}",
+                        ckpt_dir.display()
+                    )
+                })?;
+                save_vk_lora_adapter(
+                    &lora_layers,
+                    config.lora_rank,
+                    config.lora_alpha,
+                    &ckpt_dir.join("adapter_model.safetensors"),
+                )?;
+                write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
+            }
+        }
     }
 
     let output_dir = adapter_dir.join(adapter_name);
@@ -3069,7 +3066,7 @@ pub fn vk_native_grpo_train_jsonl(
     let file = File::open(dataset_path)
         .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
     let reader = BufReader::new(file);
-    let mut global_step = 0u32;
+    let mut optimizer_step = 0u32;
     let mut last_loss = 0.0f32;
     let mut processed_groups = 0usize;
     let total_substeps = total_completions.saturating_mul(2).max(1);
@@ -3136,11 +3133,11 @@ pub fn vk_native_grpo_train_jsonl(
         );
 
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
-            global_step += 1;
+            optimizer_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
             ensure_grpo_prefix_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
-            let completed_before = ((global_step as usize).saturating_sub(1)) * 2;
+            let completed_before = ((optimizer_step as usize).saturating_sub(1)) * 2;
             if let Some(ref cb) = progress_cb {
                 cb(TrainingProgress {
                     epoch: 1,
@@ -3156,7 +3153,7 @@ pub fn vk_native_grpo_train_jsonl(
                 total_groups,
                 completion = comp_idx + 1,
                 completions = tgroup.completions.len(),
-                step = global_step,
+                optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
                 "streamed vk-native GRPO reference logprobs begin"
@@ -3174,7 +3171,7 @@ pub fn vk_native_grpo_train_jsonl(
             tracing::info!(
                 group = processed_groups,
                 completion = comp_idx + 1,
-                step = global_step,
+                optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
                 elapsed_ms = ref_start.elapsed().as_millis() as u64,
@@ -3197,7 +3194,7 @@ pub fn vk_native_grpo_train_jsonl(
                 total_groups,
                 completion = comp_idx + 1,
                 completions = tgroup.completions.len(),
-                step = global_step,
+                optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
                 "streamed vk-native GRPO policy step begin"
@@ -3218,7 +3215,7 @@ pub fn vk_native_grpo_train_jsonl(
                 &mut adamw,
                 &cfg,
                 config.optimizer,
-                global_step,
+                optimizer_step,
             )
             .with_context(|| {
                 format!(
@@ -3230,7 +3227,7 @@ pub fn vk_native_grpo_train_jsonl(
             tracing::info!(
                 group = processed_groups,
                 completion = comp_idx + 1,
-                step = global_step,
+                optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
                 loss = format!("{loss:.6}"),
@@ -3239,7 +3236,7 @@ pub fn vk_native_grpo_train_jsonl(
             );
             anyhow::ensure!(
                 loss.is_finite(),
-                "vk_native_grpo_train_jsonl: non-finite loss {loss} at step {global_step}"
+                "vk_native_grpo_train_jsonl: non-finite loss {loss} at optimizer step {optimizer_step}"
             );
             last_loss = loss;
             group_loss_sum += loss as f64;
@@ -3253,29 +3250,6 @@ pub fn vk_native_grpo_train_jsonl(
                     loss: last_loss as f64,
                     progress: (completed as f32 / total_substeps as f32).min(0.999),
                 });
-            }
-
-            if let Some(interval) = config.checkpoint_interval {
-                if interval > 0
-                    && (global_step as usize) % interval == 0
-                    && (global_step as usize) < total_completions
-                {
-                    let ckpt_dir =
-                        adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    std::fs::create_dir_all(&ckpt_dir).with_context(|| {
-                        format!(
-                            "create streamed vk-native GRPO checkpoint dir {}",
-                            ckpt_dir.display()
-                        )
-                    })?;
-                    save_vk_lora_adapter(
-                        &lora_layers,
-                        config.lora_rank,
-                        config.lora_alpha,
-                        &ckpt_dir.join("adapter_model.safetensors"),
-                    )?;
-                    write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
-                }
             }
         }
 
@@ -3301,10 +3275,30 @@ pub fn vk_native_grpo_train_jsonl(
             loss = format!("{avg_group_loss:.6}"),
             "streamed vk-native GRPO group step"
         );
+
+        if let Some(interval) = config.checkpoint_interval {
+            if interval > 0 && processed_groups % interval == 0 && processed_groups < total_groups {
+                let ckpt_dir =
+                    adapter_dir.join(format!("{adapter_name}-checkpoint-{processed_groups}"));
+                std::fs::create_dir_all(&ckpt_dir).with_context(|| {
+                    format!(
+                        "create streamed vk-native GRPO checkpoint dir {}",
+                        ckpt_dir.display()
+                    )
+                })?;
+                save_vk_lora_adapter(
+                    &lora_layers,
+                    config.lora_rank,
+                    config.lora_alpha,
+                    &ckpt_dir.join("adapter_model.safetensors"),
+                )?;
+                write_vk_adapter_config(&ckpt_dir, config.lora_rank, config.lora_alpha)?;
+            }
+        }
     }
 
     anyhow::ensure!(
-        processed_groups > 0 && global_step > 0,
+        processed_groups > 0 && optimizer_step > 0,
         "vk_native_grpo_train_jsonl: no valid GRPO groups in {}",
         dataset_path.display()
     );
