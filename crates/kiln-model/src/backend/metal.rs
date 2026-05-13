@@ -657,8 +657,12 @@ impl BackendRuntime for MetalBackend {
         {
             return Ok(None);
         }
-        let out = metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta)
-            .context("metal gdn_forward_substitution kernel failed")?;
+        let out = match a_strict.dtype() {
+            DType::BF16 => metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta),
+            DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
+            other => anyhow::bail!("unsupported metal gdn_forward_substitution dtype {other:?}"),
+        }
+        .context("metal gdn_forward_substitution kernel failed")?;
         Ok(Some(out))
     }
 
@@ -1273,9 +1277,10 @@ fn metal_gdn_forward_substitution_supports(
     {
         return false;
     }
-    if a_strict.dtype() != DType::BF16
-        || v_prime.dtype() != DType::BF16
-        || beta.dtype() != DType::BF16
+    let dtype = a_strict.dtype();
+    if (dtype != DType::BF16 && dtype != DType::F32)
+        || v_prime.dtype() != dtype
+        || beta.dtype() != dtype
     {
         return false;
     }
@@ -11344,6 +11349,46 @@ kernel void kiln_gdn_forward_substitution_bf16(
     }
 }
 
+kernel void kiln_gdn_forward_substitution_f32(
+    device const float* a_strict [[buffer(0)]],
+    device const float* v_prime [[buffer(1)]],
+    device const float* beta [[buffer(2)]],
+    device float* out [[buffer(3)]],
+    constant uint& batch_heads [[buffer(4)]],
+    constant uint& chunk_size [[buffer(5)]],
+    constant uint& dv [[buffer(6)]],
+    uint bh [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (bh >= batch_heads) {
+        return;
+    }
+
+    threadgroup float sW[8192];
+
+    const uint a_base = bh * chunk_size * chunk_size;
+    const uint v_base = bh * chunk_size * dv;
+    const uint beta_base = bh * chunk_size;
+
+    for (uint t = 0; t < chunk_size; ++t) {
+        const float beta_t = beta[beta_base + t];
+
+        for (uint d = tid; d < dv; d += 128) {
+            float acc = 0.0f;
+            for (uint i = 0; i < t; ++i) {
+                acc += a_strict[a_base + t * chunk_size + i] * sW[i * dv + d];
+            }
+
+            const uint row_col = t * dv + d;
+            const float w = beta_t * (v_prime[v_base + row_col] - acc);
+            sW[row_col] = w;
+            out[v_base + row_col] = w;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
 kernel void kiln_gdn_chunk_prep_bf16(
     device const bfloat* g [[buffer(0)]],
     device const bfloat* v [[buffer(1)]],
@@ -11858,6 +11903,35 @@ fn metal_gdn_forward_substitution_pipeline(
     Ok(pipeline)
 }
 
+fn metal_gdn_forward_substitution_f32_pipeline(
+    device: &candle_core::metal_backend::MetalDevice,
+) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+    use candle_core::metal_backend::DeviceId;
+    use candle_metal_kernels::metal::ComputePipeline;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().map_err(|_| {
+        anyhow::anyhow!("metal gdn forward-substitution f32 pipeline cache poisoned")
+    })?;
+    if let Some(pipeline) = cache.get(&device.id()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_gdn_forward_substitution_f32", None)
+        .map_err(|e| anyhow::anyhow!("load metal gdn forward-substitution f32 function: {e:?}"))?;
+    let pipeline = device
+        .device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal gdn forward-substitution f32 pipeline: {e:?}"))?;
+    cache.insert(device.id(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_gdn_chunk_prep_pipeline(
     device: &candle_core::metal_backend::MetalDevice,
 ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
@@ -12001,6 +12075,100 @@ fn metal_gdn_forward_substitution_bf16(
         let out_metal = match &*out_storage {
             candle_core::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution out must be on Metal"),
+        };
+
+        let a_buf =
+            candle_core::metal_backend::buffer_o(a_metal.buffer(), &a_layout, a_strict.dtype());
+        let v_buf =
+            candle_core::metal_backend::buffer_o(v_metal.buffer(), &v_layout, v_prime.dtype());
+        let beta_buf =
+            candle_core::metal_backend::buffer_o(beta_metal.buffer(), &beta_layout, beta.dtype());
+        let out_buf =
+            candle_core::metal_backend::buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+
+        encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(v_buf.buffer), v_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(beta_buf.buffer), beta_buf.offset_in_bytes);
+        encoder.set_buffer(3, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+        let batch_heads_u32 = batch_heads as u32;
+        let chunk_size_u32 = chunk_size as u32;
+        let dv_u32 = dv as u32;
+        encoder.set_bytes(4, &batch_heads_u32);
+        encoder.set_bytes(5, &chunk_size_u32);
+        encoder.set_bytes(6, &dv_u32);
+
+        let threads_per_grid = objc2_metal::MTLSize {
+            width: batch_heads,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: 128,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threads_per_grid, threads_per_threadgroup);
+    }
+
+    Ok(out)
+}
+
+fn metal_gdn_forward_substitution_f32(
+    a_strict: &Tensor,
+    v_prime: &Tensor,
+    beta: &Tensor,
+) -> Result<Tensor> {
+    let (batch, heads, chunk_size, _) = a_strict.dims4()?;
+    let dv = v_prime.dim(3)?;
+    let batch_heads = batch * heads;
+    anyhow::ensure!(
+        batch_heads <= u32::MAX as usize
+            && chunk_size <= u32::MAX as usize
+            && dv <= u32::MAX as usize,
+        "metal gdn forward-substitution f32 shape too large"
+    );
+
+    let a_strict = a_strict.contiguous()?;
+    let v_prime = v_prime.contiguous()?;
+    let beta = beta.contiguous()?;
+    let out = unsafe {
+        Tensor::empty(
+            (batch, heads, chunk_size, dv),
+            DType::F32,
+            a_strict.device(),
+        )?
+    };
+
+    let Device::Metal(device) = a_strict.device() else {
+        anyhow::bail!("metal gdn forward-substitution f32 requires a Metal tensor");
+    };
+    let pipeline = metal_gdn_forward_substitution_f32_pipeline(device)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_label("kiln_gdn_forward_substitution_f32");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let (a_storage, a_layout) = a_strict.storage_and_layout();
+        let (v_storage, v_layout) = v_prime.storage_and_layout();
+        let (beta_storage, beta_layout) = beta.storage_and_layout();
+        let (out_storage, out_layout) = out.storage_and_layout();
+
+        let a_metal = match &*a_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution f32 a_strict must be on Metal"),
+        };
+        let v_metal = match &*v_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution f32 v_prime must be on Metal"),
+        };
+        let beta_metal = match &*beta_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution f32 beta must be on Metal"),
+        };
+        let out_metal = match &*out_storage {
+            candle_core::Storage::Metal(s) => s,
+            _ => anyhow::bail!("metal gdn forward-substitution f32 out must be on Metal"),
         };
 
         let a_buf =
@@ -13842,6 +14010,71 @@ mod tests {
             .flatten_all()?
             .mean(D::Minus1)?
             .to_scalar::<f32>()?)
+    }
+
+    fn gdn_forward_substitution_reference(
+        a_strict: &Tensor,
+        v_prime: &Tensor,
+        beta: &Tensor,
+        chunk: usize,
+    ) -> Result<Tensor> {
+        let beta_col = beta.unsqueeze(3)?;
+        let mut rows = Vec::with_capacity(chunk);
+        for t in 0..chunk {
+            let vp_t = v_prime.narrow(2, t, 1)?;
+            let beta_t = beta_col.narrow(2, t, 1)?;
+            let w_t = if t == 0 {
+                vp_t.broadcast_mul(&beta_t)?
+            } else {
+                let a_row = a_strict.narrow(2, t, 1)?.narrow(3, 0, t)?.contiguous()?;
+                let w_prev = Tensor::cat(&rows, 2)?;
+                let sub = a_row.matmul(&w_prev)?;
+                (vp_t - sub)?.broadcast_mul(&beta_t)?
+            };
+            rows.push(w_t);
+        }
+        Ok(Tensor::cat(&rows, 2)?)
+    }
+
+    #[test]
+    fn test_gdn_forward_substitution_f32_matches_reference() -> Result<()> {
+        let Some(device) = try_new_metal() else {
+            eprintln!(
+                "Metal unavailable, skipping test_gdn_forward_substitution_f32_matches_reference"
+            );
+            return Ok(());
+        };
+
+        let batch = 1;
+        let heads = 2;
+        let chunk = 8;
+        let dv = 4;
+        let a_data: Vec<f32> = (0..batch * heads * chunk * chunk)
+            .map(|idx| {
+                let row = (idx / chunk) % chunk;
+                let col = idx % chunk;
+                if row > col {
+                    ((idx % 17) as f32 - 8.0) * 0.003
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let vp_data: Vec<f32> = (0..batch * heads * chunk * dv)
+            .map(|idx| ((idx % 23) as f32 - 11.0) * 0.01)
+            .collect();
+        let beta_data: Vec<f32> = (0..batch * heads * chunk)
+            .map(|idx| 0.2 + ((idx % 7) as f32) * 0.03)
+            .collect();
+
+        let a_strict = Tensor::from_slice(&a_data, (batch, heads, chunk, chunk), &device)?;
+        let v_prime = Tensor::from_slice(&vp_data, (batch, heads, chunk, dv), &device)?;
+        let beta = Tensor::from_slice(&beta_data, (batch, heads, chunk), &device)?;
+        let actual = metal_gdn_forward_substitution_f32(&a_strict, &v_prime, &beta)?;
+        let expected = gdn_forward_substitution_reference(&a_strict, &v_prime, &beta, chunk)?;
+        let diff = max_abs_diff(&actual, &expected)?;
+        assert!(diff < 1e-6, "f32 forward-substitution diff {diff:e}");
+        Ok(())
     }
 
     fn tensor_all_finite(t: &Tensor) -> Result<bool> {
