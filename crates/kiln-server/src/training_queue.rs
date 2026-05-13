@@ -399,20 +399,42 @@ fn run_grpo(
                 "GRPO request must use either groups or dataset_path, not both".to_string(),
             );
         }
-        if !vk_native {
-            return Err(
-                "GRPO dataset_path streaming requires Vulkan-native GRPO on a Vulkan backend"
-                    .to_string(),
-            );
+        if vk_native {
+            #[cfg(feature = "vulkan")]
+            {
+                tracing::info!(
+                    job_id = %job_id,
+                    dataset_path,
+                    "routing streamed GRPO dataset to vk_native_grpo_train_jsonl"
+                );
+                return kiln_train::vk_train::vk_native_grpo_train_jsonl(
+                    std::path::Path::new(dataset_path),
+                    &req.config,
+                    model_config,
+                    weights,
+                    tokenizer,
+                    adapter_dir,
+                    adapter_name,
+                    Some(progress_cb),
+                )
+                .map_err(|e| format!("{e:#}"));
+            }
+            #[cfg(not(feature = "vulkan"))]
+            {
+                return Err(
+                    "GRPO dataset_path streaming requested but kiln-server was built without \
+                     --features vulkan"
+                        .to_string(),
+                );
+            }
         }
-        #[cfg(feature = "vulkan")]
         {
             tracing::info!(
                 job_id = %job_id,
                 dataset_path,
-                "routing streamed GRPO dataset to vk_native_grpo_train_jsonl"
+                "routing streamed GRPO dataset to generic trainer"
             );
-            return kiln_train::vk_train::vk_native_grpo_train_jsonl(
+            return trainer::grpo_train_jsonl(
                 std::path::Path::new(dataset_path),
                 &req.config,
                 model_config,
@@ -421,16 +443,9 @@ fn run_grpo(
                 adapter_dir,
                 adapter_name,
                 Some(progress_cb),
+                Some(replay_ctx),
             )
             .map_err(|e| format!("{e:#}"));
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            return Err(
-                "GRPO dataset_path streaming requested but kiln-server was built without \
-                 --features vulkan"
-                    .to_string(),
-            );
         }
     }
     if vk_native {

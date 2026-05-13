@@ -190,10 +190,7 @@ fn vk_native_grpo_enabled(state: &AppState) -> bool {
     }
 }
 
-fn validate_grpo_submission_source(
-    req: &GrpoRequest,
-    vk_native_grpo: bool,
-) -> Result<(), ApiError> {
+fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
     if req.dataset_path.is_some() && !req.groups.is_empty() {
         return Err(ApiError::training_invalid_request(
             "GRPO request must use either groups or dataset_path, not both",
@@ -202,11 +199,6 @@ fn validate_grpo_submission_source(
     if req.dataset_path.is_none() && req.groups.is_empty() {
         return Err(ApiError::training_invalid_request(
             "GRPO request needs either non-empty groups or dataset_path",
-        ));
-    }
-    if req.dataset_path.is_some() && !vk_native_grpo {
-        return Err(ApiError::training_invalid_request(
-            "GRPO dataset_path streaming requires Vulkan-native GRPO on a Vulkan backend",
         ));
     }
     Ok(())
@@ -378,7 +370,7 @@ async fn submit_grpo(
         }
     }
     let vk_native_grpo = vk_native_grpo_enabled(&state);
-    validate_grpo_submission_source(&req, vk_native_grpo)?;
+    validate_grpo_submission_source(&req)?;
 
     let stats = if let Some(path) = req.dataset_path.as_deref() {
         validate_grpo_jsonl_submission_head(path, Some(state.tokenizer.as_ref()))?
@@ -678,30 +670,23 @@ mod tests {
     }
 
     #[test]
-    fn grpo_dataset_path_submission_requires_vk_native_route() {
+    fn grpo_dataset_path_submission_allows_generic_streaming_route() {
         let req = grpo_req(Some("/tmp/grpo.jsonl"), Vec::new());
-        let err = validate_grpo_submission_source(&req, false).unwrap_err();
-        assert_eq!(err.code, "training_invalid_request");
-        assert!(
-            err.message
-                .contains("dataset_path streaming requires Vulkan-native GRPO")
-        );
-
-        validate_grpo_submission_source(&req, true).unwrap();
+        validate_grpo_submission_source(&req).unwrap();
     }
 
     #[test]
     fn grpo_submission_rejects_ambiguous_or_empty_sources() {
         let both = grpo_req(Some("/tmp/grpo.jsonl"), vec![grpo_group()]);
-        let err = validate_grpo_submission_source(&both, true).unwrap_err();
+        let err = validate_grpo_submission_source(&both).unwrap_err();
         assert!(err.message.contains("either groups or dataset_path"));
 
         let empty = grpo_req(None, Vec::new());
-        let err = validate_grpo_submission_source(&empty, true).unwrap_err();
+        let err = validate_grpo_submission_source(&empty).unwrap_err();
         assert!(err.message.contains("non-empty groups or dataset_path"));
 
         let inline = grpo_req(None, vec![grpo_group()]);
-        validate_grpo_submission_source(&inline, false).unwrap();
+        validate_grpo_submission_source(&inline).unwrap();
     }
 
     #[test]

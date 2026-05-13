@@ -1221,117 +1221,18 @@ pub fn grpo_train(
         let pb = make_step_progress(total_steps, "grpo training");
 
         for (group_idx, tgroup) in tokenized_groups.iter().enumerate() {
-            // Compute advantages from rewards (normalize within group)
-            let advantages = compute_advantages(&tgroup.rewards);
-
-            // For each completion: compute policy log-probs and reference log-probs
-            let mut group_loss_sum = 0.0;
             let num_completions = tgroup.completions.len();
-
-            for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
-                // Step 1: Reference forward pass (NO LoRA, NO gradient tracking)
-                // This is cheap memory-wise since nothing is tracked.
-                let ref_log_probs = {
-                    let mut ref_linear_state = LinearAttentionState::new(model_config, &device)?;
-                    let ref_hidden = model_forward_no_head(
-                        &*backend,
-                        &comp.input_ids,
-                        weights,
-                        model_config,
-                        Some(&mut ref_linear_state),
-                        None, // no LoRA = reference model
-                    )
-                    .context("GRPO reference forward pass")?;
-                    selected_log_probs_from_normed_hidden_chunked(
-                        &ref_hidden,
-                        &weights.embed_tokens_t,
-                        &comp.input_ids,
-                        &comp.completion_mask,
-                        DEFAULT_CHUNK_SIZE,
-                    )?
-                    .detach()
-                };
-
-                // Step 2: Policy forward pass + GRPO loss + backward
-                let advantage = advantages[comp_idx];
-                let loss_val;
-
-                if let Some(ref segs) = segments {
-                    // Gradient-checkpointed GRPO step
-                    let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
-                        &*backend,
-                        &comp.input_ids,
-                        weights,
-                        model_config,
-                        &params,
-                        &comp.completion_mask,
-                        &ref_log_probs,
-                        advantage,
-                        config.clip_epsilon,
-                        config.kl_coeff,
-                        segs,
-                        &device,
-                    )?;
-                    loss_val = lv;
-                    optimizer_step_from_map(
-                        &*backend,
-                        &params,
-                        &accumulated_grads,
-                        config.learning_rate,
-                        config.optimizer,
-                        opt_state.as_mut(),
-                    )?;
-                } else {
-                    // Standard (non-checkpointed) GRPO step
-                    let lora_weights = params.as_lora_weights();
-                    let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-                    let policy_logits = model_forward(
-                        &*backend,
-                        &comp.input_ids,
-                        weights,
-                        model_config,
-                        None,
-                        Some(&mut linear_state),
-                        Some(&lora_weights),
-                    )
-                    .context("GRPO policy forward pass")?;
-
-                    let policy_log_probs = token_log_probs(
-                        &policy_logits,
-                        &comp.input_ids,
-                        &comp.completion_mask,
-                        &device,
-                    )?;
-
-                    let loss = grpo_loss(
-                        &policy_log_probs,
-                        &ref_log_probs,
-                        advantage,
-                        config.clip_epsilon,
-                        config.kl_coeff,
-                        &device,
-                    )?;
-                    loss_val = loss.to_scalar::<f32>()? as f64;
-
-                    let grads = loss.backward().context("GRPO backward pass")?;
-                    optimizer_step(
-                        &*backend,
-                        &params,
-                        &grads,
-                        config.learning_rate,
-                        config.optimizer,
-                        opt_state.as_mut(),
-                    )?;
-                }
-
-                group_loss_sum += loss_val;
-            }
-
-            let avg_group_loss = if num_completions > 0 {
-                group_loss_sum / num_completions as f64
-            } else {
-                0.0
-            };
+            let avg_group_loss = train_tokenized_grpo_group(
+                &*backend,
+                tgroup,
+                weights,
+                model_config,
+                &params,
+                config,
+                segments.as_deref(),
+                &device,
+                opt_state.as_mut(),
+            )?;
             last_loss = avg_group_loss;
             global_step += 1;
 
@@ -1419,6 +1320,256 @@ pub fn grpo_train(
     result.map(|(dir, _)| dir)
 }
 
+/// Stream GRPO training from a JSONL dataset path using the generic candle path.
+///
+/// Each non-empty line must be one [`GrpoGroup`]. Unlike [`grpo_train`], this
+/// path does not retain all parsed or tokenized groups before training.
+pub fn grpo_train_jsonl(
+    dataset_path: &Path,
+    config: &GrpoConfig,
+    model_config: &ModelConfig,
+    weights: &GpuWeights,
+    tokenizer: &KilnTokenizer,
+    adapter_dir: &Path,
+    adapter_name: &str,
+    progress_cb: Option<ProgressCallback>,
+    replay_ctx: Option<ReplayContext>,
+) -> Result<PathBuf> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let device = weights.embed_tokens.device().clone();
+    let backend = backend::for_device(&device);
+
+    tracing::info!(
+        dataset = %dataset_path.display(),
+        lr = config.learning_rate,
+        kl_coeff = config.kl_coeff,
+        clip_epsilon = config.clip_epsilon,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting streamed GRPO training"
+    );
+
+    let (replay_state, effective_seed) = match replay_ctx.as_ref() {
+        Some(ctx) => {
+            let (state, seed) = open_replay_state(
+                ctx,
+                config.seed,
+                config.base_adapter.as_deref(),
+                adapter_dir,
+                adapter_name,
+            )?;
+            (Some(state), Some(seed))
+        }
+        None => (None, config.seed),
+    };
+
+    let params = TrainableLoraParams::initialize_seeded(
+        model_config,
+        weights,
+        config.lora_rank,
+        config.lora_alpha,
+        &device,
+        effective_seed,
+    )?;
+
+    tracing::info!(
+        num_vars = params.all_vars().len(),
+        "initialized streamed GRPO trainable LoRA parameters"
+    );
+
+    params.register_with_backend(&*backend)?;
+
+    let mut opt_state = match config.optimizer {
+        Optimizer::Sgd => None,
+        Optimizer::AdamW { .. } => {
+            let state = params.allocate_adamw_state(&device)?;
+            state.register_with_backend(&*backend)?;
+            Some(state)
+        }
+    };
+
+    let mut train_body = || -> Result<(PathBuf, f64)> {
+        let ckpt_config = CheckpointConfig::from_env(model_config.num_layers);
+        let segments = if ckpt_config.enabled {
+            Some(compute_segment_boundaries(
+                model_config.num_layers,
+                ckpt_config.num_segments,
+            ))
+        } else {
+            None
+        };
+
+        if let Some(ref segs) = segments {
+            tracing::info!(
+                num_segments = segs.len(),
+                boundaries = ?segs,
+                "streamed GRPO gradient checkpointing enabled"
+            );
+        } else {
+            tracing::info!("streamed GRPO gradient checkpointing disabled");
+        }
+
+        let file = File::open(dataset_path)
+            .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+        let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        let mut bytes_read = 0u64;
+        let mut line_no = 0usize;
+        let mut processed_groups = 0usize;
+        let mut processed_completions = 0usize;
+        let mut last_loss = 0.0;
+
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line).with_context(|| {
+                format!(
+                    "read GRPO JSONL dataset {} line {}",
+                    dataset_path.display(),
+                    line_no + 1
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            line_no += 1;
+            bytes_read = bytes_read.saturating_add(read as u64);
+            let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
+                continue;
+            };
+
+            processed_groups += 1;
+            tracing::info!(
+                group = processed_groups,
+                line = line_no,
+                line_bytes = read,
+                byte_offset = bytes_read.saturating_sub(read as u64),
+                "streamed GRPO group tokenization begin"
+            );
+            let tokenize_start = Instant::now();
+            let tgroup = tokenize_grpo_group(&group, tokenizer).with_context(|| {
+                format!(
+                    "tokenize GRPO JSONL group {} at line {}",
+                    processed_groups, line_no
+                )
+            })?;
+            processed_completions = processed_completions.saturating_add(tgroup.completions.len());
+            tracing::info!(
+                group = processed_groups,
+                completions = tgroup.completions.len(),
+                elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
+                "streamed GRPO group tokenized"
+            );
+
+            let avg_group_loss = train_tokenized_grpo_group(
+                &*backend,
+                &tgroup,
+                weights,
+                model_config,
+                &params,
+                config,
+                segments.as_deref(),
+                &device,
+                opt_state.as_mut(),
+            )?;
+            anyhow::ensure!(
+                avg_group_loss.is_finite(),
+                "grpo_train_jsonl: non-finite loss {avg_group_loss} at group {processed_groups}"
+            );
+            last_loss = avg_group_loss;
+
+            let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: 1,
+                    total_epochs: 1,
+                    step,
+                    total_steps,
+                    loss: avg_group_loss,
+                    progress,
+                });
+            }
+
+            tracing::info!(
+                group = processed_groups,
+                completions_seen = processed_completions,
+                byte_offset = bytes_read,
+                total_bytes,
+                loss = format!("{avg_group_loss:.6}"),
+                "streamed GRPO group step"
+            );
+
+            if let Some(interval) = config.checkpoint_interval {
+                if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
+                    let ckpt_dir =
+                        adapter_dir.join(format!("{adapter_name}-checkpoint-{processed_groups}"));
+                    if let Err(e) = params.sync_to_candle(&*backend) {
+                        tracing::warn!(step = processed_groups, error = %e, "failed to sync LoRA Vars to candle for streamed GRPO checkpoint");
+                    }
+                    if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
+                        tracing::warn!(step = processed_groups, error = %e, "failed to save streamed GRPO training checkpoint");
+                    } else {
+                        tracing::info!(
+                            step = processed_groups,
+                            "saved streamed GRPO training checkpoint"
+                        );
+                    }
+                }
+            }
+        }
+
+        anyhow::ensure!(
+            processed_groups > 0,
+            "grpo_train_jsonl: no valid GRPO groups in {}",
+            dataset_path.display()
+        );
+        anyhow::ensure!(
+            processed_completions > 0,
+            "grpo_train_jsonl: no valid GRPO completions in {}",
+            dataset_path.display()
+        );
+
+        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        tracing::debug!(
+            synced,
+            "synced LoRA Vars to candle before streamed GRPO save"
+        );
+
+        let output_dir = adapter_dir.join(adapter_name);
+        params.save_peft(&output_dir, model_config.num_layers)?;
+
+        tracing::info!(
+            adapter = adapter_name,
+            path = %output_dir.display(),
+            final_loss = format!("{last_loss:.6}"),
+            processed_groups,
+            processed_completions,
+            "streamed GRPO training complete"
+        );
+
+        Ok((output_dir, last_loss))
+    };
+
+    let result = train_body();
+    if let Some(state) = opt_state.as_ref() {
+        state.evict_from_backend(&*backend);
+    }
+    params.evict_from_backend(&*backend);
+    if let Some(state) = replay_state {
+        let outcome = match &result {
+            Ok((_, loss)) => Ok(*loss),
+            Err(e) => Err(format!("{e:#}")),
+        };
+        if let Err(e) = close_replay_state(state, outcome) {
+            tracing::warn!(error = %e, "failed to append streamed GRPO replay outcome record");
+        }
+    }
+    result.map(|(dir, _)| dir)
+}
+
 /// Tokenized data for a single completion within a GRPO group.
 struct TokenizedGrpoCompletion {
     /// Full input_ids: prompt + completion tokens.
@@ -1431,6 +1582,142 @@ struct TokenizedGrpoCompletion {
 struct TokenizedGrpoGroup {
     completions: Vec<TokenizedGrpoCompletion>,
     rewards: Vec<f64>,
+}
+
+fn parse_grpo_jsonl_group_line(line: &str, line_no: usize) -> Result<Option<GrpoGroup>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<GrpoGroup>(trimmed)
+        .map(Some)
+        .with_context(|| format!("parse GRPO JSONL group at line {line_no}"))
+}
+
+fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
+    let total = total_bytes.max(1);
+    let clamped = offset.min(total);
+    let total_steps = total.min(usize::MAX as u64).max(1) as usize;
+    let step = clamped.min(usize::MAX as u64).max(1) as usize;
+    let progress = (clamped as f64 / total as f64).min(0.999) as f32;
+    (step, total_steps, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn train_tokenized_grpo_group(
+    backend: &dyn BackendRuntime,
+    tgroup: &TokenizedGrpoGroup,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    config: &GrpoConfig,
+    segments: Option<&[(usize, usize)]>,
+    device: &Device,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<f64> {
+    let advantages = compute_advantages(&tgroup.rewards);
+    let mut group_loss_sum = 0.0;
+    let mut opt_state = opt_state;
+
+    for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+        let ref_log_probs = {
+            let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
+            let ref_hidden = model_forward_no_head(
+                backend,
+                &comp.input_ids,
+                weights,
+                model_config,
+                Some(&mut ref_linear_state),
+                None,
+            )
+            .context("GRPO reference forward pass")?;
+            selected_log_probs_from_normed_hidden_chunked(
+                &ref_hidden,
+                &weights.embed_tokens_t,
+                &comp.input_ids,
+                &comp.completion_mask,
+                DEFAULT_CHUNK_SIZE,
+            )?
+            .detach()
+        };
+
+        let advantage = advantages[comp_idx];
+        let loss_val;
+
+        if let Some(segs) = segments {
+            let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
+                backend,
+                &comp.input_ids,
+                weights,
+                model_config,
+                params,
+                &comp.completion_mask,
+                &ref_log_probs,
+                advantage,
+                config.clip_epsilon,
+                config.kl_coeff,
+                segs,
+                device,
+            )?;
+            loss_val = lv;
+            optimizer_step_from_map(
+                backend,
+                params,
+                &accumulated_grads,
+                config.learning_rate,
+                config.optimizer,
+                opt_state.as_deref_mut(),
+            )?;
+        } else {
+            let lora_weights = params.as_lora_weights();
+            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            let policy_logits = model_forward(
+                backend,
+                &comp.input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("GRPO policy forward pass")?;
+
+            let policy_log_probs = token_log_probs(
+                &policy_logits,
+                &comp.input_ids,
+                &comp.completion_mask,
+                device,
+            )?;
+
+            let loss = grpo_loss(
+                &policy_log_probs,
+                &ref_log_probs,
+                advantage,
+                config.clip_epsilon,
+                config.kl_coeff,
+                device,
+            )?;
+            loss_val = loss.to_scalar::<f32>()? as f64;
+
+            let grads = loss.backward().context("GRPO backward pass")?;
+            optimizer_step(
+                backend,
+                params,
+                &grads,
+                config.learning_rate,
+                config.optimizer,
+                opt_state.as_deref_mut(),
+            )?;
+        }
+
+        group_loss_sum += loss_val;
+    }
+
+    if tgroup.completions.is_empty() {
+        Ok(0.0)
+    } else {
+        Ok(group_loss_sum / tgroup.completions.len() as f64)
+    }
 }
 
 /// Tokenize a GRPO group: prompt messages + each completion text.
