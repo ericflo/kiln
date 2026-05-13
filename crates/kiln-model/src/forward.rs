@@ -5875,8 +5875,8 @@ pub fn gdn_recurrent_backward_no_grad(
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?;
 
         let dq_s_scaled = d_out.clone();
-        let d_w_scan = b_mask.transpose(2, 3)?.matmul(&d_out)?;
-        let d_b_mask = d_out.matmul(&w.transpose(2, 3)?)?;
+        let d_w_scan = b_mask.transpose(2, 3)?.contiguous()?.matmul(&d_out)?;
+        let d_b_mask = d_out.matmul(&w.transpose(2, 3)?.contiguous()?)?;
 
         let mut d_w_acc = d_w_scan;
         let mut d_decay_last_col_acc =
@@ -5891,7 +5891,7 @@ pub fn gdn_recurrent_backward_no_grad(
             d_p_last_acc = (s_in * d_s_exit)?.sum(3)?.sum(2)?;
             let tmp_dw = k_c.matmul(d_s_exit)?;
             d_w_acc = (&d_w_acc + &tmp_dw.broadcast_mul(&decay_last_col.unsqueeze(3)?)?)?;
-            let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?)?;
+            let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?.contiguous()?)?;
             dk_state_extra = Some(tmp_dk.broadcast_mul(&decay_last_col.unsqueeze(3)?)?);
             d_decay_last_col_acc = (&k_c * &tmp_dk)?.sum(candle_core::D::Minus1)?;
         }
@@ -5901,7 +5901,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let pre_beta = (&v_prime - &a_w)?;
         let d_v_prime = dr.broadcast_mul(&beta_c.unsqueeze(3)?)?;
         let d_beta = (&pre_beta * &dr)?.sum(candle_core::D::Minus1)?;
-        let dr_w_t = dr.matmul(&w.transpose(2, 3)?)?;
+        let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
         let strict_mask = strict_lower_tri_bool(chunk, q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?
@@ -5970,17 +5970,18 @@ pub fn gdn_recurrent_backward_no_grad(
         d_g_acc = (&d_g_acc + &p_last_term)?;
         let d_g = reverse_cumsum_time(&d_g_acc)?;
 
-        let s_t = s_in.transpose(2, 3)?;
-        let d_k_from_kkt = (&d_kkt.matmul(&k_c)? + &d_kkt.transpose(2, 3)?.matmul(&k_c)?)?;
-        let d_k_from_qkt = d_qkt.transpose(2, 3)?.matmul(&q_c)?;
+        let s_t = s_in.transpose(2, 3)?.contiguous()?;
+        let d_k_from_kkt =
+            (&d_kkt.matmul(&k_c)? + &d_kkt.transpose(2, 3)?.contiguous()?.matmul(&k_c)?)?;
+        let d_k_from_qkt = d_qkt.transpose(2, 3)?.contiguous()?.matmul(&q_c)?;
         let d_k_from_ks = d_ks_entry.matmul(&s_t)?;
         let mut d_k = (&(&d_k_from_kkt + &d_k_from_qkt)? + &d_k_from_ks)?;
         if let Some(extra) = dk_state_extra.as_ref() {
             d_k = (&d_k + extra)?;
         }
         let d_q = (&d_qkt.matmul(&k_c)? + &d_q_s.matmul(&s_t)?)?;
-        let d_s_from_ks = k_c.transpose(2, 3)?.matmul(&d_ks_entry)?;
-        let d_s_from_qs = q_c.transpose(2, 3)?.matmul(&d_q_s)?;
+        let d_s_from_ks = k_c.transpose(2, 3)?.contiguous()?.matmul(&d_ks_entry)?;
+        let d_s_from_qs = q_c.transpose(2, 3)?.contiguous()?.matmul(&d_q_s)?;
         let mut d_s_in = (&d_s_from_ks + &d_s_from_qs)?;
         if let Some(extra) = ds_state_extra.as_ref() {
             d_s_in = (&d_s_in + extra)?;
