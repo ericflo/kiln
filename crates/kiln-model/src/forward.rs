@@ -5838,7 +5838,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let qkt = q_c.matmul(&k_t)?;
         let (a_strict, _b_mask, v_prime, _q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
-        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?;
+        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
         let state_scaled = state.broadcast_mul(&p_last.unsqueeze(2)?.unsqueeze(3)?)?;
         let w_weighted = w.broadcast_mul(&decay_last_col.unsqueeze(3)?)?;
         let delta_state = k_t.matmul(&w_weighted)?;
@@ -5872,7 +5872,7 @@ pub fn gdn_recurrent_backward_no_grad(
         let qkt = q_c.matmul(&k_t)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
-        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?;
+        let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
 
         let dq_s_scaled = d_out.clone();
         let d_w_scan = b_mask.transpose(2, 3)?.contiguous()?.matmul(&d_out)?;
@@ -5896,10 +5896,10 @@ pub fn gdn_recurrent_backward_no_grad(
             d_decay_last_col_acc = (&k_c * &tmp_dk)?.sum(candle_core::D::Minus1)?;
         }
 
-        let dr = solve_tri_transpose_f32(&a_strict, &beta_c, &d_w_acc)?;
+        let dr = solve_tri_transpose_f32(&a_strict, &beta_c, &d_w_acc)?.contiguous()?;
         let a_w = a_strict.matmul(&w)?;
         let pre_beta = (&v_prime - &a_w)?;
-        let d_v_prime = dr.broadcast_mul(&beta_c.unsqueeze(3)?)?;
+        let d_v_prime = dr.broadcast_mul(&beta_c.unsqueeze(3)?)?.contiguous()?;
         let d_beta = (&pre_beta * &dr)?.sum(candle_core::D::Minus1)?;
         let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
         let strict_mask = strict_lower_tri_bool(chunk, q.device())?
@@ -5914,9 +5914,9 @@ pub fn gdn_recurrent_backward_no_grad(
         let p = big_g.exp()?;
         let p_col = p.unsqueeze(3)?;
         let d_v = d_v_prime.clone();
-        let d_ks_entry = d_v_prime.broadcast_mul(&p_col)?.neg()?;
+        let d_ks_entry = d_v_prime.broadcast_mul(&p_col)?.neg()?.contiguous()?;
         let mut d_g_acc = (&ks_entry * &d_ks_entry)?.sum(candle_core::D::Minus1)?;
-        let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?;
+        let d_q_s = dq_s_scaled.broadcast_mul(&p_col)?.contiguous()?;
         d_g_acc = (&d_g_acc
             + &(&q_s * &dq_s_scaled)?
                 .broadcast_mul(&p_col)?
@@ -5940,8 +5940,8 @@ pub fn gdn_recurrent_backward_no_grad(
             .where_cond(&decay_delta, &zero_delta)?
             .exp()?
             .broadcast_mul(&causal_bool.to_dtype(DType::F32)?)?;
-        let d_kkt = d_a_strict.broadcast_mul(&strict_decay)?;
-        let d_qkt = d_b_mask.broadcast_mul(&causal_decay)?;
+        let d_kkt = d_a_strict.broadcast_mul(&strict_decay)?.contiguous()?;
+        let d_qkt = d_b_mask.broadcast_mul(&causal_decay)?.contiguous()?;
         let term_a = d_a_strict
             .broadcast_mul(&strict_decay)?
             .broadcast_mul(&kkt)?;
