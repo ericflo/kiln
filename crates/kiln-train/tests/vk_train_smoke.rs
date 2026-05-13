@@ -1255,6 +1255,66 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
+    let Some(_dev) = vk_dev() else { return Ok(()) };
+    let dataset = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-long-smoke-{}.jsonl",
+        std::process::id()
+    ));
+    let prompt = "a".repeat(96);
+    let mut body = String::new();
+    for _ in 0..8 {
+        body.push_str(&format!(
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{prompt}\"}}],\"completions\":[{{\"text\":\"b\",\"reward\":1.0}},{{\"text\":\"a\",\"reward\":0.0}}]}}\n"
+        ));
+    }
+    std::fs::write(&dataset, body)?;
+    assert_eq!(grpo_jsonl_stats(&dataset)?, (8, 16));
+
+    let adapter_root = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-long-adapters-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&adapter_root);
+    std::fs::create_dir_all(&adapter_root)?;
+    let config = GrpoConfig {
+        learning_rate: 5e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        checkpoint_interval: Some(4),
+        seed: Some(4321),
+        ..Default::default()
+    };
+    let model_config = tiny_gpu_grpo_model_config();
+    let weights = build_tiny_gpu_grpo_weights()?;
+    let tokenizer = tiny_grpo_tokenizer()?;
+    let out = vk_native_grpo_train_jsonl(
+        &dataset,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        &adapter_root,
+        "jsonl-long-smoke",
+        None,
+    )?;
+
+    assert!(out.join("adapter_model.safetensors").exists());
+    let checkpoint = adapter_root
+        .join("jsonl-long-smoke-checkpoint-4")
+        .join("adapter_model.safetensors");
+    assert!(
+        checkpoint.exists(),
+        "long-prompt streamed GRPO checkpoint was not written at {}",
+        checkpoint.display()
+    );
+
+    let _ = std::fs::remove_file(dataset);
+    let _ = std::fs::remove_dir_all(adapter_root);
+    Ok(())
+}
+
 fn grpo_ref_log_probs(
     model: &VkModelWeights,
     input_ids: &[u32],
