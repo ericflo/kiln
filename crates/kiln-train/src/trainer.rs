@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, Var};
@@ -2794,11 +2795,66 @@ fn exact_gdn_reverse_tile_size(
     if !streaming_prefill_enabled_for(device, seq_len) {
         return None;
     }
-    let tile = streaming_tile_tokens_for(device);
+    let tile = exact_gdn_backward_tile_tokens_for(device);
     if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
         return None;
     }
     Some(tile)
+}
+
+fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
+    match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
+        Ok(raw) => match raw.parse::<usize>() {
+            Ok(tile) if tile > 0 && tile % GDN_CHUNK_SIZE == 0 => tile,
+            _ => {
+                tracing::warn!(
+                    value = %raw,
+                    chunk_size = GDN_CHUNK_SIZE,
+                    "ignoring invalid KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"
+                );
+                streaming_tile_tokens_for(device)
+            }
+        },
+        Err(_) => streaming_tile_tokens_for(device),
+    }
+}
+
+fn profile_exact_gdn_reverse_tiles() -> bool {
+    kiln_core::env_flag::env_tristate("KILN_PROFILE_EXACT_GDN_REVERSE_TILES").unwrap_or(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_exact_gdn_reverse_tile_stage(
+    device: &Device,
+    enabled: bool,
+    layer_idx: usize,
+    tile_idx: usize,
+    num_tiles: usize,
+    tile_start: usize,
+    tile_end: usize,
+    stage: &'static str,
+    started: Instant,
+) -> Result<Instant> {
+    if enabled && matches!(device, Device::Metal(_)) {
+        synchronize_checkpoint_boundary(device, || {
+            format!(
+                "synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx} stage {stage}"
+            )
+        })?;
+    }
+    if enabled {
+        tracing::info!(
+            layer = layer_idx,
+            tile = tile_idx + 1,
+            num_tiles,
+            tile_start,
+            tile_end,
+            stage,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "exact tiled GDN reverse tile stage"
+        );
+    }
+    Ok(Instant::now())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2835,6 +2891,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         .count();
     let layer = &weights.layers[layer_idx];
     let num_tiles = total_tokens.div_ceil(tile_size);
+    let profile_tiles = profile_exact_gdn_reverse_tiles();
 
     tracing::info!(
         layer = layer_idx,
@@ -2852,6 +2909,7 @@ fn exact_gdn_single_layer_tiled_reverse(
     conv_boundaries.push(boundary_state.conv_states[linear_attn_idx].detach());
 
     for tile_idx in 0..num_tiles {
+        let boundary_started = Instant::now();
         let tile_start = tile_idx * tile_size;
         let tile_end = (tile_start + tile_size).min(total_tokens);
         let tile_len = tile_end - tile_start;
@@ -2895,6 +2953,17 @@ fn exact_gdn_single_layer_tiled_reverse(
                 )
             })?;
         }
+        if profile_tiles {
+            tracing::info!(
+                layer = layer_idx,
+                tile = tile_idx + 1,
+                num_tiles,
+                tile_start,
+                tile_end,
+                elapsed_ms = boundary_started.elapsed().as_millis() as u64,
+                "exact tiled GDN boundary tile complete"
+            );
+        }
     }
 
     let all_vars = params.all_vars();
@@ -2903,9 +2972,22 @@ fn exact_gdn_single_layer_tiled_reverse(
     let mut next_conv_grad: Option<Tensor> = None;
 
     for tile_idx in (0..num_tiles).rev() {
+        let tile_started = Instant::now();
+        let mut stage_started = Instant::now();
         let tile_start = tile_idx * tile_size;
         let tile_end = (tile_start + tile_size).min(total_tokens);
         let tile_len = tile_end - tile_start;
+
+        if profile_tiles {
+            tracing::info!(
+                layer = layer_idx,
+                tile = tile_idx + 1,
+                num_tiles,
+                tile_start,
+                tile_end,
+                "exact tiled GDN reverse tile begin"
+            );
+        }
 
         let tile_input = seg_input
             .narrow(1, tile_start, tile_len)
@@ -2914,6 +2996,17 @@ fn exact_gdn_single_layer_tiled_reverse(
             .narrow(1, tile_start, tile_len)
             .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
         let tile_grad_out_f32 = tile_grad_out.to_dtype(DType::F32)?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "prepare",
+            stage_started,
+        )?;
 
         let lora_weights_for_seg = params.as_lora_weights();
         let layer_lora = lora_weights_for_seg
@@ -2946,6 +3039,17 @@ fn exact_gdn_single_layer_tiled_reverse(
             })?
             .detach()
         };
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "after_attn_value",
+            stage_started,
+        )?;
 
         let gated_value = transformer_mlp_gated_hidden(
             &after_attn_value,
@@ -2959,6 +3063,17 @@ fn exact_gdn_single_layer_tiled_reverse(
             )
         })?
         .detach();
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "mlp_gated_value",
+            stage_started,
+        )?;
         let gated_var = Var::from_tensor(&gated_value)?;
         let down_out =
             transformer_mlp_down_from_gated(gated_var.as_tensor(), layer, layer_lora)
@@ -2975,6 +3090,17 @@ fn exact_gdn_single_layer_tiled_reverse(
             .backward()
             .with_context(|| format!("exact tiled GDN MLP down backward tile {tile_idx}"))?;
         accumulate_grads(accumulated_grads, &down_grads, &all_vars)?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "mlp_down_backward",
+            stage_started,
+        )?;
         let grad_gated = down_grads
             .get(gated_var.as_tensor())
             .ok_or_else(|| {
@@ -3016,6 +3142,17 @@ fn exact_gdn_single_layer_tiled_reverse(
         }
         .to_dtype(DType::F32)?;
         let upstream_after_attn = (&tile_grad_out_f32 + &grad_after_mlp)?.detach();
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "mlp_gate_up_backward",
+            stage_started,
+        )?;
         drop(gate_grads);
         drop(gate_scalar);
         drop(grad_gated_f32);
@@ -3045,8 +3182,21 @@ fn exact_gdn_single_layer_tiled_reverse(
             layer_lora,
         )
         .with_context(|| {
-            format!("exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})")
+            format!(
+                "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
         })?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "attention_forward",
+            stage_started,
+        )?;
 
         let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
         let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
@@ -3076,6 +3226,17 @@ fn exact_gdn_single_layer_tiled_reverse(
             .backward()
             .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
         accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "attention_backward",
+            stage_started,
+        )?;
 
         let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
             Some(grad) => grad.detach(),
@@ -3106,6 +3267,18 @@ fn exact_gdn_single_layer_tiled_reverse(
             synchronize_checkpoint_boundary(device, || {
                 format!("synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx}")
             })?;
+        }
+        if profile_tiles {
+            tracing::info!(
+                layer = layer_idx,
+                tile = tile_idx + 1,
+                num_tiles,
+                tile_start,
+                tile_end,
+                elapsed_ms = tile_started.elapsed().as_millis() as u64,
+                last_stage_elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                "exact tiled GDN reverse tile complete"
+            );
         }
     }
 
@@ -4466,6 +4639,7 @@ mod tests {
 
     /// Serializes tests in this binary that mutate process-global env vars
     /// (`KILN_STREAMING_PREFILL`, `KILN_STREAMING_TILE_TOKENS`,
+    /// `KILN_EXACT_GDN_BACKWARD_TILE_TOKENS`,
     /// `KILN_USE_FLCE`, `KILN_DISABLE_RMSNORM_KERNEL`,
     /// `KILN_DISABLE_RMSNORM_BACKWARD`, `KILN_CUDA_FLCE`,
     /// `KILN_VULKAN_FLCE`). `cargo test` runs tests in this
@@ -4483,6 +4657,27 @@ mod tests {
                 std::env::remove_var(key);
             }
         }
+    }
+
+    #[test]
+    fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior_streaming_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
+        let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
+
+        unsafe {
+            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "256");
+            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "128");
+        }
+        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&Device::Cpu), 128);
+
+        unsafe {
+            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "130");
+        }
+        assert_eq!(super::exact_gdn_backward_tile_tokens_for(&Device::Cpu), 256);
+
+        restore_env("KILN_STREAMING_TILE_TOKENS", prior_streaming_tile);
+        restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
     }
 
     fn minimal_training_tokenizer(template: &str) -> KilnTokenizer {
@@ -5370,11 +5565,13 @@ mod tests {
         let prior_flce = std::env::var("KILN_USE_FLCE").ok();
         let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
         let prior_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
+        let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
         let prior_exact = std::env::var("KILN_EXACT_GDN_TILE_BACKWARD").ok();
         unsafe {
             std::env::set_var("KILN_USE_FLCE", "0");
             std::env::set_var("KILN_STREAMING_PREFILL", "1");
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
             std::env::set_var("KILN_EXACT_GDN_TILE_BACKWARD", "1");
         }
 
@@ -5471,6 +5668,7 @@ mod tests {
         restore_env("KILN_USE_FLCE", prior_flce);
         restore_env("KILN_STREAMING_PREFILL", prior_streaming);
         restore_env("KILN_STREAMING_TILE_TOKENS", prior_tile);
+        restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
         restore_env("KILN_EXACT_GDN_TILE_BACKWARD", prior_exact);
 
         result
