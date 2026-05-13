@@ -2008,6 +2008,237 @@ fn analytic_sft_tail_grad_pre_final_norm(
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn analytic_grpo_tail_loss_grad_pre_final_norm(
+    hidden: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    completion_mask: &[bool],
+    ref_log_probs: &Tensor,
+    advantage: f64,
+    clip_epsilon: f64,
+    kl_coeff: f64,
+    rms_norm_eps: f64,
+    chunk_size: usize,
+) -> Result<(f64, Tensor)> {
+    let device = hidden.device();
+    let seq_len = input_ids.len();
+    if seq_len < 2 {
+        anyhow::bail!("analytic GRPO tail gradient requires at least 2 tokens");
+    }
+    if chunk_size == 0 {
+        anyhow::bail!("analytic GRPO tail gradient chunk_size must be > 0");
+    }
+    if completion_mask.len() != seq_len {
+        anyhow::bail!(
+            "completion_mask length {} does not match input_ids length {}",
+            completion_mask.len(),
+            seq_len
+        );
+    }
+
+    let dims = hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != seq_len {
+        anyhow::bail!(
+            "hidden must have shape [1, seq_len, hidden_size], got {:?} for seq_len {}",
+            dims,
+            seq_len
+        );
+    }
+    let hidden_size = dims[2];
+    if final_norm_weight.dims() != [hidden_size] {
+        anyhow::bail!(
+            "final_norm_weight shape {:?} does not match hidden size {}",
+            final_norm_weight.dims(),
+            hidden_size
+        );
+    }
+    if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
+        anyhow::bail!(
+            "head_t must have shape [hidden_size, vocab_size], got {:?}",
+            head_t.dims()
+        );
+    }
+
+    let active_positions: Vec<u32> = completion_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    anyhow::ensure!(
+        !active_positions.is_empty(),
+        "analytic GRPO tail called with no active completion tokens"
+    );
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| input_ids[i as usize + 1])
+        .collect();
+    let num_active = active_positions.len();
+
+    let ref_values = ref_log_probs
+        .to_dtype(DType::F32)?
+        .to_device(&Device::Cpu)?
+        .to_vec1::<f32>()
+        .context("read GRPO reference log-probs")?;
+    anyhow::ensure!(
+        ref_values.len() == num_active,
+        "GRPO reference log-prob count {} does not match active token count {}",
+        ref_values.len(),
+        num_active
+    );
+
+    let hidden_2d = hidden.squeeze(0)?;
+    let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
+    let active_indices = Tensor::new(active_positions.as_slice(), device)?;
+    let active_hidden = shift_hidden
+        .index_select(&active_indices, 0)?
+        .to_dtype(DType::F32)?;
+
+    let variance = active_hidden.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+    let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
+    let norm_weight = final_norm_weight.to_dtype(DType::F32)?;
+    let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
+    let active_normed = active_hidden
+        .broadcast_mul(&rms_inv)?
+        .broadcast_mul(&norm_weight_plus_one)?;
+
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let vocab_size = head_t_f32.dim(1)?;
+    if vocab_size == 0 {
+        anyhow::bail!("head_t vocab dimension is zero");
+    }
+
+    let mut running_max: Option<Tensor> = None;
+    let mut running_sumexp: Option<Tensor> = None;
+    let mut correct_logits: Option<Tensor> = None;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let chunk_end = chunk_start + chunk_len;
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_normed.matmul(&head_chunk)?;
+            let chunk_max = logits_chunk.max_keepdim(candle_core::D::Minus1)?;
+            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+                (None, None) => {
+                    let shifted =
+                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    (chunk_max.detach(), chunk_sumexp.detach())
+                }
+                (Some(prev_max), Some(prev_sumexp)) => {
+                    let new_max = prev_max.maximum(&chunk_max)?;
+                    let prev_scale = (prev_max - &new_max)?.exp()?;
+                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
+                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
+                    let chunk_sumexp = shifted.exp()?.sum_keepdim(candle_core::D::Minus1)?;
+                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
+                    (new_max.detach(), new_sumexp.detach())
+                }
+                _ => unreachable!("running max/sumexp are set together"),
+            };
+            running_max = Some(new_max);
+            running_sumexp = Some(new_sumexp);
+
+            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+                } else if label >= vocab_size {
+                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
+                }
+            }
+            let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(candle_core::D::Minus1)?;
+            correct_logits = Some(match correct_logits.as_ref() {
+                Some(prev) => (prev + chunk_correct)?.detach(),
+                None => chunk_correct.detach(),
+            });
+        }
+        synchronize_metal_tail_chunk(device, "synchronize analytic GRPO tail normalizer chunk")?;
+        chunk_start = chunk_end;
+    }
+    let running_max = running_max.context("vocab_size was zero")?;
+    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
+    let correct_logits = correct_logits.context("vocab_size was zero")?;
+    let log_sum_exp = (running_max.clone() + running_sumexp.log()?)?;
+    let policy_log_probs = (correct_logits - log_sum_exp)?.squeeze(1)?.detach();
+    let policy_values = policy_log_probs
+        .to_device(&Device::Cpu)?
+        .to_vec1::<f32>()
+        .context("read GRPO policy log-probs")?;
+
+    let lo = 1.0 - clip_epsilon;
+    let hi = 1.0 + clip_epsilon;
+    let inv_n = 1.0 / num_active as f64;
+    let mut loss_sum = 0.0f64;
+    let mut grad_coeffs = Vec::with_capacity(num_active);
+    for (&policy, &reference) in policy_values.iter().zip(ref_values.iter()) {
+        let log_ratio = policy as f64 - reference as f64;
+        let ratio = log_ratio.exp();
+        let clipped_ratio = ratio.clamp(lo, hi);
+        let surr1 = ratio * advantage;
+        let surr2 = clipped_ratio * advantage;
+        let surrogate = surr1.min(surr2);
+        loss_sum += -surrogate + kl_coeff * log_ratio;
+
+        let d_surrogate = if surr1 <= surr2 || (ratio >= lo && ratio <= hi) {
+            advantage * ratio
+        } else {
+            0.0
+        };
+        grad_coeffs.push(((-d_surrogate + kl_coeff) * inv_n) as f32);
+    }
+    let loss_val = loss_sum * inv_n;
+    let grad_coeffs = Tensor::from_vec(grad_coeffs, (num_active, 1), device)?;
+
+    let mut grad_normed = Tensor::zeros((num_active, hidden_size), DType::F32, device)?;
+    let mut chunk_start = 0usize;
+    while chunk_start < vocab_size {
+        let chunk_len = chunk_size.min(vocab_size - chunk_start);
+        let chunk_end = chunk_start + chunk_len;
+        {
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_normed.matmul(&head_chunk)?;
+            let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
+            let exp_chunk = shifted.exp()?;
+            let softmax_chunk =
+                exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
+
+            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+            for (row_idx, &label) in active_labels.iter().enumerate() {
+                let label = label as usize;
+                if label >= chunk_start && label < chunk_end {
+                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
+                }
+            }
+            let one_hot = Tensor::from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let logprob_jac = (one_hot - softmax_chunk)?;
+            let grad_logits =
+                logprob_jac.broadcast_mul(&grad_coeffs.broadcast_as(logits_chunk.shape())?)?;
+            let head_chunk_t = head_chunk.t()?.contiguous()?;
+            let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
+            grad_normed = (&grad_normed + chunk_contrib)?.detach();
+        }
+        synchronize_metal_tail_chunk(device, "synchronize analytic GRPO tail gradient chunk")?;
+        chunk_start = chunk_end;
+    }
+
+    let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
+    let dot = (&u * &active_hidden)?.sum_keepdim(candle_core::D::Minus1)?;
+    let rms_inv_sq = rms_inv.sqr()?;
+    let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
+    let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
+    let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
+    let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
+
+    let mut grad_hidden_2d = Tensor::zeros((seq_len, hidden_size), DType::F32, device)?;
+    grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
+    Ok((loss_val, grad_hidden_2d.unsqueeze(0)?))
+}
+
 /// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
 /// Fused Linear Cross-Entropy path: the LM head matmul is fused into a
 /// chunked log-sum-exp + gather reduction so the `[T, V]` logits tensor
@@ -5973,11 +6204,13 @@ fn grpo_loss(
     per_token_loss.mean_all().map_err(Into::into)
 }
 
-/// Run one GRPO training step with gradient checkpointing.
+/// Run one GRPO training step with exact reverse-mode checkpointing.
 ///
-/// Similar to `checkpointed_forward_backward` but computes GRPO loss
-/// (policy vs reference) instead of cross-entropy. The reference log-probs
-/// are pre-computed and passed in (they don't need gradient tracking).
+/// Reference log-probs are pre-computed and passed in. The policy path mirrors
+/// `checkpointed_forward_backward`: compute detached segment boundaries, seed
+/// the final boundary with an analytic GRPO tail gradient, then walk segments
+/// backward with gradient injection. This preserves full-sequence context and
+/// propagates downstream gradients into every LoRA segment.
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_grpo_forward_backward(
     backend: &dyn BackendRuntime,
@@ -5994,24 +6227,40 @@ fn checkpointed_grpo_forward_backward(
     device: &Device,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
     let num_segments = segments.len();
+    anyhow::ensure!(
+        num_segments > 0,
+        "checkpointed GRPO requires at least one segment"
+    );
+    anyhow::ensure!(
+        input_ids.len() == completion_mask.len(),
+        "input_ids/completion_mask length mismatch: {} vs {}",
+        input_ids.len(),
+        completion_mask.len()
+    );
+    anyhow::ensure!(
+        completion_mask
+            .get(1..)
+            .is_some_and(|m| m.iter().any(|&v| v)),
+        "checkpointed GRPO called with no active completion tokens"
+    );
 
-    // Step 1: Run full forward pass with detached boundaries to get boundary hidden states.
-    let (embed_hidden, positions) = model_forward_embed(input_ids, weights)?;
-    let lora_weights = params.as_lora_weights();
-
-    let mut boundary_states: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
-    boundary_states.push(embed_hidden.detach());
-    // Phase 3.1 hook — same capability-gated lifecycle as in
-    // checkpointed_forward_backward.
+    let positions: Vec<u32> = (0..input_ids.len())
+        .map(|position| position as u32)
+        .collect();
+    let lora_detached = lora_weights_detached(params);
     let resident_activation = backend.supports_resident_activation();
-    if resident_activation {
-        backend.register_resident_activation(boundary_states.last().unwrap())?;
-    }
+    let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
+    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
 
-    {
-        let mut current = boundary_states[0].clone();
-        for &(start, end) in segments.iter() {
-            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
+        anyhow::ensure!(
+            boundary_idx <= num_segments,
+            "GRPO checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
+        );
+        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+        let mut current = embed_hidden.detach();
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for &(start, end) in segments.iter().take(boundary_idx) {
             current = model_forward_segment(
                 backend,
                 current,
@@ -6021,48 +6270,247 @@ fn checkpointed_grpo_forward_backward(
                 start,
                 end,
                 Some(&mut linear_state),
-                Some(&lora_weights),
+                Some(&lora_detached),
             )?;
-            boundary_states.push(current.detach());
-            if resident_activation {
-                backend.register_resident_activation(boundary_states.last().unwrap())?;
-            }
-            current = boundary_states.last().unwrap().clone();
+            current = current.detach();
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize GRPO detached checkpoint boundary segment [{start}, {end})")
+            })?;
         }
-    }
+        Ok(current)
+    };
 
-    // Step 2: For each segment, recompute with grad tracking and backprop with GRPO loss.
+    let mut spooled_final_hidden: Option<Tensor> = None;
+    let spooled_boundaries = if should_spool_boundaries {
+        let spool = SpooledCheckpointBoundaries::new(num_segments)?;
+        tracing::info!(
+            num_segments,
+            seq_len = input_ids.len(),
+            "spooling GRPO checkpoint boundaries to temporary safetensors"
+        );
+        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+        let mut current = embed_hidden.detach();
+        synchronize_checkpoint_boundary(device, || {
+            "synchronize spooled GRPO embedding checkpoint boundary".to_string()
+        })?;
+        spool.save(0, &current)?;
+        synchronize_checkpoint_boundary(device, || {
+            "synchronize spooled GRPO embedding checkpoint boundary save".to_string()
+        })?;
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for (seg_idx, &(start, end)) in segments.iter().enumerate() {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )?;
+            current = current.detach();
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize spooled GRPO checkpoint boundary {} before save",
+                    seg_idx + 1
+                )
+            })?;
+            spool.save(seg_idx + 1, &current)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize spooled GRPO checkpoint boundary {} after save",
+                    seg_idx + 1
+                )
+            })?;
+        }
+        spooled_final_hidden = Some(current);
+        Some(spool)
+    } else {
+        None
+    };
+
+    let mut boundary_states: Vec<Tensor> = Vec::new();
+    let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
+        final_hidden
+    } else if recompute_boundaries {
+        detached_boundary(num_segments)?
+    } else {
+        let first_boundary = detached_boundary(0)?;
+        boundary_states = Vec::with_capacity(num_segments + 1);
+        boundary_states.push(first_boundary);
+        if resident_activation {
+            backend.register_resident_activation(boundary_states.last().unwrap())?;
+        }
+
+        {
+            let mut current = boundary_states[0].clone();
+            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            for &(start, end) in segments.iter() {
+                current = model_forward_segment(
+                    backend,
+                    current,
+                    weights,
+                    model_config,
+                    &positions,
+                    start,
+                    end,
+                    Some(&mut linear_state),
+                    Some(&lora_detached),
+                )?;
+                boundary_states.push(current.detach());
+                if resident_activation {
+                    backend.register_resident_activation(boundary_states.last().unwrap())?;
+                }
+                synchronize_checkpoint_boundary(device, || {
+                    format!("synchronize cached GRPO checkpoint boundary segment [{start}, {end})")
+                })?;
+                current = boundary_states.last().unwrap().clone();
+            }
+        }
+        segment_input_via_registry_or_clone(
+            backend,
+            boundary_states
+                .last()
+                .context("missing final GRPO checkpoint boundary")?,
+            resident_activation,
+        )?
+    };
+
+    let (loss_val, mut upstream_grad) = analytic_grpo_tail_loss_grad_pre_final_norm(
+        &final_hidden,
+        &weights.final_norm,
+        &weights.embed_tokens_t,
+        input_ids,
+        completion_mask,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        model_config.rms_norm_eps,
+        DEFAULT_CHUNK_SIZE,
+    )
+    .context("analytic GRPO tail gradient")?;
+    upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
+    drop(final_hidden);
+    synchronize_checkpoint_boundary(device, || {
+        "synchronize GRPO checkpointed final-boundary loss cleanup".to_string()
+    })?;
+
     let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
     let all_vars = params.all_vars();
-    let mut total_loss = 0.0;
 
-    for seg_idx in 0..num_segments {
+    for seg_idx in (0..num_segments).rev() {
         let (seg_start, seg_end) = segments[seg_idx];
+        tracing::info!(
+            segment = seg_idx + 1,
+            num_segments,
+            start_layer = seg_start,
+            end_layer = seg_end,
+            "checkpointed GRPO reverse segment begin"
+        );
 
-        // Start from the detached boundary state for this segment —
-        // same resolve-or-clone helper as in
-        // checkpointed_forward_backward.
-        let seg_input = segment_input_via_registry_or_clone(
-            backend,
-            &boundary_states[seg_idx],
-            resident_activation,
-        )?;
-        // Phase 3.2 sub-step: drop the candle CPU mirror once the
-        // recompute input has been resolved. Same rationale as in
-        // checkpointed_forward_backward — see that comment for
-        // why this is safe in monolithic mode.
-        if resident_activation && backend.has_resident_activation(&boundary_states[seg_idx]) {
+        let seg_input = if let Some(spool) = spooled_boundaries.as_ref() {
+            spool.load(seg_idx, device)?
+        } else if recompute_boundaries {
+            detached_boundary(seg_idx)?
+        } else {
+            segment_input_via_registry_or_clone(
+                backend,
+                &boundary_states[seg_idx],
+                resident_activation,
+            )?
+        };
+        if !recompute_boundaries
+            && resident_activation
+            && backend.has_resident_activation(&boundary_states[seg_idx])
+        {
             backend.evict_resident_activation(&boundary_states[seg_idx]);
             boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
-                .context("phase3.2 grpo: alloc boundary stub")?;
+                .context("phase3.2 grpo exact: alloc boundary stub")?;
+        }
+        let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
+
+        if let Some(tile_size) =
+            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end)
+        {
+            let next_upstream_grad = exact_gdn_single_layer_tiled_reverse(
+                backend,
+                seg_start,
+                &seg_input,
+                &upstream_grad_for_seg,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &lora_detached,
+                tile_size,
+                device,
+                &mut accumulated_grads,
+            )
+            .with_context(|| {
+                format!(
+                    "exact tiled GDN reverse GRPO segment {seg_idx} layer {seg_start} tile_size={tile_size}"
+                )
+            })?;
+            drop(seg_input);
+            drop(upstream_grad_for_seg);
+            upstream_grad =
+                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize checkpointed GRPO tiled GDN reverse segment {seg_idx} cleanup")
+            })?;
+            continue;
         }
 
-        // Recompute this segment WITH gradient tracking (LoRA Vars are tracked)
+        if let Some(tile_size) =
+            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end)
+        {
+            let full_attn_layer_idx = (0..seg_start)
+                .filter(|&idx| {
+                    matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
+                })
+                .count();
+            let next_upstream_grad = full_attention_single_layer_tiled_mlp_reverse(
+                backend,
+                seg_start,
+                full_attn_layer_idx,
+                &seg_input,
+                &upstream_grad_for_seg,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &lora_detached,
+                tile_size,
+                device,
+                &mut accumulated_grads,
+                &all_vars,
+            )
+            .with_context(|| {
+                format!(
+                    "exact full-attention tiled MLP reverse GRPO segment {seg_idx} layer {seg_start} tile_size={tile_size}"
+                )
+            })?;
+            drop(seg_input);
+            drop(upstream_grad_for_seg);
+            upstream_grad =
+                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize checkpointed GRPO full-attention tiled MLP reverse segment {seg_idx} cleanup"
+                )
+            })?;
+            continue;
+        }
+
+        let seg_input_var = Var::from_tensor(&seg_input)?;
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
-        let mut hidden = model_forward_segment(
+        let seg_output = model_forward_segment(
             backend,
-            seg_input,
+            seg_input_var.as_tensor().clone(),
             weights,
             model_config,
             &positions,
@@ -6072,54 +6520,50 @@ fn checkpointed_grpo_forward_backward(
             Some(&lora_weights_for_seg),
         )?;
 
-        // Run remaining segments DETACHED
-        for &(later_start, later_end) in &segments[seg_idx + 1..] {
-            hidden = hidden.detach();
-            let mut later_linear_state = LinearAttentionState::new(model_config, device)?;
-            let lora_for_later = params.as_lora_weights();
-            hidden = model_forward_segment(
-                backend,
-                hidden,
-                weights,
-                model_config,
-                &positions,
-                later_start,
-                later_end,
-                Some(&mut later_linear_state),
-                Some(&lora_for_later),
-            )?;
-        }
-
-        // LM head
-        let logits = model_forward_head(&hidden, weights, model_config)?;
-
-        // Compute policy log-probs and GRPO loss
-        let policy_log_probs = token_log_probs(&logits, input_ids, completion_mask, device)?;
-        let loss = grpo_loss(
-            &policy_log_probs,
-            ref_log_probs,
-            advantage,
-            clip_epsilon,
-            kl_coeff,
-            device,
-        )?;
-        let loss_val = loss.to_scalar::<f32>()? as f64;
-        total_loss += loss_val;
-
-        // Backward — only the current segment's LoRA Vars contribute gradients
-        let grads = loss.backward().context("GRPO checkpointed backward pass")?;
+        let seg_output_f32 = seg_output.to_dtype(DType::F32)?;
+        let upstream_f32 = upstream_grad_for_seg.to_dtype(DType::F32)?;
+        let injected = (&seg_output_f32 * &upstream_f32)?
+            .sum_all()
+            .with_context(|| {
+                format!("checkpointed GRPO gradient injection for segment {seg_idx}")
+            })?;
+        let grads = injected
+            .backward()
+            .with_context(|| format!("checkpointed GRPO reverse backward for segment {seg_idx}"))?;
         accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
+
+        if seg_idx > 0 {
+            upstream_grad = grads
+                .get(seg_input_var.as_tensor())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "checkpointed GRPO reverse pass did not produce input gradient for segment {seg_idx}"
+                    )
+                })?
+                .clone()
+                .detach();
+            upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
+        }
+        drop(grads);
+        drop(injected);
+        drop(upstream_f32);
+        drop(seg_output_f32);
+        drop(seg_output);
+        drop(seg_input_var);
+        drop(seg_input);
+        drop(upstream_grad_for_seg);
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize checkpointed GRPO reverse segment {seg_idx} cleanup")
+        })?;
     }
 
-    // Phase 3.1 hook — same capability-gated eviction as the SFT path.
-    if resident_activation {
+    if !recompute_boundaries && resident_activation {
         for boundary in &boundary_states {
             backend.evict_resident_activation(boundary);
         }
     }
 
-    let avg_loss = total_loss / num_segments as f64;
-    Ok((avg_loss, accumulated_grads))
+    Ok((loss_val, accumulated_grads))
 }
 
 #[cfg(test)]
@@ -7179,6 +7623,117 @@ mod tests {
         }
 
         result
+    }
+
+    #[test]
+    fn test_checkpointed_grpo_reverse_gradients_match_standard_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let config = tiny_config();
+        let weights = tiny_weights(&config, &device)?;
+        let backend = backend::for_device(&device);
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 4, 6];
+        let completion_mask = vec![false, false, false, true, true, true, true, true, false];
+        let seed = 0x6752_504f_u64;
+        let advantage = 0.75;
+        let clip_epsilon = 0.2;
+        let kl_coeff = 0.05;
+
+        let ref_log_probs = {
+            let mut ref_linear_state = LinearAttentionState::new(&config, &device)?;
+            let ref_logits = model_forward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                None,
+                Some(&mut ref_linear_state),
+                None,
+            )?;
+            token_log_probs(&ref_logits, &input_ids, &completion_mask, &device)?.detach()
+        };
+
+        let params_std =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
+        let params_ckpt =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
+
+        let lora_weights = params_std.as_lora_weights();
+        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+        let policy_logits = model_forward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut linear_state),
+            Some(&lora_weights),
+        )?;
+        let policy_log_probs =
+            token_log_probs(&policy_logits, &input_ids, &completion_mask, &device)?;
+        let loss = grpo_loss(
+            &policy_log_probs,
+            &ref_log_probs,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            &device,
+        )?;
+        let loss_std = loss.to_scalar::<f32>()? as f64;
+        let grads_std = loss.backward().context("standard GRPO backward")?;
+
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let (loss_ckpt, grads_ckpt) = checkpointed_grpo_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params_ckpt,
+            &completion_mask,
+            &ref_log_probs,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            &segments,
+            &device,
+        )?;
+
+        let loss_diff = (loss_std - loss_ckpt).abs();
+        assert!(
+            loss_diff < 1e-5,
+            "checkpointed GRPO loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
+        );
+
+        let std_vars = params_std.all_vars();
+        let ckpt_vars = params_ckpt.all_vars();
+        assert_eq!(std_vars.len(), ckpt_vars.len());
+        let mut compared = 0usize;
+        for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
+            let g_std = grads_std.get(std_var.as_tensor());
+            let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
+            match (g_std, g_ckpt) {
+                (Some(a), Some(b)) => {
+                    let diff = (a - b)?
+                        .abs()?
+                        .max_all()?
+                        .to_dtype(DType::F32)?
+                        .to_scalar::<f32>()?;
+                    assert!(
+                        diff < 1e-3,
+                        "checkpointed GRPO grad differs from standard: max_abs_diff={diff:e}"
+                    );
+                    compared += 1;
+                }
+                (None, None) => {}
+                (std_some, ckpt_some) => panic!(
+                    "GRPO gradient presence mismatch: standard={} checkpointed={}",
+                    std_some.is_some(),
+                    ckpt_some.is_some()
+                ),
+            }
+        }
+        assert!(compared > 0, "test compared no GRPO LoRA gradients");
+        Ok(())
     }
 
     #[test]
