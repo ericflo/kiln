@@ -118,6 +118,7 @@ fn build_tiny_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
         lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
         layers: vec![layer],
         rotary_inv_freq: vec![],
+        rope_cache: Default::default(),
         rotary_dim: 0,
         vocab,
         hidden,
@@ -430,6 +431,7 @@ fn build_tiny_gdn_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWeights> {
         lm_head: upload_f32(dev, &small_random(vocab * hidden, 307), &[vocab, hidden])?,
         layers: vec![layer],
         rotary_inv_freq: vec![],
+        rope_cache: Default::default(),
         rotary_dim: 0,
         vocab,
         hidden,
@@ -799,6 +801,7 @@ fn build_tiny_qwen35_specific_model(dev: &Arc<VulkanDevice>) -> Result<VkModelWe
         lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
         layers: vec![layer],
         rotary_inv_freq: vec![],
+        rope_cache: Default::default(),
         rotary_dim: 0,
         vocab,
         hidden,
@@ -914,7 +917,13 @@ fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
 
     let lora_layers = vec![build_qwen35_specific_lora(&dev)?];
     let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    assert_eq!(model.rope_cache.lock().unwrap().len(), 0);
     let loss = vk_model_forward_loss(&model, &lora_layers, &input_ids)?.to_vec_f32()?[0];
+    {
+        let cache = model.rope_cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&input_ids.len()));
+    }
     assert!(
         loss.is_finite(),
         "RoPE-enabled forward produced non-finite loss {loss}"
@@ -922,6 +931,7 @@ fn vk_rope_wired_into_full_attn_layer() -> Result<()> {
     println!("vk_rope_wired loss = {loss}");
 
     let loss_t = vk_model_forward_loss(&model, &lora_layers, &input_ids)?;
+    assert_eq!(model.rope_cache.lock().unwrap().len(), 1);
     let grads = vk_step_backward(&loss_t)?;
     println!("vk_rope_wired: grads has {} entries", grads.len());
     assert!(grads.len() >= 8);

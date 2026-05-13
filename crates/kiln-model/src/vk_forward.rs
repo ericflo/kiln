@@ -38,7 +38,8 @@ use kiln_vulkan_kernel::vk_ops::narrow::vk_narrow_lastdim;
 use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
 use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // LoRA parameter holders
@@ -213,9 +214,40 @@ pub struct VkModelWeights {
     /// Rotary frequency table, shape [rotary_dim / 2], F32. Used to
     /// compute cos/sin tables on the fly in `vk_full_attention_layer`.
     pub rotary_inv_freq: Vec<f32>,
+    /// GPU-resident RoPE cos/sin tables keyed by sequence length. Long
+    /// native GRPO runs reuse the same prompt lengths across reference and
+    /// policy passes, so caching avoids repeated single-core CPU trig loops
+    /// and host uploads.
+    pub rope_cache: Mutex<HashMap<usize, (VkTensor, VkTensor)>>,
     pub rotary_dim: usize,
     pub vocab: usize,
     pub hidden: usize,
+}
+
+impl VkModelWeights {
+    fn rope_tables_for_len(
+        &self,
+        device: &Arc<VulkanDevice>,
+        t: usize,
+    ) -> Result<(VkTensor, VkTensor)> {
+        {
+            let cache = self
+                .rope_cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("vk-native RoPE cache mutex poisoned"))?;
+            if let Some((cos, sin)) = cache.get(&t) {
+                return Ok((cos.clone(), sin.clone()));
+            }
+        }
+
+        let tables = vk_compute_rope_tables(device, &self.rotary_inv_freq, t)?;
+        let mut cache = self
+            .rope_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vk-native RoPE cache mutex poisoned"))?;
+        let entry = cache.entry(t).or_insert_with(|| tables.clone());
+        Ok(entry.clone())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -809,11 +841,7 @@ pub fn vk_model_forward_final_norm_with_state(
     // across all FullAttention layers.
     let t_rope = input_ids.len();
     let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
-        Some(vk_compute_rope_tables(
-            device,
-            &weights.rotary_inv_freq,
-            t_rope,
-        )?)
+        Some(weights.rope_tables_for_len(device, t_rope)?)
     } else {
         None
     };
@@ -1254,6 +1282,7 @@ impl VkModelWeights {
             lm_head,
             layers,
             rotary_inv_freq,
+            rope_cache: Default::default(),
             rotary_dim,
             vocab,
             hidden,

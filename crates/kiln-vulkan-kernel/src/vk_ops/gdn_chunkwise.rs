@@ -27,7 +27,7 @@ use crate::vk_ops::gdn_chunk_bwd::{
     vk_gdn_chunk_prep_bwd_no_grad, vk_gdn_chunk_scan_bwd_no_grad, vk_gdn_state_exit_bwd_no_grad,
     vk_solve_tri_transpose_no_grad,
 };
-use crate::vk_ops::gdn_chunk_prep::{GdnChunkPrepOutput, vk_gdn_chunk_prep_no_grad};
+use crate::vk_ops::gdn_chunk_prep::{vk_gdn_chunk_prep_no_grad, GdnChunkPrepOutput};
 use crate::vk_ops::mask::vk_scale_no_grad;
 use crate::vk_ops::matmul_batched::{vk_matmul_batched_no_grad, vk_transpose_batched_2d_no_grad};
 use crate::vk_ops::narrow::vk_narrow_lastdim_no_grad;
@@ -36,7 +36,22 @@ use crate::vk_ops::solve_tri::vk_solve_tri_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct StrictLowerMaskKey {
+    device: usize,
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+}
+
+thread_local! {
+    static STRICT_LOWER_MASK_CACHE: RefCell<HashMap<StrictLowerMaskKey, VkTensor>> =
+        RefCell::new(HashMap::new());
+}
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
     crate::buffer_pool::pool_alloc_f32(device, n)
@@ -381,39 +396,51 @@ fn upload_f32_full(device: &Arc<VulkanDevice>, value: f32, shape: &[usize]) -> R
     upload_f32(device, &data, shape.to_vec())
 }
 
-/// Zero out the upper-triangular (j >= t) entries of a [B, nv, C, C]
-/// tensor on GPU. CPU pattern: build a [C, C] mask once, broadcast-mul.
-/// This impl uploads the mask once and reuses via vk_mul.
-fn strict_lower_mask_4d(t: &VkTensor, chunk: usize) -> Result<VkTensor> {
-    let dims = t.shape();
-    debug_assert_eq!(dims.len(), 4);
-    debug_assert_eq!(dims[2], chunk);
-    debug_assert_eq!(dims[3], chunk);
-    let device = t.device();
+fn cached_strict_lower_mask_4d(
+    device: &Arc<VulkanDevice>,
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+) -> Result<VkTensor> {
+    let key = StrictLowerMaskKey {
+        device: Arc::as_ptr(device) as usize,
+        batch,
+        heads,
+        chunk,
+    };
+    if let Some(mask) = STRICT_LOWER_MASK_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+        return Ok(mask);
+    }
+
     let mut mask = vec![0.0_f32; chunk * chunk];
     for i in 0..chunk {
         for j in 0..i {
             mask[i * chunk + j] = 1.0;
         }
     }
-    let mask_2d = upload_f32(device, &mask, vec![chunk, chunk])?;
-    // broadcast to [B, nv, C, C] via reshape + mul. mask_2d is [C, C].
-    // vk_mul_no_grad requires same shape; reshape t to [B*nv*C, C] and
-    // broadcast mask via the same shape (it doesn't broadcast — we
-    // need to repeat the mask rows). Simpler: just mul with reshape.
-    let bh_c = dims[0] * dims[1] * dims[2];
-    // Replicate the mask to [bh_c, C] by treating it as a tile. The
-    // pattern we want: mask[r * C + j] = mask_2d[r % C, j]. Quickest:
-    // build the full mask buffer once.
-    let mut full = vec![0.0_f32; dims[0] * dims[1] * chunk * chunk];
-    for i in 0..(dims[0] * dims[1]) {
+    let mut full = vec![0.0_f32; batch * heads * chunk * chunk];
+    for i in 0..(batch * heads) {
         let off = i * chunk * chunk;
         for j in 0..(chunk * chunk) {
             full[off + j] = mask[j];
         }
     }
-    let mask_full = upload_f32(device, &full, dims.to_vec())?;
-    let _ = mask_2d;
+    let mask_full = upload_f32(device, &full, vec![batch, heads, chunk, chunk])?;
+    STRICT_LOWER_MASK_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, mask_full.clone());
+    });
+    Ok(mask_full)
+}
+
+/// Zero out the upper-triangular (j >= t) entries of a [B, nv, C, C]
+/// tensor on GPU. The mask depends only on device/shape, so long GRPO
+/// GDN backward reuses the same GPU-resident tensor across chunks/layers.
+fn strict_lower_mask_4d(t: &VkTensor, chunk: usize) -> Result<VkTensor> {
+    let dims = t.shape();
+    debug_assert_eq!(dims.len(), 4);
+    debug_assert_eq!(dims[2], chunk);
+    debug_assert_eq!(dims[3], chunk);
+    let mask_full = cached_strict_lower_mask_4d(t.device(), dims[0], dims[1], chunk)?;
     crate::vk_ops::elementwise::vk_mul_no_grad(t, &mask_full)
 }
 
