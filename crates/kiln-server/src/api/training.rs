@@ -28,12 +28,13 @@ use crate::training_preflight::{
 use crate::training_queue::{QueueEntry, QueuedJob};
 
 struct GrpoSubmissionStats {
-    num_groups: usize,
-    total_completions: usize,
+    num_groups: Option<usize>,
+    total_completions: Option<usize>,
     max_seq_len: usize,
+    streaming_dataset: bool,
 }
 
-fn scan_grpo_jsonl_submission(
+fn validate_grpo_jsonl_submission_head(
     dataset_path: &str,
     tokenizer: Option<&kiln_core::tokenizer::KilnTokenizer>,
 ) -> Result<GrpoSubmissionStats, ApiError> {
@@ -46,9 +47,6 @@ fn scan_grpo_jsonl_submission(
         ))
     })?;
     let reader = BufReader::new(file);
-    let mut num_groups = 0usize;
-    let mut total_completions = 0usize;
-    let mut max_seq_len = 0usize;
 
     for (idx, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| {
@@ -67,29 +65,23 @@ fn scan_grpo_jsonl_submission(
                 idx + 1
             ))
         })?;
-        num_groups += 1;
-        total_completions += group.completions.len();
-        max_seq_len = max_seq_len.max(training_preflight::approximate_max_seq_len_grpo_group(
-            &group, tokenizer,
-        ));
+        if group.completions.is_empty() {
+            return Err(ApiError::training_invalid_request(format!(
+                "GRPO JSONL first non-empty group at line {} in '{dataset_path}' has no completions",
+                idx + 1
+            )));
+        }
+        return Ok(GrpoSubmissionStats {
+            num_groups: None,
+            total_completions: None,
+            max_seq_len: training_preflight::approximate_max_seq_len_grpo_group(&group, tokenizer),
+            streaming_dataset: true,
+        });
     }
 
-    if num_groups == 0 {
-        return Err(ApiError::training_invalid_request(format!(
-            "GRPO dataset_path '{dataset_path}' contains no groups"
-        )));
-    }
-    if total_completions == 0 {
-        return Err(ApiError::training_invalid_request(format!(
-            "GRPO dataset_path '{dataset_path}' contains no completions"
-        )));
-    }
-
-    Ok(GrpoSubmissionStats {
-        num_groups,
-        total_completions,
-        max_seq_len,
-    })
+    Err(ApiError::training_invalid_request(format!(
+        "GRPO dataset_path '{dataset_path}' contains no groups"
+    )))
 }
 
 /// Estimate the per-step working set against the corrected memory
@@ -389,19 +381,18 @@ async fn submit_grpo(
     validate_grpo_submission_source(&req, vk_native_grpo)?;
 
     let stats = if let Some(path) = req.dataset_path.as_deref() {
-        scan_grpo_jsonl_submission(path, Some(state.tokenizer.as_ref()))?
+        validate_grpo_jsonl_submission_head(path, Some(state.tokenizer.as_ref()))?
     } else {
         GrpoSubmissionStats {
-            num_groups: req.groups.len(),
-            total_completions: req.groups.iter().map(|g| g.completions.len()).sum(),
+            num_groups: Some(req.groups.len()),
+            total_completions: Some(req.groups.iter().map(|g| g.completions.len()).sum()),
             max_seq_len: training_preflight::approximate_max_seq_len_grpo(
                 &req.groups,
                 Some(state.tokenizer.as_ref()),
             ),
+            streaming_dataset: false,
         }
     };
-    let num_groups = stats.num_groups;
-    let total_completions = stats.total_completions;
     let job_id = uuid::Uuid::new_v4().to_string();
     let adapter_name = req
         .config
@@ -410,7 +401,23 @@ async fn submit_grpo(
         .unwrap_or_else(|| format!("grpo-{}", &job_id[..8]));
     let auto_load = req.config.auto_load;
 
-    tracing::info!(num_groups, total_completions, job_id = %job_id, adapter = %adapter_name, "GRPO training request queued");
+    if stats.streaming_dataset {
+        tracing::info!(
+            dataset_path = req.dataset_path.as_deref().unwrap_or_default(),
+            max_seq_len_first_group = stats.max_seq_len,
+            job_id = %job_id,
+            adapter = %adapter_name,
+            "streamed GRPO training request queued"
+        );
+    } else {
+        tracing::info!(
+            num_groups = stats.num_groups.unwrap_or(0),
+            total_completions = stats.total_completions.unwrap_or(0),
+            job_id = %job_id,
+            adapter = %adapter_name,
+            "GRPO training request queued"
+        );
+    }
 
     // Verify we have real model weights
     if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
@@ -460,9 +467,17 @@ async fn submit_grpo(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: format!(
-            "Queued GRPO training with {num_groups} groups ({total_completions} completions, position {queue_position} in queue)"
-        ),
+        message: if stats.streaming_dataset {
+            format!(
+                "Queued streamed GRPO training from dataset_path (position {queue_position} in queue)"
+            )
+        } else {
+            let num_groups = stats.num_groups.unwrap_or(0);
+            let total_completions = stats.total_completions.unwrap_or(0);
+            format!(
+                "Queued GRPO training with {num_groups} groups ({total_completions} completions, position {queue_position} in queue)"
+            )
+        },
     }))
 }
 
@@ -687,5 +702,19 @@ mod tests {
 
         let inline = grpo_req(None, vec![grpo_group()]);
         validate_grpo_submission_source(&inline, false).unwrap();
+    }
+
+    #[test]
+    fn grpo_dataset_path_submission_validation_is_head_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grpo.jsonl");
+        let first = serde_json::to_string(&grpo_group()).unwrap();
+        std::fs::write(&path, format!("{first}\nthis is not json\n")).unwrap();
+
+        let stats = validate_grpo_jsonl_submission_head(path.to_str().unwrap(), None).unwrap();
+        assert!(stats.streaming_dataset);
+        assert_eq!(stats.num_groups, None);
+        assert_eq!(stats.total_completions, None);
+        assert!(stats.max_seq_len > 0);
     }
 }

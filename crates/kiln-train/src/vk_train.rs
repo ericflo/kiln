@@ -2782,6 +2782,15 @@ pub fn grpo_jsonl_stats(path: &Path) -> Result<(usize, usize)> {
     Ok((groups, completions))
 }
 
+fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
+    let total = total_bytes.max(1);
+    let clamped = offset.min(total);
+    let total_steps = total.min(usize::MAX as u64).max(1) as usize;
+    let step = clamped.min(usize::MAX as u64).max(1) as usize;
+    let progress = (clamped as f64 / total as f64).min(0.999) as f32;
+    (step, total_steps, progress)
+}
+
 /// Vulkan-native GRPO training loop.
 ///
 /// This path keeps reference forward, selected-token logprob extraction,
@@ -2992,9 +3001,9 @@ pub fn vk_native_grpo_train(
 
 /// Vulkan-native GRPO training loop over a JSONL dataset.
 ///
-/// The file is scanned for counts, then streamed one non-empty line at a time.
-/// Each line is a `GrpoGroup`; no vector of all groups is retained during
-/// tokenization, reference forward, policy loss, backward, or optimizer update.
+/// The file is streamed one non-empty line at a time. Each line is a
+/// `GrpoGroup`; no vector of all groups is retained during tokenization,
+/// reference forward, policy loss, backward, or optimizer update.
 pub fn vk_native_grpo_train_jsonl(
     dataset_path: &Path,
     config: &GrpoConfig,
@@ -3008,7 +3017,6 @@ pub fn vk_native_grpo_train_jsonl(
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let (total_groups, total_completions) = grpo_jsonl_stats(dataset_path)?;
     if !VulkanDevice::probe() {
         bail!(
             "vk_native_grpo_train_jsonl: no Vulkan device available - \
@@ -3050,10 +3058,12 @@ pub fn vk_native_grpo_train_jsonl(
         ..Default::default()
     };
     let num_gdn_layers = vk_count_gdn_layers(&vk_weights);
+    let file = File::open(dataset_path)
+        .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
+    let total_bytes = file.metadata().map(|m| m.len()).unwrap_or(0).max(1);
     tracing::info!(
         dataset = %dataset_path.display(),
-        total_groups,
-        total_completions,
+        total_bytes,
         lr = config.learning_rate,
         kl_coeff = config.kl_coeff,
         clip_epsilon = config.clip_epsilon,
@@ -3063,37 +3073,50 @@ pub fn vk_native_grpo_train_jsonl(
         "starting streamed vk-native GRPO training"
     );
 
-    let file = File::open(dataset_path)
-        .with_context(|| format!("open GRPO JSONL dataset {}", dataset_path.display()))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut optimizer_step = 0u32;
     let mut last_loss = 0.0f32;
     let mut processed_groups = 0usize;
-    let total_substeps = total_completions.saturating_mul(2).max(1);
+    let mut processed_completions = 0usize;
+    let mut bytes_read = 0u64;
+    let mut line_no = 0usize;
+    let mut line = String::new();
 
-    for (line_idx, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| {
+    loop {
+        line.clear();
+        let line_start = bytes_read;
+        let read = reader.read_line(&mut line).with_context(|| {
             format!(
                 "read GRPO JSONL dataset {} line {}",
                 dataset_path.display(),
-                line_idx + 1
+                line_no + 1
             )
         })?;
-        let Some(group) = parse_grpo_jsonl_group_line(&line, line_idx + 1)? else {
+        if read == 0 {
+            break;
+        }
+        line_no += 1;
+        bytes_read = bytes_read.saturating_add(read as u64);
+        let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
             continue;
         };
         processed_groups += 1;
+        tracing::info!(
+            group = processed_groups,
+            line = line_no,
+            line_bytes = read,
+            byte_offset = line_start,
+            "streamed vk-native GRPO group tokenization begin"
+        );
         let tokenize_start = std::time::Instant::now();
         let tgroup = tokenize_vk_grpo_group(&group, tokenizer).with_context(|| {
             format!(
                 "tokenize GRPO JSONL group {} at line {}",
-                processed_groups,
-                line_idx + 1
+                processed_groups, line_no
             )
         })?;
         tracing::info!(
             group = processed_groups,
-            total_groups,
             completions = tgroup.completions.len(),
             seq_lens = ?tgroup
                 .completions
@@ -3107,7 +3130,6 @@ pub fn vk_native_grpo_train_jsonl(
         let mut group_loss_sum = 0.0f64;
         tracing::info!(
             group = processed_groups,
-            total_groups,
             prompt_len = tgroup.prompt_ids.len(),
             "streamed vk-native GRPO reference prompt prefill begin"
         );
@@ -3126,31 +3148,35 @@ pub fn vk_native_grpo_train_jsonl(
         })?;
         tracing::info!(
             group = processed_groups,
-            total_groups,
             prompt_len = tgroup.prompt_ids.len(),
             elapsed_ms = ref_prefix_start.elapsed().as_millis() as u64,
             "streamed vk-native GRPO reference prompt prefill done"
         );
 
+        let group_substeps = tgroup.completions.len().saturating_mul(2).max(1);
+        let line_span = bytes_read.saturating_sub(line_start);
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
             ensure_grpo_prefix_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
-            let completed_before = ((optimizer_step as usize).saturating_sub(1)) * 2;
+            let completed_before = comp_idx.saturating_mul(2);
+            let progress_offset = line_start.saturating_add(
+                line_span.saturating_mul(completed_before as u64) / group_substeps as u64,
+            );
+            let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, progress_offset);
             if let Some(ref cb) = progress_cb {
                 cb(TrainingProgress {
                     epoch: 1,
                     total_epochs: 1,
-                    step: completed_before.max(1),
-                    total_steps: total_substeps,
+                    step,
+                    total_steps,
                     loss: last_loss as f64,
-                    progress: (completed_before.max(1) as f32 / total_substeps as f32).min(0.999),
+                    progress,
                 });
             }
             tracing::info!(
                 group = processed_groups,
-                total_groups,
                 completion = comp_idx + 1,
                 completions = tgroup.completions.len(),
                 optimizer_step,
@@ -3179,19 +3205,23 @@ pub fn vk_native_grpo_train_jsonl(
             );
             if let Some(ref cb) = progress_cb {
                 let completed = completed_before + 1;
+                let progress_offset = line_start.saturating_add(
+                    line_span.saturating_mul(completed as u64) / group_substeps as u64,
+                );
+                let (step, total_steps, progress) =
+                    jsonl_byte_progress(total_bytes, progress_offset);
                 cb(TrainingProgress {
                     epoch: 1,
                     total_epochs: 1,
-                    step: completed,
-                    total_steps: total_substeps,
+                    step,
+                    total_steps,
                     loss: last_loss as f64,
-                    progress: (completed as f32 / total_substeps as f32).min(0.999),
+                    progress,
                 });
             }
 
             tracing::info!(
                 group = processed_groups,
-                total_groups,
                 completion = comp_idx + 1,
                 completions = tgroup.completions.len(),
                 optimizer_step,
@@ -3242,16 +3272,22 @@ pub fn vk_native_grpo_train_jsonl(
             group_loss_sum += loss as f64;
             if let Some(ref cb) = progress_cb {
                 let completed = completed_before + 2;
+                let progress_offset = line_start.saturating_add(
+                    line_span.saturating_mul(completed as u64) / group_substeps as u64,
+                );
+                let (step, total_steps, progress) =
+                    jsonl_byte_progress(total_bytes, progress_offset);
                 cb(TrainingProgress {
                     epoch: 1,
                     total_epochs: 1,
-                    step: completed,
-                    total_steps: total_substeps,
+                    step,
+                    total_steps,
                     loss: last_loss as f64,
-                    progress: (completed as f32 / total_substeps as f32).min(0.999),
+                    progress,
                 });
             }
         }
+        processed_completions = processed_completions.saturating_add(tgroup.completions.len());
 
         let avg_group_loss = if tgroup.completions.is_empty() {
             0.0
@@ -3259,25 +3295,28 @@ pub fn vk_native_grpo_train_jsonl(
             group_loss_sum / tgroup.completions.len() as f64
         };
         if let Some(ref cb) = progress_cb {
+            let (step, total_steps, progress) = jsonl_byte_progress(total_bytes, bytes_read);
             cb(TrainingProgress {
                 epoch: 1,
                 total_epochs: 1,
-                step: processed_groups,
-                total_steps: total_groups,
+                step,
+                total_steps,
                 loss: avg_group_loss,
-                progress: processed_groups as f32 / total_groups.max(1) as f32,
+                progress,
             });
         }
         tracing::info!(
             group = processed_groups,
-            total_groups,
+            completions_seen = processed_completions,
             completions = tgroup.completions.len(),
+            byte_offset = bytes_read,
+            total_bytes,
             loss = format!("{avg_group_loss:.6}"),
             "streamed vk-native GRPO group step"
         );
 
         if let Some(interval) = config.checkpoint_interval {
-            if interval > 0 && processed_groups % interval == 0 && processed_groups < total_groups {
+            if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
                 let ckpt_dir =
                     adapter_dir.join(format!("{adapter_name}-checkpoint-{processed_groups}"));
                 std::fs::create_dir_all(&ckpt_dir).with_context(|| {
@@ -3323,7 +3362,7 @@ pub fn vk_native_grpo_train_jsonl(
         path = %output_dir.display(),
         final_loss = format!("{last_loss:.6}"),
         processed_groups,
-        total_groups,
+        processed_completions,
         "streamed vk-native GRPO training complete"
     );
 

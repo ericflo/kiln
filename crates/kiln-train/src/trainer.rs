@@ -5135,6 +5135,129 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_grpo_loss_matches_existing_trainer_selected_logprob_loss_and_hidden_grad() -> Result<()> {
+        use kiln_vulkan_kernel::vk_autograd::vk_backward;
+        use kiln_vulkan_kernel::vk_ops::flce::{vk_grpo_loss, vk_selected_log_probs};
+        use kiln_vulkan_kernel::{VkTensor, VulkanDevice};
+        use std::sync::Arc;
+
+        let Some(vk_device) = (if VulkanDevice::probe() {
+            VulkanDevice::new().ok().map(Arc::new)
+        } else {
+            None
+        }) else {
+            return Ok(());
+        };
+
+        let device = Device::Cpu;
+        let num_active = 3usize;
+        let hidden_dim = 5usize;
+        let vocab = 11usize;
+        let hidden_data: Vec<f32> = (0..num_active * hidden_dim)
+            .map(|i| ((i as f32) * 0.17).sin() * 0.25)
+            .collect();
+        let weight_data: Vec<f32> = (0..vocab * hidden_dim)
+            .map(|i| ((i as f32) * 0.031).cos() * 0.35)
+            .collect();
+        let input_ids = vec![0_u32, 1, 2, 3, 4];
+        let labels = vec![2_u32, 3, 4];
+        let completion_mask = vec![false, false, true, true, true];
+        let ref_log_probs = vec![-2.7_f32, -2.1, -3.0];
+        let advantage = 0.65_f64;
+        let clip_epsilon = 0.2_f64;
+        let kl_coeff = 0.05_f64;
+
+        let hidden_var = Var::from_tensor(&Tensor::from_vec(
+            hidden_data.clone(),
+            (num_active, hidden_dim),
+            &device,
+        )?)?;
+        let hidden = hidden_var.as_tensor();
+        let weight = Tensor::from_vec(weight_data.clone(), (vocab, hidden_dim), &device)?;
+        let active_logits = hidden.matmul(&weight.transpose(0, 1)?)?;
+        let zero_row = Tensor::zeros((1usize, vocab), DType::F32, &device)?;
+        let row0 = active_logits.narrow(0, 0, 1)?;
+        let row1 = active_logits.narrow(0, 1, 1)?;
+        let row2 = active_logits.narrow(0, 2, 1)?;
+        let logits = Tensor::cat(&[&zero_row, &row0, &row1, &row2, &zero_row], 0)?.unsqueeze(0)?;
+        let trainer_log_probs = token_log_probs(&logits, &input_ids, &completion_mask, &device)?;
+        let ref_log_probs_t =
+            Tensor::new(ref_log_probs.as_slice(), &device)?.to_dtype(DType::F32)?;
+        let trainer_loss = grpo_loss(
+            &trainer_log_probs,
+            &ref_log_probs_t,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            &device,
+        )?;
+        let trainer_loss_value = trainer_loss.to_scalar::<f32>()?;
+        let trainer_grads = trainer_loss.backward()?;
+        let trainer_hidden_grad = trainer_grads
+            .get(hidden)
+            .context("existing trainer GRPO did not produce hidden gradient")?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        let hidden_vk_base = VkTensor::from_candle(hidden, Arc::clone(&vk_device))?;
+        let hidden_vk = VkTensor::parameter(
+            Arc::clone(hidden_vk_base.buffer()),
+            hidden_vk_base.shape().to_vec(),
+            hidden_vk_base.dtype(),
+            Arc::clone(hidden_vk_base.device()),
+            hidden_var.id(),
+        );
+        let weight_vk = VkTensor::from_candle(&weight, Arc::clone(&vk_device))?;
+        let ref_vk = VkTensor::from_candle(&ref_log_probs_t, Arc::clone(&vk_device))?;
+
+        let vk_log_probs = vk_selected_log_probs(&hidden_vk, &weight_vk, &labels, 4)?;
+        let vk_loss = vk_grpo_loss(
+            &hidden_vk,
+            &weight_vk,
+            &labels,
+            &ref_vk,
+            advantage as f32,
+            clip_epsilon as f32,
+            kl_coeff as f32,
+            4,
+        )?;
+        let vk_loss_value = vk_loss.to_vec_f32()?[0];
+        let vk_grads = vk_backward(&vk_loss)?;
+        let vk_hidden_grad = vk_grads
+            .get(hidden_vk.param_id().unwrap())
+            .context("vk GRPO did not produce hidden gradient")?
+            .to_vec_f32()?;
+
+        let trainer_log_probs = trainer_log_probs.to_vec1::<f32>()?;
+        let vk_log_probs = vk_log_probs.to_vec_f32()?;
+        let logprob_mad = trainer_log_probs
+            .iter()
+            .zip(vk_log_probs.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            logprob_mad < 1e-4,
+            "vk selected logprobs diverged from existing trainer token_log_probs: {logprob_mad:e}"
+        );
+        assert!(
+            (trainer_loss_value - vk_loss_value).abs() < 1e-4,
+            "vk GRPO loss diverged from existing trainer: trainer={trainer_loss_value:e} vk={vk_loss_value:e}"
+        );
+        let grad_mad = trainer_hidden_grad
+            .iter()
+            .zip(vk_hidden_grad.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            grad_mad < 1e-4,
+            "vk GRPO hidden gradient diverged from existing trainer: {grad_mad:e}"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn tokenize_for_training_falls_back_for_non_prefix_stable_templates() -> Result<()> {
         let tokenizer = minimal_training_tokenizer(
