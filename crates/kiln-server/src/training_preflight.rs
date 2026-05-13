@@ -461,7 +461,14 @@ pub fn available_for_training_bytes_with_meminfo(
             return live.min(vram.total_bytes.saturating_sub(SAFETY_MARGIN_BYTES));
         }
         // No /proc/meminfo (non-Linux Apple Silicon, or read failed):
-        // fall through to the conservative static path.
+        // honor the explicit unified-memory reserve knob when present,
+        // otherwise fall through to the conservative static path.
+        if let Some(reserve) = training_memory_reserve_override_bytes() {
+            return vram
+                .total_bytes
+                .saturating_sub(reserve)
+                .saturating_sub(SAFETY_MARGIN_BYTES);
+        }
     }
 
     // Discrete-GPU / unknown path: reserve a fraction of the budget
@@ -471,6 +478,14 @@ pub fn available_for_training_bytes_with_meminfo(
     let inference_reserve = (vram.total_bytes / 3).min(6 * BYTES_PER_GB);
     let after_inference = vram.total_bytes.saturating_sub(inference_reserve);
     after_inference.saturating_sub(SAFETY_MARGIN_BYTES)
+}
+
+fn training_memory_reserve_override_bytes() -> Option<u64> {
+    let gb = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB")
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    (gb.is_finite() && gb >= 0.0).then_some((gb * BYTES_PER_GB as f64) as u64)
 }
 
 #[cfg(target_os = "linux")]
@@ -1023,6 +1038,24 @@ mod tests {
         // 50 GB MemAvailable on a 10 GB ceiling — cap to ceiling.
         let avail = available_for_training_bytes_with_meminfo(&vram, Some(50 * BYTES_PER_GB));
         assert_eq!(avail, 10u64 * BYTES_PER_GB - SAFETY_MARGIN_BYTES);
+    }
+
+    #[test]
+    fn unified_memory_without_meminfo_honors_reserve_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "1.5") };
+        let vram = GpuVramInfo {
+            total_bytes: 10 * BYTES_PER_GB,
+            source: VramSource::AppleSilicon,
+        };
+
+        let avail = available_for_training_bytes_with_meminfo(&vram, None);
+
+        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
+        assert_eq!(
+            avail,
+            10 * BYTES_PER_GB - BYTES_PER_GB - BYTES_PER_GB / 2 - SAFETY_MARGIN_BYTES
+        );
     }
 
     #[test]
