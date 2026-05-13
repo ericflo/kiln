@@ -60,6 +60,8 @@ struct Args {
     epochs: usize,
     max_examples: Option<usize>,
     skip_examples: usize,
+    checkpoint_interval: Option<usize>,
+    vram_poll_millis: u64,
     trainer: TrainerKind,
 }
 
@@ -73,6 +75,8 @@ impl Args {
         let mut epochs = 1usize;
         let mut max_examples = None;
         let mut skip_examples = 0usize;
+        let mut checkpoint_interval = None;
+        let mut vram_poll_millis = 1_000u64;
         let mut trainer = TrainerKind::Native;
 
         let mut args = std::env::args().skip(1);
@@ -111,6 +115,21 @@ impl Args {
                         .parse()
                         .context("--skip-examples must be a non-negative integer")?
                 }
+                "--checkpoint-interval" => {
+                    checkpoint_interval = Some(
+                        args.next()
+                            .context("--checkpoint-interval requires a value")?
+                            .parse()
+                            .context("--checkpoint-interval must be a non-negative integer")?,
+                    )
+                }
+                "--vram-poll-millis" => {
+                    vram_poll_millis = args
+                        .next()
+                        .context("--vram-poll-millis requires a value")?
+                        .parse()
+                        .context("--vram-poll-millis must be a positive integer")?
+                }
                 "--trainer" => {
                     trainer = TrainerKind::parse(
                         &args
@@ -123,6 +142,7 @@ impl Args {
                         "usage: cuda_sft_file --data <jsonl> --model-path <dir> \
                          [--output-dir <dir>] [--adapter-name <name>] \
                          [--epochs <n>] [--skip-examples <n>] [--max-examples <n>] \
+                         [--checkpoint-interval <n>] [--vram-poll-millis <n>] \
                          [--trainer native|generic|server|default]"
                     );
                     std::process::exit(0);
@@ -134,6 +154,7 @@ impl Args {
         let data = data.context("--data <jsonl> is required")?;
         let model_path = model_path.context("--model-path <dir> is required")?;
         anyhow::ensure!(epochs > 0, "--epochs must be positive");
+        anyhow::ensure!(vram_poll_millis > 0, "--vram-poll-millis must be positive");
         Ok(Self {
             data,
             model_path,
@@ -142,6 +163,8 @@ impl Args {
             epochs,
             max_examples,
             skip_examples,
+            checkpoint_interval,
+            vram_poll_millis,
             trainer,
         })
     }
@@ -278,10 +301,17 @@ fn main() -> Result<()> {
         base_adapter: None,
         output_name: Some(args.adapter_name.clone()),
         auto_load: false,
-        checkpoint_interval: None,
+        checkpoint_interval: args.checkpoint_interval,
         seed: Some(0xC0DA_5EED),
         optimizer: Optimizer::default(),
     };
+    println!(
+        "output_dir={} adapter_name={} checkpoint_interval={:?} vram_poll_millis={}",
+        args.output_dir.display(),
+        args.adapter_name,
+        args.checkpoint_interval,
+        args.vram_poll_millis
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let peak = Arc::new(AtomicU64::new(baseline_mib));
@@ -297,7 +327,7 @@ fn main() -> Result<()> {
                     Err(next) => current = next,
                 }
             }
-            thread::sleep(Duration::from_millis(50));
+            thread::sleep(Duration::from_millis(args.vram_poll_millis));
         }
     });
 
