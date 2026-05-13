@@ -1,0 +1,54 @@
+// 2D transpose for packed BF16 tensors: out[j, i] = in[i, j]
+//
+// BF16 storage is a logical u16 sequence packed into u32 words
+// (low lane = even logical index, high lane = odd logical index).
+// One invocation writes one output word so there are no read/modify/write
+// races between lanes.
+//
+// Push constants: [rows, cols]
+// Bindings:
+//   0: in  (readonly, [rows*cols] BF16 packed as u32[])
+//   1: out (writeonly, [cols*rows] BF16 packed as u32[])
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint cols;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { uint data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { uint data_out[]; };
+
+uint load_bf16_lane(uint logical_idx) {
+    uint word = data_in[logical_idx >> 1u];
+    return ((logical_idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16u);
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint total = rows * cols;
+    uint total_words = (total + 1u) / 2u;
+    if (word_idx >= total_words) return;
+
+    uint out_base = word_idx * 2u;
+    uint packed = 0u;
+
+    [[unroll]]
+    for (uint lane = 0u; lane < 2u; lane++) {
+        uint out_idx = out_base + lane;
+        if (out_idx >= total) break;
+
+        // Output shape is [cols, rows].
+        uint out_row = out_idx / rows;
+        uint out_col = out_idx - out_row * rows;
+        uint src_idx = out_col * cols + out_row;
+        uint bits = load_bf16_lane(src_idx) & 0xffffu;
+        packed |= bits << (16u * lane);
+    }
+
+    data_out[word_idx] = packed;
+}

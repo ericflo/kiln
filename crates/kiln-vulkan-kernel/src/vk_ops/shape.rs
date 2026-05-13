@@ -102,6 +102,49 @@ fn dispatch_transpose_2d_f32(
     )
 }
 
+fn dispatch_transpose_2d_bf16(
+    device: &VulkanDevice,
+    src: &VulkanBuffer,
+    dst: &VulkanBuffer,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    let total_words = ((rows * cols) + 1) / 2;
+    let workgroups = ((total_words + 255) / 256) as u32;
+    let limit = device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroups <= limit,
+        "vk_transpose_2d_bf16: workgroups {workgroups} > device limit {limit}"
+    );
+    let push_constants = [rows as u32, cols as u32];
+    crate::vk_ops::dispatch_simple(
+        device,
+        "vk_transpose_2d_bf16",
+        &[src.handle(), dst.handle()],
+        &push_constants,
+        workgroups,
+    )
+}
+
+fn alloc_transpose_output(
+    device: &Arc<VulkanDevice>,
+    n_elements: usize,
+    dtype: VkDType,
+) -> Result<Arc<VulkanBuffer>> {
+    let mut bytes = (n_elements * dtype.byte_size()).max(dtype.byte_size());
+    if dtype == VkDType::Bf16 {
+        // BF16 shaders address storage as u32-packed pairs.
+        bytes = ((bytes + 3) / 4) * 4;
+    }
+    let buf = VulkanBuffer::create_device_local(
+        device.device(),
+        device.device_local_mem_type(),
+        bytes as u64,
+    )
+    .context("vk_transpose_2d: alloc output buffer")?;
+    Ok(Arc::new(buf))
+}
+
 pub fn vk_transpose_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
     anyhow::ensure!(
         t.shape().len() == 2,
@@ -109,23 +152,22 @@ pub fn vk_transpose_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
         t.shape()
     );
     anyhow::ensure!(
-        t.dtype() == VkDType::F32,
-        "vk_transpose_2d: Phase A is F32-only"
+        matches!(t.dtype(), VkDType::F32 | VkDType::Bf16),
+        "vk_transpose_2d: expected F32 or BF16"
     );
     let rows = t.shape()[0];
     let cols = t.shape()[1];
     let n = rows * cols;
     let dev = t.device();
-    let bytes = (n * 4).max(4);
-    let buf =
-        VulkanBuffer::create_device_local(dev.device(), dev.device_local_mem_type(), bytes as u64)
-            .context("vk_transpose_2d: alloc output buffer")?;
-    let buf = Arc::new(buf);
-    dispatch_transpose_2d_f32(dev, t.buffer(), &buf, rows, cols)?;
+    let buf = alloc_transpose_output(dev, n, t.dtype())?;
+    match t.dtype() {
+        VkDType::F32 => dispatch_transpose_2d_f32(dev, t.buffer(), &buf, rows, cols)?,
+        VkDType::Bf16 => dispatch_transpose_2d_bf16(dev, t.buffer(), &buf, rows, cols)?,
+    }
     Ok(VkTensor::from_buffer(
         buf,
         vec![cols, rows],
-        VkDType::F32,
+        t.dtype(),
         Arc::clone(dev),
     ))
 }

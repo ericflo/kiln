@@ -36,7 +36,7 @@ use kiln_vulkan_kernel::vk_ops::matmul::vk_matmul;
 use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w;
 use kiln_vulkan_kernel::vk_ops::narrow::vk_narrow_lastdim;
 use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
-use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d};
+use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::sync::Arc;
 
@@ -1027,23 +1027,25 @@ impl VkModelWeights {
         // `dropped_weight_stub` in forward.rs. The real data lives in
         // `embed_tokens_t` with shape [hidden, vocab]. Detect this and
         // transpose back to [vocab, hidden] for vk-native consumption.
-        let (embed_source, vocab, hidden) = {
+        let (embed_tokens, vocab, hidden) = {
             let et_dims = weights.embed_tokens.dims();
             let ett_dims = weights.embed_tokens_t.dims();
             if et_dims.len() == 2 && et_dims[0] > 1 {
                 // Real [vocab, hidden] available
-                (weights.embed_tokens.clone(), et_dims[0], et_dims[1])
+                let embed_tokens =
+                    vk_from_candle_typed(&weights.embed_tokens, device).context("embed_tokens")?;
+                (embed_tokens, et_dims[0], et_dims[1])
             } else if ett_dims.len() == 2 {
-                // Stubbed; reconstruct [vocab, hidden] by transposing
-                // embed_tokens_t (which is [hidden, vocab]).
+                // Stubbed; reconstruct [vocab, hidden] on Vulkan by
+                // transposing embed_tokens_t (which is [hidden, vocab]).
+                // Doing this through candle would materialize a multi-GiB
+                // CPU transpose before native GRPO can dispatch.
                 let hidden = ett_dims[0];
                 let vocab = ett_dims[1];
-                let restored = weights
-                    .embed_tokens_t
-                    .t()
-                    .context("embed_tokens_t.t() to recover [vocab, hidden]")?
-                    .contiguous()
-                    .context("embed_tokens contiguous after transpose")?;
+                let embed_t = vk_from_candle_typed(&weights.embed_tokens_t, device)
+                    .context("embed_tokens_t")?;
+                let restored = vk_transpose_2d_no_grad(&embed_t)
+                    .context("embed_tokens_t Vulkan transpose to [vocab, hidden]")?;
                 (restored, vocab, hidden)
             } else {
                 anyhow::bail!(
@@ -1054,16 +1056,14 @@ impl VkModelWeights {
                 );
             }
         };
-        let embed_tokens = vk_from_candle_typed(&embed_source, device).context("embed_tokens")?;
         let embed_dtype = embed_tokens.dtype();
         // Norm weights must be F32 (vk_rmsnorm requirement).
         let final_norm_weight =
             vk_from_candle_as_f32(&weights.final_norm, device).context("final_norm")?;
-        // lm_head: keep the tied embedding table in its native dtype.
-        // Vulkan FLCE/GRPO handles BF16 weights directly; forcing this
-        // to F32 would spend multiple GiB and a long CPU BF16->F32
-        // conversion before native training can dispatch real GPU work.
-        let lm_head = vk_from_candle_typed(&embed_source, device).context("lm_head (tied)")?;
+        // lm_head is tied to embed_tokens for Qwen3.5. Share the same
+        // Vulkan buffer instead of uploading a second copy; Vulkan
+        // FLCE/GRPO handles BF16 weights directly.
+        let lm_head = embed_tokens.clone();
         let eps = model_config.rms_norm_eps as f32;
 
         let mut layers = Vec::with_capacity(weights.layers.len());

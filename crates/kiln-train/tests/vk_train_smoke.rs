@@ -25,17 +25,17 @@ use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
 };
 use kiln_model::vk_forward::{
-    VkFullAttentionWeights, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights, vk_model_forward_final_norm_with_state, vk_model_forward_loss,
-    vk_model_forward_loss_with_state,
+    vk_model_forward_final_norm_with_state, vk_model_forward_loss,
+    vk_model_forward_loss_with_state, VkFullAttentionWeights, VkLayerWeights,
+    VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
+};
+use kiln_train::vk_train::{
+    allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter, vk_init_lora_layers,
+    vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
+    vk_recompute_train_step_with_state_masked, vk_train_step, VkAdamWConfig,
 };
 use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
-use kiln_train::vk_train::{
-    VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
-    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
-    vk_recompute_train_step_with_state_masked, vk_train_step,
-};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::sync::Arc;
@@ -219,6 +219,36 @@ fn build_tiny_gpu_grpo_weights() -> Result<GpuWeights> {
         rotary_inv_freq: cpu_tensor(Vec::<f32>::new(), (0,))?,
         mtp: None,
     })
+}
+
+#[test]
+fn vk_from_gpu_weights_restores_stubbed_tied_embedding_on_device() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let config = tiny_gpu_grpo_model_config();
+    let mut weights = build_tiny_gpu_grpo_weights()?;
+    let expected = weights.embed_tokens.flatten_all()?.to_vec1::<f32>()?;
+    weights.embed_tokens = Tensor::zeros((1usize,), candle_core::DType::F32, &Device::Cpu)?;
+
+    let vk_weights = VkModelWeights::from_gpu_weights(&weights, &config, &dev)?;
+    assert_eq!(
+        vk_weights.embed_tokens.shape(),
+        &[config.vocab_size, config.hidden_size]
+    );
+    assert!(
+        Arc::ptr_eq(
+            vk_weights.embed_tokens.buffer(),
+            vk_weights.lm_head.buffer()
+        ),
+        "tied lm_head should share the embed_tokens Vulkan buffer"
+    );
+    let got = vk_weights.embed_tokens.to_vec_f32()?;
+    let mad = got
+        .iter()
+        .zip(expected.iter())
+        .map(|(g, e)| (g - e).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(mad < 1e-6, "restored embedding max abs diff {mad}");
+    Ok(())
 }
 
 fn tiny_grpo_tokenizer() -> Result<KilnTokenizer> {

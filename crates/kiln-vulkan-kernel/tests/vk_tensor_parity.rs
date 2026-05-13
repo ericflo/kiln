@@ -6,8 +6,7 @@
 //! tolerance. Tests skip cleanly if no Vulkan device is available.
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
-use kiln_vulkan_kernel::VulkanDevice;
+use candle_core::{DType, Device, Tensor};
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::cast::{
     vk_cast, vk_cast_bf16_to_f32_no_grad, vk_cast_f32_to_bf16_no_grad,
@@ -16,6 +15,7 @@ use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_div, vk_mul, vk_sub};
 use kiln_vulkan_kernel::vk_ops::reduce::{vk_mean_all, vk_sum_all};
 use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -27,6 +27,11 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
+    VkTensor::from_candle(&t, Arc::clone(dev))
+}
+
+fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
+    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
     VkTensor::from_candle(&t, Arc::clone(dev))
 }
 
@@ -347,6 +352,38 @@ fn vk_transpose_2d_forward_parity() -> Result<()> {
         2.0, 6.0, 10.0, 3.0, 7.0, 11.0, 4.0, 8.0, 12.0,
     ];
     assert_eq!(back, expected);
+    Ok(())
+}
+
+#[test]
+fn vk_transpose_2d_bf16_forward_parity() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    // Odd element count exercises the final packed BF16 word.
+    let rows = 3usize;
+    let cols = 5usize;
+    let data: Vec<f32> = (0..(rows * cols))
+        .map(|i| ((i as f32) * 0.17).sin() * 0.25)
+        .collect();
+    let rounded = Tensor::from_vec(data.clone(), &[rows, cols], &Device::Cpu)?
+        .to_dtype(DType::BF16)?
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let t = upload_bf16(&dev, &data, &[rows, cols])?;
+    let tt = vk_transpose_2d_no_grad(&t)?;
+    assert_eq!(tt.dtype(), VkDType::Bf16);
+    assert_eq!(tt.shape(), &[cols, rows]);
+    let got = tt.to_vec_f32()?;
+    let mut expected = Vec::with_capacity(rows * cols);
+    for c in 0..cols {
+        for r in 0..rows {
+            expected.push(rounded[r * cols + c]);
+        }
+    }
+    assert!(
+        max_abs_diff(&got, &expected) < 1e-6,
+        "got {got:?} vs {expected:?}"
+    );
     Ok(())
 }
 

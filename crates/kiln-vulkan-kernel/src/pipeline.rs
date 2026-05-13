@@ -211,6 +211,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("vk_cast_f32_to_bf16", SPIR_V_VK_CAST_F32_TO_BF16),
     ("vk_cast_bf16_to_f32", SPIR_V_VK_CAST_BF16_TO_F32),
     ("vk_transpose_2d_f32", SPIR_V_VK_TRANSPOSE_2D_F32),
+    ("vk_transpose_2d_bf16", SPIR_V_VK_TRANSPOSE_2D_BF16),
     ("vk_matmul_f32", SPIR_V_VK_MATMUL_F32),
     ("vk_softmax_lastdim_f32", SPIR_V_VK_SOFTMAX_LASTDIM_F32),
     (

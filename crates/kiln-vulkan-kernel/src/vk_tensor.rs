@@ -49,6 +49,16 @@ impl VkDType {
     }
 }
 
+fn device_buffer_bytes(n_elements: usize, dtype: VkDType) -> usize {
+    let mut bytes = (n_elements * dtype.byte_size()).max(dtype.byte_size());
+    if dtype == VkDType::Bf16 {
+        // BF16 kernels view storage as u32 words containing two logical
+        // lanes. Round odd element counts up so the final word is addressable.
+        bytes = ((bytes + 3) / 4) * 4;
+    }
+    bytes
+}
+
 /// Monotonic op-id allocator. Used for autograd topo ordering.
 static NEXT_OP_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -238,10 +248,11 @@ impl VkTensor {
     pub fn from_candle(t: &Tensor, device: Arc<VulkanDevice>) -> Result<Self> {
         let dtype = VkDType::from_candle(t.dtype())?;
         if let Some((bytes_vec, shape)) = contiguous_cpu_tensor_bytes(t, dtype)? {
+            let nelem = shape.iter().product();
             let buffer = VulkanBuffer::create_device_local(
                 device.device(),
                 device.device_local_mem_type(),
-                bytes_vec.len().max(1) as u64,
+                device_buffer_bytes(nelem, dtype) as u64,
             )
             .context("VkTensor::from_candle: device-local buffer")?;
             VulkanBuffer::upload_data(
@@ -288,7 +299,7 @@ impl VkTensor {
         let buffer = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
-            bytes_vec.len().max(1) as u64,
+            device_buffer_bytes(nelem, dtype) as u64,
         )
         .context("VkTensor::from_candle: device-local buffer")?;
         VulkanBuffer::upload_data(
