@@ -15,8 +15,8 @@ use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use candle_core::{CpuStorage, DType, Device, Storage, Tensor, TensorId};
 use half::bf16;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Element type of a `VkTensor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

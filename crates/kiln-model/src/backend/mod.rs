@@ -1070,7 +1070,10 @@ mod tests {
     fn cuda_training_capabilities_do_not_overclaim_native_training() {
         let caps = cuda::CudaBackend::training_capabilities_static();
         assert!(caps.projection_training.contains("offset chunk hook"));
-        assert!(caps.lora_delta_training.contains("declines tracked tensors"));
+        assert!(
+            caps.lora_delta_training
+                .contains("declines tracked tensors")
+        );
         assert_eq!(
             caps.resident_activation,
             "TensorId lifecycle registry; candle CUDA tensors are canonical"

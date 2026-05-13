@@ -21,10 +21,10 @@
 
 #![cfg(feature = "vulkan")]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor, TensorId, Var};
 use kiln_core::config::ModelConfig;
-use kiln_vulkan_kernel::vk_autograd::{vk_backward, VkGradStore};
+use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
 use kiln_vulkan_kernel::vk_ops::attention::{
     vk_flash_sdpa_decode_split_flat_no_grad, vk_flash_sdpa_prefill_flat,
 };

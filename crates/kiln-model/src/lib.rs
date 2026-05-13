@@ -2,9 +2,9 @@ pub mod adapter_merge;
 pub mod backend;
 pub mod c1_attr;
 pub mod cancel;
+pub mod cuda_graph;
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
-pub mod cuda_graph;
 pub mod decode_buffers;
 pub mod engine;
 pub mod forward;

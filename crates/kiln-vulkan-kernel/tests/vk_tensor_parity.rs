@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::cast::{
     vk_cast, vk_cast_bf16_to_f32_no_grad, vk_cast_f32_to_bf16_no_grad,
@@ -15,7 +16,6 @@ use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_div, vk_mul, vk_sub};
 use kiln_vulkan_kernel::vk_ops::reduce::{vk_mean_all, vk_sum_all};
 use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {

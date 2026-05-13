@@ -27,7 +27,7 @@ use crate::vk_ops::gdn_chunk_bwd::{
     vk_gdn_chunk_prep_bwd_no_grad, vk_gdn_chunk_scan_bwd_no_grad, vk_gdn_state_exit_bwd_no_grad,
     vk_solve_tri_transpose_no_grad,
 };
-use crate::vk_ops::gdn_chunk_prep::{vk_gdn_chunk_prep_no_grad, GdnChunkPrepOutput};
+use crate::vk_ops::gdn_chunk_prep::{GdnChunkPrepOutput, vk_gdn_chunk_prep_no_grad};
 use crate::vk_ops::mask::vk_scale_no_grad;
 use crate::vk_ops::matmul_batched::{vk_matmul_batched_no_grad, vk_transpose_batched_2d_no_grad};
 use crate::vk_ops::narrow::vk_narrow_lastdim_no_grad;

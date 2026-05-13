@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor, Var};
+use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
     flce_recommended_chunk_len_from_limits, vk_flce_loss, vk_grpo_loss, vk_selected_log_probs,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
-use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -208,7 +208,7 @@ fn candle_selected_log_probs_and_grpo(
     hidden_dim: usize,
     vocab: usize,
 ) -> Result<(Vec<f32>, f32, Vec<f32>)> {
-    use candle_core::{DType, D};
+    use candle_core::{D, DType};
 
     let dev = Device::Cpu;
     let hidden_var = Var::from_tensor(&Tensor::from_vec(

@@ -28,8 +28,8 @@ use kiln_train::trainer::sft_train;
 use kiln_train::{ChatMessage, SftConfig, SftExample};
 use std::path::PathBuf;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};

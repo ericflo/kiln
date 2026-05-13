@@ -6,6 +6,12 @@
 
 use anyhow::{Context, Result};
 use candle_core::backend::BackendDevice;
+#[cfg(feature = "cuda")]
+use candle_core::backend::BackendStorage;
+#[cfg(feature = "cuda")]
+use candle_core::op::BackpropOp;
+#[cfg(feature = "cuda")]
+use candle_core::{CpuStorage, CudaStorage, CustomOp2, CustomOp3, Layout, Shape, Storage};
 use candle_core::{DType, Device, Tensor};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
@@ -501,6 +507,14 @@ fn add_lora_delta_to_base(
     let Some(proj) = lora else {
         return Ok(base);
     };
+    #[cfg(feature = "cuda")]
+    if let Some(out) = cuda_lora_add_training_f32(&base, x, proj, lora_scale)? {
+        return Ok(out);
+    }
+    #[cfg(feature = "cuda")]
+    if let Some(out) = cuda_lora_add_training_bf16(&base, x, proj, lora_scale)? {
+        return Ok(out);
+    }
     if let Some(backend) = backend {
         if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
             return Ok(out);
@@ -539,6 +553,699 @@ fn add_lora_delta_to_base(
     Ok((base + delta)?)
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_lora_training_add_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_LORA_TRAINING_ADD").is_ok())
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_lora_training_linear_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_LORA_TRAINING_LINEAR").is_ok())
+}
+
+#[cfg(feature = "cuda")]
+fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> candle_core::Result<Tensor> {
+    if t.dtype() == dtype {
+        Ok(t.clone())
+    } else {
+        t.to_dtype(dtype)
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_lora_bwd_tile_rows() -> usize {
+    static TILE_ROWS: OnceLock<usize> = OnceLock::new();
+    *TILE_ROWS.get_or_init(|| {
+        std::env::var("KILN_CUDA_LORA_BWD_TILE_ROWS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(512)
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_lora_linear_training_bf16(
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    let Some(proj) = lora else {
+        return Ok(None);
+    };
+    if cuda_lora_training_linear_disabled()
+        || x.dtype() != DType::BF16
+        || weight_t.dtype() != DType::BF16
+        || !x.track_op()
+        || !matches!(x.device(), Device::Cuda(_))
+        || !matches!(weight_t.device(), Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+
+    let x_dims = x.dims();
+    if x_dims.len() < 2 {
+        return Ok(None);
+    }
+    let Ok((in_features, out_dim)) = weight_t.dims2() else {
+        return Ok(None);
+    };
+    if *x_dims.last().unwrap() != in_features {
+        return Ok(None);
+    }
+    let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
+    if rows == 0 {
+        let mut out_dims = x_dims.to_vec();
+        *out_dims.last_mut().unwrap() = out_dim;
+        return Ok(Some(Tensor::zeros(out_dims, DType::BF16, x.device())?));
+    }
+
+    let Ok((rank, a_in)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((b_out, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if a_in != in_features || b_out != out_dim || b_rank != rank {
+        return Ok(None);
+    }
+
+    let x_2d = x.reshape((rows, in_features))?;
+    if !x_2d.is_contiguous() {
+        return Ok(None);
+    }
+    let a_bf16 = to_dtype_if_needed(&proj.a, DType::BF16)?.contiguous()?;
+    let b_bf16 = to_dtype_if_needed(&proj.b, DType::BF16)?.contiguous()?;
+    let out_2d = x_2d
+        .apply_op3(
+            &a_bf16,
+            &b_bf16,
+            CudaLoraLinearBf16 {
+                weight_t: weight_t.clone(),
+                scale,
+            },
+        )
+        .context("cuda BF16 LoRA training fused linear")?;
+    let mut out_dims = x_dims.to_vec();
+    *out_dims.last_mut().unwrap() = out_dim;
+    Ok(Some(out_2d.reshape(out_dims)?))
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_lora_add_training_f32(
+    base: &Tensor,
+    x: &Tensor,
+    proj: &LoraProjectionWeights,
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    if cuda_lora_training_add_disabled()
+        || base.dtype() != DType::F32
+        || x.dtype() != DType::F32
+        || !matches!(base.device(), Device::Cuda(_))
+        || !matches!(x.device(), Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+
+    let base_dims = base.dims();
+    let x_dims = x.dims();
+    if base_dims.len() < 2 || x_dims.len() != base_dims.len() {
+        return Ok(None);
+    }
+    if base_dims[..base_dims.len() - 1] != x_dims[..x_dims.len() - 1] {
+        return Ok(None);
+    }
+    let out_dim = *base_dims.last().unwrap();
+    let in_features = *x_dims.last().unwrap();
+    let rows: usize = base_dims[..base_dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(Some(base.clone()));
+    }
+
+    let Ok((rank, a_in)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((b_out, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if a_in != in_features || b_out != out_dim || b_rank != rank {
+        return Ok(None);
+    }
+
+    let base_2d = base.reshape((rows, out_dim))?;
+    let x_2d = x.reshape((rows, in_features))?;
+    if !base_2d.is_contiguous() || !x_2d.is_contiguous() {
+        return Ok(None);
+    }
+
+    let a_f32 = proj.a.to_dtype(DType::F32)?.contiguous()?;
+    let b_f32 = proj.b.to_dtype(DType::F32)?.contiguous()?;
+    let a_t = a_f32.t()?.contiguous()?;
+    let hidden = x_2d
+        .matmul(&a_t)
+        .context("cuda LoRA training add hidden matmul")?
+        .contiguous()
+        .context("cuda LoRA training add hidden contiguous")?;
+    let out_2d = base_2d
+        .apply_op3(&hidden, &b_f32, CudaLoraAddF32 { scale })
+        .context("cuda LoRA training add CustomOp3")?;
+    Ok(Some(out_2d.reshape(base_dims)?))
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_lora_add_training_bf16(
+    base: &Tensor,
+    x: &Tensor,
+    proj: &LoraProjectionWeights,
+    scale: f32,
+) -> Result<Option<Tensor>> {
+    if cuda_lora_training_add_disabled()
+        || base.dtype() != DType::BF16
+        || x.dtype() != DType::BF16
+        || !matches!(base.device(), Device::Cuda(_))
+        || !matches!(x.device(), Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+
+    let base_dims = base.dims();
+    let x_dims = x.dims();
+    if base_dims.len() < 2 || x_dims.len() != base_dims.len() {
+        return Ok(None);
+    }
+    if base_dims[..base_dims.len() - 1] != x_dims[..x_dims.len() - 1] {
+        return Ok(None);
+    }
+    let out_dim = *base_dims.last().unwrap();
+    let in_features = *x_dims.last().unwrap();
+    let rows: usize = base_dims[..base_dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(Some(base.clone()));
+    }
+
+    let Ok((rank, a_in)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((b_out, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if a_in != in_features || b_out != out_dim || b_rank != rank {
+        return Ok(None);
+    }
+
+    let base_2d = base.reshape((rows, out_dim))?;
+    let x_2d = x.reshape((rows, in_features))?;
+    if !base_2d.is_contiguous() || !x_2d.is_contiguous() {
+        return Ok(None);
+    }
+
+    let a_bf16 = proj.a.to_dtype(DType::BF16)?.contiguous()?;
+    let b_bf16 = proj.b.to_dtype(DType::BF16)?.contiguous()?;
+    let a_t = a_bf16.t()?.contiguous()?;
+    let hidden = x_2d
+        .matmul(&a_t)
+        .context("cuda BF16 LoRA training add hidden matmul")?
+        .to_dtype(DType::F32)?
+        .contiguous()
+        .context("cuda BF16 LoRA training add hidden contiguous")?;
+    let out_2d = base_2d
+        .apply_op3(&hidden, &b_bf16, CudaLoraAddBf16 { scale })
+        .context("cuda BF16 LoRA training add CustomOp3")?;
+    Ok(Some(out_2d.reshape(base_dims)?))
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct CudaLoraAddF32 {
+    scale: f32,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for CudaLoraAddF32 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-lora-add-f32"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_base: &CpuStorage,
+        l_base: &Layout,
+        s_hidden: &CpuStorage,
+        l_hidden: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        if !l_base.is_contiguous()
+            || !l_hidden.is_contiguous()
+            || !l_b.is_contiguous()
+            || l_base.start_offset() != 0
+            || l_hidden.start_offset() != 0
+            || l_b.start_offset() != 0
+        {
+            candle_core::bail!("CudaLoraAddF32 CPU fallback requires compact contiguous inputs");
+        }
+        let base = Tensor::from_storage(
+            Storage::Cpu(s_base.clone()),
+            Shape::from(l_base.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let hidden = Tensor::from_storage(
+            Storage::Cpu(s_hidden.clone()),
+            Shape::from(l_hidden.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let b = Tensor::from_storage(
+            Storage::Cpu(s_b.clone()),
+            Shape::from(l_b.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let delta = (hidden.matmul(&b.t()?)? * self.scale as f64)?;
+        let out = (base + delta)?;
+        let (storage, layout) = out.storage_and_layout();
+        let storage = storage.try_clone(layout)?;
+        match storage {
+            Storage::Cpu(storage) => Ok((storage, Shape::from(l_base.dims().to_vec()))),
+            _ => candle_core::bail!("CudaLoraAddF32 CPU fallback produced non-CPU storage"),
+        }
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_base: &CudaStorage,
+        l_base: &Layout,
+        s_hidden: &CudaStorage,
+        l_hidden: &Layout,
+        s_b: &CudaStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_base.is_contiguous() || !l_hidden.is_contiguous() || !l_b.is_contiguous() {
+            candle_core::bail!("CudaLoraAddF32 CUDA path requires contiguous inputs");
+        }
+        let out_storage = s_base.try_clone(l_base)?;
+        let out_shape = Shape::from(l_base.dims().to_vec());
+        let out_layout = Layout::contiguous(out_shape.clone());
+        kiln_rmsnorm_kernel::lora_add_inplace_f32_storage(
+            &out_storage,
+            &out_layout,
+            s_hidden,
+            l_hidden,
+            s_b,
+            l_b,
+            self.scale,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraAddF32 CUDA add: {e:?}")))?;
+        Ok((out_storage, out_shape))
+    }
+
+    fn bwd(
+        &self,
+        _base: &Tensor,
+        hidden: &Tensor,
+        b: &Tensor,
+        _res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        let grad_base = grad_y.clone();
+        let grad_y_f32 = to_dtype_if_needed(grad_y, DType::F32)?;
+        let grad_delta = (grad_y_f32 * self.scale as f64)?;
+        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
+        let hidden_f32 = to_dtype_if_needed(hidden, DType::F32)?;
+        let grad_hidden = grad_delta.matmul(&b_f32)?;
+        let grad_b = grad_delta.t()?.contiguous()?.matmul(&hidden_f32)?;
+        Ok((Some(grad_base), Some(grad_hidden), Some(grad_b)))
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct CudaLoraAddBf16 {
+    scale: f32,
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone)]
+struct CudaLoraLinearBf16 {
+    weight_t: Tensor,
+    scale: f32,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaLoraLinearBf16 {
+    fn forward_tensor(&self, x: &Tensor, a: &Tensor, b: &Tensor) -> candle_core::Result<Tensor> {
+        let base = x.matmul(&self.weight_t)?;
+        let a_t = a.t()?.contiguous()?;
+        let hidden = x.matmul(&a_t)?.to_dtype(DType::F32)?.contiguous()?;
+        base.apply_op3_no_bwd(&hidden, b, &CudaLoraAddBf16 { scale: self.scale })
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for CudaLoraLinearBf16 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-lora-linear-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_x: &CpuStorage,
+        l_x: &Layout,
+        s_a: &CpuStorage,
+        l_a: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        if !l_x.is_contiguous()
+            || !l_a.is_contiguous()
+            || !l_b.is_contiguous()
+            || l_x.start_offset() != 0
+            || l_a.start_offset() != 0
+            || l_b.start_offset() != 0
+        {
+            candle_core::bail!(
+                "CudaLoraLinearBf16 CPU fallback requires compact contiguous inputs"
+            );
+        }
+        let x = Tensor::from_storage(
+            Storage::Cpu(s_x.clone()),
+            Shape::from(l_x.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let a = Tensor::from_storage(
+            Storage::Cpu(s_a.clone()),
+            Shape::from(l_a.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let b = Tensor::from_storage(
+            Storage::Cpu(s_b.clone()),
+            Shape::from(l_b.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let out = self.forward_tensor(&x, &a, &b)?;
+        let (storage, layout) = out.storage_and_layout();
+        let storage = storage.try_clone(layout)?;
+        match storage {
+            Storage::Cpu(storage) => Ok((storage, Shape::from(out.dims().to_vec()))),
+            _ => candle_core::bail!("CudaLoraLinearBf16 CPU fallback produced non-CPU storage"),
+        }
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_x: &CudaStorage,
+        l_x: &Layout,
+        s_a: &CudaStorage,
+        l_a: &Layout,
+        s_b: &CudaStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_x.is_contiguous() || !l_a.is_contiguous() || !l_b.is_contiguous() {
+            candle_core::bail!("CudaLoraLinearBf16 CUDA path requires contiguous inputs");
+        }
+        let x_dims = l_x.dims();
+        let a_dims = l_a.dims();
+        let b_dims = l_b.dims();
+        if x_dims.len() != 2 || a_dims.len() != 2 || b_dims.len() != 2 {
+            candle_core::bail!(
+                "CudaLoraLinearBf16 CUDA path expects rank-2 inputs, got x={x_dims:?} a={a_dims:?} b={b_dims:?}"
+            );
+        }
+        let (rows, in_features) = (x_dims[0], x_dims[1]);
+        let (rank, a_in) = (a_dims[0], a_dims[1]);
+        let (out_dim, b_rank) = (b_dims[0], b_dims[1]);
+        if a_in != in_features || b_rank != rank {
+            candle_core::bail!(
+                "CudaLoraLinearBf16 CUDA shape mismatch x={x_dims:?} a={a_dims:?} b={b_dims:?}"
+            );
+        }
+        let (weight_storage, weight_layout) = self.weight_t.storage_and_layout();
+        let Storage::Cuda(weight_storage) = &*weight_storage else {
+            candle_core::bail!("CudaLoraLinearBf16 CUDA path requires CUDA weight storage");
+        };
+        if weight_layout.dims() != [in_features, out_dim] {
+            candle_core::bail!(
+                "CudaLoraLinearBf16 CUDA weight shape mismatch weight={:?} x={x_dims:?} b={b_dims:?}",
+                weight_layout.dims()
+            );
+        }
+
+        let out_shape = Shape::from(vec![rows, out_dim]);
+        let out_layout = Layout::contiguous(out_shape.clone());
+        let out_storage = s_x.matmul(
+            weight_storage,
+            (1, rows, out_dim, in_features),
+            l_x,
+            weight_layout,
+        )?;
+
+        let a_t_layout = l_a.transpose(0, 1)?;
+        let hidden_bf16 = s_x.matmul(s_a, (1, rows, rank, in_features), l_x, &a_t_layout)?;
+        let hidden_shape = Shape::from(vec![rows, rank]);
+        let hidden_layout = Layout::contiguous(hidden_shape);
+        let hidden_f32 = hidden_bf16.to_dtype(&hidden_layout, DType::F32)?;
+        kiln_rmsnorm_kernel::lora_add_bf16_storage(
+            &out_storage,
+            &out_layout,
+            &out_storage,
+            &out_layout,
+            &hidden_f32,
+            &hidden_layout,
+            s_b,
+            l_b,
+            self.scale,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraLinearBf16 CUDA add: {e:?}")))?;
+        Ok((out_storage, out_shape))
+    }
+
+    fn bwd(
+        &self,
+        x: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        _res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        let rows = grad_y.dim(0)?;
+        let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
+        let weight_t_t = self.weight_t.t()?;
+        let a_bf16 = to_dtype_if_needed(a, DType::BF16)?;
+        let a_t_bf16 = a_bf16.t()?.contiguous()?;
+        let a_f32 = to_dtype_if_needed(a, DType::F32)?;
+        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
+        let x_in = x.dim(1)?;
+        let grad_x_shape = Shape::from(vec![rows, x_in]);
+        let Device::Cuda(cuda_device) = x.device() else {
+            candle_core::bail!("CudaLoraLinearBf16 backward requires CUDA input");
+        };
+        let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&grad_x_shape, DType::BF16)? };
+        let mut grad_a_acc: Option<Tensor> = None;
+        let mut grad_b_acc: Option<Tensor> = None;
+
+        for start in (0..rows).step_by(tile_rows) {
+            let len = (rows - start).min(tile_rows);
+            let x_tile = x.narrow(0, start, len)?;
+            let x_tile_f32 = to_dtype_if_needed(&x_tile, DType::F32)?;
+            let grad_y_tile = grad_y.narrow(0, start, len)?;
+            let grad_y_tile_bf16 = to_dtype_if_needed(&grad_y_tile, DType::BF16)?;
+            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
+
+            let grad_x_base = grad_y_tile_bf16.matmul(&weight_t_t)?;
+            let grad_hidden = grad_y_tile_f32
+                .matmul(&b_f32)?
+                .affine(self.scale as f64, 0.0)?;
+            let grad_x_lora = grad_hidden.matmul(&a_f32)?.to_dtype(DType::BF16)?;
+            let grad_x_tile = (grad_x_base + grad_x_lora)?;
+            let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
+            let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
+                candle_core::bail!("CudaLoraLinearBf16 backward produced non-CUDA grad_x tile");
+            };
+            grad_x_tile_storage.copy2d(
+                &mut grad_x_storage,
+                len,
+                x_in,
+                x_in,
+                x_in,
+                grad_x_tile_layout.start_offset(),
+                start * x_in,
+            )?;
+
+            let hidden = x_tile
+                .matmul(&a_t_bf16)?
+                .to_dtype(DType::F32)?
+                .contiguous()?;
+            let grad_b_tile = grad_y_tile_f32
+                .t()?
+                .matmul(&hidden)?
+                .affine(self.scale as f64, 0.0)?;
+            grad_b_acc = Some(match grad_b_acc {
+                Some(acc) => (acc + grad_b_tile)?,
+                None => grad_b_tile,
+            });
+
+            let grad_a_tile = grad_hidden.t()?.matmul(&x_tile_f32)?;
+            grad_a_acc = Some(match grad_a_acc {
+                Some(acc) => (acc + grad_a_tile)?,
+                None => grad_a_tile,
+            });
+        }
+
+        let grad_x = Tensor::from_storage(
+            Storage::Cuda(grad_x_storage),
+            grad_x_shape,
+            BackpropOp::none(),
+            false,
+        );
+        let Some(grad_a_acc) = grad_a_acc else {
+            candle_core::bail!("CudaLoraLinearBf16 backward produced no A gradient tiles");
+        };
+        let Some(grad_b_acc) = grad_b_acc else {
+            candle_core::bail!("CudaLoraLinearBf16 backward produced no B gradient tiles");
+        };
+        let grad_a = grad_a_acc.to_dtype(a.dtype())?;
+        let grad_b = grad_b_acc.to_dtype(b.dtype())?;
+        Ok((Some(grad_x), Some(grad_a), Some(grad_b)))
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for CudaLoraAddBf16 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-lora-add-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_base: &CpuStorage,
+        l_base: &Layout,
+        s_hidden: &CpuStorage,
+        l_hidden: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        if !l_base.is_contiguous()
+            || !l_hidden.is_contiguous()
+            || !l_b.is_contiguous()
+            || l_base.start_offset() != 0
+            || l_hidden.start_offset() != 0
+            || l_b.start_offset() != 0
+        {
+            candle_core::bail!("CudaLoraAddBf16 CPU fallback requires compact contiguous inputs");
+        }
+        let base = Tensor::from_storage(
+            Storage::Cpu(s_base.clone()),
+            Shape::from(l_base.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let hidden = Tensor::from_storage(
+            Storage::Cpu(s_hidden.clone()),
+            Shape::from(l_hidden.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let b = Tensor::from_storage(
+            Storage::Cpu(s_b.clone()),
+            Shape::from(l_b.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let delta = (hidden
+            .to_dtype(DType::F32)?
+            .matmul(&b.to_dtype(DType::F32)?.t()?)?
+            * self.scale as f64)?;
+        let out = (base.to_dtype(DType::F32)? + delta)?.to_dtype(DType::BF16)?;
+        let (storage, layout) = out.storage_and_layout();
+        let storage = storage.try_clone(layout)?;
+        match storage {
+            Storage::Cpu(storage) => Ok((storage, Shape::from(l_base.dims().to_vec()))),
+            _ => candle_core::bail!("CudaLoraAddBf16 CPU fallback produced non-CPU storage"),
+        }
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_base: &CudaStorage,
+        l_base: &Layout,
+        s_hidden: &CudaStorage,
+        l_hidden: &Layout,
+        s_b: &CudaStorage,
+        l_b: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_base.is_contiguous() || !l_hidden.is_contiguous() || !l_b.is_contiguous() {
+            candle_core::bail!("CudaLoraAddBf16 CUDA path requires contiguous inputs");
+        }
+        let out_storage = s_base.try_clone(l_base)?;
+        let out_shape = Shape::from(l_base.dims().to_vec());
+        let out_layout = Layout::contiguous(out_shape.clone());
+        kiln_rmsnorm_kernel::lora_add_bf16_storage(
+            &out_storage,
+            &out_layout,
+            s_base,
+            l_base,
+            s_hidden,
+            l_hidden,
+            s_b,
+            l_b,
+            self.scale,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("CudaLoraAddBf16 CUDA add: {e:?}")))?;
+        Ok((out_storage, out_shape))
+    }
+
+    fn bwd(
+        &self,
+        _base: &Tensor,
+        hidden: &Tensor,
+        b: &Tensor,
+        _res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        let grad_base = to_dtype_if_needed(grad_y, DType::BF16)?;
+        let rows = grad_y.dim(0)?;
+        let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
+        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
+        let mut grad_hidden_tiles = Vec::with_capacity(rows.div_ceil(tile_rows));
+        let mut grad_b_acc: Option<Tensor> = None;
+
+        for start in (0..rows).step_by(tile_rows) {
+            let len = (rows - start).min(tile_rows);
+            let grad_y_tile = grad_y.narrow(0, start, len)?;
+            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
+            let hidden_tile = hidden.narrow(0, start, len)?;
+            let hidden_tile_f32 = to_dtype_if_needed(&hidden_tile, DType::F32)?;
+            let grad_hidden_tile = grad_y_tile_f32
+                .matmul(&b_f32)?
+                .affine(self.scale as f64, 0.0)?;
+            let grad_b_tile = grad_y_tile_f32
+                .t()?
+                .matmul(&hidden_tile_f32)?
+                .affine(self.scale as f64, 0.0)?;
+            grad_hidden_tiles.push(grad_hidden_tile);
+            grad_b_acc = Some(match grad_b_acc {
+                Some(acc) => (acc + grad_b_tile)?,
+                None => grad_b_tile,
+            });
+        }
+
+        let grad_hidden_refs = grad_hidden_tiles.iter().collect::<Vec<_>>();
+        let grad_hidden = Tensor::cat(&grad_hidden_refs, 0)?;
+        let Some(grad_b_acc) = grad_b_acc else {
+            candle_core::bail!("CudaLoraAddBf16 backward produced no B gradient tiles");
+        };
+        let grad_b = grad_b_acc.to_dtype(b.dtype())?;
+        Ok((Some(grad_base), Some(grad_hidden), Some(grad_b)))
+    }
+}
+
 fn linear_with_lora_t_decode_if(
     use_metal_decode_gemv: bool,
     x: &Tensor,
@@ -561,6 +1268,10 @@ fn linear_with_lora_t_backend_decode_if(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if let Some(out) = cuda_lora_linear_training_bf16(x, weight_t, lora, lora_scale)? {
+        return Ok(out);
+    }
     if let Some(backend) = backend {
         // Autograd-tracked input → prefer the autograd-safe Vulkan
         // CustomOp1 (linear_prefill_apply). The existing linear_decode
@@ -625,6 +1336,9 @@ fn attention_output_gate_decode_if(
 
     #[cfg(feature = "cuda")]
     {
+        if let Some(out) = cuda_sigmoid_mul_training_bf16(&attn_output, gate)? {
+            return Ok(out);
+        }
         if !cuda_fused_attn_sigmoid_mul_disabled()
             && !attn_output.track_op()
             && !gate.track_op()
@@ -638,6 +1352,182 @@ fn attention_output_gate_decode_if(
 
     let sigmoid_gate = cuda_sigmoid(gate)?;
     Ok((attn_output * sigmoid_gate)?)
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_sigmoid_mul_training_bf16(x: &Tensor, gate: &Tensor) -> Result<Option<Tensor>> {
+    if cuda_fused_attn_sigmoid_mul_disabled()
+        || (!x.track_op() && !gate.track_op())
+        || !kiln_rmsnorm_kernel::supports_sigmoid_mul(x, gate)
+    {
+        return Ok(None);
+    }
+    let out = x
+        .apply_op2(gate, CudaSigmoidMulTrainingBf16)
+        .context("cuda training sigmoid/mul CustomOp2")?;
+    Ok(Some(out))
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct CudaSigmoidMulTrainingBf16;
+
+#[cfg(feature = "cuda")]
+impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-sigmoid-mul-training-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s_x: &CpuStorage,
+        _l_x: &Layout,
+        _s_gate: &CpuStorage,
+        _l_gate: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        candle_core::bail!("CudaSigmoidMulTrainingBf16 requires CUDA inputs");
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_x: &CudaStorage,
+        l_x: &Layout,
+        s_gate: &CudaStorage,
+        l_gate: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_x.is_contiguous()
+            || !l_gate.is_contiguous()
+            || l_x.start_offset() != 0
+            || l_gate.start_offset() != 0
+        {
+            candle_core::bail!(
+                "CudaSigmoidMulTrainingBf16 CUDA path requires compact contiguous inputs"
+            );
+        }
+        let out_storage = s_x.try_clone(l_x)?;
+        let out_shape = Shape::from(l_x.dims().to_vec());
+        let out_layout = Layout::contiguous(out_shape.clone());
+        kiln_rmsnorm_kernel::fused_sigmoid_mul_storage(
+            &out_storage,
+            &out_layout,
+            s_x,
+            l_x,
+            s_gate,
+            l_gate,
+        )
+        .map_err(|e| {
+            candle_core::Error::Msg(format!("CudaSigmoidMulTrainingBf16 CUDA fwd: {e:?}"))
+        })?;
+        Ok((out_storage, out_shape))
+    }
+
+    fn bwd(
+        &self,
+        x: &Tensor,
+        gate: &Tensor,
+        _res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>)> {
+        let dims = x.dims();
+        if dims != gate.dims() || dims != grad_y.dims() {
+            candle_core::bail!(
+                "CudaSigmoidMulTrainingBf16 backward shape mismatch x={:?} gate={:?} grad={:?}",
+                dims,
+                gate.dims(),
+                grad_y.dims()
+            );
+        }
+        let Some(&width) = dims.last() else {
+            candle_core::bail!("CudaSigmoidMulTrainingBf16 backward requires non-scalar input");
+        };
+        let rows = x.elem_count() / width.max(1);
+        if rows == 0 {
+            return Ok((
+                Some(Tensor::zeros(dims, x.dtype(), x.device())?),
+                Some(Tensor::zeros(dims, gate.dtype(), gate.device())?),
+            ));
+        }
+        let Device::Cuda(cuda_device) = x.device() else {
+            candle_core::bail!("CudaSigmoidMulTrainingBf16 backward requires CUDA input");
+        };
+        x.device().synchronize()?;
+
+        let x_2d = x.reshape((rows, width))?;
+        let gate_2d = gate.reshape((rows, width))?;
+        let grad_y_2d = grad_y.reshape((rows, width))?;
+        let out_shape = Shape::from(vec![rows, width]);
+        let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&out_shape, x.dtype()) }
+            .map_err(|e| candle_core::Error::Msg(format!("sigmoid-mul bwd grad_x alloc: {e:?}")))?;
+        let mut grad_gate_storage = unsafe { cuda_device.alloc_uninit(&out_shape, gate.dtype()) }
+            .map_err(|e| {
+            candle_core::Error::Msg(format!("sigmoid-mul bwd grad_gate alloc: {e:?}"))
+        })?;
+        let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
+
+        for start in (0..rows).step_by(tile_rows) {
+            let len = (rows - start).min(tile_rows);
+            let x_tile = x_2d.narrow(0, start, len)?;
+            let gate_tile = gate_2d.narrow(0, start, len)?;
+            let grad_y_tile = grad_y_2d.narrow(0, start, len)?;
+
+            let sigmoid_gate = (gate_tile.neg()?.exp()? + 1.0)?.recip()?;
+            let grad_x_tile = (grad_y_tile.clone() * sigmoid_gate.clone())?;
+            let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
+            let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
+                candle_core::bail!(
+                    "CudaSigmoidMulTrainingBf16 backward produced non-CUDA grad_x tile"
+                );
+            };
+            grad_x_tile_storage.copy2d(
+                &mut grad_x_storage,
+                len,
+                width,
+                width,
+                width,
+                grad_x_tile_layout.start_offset(),
+                start * width,
+            )?;
+
+            let sigmoid_f32 = sigmoid_gate.to_dtype(DType::F32)?;
+            let one_minus_sigmoid = (sigmoid_f32.neg()? + 1.0)?;
+            let gate_deriv = (sigmoid_f32 * one_minus_sigmoid)?;
+            let grad_gate_tile =
+                (grad_y_tile.to_dtype(DType::F32)? * x_tile.to_dtype(DType::F32)?)?;
+            let grad_gate_tile = (grad_gate_tile * gate_deriv)?.to_dtype(gate.dtype())?;
+            let (grad_gate_tile_storage, grad_gate_tile_layout) =
+                grad_gate_tile.storage_and_layout();
+            let Storage::Cuda(grad_gate_tile_storage) = &*grad_gate_tile_storage else {
+                candle_core::bail!(
+                    "CudaSigmoidMulTrainingBf16 backward produced non-CUDA grad_gate tile"
+                );
+            };
+            grad_gate_tile_storage.copy2d(
+                &mut grad_gate_storage,
+                len,
+                width,
+                width,
+                width,
+                grad_gate_tile_layout.start_offset(),
+                start * width,
+            )?;
+        }
+
+        let grad_x = Tensor::from_storage(
+            Storage::Cuda(grad_x_storage),
+            out_shape.clone(),
+            BackpropOp::none(),
+            false,
+        )
+        .reshape(dims)?;
+        let grad_gate = Tensor::from_storage(
+            Storage::Cuda(grad_gate_storage),
+            out_shape,
+            BackpropOp::none(),
+            false,
+        )
+        .reshape(dims)?;
+        Ok((Some(grad_x), Some(grad_gate)))
+    }
 }
 
 fn full_attn_qkv_proj_decode_if(
@@ -781,14 +1671,10 @@ fn flash_attention_forward(
     let softmax_scale = 1.0 / (head_dim as f32).sqrt();
     let causal = true;
 
-    // GQA: expand K/V heads to match Q head count for flash_attn.
-    // The `expand(..).contiguous()` path is required because `expand` produces a
-    // strided view (stride=0 along the broadcast dim) that the flash kernel cannot
-    // consume directly. For the non-GQA branch, callers already pass contiguous
-    // K/V (the KV-cache concat produces contiguous tensors), so no extra copy is
-    // needed. Similarly, the flash kernel returns a freshly-allocated contiguous
-    // tensor, so the post-flash reshape does not need a `.contiguous()` call.
-    let (k, v) = if num_heads != num_kv_heads {
+    // GQA: the vendored CUDA FA2 wrapper receives `num_heads_k` separately, so
+    // it can consume grouped K/V directly. Other backends still take the
+    // historic expanded layout through this trait method.
+    let (k, v) = if num_heads != num_kv_heads && backend.name() != "cuda" {
         let gqa_ratio = num_heads / num_kv_heads;
         let (batch, kv_len, _kv_heads, hd) = k.dims4()?;
         // [batch, kv_len, num_kv_heads, head_dim] -> [batch, kv_len, num_heads, head_dim]
@@ -815,6 +1701,187 @@ fn flash_attention_forward(
     let (batch, seq_len, _heads, _hd) = attn_output.dims4()?;
     let attn_output = attn_output.reshape((batch, seq_len, num_heads * head_dim))?;
     Ok(Some(attn_output))
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_flash_attention_training_disabled() -> bool {
+    env_truthy("KILN_DISABLE_CUDA_FLASH_ATTN_TRAINING")
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_flash_attention_training_bf16(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<Option<Tensor>> {
+    if cuda_flash_attention_training_disabled() || !any_tensor_tracks_op(&[q, k, v]) {
+        return Ok(None);
+    }
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || !matches!(q.device(), Device::Cuda(_))
+        || !matches!(k.device(), Device::Cuda(_))
+        || !matches!(v.device(), Device::Cuda(_))
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+        || !matches!(head_dim, 128 | 256)
+        || num_kv_heads == 0
+        || num_heads % num_kv_heads != 0
+    {
+        return Ok(None);
+    }
+    let (bq, _sq, hq, dq) = q.dims4()?;
+    let (bk, sk, hk, dk) = k.dims4()?;
+    let (bv, sv, hv, dv) = v.dims4()?;
+    if bq != bk
+        || bq != bv
+        || sk != sv
+        || hq != num_heads
+        || hk != num_kv_heads
+        || hv != num_kv_heads
+        || dq != head_dim
+        || dk != head_dim
+        || dv != head_dim
+    {
+        return Ok(None);
+    }
+
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+    let out = q
+        .apply_op3(
+            k,
+            v,
+            CudaFlashAttentionTrainingBf16 {
+                softmax_scale,
+                causal: true,
+            },
+        )
+        .context("cuda training FlashAttention CustomOp3")?;
+    Ok(Some(out))
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct CudaFlashAttentionTrainingBf16 {
+    softmax_scale: f32,
+    causal: bool,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-flash-attn-training-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _s_q: &CpuStorage,
+        _l_q: &Layout,
+        _s_k: &CpuStorage,
+        _l_k: &Layout,
+        _s_v: &CpuStorage,
+        _l_v: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        candle_core::bail!("CudaFlashAttentionTrainingBf16 requires CUDA inputs");
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_q: &CudaStorage,
+        l_q: &Layout,
+        s_k: &CudaStorage,
+        l_k: &Layout,
+        s_v: &CudaStorage,
+        l_v: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_q.is_contiguous()
+            || !l_k.is_contiguous()
+            || !l_v.is_contiguous()
+            || l_q.start_offset() != 0
+            || l_k.start_offset() != 0
+            || l_v.start_offset() != 0
+        {
+            candle_core::bail!(
+                "CudaFlashAttentionTrainingBf16 CUDA path requires compact contiguous inputs"
+            );
+        }
+        let q = Tensor::from_storage(
+            Storage::Cuda(s_q.try_clone(l_q)?),
+            Shape::from(l_q.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let k = Tensor::from_storage(
+            Storage::Cuda(s_k.try_clone(l_k)?),
+            Shape::from(l_k.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let v = Tensor::from_storage(
+            Storage::Cuda(s_v.try_clone(l_v)?),
+            Shape::from(l_v.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let (out, _softmax_lse) =
+            kiln_flash_attn::flash_attn_fwd(&q, &k, &v, self.softmax_scale, self.causal).map_err(
+                |e| {
+                    candle_core::Error::Msg(format!(
+                        "CudaFlashAttentionTrainingBf16 CUDA fwd: {e:?}"
+                    ))
+                },
+            )?;
+        let out_shape = Shape::from(out.dims().to_vec());
+        let (storage, layout) = out.storage_and_layout();
+        let storage = storage.try_clone(layout)?;
+        match storage {
+            Storage::Cuda(storage) => Ok((storage, out_shape)),
+            _ => candle_core::bail!("CudaFlashAttentionTrainingBf16 produced non-CUDA storage"),
+        }
+    }
+
+    fn bwd(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        let (recomputed_out, softmax_lse) =
+            kiln_flash_attn::flash_attn_fwd(q, k, v, self.softmax_scale, self.causal).map_err(
+                |e| {
+                    candle_core::Error::Msg(format!(
+                        "CudaFlashAttentionTrainingBf16 bwd recompute: {e:?}"
+                    ))
+                },
+            )?;
+        drop(recomputed_out);
+        let dout = if grad_y.dtype() == DType::BF16 {
+            grad_y.clone()
+        } else {
+            grad_y.to_dtype(DType::BF16)?
+        };
+        let (dq, dk, dv) = kiln_flash_attn::flash_attn_bwd(
+            &dout,
+            q,
+            k,
+            v,
+            res,
+            &softmax_lse,
+            self.softmax_scale,
+            self.causal,
+        )
+        .map_err(|e| {
+            candle_core::Error::Msg(format!("CudaFlashAttentionTrainingBf16 bwd: {e:?}"))
+        })?;
+        Ok((Some(dq), Some(dk), Some(dv)))
+    }
 }
 
 /// Compute attention using a backend fast path when Q/K/V are already in
@@ -3771,6 +4838,24 @@ fn apply_rope(
     head_dim: usize,
     rotary_dim: usize,
 ) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if !cuda_fused_rotary_qk_disabled()
+            && cuda_rotary_one_training_bf16_supported(x, cos, sin, head_dim, rotary_dim)
+        {
+            return x
+                .apply_op3(
+                    cos,
+                    sin,
+                    CudaRotaryOneBf16 {
+                        head_dim,
+                        rotary_dim,
+                    },
+                )
+                .context("cuda rotary one CustomOp3");
+        }
+    }
+
     let half_rotary = rotary_dim / 2;
     let x_dtype = x.dtype();
 
@@ -3806,6 +4891,191 @@ fn apply_rope(
     Ok(out.to_dtype(x_dtype)?)
 }
 
+#[cfg(feature = "cuda")]
+fn cuda_rotary_one_training_bf16_supported(
+    x: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> bool {
+    if !matches!(x.device(), Device::Cuda(_))
+        || !matches!(cos.device(), Device::Cuda(_))
+        || !matches!(sin.device(), Device::Cuda(_))
+        || x.dtype() != DType::BF16
+        || cos.dtype() != DType::F32
+        || sin.dtype() != DType::F32
+        || !x.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || x.rank() != 4
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+    let dims = x.dims();
+    let seq_len = dims[1];
+    dims[3] == head_dim
+        && cos.dims() == [seq_len, rotary_dim / 2]
+        && sin.dims() == [seq_len, rotary_dim / 2]
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy)]
+struct CudaRotaryOneBf16 {
+    head_dim: usize,
+    rotary_dim: usize,
+}
+
+#[cfg(feature = "cuda")]
+impl CustomOp3 for CudaRotaryOneBf16 {
+    fn name(&self) -> &'static str {
+        "kiln-cuda-rotary-one-bf16"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_x: &CpuStorage,
+        l_x: &Layout,
+        s_cos: &CpuStorage,
+        l_cos: &Layout,
+        s_sin: &CpuStorage,
+        l_sin: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        if !l_x.is_contiguous()
+            || !l_cos.is_contiguous()
+            || !l_sin.is_contiguous()
+            || l_x.start_offset() != 0
+            || l_cos.start_offset() != 0
+            || l_sin.start_offset() != 0
+        {
+            candle_core::bail!("CudaRotaryOneBf16 CPU fallback requires compact contiguous inputs");
+        }
+        let x = Tensor::from_storage(
+            Storage::Cpu(s_x.clone()),
+            Shape::from(l_x.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let cos = Tensor::from_storage(
+            Storage::Cpu(s_cos.clone()),
+            Shape::from(l_cos.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let sin = Tensor::from_storage(
+            Storage::Cpu(s_sin.clone()),
+            Shape::from(l_sin.dims().to_vec()),
+            BackpropOp::none(),
+            false,
+        );
+        let out = apply_rope(&x, &cos, &sin, self.head_dim, self.rotary_dim).map_err(|e| {
+            candle_core::Error::Msg(format!("CudaRotaryOneBf16 CPU fallback: {e:?}"))
+        })?;
+        let (storage, layout) = out.storage_and_layout();
+        let storage = storage.try_clone(layout)?;
+        match storage {
+            Storage::Cpu(storage) => Ok((storage, Shape::from(l_x.dims().to_vec()))),
+            _ => candle_core::bail!("CudaRotaryOneBf16 CPU fallback produced non-CPU storage"),
+        }
+    }
+
+    fn cuda_fwd(
+        &self,
+        s_x: &CudaStorage,
+        l_x: &Layout,
+        s_cos: &CudaStorage,
+        l_cos: &Layout,
+        s_sin: &CudaStorage,
+        l_sin: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        if !l_x.is_contiguous() || !l_cos.is_contiguous() || !l_sin.is_contiguous() {
+            candle_core::bail!("CudaRotaryOneBf16 CUDA path requires contiguous inputs");
+        }
+        let out_storage = s_x.try_clone(l_x)?;
+        let out_shape = Shape::from(l_x.dims().to_vec());
+        let out_layout = Layout::contiguous(out_shape.clone());
+        kiln_rmsnorm_kernel::rotary_one_bf16_storage(
+            &out_storage,
+            &out_layout,
+            s_x,
+            l_x,
+            s_cos,
+            l_cos,
+            s_sin,
+            l_sin,
+            self.head_dim,
+            self.rotary_dim,
+        )
+        .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 CUDA fwd: {e:?}")))?;
+        Ok((out_storage, out_shape))
+    }
+
+    fn bwd(
+        &self,
+        _x: &Tensor,
+        cos: &Tensor,
+        sin: &Tensor,
+        _res: &Tensor,
+        grad_y: &Tensor,
+    ) -> candle_core::Result<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        if kiln_rmsnorm_kernel::supports_rotary_one_bwd_bf16(
+            grad_y,
+            cos,
+            sin,
+            self.head_dim,
+            self.rotary_dim,
+        ) {
+            let grad_x = kiln_rmsnorm_kernel::rotary_one_bwd_bf16(
+                grad_y,
+                cos,
+                sin,
+                self.head_dim,
+                self.rotary_dim,
+            )
+            .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 CUDA bwd: {e:?}")))?;
+            return Ok((Some(grad_x), None, None));
+        }
+        let grad_x = rotary_one_backward(grad_y, cos, sin, self.head_dim, self.rotary_dim)
+            .map_err(|e| candle_core::Error::Msg(format!("CudaRotaryOneBf16 bwd: {e:?}")))?;
+        Ok((Some(grad_x), None, None))
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn rotary_one_backward(
+    grad_y: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<Tensor> {
+    let half_rotary = rotary_dim / 2;
+    let grad_dtype = grad_y.dtype();
+    let grad = grad_y.to_dtype(DType::F32)?;
+    let grad_rot = grad.narrow(candle_core::D::Minus1, 0, rotary_dim)?;
+    let grad_pass = if rotary_dim < head_dim {
+        Some(grad.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?)
+    } else {
+        None
+    };
+
+    let g1 = grad_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?;
+    let g2 = grad_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?;
+    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+
+    let dx1 = (g1.broadcast_mul(&cos)? + g2.broadcast_mul(&sin)?)?;
+    let dx2 = (g2.broadcast_mul(&cos)? - g1.broadcast_mul(&sin)?)?;
+    let out = match grad_pass {
+        Some(pass) => Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?,
+        None => Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?,
+    };
+    Ok(out.to_dtype(grad_dtype)?)
+}
+
 /// SwiGLU feed-forward network.
 ///
 /// Computes: down_proj @ (silu(gate_proj @ x) * (up_proj @ x))
@@ -3829,10 +5099,6 @@ pub fn swiglu_ffn(
 }
 
 /// SwiGLU gate/up half used by exact training-time split backprop.
-///
-/// Returns `silu(gate_proj(x)) * up_proj(x)` without applying the down
-/// projection. This mirrors the unfused path inside [`swiglu_ffn`] so callers
-/// can backprop the large MLP block as two smaller exact subgraphs.
 pub fn swiglu_ffn_gated_hidden(
     x: &Tensor,
     mlp: &GpuFfnWeights,
@@ -3871,6 +5137,17 @@ pub fn swiglu_ffn_gated_hidden(
         if crate::backend::metal::metal_mlp_silu_mul_supports(&gate, &up) {
             return crate::backend::metal::metal_mlp_silu_mul_bf16(&gate, &up)
                 .context("metal mlp silu*mul kernel failed");
+        }
+    }
+    #[cfg(feature = "cuda")]
+    {
+        if !cuda_fused_mlp_silu_mul_disabled()
+            && !gate.track_op()
+            && !up.track_op()
+            && kiln_rmsnorm_kernel::supports_mlp_silu_mul(&gate, &up)
+        {
+            return kiln_rmsnorm_kernel::fused_mlp_silu_mul(&gate, &up)
+                .context("cuda fused mlp silu*mul kernel failed");
         }
     }
     let gate = cuda_silu(&gate)?;
@@ -3948,6 +5225,102 @@ fn swiglu_ffn_backend_profiled(
 }
 
 fn swiglu_ffn_impl(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
+) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    let (_, seq_len, _) = x.dims3()?;
+    #[cfg(feature = "cuda")]
+    {
+        let chunk_tokens = cuda_training_mlp_chunk_tokens();
+        if !cuda_training_mlp_chunking_disabled()
+            && chunk_tokens > 0
+            && seq_len > chunk_tokens
+            && (x.track_op() || lora.is_some())
+            && matches!(x.device(), Device::Cuda(_))
+        {
+            return swiglu_ffn_impl_chunked(
+                backend,
+                x,
+                mlp,
+                lora,
+                use_metal_decode_gemv,
+                profile_context,
+                chunk_tokens,
+            );
+        }
+    }
+
+    swiglu_ffn_impl_no_chunk(
+        backend,
+        x,
+        mlp,
+        lora,
+        use_metal_decode_gemv,
+        profile_context,
+    )
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_training_mlp_chunking_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_truthy("KILN_DISABLE_CUDA_TRAINING_MLP_CHUNKING"))
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_training_mlp_chunk_tokens() -> usize {
+    static CHUNK_TOKENS: OnceLock<usize> = OnceLock::new();
+    *CHUNK_TOKENS.get_or_init(|| {
+        std::env::var("KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(1024)
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn swiglu_ffn_impl_chunked(
+    backend: Option<&dyn BackendRuntime>,
+    x: &Tensor,
+    mlp: &GpuFfnWeights,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
+    chunk_tokens: usize,
+) -> Result<Tensor> {
+    let (_, seq_len, _) = x.dims3()?;
+    let mut outputs = Vec::with_capacity(seq_len.div_ceil(chunk_tokens));
+    let mut start = 0usize;
+    while start < seq_len {
+        let len = (seq_len - start).min(chunk_tokens);
+        let x_chunk = x.narrow(1, start, len).with_context(|| {
+            format!(
+                "chunked CUDA training MLP input tile [{start}, {})",
+                start + len
+            )
+        })?;
+        let out = swiglu_ffn_impl_no_chunk(
+            backend,
+            &x_chunk,
+            mlp,
+            lora,
+            use_metal_decode_gemv,
+            profile_context,
+        )
+        .with_context(|| format!("chunked CUDA training MLP tile [{start}, {})", start + len))?;
+        outputs.push(out);
+        start += len;
+    }
+    let output_refs: Vec<&Tensor> = outputs.iter().collect();
+    Tensor::cat(&output_refs, 1).context("chunked CUDA training MLP cat")
+}
+
+fn swiglu_ffn_impl_no_chunk(
     backend: Option<&dyn BackendRuntime>,
     x: &Tensor,
     mlp: &GpuFfnWeights,
@@ -7439,8 +8812,554 @@ fn q_proj_forward_decode_if(
     )
 }
 
-/// Returns: [batch, seq_len, hidden_size]
-pub fn gqa_attention(
+#[cfg(feature = "cuda")]
+fn cuda_split_q_gate_training_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| env_truthy("KILN_DISABLE_CUDA_SPLIT_Q_GATE_TRAINING"))
+}
+
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn cuda_split_q_gate_training_bf16(
+    backend: &dyn BackendRuntime,
+    use_metal_decode_gemv: bool,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+) -> Result<Option<(Tensor, Tensor)>> {
+    if cuda_split_q_gate_training_disabled()
+        || !x.track_op()
+        || x.dtype() != DType::BF16
+        || !matches!(x.device(), Device::Cuda(_))
+        || attn_weights.q_proj_marlin.is_some()
+    {
+        return Ok(None);
+    }
+
+    let q_dim = num_heads * head_dim;
+    let Ok((_, q_out_dim)) = attn_weights.q_proj_t.dims2() else {
+        return Ok(None);
+    };
+    if q_out_dim != q_dim * 2 {
+        return Ok(None);
+    }
+
+    let q_weight_t = attn_weights.q_proj_t.narrow(1, 0, q_dim)?.contiguous()?;
+    let gate_weight_t = attn_weights
+        .q_proj_t
+        .narrow(1, q_dim, q_dim)?
+        .contiguous()?;
+
+    let mut q_lora = None;
+    let mut gate_lora = None;
+    if let Some(proj) = lora {
+        let Ok((b_out, _rank)) = proj.b.dims2() else {
+            return Ok(None);
+        };
+        if b_out != q_dim * 2 {
+            return Ok(None);
+        }
+        q_lora = Some(LoraProjectionWeights {
+            a: proj.a.clone(),
+            b: proj.b.narrow(0, 0, q_dim)?.contiguous()?,
+        });
+        gate_lora = Some(LoraProjectionWeights {
+            a: proj.a.clone(),
+            b: proj.b.narrow(0, q_dim, q_dim)?.contiguous()?,
+        });
+    }
+
+    let q_flat = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        use_metal_decode_gemv,
+        x,
+        &q_weight_t,
+        q_lora.as_ref(),
+        lora_scale,
+    )?;
+    let gate = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        use_metal_decode_gemv,
+        x,
+        &gate_weight_t,
+        gate_lora.as_ref(),
+        lora_scale,
+    )?;
+    let q = q_flat.reshape(((), seq_len, num_heads, head_dim))?;
+    let gate = gate.reshape(((), seq_len, q_dim))?;
+    Ok(Some((q, gate)))
+}
+
+pub struct GqaAttentionPrepared {
+    pub q: Tensor,
+    pub k: Tensor,
+    pub v: Tensor,
+    pub gate: Option<Tensor>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_q_gate_prefill(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_gemv = false;
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let split_q_gate = {
+        #[cfg(feature = "cuda")]
+        {
+            if attn_output_gate {
+                cuda_split_q_gate_training_bf16(
+                    backend,
+                    use_metal_decode_gemv,
+                    x,
+                    attn_weights,
+                    lora_layer.and_then(|l| l.q_proj.as_ref()),
+                    lora_scale,
+                    seq_len,
+                    num_heads,
+                    head_dim,
+                )?
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            None
+        }
+    };
+
+    let (q, gate) = if let Some((q, gate)) = split_q_gate {
+        (q, Some(gate))
+    } else {
+        let q_raw = q_proj_forward_decode_if(
+            Some(backend),
+            use_metal_decode_gemv,
+            x,
+            attn_weights,
+            lora_layer.and_then(|l| l.q_proj.as_ref()),
+            lora_scale,
+        )?;
+        if attn_output_gate {
+            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q = q_raw.narrow(3, 0, head_dim)?;
+            let gate = q_raw.narrow(3, head_dim, head_dim)?;
+            let gate = gate
+                .contiguous()?
+                .reshape(((), seq_len, num_heads * head_dim))?;
+            (q.contiguous()?, Some(gate))
+        } else {
+            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+        }
+    };
+
+    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+    let (q, _) = rotary_embedding(&q, &q, positions, head_dim, rotary_dim, inv_freq)?;
+    Ok((q, gate))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_kv_prefill(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<(Tensor, Tensor)> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let k = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        x,
+        &attn_weights.k_proj_t,
+        lora_layer.and_then(|l| l.k_proj.as_ref()),
+        lora_scale,
+    )?
+    .reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        x,
+        &attn_weights.v_proj_t,
+        lora_layer.and_then(|l| l.v_proj.as_ref()),
+        lora_scale,
+    )?
+    .reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+    let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)?;
+    Ok((k, v))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_prepare_prefill(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<GqaAttentionPrepared> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_gemv = false;
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let split_q_gate = {
+        #[cfg(feature = "cuda")]
+        {
+            if attn_output_gate {
+                cuda_split_q_gate_training_bf16(
+                    backend,
+                    use_metal_decode_gemv,
+                    x,
+                    attn_weights,
+                    lora_layer.and_then(|l| l.q_proj.as_ref()),
+                    lora_scale,
+                    seq_len,
+                    num_heads,
+                    head_dim,
+                )?
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            None
+        }
+    };
+
+    let (q_raw, k, v) = {
+        kiln_nvtx::range!(c"kiln/proj/qkv");
+        if split_q_gate.is_some() {
+            let k = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &attn_weights.k_proj_t,
+                lora_layer.and_then(|l| l.k_proj.as_ref()),
+                lora_scale,
+            )?;
+            let v = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &attn_weights.v_proj_t,
+                lora_layer.and_then(|l| l.v_proj.as_ref()),
+                lora_scale,
+            )?;
+            (None, k, v)
+        } else {
+            let (q_raw, k, v) = full_attn_qkv_proj_decode_if(
+                backend,
+                use_metal_decode_gemv,
+                x,
+                attn_weights,
+                lora_layer,
+                lora_scale,
+            )?;
+            (Some(q_raw), k, v)
+        }
+    };
+
+    let (q, gate) = if let Some((q, gate)) = split_q_gate {
+        (q, Some(gate))
+    } else if attn_output_gate {
+        let q_raw = q_raw
+            .as_ref()
+            .expect("q_raw is present when split_q_gate is inactive");
+        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q = q_raw.narrow(3, 0, head_dim)?;
+        let gate = q_raw.narrow(3, head_dim, head_dim)?;
+        let gate = gate
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
+        (q.contiguous()?, Some(gate))
+    } else {
+        let q_raw = q_raw
+            .as_ref()
+            .expect("q_raw is present when attention output gate is disabled");
+        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        (q, None)
+    };
+
+    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+    let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
+
+    Ok(GqaAttentionPrepared { q, k, v, gate })
+}
+
+pub fn gqa_attention_core_prefill(
+    backend: &dyn BackendRuntime,
+    prepared: &GqaAttentionPrepared,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let (_batch, seq_len, _heads, _hd) = prepared.q.dims4()?;
+    if seq_len > 1 && backend.supports_flash_attn_prefill() {
+        let q = prepared.q.contiguous()?;
+        let k = prepared.k.contiguous()?;
+        let v = prepared.v.contiguous()?;
+        #[cfg(feature = "cuda")]
+        if let Some(attn_output) =
+            cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            return Ok(attn_output.reshape(((), seq_len, num_heads * head_dim))?);
+        }
+        if let Some(attn_output) =
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            return Ok(attn_output);
+        }
+    }
+
+    let q = prepared.q.transpose(1, 2)?.contiguous()?;
+    let k = prepared.k.transpose(1, 2)?.contiguous()?;
+    let v = prepared.v.transpose(1, 2)?.contiguous()?;
+    let gqa_ratio = num_heads / num_kv_heads;
+    let batch = k.dim(0)?;
+    let (k, v) = if gqa_ratio > 1 {
+        let k = k
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+            .contiguous()?
+            .reshape((batch, num_heads, seq_len, head_dim))?;
+        let v = v
+            .unsqueeze(2)?
+            .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
+            .contiguous()?
+            .reshape((batch, num_heads, seq_len, head_dim))?;
+        (k, v)
+    } else {
+        (k.contiguous()?, v.contiguous()?)
+    };
+
+    let scale = (head_dim as f64).sqrt();
+    let attn_scores = q.broadcast_matmul(&k.t()?)?;
+    let attn_scores = (attn_scores / scale)?;
+    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
+    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
+    Ok(attn_output
+        .transpose(1, 2)?
+        .contiguous()?
+        .reshape(((), seq_len, num_heads * head_dim))?)
+}
+
+pub fn gqa_attention_apply_output_gate(
+    attn_output: Tensor,
+    gate: Option<&Tensor>,
+) -> Result<Tensor> {
+    attention_output_gate_decode_if(false, attn_output, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_pre_o_chunked_prefill(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+    tile_size: usize,
+) -> Result<Tensor> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    if tile_size == 0 || tile_size >= seq_len {
+        return gqa_attention_pre_o(
+            backend,
+            x,
+            attn_weights,
+            positions,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            rotary_dim,
+            inv_freq,
+            rms_norm_eps,
+            None,
+            0,
+            attn_output_gate,
+            lora,
+        );
+    }
+
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+
+    let k = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        x,
+        &attn_weights.k_proj_t,
+        lora_layer.and_then(|l| l.k_proj.as_ref()),
+        lora_scale,
+    )
+    .context("chunked full-attention pre-o k projection")?
+    .reshape(((), seq_len, num_kv_heads, head_dim))
+    .context("chunked full-attention pre-o k reshape")?;
+    let v = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        x,
+        &attn_weights.v_proj_t,
+        lora_layer.and_then(|l| l.v_proj.as_ref()),
+        lora_scale,
+    )
+    .context("chunked full-attention pre-o v projection")?
+    .reshape(((), seq_len, num_kv_heads, head_dim))
+    .context("chunked full-attention pre-o v reshape")?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
+        .context("chunked full-attention pre-o k norm")?;
+    let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)
+        .context("chunked full-attention pre-o k rotary")?;
+
+    let mut output_tiles = Vec::with_capacity(seq_len.div_ceil(tile_size));
+    let mut tile_start = 0usize;
+    while tile_start < seq_len {
+        let tile_len = (seq_len - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+
+        let x_tile = x.narrow(1, tile_start, tile_len).with_context(|| {
+            format!("chunked full-attention pre-o input tile [{tile_start}, {tile_end})")
+        })?;
+        let q_raw = q_proj_forward_decode_if(
+            Some(backend),
+            false,
+            &x_tile,
+            attn_weights,
+            lora_layer.and_then(|l| l.q_proj.as_ref()),
+            lora_scale,
+        )
+        .with_context(|| {
+            format!("chunked full-attention pre-o q projection [{tile_start}, {tile_end})")
+        })?;
+        let (q_tile, gate_tile) = if attn_output_gate {
+            let q_raw = q_raw
+                .reshape(((), tile_len, num_heads, head_dim * 2))
+                .with_context(|| {
+                    format!(
+                        "chunked full-attention pre-o q/gate reshape [{tile_start}, {tile_end})"
+                    )
+                })?;
+            let q = q_raw
+                .narrow(3, 0, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention pre-o q split [{tile_start}, {tile_end})")
+                })?
+                .contiguous()
+                .context("chunked full-attention pre-o q contiguous")?;
+            let gate = q_raw
+                .narrow(3, head_dim, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention pre-o gate split [{tile_start}, {tile_end})")
+                })?
+                .contiguous()
+                .context("chunked full-attention pre-o gate contiguous")?
+                .reshape(((), tile_len, num_heads * head_dim))
+                .context("chunked full-attention pre-o gate reshape")?;
+            (q, Some(gate))
+        } else {
+            (
+                q_raw
+                    .reshape(((), tile_len, num_heads, head_dim))
+                    .with_context(|| {
+                        format!("chunked full-attention pre-o q reshape [{tile_start}, {tile_end})")
+                    })?,
+                None,
+            )
+        };
+        let q_tile = rms_norm(&q_tile, &attn_weights.q_norm, rms_norm_eps)
+            .context("chunked full-attention pre-o q norm")?;
+        let tile_positions = &positions[tile_start..tile_end];
+        let (q_tile, _) = rotary_embedding(
+            &q_tile,
+            &q_tile,
+            tile_positions,
+            head_dim,
+            rotary_dim,
+            inv_freq,
+        )
+        .with_context(|| {
+            format!("chunked full-attention pre-o q rotary [{tile_start}, {tile_end})")
+        })?;
+        let k_prefix = k.narrow(1, 0, tile_end).with_context(|| {
+            format!("chunked full-attention pre-o k prefix [0, {tile_end}) for tile {tile_start}")
+        })?;
+        let v_prefix = v.narrow(1, 0, tile_end).with_context(|| {
+            format!("chunked full-attention pre-o v prefix [0, {tile_end}) for tile {tile_start}")
+        })?;
+        let tile_prepared = GqaAttentionPrepared {
+            q: q_tile,
+            k: k_prefix,
+            v: v_prefix,
+            gate: None,
+        };
+        let attn_core =
+            gqa_attention_core_prefill(backend, &tile_prepared, num_heads, num_kv_heads, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention pre-o core tile [{tile_start}, {tile_end})")
+                })?;
+        let attn_output = gqa_attention_apply_output_gate(attn_core, gate_tile.as_ref())
+            .with_context(|| {
+                format!("chunked full-attention pre-o gate tile [{tile_start}, {tile_end})")
+            })?;
+        output_tiles.push(attn_output);
+
+        tile_start = tile_end;
+    }
+
+    let output_refs: Vec<&Tensor> = output_tiles.iter().collect();
+    Tensor::cat(&output_refs, 1).context("chunked full-attention pre-o cat")
+}
+
+/// Returns the gated attention value before the final output projection:
+/// [batch, seq_len, num_heads * head_dim].
+pub fn gqa_attention_pre_o(
     backend: &dyn BackendRuntime,
     x: &Tensor,
     attn_weights: &GpuFullAttentionWeights,
@@ -7474,6 +9393,31 @@ pub fn gqa_attention(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
+    let split_q_gate = {
+        #[cfg(feature = "cuda")]
+        {
+            if attn_output_gate {
+                cuda_split_q_gate_training_bf16(
+                    backend,
+                    use_metal_decode_gemv,
+                    x,
+                    attn_weights,
+                    lora_layer.and_then(|l| l.q_proj.as_ref()),
+                    lora_scale,
+                    seq_len,
+                    num_heads,
+                    head_dim,
+                )?
+            } else {
+                None
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            None
+        }
+    };
+
     let (q_raw, k, v) = {
         let stage_profile = start_named_full_attn_stage_profile(
             profile_device,
@@ -7482,14 +9426,35 @@ pub fn gqa_attention(
             seq_len,
         )?;
         kiln_nvtx::range!(c"kiln/proj/qkv");
-        let out = full_attn_qkv_proj_decode_if(
-            backend,
-            use_metal_decode_gemv,
-            x,
-            attn_weights,
-            lora_layer,
-            lora_scale,
-        )?;
+        let out = if split_q_gate.is_some() {
+            let k = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &attn_weights.k_proj_t,
+                lora_layer.and_then(|l| l.k_proj.as_ref()),
+                lora_scale,
+            )?;
+            let v = linear_with_lora_t_backend_decode_if(
+                Some(backend),
+                use_metal_decode_gemv,
+                x,
+                &attn_weights.v_proj_t,
+                lora_layer.and_then(|l| l.v_proj.as_ref()),
+                lora_scale,
+            )?;
+            (None, k, v)
+        } else {
+            let (q_raw, k, v) = full_attn_qkv_proj_decode_if(
+                backend,
+                use_metal_decode_gemv,
+                x,
+                attn_weights,
+                lora_layer,
+                lora_scale,
+            )?;
+            (Some(q_raw), k, v)
+        };
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -7501,36 +9466,28 @@ pub fn gqa_attention(
     };
 
     // Split Q and gate if output gate is enabled
-    let (q, gate) = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "q_split",
-            seq_len,
-        )?;
-        let out = if attn_output_gate {
-            // q_raw: [batch, seq_len, num_heads * head_dim * 2]
-            // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
-            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
-            let q = q_raw.narrow(3, 0, head_dim)?;
-            let gate = q_raw.narrow(3, head_dim, head_dim)?;
-            // gate needs to be [batch, seq_len, num_heads * head_dim] for later
-            let gate = gate
-                .contiguous()?
-                .reshape(((), seq_len, num_heads * head_dim))?;
-            (q.contiguous()?, Some(gate))
-        } else {
-            let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
-            (q, None)
-        };
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "q_split",
-            seq_len,
-            stage_profile,
-        )?;
-        out
+    let (q, gate) = if let Some((q, gate)) = split_q_gate {
+        (q, Some(gate))
+    } else if attn_output_gate {
+        let q_raw = q_raw
+            .as_ref()
+            .expect("q_raw is present when split_q_gate is inactive");
+        // q_raw: [batch, seq_len, num_heads * head_dim * 2]
+        // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
+        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q = q_raw.narrow(3, 0, head_dim)?;
+        let gate = q_raw.narrow(3, head_dim, head_dim)?;
+        // gate needs to be [batch, seq_len, num_heads * head_dim] for later
+        let gate = gate
+            .contiguous()?
+            .reshape(((), seq_len, num_heads * head_dim))?;
+        (q.contiguous()?, Some(gate))
+    } else {
+        let q_raw = q_raw
+            .as_ref()
+            .expect("q_raw is present when attention output gate is disabled");
+        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        (q, None)
     };
 
     // Reshape K, V to [batch, seq_len, num_heads, head_dim]
@@ -7601,78 +9558,22 @@ pub fn gqa_attention(
     // Backend declines (returns None) on dtype mismatch so non-BF16 configs
     // (e.g. tests on F32) transparently fall back to naive softmax+matmul.
     if seq_len > 1 && kv_cache.is_none() && backend.supports_flash_attn_prefill() {
-        let (q, k, v) = {
-            let stage_profile = start_named_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_qkv_layout",
-                seq_len,
-            )?;
-            let out = (q.contiguous()?, k.contiguous()?, v.contiguous()?);
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "prefill_qkv_layout",
-                seq_len,
-                stage_profile,
-            )?;
-            out
-        };
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_attn",
-            seq_len,
-        )?;
-        let attn_output =
-            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "prefill_attn",
-            seq_len,
-            stage_profile,
-        )?;
-        if let Some(attn_output) = attn_output {
-            let stage_profile = start_named_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "attn_gate",
-                seq_len,
-            )?;
+        let q = q.contiguous()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
+        #[cfg(feature = "cuda")]
+        if let Some(attn_output) =
+            cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            let attn_output = attn_output.reshape(((), seq_len, num_heads * head_dim))?;
             let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "attn_gate",
-                seq_len,
-                stage_profile,
-            )?;
-            let stage_profile = start_named_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "o_proj",
-                seq_len,
-            )?;
-            let out = {
-                kiln_nvtx::range!(c"kiln/proj/o");
-                linear_with_lora_t_backend_decode_if(
-                    Some(backend),
-                    false,
-                    &attn_output,
-                    &attn_weights.o_proj_t,
-                    lora_layer.and_then(|l| l.o_proj.as_ref()),
-                    lora_scale,
-                )?
-            };
-            finish_full_attn_stage_profile(
-                profile_device,
-                profile_context,
-                "o_proj",
-                seq_len,
-                stage_profile,
-            )?;
-            return Ok(out);
+            return Ok(attn_output);
+        }
+        if let Some(attn_output) =
+            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+        {
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            return Ok(attn_output);
         }
     }
 
@@ -7858,52 +9759,77 @@ pub fn gqa_attention(
         out
     };
 
-    let attn_output = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_gate",
-            seq_len,
-        )?;
-        let out =
-            attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "attn_gate",
-            seq_len,
-            stage_profile,
-        )?;
-        out
-    };
+    let attn_output =
+        attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate.as_ref())?;
+    Ok(attn_output)
+}
 
-    // Output projection
-    let out = {
-        let stage_profile = start_named_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "o_proj",
-            seq_len,
-        )?;
-        kiln_nvtx::range!(c"kiln/proj/o");
-        let out = linear_with_lora_t_backend_decode_if(
-            Some(backend),
-            use_metal_decode_gemv,
-            &attn_output,
-            &attn_weights.o_proj_t,
-            lora_layer.and_then(|l| l.o_proj.as_ref()),
-            lora_scale,
-        )?;
-        finish_full_attn_stage_profile(
-            profile_device,
-            profile_context,
-            "o_proj",
-            seq_len,
-            stage_profile,
-        )?;
-        out
+pub fn gqa_attention_output_projection(
+    backend: &dyn BackendRuntime,
+    attn_output: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    use_metal_decode_gemv: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
     };
-    Ok(out)
+    kiln_nvtx::range!(c"kiln/proj/o");
+    linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        use_metal_decode_gemv,
+        attn_output,
+        &attn_weights.o_proj_t,
+        lora_layer.and_then(|l| l.o_proj.as_ref()),
+        lora_scale,
+    )
+}
+
+/// Returns: [batch, seq_len, hidden_size]
+pub fn gqa_attention(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    attn_weights: &GpuFullAttentionWeights,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    kv_cache: Option<&mut KvCache>,
+    full_attn_layer_idx: usize,
+    attn_output_gate: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    let use_metal_decode_gemv = seq_len == 1
+        && kv_cache.is_some()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
+    let attn_output = gqa_attention_pre_o(
+        backend,
+        x,
+        attn_weights,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+        inv_freq,
+        rms_norm_eps,
+        kv_cache,
+        full_attn_layer_idx,
+        attn_output_gate,
+        lora,
+    )?;
+    gqa_attention_output_projection(
+        backend,
+        &attn_output,
+        attn_weights,
+        use_metal_decode_gemv,
+        lora,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -9999,6 +11925,25 @@ pub fn transformer_block(
         && kv_cache.is_some()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
+    if let Some(out) = transformer_block_detached_cuda_prefill_chunked(
+        backend,
+        x,
+        layer,
+        config,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+        inv_freq,
+        rms_norm_eps,
+        kv_cache.is_some(),
+        full_attn_layer_idx,
+        lora,
+    )? {
+        return Ok(out);
+    }
+
     // Pre-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
@@ -10048,6 +11993,203 @@ pub fn transformer_block(
         (x + ffn_out)?
     };
     Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transformer_block_detached_cuda_prefill_chunked(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &[u32],
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    inv_freq: &Tensor,
+    rms_norm_eps: f64,
+    has_kv_cache: bool,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Option<Tensor>> {
+    if backend.name() != "cuda" || has_kv_cache || x.track_op() {
+        return Ok(None);
+    }
+    let (_batch, seq_len, _hidden) = x.dims3()?;
+    if !streaming_prefill_enabled_for(x.device(), seq_len) {
+        return Ok(None);
+    }
+    let tile_size = streaming_tile_tokens_for(x.device());
+    if tile_size == 0 || tile_size >= seq_len {
+        return Ok(None);
+    }
+
+    let GpuAttentionWeights::Full(attn_weights) = &layer.attention else {
+        return Ok(None);
+    };
+
+    tracing::info!(
+        layer = full_attn_layer_idx,
+        seq_len,
+        tile_size,
+        "detached CUDA full-attention prefill chunked"
+    );
+
+    let normed = {
+        kiln_nvtx::range!(c"kiln/norm/pre_attn_chunked");
+        rms_norm(x, &layer.input_layernorm, rms_norm_eps)?
+    };
+    let (lora_layer, lora_scale) = match lora {
+        Some((l, s)) => (Some(l), s),
+        None => (None, 0.0),
+    };
+    let k = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        &normed,
+        &attn_weights.k_proj_t,
+        lora_layer.and_then(|l| l.k_proj.as_ref()),
+        lora_scale,
+    )
+    .context("chunked full-attention k projection")?
+    .reshape(((), seq_len, num_kv_heads, head_dim))
+    .context("chunked full-attention k reshape")?;
+    let v = linear_with_lora_t_backend_decode_if(
+        Some(backend),
+        false,
+        &normed,
+        &attn_weights.v_proj_t,
+        lora_layer.and_then(|l| l.v_proj.as_ref()),
+        lora_scale,
+    )
+    .context("chunked full-attention v projection")?
+    .reshape(((), seq_len, num_kv_heads, head_dim))
+    .context("chunked full-attention v reshape")?;
+    let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
+        .context("chunked full-attention k norm")?;
+    let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)
+        .context("chunked full-attention k rotary")?;
+
+    let mut output_tiles = Vec::with_capacity(seq_len.div_ceil(tile_size));
+    let mut tile_start = 0usize;
+    while tile_start < seq_len {
+        let tile_len = (seq_len - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+
+        let normed_tile = normed.narrow(1, tile_start, tile_len).with_context(|| {
+            format!("chunked full-attention normed tile [{tile_start}, {tile_end})")
+        })?;
+        let q_raw = q_proj_forward_decode_if(
+            Some(backend),
+            false,
+            &normed_tile,
+            attn_weights,
+            lora_layer.and_then(|l| l.q_proj.as_ref()),
+            lora_scale,
+        )
+        .with_context(|| {
+            format!("chunked full-attention q projection [{tile_start}, {tile_end})")
+        })?;
+        let (q_tile, gate_tile) = if config.attn_output_gate {
+            let q_raw = q_raw
+                .reshape(((), tile_len, num_heads, head_dim * 2))
+                .with_context(|| {
+                    format!("chunked full-attention q/gate reshape [{tile_start}, {tile_end})")
+                })?;
+            let q = q_raw
+                .narrow(3, 0, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention q split [{tile_start}, {tile_end})")
+                })?
+                .contiguous()
+                .context("chunked full-attention q contiguous")?;
+            let gate = q_raw
+                .narrow(3, head_dim, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention gate split [{tile_start}, {tile_end})")
+                })?
+                .contiguous()
+                .context("chunked full-attention gate contiguous")?
+                .reshape(((), tile_len, num_heads * head_dim))
+                .context("chunked full-attention gate reshape")?;
+            (q, Some(gate))
+        } else {
+            (
+                q_raw
+                    .reshape(((), tile_len, num_heads, head_dim))
+                    .with_context(|| {
+                        format!("chunked full-attention q reshape [{tile_start}, {tile_end})")
+                    })?,
+                None,
+            )
+        };
+        let q_tile = rms_norm(&q_tile, &attn_weights.q_norm, rms_norm_eps)
+            .context("chunked full-attention q norm")?;
+        let tile_positions = &positions[tile_start..tile_end];
+        let (q_tile, _) = rotary_embedding(
+            &q_tile,
+            &q_tile,
+            tile_positions,
+            head_dim,
+            rotary_dim,
+            inv_freq,
+        )
+        .with_context(|| format!("chunked full-attention q rotary [{tile_start}, {tile_end})"))?;
+        let k_prefix = k.narrow(1, 0, tile_end).with_context(|| {
+            format!("chunked full-attention k prefix [0, {tile_end}) for tile {tile_start}")
+        })?;
+        let v_prefix = v.narrow(1, 0, tile_end).with_context(|| {
+            format!("chunked full-attention v prefix [0, {tile_end}) for tile {tile_start}")
+        })?;
+        let tile_prepared = GqaAttentionPrepared {
+            q: q_tile,
+            k: k_prefix,
+            v: v_prefix,
+            gate: None,
+        };
+
+        let attn_core =
+            gqa_attention_core_prefill(backend, &tile_prepared, num_heads, num_kv_heads, head_dim)
+                .with_context(|| {
+                    format!("chunked full-attention core tile [{tile_start}, {tile_end})")
+                })?;
+        let attn_output = gqa_attention_apply_output_gate(attn_core, gate_tile.as_ref())
+            .with_context(|| {
+                format!("chunked full-attention gate tile [{tile_start}, {tile_end})")
+            })?;
+        let attn_out =
+            gqa_attention_output_projection(backend, &attn_output, attn_weights, false, lora)
+                .with_context(|| {
+                    format!("chunked full-attention o-proj tile [{tile_start}, {tile_end})")
+                })?;
+        let x_tile = x.narrow(1, tile_start, tile_len).with_context(|| {
+            format!("chunked full-attention residual tile [{tile_start}, {tile_end})")
+        })?;
+        let residual = (&x_tile + attn_out).with_context(|| {
+            format!("chunked full-attention attention residual tile [{tile_start}, {tile_end})")
+        })?;
+        let normed_post = rms_norm(&residual, &layer.post_attention_layernorm, rms_norm_eps)
+            .with_context(|| {
+                format!("chunked full-attention post norm tile [{tile_start}, {tile_end})")
+            })?;
+        let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, lora).with_context(|| {
+            format!("chunked full-attention MLP tile [{tile_start}, {tile_end})")
+        })?;
+        let out_tile = (residual + ffn_out)
+            .with_context(|| {
+                format!("chunked full-attention output tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+        output_tiles.push(out_tile);
+
+        tile_start = tile_end;
+    }
+
+    let output_refs: Vec<&Tensor> = output_tiles.iter().collect();
+    let output = Tensor::cat(&output_refs, 1)
+        .context("chunked full-attention output cat")?
+        .detach();
+    Ok(Some(output))
 }
 
 /// Transformer block using paged KV cache.

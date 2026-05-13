@@ -39,12 +39,7 @@ fn dispatch_l2norm_forward(
         workgroups <= limit,
         "vk_l2_norm_forward: rows {workgroups} > device limit {limit}"
     );
-    let push = [
-        rows as u32,
-        hidden as u32,
-        scale.to_bits(),
-        eps.to_bits(),
-    ];
+    let push = [rows as u32, hidden as u32, scale.to_bits(), eps.to_bits()];
     dispatch_simple(
         device,
         "vk_l2_norm_lastdim_f32",
@@ -70,12 +65,7 @@ fn dispatch_l2norm_backward(
         workgroups <= limit,
         "vk_l2_norm_backward: rows {workgroups} > device limit {limit}"
     );
-    let push = [
-        rows as u32,
-        hidden as u32,
-        scale.to_bits(),
-        eps.to_bits(),
-    ];
+    let push = [rows as u32, hidden as u32, scale.to_bits(), eps.to_bits()];
     dispatch_simple(
         device,
         "vk_l2_norm_lastdim_bwd_f32",
@@ -134,16 +124,8 @@ impl VkBackwardOp for L2NormBackward {
 pub fn vk_l2_norm_lastdim_no_grad(x: &VkTensor, scale: f32, eps: f32) -> Result<VkTensor> {
     let (rows, hidden) = check_l2norm_shape(x)?;
     let out = alloc_f32(x.device(), x.num_elements())?;
-    dispatch_l2norm_forward(
-        x.device(),
-        x.buffer(),
-        &out,
-        rows,
-        hidden,
-        scale,
-        eps,
-    )
-    .context("vk_l2_norm forward dispatch")?;
+    dispatch_l2norm_forward(x.device(), x.buffer(), &out, rows, hidden, scale, eps)
+        .context("vk_l2_norm forward dispatch")?;
     Ok(VkTensor::from_buffer(
         out,
         x.shape().to_vec(),

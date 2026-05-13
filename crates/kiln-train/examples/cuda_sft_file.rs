@@ -4,8 +4,8 @@ use anyhow::Result;
 use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 #[cfg(feature = "cuda")]
 use std::thread;
@@ -25,6 +25,33 @@ use kiln_train::{Optimizer, SftConfig, SftExample};
 
 #[cfg(feature = "cuda")]
 #[derive(Debug)]
+enum TrainerKind {
+    Native,
+    Generic,
+}
+
+#[cfg(feature = "cuda")]
+impl TrainerKind {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "native" => Ok(Self::Native),
+            "generic" | "server" | "default" => Ok(Self::Generic),
+            other => {
+                anyhow::bail!("--trainer must be native, generic, server, or default; got {other}")
+            }
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Generic => "generic",
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
 struct Args {
     data: PathBuf,
     model_path: PathBuf,
@@ -33,6 +60,7 @@ struct Args {
     epochs: usize,
     max_examples: Option<usize>,
     skip_examples: usize,
+    trainer: TrainerKind,
 }
 
 #[cfg(feature = "cuda")]
@@ -45,6 +73,7 @@ impl Args {
         let mut epochs = 1usize;
         let mut max_examples = None;
         let mut skip_examples = 0usize;
+        let mut trainer = TrainerKind::Native;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -82,11 +111,19 @@ impl Args {
                         .parse()
                         .context("--skip-examples must be a non-negative integer")?
                 }
+                "--trainer" => {
+                    trainer = TrainerKind::parse(
+                        &args
+                            .next()
+                            .context("--trainer requires native, generic, server, or default")?,
+                    )?
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: cuda_sft_file --data <jsonl> --model-path <dir> \
                          [--output-dir <dir>] [--adapter-name <name>] \
-                         [--epochs <n>] [--skip-examples <n>] [--max-examples <n>]"
+                         [--epochs <n>] [--skip-examples <n>] [--max-examples <n>] \
+                         [--trainer native|generic|server|default]"
                     );
                     std::process::exit(0);
                 }
@@ -105,6 +142,7 @@ impl Args {
             epochs,
             max_examples,
             skip_examples,
+            trainer,
         })
     }
 }
@@ -196,10 +234,11 @@ fn main() -> Result<()> {
     let examples = load_examples(&args.data, args.skip_examples, args.max_examples)?;
     anyhow::ensure!(!examples.is_empty(), "no examples selected");
     println!(
-        "selected_examples={} skip={} max={:?}",
+        "selected_examples={} skip={} max={:?} trainer={}",
         examples.len(),
         args.skip_examples,
-        args.max_examples
+        args.max_examples,
+        args.trainer.as_str()
     );
 
     let tokenizer = load_tokenizer(&args.model_path)?;
@@ -275,16 +314,29 @@ fn main() -> Result<()> {
         );
     }) as kiln_train::trainer::ProgressCallback);
 
-    let result = kiln_train::cuda_train::cuda_native_sft_train(
-        &examples,
-        &config,
-        &model_config,
-        &gpu_weights,
-        &tokenizer,
-        &args.output_dir,
-        &args.adapter_name,
-        progress,
-    );
+    let result = match args.trainer {
+        TrainerKind::Native => kiln_train::cuda_train::cuda_native_sft_train(
+            &examples,
+            &config,
+            &model_config,
+            &gpu_weights,
+            &tokenizer,
+            &args.output_dir,
+            &args.adapter_name,
+            progress,
+        ),
+        TrainerKind::Generic => kiln_train::trainer::sft_train(
+            &examples,
+            &config,
+            &model_config,
+            &gpu_weights,
+            &tokenizer,
+            &args.output_dir,
+            &args.adapter_name,
+            progress,
+            None,
+        ),
+    };
 
     stop.store(true, Ordering::Relaxed);
     let _ = poller.join();

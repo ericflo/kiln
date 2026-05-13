@@ -431,18 +431,45 @@ pub fn flash_attn_bwd(
     let head_dim_rounded = round_up(head_dim, 32);
 
     // Allocate gradient outputs
-    let dq = Tensor::zeros((b, seqlen_q, num_heads, head_dim), DType::BF16, device)?;
+    let dq =
+        Tensor::zeros((b, seqlen_q, num_heads, head_dim), DType::BF16, device).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "flash_attn_bwd alloc dq shape=[{b},{seqlen_q},{num_heads},{head_dim}] bf16: {e:?}"
+            ))
+        })?;
     // For GQA backward: expand dk/dv to num_heads, then sum later
-    let dk = Tensor::zeros((b, seqlen_k, num_heads, head_dim), DType::BF16, device)?;
-    let dv = Tensor::zeros((b, seqlen_k, num_heads, head_dim), DType::BF16, device)?;
+    let dk = Tensor::zeros((b, seqlen_k, num_heads, head_dim), DType::BF16, device).map_err(
+        |e| {
+            candle_core::Error::Msg(format!(
+                "flash_attn_bwd alloc expanded dk shape=[{b},{seqlen_k},{num_heads},{head_dim}] bf16: {e:?}"
+            ))
+        },
+    )?;
+    let dv = Tensor::zeros((b, seqlen_k, num_heads, head_dim), DType::BF16, device).map_err(
+        |e| {
+            candle_core::Error::Msg(format!(
+                "flash_attn_bwd alloc expanded dv shape=[{b},{seqlen_k},{num_heads},{head_dim}] bf16: {e:?}"
+            ))
+        },
+    )?;
 
     // Scratch buffers
-    let softmax_d = Tensor::zeros((b, num_heads, seqlen_q_rounded), DType::F32, device)?;
+    let softmax_d =
+        Tensor::zeros((b, num_heads, seqlen_q_rounded), DType::F32, device).map_err(|e| {
+            candle_core::Error::Msg(format!(
+                "flash_attn_bwd alloc softmax_d shape=[{b},{num_heads},{seqlen_q_rounded}] f32: {e:?}"
+            ))
+        })?;
     let dq_accum = Tensor::zeros(
         (b, seqlen_q_rounded, num_heads, head_dim_rounded),
         DType::F32,
         device,
-    )?;
+    )
+    .map_err(|e| {
+        candle_core::Error::Msg(format!(
+            "flash_attn_bwd alloc dq_accum shape=[{b},{seqlen_q_rounded},{num_heads},{head_dim_rounded}] f32: {e:?}"
+        ))
+    })?;
 
     // Scope the storage borrows so they're dropped before we return/reshape the tensors
     {

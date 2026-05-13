@@ -369,8 +369,7 @@ impl BackendRuntime for CudaBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16
-        {
+        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != DType::BF16 {
             return Ok(None);
         }
         let out = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen(
@@ -945,7 +944,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32: {err}"
+                );
                 return Ok(());
             }
         };
@@ -959,7 +960,10 @@ mod tests {
         let actual = param.to_vec1::<f32>()?;
         let expected = [0.975f32, -1.95, 0.375, 2.75];
         for (a, e) in actual.iter().zip(expected.iter()) {
-            assert!((a - e).abs() < 1e-6, "actual={actual:?} expected={expected:?}");
+            assert!(
+                (a - e).abs() < 1e-6,
+                "actual={actual:?} expected={expected:?}"
+            );
         }
         Ok(())
     }
@@ -969,7 +973,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32: {err}"
+                );
                 return Ok(());
             }
         };
@@ -1023,14 +1029,16 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16: {err}"
+                );
                 return Ok(());
             }
         };
         let backend = CudaBackend::new(device.clone());
 
-        let param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?
-            .to_dtype(DType::BF16)?;
+        let param =
+            Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(DType::BF16)?;
         let grad = Tensor::from_slice(&[0.25f32, -0.5, 0.5, -0.25], (4,), &device)?
             .to_dtype(DType::BF16)?;
         backend.register_resident_activation(&param)?;
@@ -1039,11 +1047,14 @@ mod tests {
         let sgd_actual = param.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
         for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
-            assert!((a - e).abs() < 0.02, "actual={sgd_actual:?} expected={sgd_expected:?}");
+            assert!(
+                (a - e).abs() < 0.02,
+                "actual={sgd_actual:?} expected={sgd_expected:?}"
+            );
         }
 
-        let adam_param = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?
-            .to_dtype(DType::BF16)?;
+        let adam_param =
+            Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(DType::BF16)?;
         let adam_grad = Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?
             .to_dtype(DType::BF16)?;
         let m = Tensor::zeros((4,), DType::BF16, &device)?;
@@ -1083,7 +1094,10 @@ mod tests {
         let q = q_var.as_tensor();
         let k = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
         let v = Tensor::zeros((1, 2, 1, 128), DType::BF16, &Device::Cpu)?;
-        assert!(q.track_op(), "test precondition: q must be autograd-tracked");
+        assert!(
+            q.track_op(),
+            "test precondition: q must be autograd-tracked"
+        );
         assert!(
             backend.flash_attn_prefill(q, &k, &v, 1.0, true)?.is_none(),
             "CUDA FlashAttention prefill must decline tracked tensors until it has a bwd hook"
@@ -1099,7 +1113,16 @@ mod tests {
 
         assert!(
             backend
-                .flash_attn_paged_decode(q_decode, &k_pool, &v_pool, &block_table, 128, 128, 1.0, true)?
+                .flash_attn_paged_decode(
+                    q_decode,
+                    &k_pool,
+                    &v_pool,
+                    &block_table,
+                    128,
+                    128,
+                    1.0,
+                    true
+                )?
                 .is_none(),
             "CUDA paged decode attention must decline tracked tensors"
         );
@@ -1128,7 +1151,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_candle_cuda_matmul: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_linear_prefill_apply_matches_candle_cuda_matmul: {err}"
+                );
                 return Ok(());
             }
         };
@@ -1136,7 +1161,9 @@ mod tests {
 
         let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
         let w = Tensor::from_slice(
-            &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
+            &[
+                0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5,
+            ],
             (3, 4),
             &device,
         )?;
@@ -1154,7 +1181,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk: {err}"
+                );
                 return Ok(());
             }
         };
@@ -1163,8 +1192,8 @@ mod tests {
         let x = Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
         let w = Tensor::from_slice(
             &[
-                0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0,
-                0.5, -2.0,
+                0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0, 0.5,
+                -2.0,
             ],
             (3, 5),
             &device,
@@ -1184,7 +1213,9 @@ mod tests {
         let device = match Device::new_cuda(0) {
             Ok(device) => device,
             Err(err) => {
-                eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_candle_cuda_reference: {err}");
+                eprintln!(
+                    "CUDA unavailable, skipping cuda_registered_lora_delta_matches_candle_cuda_reference: {err}"
+                );
                 return Ok(());
             }
         };
@@ -1192,7 +1223,11 @@ mod tests {
 
         let x = Tensor::from_slice(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], (2, 3), &device)?;
         let a = Tensor::from_slice(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], (2, 3), &device)?;
-        let b = Tensor::from_slice(&[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5], (4, 2), &device)?;
+        let b = Tensor::from_slice(
+            &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
+            (4, 2),
+            &device,
+        )?;
         let scale = 0.5;
 
         assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());

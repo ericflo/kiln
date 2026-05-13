@@ -74,8 +74,8 @@
 //! ([`fused_rmsnorm_backward`]); the QK-norm kernels remain forward-only.
 
 use candle_core::{
-    backend::BackendStorage, cuda_backend::cudarc::driver::DevicePtr, CpuStorage, CudaStorage,
-    DType, Device, Layout, Result, Shape, Tensor,
+    CpuStorage, CudaStorage, DType, Device, Layout, Result, Shape, Tensor, backend::BackendStorage,
+    cuda_backend::cudarc::driver::DevicePtr,
 };
 use half::bf16;
 use std::sync::OnceLock;
@@ -147,6 +147,32 @@ unsafe extern "C" {
         seq_len: i32,
         q_heads: i32,
         k_heads: i32,
+        head_dim: i32,
+        rotary_dim: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_fused_rotary_one(
+        x: *const core::ffi::c_void,
+        cos: *const f32,
+        sin: *const f32,
+        out: *mut core::ffi::c_void,
+        batch: i32,
+        seq_len: i32,
+        heads: i32,
+        head_dim: i32,
+        rotary_dim: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_fused_rotary_one_bwd(
+        grad_y: *const core::ffi::c_void,
+        cos: *const f32,
+        sin: *const f32,
+        grad_x: *mut core::ffi::c_void,
+        batch: i32,
+        seq_len: i32,
+        heads: i32,
         head_dim: i32,
         rotary_dim: i32,
         stream: *mut core::ffi::c_void,
@@ -1477,6 +1503,332 @@ pub fn fused_rotary_qk(
     Ok((q_out, k_out))
 }
 
+/// Storage-level single-tensor BF16 RoPE for CUDA custom ops.
+pub fn rotary_one_bf16_storage(
+    out_cuda: &CudaStorage,
+    out_layout: &Layout,
+    x_cuda: &CudaStorage,
+    x_layout: &Layout,
+    cos_cuda: &CudaStorage,
+    cos_layout: &Layout,
+    sin_cuda: &CudaStorage,
+    sin_layout: &Layout,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<()> {
+    let x_dims = x_layout.dims();
+    let out_dims = out_layout.dims();
+    if x_dims.len() != 4 || out_dims != x_dims {
+        candle_core::bail!(
+            "rotary_one_bf16_storage: x/out must be matching rank-4 tensors, got x={x_dims:?} out={out_dims:?}"
+        );
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || rotary_dim % 2 != 0 {
+        candle_core::bail!(
+            "rotary_one_bf16_storage: invalid head_dim={head_dim} rotary_dim={rotary_dim}"
+        );
+    }
+    let (batch, seq_len, heads, x_head_dim) = (x_dims[0], x_dims[1], x_dims[2], x_dims[3]);
+    if x_head_dim != head_dim {
+        candle_core::bail!(
+            "rotary_one_bf16_storage: x head dim {x_head_dim} != head_dim {head_dim}"
+        );
+    }
+    if cos_layout.dims() != [seq_len, rotary_dim / 2]
+        || sin_layout.dims() != [seq_len, rotary_dim / 2]
+    {
+        candle_core::bail!(
+            "rotary_one_bf16_storage: table shape mismatch cos={:?} sin={:?} expected=[{seq_len}, {}]",
+            cos_layout.dims(),
+            sin_layout.dims(),
+            rotary_dim / 2
+        );
+    }
+    if out_cuda.dtype() != DType::BF16
+        || x_cuda.dtype() != DType::BF16
+        || cos_cuda.dtype() != DType::F32
+        || sin_cuda.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "rotary_one_bf16_storage: expected out/x BF16 and cos/sin F32, got out={:?} x={:?} cos={:?} sin={:?}",
+            out_cuda.dtype(),
+            x_cuda.dtype(),
+            cos_cuda.dtype(),
+            sin_cuda.dtype()
+        );
+    }
+    if !out_layout.is_contiguous()
+        || !x_layout.is_contiguous()
+        || !cos_layout.is_contiguous()
+        || !sin_layout.is_contiguous()
+    {
+        candle_core::bail!("rotary_one_bf16_storage: tensors must be contiguous");
+    }
+    if batch > i32::MAX as usize
+        || seq_len > i32::MAX as usize
+        || heads > i32::MAX as usize
+        || head_dim > i32::MAX as usize
+        || rotary_dim > i32::MAX as usize
+    {
+        candle_core::bail!("rotary_one_bf16_storage: dimensions exceed i32 kernel envelope");
+    }
+
+    let stream = x_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let x_slice = x_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(x_layout.start_offset()..);
+    let cos_slice = cos_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(cos_layout.start_offset()..);
+    let sin_slice = sin_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(sin_layout.start_offset()..);
+    let out_slice = out_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(out_layout.start_offset()..);
+
+    let status = unsafe {
+        let (x_ptr, _x_guard) = x_slice.device_ptr(&stream);
+        let (cos_ptr, _cos_guard) = cos_slice.device_ptr(&stream);
+        let (sin_ptr, _sin_guard) = sin_slice.device_ptr(&stream);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        kiln_fused_rotary_one(
+            x_ptr as *const _,
+            cos_ptr as *const f32,
+            sin_ptr as *const f32,
+            out_ptr as *mut _,
+            batch as i32,
+            seq_len as i32,
+            heads as i32,
+            head_dim as i32,
+            rotary_dim as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_fused_rotary_one failed with status {status}");
+    }
+    Ok(())
+}
+
+/// Whether the fused single-tensor BF16 RoPE backward kernel is available.
+pub fn supports_rotary_one_bwd_bf16(
+    grad_y: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> bool {
+    if !matches!(grad_y.device(), Device::Cuda(_))
+        || !matches!(cos.device(), Device::Cuda(_))
+        || !matches!(sin.device(), Device::Cuda(_))
+        || grad_y.dtype() != DType::BF16
+        || cos.dtype() != DType::F32
+        || sin.dtype() != DType::F32
+        || !grad_y.is_contiguous()
+        || !cos.is_contiguous()
+        || !sin.is_contiguous()
+        || grad_y.rank() != 4
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+    {
+        return false;
+    }
+    let dims = grad_y.dims();
+    let batch = dims[0];
+    let seq_len = dims[1];
+    let heads = dims[2];
+    dims[3] == head_dim
+        && cos.dims() == [seq_len, rotary_dim / 2]
+        && sin.dims() == [seq_len, rotary_dim / 2]
+        && batch <= i32::MAX as usize
+        && seq_len <= i32::MAX as usize
+        && heads <= i32::MAX as usize
+        && head_dim <= i32::MAX as usize
+        && rotary_dim <= i32::MAX as usize
+}
+
+/// Run fused single-tensor BF16 RoPE backward.
+pub fn rotary_one_bwd_bf16(
+    grad_y: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<Tensor> {
+    if !supports_rotary_one_bwd_bf16(grad_y, cos, sin, head_dim, rotary_dim) {
+        candle_core::bail!(
+            "kiln-rmsnorm-kernel: rotary_one_bwd unsupported shapes grad_y={:?} cos={:?} sin={:?} dtypes=({:?},{:?},{:?}) head_dim={head_dim} rotary_dim={rotary_dim}",
+            grad_y.shape(),
+            cos.shape(),
+            sin.shape(),
+            grad_y.dtype(),
+            cos.dtype(),
+            sin.dtype()
+        );
+    }
+
+    let grad_x = if cuda_empty_kernel_outputs_enabled() {
+        unsafe { Tensor::empty(grad_y.dims(), DType::BF16, grad_y.device())? }
+    } else {
+        Tensor::zeros(grad_y.dims(), DType::BF16, grad_y.device())?
+    };
+
+    {
+        let (grad_y_storage, grad_y_layout) = grad_y.storage_and_layout();
+        let (cos_storage, cos_layout) = cos.storage_and_layout();
+        let (sin_storage, sin_layout) = sin.storage_and_layout();
+        let (grad_x_storage, grad_x_layout) = grad_x.storage_and_layout();
+
+        let grad_y_cuda = match &*grad_y_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary_one_bwd grad_y must be on CUDA"),
+        };
+        let cos_cuda = match &*cos_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary_one_bwd cos must be on CUDA"),
+        };
+        let sin_cuda = match &*sin_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary_one_bwd sin must be on CUDA"),
+        };
+        let grad_x_cuda = match &*grad_x_storage {
+            candle_core::Storage::Cuda(c) => c,
+            _ => candle_core::bail!("kiln-rmsnorm-kernel: rotary_one_bwd grad_x must be on CUDA"),
+        };
+
+        rotary_one_bwd_bf16_storage(
+            grad_x_cuda,
+            &grad_x_layout,
+            grad_y_cuda,
+            &grad_y_layout,
+            cos_cuda,
+            &cos_layout,
+            sin_cuda,
+            &sin_layout,
+            head_dim,
+            rotary_dim,
+        )?;
+    }
+    Ok(grad_x)
+}
+
+/// Storage-level single-tensor BF16 RoPE backward for CUDA custom ops.
+pub fn rotary_one_bwd_bf16_storage(
+    grad_x_cuda: &CudaStorage,
+    grad_x_layout: &Layout,
+    grad_y_cuda: &CudaStorage,
+    grad_y_layout: &Layout,
+    cos_cuda: &CudaStorage,
+    cos_layout: &Layout,
+    sin_cuda: &CudaStorage,
+    sin_layout: &Layout,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<()> {
+    let grad_y_dims = grad_y_layout.dims();
+    let grad_x_dims = grad_x_layout.dims();
+    if grad_y_dims.len() != 4 || grad_x_dims != grad_y_dims {
+        candle_core::bail!(
+            "rotary_one_bwd_bf16_storage: grad_y/grad_x must be matching rank-4 tensors, got grad_y={grad_y_dims:?} grad_x={grad_x_dims:?}"
+        );
+    }
+    if rotary_dim == 0 || rotary_dim > head_dim || rotary_dim % 2 != 0 {
+        candle_core::bail!(
+            "rotary_one_bwd_bf16_storage: invalid head_dim={head_dim} rotary_dim={rotary_dim}"
+        );
+    }
+    let (batch, seq_len, heads, grad_head_dim) = (
+        grad_y_dims[0],
+        grad_y_dims[1],
+        grad_y_dims[2],
+        grad_y_dims[3],
+    );
+    if grad_head_dim != head_dim {
+        candle_core::bail!(
+            "rotary_one_bwd_bf16_storage: grad_y head dim {grad_head_dim} != head_dim {head_dim}"
+        );
+    }
+    if cos_layout.dims() != [seq_len, rotary_dim / 2]
+        || sin_layout.dims() != [seq_len, rotary_dim / 2]
+    {
+        candle_core::bail!(
+            "rotary_one_bwd_bf16_storage: table shape mismatch cos={:?} sin={:?} expected=[{seq_len}, {}]",
+            cos_layout.dims(),
+            sin_layout.dims(),
+            rotary_dim / 2
+        );
+    }
+    if grad_x_cuda.dtype() != DType::BF16
+        || grad_y_cuda.dtype() != DType::BF16
+        || cos_cuda.dtype() != DType::F32
+        || sin_cuda.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "rotary_one_bwd_bf16_storage: expected grad_x/grad_y BF16 and cos/sin F32, got grad_x={:?} grad_y={:?} cos={:?} sin={:?}",
+            grad_x_cuda.dtype(),
+            grad_y_cuda.dtype(),
+            cos_cuda.dtype(),
+            sin_cuda.dtype()
+        );
+    }
+    if !grad_x_layout.is_contiguous()
+        || !grad_y_layout.is_contiguous()
+        || !cos_layout.is_contiguous()
+        || !sin_layout.is_contiguous()
+    {
+        candle_core::bail!("rotary_one_bwd_bf16_storage: tensors must be contiguous");
+    }
+    if batch > i32::MAX as usize
+        || seq_len > i32::MAX as usize
+        || heads > i32::MAX as usize
+        || head_dim > i32::MAX as usize
+        || rotary_dim > i32::MAX as usize
+    {
+        candle_core::bail!("rotary_one_bwd_bf16_storage: dimensions exceed i32 kernel envelope");
+    }
+
+    let stream = grad_y_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let grad_y_slice = grad_y_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(grad_y_layout.start_offset()..);
+    let cos_slice = cos_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(cos_layout.start_offset()..);
+    let sin_slice = sin_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(sin_layout.start_offset()..);
+    let grad_x_slice = grad_x_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(grad_x_layout.start_offset()..);
+
+    let status = unsafe {
+        let (grad_y_ptr, _grad_y_guard) = grad_y_slice.device_ptr(&stream);
+        let (cos_ptr, _cos_guard) = cos_slice.device_ptr(&stream);
+        let (sin_ptr, _sin_guard) = sin_slice.device_ptr(&stream);
+        let (grad_x_ptr, _grad_x_guard) = grad_x_slice.device_ptr(&stream);
+        kiln_fused_rotary_one_bwd(
+            grad_y_ptr as *const _,
+            cos_ptr as *const f32,
+            sin_ptr as *const f32,
+            grad_x_ptr as *mut _,
+            batch as i32,
+            seq_len as i32,
+            heads as i32,
+            head_dim as i32,
+            rotary_dim as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_fused_rotary_one_bwd failed with status {status}");
+    }
+    Ok(())
+}
+
 /// Whether the fused single-token decode QKV-prep kernel is available.
 ///
 /// Supports post-projection CUDA bf16 tensors for a decode step:
@@ -1946,6 +2298,77 @@ pub fn fused_sigmoid_mul(x: &Tensor, gate: &Tensor) -> Result<Tensor> {
     }
 
     Ok(out)
+}
+
+/// Storage-level variant of [`fused_sigmoid_mul`] for CUDA custom ops.
+///
+/// Computes `out = x * sigmoid(gate)` for matching contiguous BF16 CUDA
+/// tensors. `out` may alias neither input.
+pub fn fused_sigmoid_mul_storage(
+    out_cuda: &CudaStorage,
+    out_layout: &Layout,
+    x_cuda: &CudaStorage,
+    x_layout: &Layout,
+    gate_cuda: &CudaStorage,
+    gate_layout: &Layout,
+) -> Result<()> {
+    let out_dims = out_layout.dims();
+    let x_dims = x_layout.dims();
+    let gate_dims = gate_layout.dims();
+    if out_dims != x_dims || out_dims != gate_dims {
+        candle_core::bail!(
+            "fused_sigmoid_mul_storage: shape mismatch out={out_dims:?} x={x_dims:?} gate={gate_dims:?}"
+        );
+    }
+    if out_cuda.dtype() != DType::BF16
+        || x_cuda.dtype() != DType::BF16
+        || gate_cuda.dtype() != DType::BF16
+    {
+        candle_core::bail!(
+            "fused_sigmoid_mul_storage: expected BF16 tensors, got out={:?} x={:?} gate={:?}",
+            out_cuda.dtype(),
+            x_cuda.dtype(),
+            gate_cuda.dtype()
+        );
+    }
+    if !out_layout.is_contiguous() || !x_layout.is_contiguous() || !gate_layout.is_contiguous() {
+        candle_core::bail!("fused_sigmoid_mul_storage: tensors must be contiguous");
+    }
+    let elems: usize = out_dims.iter().product();
+    if elems > i64::MAX as usize {
+        candle_core::bail!("fused_sigmoid_mul_storage: element count exceeds i64");
+    }
+    if elems == 0 {
+        return Ok(());
+    }
+
+    let stream = x_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let x_slice = x_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(x_layout.start_offset()..);
+    let gate_slice = gate_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(gate_layout.start_offset()..);
+    let out_slice = out_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(out_layout.start_offset()..);
+    let status = unsafe {
+        let (x_ptr, _x_guard) = x_slice.device_ptr(&stream);
+        let (gate_ptr, _gate_guard) = gate_slice.device_ptr(&stream);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        kiln_fused_sigmoid_mul_bf16(
+            x_ptr as *const _,
+            gate_ptr as *const _,
+            out_ptr as *mut _,
+            elems as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_fused_sigmoid_mul_bf16 failed with status {status}");
+    }
+    Ok(())
 }
 
 /// Whether the fused forward-only LoRA delta/add decode kernels support this shape.
@@ -2513,6 +2936,74 @@ pub fn lora_add_inplace_f32(base: &Tensor, hidden: &Tensor, b: &Tensor, scale: f
         candle_core::Storage::Cuda(c) => c,
         _ => candle_core::bail!("lora_add_inplace_f32: B must be CUDA"),
     };
+    lora_add_inplace_f32_storage(
+        base_cuda,
+        base_layout,
+        hidden_cuda,
+        hidden_layout,
+        b_cuda,
+        b_layout,
+        scale,
+    )
+}
+
+/// Storage-level variant of [`lora_add_inplace_f32`] for CUDA custom ops.
+///
+/// `base` is mutated in-place. Layouts must describe contiguous rank-2 F32
+/// tensors with shapes `base=[rows,out]`, `hidden=[rows,rank]`,
+/// `b=[out,rank]`.
+pub fn lora_add_inplace_f32_storage(
+    base_cuda: &CudaStorage,
+    base_layout: &Layout,
+    hidden_cuda: &CudaStorage,
+    hidden_layout: &Layout,
+    b_cuda: &CudaStorage,
+    b_layout: &Layout,
+    scale: f32,
+) -> Result<()> {
+    let base_dims = base_layout.dims();
+    let hidden_dims = hidden_layout.dims();
+    let b_dims = b_layout.dims();
+    if base_dims.len() != 2 {
+        candle_core::bail!("lora_add_inplace_f32_storage: base must be rank-2, got {base_dims:?}");
+    }
+    if hidden_dims.len() != 2 {
+        candle_core::bail!(
+            "lora_add_inplace_f32_storage: hidden must be rank-2, got {hidden_dims:?}"
+        );
+    }
+    if b_dims.len() != 2 {
+        candle_core::bail!("lora_add_inplace_f32_storage: B must be rank-2, got {b_dims:?}");
+    }
+    let (rows, out_dim) = (base_dims[0], base_dims[1]);
+    let (hidden_rows, rank) = (hidden_dims[0], hidden_dims[1]);
+    let (b_out, b_rank) = (b_dims[0], b_dims[1]);
+    if rows != hidden_rows || out_dim != b_out || rank != b_rank {
+        candle_core::bail!(
+            "lora_add_inplace_f32_storage: shape mismatch base={base_dims:?} hidden={hidden_dims:?} b={b_dims:?}"
+        );
+    }
+    if base_cuda.dtype() != DType::F32
+        || hidden_cuda.dtype() != DType::F32
+        || b_cuda.dtype() != DType::F32
+    {
+        candle_core::bail!(
+            "lora_add_inplace_f32_storage: expected F32 tensors, got base={:?} hidden={:?} b={:?}",
+            base_cuda.dtype(),
+            hidden_cuda.dtype(),
+            b_cuda.dtype()
+        );
+    }
+    if !base_layout.is_contiguous() || !hidden_layout.is_contiguous() || !b_layout.is_contiguous() {
+        candle_core::bail!("lora_add_inplace_f32_storage: tensors must be contiguous");
+    }
+    if rows > i32::MAX as usize || out_dim > i32::MAX as usize || rank > i32::MAX as usize {
+        candle_core::bail!("lora_add_inplace_f32_storage: dimensions exceed i32 kernel envelope");
+    }
+    if rows == 0 || out_dim == 0 || rank == 0 {
+        return Ok(());
+    }
+
     let stream = base_cuda.device().cuda_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
     let base_slice = base_cuda
@@ -2542,6 +3033,109 @@ pub fn lora_add_inplace_f32(base: &Tensor, hidden: &Tensor, b: &Tensor, scale: f
     };
     if status != 0 {
         candle_core::bail!("kiln_lora_add_inplace_f32 failed with status {status}");
+    }
+    Ok(())
+}
+
+/// Storage-level BF16 LoRA add for CUDA custom ops.
+///
+/// Computes `out = base + scale * hidden @ b.T`, where
+/// `base=[rows,out]` and `b=[out,rank]` are BF16, `hidden=[rows,rank]`
+/// is F32, and `out=[rows,out]` is BF16.
+pub fn lora_add_bf16_storage(
+    out_cuda: &CudaStorage,
+    out_layout: &Layout,
+    base_cuda: &CudaStorage,
+    base_layout: &Layout,
+    hidden_cuda: &CudaStorage,
+    hidden_layout: &Layout,
+    b_cuda: &CudaStorage,
+    b_layout: &Layout,
+    scale: f32,
+) -> Result<()> {
+    let out_dims = out_layout.dims();
+    let base_dims = base_layout.dims();
+    let hidden_dims = hidden_layout.dims();
+    let b_dims = b_layout.dims();
+    if out_dims.len() != 2 || base_dims.len() != 2 {
+        candle_core::bail!(
+            "lora_add_bf16_storage: out/base must be rank-2, got out={out_dims:?} base={base_dims:?}"
+        );
+    }
+    if hidden_dims.len() != 2 || b_dims.len() != 2 {
+        candle_core::bail!(
+            "lora_add_bf16_storage: hidden/B must be rank-2, got hidden={hidden_dims:?} b={b_dims:?}"
+        );
+    }
+    let (rows, out_dim) = (base_dims[0], base_dims[1]);
+    let (hidden_rows, rank) = (hidden_dims[0], hidden_dims[1]);
+    let (b_out, b_rank) = (b_dims[0], b_dims[1]);
+    if out_dims != base_dims || rows != hidden_rows || out_dim != b_out || rank != b_rank {
+        candle_core::bail!(
+            "lora_add_bf16_storage: shape mismatch out={out_dims:?} base={base_dims:?} hidden={hidden_dims:?} b={b_dims:?}"
+        );
+    }
+    if out_cuda.dtype() != DType::BF16
+        || base_cuda.dtype() != DType::BF16
+        || hidden_cuda.dtype() != DType::F32
+        || b_cuda.dtype() != DType::BF16
+    {
+        candle_core::bail!(
+            "lora_add_bf16_storage: expected out/base BF16, hidden F32, B BF16; got out={:?} base={:?} hidden={:?} b={:?}",
+            out_cuda.dtype(),
+            base_cuda.dtype(),
+            hidden_cuda.dtype(),
+            b_cuda.dtype()
+        );
+    }
+    if !out_layout.is_contiguous()
+        || !base_layout.is_contiguous()
+        || !hidden_layout.is_contiguous()
+        || !b_layout.is_contiguous()
+    {
+        candle_core::bail!("lora_add_bf16_storage: tensors must be contiguous");
+    }
+    if rows > i32::MAX as usize || out_dim > i32::MAX as usize || rank > i32::MAX as usize {
+        candle_core::bail!("lora_add_bf16_storage: dimensions exceed i32 kernel envelope");
+    }
+    if rows == 0 || out_dim == 0 || rank == 0 {
+        return Ok(());
+    }
+
+    let stream = base_cuda.device().cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+    let out_slice = out_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(out_layout.start_offset()..);
+    let base_slice = base_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(base_layout.start_offset()..);
+    let hidden_slice = hidden_cuda
+        .as_cuda_slice::<f32>()?
+        .slice(hidden_layout.start_offset()..);
+    let b_slice = b_cuda
+        .as_cuda_slice::<bf16>()?
+        .slice(b_layout.start_offset()..);
+
+    let status = unsafe {
+        let (base_ptr, _base_guard) = base_slice.device_ptr(&stream);
+        let (hidden_ptr, _hidden_guard) = hidden_slice.device_ptr(&stream);
+        let (b_ptr, _b_guard) = b_slice.device_ptr(&stream);
+        let (out_ptr, _out_guard) = out_slice.device_ptr(&stream);
+        kiln_lora_decode_add_bf16(
+            base_ptr as *const _,
+            hidden_ptr as *const f32,
+            b_ptr as *const _,
+            out_ptr as *mut _,
+            scale,
+            rows as i32,
+            out_dim as i32,
+            rank as i32,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        candle_core::bail!("kiln_lora_decode_add_bf16 failed with status {status}");
     }
     Ok(())
 }

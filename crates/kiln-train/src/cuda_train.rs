@@ -5,28 +5,27 @@
 //! to an optimizer step in the training crate, mirroring the direction of the
 //! Vulkan `vk_train` module without claiming full model coverage yet.
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use candle_core::{DType, Device, Tensor, TensorId};
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::cuda_train::{
-    cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias, cuda_backward,
-    cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad, cuda_embedding_lookup,
-    cuda_exp, cuda_flash_attn_prefill_causal_f32, cuda_frozen_matmul, cuda_full_attention_layer,
-    cuda_gdn_multi_head_sequence_recurrence, cuda_lora_linear_fused, cuda_matmul, cuda_mul,
-    cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh, cuda_permute_rh_to_hr,
-    cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope, cuda_scale,
-    cuda_sdpa_prefill_causal, cuda_shifted_linear_cross_entropy_loss, cuda_sigmoid, cuda_silu,
-    cuda_silu_inplace, cuda_softplus, cuda_sum_all, cuda_to_dtype, cuda_transpose2d,
     CudaAdamWConfig, CudaAdamWState, CudaFullAttentionLayer, CudaGdnLayerState, CudaLayerWeights,
     CudaLinearAttentionState, CudaModelWeights, CudaOwnedLinearAttentionLayer, CudaRopeTables,
-    CudaTrainArena, CudaTrainTensor,
+    CudaTrainArena, CudaTrainTensor, cuda_adamw_step_from_store, cuda_add, cuda_add_last_dim_bias,
+    cuda_backward, cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad,
+    cuda_embedding_lookup, cuda_exp, cuda_flash_attn_prefill_causal_f32, cuda_frozen_matmul,
+    cuda_full_attention_layer, cuda_gdn_multi_head_sequence_recurrence, cuda_lora_linear_fused,
+    cuda_matmul, cuda_mul, cuda_mul_last_dim_weight, cuda_narrow_last_dim, cuda_permute_hr_to_rh,
+    cuda_permute_rh_to_hr, cuda_repeat_kv_heads, cuda_reshape, cuda_rmsnorm, cuda_rope, cuda_scale,
+    cuda_sdpa_prefill_causal, cuda_shifted_linear_cross_entropy_loss, cuda_sigmoid, cuda_silu,
+    cuda_silu_inplace, cuda_softplus, cuda_sum_all, cuda_to_dtype, cuda_transpose2d,
 };
 use kiln_model::forward::GpuWeights;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
+use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
 use crate::{SftConfig, SftExample};
 
 pub type CudaAdamWBook = HashMap<TensorId, CudaAdamWState>;
@@ -2379,11 +2378,13 @@ mod tests {
         )?;
 
         assert!(loss.is_finite());
-        assert!(gdn_state.layers[0]
-            .recurrent_state
-            .to_vec_f32()?
-            .iter()
-            .any(|value| value.abs() > 1e-6));
+        assert!(
+            gdn_state.layers[0]
+                .recurrent_state
+                .to_vec_f32()?
+                .iter()
+                .any(|value| value.abs() > 1e-6)
+        );
         let losses = cuda_lora_train_token_sequences_with_gdn_state(
             &model,
             &lora_layers,

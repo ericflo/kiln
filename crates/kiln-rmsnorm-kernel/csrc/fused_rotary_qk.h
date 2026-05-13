@@ -32,6 +32,30 @@ int32_t kiln_fused_rotary_qk(
     int32_t rotary_dim,
     void *stream);
 
+int32_t kiln_fused_rotary_one(
+    const void *x,
+    const float *cos,
+    const float *sin,
+    void *out,
+    int32_t batch,
+    int32_t seq_len,
+    int32_t heads,
+    int32_t head_dim,
+    int32_t rotary_dim,
+    void *stream);
+
+int32_t kiln_fused_rotary_one_bwd(
+    const void *grad_y,
+    const float *cos,
+    const float *sin,
+    void *grad_x,
+    int32_t batch,
+    int32_t seq_len,
+    int32_t heads,
+    int32_t head_dim,
+    int32_t rotary_dim,
+    void *stream);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,13 +6,13 @@
 //! kernels. Higher-level native CUDA training can build on this without
 //! accepting CPU tensors by accident.
 
-use anyhow::{ensure, Context, Result};
-use candle_core::{DType, Device, Tensor, TensorId, D};
+use anyhow::{Context, Result, ensure};
+use candle_core::{D, DType, Device, Tensor, TensorId};
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::forward::{
     GpuAttentionWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuLinearAttentionWeights,
@@ -2480,7 +2480,9 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state(
     conv_state: &CudaTrainTensor,
 ) -> Result<(CudaTrainTensor, CudaTrainTensor)> {
     ensure!(
-        input.dtype() == DType::F32 && weight.dtype() == DType::F32 && conv_state.dtype() == DType::F32,
+        input.dtype() == DType::F32
+            && weight.dtype() == DType::F32
+            && conv_state.dtype() == DType::F32,
         "cuda_causal_depthwise_conv1d_prefill_with_state: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
         input.dtype(),
         weight.dtype(),
@@ -2561,7 +2563,9 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
     conv_state: &CudaTrainTensor,
 ) -> Result<(CudaTrainTensor, CudaTrainTensor)> {
     ensure!(
-        input.dtype() == DType::F32 && weight.dtype() == DType::F32 && conv_state.dtype() == DType::F32,
+        input.dtype() == DType::F32
+            && weight.dtype() == DType::F32
+            && conv_state.dtype() == DType::F32,
         "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: expected F32 input/weight/state, got {:?}/{:?}/{:?}",
         input.dtype(),
         weight.dtype(),
@@ -2583,7 +2587,9 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
         "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: weight gradients are not supported"
     );
     ensure!(
-        !conv_state.requires_grad() && conv_state.grad_fn().is_none() && conv_state.param_id().is_none(),
+        !conv_state.requires_grad()
+            && conv_state.grad_fn().is_none()
+            && conv_state.param_id().is_none(),
         "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad: state gradients are not supported"
     );
     ensure!(
@@ -5310,11 +5316,13 @@ mod tests {
             assert_eq!(layer.recurrent_state.dims(), &[3, 4, 5, 6]);
             assert_eq!(layer.conv_n_elements, 3 * 7 * 3);
             assert_eq!(layer.conv_state.dims(), &[3, 7, 3]);
-            assert!(layer
-                .recurrent_state
-                .to_vec_f32()?
-                .iter()
-                .all(|v| *v == 0.0));
+            assert!(
+                layer
+                    .recurrent_state
+                    .to_vec_f32()?
+                    .iter()
+                    .all(|v| *v == 0.0)
+            );
             assert!(layer.conv_state.to_vec_f32()?.iter().all(|v| *v == 0.0));
         }
         Ok(())
@@ -6144,7 +6152,9 @@ mod tests {
         let grads = cuda_backward(&loss)?;
         assert_eq!(
             grads.get(param_id).expect("param grad").to_vec_f32()?,
-            vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0]
+            vec![
+                1.0, 2.0, 3.0, 10.0, 20.0, 30.0, 4.0, 5.0, 6.0, 1.0, 2.0, 3.0
+            ]
         );
         Ok(())
     }
@@ -6297,7 +6307,9 @@ mod tests {
         let grads = cuda_backward(&loss)?;
         assert_eq!(
             grads.get(lhs_id).expect("lhs grad").to_vec_f32()?,
-            vec![11.0, 22.0, 33.0, 11.0, 22.0, 33.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0]
+            vec![
+                11.0, 22.0, 33.0, 11.0, 22.0, 33.0, 5.0, 7.0, 9.0, 5.0, 7.0, 9.0
+            ]
         );
         assert_eq!(
             grads.get(rhs_id).expect("rhs grad").to_vec_f32()?,
@@ -7852,16 +7864,20 @@ mod tests {
 
         let state = states.get(&param_id).expect("adamw state");
         assert_eq!(state.step, 1);
-        assert!(state
-            .first_moment
-            .to_vec_f32()?
-            .iter()
-            .any(|v| v.abs() > 0.0));
-        assert!(state
-            .second_moment
-            .to_vec_f32()?
-            .iter()
-            .any(|v| v.abs() > 0.0));
+        assert!(
+            state
+                .first_moment
+                .to_vec_f32()?
+                .iter()
+                .any(|v| v.abs() > 0.0)
+        );
+        assert!(
+            state
+                .second_moment
+                .to_vec_f32()?
+                .iter()
+                .any(|v| v.abs() > 0.0)
+        );
 
         let after = cuda_sum_all(&cuda_mul(&param, &param)?)?;
         let after_loss = after.to_vec_f32()?[0];

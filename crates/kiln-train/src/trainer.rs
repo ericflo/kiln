@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor, Var};
+#[cfg(feature = "cuda")]
+use candle_core::CudaStorage;
+#[cfg(feature = "cuda")]
+use candle_core::backend::BackendStorage;
+use candle_core::{CpuStorage, CustomOp1, DType, Device, Layout, Shape, Tensor, Var};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -22,13 +26,16 @@ use kiln_flce_kernel::{
 };
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
-    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, LinearAttentionState,
+    GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
     gdn_gated_norm_from_recurrent, gdn_gates_from_ab_training, gdn_out_proj_from_gated_norm,
     gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
-    model_forward, model_forward_embed, model_forward_final_norm, model_forward_head,
-    model_forward_no_head, model_forward_segment, streaming_prefill_enabled_for,
-    streaming_tile_tokens_for, transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
+    gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
+    gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
+    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward,
+    model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
+    model_forward_segment, rms_norm, streaming_prefill_enabled_for, streaming_tile_tokens_for,
+    swiglu_ffn, transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
 
@@ -2156,8 +2163,11 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     seq_len >= threshold
 }
 
-fn spool_checkpoint_boundaries() -> bool {
-    kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES").unwrap_or(false)
+fn spool_checkpoint_boundaries(device: &Device) -> bool {
+    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES") {
+        return forced;
+    }
+    matches!(device, Device::Cuda(_))
 }
 
 fn profile_checkpoint_segments() -> bool {
@@ -2488,10 +2498,14 @@ fn accumulate_grads(
     for var in vars {
         if let Some(grad) = src.get(var.as_tensor()) {
             let id = var.as_tensor().id();
+            let grad = grad
+                .to_device(&Device::Cpu)
+                .context("offload accumulated gradient to CPU")?
+                .detach();
             if let Some(existing) = dst.get(&id) {
-                dst.insert(id, (existing + grad)?.detach());
+                dst.insert(id, (existing + &grad)?.detach());
             } else {
-                dst.insert(id, grad.detach());
+                dst.insert(id, grad);
             }
         }
     }
@@ -2509,6 +2523,45 @@ fn grad_or_zeros_like(
     }
 }
 
+fn offload_checkpoint_tensor_to_cpu(tensor: Tensor, enabled: bool) -> Result<Tensor> {
+    if enabled && !tensor.device().is_cpu() {
+        Ok(tensor
+            .to_device(&Device::Cpu)
+            .context("offload checkpoint tensor to CPU")?
+            .detach())
+    } else {
+        Ok(tensor.detach())
+    }
+}
+
+fn tensor_on_device(tensor: &Tensor, device: &Device) -> Result<Tensor> {
+    if tensor.device().same_device(device) {
+        Ok(tensor.clone())
+    } else {
+        tensor
+            .to_device(device)
+            .context("reload checkpoint tensor to device")
+    }
+}
+
+fn accumulate_cpu_tensor_slot(
+    slot: &mut Option<Tensor>,
+    tensor: Tensor,
+    context: &str,
+) -> Result<()> {
+    let tensor_cpu = tensor
+        .to_device(&Device::Cpu)
+        .with_context(|| format!("{context} CPU offload"))?
+        .detach();
+    *slot = Some(match slot.take() {
+        Some(existing) => (&existing + &tensor_cpu)
+            .with_context(|| format!("{context} CPU accumulate"))?
+            .detach(),
+        None => tensor_cpu,
+    });
+    Ok(())
+}
+
 /// SGD update from accumulated gradient map (not GradStore).
 fn sgd_step_from_map(
     backend: &dyn BackendRuntime,
@@ -2520,7 +2573,12 @@ fn sgd_step_from_map(
     for var in params.all_vars() {
         let id = var.as_tensor().id();
         if let Some(grad) = grads.get(&id) {
-            apply_sgd_update(backend, var, grad, lr, resident_activation)?;
+            let grad = if grad.device().same_device(var.as_tensor().device()) {
+                grad.clone()
+            } else {
+                grad.to_device(var.as_tensor().device())?
+            };
+            apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
         }
     }
     Ok(())
@@ -2552,6 +2610,11 @@ fn optimizer_step_from_map(
             for var in params.all_vars() {
                 let id = var.as_tensor().id();
                 if let Some(grad) = grads.get(&id) {
+                    let grad = if grad.device().same_device(var.as_tensor().device()) {
+                        grad.clone()
+                    } else {
+                        grad.to_device(var.as_tensor().device())?
+                    };
                     let moments = state.moments.get(&id).ok_or_else(|| {
                         anyhow::anyhow!(
                             "optimizer_step_from_map: missing AdamW moments for Var id {:?}",
@@ -2561,7 +2624,7 @@ fn optimizer_step_from_map(
                     apply_adamw_update(
                         backend,
                         var,
-                        grad,
+                        &grad,
                         moments,
                         lr,
                         beta1,
@@ -2831,6 +2894,14 @@ fn exact_gdn_reverse_tile_size(
 }
 
 fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
+    fn fallback_tile(device: &Device) -> usize {
+        if matches!(device, Device::Cuda(_)) {
+            1024
+        } else {
+            streaming_tile_tokens_for(device)
+        }
+    }
+
     match std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS") {
         Ok(raw) => match raw.parse::<usize>() {
             Ok(tile) if tile > 0 && tile % GDN_CHUNK_SIZE == 0 => tile,
@@ -2840,10 +2911,10 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
                     chunk_size = GDN_CHUNK_SIZE,
                     "ignoring invalid KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"
                 );
-                streaming_tile_tokens_for(device)
+                fallback_tile(device)
             }
         },
-        Err(_) => streaming_tile_tokens_for(device),
+        Err(_) => fallback_tile(device),
     }
 }
 
@@ -2852,7 +2923,7 @@ fn profile_exact_gdn_reverse_tiles() -> bool {
 }
 
 fn exact_gdn_split_recurrent_backward_enabled() -> bool {
-    kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").unwrap_or(false)
+    kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").unwrap_or(true)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2887,6 +2958,947 @@ fn finish_exact_gdn_reverse_tile_stage(
         );
     }
     Ok(Instant::now())
+}
+
+fn full_attention_mlp_reverse_tile_size(
+    weights: &GpuWeights,
+    seq_len: usize,
+    seg_start: usize,
+    seg_end: usize,
+) -> Option<usize> {
+    if !kiln_core::env_flag::env_tristate("KILN_EXACT_FULL_ATTN_MLP_TILE_BACKWARD").unwrap_or(true)
+    {
+        return None;
+    }
+    if seg_end != seg_start + 1 {
+        return None;
+    }
+    if !matches!(
+        weights.layers[seg_start].attention,
+        GpuAttentionWeights::Full(_)
+    ) {
+        return None;
+    }
+    let tile = std::env::var("KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(1024);
+    if tile >= seq_len { None } else { Some(tile) }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_attention_attention_pre_o_forward(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    layer_idx: usize,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let layer = &weights.layers[layer_idx];
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(attn_weights) => attn_weights,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!("full_attention_attention_pre_o_forward called for GDN layer {layer_idx}")
+        }
+    };
+    let normed = rms_norm(x, &layer.input_layernorm, model_config.rms_norm_eps)?;
+    let (_batch, seq_len, _hidden) = normed.dims3()?;
+    let tile_size = streaming_tile_tokens_for(normed.device());
+    let attn_out = if backend.name() == "cuda"
+        && streaming_prefill_enabled_for(normed.device(), seq_len)
+        && tile_size > 0
+        && tile_size < seq_len
+    {
+        gqa_attention_pre_o_chunked_prefill(
+            backend,
+            &normed,
+            attn_weights,
+            positions,
+            model_config.num_attention_heads,
+            model_config.num_kv_heads,
+            model_config.head_dim,
+            model_config.rotary_dim(),
+            &weights.rotary_inv_freq,
+            model_config.rms_norm_eps,
+            model_config.attn_output_gate,
+            lora,
+            tile_size,
+        )
+    } else {
+        gqa_attention_pre_o(
+            backend,
+            &normed,
+            attn_weights,
+            positions,
+            model_config.num_attention_heads,
+            model_config.num_kv_heads,
+            model_config.head_dim,
+            model_config.rotary_dim(),
+            &weights.rotary_inv_freq,
+            model_config.rms_norm_eps,
+            None,
+            full_attn_layer_idx,
+            model_config.attn_output_gate,
+            lora,
+        )
+    }
+    .with_context(|| format!("full attention pre-o forward layer {layer_idx}"))?;
+    Ok(attn_out)
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
+fn full_attention_attention_prepare_forward(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<GqaAttentionPrepared> {
+    let layer = &weights.layers[layer_idx];
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(attn_weights) => attn_weights,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!(
+                "full_attention_attention_prepare_forward called for GDN layer {layer_idx}"
+            )
+        }
+    };
+    let normed = rms_norm(x, &layer.input_layernorm, model_config.rms_norm_eps)?;
+    gqa_attention_prepare_prefill(
+        backend,
+        &normed,
+        attn_weights,
+        positions,
+        model_config.num_attention_heads,
+        model_config.num_kv_heads,
+        model_config.head_dim,
+        model_config.rotary_dim(),
+        &weights.rotary_inv_freq,
+        model_config.rms_norm_eps,
+        model_config.attn_output_gate,
+        lora,
+    )
+    .with_context(|| format!("full attention prepare forward layer {layer_idx}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_attention_attention_forward(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    layer_idx: usize,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let layer = &weights.layers[layer_idx];
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(attn_weights) => attn_weights,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!("full_attention_attention_forward called for GDN layer {layer_idx}")
+        }
+    };
+    let attn_output = full_attention_attention_pre_o_forward(
+        backend,
+        x,
+        weights,
+        model_config,
+        positions,
+        layer_idx,
+        full_attn_layer_idx,
+        lora,
+    )?;
+    gqa_attention_output_projection(backend, &attn_output, attn_weights, false, lora)
+        .with_context(|| format!("full attention output projection layer {layer_idx}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_attention_residual_forward(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    layer_idx: usize,
+    full_attn_layer_idx: usize,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let attn_out = full_attention_attention_forward(
+        backend,
+        x,
+        weights,
+        model_config,
+        positions,
+        layer_idx,
+        full_attn_layer_idx,
+        lora,
+    )?;
+    Ok((x + attn_out)?)
+}
+
+#[derive(Clone)]
+struct InjectTensorGradient {
+    upstream: Tensor,
+}
+
+impl std::fmt::Debug for InjectTensorGradient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InjectTensorGradient")
+            .field("upstream_dtype", &self.upstream.dtype())
+            .field("upstream_dims", &self.upstream.dims())
+            .finish()
+    }
+}
+
+impl CustomOp1 for InjectTensorGradient {
+    fn name(&self) -> &'static str {
+        "kiln-inject-tensor-gradient"
+    }
+
+    fn cpu_fwd(
+        &self,
+        _storage: &CpuStorage,
+        _layout: &Layout,
+    ) -> candle_core::Result<(CpuStorage, Shape)> {
+        Ok((CpuStorage::F32(vec![0.0]), Shape::from(())))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        storage: &CudaStorage,
+        _layout: &Layout,
+    ) -> candle_core::Result<(CudaStorage, Shape)> {
+        let device = storage.device();
+        let out_slice = device.clone_htod(&[0.0f32])?;
+        Ok((
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
+            Shape::from(()),
+        ))
+    }
+
+    fn bwd(
+        &self,
+        arg: &Tensor,
+        _res: &Tensor,
+        _grad_res: &Tensor,
+    ) -> candle_core::Result<Option<Tensor>> {
+        if self.upstream.dims() != arg.dims() {
+            candle_core::bail!(
+                "InjectTensorGradient shape mismatch: upstream {:?}, arg {:?}",
+                self.upstream.dims(),
+                arg.dims()
+            );
+        }
+        let upstream = self.upstream.to_device(arg.device())?;
+        let grad = if upstream.dtype() == arg.dtype() {
+            upstream
+        } else {
+            upstream.to_dtype(arg.dtype())?
+        };
+        Ok(Some(grad))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn full_attention_single_layer_tiled_mlp_reverse(
+    backend: &dyn BackendRuntime,
+    layer_idx: usize,
+    full_attn_layer_idx: usize,
+    seg_input: &Tensor,
+    upstream_grad: &Tensor,
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    positions: &[u32],
+    params: &TrainableLoraParams,
+    lora_detached: &LoraWeights,
+    tile_size: usize,
+    device: &Device,
+    accumulated_grads: &mut HashMap<candle_core::TensorId, Tensor>,
+    all_vars: &[&Var],
+) -> Result<Tensor> {
+    let layer = &weights.layers[layer_idx];
+    let attn_weights = match &layer.attention {
+        GpuAttentionWeights::Full(attn_weights) => attn_weights,
+        GpuAttentionWeights::Linear(_) => {
+            anyhow::bail!(
+                "full-attention tiled MLP reverse called for non-full-attention layer {layer_idx}"
+            )
+        }
+    };
+    let (_, total_tokens, _hidden_size) = seg_input.dims3()?;
+    anyhow::ensure!(
+        upstream_grad.dims() == seg_input.dims(),
+        "full-attention tiled MLP reverse upstream/input shape mismatch: {:?} vs {:?}",
+        upstream_grad.dims(),
+        seg_input.dims()
+    );
+
+    let lora_weights_for_seg = params.as_lora_weights();
+    let layer_lora: Option<(&LoraLayerWeights, f32)> = lora_weights_for_seg
+        .layers
+        .get(layer_idx)
+        .map(|ll| (ll, lora_weights_for_seg.scale));
+    let detached_layer_lora: Option<(&LoraLayerWeights, f32)> = lora_detached
+        .layers
+        .get(layer_idx)
+        .map(|ll| (ll, lora_detached.scale));
+
+    tracing::info!(
+        layer = layer_idx,
+        full_attn_layer_idx,
+        total_tokens,
+        tile_size,
+        num_tiles = total_tokens.div_ceil(tile_size),
+        "exact full-attention tiled MLP reverse begin"
+    );
+
+    let attn_residual_value = full_attention_residual_forward(
+        backend,
+        seg_input,
+        weights,
+        model_config,
+        positions,
+        layer_idx,
+        full_attn_layer_idx,
+        detached_layer_lora,
+    )
+    .with_context(|| format!("full-attention tiled MLP value residual layer {layer_idx}"))?
+    .detach();
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention tiled MLP value residual layer {layer_idx}")
+    })?;
+
+    let mut residual_grad_tiles = Vec::with_capacity(total_tokens.div_ceil(tile_size));
+    let mut tile_start = 0usize;
+    while tile_start < total_tokens {
+        let tile_len = (total_tokens - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+        let residual_tile = attn_residual_value
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention MLP residual tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+        let upstream_tile = upstream_grad
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention MLP upstream tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+        let residual_tile_var = Var::from_tensor(&residual_tile).with_context(|| {
+            format!("full-attention MLP residual tile Var [{tile_start}, {tile_end})")
+        })?;
+        let normed_tile = rms_norm(
+            residual_tile_var.as_tensor(),
+            &layer.post_attention_layernorm,
+            model_config.rms_norm_eps,
+        )
+        .with_context(|| format!("full-attention MLP post norm tile [{tile_start}, {tile_end})"))?;
+        let ffn_out = swiglu_ffn(&normed_tile, &layer.mlp, layer_lora)
+            .with_context(|| format!("full-attention MLP tile [{tile_start}, {tile_end})"))?;
+        let tile_output = (residual_tile_var.as_tensor() + ffn_out).with_context(|| {
+            format!("full-attention MLP residual add tile [{tile_start}, {tile_end})")
+        })?;
+        let tile_output_f32 = tile_output.to_dtype(DType::F32)?;
+        let upstream_tile_f32 = upstream_tile.to_dtype(DType::F32)?;
+        let injected = (&tile_output_f32 * &upstream_tile_f32)?
+            .sum_all()
+            .with_context(|| {
+                format!("full-attention MLP gradient injection tile [{tile_start}, {tile_end})")
+            })?;
+        let grads = injected.backward().with_context(|| {
+            format!("full-attention MLP backward tile [{tile_start}, {tile_end})")
+        })?;
+        accumulate_grads(accumulated_grads, &grads, all_vars)?;
+        let residual_grad = grads
+            .get(residual_tile_var.as_tensor())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "full-attention MLP reverse did not produce residual grad for tile [{tile_start}, {tile_end})"
+                )
+            })?
+            .clone()
+            .detach();
+        residual_grad_tiles.push(residual_grad);
+
+        drop(grads);
+        drop(injected);
+        drop(upstream_tile_f32);
+        drop(tile_output_f32);
+        drop(tile_output);
+        drop(normed_tile);
+        drop(residual_tile_var);
+        drop(upstream_tile);
+        drop(residual_tile);
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize full-attention MLP tile [{tile_start}, {tile_end}) cleanup")
+        })?;
+        tile_start = tile_end;
+    }
+
+    let residual_grad_refs: Vec<&Tensor> = residual_grad_tiles.iter().collect();
+    let residual_grad = Tensor::cat(&residual_grad_refs, 1)
+        .context("full-attention tiled MLP residual grad cat")?
+        .detach();
+    drop(residual_grad_tiles);
+    drop(attn_residual_value);
+    let residual_grad_cpu = residual_grad
+        .to_device(&Device::Cpu)
+        .context("full-attention tiled MLP residual grad CPU offload")?
+        .detach();
+    drop(residual_grad);
+    device.synchronize().with_context(|| {
+        format!("synchronize full-attention residual grad offload layer {layer_idx}")
+    })?;
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention tiled MLP value cleanup layer {layer_idx}")
+    })?;
+
+    let pre_o_value = full_attention_attention_pre_o_forward(
+        backend,
+        seg_input,
+        weights,
+        model_config,
+        positions,
+        layer_idx,
+        full_attn_layer_idx,
+        detached_layer_lora,
+    )
+    .with_context(|| format!("full-attention pre-o value layer {layer_idx}"))?
+    .detach();
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention pre-o value layer {layer_idx}")
+    })?;
+
+    let mut pre_o_grad_tiles = Vec::with_capacity(total_tokens.div_ceil(tile_size));
+    let mut tile_start = 0usize;
+    while tile_start < total_tokens {
+        let tile_len = (total_tokens - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+        let pre_o_tile = pre_o_value
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| format!("full-attention pre-o tile [{tile_start}, {tile_end})"))?
+            .detach();
+        let upstream_tile = residual_grad_cpu
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention o-proj upstream tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+        let pre_o_tile_var = Var::from_tensor(&pre_o_tile).with_context(|| {
+            format!("full-attention o-proj pre-o tile Var [{tile_start}, {tile_end})")
+        })?;
+        let out_proj_tile = gqa_attention_output_projection(
+            backend,
+            pre_o_tile_var.as_tensor(),
+            attn_weights,
+            false,
+            layer_lora,
+        )
+        .with_context(|| {
+            format!("full-attention o-proj forward tile [{tile_start}, {tile_end})")
+        })?;
+        let injected = out_proj_tile
+            .apply_op1(InjectTensorGradient {
+                upstream: upstream_tile.clone(),
+            })
+            .with_context(|| {
+                format!("full-attention o-proj gradient injection tile [{tile_start}, {tile_end})")
+            })?;
+        let grads = injected.backward().with_context(|| {
+            format!("full-attention o-proj backward tile [{tile_start}, {tile_end})")
+        })?;
+        accumulate_grads(accumulated_grads, &grads, all_vars)?;
+        let pre_o_grad = grads
+            .get(pre_o_tile_var.as_tensor())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "full-attention o-proj reverse did not produce pre-o grad for tile [{tile_start}, {tile_end})"
+                )
+            })?
+            .clone()
+            .detach();
+        pre_o_grad_tiles.push(pre_o_grad);
+
+        drop(grads);
+        drop(injected);
+        drop(out_proj_tile);
+        drop(pre_o_tile_var);
+        drop(upstream_tile);
+        drop(pre_o_tile);
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize full-attention o-proj tile [{tile_start}, {tile_end}) cleanup")
+        })?;
+        tile_start = tile_end;
+    }
+
+    let pre_o_grad_refs: Vec<&Tensor> = pre_o_grad_tiles.iter().collect();
+    let pre_o_grad = Tensor::cat(&pre_o_grad_refs, 1)
+        .context("full-attention tiled o-proj pre-o grad cat")?
+        .detach();
+    drop(pre_o_grad_tiles);
+    drop(pre_o_value);
+    let pre_o_grad_cpu = pre_o_grad
+        .to_device(&Device::Cpu)
+        .context("full-attention tiled o-proj pre-o grad CPU offload")?
+        .detach();
+    drop(pre_o_grad);
+    device.synchronize().with_context(|| {
+        format!("synchronize full-attention pre-o grad offload layer {layer_idx}")
+    })?;
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention tiled o-proj cleanup layer {layer_idx}")
+    })?;
+
+    let total_tiles = total_tokens.div_ceil(tile_size);
+    let normed_value = rms_norm(seg_input, &layer.input_layernorm, model_config.rms_norm_eps)
+        .with_context(|| format!("full-attention core value norm layer {layer_idx}"))?
+        .detach();
+    let (k_value, v_value) = gqa_attention_kv_prefill(
+        backend,
+        &normed_value,
+        attn_weights,
+        positions,
+        model_config.num_kv_heads,
+        model_config.head_dim,
+        model_config.rotary_dim(),
+        &weights.rotary_inv_freq,
+        model_config.rms_norm_eps,
+        detached_layer_lora,
+    )
+    .with_context(|| format!("full-attention K/V value layer {layer_idx}"))?;
+    let k_value = k_value.detach();
+    let v_value = v_value.detach();
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention K/V value layer {layer_idx}")
+    })?;
+
+    let mut q_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut gate_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut k_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    let mut v_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+
+    for tile_idx in 0..total_tiles {
+        let tile_start = tile_idx * tile_size;
+        let tile_len = (total_tokens - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+        let normed_tile = normed_value
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention core normed tile [{tile_start}, {tile_end})")
+            })?;
+        let (q_value, gate_value) = gqa_attention_q_gate_prefill(
+            backend,
+            &normed_tile,
+            attn_weights,
+            &positions[tile_start..tile_end],
+            model_config.num_attention_heads,
+            model_config.head_dim,
+            model_config.rotary_dim(),
+            &weights.rotary_inv_freq,
+            model_config.rms_norm_eps,
+            model_config.attn_output_gate,
+            detached_layer_lora,
+        )
+        .with_context(|| format!("full-attention Q/Gate value tile [{tile_start}, {tile_end})"))?;
+        let k_prefix = k_value
+            .narrow(1, 0, tile_end)
+            .with_context(|| format!("full-attention K prefix tile {tile_idx}"))?
+            .detach();
+        let v_prefix = v_value
+            .narrow(1, 0, tile_end)
+            .with_context(|| format!("full-attention V prefix tile {tile_idx}"))?
+            .detach();
+        let q_var = Var::from_tensor(&q_value.detach())
+            .with_context(|| format!("full-attention q Var tile [{tile_start}, {tile_end})"))?;
+        let k_var = Var::from_tensor(&k_prefix).with_context(|| {
+            format!("full-attention k Var prefix [0, {tile_end}) tile {tile_idx}")
+        })?;
+        let v_var = Var::from_tensor(&v_prefix).with_context(|| {
+            format!("full-attention v Var prefix [0, {tile_end}) tile {tile_idx}")
+        })?;
+        let gate_var = gate_value
+            .as_ref()
+            .map(|gate| {
+                Var::from_tensor(&gate.detach()).with_context(|| {
+                    format!("full-attention gate Var tile [{tile_start}, {tile_end})")
+                })
+            })
+            .transpose()?;
+        let prepared_vars = GqaAttentionPrepared {
+            q: q_var.as_tensor().clone(),
+            k: k_var.as_tensor().clone(),
+            v: v_var.as_tensor().clone(),
+            gate: None,
+        };
+        let attn_core = gqa_attention_core_prefill(
+            backend,
+            &prepared_vars,
+            model_config.num_attention_heads,
+            model_config.num_kv_heads,
+            model_config.head_dim,
+        )
+        .with_context(|| format!("full-attention core recompute tile {tile_idx}"))?;
+        let pre_o = gqa_attention_apply_output_gate(
+            attn_core,
+            gate_var.as_ref().map(|gate| gate.as_tensor()),
+        )
+        .with_context(|| format!("full-attention output gate recompute tile {tile_idx}"))?;
+        let pre_o_grad_tile = pre_o_grad_cpu
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention core upstream tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+        let injected = pre_o
+            .apply_op1(InjectTensorGradient {
+                upstream: pre_o_grad_tile,
+            })
+            .with_context(|| format!("full-attention core gradient injection tile {tile_idx}"))?;
+        let grads = injected
+            .backward()
+            .with_context(|| format!("full-attention core backward tile {tile_idx}"))?;
+
+        let q_grad = grads
+            .get(q_var.as_tensor())
+            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce q grad tile"))?
+            .clone();
+        accumulate_cpu_tensor_slot(
+            &mut q_grad_tiles_cpu[tile_idx],
+            q_grad,
+            &format!("full-attention q grad tile [{tile_start}, {tile_end})"),
+        )?;
+
+        if let Some(gate_var) = gate_var.as_ref() {
+            let gate_grad = grads
+                .get(gate_var.as_tensor())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("full-attention core did not produce gate grad tile")
+                })?
+                .clone();
+            accumulate_cpu_tensor_slot(
+                &mut gate_grad_tiles_cpu[tile_idx],
+                gate_grad,
+                &format!("full-attention gate grad tile [{tile_start}, {tile_end})"),
+            )?;
+        }
+
+        let k_grad_prefix_cpu = grads
+            .get(k_var.as_tensor())
+            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce k grad prefix"))?
+            .to_device(&Device::Cpu)
+            .context("full-attention k grad prefix CPU offload")?
+            .detach();
+        let v_grad_prefix_cpu = grads
+            .get(v_var.as_tensor())
+            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce v grad prefix"))?
+            .to_device(&Device::Cpu)
+            .context("full-attention v grad prefix CPU offload")?
+            .detach();
+        for source_idx in 0..=tile_idx {
+            let source_start = source_idx * tile_size;
+            let source_len = (tile_end - source_start).min(tile_size);
+            let source_end = source_start + source_len;
+            let k_source_grad = k_grad_prefix_cpu
+                .narrow(1, source_start, source_len)
+                .with_context(|| {
+                    format!(
+                        "full-attention k source grad [{source_start}, {source_end}) from tile {tile_idx}"
+                    )
+                })?;
+            accumulate_cpu_tensor_slot(
+                &mut k_grad_tiles_cpu[source_idx],
+                k_source_grad,
+                &format!(
+                    "full-attention k grad source [{source_start}, {source_end}) from tile {tile_idx}"
+                ),
+            )?;
+            let v_source_grad = v_grad_prefix_cpu
+                .narrow(1, source_start, source_len)
+                .with_context(|| {
+                    format!(
+                        "full-attention v source grad [{source_start}, {source_end}) from tile {tile_idx}"
+                    )
+                })?;
+            accumulate_cpu_tensor_slot(
+                &mut v_grad_tiles_cpu[source_idx],
+                v_source_grad,
+                &format!(
+                    "full-attention v grad source [{source_start}, {source_end}) from tile {tile_idx}"
+                ),
+            )?;
+        }
+
+        drop(grads);
+        drop(injected);
+        drop(pre_o);
+        drop(prepared_vars);
+        drop(gate_var);
+        drop(v_var);
+        drop(k_var);
+        drop(q_var);
+        drop(gate_value);
+        drop(v_prefix);
+        drop(k_prefix);
+        drop(normed_tile);
+        synchronize_checkpoint_boundary(device, || {
+            format!("synchronize full-attention core backward tile {tile_idx}")
+        })?;
+    }
+    drop(k_value);
+    drop(v_value);
+    drop(normed_value);
+    device.synchronize().with_context(|| {
+        format!("synchronize full-attention tiled core grad offload layer {layer_idx}")
+    })?;
+
+    let mut attention_input_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
+    for tile_idx in 0..total_tiles {
+        let tile_start = tile_idx * tile_size;
+        let tile_len = (total_tokens - tile_start).min(tile_size);
+        let tile_end = tile_start + tile_len;
+        let seg_input_tile = seg_input
+            .narrow(1, tile_start, tile_len)
+            .with_context(|| {
+                format!("full-attention prepare input tile [{tile_start}, {tile_end})")
+            })?
+            .detach();
+
+        let mut q_gate_terms_present = q_grad_tiles_cpu[tile_idx].is_some();
+        q_gate_terms_present |= gate_grad_tiles_cpu[tile_idx].is_some();
+        if q_gate_terms_present {
+            let seg_input_var = Var::from_tensor(&seg_input_tile).with_context(|| {
+                format!("full-attention q/gate input Var tile [{tile_start}, {tile_end})")
+            })?;
+            let normed_tile = rms_norm(
+                seg_input_var.as_tensor(),
+                &layer.input_layernorm,
+                model_config.rms_norm_eps,
+            )
+            .with_context(|| {
+                format!("full-attention q/gate norm tile [{tile_start}, {tile_end})")
+            })?;
+            let (q, gate) = gqa_attention_q_gate_prefill(
+                backend,
+                &normed_tile,
+                attn_weights,
+                &positions[tile_start..tile_end],
+                model_config.num_attention_heads,
+                model_config.head_dim,
+                model_config.rotary_dim(),
+                &weights.rotary_inv_freq,
+                model_config.rms_norm_eps,
+                model_config.attn_output_gate,
+                layer_lora,
+            )
+            .with_context(|| {
+                format!("full-attention q/gate prepare tile [{tile_start}, {tile_end})")
+            })?;
+            let mut inject_terms = Vec::with_capacity(2);
+            if let Some(q_grad_cpu) = q_grad_tiles_cpu[tile_idx].as_ref() {
+                inject_terms.push(
+                    q.apply_op1(InjectTensorGradient {
+                        upstream: q_grad_cpu.clone(),
+                    })
+                    .context("full-attention q tile gradient injection")?,
+                );
+            }
+            if let (Some(gate), Some(gate_grad_cpu)) =
+                (gate.as_ref(), gate_grad_tiles_cpu[tile_idx].as_ref())
+            {
+                inject_terms.push(
+                    gate.apply_op1(InjectTensorGradient {
+                        upstream: gate_grad_cpu.clone(),
+                    })
+                    .context("full-attention gate tile gradient injection")?,
+                );
+            }
+            let mut injected = inject_terms
+                .first()
+                .context("full-attention q/gate missing gradient injections")?
+                .clone();
+            for term in inject_terms.iter().skip(1) {
+                injected =
+                    (&injected + term).context("full-attention q/gate gradient injection add")?;
+            }
+            let grads = injected.backward().with_context(|| {
+                format!("full-attention q/gate prepare backward tile {tile_idx}")
+            })?;
+            accumulate_grads(accumulated_grads, &grads, all_vars)?;
+            let input_grad = match grads.get(seg_input_var.as_tensor()) {
+                Some(grad) => grad.detach(),
+                None => Tensor::zeros(seg_input_tile.dims(), seg_input_tile.dtype(), device)
+                    .context("alloc zero full-attention q/gate input grad tile")?,
+            };
+            accumulate_cpu_tensor_slot(
+                &mut attention_input_grad_tiles_cpu[tile_idx],
+                input_grad,
+                &format!("full-attention q/gate input grad tile {tile_idx}"),
+            )?;
+            drop(grads);
+            drop(injected);
+            drop(inject_terms);
+            drop(gate);
+            drop(q);
+            drop(normed_tile);
+            drop(seg_input_var);
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize full-attention q/gate prepare tile {tile_idx}")
+            })?;
+        }
+
+        let mut kv_terms_present = k_grad_tiles_cpu[tile_idx].is_some();
+        kv_terms_present |= v_grad_tiles_cpu[tile_idx].is_some();
+        if kv_terms_present {
+            let seg_input_var = Var::from_tensor(&seg_input_tile).with_context(|| {
+                format!("full-attention k/v input Var tile [{tile_start}, {tile_end})")
+            })?;
+            let normed_tile = rms_norm(
+                seg_input_var.as_tensor(),
+                &layer.input_layernorm,
+                model_config.rms_norm_eps,
+            )
+            .with_context(|| format!("full-attention k/v norm tile [{tile_start}, {tile_end})"))?;
+            let (k, v) = gqa_attention_kv_prefill(
+                backend,
+                &normed_tile,
+                attn_weights,
+                &positions[tile_start..tile_end],
+                model_config.num_kv_heads,
+                model_config.head_dim,
+                model_config.rotary_dim(),
+                &weights.rotary_inv_freq,
+                model_config.rms_norm_eps,
+                layer_lora,
+            )
+            .with_context(|| {
+                format!("full-attention k/v prepare tile [{tile_start}, {tile_end})")
+            })?;
+            let mut inject_terms = Vec::with_capacity(2);
+            if let Some(k_grad_cpu) = k_grad_tiles_cpu[tile_idx].as_ref() {
+                inject_terms.push(
+                    k.apply_op1(InjectTensorGradient {
+                        upstream: k_grad_cpu.clone(),
+                    })
+                    .context("full-attention k tile gradient injection")?,
+                );
+            }
+            if let Some(v_grad_cpu) = v_grad_tiles_cpu[tile_idx].as_ref() {
+                inject_terms.push(
+                    v.apply_op1(InjectTensorGradient {
+                        upstream: v_grad_cpu.clone(),
+                    })
+                    .context("full-attention v tile gradient injection")?,
+                );
+            }
+            let mut injected = inject_terms
+                .first()
+                .context("full-attention k/v missing gradient injections")?
+                .clone();
+            for term in inject_terms.iter().skip(1) {
+                injected =
+                    (&injected + term).context("full-attention k/v gradient injection add")?;
+            }
+            let grads = injected
+                .backward()
+                .with_context(|| format!("full-attention k/v prepare backward tile {tile_idx}"))?;
+            accumulate_grads(accumulated_grads, &grads, all_vars)?;
+            let input_grad = match grads.get(seg_input_var.as_tensor()) {
+                Some(grad) => grad.detach(),
+                None => Tensor::zeros(seg_input_tile.dims(), seg_input_tile.dtype(), device)
+                    .context("alloc zero full-attention k/v input grad tile")?,
+            };
+            accumulate_cpu_tensor_slot(
+                &mut attention_input_grad_tiles_cpu[tile_idx],
+                input_grad,
+                &format!("full-attention k/v input grad tile {tile_idx}"),
+            )?;
+            drop(grads);
+            drop(injected);
+            drop(inject_terms);
+            drop(v);
+            drop(k);
+            drop(normed_tile);
+            drop(seg_input_var);
+            synchronize_checkpoint_boundary(device, || {
+                format!("synchronize full-attention k/v prepare tile {tile_idx}")
+            })?;
+        }
+    }
+
+    let mut attention_input_grad_tile_values = Vec::with_capacity(total_tiles);
+    for tile_idx in 0..total_tiles {
+        let tile_start = tile_idx * tile_size;
+        let tile_len = (total_tokens - tile_start).min(tile_size);
+        let tile = match attention_input_grad_tiles_cpu[tile_idx].take() {
+            Some(tile) => tile,
+            None => Tensor::zeros(
+                (1usize, tile_len, seg_input.dim(2)?),
+                seg_input.dtype(),
+                &Device::Cpu,
+            )
+            .with_context(|| format!("alloc zero full-attention input grad tile {tile_idx}"))?,
+        };
+        if tile.dim(1)? != tile_len {
+            anyhow::bail!(
+                "full-attention input grad tile length mismatch at {tile_start}: {} vs {tile_len}",
+                tile.dim(1)?
+            );
+        }
+        attention_input_grad_tile_values.push(tile);
+    }
+    let attention_input_grad_tile_refs: Vec<&Tensor> =
+        attention_input_grad_tile_values.iter().collect();
+    let attention_input_grad_cpu = Tensor::cat(&attention_input_grad_tile_refs, 1)
+        .context("full-attention tiled prepare input grad cat")?
+        .detach();
+    let attention_input_grad = attention_input_grad_cpu
+        .to_device(device)
+        .context("full-attention attention input grad GPU reload")?;
+    let residual_grad_for_passthrough = residual_grad_cpu
+        .to_device(device)
+        .context("full-attention residual passthrough grad GPU reload")?;
+    let residual_passthrough_grad =
+        if residual_grad_for_passthrough.dtype() == attention_input_grad.dtype() {
+            residual_grad_for_passthrough.clone()
+        } else {
+            residual_grad_for_passthrough
+                .to_dtype(attention_input_grad.dtype())
+                .context("full-attention residual passthrough grad dtype conversion")?
+        };
+    let input_grad = (&attention_input_grad + &residual_passthrough_grad)?.detach();
+
+    drop(residual_grad_for_passthrough);
+    drop(residual_passthrough_grad);
+    drop(attention_input_grad);
+    drop(attention_input_grad_cpu);
+    drop(q_grad_tiles_cpu);
+    drop(gate_grad_tiles_cpu);
+    drop(k_grad_tiles_cpu);
+    drop(v_grad_tiles_cpu);
+    drop(attention_input_grad_tile_values);
+    drop(pre_o_grad_cpu);
+    drop(residual_grad_cpu);
+    synchronize_checkpoint_boundary(device, || {
+        format!("synchronize full-attention tiled MLP reverse layer {layer_idx} cleanup")
+    })?;
+    tracing::info!(
+        layer = layer_idx,
+        full_attn_layer_idx,
+        total_tokens,
+        tile_size,
+        "exact full-attention tiled MLP reverse complete"
+    );
+
+    Ok(input_grad)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3000,6 +4012,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         }
     }
 
+    let lora_weights_for_seg = params.as_lora_weights();
     let all_vars = params.all_vars();
     let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
     let mut next_recurrent_grad: Option<Tensor> = None;
@@ -3042,7 +4055,6 @@ fn exact_gdn_single_layer_tiled_reverse(
             stage_started,
         )?;
 
-        let lora_weights_for_seg = params.as_lora_weights();
         let layer_lora = lora_weights_for_seg
             .layers
             .get(layer_idx)
@@ -3084,18 +4096,14 @@ fn exact_gdn_single_layer_tiled_reverse(
             stage_started,
         )?;
 
-        let gated_value = transformer_mlp_gated_hidden(
-            &after_attn_value,
-            layer,
-            model_config,
-            detached_layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse MLP gated value layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?
-        .detach();
+        let gated_value =
+            transformer_mlp_gated_hidden(&after_attn_value, layer, model_config, detached_layer_lora)
+                .with_context(|| {
+                    format!(
+                        "exact tiled GDN reverse MLP gated value layer {layer_idx} tile [{tile_start}, {tile_end})"
+                    )
+                })?
+                .detach();
         stage_started = finish_exact_gdn_reverse_tile_stage(
             device,
             profile_tiles,
@@ -3108,13 +4116,12 @@ fn exact_gdn_single_layer_tiled_reverse(
             stage_started,
         )?;
         let gated_var = Var::from_tensor(&gated_value)?;
-        let down_out =
-            transformer_mlp_down_from_gated(gated_var.as_tensor(), layer, layer_lora)
-                .with_context(|| {
-                    format!(
-                        "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
-                    )
-                })?;
+        let down_out = transformer_mlp_down_from_gated(gated_var.as_tensor(), layer, layer_lora)
+            .with_context(|| {
+                format!(
+                    "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
+                )
+            })?;
         let down_out_f32 = down_out.to_dtype(DType::F32)?;
         let down_scalar = (&down_out_f32 * &tile_grad_out_f32)?
             .sum_all()
@@ -3148,17 +4155,13 @@ fn exact_gdn_single_layer_tiled_reverse(
         drop(gated_value);
 
         let after_attn_var = Var::from_tensor(&after_attn_value)?;
-        let gated_tracked = transformer_mlp_gated_hidden(
-            after_attn_var.as_tensor(),
-            layer,
-            model_config,
-            layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?;
+        let gated_tracked =
+            transformer_mlp_gated_hidden(after_attn_var.as_tensor(), layer, model_config, layer_lora)
+                .with_context(|| {
+                    format!(
+                        "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
+                    )
+                })?;
         let gated_tracked_f32 = gated_tracked.to_dtype(DType::F32)?;
         let grad_gated_f32 = grad_gated.to_dtype(DType::F32)?;
         let gate_scalar = (&gated_tracked_f32 * &grad_gated_f32)?
@@ -3565,107 +4568,129 @@ fn exact_gdn_single_layer_tiled_reverse(
                 "attn_input_norm_backward",
                 stage_started,
             )?;
-        } else {
-            let tile_input_var = Var::from_tensor(&tile_input)?;
-            let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
-            let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
 
-            let mut tile_state = LinearAttentionState::new(model_config, device)?;
-            tile_state.recurrent_states[linear_attn_idx] = recurrent_var.as_tensor().clone();
-            tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+            drop(upstream_after_attn);
+            drop(tile_grad_out_f32);
+            drop(tile_grad_out);
+            drop(tile_input);
 
-            let after_attn = gdn_attention_residual_block(
-                backend,
-                tile_input_var.as_tensor(),
-                layer,
-                model_config,
-                &mut tile_state.recurrent_states[linear_attn_idx],
-                &mut tile_state.conv_states[linear_attn_idx],
-                layer_lora,
-            )
-            .with_context(|| {
-                format!(
-                    "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?;
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attention_forward",
-                stage_started,
-            )?;
-
-            let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
-            let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
-            let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
-                .sum_all()
-                .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
-
-            if let Some(grad) = next_recurrent_grad.as_ref() {
-                let exit_state_f32 =
-                    tile_state.recurrent_states[linear_attn_idx].to_dtype(DType::F32)?;
-                let grad_f32 = grad.to_dtype(DType::F32)?;
-                let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
-                    format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
+            if matches!(device, Device::Metal(_)) {
+                synchronize_checkpoint_boundary(device, || {
+                    format!("synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx}")
                 })?;
-                scalar = (scalar + state_scalar)?;
             }
-            if let Some(grad) = next_conv_grad.as_ref() {
-                let exit_state_f32 =
-                    tile_state.conv_states[linear_attn_idx].to_dtype(DType::F32)?;
-                let grad_f32 = grad.to_dtype(DType::F32)?;
-                let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
-                    format!("exact tiled GDN conv-state injection tile {tile_idx}")
-                })?;
-                scalar = (scalar + state_scalar)?;
+            if profile_tiles {
+                tracing::info!(
+                    layer = layer_idx,
+                    tile = tile_idx + 1,
+                    num_tiles,
+                    tile_start,
+                    tile_end,
+                    elapsed_ms = tile_started.elapsed().as_millis() as u64,
+                    last_stage_elapsed_ms = stage_started.elapsed().as_millis() as u64,
+                    "exact tiled GDN reverse tile complete"
+                );
             }
-
-            let tile_grads = scalar
-                .backward()
-                .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
-            accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attention_backward",
-                stage_started,
-            )?;
-
-            let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
-                Some(grad) => grad.detach(),
-                None => Tensor::zeros((1, tile_len, hidden_size), seg_input.dtype(), device)
-                    .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
-            };
-            input_grad_chunks[tile_idx] = Some(input_grad);
-            next_recurrent_grad = tile_grads
-                .get(recurrent_var.as_tensor())
-                .map(Tensor::detach);
-            next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
-
-            drop(tile_grads);
-            drop(scalar);
-            drop(upstream_after_attn_f32);
-            drop(after_attn_f32);
-            drop(after_attn);
-            drop(tile_state);
-            drop(conv_var);
-            drop(recurrent_var);
-            drop(tile_input_var);
+            continue;
         }
 
+        let tile_input_var = Var::from_tensor(&tile_input)?;
+        let recurrent_var = Var::from_tensor(&recurrent_boundaries[tile_idx])?;
+        let conv_var = Var::from_tensor(&conv_boundaries[tile_idx])?;
+
+        let mut tile_state = LinearAttentionState::new(model_config, device)?;
+        tile_state.recurrent_states[linear_attn_idx] = recurrent_var.as_tensor().clone();
+        tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+
+        let after_attn = gdn_attention_residual_block(
+            backend,
+            tile_input_var.as_tensor(),
+            layer,
+            model_config,
+            &mut tile_state.recurrent_states[linear_attn_idx],
+            &mut tile_state.conv_states[linear_attn_idx],
+            layer_lora,
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "attention_forward",
+            stage_started,
+        )?;
+
+        let after_attn_f32 = after_attn.to_dtype(DType::F32)?;
+        let upstream_after_attn_f32 = upstream_after_attn.to_dtype(DType::F32)?;
+        let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
+            .sum_all()
+            .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
+
+        if let Some(grad) = next_recurrent_grad.as_ref() {
+            let exit_state_f32 =
+                tile_state.recurrent_states[linear_attn_idx].to_dtype(DType::F32)?;
+            let grad_f32 = grad.to_dtype(DType::F32)?;
+            let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
+                format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
+            })?;
+            scalar = (scalar + state_scalar)?;
+        }
+        if let Some(grad) = next_conv_grad.as_ref() {
+            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_dtype(DType::F32)?;
+            let grad_f32 = grad.to_dtype(DType::F32)?;
+            let state_scalar = (&exit_state_f32 * &grad_f32)?
+                .sum_all()
+                .with_context(|| format!("exact tiled GDN conv-state injection tile {tile_idx}"))?;
+            scalar = (scalar + state_scalar)?;
+        }
+
+        let tile_grads = scalar
+            .backward()
+            .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
+        accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
+        stage_started = finish_exact_gdn_reverse_tile_stage(
+            device,
+            profile_tiles,
+            layer_idx,
+            tile_idx,
+            num_tiles,
+            tile_start,
+            tile_end,
+            "attention_backward",
+            stage_started,
+        )?;
+
+        let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
+            Some(grad) => grad.detach(),
+            None => Tensor::zeros((1, tile_len, hidden_size), seg_input.dtype(), device)
+                .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
+        };
+        input_grad_chunks[tile_idx] = Some(input_grad);
+        next_recurrent_grad = tile_grads
+            .get(recurrent_var.as_tensor())
+            .map(Tensor::detach);
+        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
+
+        drop(tile_grads);
+        drop(scalar);
+        drop(upstream_after_attn_f32);
+        drop(after_attn_f32);
+        drop(after_attn);
         drop(upstream_after_attn);
         drop(tile_grad_out_f32);
         drop(tile_grad_out);
+        drop(tile_state);
+        drop(conv_var);
+        drop(recurrent_var);
+        drop(tile_input_var);
         drop(tile_input);
 
         if matches!(device, Device::Metal(_)) {
@@ -4400,7 +5425,7 @@ fn checkpointed_forward_backward(
     let lora_detached = lora_weights_detached(params);
     let resident_activation = backend.supports_resident_activation();
     let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
-    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries();
+    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
     let profile_checkpoint_segments = profile_checkpoint_segments();
 
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
@@ -4635,6 +5660,7 @@ fn checkpointed_forward_backward(
     )
     .context("analytic SFT tail gradient")?
     .detach();
+    upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
     drop(loss);
     drop(final_hidden);
     synchronize_checkpoint_boundary(device, || {
@@ -4692,15 +5718,16 @@ fn checkpointed_forward_backward(
             boundary_states[seg_idx] = Tensor::zeros((1usize,), DType::BF16, device)
                 .context("phase3.2: alloc boundary stub")?;
         }
+        let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
 
         if let Some(tile_size) =
             exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end)
         {
-            upstream_grad = exact_gdn_single_layer_tiled_reverse(
+            let next_upstream_grad = exact_gdn_single_layer_tiled_reverse(
                 backend,
                 seg_start,
                 &seg_input,
-                &upstream_grad,
+                &upstream_grad_for_seg,
                 weights,
                 model_config,
                 &positions,
@@ -4716,6 +5743,9 @@ fn checkpointed_forward_backward(
                 )
             })?;
             drop(seg_input);
+            drop(upstream_grad_for_seg);
+            upstream_grad =
+                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
             synchronize_checkpoint_boundary(device, || {
                 format!("synchronize checkpointed tiled GDN reverse segment {seg_idx} cleanup")
             })?;
@@ -4726,6 +5756,55 @@ fn checkpointed_forward_backward(
                 end_layer = seg_end,
                 tile_size,
                 "checkpointed tiled GDN reverse segment complete"
+            );
+            continue;
+        }
+
+        if let Some(tile_size) =
+            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end)
+        {
+            let full_attn_layer_idx = (0..seg_start)
+                .filter(|&idx| {
+                    matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
+                })
+                .count();
+            let next_upstream_grad = full_attention_single_layer_tiled_mlp_reverse(
+                backend,
+                seg_start,
+                full_attn_layer_idx,
+                &seg_input,
+                &upstream_grad_for_seg,
+                weights,
+                model_config,
+                &positions,
+                params,
+                &lora_detached,
+                tile_size,
+                device,
+                &mut accumulated_grads,
+                &all_vars,
+            )
+            .with_context(|| {
+                format!(
+                    "exact full-attention tiled MLP reverse segment {seg_idx} layer {seg_start} tile_size={tile_size}"
+                )
+            })?;
+            drop(seg_input);
+            drop(upstream_grad_for_seg);
+            upstream_grad =
+                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
+            synchronize_checkpoint_boundary(device, || {
+                format!(
+                    "synchronize checkpointed full-attention tiled MLP reverse segment {seg_idx} cleanup"
+                )
+            })?;
+            tracing::info!(
+                segment = seg_idx + 1,
+                num_segments,
+                start_layer = seg_start,
+                end_layer = seg_end,
+                tile_size,
+                "checkpointed full-attention tiled MLP reverse segment complete"
             );
             continue;
         }
@@ -4747,7 +5826,7 @@ fn checkpointed_forward_backward(
         )?;
 
         let seg_output_f32 = seg_output.to_dtype(DType::F32)?;
-        let upstream_f32 = upstream_grad.to_dtype(DType::F32)?;
+        let upstream_f32 = upstream_grad_for_seg.to_dtype(DType::F32)?;
         let injected = (&seg_output_f32 * &upstream_f32)?
             .sum_all()
             .with_context(|| format!("checkpointed gradient injection for segment {seg_idx}"))?;
@@ -4766,6 +5845,7 @@ fn checkpointed_forward_backward(
                 })?
                 .clone()
                 .detach();
+            upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
         }
         drop(grads);
         drop(injected);
@@ -4774,6 +5854,7 @@ fn checkpointed_forward_backward(
         drop(seg_output);
         drop(seg_input_var);
         drop(seg_input);
+        drop(upstream_grad_for_seg);
         synchronize_checkpoint_boundary(device, || {
             format!("synchronize checkpointed reverse segment {seg_idx} cleanup")
         })?;
