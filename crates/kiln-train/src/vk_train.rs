@@ -21,19 +21,18 @@
 //!   for each lora pair: VkTensor readback → direct safetensors save
 //! ```
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
-    vk_count_gdn_layers, vk_grpo_reference_log_probs_from_prefix,
+    VkGrpoReferencePrefix, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights, vk_count_gdn_layers, vk_grpo_reference_log_probs_from_prefix,
     vk_grpo_reference_log_probs_full_sequence, vk_grpo_reference_prefill_prompt,
     vk_linear_with_lora, vk_model_forward_final_norm_with_state,
     vk_model_forward_loss_masked_with_state, vk_model_forward_loss_with_state, vk_step_backward,
-    VkGrpoReferencePrefix, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights,
 };
 use kiln_vulkan_kernel::kernels::{dispatch_adamw_step_f32, dispatch_sgd_step_f32};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
@@ -43,7 +42,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
+use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
 use crate::{GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
 
 struct TokenizedSftExample {
@@ -197,6 +196,8 @@ fn ensure_grpo_completion_scoring_layout(prompt_len: usize, active_rows: &[u32])
 }
 
 const DEFAULT_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS: usize = 8;
+const LONG_PROMPT_REFERENCE_MIN_TOKENS: usize = 4096;
+const LONG_PROMPT_PREFIX_REFERENCE_MAX_DECODE_TOKENS: usize = 256;
 
 fn grpo_prefix_reference_max_decode_tokens() -> usize {
     std::env::var("KILN_VK_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS")
@@ -205,11 +206,34 @@ fn grpo_prefix_reference_max_decode_tokens() -> usize {
         .unwrap_or(DEFAULT_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS)
 }
 
-fn grpo_use_prefix_reference(active_label_count: usize) -> bool {
-    active_label_count.saturating_sub(1) <= grpo_prefix_reference_max_decode_tokens()
+fn grpo_long_prompt_prefix_reference_max_decode_tokens() -> usize {
+    std::env::var("KILN_VK_GRPO_LONG_PROMPT_PREFIX_REFERENCE_MAX_DECODE_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(LONG_PROMPT_PREFIX_REFERENCE_MAX_DECODE_TOKENS)
+}
+
+fn grpo_use_prefix_reference(
+    prompt_len: usize,
+    active_label_count: usize,
+    completions_in_group: usize,
+) -> bool {
+    let decode_steps = active_label_count.saturating_sub(1);
+    if decode_steps <= grpo_prefix_reference_max_decode_tokens() {
+        return true;
+    }
+
+    // Full-sequence reference scoring replays the whole prompt once per
+    // completion. For long-prompt GRPO groups, prefer a shared prompt prefix
+    // state for moderate completion tails so the reference pass does not
+    // duplicate tens of thousands of prompt tokens across completions.
+    prompt_len >= LONG_PROMPT_REFERENCE_MIN_TOKENS
+        && completions_in_group > 1
+        && decode_steps <= grpo_long_prompt_prefix_reference_max_decode_tokens()
 }
 
 fn grpo_group_needs_prefix_reference(group: &TokenizedVkGrpoGroup) -> bool {
+    let completions_in_group = group.completions.len();
     group.completions.iter().any(|completion| {
         let active_labels = completion
             .completion_mask
@@ -218,8 +242,28 @@ fn grpo_group_needs_prefix_reference(group: &TokenizedVkGrpoGroup) -> bool {
             .iter()
             .filter(|&&active| active)
             .count();
-        grpo_use_prefix_reference(active_labels)
+        grpo_use_prefix_reference(group.prompt_ids.len(), active_labels, completions_in_group)
     })
+}
+
+#[cfg(test)]
+mod reference_path_tests {
+    use super::*;
+
+    #[test]
+    fn short_completion_tail_uses_prefix_reference() {
+        assert!(grpo_use_prefix_reference(128, 9, 1));
+    }
+
+    #[test]
+    fn long_prompt_group_keeps_moderate_tail_on_prefix_reference() {
+        assert!(grpo_use_prefix_reference(22_700, 22, 2));
+    }
+
+    #[test]
+    fn long_completion_tail_uses_full_sequence_reference() {
+        assert!(!grpo_use_prefix_reference(22_700, 300, 2));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -231,8 +275,10 @@ fn vk_grpo_reference_log_probs_dynamic(
     labels: &[u32],
     model_config: &ModelConfig,
     num_gdn_layers: usize,
+    prompt_len: usize,
+    completions_in_group: usize,
 ) -> Result<(VkTensor, &'static str)> {
-    if grpo_use_prefix_reference(labels.len()) {
+    if grpo_use_prefix_reference(prompt_len, labels.len(), completions_in_group) {
         let prefix = ref_prefix.ok_or_else(|| {
             anyhow::anyhow!("vk-native GRPO prefix reference path selected without prompt prefix")
         })?;
@@ -1366,8 +1412,9 @@ pub fn vk_checkpointed_train_step(
     num_segments: usize,
 ) -> Result<f32> {
     use kiln_model::vk_forward::{
-        vk_compute_rope_tables, vk_full_attention_layer_with_rope, VkLayerWeights,
+        VkLayerWeights, vk_compute_rope_tables, vk_full_attention_layer_with_rope,
     };
+    use kiln_vulkan_kernel::VkTensor;
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
     use kiln_vulkan_kernel::vk_ops::embedding::{
@@ -1376,7 +1423,6 @@ pub fn vk_checkpointed_train_step(
     use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_flce_loss};
     use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
-    use kiln_vulkan_kernel::VkTensor;
 
     // GDN unsupported in this path for v1 (would need state snapshot per segment)
     for layer in &weights.layers {
@@ -3007,6 +3053,8 @@ pub fn vk_native_grpo_train(
                 &labels,
                 model_config,
                 num_gdn_layers,
+                tgroup.prompt_ids.len(),
+                tgroup.completions.len(),
             )
             .with_context(|| {
                 format!(
@@ -3314,7 +3362,11 @@ pub fn vk_native_grpo_train_jsonl(
                 optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
-                reference_path = if grpo_use_prefix_reference(labels.len()) {
+                reference_path = if grpo_use_prefix_reference(
+                    tgroup.prompt_ids.len(),
+                    labels.len(),
+                    tgroup.completions.len(),
+                ) {
                     "prefix_decode"
                 } else {
                     "full_sequence"
@@ -3330,6 +3382,8 @@ pub fn vk_native_grpo_train_jsonl(
                 &labels,
                 model_config,
                 num_gdn_layers,
+                tgroup.prompt_ids.len(),
+                tgroup.completions.len(),
             )
             .with_context(|| {
                 format!(
@@ -3658,11 +3712,7 @@ pub fn vk_native_sft_train(
         None
     } else {
         let segs = vk_recommended_checkpoint_segments(model_config.num_layers);
-        if segs > 1 {
-            Some(segs)
-        } else {
-            None
-        }
+        if segs > 1 { Some(segs) } else { None }
     };
     if let Some(segs) = ckpt_segments {
         tracing::info!(
