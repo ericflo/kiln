@@ -401,7 +401,7 @@ fn spawn_backend_prewarm(state: AppState) {
 
     if vk_native_training_enabled(is_vulkan) {
         tracing::info!(
-            "skipping background inference prewarm because Vulkan-native SFT is enabled"
+            "skipping background inference prewarm because Vulkan-native training is enabled"
         );
         prewarm_complete.store(true, Ordering::Release);
         return;

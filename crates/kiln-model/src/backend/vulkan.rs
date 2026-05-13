@@ -1,12 +1,11 @@
 //! Vulkan backend: FlashAttention-2 and Gated DeltaNet fused kernels via Vulkan.
 //!
 //! candle-core 0.10.x has no native Vulkan device, so this backend manages
-//! its own `vk::Device` and copies tensor data through the CPU path at
-//! kernel boundaries. The model's main forward pass (matmuls, MLP, lm_head)
-//! runs on CPU; only GDN-specific kernel calls reach Vulkan. This means
-//! each kernel call pays a CPU→GPU→CPU roundtrip, which is the primary
-//! bottleneck for this backend. A native Vulkan tensor storage layer is needed
-//! to keep tensors resident on GPU between kernel calls.
+//! its own `vk::Device`. Normal inference still exposes a candle `Device::Cpu`
+//! surface and may fall back to portable candle ops when a Vulkan backend method
+//! declines a call. Vulkan-native SFT/GRPO training use the separate `VkTensor`
+//! stack to keep weights, activations, loss, backward, and optimizer updates
+//! resident on Vulkan buffers.
 //!
 //! `Ok(None)` responses route the caller to the portable candle path.
 
@@ -617,7 +616,7 @@ impl BackendRuntime for VulkanBackend {
             lora_delta_training: "VulkanLoraOp CustomOp3 with registry-resident A/B",
             sgd_step: "Vulkan in-place registry update when operands are resident",
             adamw_step: "Vulkan in-place registry update when operands are resident",
-            native_training: "vk_native_sft_train behind KILN_VK_NATIVE_TRAINING",
+            native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
         }
     }
 
