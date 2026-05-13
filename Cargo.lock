@@ -1747,6 +1747,7 @@ dependencies = [
  "kiln-vulkan-kernel",
  "minijinja",
  "minijinja-contrib",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

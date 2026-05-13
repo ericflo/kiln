@@ -1,4 +1,5 @@
 use crate::token::TokenId;
+use rayon::prelude::*;
 use thiserror::Error;
 use tokenizers::Tokenizer;
 
@@ -150,6 +151,19 @@ impl KilnTokenizer {
     /// `chat_template` via `with_chat_template` for production use.
     pub fn apply_chat_template(&self, messages: &[ChatMessage]) -> Result<String, TokenizerError> {
         self.apply_chat_template_with_tools(messages, None)
+    }
+
+    /// Render many independent chat conversations with the exact same
+    /// semantics as [`Self::apply_chat_template`], using Rayon to avoid
+    /// serializing large GRPO completion batches on one CPU core.
+    pub fn apply_chat_template_batch(
+        &self,
+        message_batches: &[Vec<ChatMessage>],
+    ) -> Result<Vec<String>, TokenizerError> {
+        message_batches
+            .par_iter()
+            .map(|messages| self.apply_chat_template(messages))
+            .collect()
     }
 
     /// Same as [`apply_chat_template`] but also threads OpenAI-style tool/function
@@ -479,6 +493,36 @@ mod tests {
         let scalar = texts
             .iter()
             .map(|text| tok.encode(text).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(batched, scalar);
+    }
+
+    #[test]
+    fn apply_chat_template_batch_matches_scalar_render() {
+        let tok = minimal_tokenizer();
+        let batches = vec![
+            vec![ChatMessage {
+                role: "user".to_string(),
+                content: "A".to_string(),
+                ..Default::default()
+            }],
+            vec![
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: "A".to_string(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "assistant".to_string(),
+                    content: "B".to_string(),
+                    ..Default::default()
+                },
+            ],
+        ];
+        let batched = tok.apply_chat_template_batch(&batches).unwrap();
+        let scalar = batches
+            .iter()
+            .map(|messages| tok.apply_chat_template(messages).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(batched, scalar);
     }

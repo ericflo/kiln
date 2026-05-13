@@ -1432,7 +1432,7 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut raw_rewards = Vec::with_capacity(group.completions.len());
-    let mut full_texts = Vec::with_capacity(group.completions.len());
+    let mut full_message_batches = Vec::with_capacity(group.completions.len());
 
     for scored in &group.completions {
         // Build full conversation: prompt + assistant completion
@@ -1443,13 +1443,13 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
             ..Default::default()
         });
 
-        let full_text = tokenizer
-            .apply_chat_template(&full_messages)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        full_texts.push(full_text);
+        full_message_batches.push(full_messages);
         raw_rewards.push(scored.reward);
     }
 
+    let full_texts = tokenizer
+        .apply_chat_template_batch(&full_message_batches)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let full_id_batches = tokenizer
         .encode_batch(&full_texts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;

@@ -88,7 +88,7 @@ fn tokenize_vk_grpo_group(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let mut rewards = Vec::with_capacity(group.completions.len());
-    let mut full_texts = Vec::with_capacity(group.completions.len());
+    let mut full_message_batches = Vec::with_capacity(group.completions.len());
     for scored in &group.completions {
         let mut full_messages = prompt_messages.clone();
         full_messages.push(kiln_core::tokenizer::ChatMessage {
@@ -96,13 +96,13 @@ fn tokenize_vk_grpo_group(
             content: scored.text.clone(),
             ..Default::default()
         });
-        let full_text = tokenizer
-            .apply_chat_template(&full_messages)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        full_texts.push(full_text);
+        full_message_batches.push(full_messages);
         rewards.push(scored.reward);
     }
 
+    let full_texts = tokenizer
+        .apply_chat_template_batch(&full_message_batches)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let full_id_batches = tokenizer
         .encode_batch(&full_texts)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
