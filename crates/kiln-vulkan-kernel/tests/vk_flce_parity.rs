@@ -1,13 +1,13 @@
 //! FLCE forward + backward parity vs naive CPU cross-entropy.
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, Var};
-use kiln_vulkan_kernel::VulkanDevice;
+use candle_core::{DType, Device, Tensor, Var};
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
     flce_recommended_chunk_len_from_limits, vk_flce_loss, vk_grpo_loss, vk_selected_log_probs,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
+use kiln_vulkan_kernel::VulkanDevice;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -66,6 +66,21 @@ fn upload_param_f32(
 fn upload_f32(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?;
     VkTensor::from_candle(&t, Arc::clone(dev))
+}
+
+fn upload_bf16(dev: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
+    let t = Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?.to_dtype(DType::BF16)?;
+    VkTensor::from_candle(&t, Arc::clone(dev))
+}
+
+fn bf16_rounded(data: &[f32], shape: &[usize]) -> Result<Vec<f32>> {
+    Ok(
+        Tensor::from_vec(data.to_vec(), shape.to_vec(), &Device::Cpu)?
+            .to_dtype(DType::BF16)?
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?,
+    )
 }
 
 /// CPU cross-entropy reference: loss = mean_i (-log(softmax(logit_i)[label_i]))
@@ -193,7 +208,7 @@ fn candle_selected_log_probs_and_grpo(
     hidden_dim: usize,
     vocab: usize,
 ) -> Result<(Vec<f32>, f32, Vec<f32>)> {
-    use candle_core::{D, DType};
+    use candle_core::{DType, D};
 
     let dev = Device::Cpu;
     let hidden_var = Var::from_tensor(&Tensor::from_vec(
@@ -386,5 +401,82 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
         candle_mad < 1e-4,
         "grpo d_hidden vs candle mad {candle_mad}"
     );
+    Ok(())
+}
+
+#[test]
+fn vk_selected_logprob_and_grpo_parity_bf16_lm_head() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let num_active = 4;
+    let hidden_dim = 8;
+    let vocab = 18;
+    let chunk = 5;
+    let h_data: Vec<f32> = (0..(num_active * hidden_dim))
+        .map(|i| ((i as f32) * 0.09).sin() * 0.2)
+        .collect();
+    let w_f32: Vec<f32> = (0..(vocab * hidden_dim))
+        .map(|i| ((i as f32) * 0.019).cos() * 0.35)
+        .collect();
+    let w_data = bf16_rounded(&w_f32, &[vocab, hidden_dim])?;
+    let labels: Vec<u32> = vec![3, 12, 0, 17];
+    let ref_log_probs = vec![-2.8_f32, -3.1, -2.3, -3.4];
+    let advantage = 0.7_f32;
+    let clip_epsilon = 0.2_f32;
+    let kl_coeff = 0.05_f32;
+
+    let (_hv, hidden) = upload_param_f32(&dev, &h_data, &[num_active, hidden_dim])?;
+    let weight = upload_bf16(&dev, &w_f32, &[vocab, hidden_dim])?;
+    let ref_vk = upload_f32(&dev, &ref_log_probs, &[num_active])?;
+
+    let selected = vk_selected_log_probs(&hidden, &weight, &labels, chunk)?.to_vec_f32()?;
+    let loss = vk_grpo_loss(
+        &hidden,
+        &weight,
+        &labels,
+        &ref_vk,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        chunk,
+    )?;
+
+    let (exp_log_probs, exp_loss, exp_dh) = cpu_selected_log_probs_and_grpo(
+        &h_data,
+        &w_data,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        num_active,
+        hidden_dim,
+        vocab,
+    );
+    let logp_mad = selected
+        .iter()
+        .zip(exp_log_probs.iter())
+        .map(|(g, e)| (g - e).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(logp_mad < 1e-3, "BF16 selected logprob mad {logp_mad}");
+
+    let got_loss = loss.to_vec_f32()?[0];
+    assert!(
+        (got_loss - exp_loss).abs() < 1e-3,
+        "BF16 grpo loss {} vs {}",
+        got_loss,
+        exp_loss
+    );
+
+    let grads = vk_backward(&loss)?;
+    let grad_h = grads
+        .get(hidden.param_id().unwrap())
+        .expect("d hidden")
+        .to_vec_f32()?;
+    let mad = grad_h
+        .iter()
+        .zip(exp_dh.iter())
+        .map(|(g, e)| (g - e).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(mad < 1e-3, "BF16 grpo d_hidden mad {mad}");
     Ok(())
 }

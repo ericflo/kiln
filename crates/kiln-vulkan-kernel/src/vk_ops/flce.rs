@@ -25,11 +25,13 @@
 
 use crate::vk_ops::dispatch_simple;
 use crate::vk_ops::matmul::{vk_matmul, vk_matmul_no_grad};
+use crate::vk_ops::matmul_bf16w::{vk_matmul_bf16w_bwd_no_grad, vk_matmul_bf16w_no_grad};
 use crate::vk_ops::reduce::vk_mean_all;
 use crate::vk_ops::shape::vk_transpose_2d_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use ash::vk;
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
@@ -105,9 +107,14 @@ fn run_flce_forward(
         // block. Avoids a full `[hidden_dim, vocab]` F32 LM-head
         // transpose, which costs multiple GiB at Qwen3.5 vocab size.
         let w_chunk = extract_weight_chunk_rows(weight, chunk_off, cur_len)?;
-        let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
-        // logits_chunk = hidden @ chunk_w_t  → [num_active, cur_len]
-        let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
+        // logits_chunk = hidden @ w_chunk.T  → [num_active, cur_len]
+        let logits_chunk = match w_chunk.dtype() {
+            VkDType::F32 => {
+                let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
+                vk_matmul_no_grad(hidden, &chunk_w_t)?
+            }
+            VkDType::Bf16 => vk_matmul_bf16w_no_grad(hidden, &w_chunk)?,
+        };
         // chunk stats
         let chunk_max = alloc_f32(device, num_active)?;
         let chunk_sumexp = alloc_f32(device, num_active)?;
@@ -228,8 +235,13 @@ impl VkBackwardOp for FlceBackward {
             let cur_len = self.chunk_len.min(self.vocab - chunk_off);
             // Recompute logits_chunk
             let w_chunk = extract_weight_chunk_rows(&self.weight, chunk_off, cur_len)?;
-            let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
-            let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
+            let logits_chunk = match w_chunk.dtype() {
+                VkDType::F32 => {
+                    let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
+                    vk_matmul_no_grad(hidden, &chunk_w_t)?
+                }
+                VkDType::Bf16 => vk_matmul_bf16w_no_grad(hidden, &w_chunk)?,
+            };
             // Convert logits_chunk in-place to grad_logits_chunk
             let push = [
                 self.num_active as u32,
@@ -253,7 +265,10 @@ impl VkBackwardOp for FlceBackward {
             // d hidden_chunk = grad_logits_chunk @ W_chunk
             //  shape: [num_active, cur_len] @ [cur_len, hidden_dim]
             //  → W_chunk is contiguous in original (vocab-major) layout.
-            let dh_chunk = vk_matmul_no_grad(&logits_chunk, &w_chunk)?;
+            let dh_chunk = match w_chunk.dtype() {
+                VkDType::F32 => vk_matmul_no_grad(&logits_chunk, &w_chunk)?,
+                VkDType::Bf16 => vk_matmul_bf16w_bwd_no_grad(&logits_chunk, &w_chunk)?,
+            };
             // accumulate into grad_hidden
             let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
             let push = [
@@ -363,8 +378,13 @@ impl VkBackwardOp for GrpoBackward {
         while chunk_off < self.vocab {
             let cur_len = self.chunk_len.min(self.vocab - chunk_off);
             let w_chunk = extract_weight_chunk_rows(&self.weight, chunk_off, cur_len)?;
-            let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
-            let logits_chunk = vk_matmul_no_grad(hidden, &chunk_w_t)?;
+            let logits_chunk = match w_chunk.dtype() {
+                VkDType::F32 => {
+                    let chunk_w_t = vk_transpose_2d_no_grad(&w_chunk)?;
+                    vk_matmul_no_grad(hidden, &chunk_w_t)?
+                }
+                VkDType::Bf16 => vk_matmul_bf16w_no_grad(hidden, &w_chunk)?,
+            };
 
             let push = [
                 self.num_active as u32,
@@ -387,7 +407,10 @@ impl VkBackwardOp for GrpoBackward {
                 workgroups,
             )?;
 
-            let dh_chunk = vk_matmul_no_grad(&logits_chunk, &w_chunk)?;
+            let dh_chunk = match w_chunk.dtype() {
+                VkDType::F32 => vk_matmul_no_grad(&logits_chunk, &w_chunk)?,
+                VkDType::Bf16 => vk_matmul_bf16w_bwd_no_grad(&logits_chunk, &w_chunk)?,
+            };
             let workgroups = (((self.num_active * self.hidden_dim) + 255) / 256) as u32;
             let push = [
                 (self.num_active * self.hidden_dim) as u32,
@@ -450,6 +473,45 @@ fn extract_weight_chunk_rows(
     // vocab=248K × hidden=2560 × 4 bytes).
     let hidden_dim = weight.shape()[1];
     let vocab = weight.shape()[0];
+    if weight.dtype() == VkDType::Bf16 {
+        let elem_size = weight.dtype().byte_size();
+        let byte_offset = chunk_off
+            .checked_mul(hidden_dim)
+            .and_then(|n| n.checked_mul(elem_size))
+            .context("FLCE BF16 weight chunk byte offset overflow")?;
+        let byte_len = cur_len
+            .checked_mul(hidden_dim)
+            .and_then(|n| n.checked_mul(elem_size))
+            .context("FLCE BF16 weight chunk byte length overflow")?;
+        anyhow::ensure!(
+            (byte_offset as u64).saturating_add(byte_len as u64) <= weight.buffer().size(),
+            "FLCE BF16 weight chunk byte range {}..{} exceeds buffer size {}",
+            byte_offset,
+            byte_offset + byte_len,
+            weight.buffer().size()
+        );
+        let out = VulkanBuffer::create_device_local(
+            weight.device().device(),
+            weight.device().device_local_mem_type(),
+            byte_len.max(4) as u64,
+        )
+        .context("FLCE BF16 weight chunk allocation")?;
+        copy_buffer_region(
+            weight.device(),
+            weight.buffer(),
+            &out,
+            byte_offset as u64,
+            0,
+            byte_len as u64,
+            "FLCE BF16 LM-head chunk copy",
+        )?;
+        return Ok(VkTensor::from_buffer(
+            Arc::new(out),
+            vec![cur_len, hidden_dim],
+            VkDType::Bf16,
+            Arc::clone(weight.device()),
+        ));
+    }
     let flat = crate::vk_ops::shape::vk_reshape(weight, &[1, vocab * hidden_dim])?;
     let sliced = crate::vk_ops::narrow::vk_narrow_lastdim_no_grad(
         &flat,
@@ -457,6 +519,54 @@ fn extract_weight_chunk_rows(
         cur_len * hidden_dim,
     )?;
     crate::vk_ops::shape::vk_reshape(&sliced, &[cur_len, hidden_dim])
+}
+
+fn copy_buffer_region(
+    device: &VulkanDevice,
+    src: &VulkanBuffer,
+    dst: &VulkanBuffer,
+    src_offset: u64,
+    dst_offset: u64,
+    size: u64,
+    label: &str,
+) -> Result<()> {
+    let command_pool = device.transient_command_pool()?;
+    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        .command_pool(*command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1)
+        .build();
+    let command_buffers = unsafe { device.device().allocate_command_buffers(&alloc_info) }
+        .with_context(|| format!("{label}: allocate command buffer"))?;
+    let cmd = command_buffers[0];
+    let begin_info = vk::CommandBufferBeginInfo::builder()
+        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+        .build();
+    unsafe {
+        device
+            .device()
+            .begin_command_buffer(cmd, &begin_info)
+            .with_context(|| format!("{label}: begin command buffer"))?;
+        let copy = vk::BufferCopy::builder()
+            .src_offset(src_offset)
+            .dst_offset(dst_offset)
+            .size(size)
+            .build();
+        device
+            .device()
+            .cmd_copy_buffer(cmd, src.handle(), dst.handle(), &[copy]);
+        device
+            .device()
+            .end_command_buffer(cmd)
+            .with_context(|| format!("{label}: end command buffer"))?;
+    }
+    let submit = device.submit_and_wait(cmd, label);
+    unsafe {
+        device
+            .device()
+            .free_command_buffers(*command_pool, &command_buffers);
+    }
+    submit
 }
 
 /// Conservative fallback FLCE vocab-chunk length for legacy callers that
@@ -578,8 +688,8 @@ fn validate_lm_head_inputs(
         "vk lm-head loss/logprob: hidden and weight must be rank-2"
     );
     anyhow::ensure!(
-        hidden.dtype() == VkDType::F32 && weight.dtype() == VkDType::F32,
-        "vk lm-head loss/logprob: F32-only"
+        hidden.dtype() == VkDType::F32 && matches!(weight.dtype(), VkDType::F32 | VkDType::Bf16),
+        "vk lm-head loss/logprob: hidden must be F32 and weight must be F32 or BF16"
     );
     let num_active = hidden.shape()[0];
     let hidden_dim = hidden.shape()[1];

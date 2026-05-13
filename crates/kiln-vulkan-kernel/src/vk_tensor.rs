@@ -13,10 +13,10 @@
 
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor, TensorId};
+use candle_core::{CpuStorage, DType, Device, Storage, Tensor, TensorId};
 use half::bf16;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Element type of a `VkTensor`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -237,6 +237,25 @@ impl VkTensor {
     /// strided views are materialized first.
     pub fn from_candle(t: &Tensor, device: Arc<VulkanDevice>) -> Result<Self> {
         let dtype = VkDType::from_candle(t.dtype())?;
+        if let Some((bytes_vec, shape)) = contiguous_cpu_tensor_bytes(t, dtype)? {
+            let buffer = VulkanBuffer::create_device_local(
+                device.device(),
+                device.device_local_mem_type(),
+                bytes_vec.len().max(1) as u64,
+            )
+            .context("VkTensor::from_candle: device-local buffer")?;
+            VulkanBuffer::upload_data(
+                device.device(),
+                device.host_visible_mem_type(),
+                device.queue(),
+                device.queue_family_index(),
+                &buffer,
+                &bytes_vec,
+            )
+            .context("VkTensor::from_candle: upload")?;
+            return Ok(Self::from_buffer(Arc::new(buffer), shape, dtype, device));
+        }
+
         let t = t
             .contiguous()
             .context("VkTensor::from_candle: contiguous")?;
@@ -372,6 +391,47 @@ impl VkTensor {
                 Ok(data)
             }
         }
+    }
+}
+
+fn contiguous_cpu_tensor_bytes(
+    tensor: &Tensor,
+    dtype: VkDType,
+) -> Result<Option<(Vec<u8>, Vec<usize>)>> {
+    let (storage, layout) = tensor.storage_and_layout();
+    let Some((start, end)) = layout.contiguous_offsets() else {
+        return Ok(None);
+    };
+    let shape = layout.shape().dims().to_vec();
+    match (&*storage, dtype) {
+        (Storage::Cpu(CpuStorage::F32(data)), VkDType::F32) => {
+            anyhow::ensure!(
+                end <= data.len(),
+                "VkTensor::from_candle: f32 CPU storage range {start}..{end} exceeds len {}",
+                data.len()
+            );
+            Ok(Some((
+                bytemuck::cast_slice(&data[start..end]).to_vec(),
+                shape,
+            )))
+        }
+        (Storage::Cpu(CpuStorage::BF16(data)), VkDType::Bf16) => {
+            anyhow::ensure!(
+                end <= data.len(),
+                "VkTensor::from_candle: bf16 CPU storage range {start}..{end} exceeds len {}",
+                data.len()
+            );
+            let slice = &data[start..end];
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    slice.as_ptr().cast::<u8>(),
+                    std::mem::size_of_val(slice),
+                )
+                .to_vec()
+            };
+            Ok(Some((bytes, shape)))
+        }
+        _ => Ok(None),
     }
 }
 

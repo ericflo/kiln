@@ -21,10 +21,10 @@
 
 #![cfg(feature = "vulkan")]
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId, Var};
 use kiln_core::config::ModelConfig;
-use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
+use kiln_vulkan_kernel::vk_autograd::{vk_backward, VkGradStore};
 use kiln_vulkan_kernel::vk_ops::attention::vk_flash_sdpa_prefill_flat;
 use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_mul};
 use kiln_vulkan_kernel::vk_ops::embedding::{
@@ -1059,10 +1059,11 @@ impl VkModelWeights {
         // Norm weights must be F32 (vk_rmsnorm requirement).
         let final_norm_weight =
             vk_from_candle_as_f32(&weights.final_norm, device).context("final_norm")?;
-        // lm_head: vk_flce_loss currently requires F32 weight. Cast on
-        // upload (~2.5 GB for Qwen3.5-4B vocab=248K × hidden=2560).
-        // Worth the memory for v1; a BF16 FLCE variant is a follow-up.
-        let lm_head = vk_from_candle_as_f32(&embed_source, device).context("lm_head (tied)")?;
+        // lm_head: keep the tied embedding table in its native dtype.
+        // Vulkan FLCE/GRPO handles BF16 weights directly; forcing this
+        // to F32 would spend multiple GiB and a long CPU BF16->F32
+        // conversion before native training can dispatch real GPU work.
+        let lm_head = vk_from_candle_typed(&embed_source, device).context("lm_head (tied)")?;
         let eps = model_config.rms_norm_eps as f32;
 
         let mut layers = Vec::with_capacity(weights.layers.len());

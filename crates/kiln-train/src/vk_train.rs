@@ -21,16 +21,16 @@
 //!   for each lora pair: VkTensor readback → direct safetensors save
 //! ```
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use candle_core::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
-    VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
     vk_count_gdn_layers, vk_linear_with_lora, vk_model_forward_final_norm_with_state,
     vk_model_forward_loss_masked_with_state, vk_model_forward_loss_with_state, vk_step_backward,
+    VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
 };
 use kiln_vulkan_kernel::kernels::{dispatch_adamw_step_f32, dispatch_sgd_step_f32};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
@@ -40,7 +40,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
+use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
 use crate::{GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
 
 struct TokenizedSftExample {
@@ -1244,9 +1244,8 @@ pub fn vk_checkpointed_train_step(
     num_segments: usize,
 ) -> Result<f32> {
     use kiln_model::vk_forward::{
-        VkLayerWeights, vk_compute_rope_tables, vk_full_attention_layer_with_rope,
+        vk_compute_rope_tables, vk_full_attention_layer_with_rope, VkLayerWeights,
     };
-    use kiln_vulkan_kernel::VkTensor;
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
     use kiln_vulkan_kernel::vk_ops::embedding::{
@@ -1255,6 +1254,7 @@ pub fn vk_checkpointed_train_step(
     use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_flce_loss};
     use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
+    use kiln_vulkan_kernel::VkTensor;
 
     // GDN unsupported in this path for v1 (would need state snapshot per segment)
     for layer in &weights.layers {
@@ -2815,8 +2815,14 @@ pub fn vk_native_grpo_train(
             .unwrap_or(0x6752_504f)
     });
 
+    let upload_start = std::time::Instant::now();
+    tracing::info!("uploading frozen model weights into vk-native GRPO tensors");
     let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
         .context("vk_native_grpo_train: VkModelWeights::from_gpu_weights")?;
+    tracing::info!(
+        elapsed_ms = upload_start.elapsed().as_millis() as u64,
+        "vk-native GRPO frozen model weights ready"
+    );
     let lora_layers = vk_init_lora_layers(
         &vk_device,
         &vk_weights,
@@ -3015,8 +3021,14 @@ pub fn vk_native_grpo_train_jsonl(
             .unwrap_or(0x6752_504f)
     });
 
+    let upload_start = std::time::Instant::now();
+    tracing::info!("uploading frozen model weights into streamed vk-native GRPO tensors");
     let vk_weights = VkModelWeights::from_gpu_weights(weights, model_config, &vk_device)
         .context("vk_native_grpo_train_jsonl: VkModelWeights::from_gpu_weights")?;
+    tracing::info!(
+        elapsed_ms = upload_start.elapsed().as_millis() as u64,
+        "streamed vk-native GRPO frozen model weights ready"
+    );
     let lora_layers = vk_init_lora_layers(
         &vk_device,
         &vk_weights,
@@ -3050,6 +3062,7 @@ pub fn vk_native_grpo_train_jsonl(
     let mut global_step = 0u32;
     let mut last_loss = 0.0f32;
     let mut processed_groups = 0usize;
+    let total_substeps = total_completions.saturating_mul(2).max(1);
 
     for (line_idx, line) in reader.lines().enumerate() {
         let line = line.with_context(|| {
@@ -3063,6 +3076,7 @@ pub fn vk_native_grpo_train_jsonl(
             continue;
         };
         processed_groups += 1;
+        let tokenize_start = std::time::Instant::now();
         let tgroup = tokenize_vk_grpo_group(&group, tokenizer).with_context(|| {
             format!(
                 "tokenize GRPO JSONL group {} at line {}",
@@ -3070,6 +3084,18 @@ pub fn vk_native_grpo_train_jsonl(
                 line_idx + 1
             )
         })?;
+        tracing::info!(
+            group = processed_groups,
+            total_groups,
+            completions = tgroup.completions.len(),
+            seq_lens = ?tgroup
+                .completions
+                .iter()
+                .map(|c| c.input_ids.len())
+                .collect::<Vec<_>>(),
+            elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
+            "streamed vk-native GRPO group tokenized"
+        );
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
         let mut group_loss_sum = 0.0f64;
 
@@ -3077,6 +3103,28 @@ pub fn vk_native_grpo_train_jsonl(
             global_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
+            let completed_before = ((global_step as usize).saturating_sub(1)) * 2;
+            if let Some(ref cb) = progress_cb {
+                cb(TrainingProgress {
+                    epoch: 1,
+                    total_epochs: 1,
+                    step: completed_before.max(1),
+                    total_steps: total_substeps,
+                    loss: last_loss as f64,
+                    progress: (completed_before.max(1) as f32 / total_substeps as f32).min(0.999),
+                });
+            }
+            tracing::info!(
+                group = processed_groups,
+                total_groups,
+                completion = comp_idx + 1,
+                completions = tgroup.completions.len(),
+                step = global_step,
+                seq_len = comp.input_ids.len(),
+                active_labels = labels.len(),
+                "streamed vk-native GRPO reference logprobs begin"
+            );
+            let ref_start = std::time::Instant::now();
             let ref_log_probs = vk_grpo_reference_log_probs(
                 &vk_weights,
                 &comp.input_ids,
@@ -3092,7 +3140,38 @@ pub fn vk_native_grpo_train_jsonl(
                     comp_idx + 1
                 )
             })?;
+            tracing::info!(
+                group = processed_groups,
+                completion = comp_idx + 1,
+                step = global_step,
+                seq_len = comp.input_ids.len(),
+                active_labels = labels.len(),
+                elapsed_ms = ref_start.elapsed().as_millis() as u64,
+                "streamed vk-native GRPO reference logprobs done"
+            );
+            if let Some(ref cb) = progress_cb {
+                let completed = completed_before + 1;
+                cb(TrainingProgress {
+                    epoch: 1,
+                    total_epochs: 1,
+                    step: completed,
+                    total_steps: total_substeps,
+                    loss: last_loss as f64,
+                    progress: (completed as f32 / total_substeps as f32).min(0.999),
+                });
+            }
 
+            tracing::info!(
+                group = processed_groups,
+                total_groups,
+                completion = comp_idx + 1,
+                completions = tgroup.completions.len(),
+                step = global_step,
+                seq_len = comp.input_ids.len(),
+                active_labels = labels.len(),
+                "streamed vk-native GRPO policy step begin"
+            );
+            let policy_start = std::time::Instant::now();
             let loss = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
                 &lora_layers,
@@ -3117,12 +3196,33 @@ pub fn vk_native_grpo_train_jsonl(
                     comp_idx + 1
                 )
             })?;
+            tracing::info!(
+                group = processed_groups,
+                completion = comp_idx + 1,
+                step = global_step,
+                seq_len = comp.input_ids.len(),
+                active_labels = labels.len(),
+                loss = format!("{loss:.6}"),
+                elapsed_ms = policy_start.elapsed().as_millis() as u64,
+                "streamed vk-native GRPO policy step done"
+            );
             anyhow::ensure!(
                 loss.is_finite(),
                 "vk_native_grpo_train_jsonl: non-finite loss {loss} at step {global_step}"
             );
             last_loss = loss;
             group_loss_sum += loss as f64;
+            if let Some(ref cb) = progress_cb {
+                let completed = completed_before + 2;
+                cb(TrainingProgress {
+                    epoch: 1,
+                    total_epochs: 1,
+                    step: completed,
+                    total_steps: total_substeps,
+                    loss: last_loss as f64,
+                    progress: (completed as f32 / total_substeps as f32).min(0.999),
+                });
+            }
 
             if let Some(interval) = config.checkpoint_interval {
                 if interval > 0
@@ -3349,7 +3449,11 @@ pub fn vk_native_sft_train(
         None
     } else {
         let segs = vk_recommended_checkpoint_segments(model_config.num_layers);
-        if segs > 1 { Some(segs) } else { None }
+        if segs > 1 {
+            Some(segs)
+        } else {
+            None
+        }
     };
     if let Some(segs) = ckpt_segments {
         tracing::info!(

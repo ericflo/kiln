@@ -293,3 +293,92 @@ pub fn vk_matmul_bf16w(x: &VkTensor, weight: &VkTensor) -> Result<VkTensor> {
         grad_fn,
     ))
 }
+
+/// Forward `out = x @ W.T` without attaching an autograd edge.
+pub fn vk_matmul_bf16w_no_grad(x: &VkTensor, weight: &VkTensor) -> Result<VkTensor> {
+    anyhow::ensure!(
+        x.dtype() == VkDType::F32,
+        "vk_matmul_bf16w_no_grad: x must be F32 (got {:?})",
+        x.dtype()
+    );
+    anyhow::ensure!(
+        weight.dtype() == VkDType::Bf16,
+        "vk_matmul_bf16w_no_grad: weight must be Bf16 (got {:?})",
+        weight.dtype()
+    );
+    anyhow::ensure!(
+        x.shape().len() == 2 && weight.shape().len() == 2,
+        "vk_matmul_bf16w_no_grad: rank-2 inputs required"
+    );
+    let batch = x.shape()[0];
+    let hidden = x.shape()[1];
+    let out_dim = weight.shape()[0];
+    anyhow::ensure!(
+        weight.shape()[1] == hidden,
+        "vk_matmul_bf16w_no_grad: weight inner-dim {} != hidden {}",
+        weight.shape()[1],
+        hidden
+    );
+
+    let out = alloc_f32(x.device(), batch * out_dim)?;
+    dispatch_fwd_tiled(
+        x.device(),
+        x.buffer(),
+        weight.buffer(),
+        &out,
+        batch,
+        hidden,
+        out_dim,
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, out_dim],
+        VkDType::F32,
+        Arc::clone(x.device()),
+    ))
+}
+
+/// Computes `grad_out @ W` for a frozen BF16 weight `W` shaped
+/// `[out_dim, hidden]`, without attaching an autograd edge.
+pub fn vk_matmul_bf16w_bwd_no_grad(grad_out: &VkTensor, weight: &VkTensor) -> Result<VkTensor> {
+    anyhow::ensure!(
+        grad_out.dtype() == VkDType::F32,
+        "vk_matmul_bf16w_bwd_no_grad: grad_out must be F32 (got {:?})",
+        grad_out.dtype()
+    );
+    anyhow::ensure!(
+        weight.dtype() == VkDType::Bf16,
+        "vk_matmul_bf16w_bwd_no_grad: weight must be Bf16 (got {:?})",
+        weight.dtype()
+    );
+    anyhow::ensure!(
+        grad_out.shape().len() == 2 && weight.shape().len() == 2,
+        "vk_matmul_bf16w_bwd_no_grad: rank-2 inputs required"
+    );
+    let batch = grad_out.shape()[0];
+    let out_dim = grad_out.shape()[1];
+    let hidden = weight.shape()[1];
+    anyhow::ensure!(
+        weight.shape()[0] == out_dim,
+        "vk_matmul_bf16w_bwd_no_grad: weight out-dim {} != grad_out inner-dim {}",
+        weight.shape()[0],
+        out_dim
+    );
+
+    let grad_in = alloc_f32(grad_out.device(), batch * hidden)?;
+    dispatch_bwd_tiled(
+        grad_out.device(),
+        grad_out.buffer(),
+        weight.buffer(),
+        &grad_in,
+        batch,
+        out_dim,
+        hidden,
+    )?;
+    Ok(VkTensor::from_buffer(
+        grad_in,
+        vec![batch, hidden],
+        VkDType::F32,
+        Arc::clone(grad_out.device()),
+    ))
+}
