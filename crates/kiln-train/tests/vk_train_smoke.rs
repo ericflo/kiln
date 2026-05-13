@@ -25,22 +25,24 @@ use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
 };
 use kiln_model::vk_forward::{
-    vk_grpo_reference_log_probs_from_prefix, vk_grpo_reference_log_probs_full_sequence,
-    vk_grpo_reference_prefill_prompt, vk_model_forward_final_norm_with_state,
-    vk_model_forward_loss, vk_model_forward_loss_with_state, VkFullAttentionWeights,
-    VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
-};
-use kiln_train::vk_train::{
-    allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter, validate_vk_grpo_seq_lens,
-    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
-    vk_recompute_train_step_with_state_masked, vk_train_step, VkAdamWConfig,
+    VkFullAttentionWeights, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights, vk_grpo_reference_log_probs_from_prefix,
+    vk_grpo_reference_log_probs_full_sequence, vk_grpo_reference_prefill_prompt,
+    vk_model_forward_final_norm_with_state, vk_model_forward_loss,
+    vk_model_forward_loss_with_state,
 };
 use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
+use kiln_train::vk_train::{
+    VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
+    validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
+    vk_recompute_grpo_train_step_with_state, vk_recompute_train_step_with_state_masked,
+    vk_train_step,
+};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
     if !VulkanDevice::probe() {
@@ -1355,6 +1357,87 @@ fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
         checkpoint.display()
     );
     assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
+
+    let _ = std::fs::remove_file(dataset);
+    let _ = std::fs::remove_dir_all(adapter_root);
+    Ok(())
+}
+
+#[test]
+fn vk_native_grpo_jsonl_smoke_streams_large_dataset() -> Result<()> {
+    let Some(_dev) = vk_dev() else { return Ok(()) };
+    const GROUPS: usize = 64;
+
+    let dataset = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-large-smoke-{}.jsonl",
+        std::process::id()
+    ));
+    let mut body = String::new();
+    for idx in 0..GROUPS {
+        let prompt = if idx % 2 == 0 { "a" } else { "aa" };
+        let good = if idx % 3 == 0 { "bb" } else { "b" };
+        let weak = if idx % 3 == 0 { "aa" } else { "a" };
+        body.push_str(&format!(
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{prompt}\"}}],\"completions\":[{{\"text\":\"{good}\",\"reward\":1.0}},{{\"text\":\"{weak}\",\"reward\":0.0}}]}}\n"
+        ));
+    }
+    std::fs::write(&dataset, body)?;
+    assert_eq!(grpo_jsonl_stats(&dataset)?, (GROUPS, GROUPS * 2));
+
+    let adapter_root = std::env::temp_dir().join(format!(
+        "kiln-vk-grpo-jsonl-large-adapters-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&adapter_root);
+    std::fs::create_dir_all(&adapter_root)?;
+    let config = GrpoConfig {
+        learning_rate: 2e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        checkpoint_interval: Some(32),
+        seed: Some(9876),
+        ..Default::default()
+    };
+    let model_config = tiny_gpu_grpo_model_config();
+    let weights = build_tiny_gpu_grpo_weights()?;
+    let tokenizer = tiny_grpo_tokenizer()?;
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let progress_cb = {
+        let progress = Arc::clone(&progress);
+        Box::new(move |p| progress.lock().unwrap().push(p))
+    };
+    let out = vk_native_grpo_train_jsonl(
+        &dataset,
+        &config,
+        &model_config,
+        &weights,
+        &tokenizer,
+        &adapter_root,
+        "jsonl-large-smoke",
+        Some(progress_cb),
+    )?;
+
+    assert!(out.join("adapter_model.safetensors").exists());
+    assert_vk_adapter_config_targets(&out)?;
+    let checkpoint = adapter_root
+        .join("jsonl-large-smoke-checkpoint-32")
+        .join("adapter_model.safetensors");
+    assert!(
+        checkpoint.exists(),
+        "large streamed GRPO checkpoint was not written at {}",
+        checkpoint.display()
+    );
+    assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
+    let updates = progress.lock().unwrap();
+    assert!(
+        updates.len() >= GROUPS,
+        "expected at least one progress update per streamed group, got {}",
+        updates.len()
+    );
+    assert!(
+        updates.last().is_some_and(|p| p.progress >= 0.999),
+        "final streamed progress should reach completion"
+    );
 
     let _ = std::fs::remove_file(dataset);
     let _ = std::fs::remove_dir_all(adapter_root);
