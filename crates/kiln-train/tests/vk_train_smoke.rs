@@ -39,6 +39,7 @@ use kiln_train::vk_train::{
 };
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
+use std::path::Path;
 use std::sync::Arc;
 
 fn vk_dev() -> Option<Arc<VulkanDevice>> {
@@ -1179,6 +1180,36 @@ fn grpo_jsonl_stats_counts_large_file_without_retaining_groups() -> Result<()> {
     Ok(())
 }
 
+fn assert_vk_adapter_config_targets(adapter_dir: &Path) -> Result<()> {
+    let config_path = adapter_dir.join("adapter_config.json");
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path)?)?;
+    let modules = config
+        .get("target_modules")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| anyhow::anyhow!("{} missing target_modules", config_path.display()))?;
+    for expected in [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        "in_proj_qkv",
+        "in_proj_z",
+        "out_proj",
+    ] {
+        assert!(
+            modules
+                .iter()
+                .any(|module| module.as_str() == Some(expected)),
+            "{} missing target module {expected}",
+            config_path.display()
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
     let Some(_dev) = vk_dev() else { return Ok(()) };
@@ -1224,6 +1255,7 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
 
     let loaded =
         candle_core::safetensors::load(out.join("adapter_model.safetensors"), &Device::Cpu)?;
+    assert_vk_adapter_config_targets(&out)?;
     for key in [
         "self_attn.q_proj.lora_A.weight",
         "self_attn.o_proj.lora_A.weight",
@@ -1243,6 +1275,7 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
         "streamed GRPO checkpoint adapter was not written at {}",
         checkpoint.display()
     );
+    assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
     let checkpoint_loaded = candle_core::safetensors::load(&checkpoint, &Device::Cpu)?;
     assert!(
         checkpoint_loaded
@@ -1301,6 +1334,7 @@ fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
     )?;
 
     assert!(out.join("adapter_model.safetensors").exists());
+    assert_vk_adapter_config_targets(&out)?;
     let checkpoint = adapter_root
         .join("jsonl-long-smoke-checkpoint-4")
         .join("adapter_model.safetensors");
@@ -1309,6 +1343,7 @@ fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
         "long-prompt streamed GRPO checkpoint was not written at {}",
         checkpoint.display()
     );
+    assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
 
     let _ = std::fs::remove_file(dataset);
     let _ = std::fs::remove_dir_all(adapter_root);
