@@ -198,6 +198,28 @@ fn vk_native_grpo_enabled(state: &AppState) -> bool {
     }
 }
 
+fn validate_grpo_submission_source(
+    req: &GrpoRequest,
+    vk_native_grpo: bool,
+) -> Result<(), ApiError> {
+    if req.dataset_path.is_some() && !req.groups.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "GRPO request must use either groups or dataset_path, not both",
+        ));
+    }
+    if req.dataset_path.is_none() && req.groups.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "GRPO request needs either non-empty groups or dataset_path",
+        ));
+    }
+    if req.dataset_path.is_some() && !vk_native_grpo {
+        return Err(ApiError::training_invalid_request(
+            "GRPO dataset_path streaming requires Vulkan-native GRPO on a Vulkan backend",
+        ));
+    }
+    Ok(())
+}
+
 /// Response for queue listing.
 #[derive(serde::Serialize)]
 struct QueueResponse {
@@ -363,16 +385,8 @@ async fn submit_grpo(
             req.dataset_path = Some(path);
         }
     }
-    if req.dataset_path.is_some() && !req.groups.is_empty() {
-        return Err(ApiError::training_invalid_request(
-            "GRPO request must use either groups or dataset_path, not both",
-        ));
-    }
-    if req.dataset_path.is_none() && req.groups.is_empty() {
-        return Err(ApiError::training_invalid_request(
-            "GRPO request needs either non-empty groups or dataset_path",
-        ));
-    }
+    let vk_native_grpo = vk_native_grpo_enabled(&state);
+    validate_grpo_submission_source(&req, vk_native_grpo)?;
 
     let stats = if let Some(path) = req.dataset_path.as_deref() {
         scan_grpo_jsonl_submission(path, Some(state.tokenizer.as_ref()))?
@@ -410,7 +424,7 @@ async fn submit_grpo(
         max_seq_len,
         EstimateOptions::default(),
         req.config.lora_rank,
-        vk_native_grpo_enabled(&state),
+        vk_native_grpo,
     )?;
 
     // Register the job in the tracking map
@@ -620,4 +634,58 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/train/status/{job_id}", get(job_status))
         .route("/v1/train/queue", get(list_queue))
         .route("/v1/train/queue/{job_id}", delete(cancel_queued_job))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kiln_train::{ChatMessage, GrpoConfig, ScoredCompletion};
+
+    fn grpo_group() -> GrpoGroup {
+        GrpoGroup {
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "prompt".to_string(),
+            }],
+            completions: vec![ScoredCompletion {
+                text: "completion".to_string(),
+                reward: 1.0,
+            }],
+        }
+    }
+
+    fn grpo_req(dataset_path: Option<&str>, groups: Vec<GrpoGroup>) -> GrpoRequest {
+        GrpoRequest {
+            groups,
+            dataset_path: dataset_path.map(str::to_string),
+            config: GrpoConfig::default(),
+        }
+    }
+
+    #[test]
+    fn grpo_dataset_path_submission_requires_vk_native_route() {
+        let req = grpo_req(Some("/tmp/grpo.jsonl"), Vec::new());
+        let err = validate_grpo_submission_source(&req, false).unwrap_err();
+        assert_eq!(err.code, "training_invalid_request");
+        assert!(
+            err.message
+                .contains("dataset_path streaming requires Vulkan-native GRPO")
+        );
+
+        validate_grpo_submission_source(&req, true).unwrap();
+    }
+
+    #[test]
+    fn grpo_submission_rejects_ambiguous_or_empty_sources() {
+        let both = grpo_req(Some("/tmp/grpo.jsonl"), vec![grpo_group()]);
+        let err = validate_grpo_submission_source(&both, true).unwrap_err();
+        assert!(err.message.contains("either groups or dataset_path"));
+
+        let empty = grpo_req(None, Vec::new());
+        let err = validate_grpo_submission_source(&empty, true).unwrap_err();
+        assert!(err.message.contains("non-empty groups or dataset_path"));
+
+        let inline = grpo_req(None, vec![grpo_group()]);
+        validate_grpo_submission_source(&inline, false).unwrap();
+    }
 }
