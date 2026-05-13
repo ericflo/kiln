@@ -107,6 +107,21 @@ impl KilnTokenizer {
         Ok(encoding.get_ids().to_vec())
     }
 
+    /// Encode a batch of texts into token IDs. This uses the tokenizer crate's
+    /// parallel batch path and is semantically identical to calling
+    /// [`Self::encode`] for each text with `add_special_tokens=false`.
+    pub fn encode_batch(&self, texts: &[String]) -> Result<Vec<Vec<TokenId>>, TokenizerError> {
+        let inputs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let encodings = self
+            .inner
+            .encode_batch(inputs, false)
+            .map_err(|e| TokenizerError::Encode(e.to_string()))?;
+        Ok(encodings
+            .into_iter()
+            .map(|encoding| encoding.get_ids().to_vec())
+            .collect())
+    }
+
     /// Encode text into token IDs plus byte offsets into the original string.
     pub fn encode_with_offsets(
         &self,
@@ -454,6 +469,18 @@ mod tests {
             inner: Tokenizer::from_bytes(json.as_slice()).unwrap(),
             chat_template: None,
         }
+    }
+
+    #[test]
+    fn encode_batch_matches_scalar_encode() {
+        let tok = minimal_tokenizer();
+        let texts = vec!["a".to_string(), "ab".to_string(), "b".to_string()];
+        let batched = tok.encode_batch(&texts).unwrap();
+        let scalar = texts
+            .iter()
+            .map(|text| tok.encode(text).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(batched, scalar);
     }
 
     #[test]

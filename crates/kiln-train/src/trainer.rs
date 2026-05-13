@@ -1431,8 +1431,8 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         .encode(&prompt_text)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let mut completions = Vec::with_capacity(group.completions.len());
-    let mut rewards = Vec::with_capacity(group.completions.len());
+    let mut raw_rewards = Vec::with_capacity(group.completions.len());
+    let mut full_texts = Vec::with_capacity(group.completions.len());
 
     for scored in &group.completions {
         // Build full conversation: prompt + assistant completion
@@ -1446,10 +1446,16 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
         let full_text = tokenizer
             .apply_chat_template(&full_messages)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let full_ids = tokenizer
-            .encode(&full_text)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        full_texts.push(full_text);
+        raw_rewards.push(scored.reward);
+    }
 
+    let full_id_batches = tokenizer
+        .encode_batch(&full_texts)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut completions = Vec::with_capacity(full_id_batches.len());
+    let mut rewards = Vec::with_capacity(full_id_batches.len());
+    for (full_ids, reward) in full_id_batches.into_iter().zip(raw_rewards.into_iter()) {
         if full_ids.len() < 2 {
             tracing::warn!("skipping completion: too short ({} tokens)", full_ids.len());
             continue;
@@ -1465,7 +1471,7 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
             input_ids: full_ids,
             completion_mask: mask,
         });
-        rewards.push(scored.reward);
+        rewards.push(reward);
     }
 
     if completions.is_empty() {

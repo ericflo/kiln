@@ -87,8 +87,8 @@ fn tokenize_vk_grpo_group(
         .encode(&prompt_text)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let mut completions = Vec::with_capacity(group.completions.len());
     let mut rewards = Vec::with_capacity(group.completions.len());
+    let mut full_texts = Vec::with_capacity(group.completions.len());
     for scored in &group.completions {
         let mut full_messages = prompt_messages.clone();
         full_messages.push(kiln_core::tokenizer::ChatMessage {
@@ -99,9 +99,15 @@ fn tokenize_vk_grpo_group(
         let full_text = tokenizer
             .apply_chat_template(&full_messages)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let full_ids = tokenizer
-            .encode(&full_text)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        full_texts.push(full_text);
+        rewards.push(scored.reward);
+    }
+
+    let full_id_batches = tokenizer
+        .encode_batch(&full_texts)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut completions = Vec::with_capacity(full_id_batches.len());
+    for full_ids in full_id_batches {
         if full_ids.len() < 2 {
             bail!("GRPO completion tokenized to fewer than 2 tokens");
         }
@@ -117,7 +123,6 @@ fn tokenize_vk_grpo_group(
             input_ids: full_ids,
             completion_mask: mask,
         });
-        rewards.push(scored.reward);
     }
 
     Ok(TokenizedVkGrpoGroup {
