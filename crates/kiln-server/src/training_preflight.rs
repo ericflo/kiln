@@ -163,13 +163,14 @@ fn boundary_state_bytes(
     recompute_boundaries: bool,
 ) -> u64 {
     if recompute_boundaries {
+        let elem = dtype_bytes(cfg.dtype);
         let h = cfg.hidden_size as u64;
         let t = max_seq_len as u64;
         // Long-context SFT recomputes segment inputs on demand. At peak it
         // keeps the upstream hidden gradient (F32) plus one detached segment
-        // input (model dtype), with a one-extra-buffer cushion for allocator
-        // overlap during recompute.
-        return 3 * h * t * 4;
+        // input (model dtype), with one F32-sized cushion for allocator
+        // overlap during recompute/backprop.
+        return 2 * h * t * 4 + h * t * elem;
     }
     let elem = dtype_bytes(cfg.dtype);
     let h = cfg.hidden_size as u64;
@@ -785,6 +786,28 @@ mod tests {
             recompute.breakdown.boundary_states < cached.breakdown.boundary_states,
             "recomputed-boundary estimate should not charge all segment boundaries"
         );
+    }
+
+    #[test]
+    fn recompute_boundary_estimate_charges_model_dtype_segment_input() {
+        let cfg = qwen_4b();
+        let seq_len = 8192usize;
+        let estimate = estimate_step_working_set_with_options(
+            &cfg,
+            seq_len,
+            16,
+            32,
+            WeightResidency::SingleCopy,
+            true,
+            EstimateOptions {
+                max_supervised_tokens: None,
+                recompute_boundaries: true,
+            },
+        );
+        let h = cfg.hidden_size as u64;
+        let t = seq_len as u64;
+        let expected = 2 * h * t * 4 + h * t * dtype_bytes(cfg.dtype);
+        assert_eq!(estimate.breakdown.boundary_states, expected);
     }
 
     #[test]
