@@ -34,8 +34,9 @@ use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
 use kiln_train::vk_train::{
     VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
-    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
-    vk_recompute_train_step_with_state_masked, vk_train_step,
+    validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
+    vk_recompute_grpo_train_step_with_state, vk_recompute_train_step_with_state_masked,
+    vk_train_step,
 };
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
@@ -1208,6 +1209,15 @@ fn assert_vk_adapter_config_targets(adapter_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[test]
+fn vk_grpo_seq_len_guard_rejects_over_context_groups() {
+    validate_vk_grpo_seq_lens(&[4, 5, 6], 6, "test context").unwrap();
+    let err = validate_vk_grpo_seq_lens(&[4, 7], 6, "test context").unwrap_err();
+    let message = format!("{err:#}");
+    assert!(message.contains("test context"));
+    assert!(message.contains("exceeds model max_position_embeddings 6"));
 }
 
 #[test]

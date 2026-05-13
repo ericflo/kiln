@@ -194,6 +194,38 @@ fn ensure_grpo_prefix_scoring_layout(prompt_len: usize, active_rows: &[u32]) -> 
     Ok(())
 }
 
+pub fn validate_vk_grpo_seq_lens(
+    seq_lens: &[usize],
+    max_position_embeddings: usize,
+    context: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        max_position_embeddings > 0,
+        "{context}: model max_position_embeddings must be positive"
+    );
+    let Some(max_seq_len) = seq_lens.iter().copied().max() else {
+        anyhow::bail!("{context}: no GRPO sequence lengths to validate");
+    };
+    anyhow::ensure!(
+        max_seq_len <= max_position_embeddings,
+        "{context}: tokenized GRPO sequence length {max_seq_len} exceeds model max_position_embeddings {max_position_embeddings}; shorten or split the offending group"
+    );
+    Ok(())
+}
+
+fn validate_vk_grpo_tokenized_group_context(
+    group: &TokenizedVkGrpoGroup,
+    model_config: &ModelConfig,
+    context: &str,
+) -> Result<()> {
+    let seq_lens = group
+        .completions
+        .iter()
+        .map(|completion| completion.input_ids.len())
+        .collect::<Vec<_>>();
+    validate_vk_grpo_seq_lens(&seq_lens, model_config.max_position_embeddings, context)
+}
+
 /// Per-parameter AdamW state held entirely on the GPU.
 pub struct VkAdamWState {
     pub m: Arc<VulkanBuffer>,
@@ -2874,6 +2906,11 @@ pub fn vk_native_grpo_train(
         let group_step = group_idx + 1;
         let tgroup = tokenize_vk_grpo_group(group, tokenizer)
             .with_context(|| format!("tokenize GRPO group {group_step}"))?;
+        validate_vk_grpo_tokenized_group_context(
+            &tgroup,
+            model_config,
+            &format!("vk-native GRPO group {group_step}"),
+        )?;
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
         let mut group_loss_sum = 0.0f64;
         let ref_prefix = vk_grpo_reference_prefill_prompt(
@@ -3120,6 +3157,11 @@ pub fn vk_native_grpo_train_jsonl(
                 processed_groups, line_no
             )
         })?;
+        validate_vk_grpo_tokenized_group_context(
+            &tgroup,
+            model_config,
+            &format!("vk-native GRPO JSONL group {processed_groups} line {line_no}"),
+        )?;
         tracing::info!(
             group = processed_groups,
             completions = tgroup.completions.len(),
