@@ -21,17 +21,19 @@
 //!   for each lora pair: VkTensor readback → direct safetensors save
 //! ```
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use candle_core::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_core::env_flag::env_flag;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::GpuWeights;
 use kiln_model::vk_forward::{
-    VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
-    vk_count_gdn_layers, vk_grpo_reference_log_probs_from_prefix, vk_grpo_reference_prefill_prompt,
+    vk_count_gdn_layers, vk_grpo_reference_log_probs_from_prefix,
+    vk_grpo_reference_log_probs_full_sequence, vk_grpo_reference_prefill_prompt,
     vk_linear_with_lora, vk_model_forward_final_norm_with_state,
     vk_model_forward_loss_masked_with_state, vk_model_forward_loss_with_state, vk_step_backward,
+    VkGrpoReferencePrefix, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights,
 };
 use kiln_vulkan_kernel::kernels::{dispatch_adamw_step_f32, dispatch_sgd_step_f32};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
@@ -41,7 +43,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
+use crate::trainer::{tokenize_for_training, ProgressCallback, TrainingProgress};
 use crate::{GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
 
 struct TokenizedSftExample {
@@ -173,14 +175,14 @@ fn grpo_active_rows_and_labels(
     Ok((active_rows, labels))
 }
 
-fn ensure_grpo_prefix_scoring_layout(prompt_len: usize, active_rows: &[u32]) -> Result<()> {
+fn ensure_grpo_completion_scoring_layout(prompt_len: usize, active_rows: &[u32]) -> Result<()> {
     anyhow::ensure!(
         prompt_len > 0,
-        "GRPO prefix scoring requires at least one prompt token"
+        "GRPO completion scoring requires at least one prompt token"
     );
     anyhow::ensure!(
         !active_rows.is_empty(),
-        "GRPO prefix scoring requires active rows"
+        "GRPO completion scoring requires active rows"
     );
     let first = (prompt_len - 1) as u32;
     for (idx, &row) in active_rows.iter().enumerate() {
@@ -192,6 +194,61 @@ fn ensure_grpo_prefix_scoring_layout(prompt_len: usize, active_rows: &[u32]) -> 
         );
     }
     Ok(())
+}
+
+const DEFAULT_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS: usize = 8;
+
+fn grpo_prefix_reference_max_decode_tokens() -> usize {
+    std::env::var("KILN_VK_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_GRPO_PREFIX_REFERENCE_MAX_DECODE_TOKENS)
+}
+
+fn grpo_use_prefix_reference(active_label_count: usize) -> bool {
+    active_label_count.saturating_sub(1) <= grpo_prefix_reference_max_decode_tokens()
+}
+
+fn grpo_group_needs_prefix_reference(group: &TokenizedVkGrpoGroup) -> bool {
+    group.completions.iter().any(|completion| {
+        let active_labels = completion
+            .completion_mask
+            .get(1..)
+            .unwrap_or(&[])
+            .iter()
+            .filter(|&&active| active)
+            .count();
+        grpo_use_prefix_reference(active_labels)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vk_grpo_reference_log_probs_dynamic(
+    weights: &VkModelWeights,
+    ref_prefix: Option<&VkGrpoReferencePrefix>,
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+) -> Result<(VkTensor, &'static str)> {
+    if grpo_use_prefix_reference(labels.len()) {
+        let prefix = ref_prefix.ok_or_else(|| {
+            anyhow::anyhow!("vk-native GRPO prefix reference path selected without prompt prefix")
+        })?;
+        let log_probs = vk_grpo_reference_log_probs_from_prefix(weights, prefix, labels)?;
+        Ok((log_probs, "prefix_decode"))
+    } else {
+        let log_probs = vk_grpo_reference_log_probs_full_sequence(
+            weights,
+            input_ids,
+            active_rows,
+            labels,
+            model_config,
+            num_gdn_layers,
+        )?;
+        Ok((log_probs, "full_sequence"))
+    }
 }
 
 pub fn validate_vk_grpo_seq_lens(
@@ -1309,9 +1366,8 @@ pub fn vk_checkpointed_train_step(
     num_segments: usize,
 ) -> Result<f32> {
     use kiln_model::vk_forward::{
-        VkLayerWeights, vk_compute_rope_tables, vk_full_attention_layer_with_rope,
+        vk_compute_rope_tables, vk_full_attention_layer_with_rope, VkLayerWeights,
     };
-    use kiln_vulkan_kernel::VkTensor;
     use kiln_vulkan_kernel::vk_autograd::vk_backward;
     use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
     use kiln_vulkan_kernel::vk_ops::embedding::{
@@ -1320,6 +1376,7 @@ pub fn vk_checkpointed_train_step(
     use kiln_vulkan_kernel::vk_ops::flce::{flce_recommended_chunk_len_for_tensors, vk_flce_loss};
     use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
     use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
+    use kiln_vulkan_kernel::VkTensor;
 
     // GDN unsupported in this path for v1 (would need state snapshot per segment)
     for layer in &weights.layers {
@@ -2913,33 +2970,51 @@ pub fn vk_native_grpo_train(
         )?;
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
         let mut group_loss_sum = 0.0f64;
-        let ref_prefix = vk_grpo_reference_prefill_prompt(
-            &vk_weights,
-            &tgroup.prompt_ids,
-            model_config,
-            num_gdn_layers,
-        )
-        .with_context(|| {
-            format!(
-                "vk-native GRPO reference prompt prefill group {}",
-                group_step
+        let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
+            Some(
+                vk_grpo_reference_prefill_prompt(
+                    &vk_weights,
+                    &tgroup.prompt_ids,
+                    model_config,
+                    num_gdn_layers,
+                )
+                .with_context(|| {
+                    format!(
+                        "vk-native GRPO reference prompt prefill group {}",
+                        group_step
+                    )
+                })?,
             )
-        })?;
+        } else {
+            tracing::info!(
+                group = group_step,
+                prompt_len = tgroup.prompt_ids.len(),
+                "vk-native GRPO reference prompt prefill skipped for full-sequence scoring"
+            );
+            None
+        };
 
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
-            ensure_grpo_prefix_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
-            let ref_log_probs =
-                vk_grpo_reference_log_probs_from_prefix(&vk_weights, &ref_prefix, &labels)
-                    .with_context(|| {
-                        format!(
-                            "vk-native GRPO reference logprobs group {} completion {}",
-                            group_step,
-                            comp_idx + 1
-                        )
-                    })?;
+            ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
+            let (ref_log_probs, _reference_path) = vk_grpo_reference_log_probs_dynamic(
+                &vk_weights,
+                ref_prefix.as_ref(),
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                model_config,
+                num_gdn_layers,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO reference logprobs group {} completion {}",
+                    group_step,
+                    comp_idx + 1
+                )
+            })?;
 
             let loss = vk_recompute_grpo_train_step_with_state(
                 &vk_weights,
@@ -3175,30 +3250,40 @@ pub fn vk_native_grpo_train_jsonl(
         );
         let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
         let mut group_loss_sum = 0.0f64;
-        tracing::info!(
-            group = processed_groups,
-            prompt_len = tgroup.prompt_ids.len(),
-            "streamed vk-native GRPO reference prompt prefill begin"
-        );
-        let ref_prefix_start = std::time::Instant::now();
-        let ref_prefix = vk_grpo_reference_prefill_prompt(
-            &vk_weights,
-            &tgroup.prompt_ids,
-            model_config,
-            num_gdn_layers,
-        )
-        .with_context(|| {
-            format!(
-                "vk-native GRPO JSONL reference prompt prefill group {}",
-                processed_groups
+        let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
+            tracing::info!(
+                group = processed_groups,
+                prompt_len = tgroup.prompt_ids.len(),
+                "streamed vk-native GRPO reference prompt prefill begin"
+            );
+            let ref_prefix_start = std::time::Instant::now();
+            let ref_prefix = vk_grpo_reference_prefill_prompt(
+                &vk_weights,
+                &tgroup.prompt_ids,
+                model_config,
+                num_gdn_layers,
             )
-        })?;
-        tracing::info!(
-            group = processed_groups,
-            prompt_len = tgroup.prompt_ids.len(),
-            elapsed_ms = ref_prefix_start.elapsed().as_millis() as u64,
-            "streamed vk-native GRPO reference prompt prefill done"
-        );
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO JSONL reference prompt prefill group {}",
+                    processed_groups
+                )
+            })?;
+            tracing::info!(
+                group = processed_groups,
+                prompt_len = tgroup.prompt_ids.len(),
+                elapsed_ms = ref_prefix_start.elapsed().as_millis() as u64,
+                "streamed vk-native GRPO reference prompt prefill done"
+            );
+            Some(ref_prefix)
+        } else {
+            tracing::info!(
+                group = processed_groups,
+                prompt_len = tgroup.prompt_ids.len(),
+                "streamed vk-native GRPO reference prompt prefill skipped for full-sequence scoring"
+            );
+            None
+        };
 
         let group_substeps = tgroup.completions.len().saturating_mul(2).max(1);
         let line_span = bytes_read.saturating_sub(line_start);
@@ -3206,7 +3291,7 @@ pub fn vk_native_grpo_train_jsonl(
             optimizer_step += 1;
             let (active_rows, labels) =
                 grpo_active_rows_and_labels(&comp.input_ids, &comp.completion_mask)?;
-            ensure_grpo_prefix_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
+            ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
             let completed_before = comp_idx.saturating_mul(2);
             let progress_offset = line_start.saturating_add(
                 line_span.saturating_mul(completed_before as u64) / group_substeps as u64,
@@ -3229,24 +3314,37 @@ pub fn vk_native_grpo_train_jsonl(
                 optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
+                reference_path = if grpo_use_prefix_reference(labels.len()) {
+                    "prefix_decode"
+                } else {
+                    "full_sequence"
+                },
                 "streamed vk-native GRPO reference logprobs begin"
             );
             let ref_start = std::time::Instant::now();
-            let ref_log_probs =
-                vk_grpo_reference_log_probs_from_prefix(&vk_weights, &ref_prefix, &labels)
-                    .with_context(|| {
-                        format!(
-                            "vk-native GRPO JSONL reference logprobs group {} completion {}",
-                            processed_groups,
-                            comp_idx + 1
-                        )
-                    })?;
+            let (ref_log_probs, reference_path) = vk_grpo_reference_log_probs_dynamic(
+                &vk_weights,
+                ref_prefix.as_ref(),
+                &comp.input_ids,
+                &active_rows,
+                &labels,
+                model_config,
+                num_gdn_layers,
+            )
+            .with_context(|| {
+                format!(
+                    "vk-native GRPO JSONL reference logprobs group {} completion {}",
+                    processed_groups,
+                    comp_idx + 1
+                )
+            })?;
             tracing::info!(
                 group = processed_groups,
                 completion = comp_idx + 1,
                 optimizer_step,
                 seq_len = comp.input_ids.len(),
                 active_labels = labels.len(),
+                reference_path,
                 elapsed_ms = ref_start.elapsed().as_millis() as u64,
                 "streamed vk-native GRPO reference logprobs done"
             );
@@ -3560,7 +3658,11 @@ pub fn vk_native_sft_train(
         None
     } else {
         let segs = vk_recommended_checkpoint_segments(model_config.num_layers);
-        if segs > 1 { Some(segs) } else { None }
+        if segs > 1 {
+            Some(segs)
+        } else {
+            None
+        }
     };
     if let Some(segs) = ckpt_segments {
         tracing::info!(

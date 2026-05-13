@@ -25,19 +25,18 @@ use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
 };
 use kiln_model::vk_forward::{
-    VkFullAttentionWeights, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
-    VkModelWeights, vk_grpo_reference_log_probs_from_prefix, vk_grpo_reference_prefill_prompt,
-    vk_model_forward_final_norm_with_state, vk_model_forward_loss,
-    vk_model_forward_loss_with_state,
+    vk_grpo_reference_log_probs_from_prefix, vk_grpo_reference_log_probs_full_sequence,
+    vk_grpo_reference_prefill_prompt, vk_model_forward_final_norm_with_state,
+    vk_model_forward_loss, vk_model_forward_loss_with_state, VkFullAttentionWeights,
+    VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
+};
+use kiln_train::vk_train::{
+    allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter, validate_vk_grpo_seq_lens,
+    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
+    vk_recompute_train_step_with_state_masked, vk_train_step, VkAdamWConfig,
 };
 use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
-use kiln_train::vk_train::{
-    VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
-    validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
-    vk_recompute_grpo_train_step_with_state, vk_recompute_train_step_with_state_masked,
-    vk_train_step,
-};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::path::Path;
@@ -1306,10 +1305,12 @@ fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
         std::process::id()
     ));
     let prompt = "a".repeat(96);
+    let strong_completion = "b".repeat(12);
+    let weak_completion = "a".repeat(12);
     let mut body = String::new();
     for _ in 0..8 {
         body.push_str(&format!(
-            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{prompt}\"}}],\"completions\":[{{\"text\":\"b\",\"reward\":1.0}},{{\"text\":\"a\",\"reward\":0.0}}]}}\n"
+            "{{\"messages\":[{{\"role\":\"user\",\"content\":\"{prompt}\"}}],\"completions\":[{{\"text\":\"{strong_completion}\",\"reward\":1.0}},{{\"text\":\"{weak_completion}\",\"reward\":0.0}}]}}\n"
         ));
     }
     std::fs::write(&dataset, body)?;
@@ -1446,6 +1447,74 @@ fn vk_grpo_reference_prefix_scorer_matches_monolithic_gdn() -> Result<()> {
     assert_close_vec(
         "GDN prefix GRPO reference scorer",
         &fast.to_vec_f32()?,
+        &mono.to_vec_f32()?,
+        5e-4,
+    );
+    Ok(())
+}
+
+#[test]
+fn vk_grpo_reference_full_sequence_scorer_matches_monolithic_full_attention() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0, 13, 4, 9, 2];
+    let active_rows: Vec<u32> = (4..(input_ids.len() - 1)).map(|row| row as u32).collect();
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+
+    let full = vk_grpo_reference_log_probs_full_sequence(
+        &model,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &tiny_model_config(),
+        0,
+    )?;
+    let mono = grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, None)?;
+
+    assert_close_vec(
+        "full-attn full-sequence GRPO reference scorer",
+        &full.to_vec_f32()?,
+        &mono.to_vec_f32()?,
+        5e-4,
+    );
+    Ok(())
+}
+
+#[test]
+fn vk_grpo_reference_full_sequence_scorer_matches_monolithic_gdn() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_gdn_model(&dev)?;
+    let config = tiny_gdn_model_config();
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0, 13, 4, 9, 2];
+    let active_rows: Vec<u32> = (4..(input_ids.len() - 1)).map(|row| row as u32).collect();
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+
+    let full = vk_grpo_reference_log_probs_full_sequence(
+        &model,
+        &input_ids,
+        &active_rows,
+        &labels,
+        &config,
+        1,
+    )?;
+    let mut mono_state = tiny_gdn_state(&dev)?;
+    let mono = grpo_ref_log_probs(
+        &model,
+        &input_ids,
+        &active_rows,
+        &labels,
+        Some(&mut mono_state),
+    )?;
+
+    assert_close_vec(
+        "GDN full-sequence GRPO reference scorer",
+        &full.to_vec_f32()?,
         &mono.to_vec_f32()?,
         5e-4,
     );

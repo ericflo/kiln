@@ -21,10 +21,10 @@
 
 #![cfg(feature = "vulkan")]
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId, Var};
 use kiln_core::config::ModelConfig;
-use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
+use kiln_vulkan_kernel::vk_autograd::{vk_backward, VkGradStore};
 use kiln_vulkan_kernel::vk_ops::attention::{
     vk_flash_sdpa_decode_split_flat_no_grad, vk_flash_sdpa_prefill_flat,
 };
@@ -1214,6 +1214,74 @@ pub fn vk_grpo_reference_log_probs_from_prefix(
         &weights.lm_head,
         labels,
         flce_recommended_chunk_len_for_tensors(&hidden_rows, &weights.lm_head),
+    )
+}
+
+/// Score GRPO reference log-probs with a full native Vulkan forward pass.
+///
+/// This is semantically equivalent to prefix-state scoring, but avoids the
+/// long-completion pathology where a reused prompt state is followed by
+/// thousands of one-token decode dispatches from one CPU thread.
+pub fn vk_grpo_reference_log_probs_full_sequence(
+    weights: &VkModelWeights,
+    input_ids: &[u32],
+    active_rows: &[u32],
+    labels: &[u32],
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        !input_ids.is_empty(),
+        "vk_grpo_reference_log_probs_full_sequence: empty input"
+    );
+    anyhow::ensure!(
+        active_rows.len() == labels.len(),
+        "vk_grpo_reference_log_probs_full_sequence: active row count {} != label count {}",
+        active_rows.len(),
+        labels.len()
+    );
+    anyhow::ensure!(
+        !active_rows.is_empty(),
+        "vk_grpo_reference_log_probs_full_sequence: empty active rows"
+    );
+    for &row in active_rows {
+        anyhow::ensure!(
+            (row as usize) + 1 < input_ids.len(),
+            "vk_grpo_reference_log_probs_full_sequence: active row {row} out of range for {} tokens",
+            input_ids.len()
+        );
+    }
+
+    let mut no_lora = Vec::with_capacity(weights.layers.len());
+    no_lora.resize_with(weights.layers.len(), VkLoraLayer::default);
+    let device = weights.embed_tokens.device();
+    let mut gdn_state = if num_gdn_layers > 0 {
+        Some(VkLinearAttentionState::zeros(
+            device,
+            num_gdn_layers,
+            1,
+            model_config.linear_num_value_heads,
+            model_config.linear_key_head_dim,
+            model_config.linear_value_head_dim,
+            2 * model_config.linear_num_key_heads * model_config.linear_key_head_dim
+                + model_config.linear_num_value_heads * model_config.linear_value_head_dim,
+            model_config.linear_conv_kernel_dim,
+        )?)
+    } else {
+        None
+    };
+    let h = match gdn_state.as_mut() {
+        Some(state) => {
+            vk_model_forward_final_norm_with_state(weights, &no_lora, input_ids, Some(state))?
+        }
+        None => vk_model_forward_final_norm_with_state(weights, &no_lora, input_ids, None)?,
+    };
+    let active_h = vk_index_select_rows(&h, active_rows)?;
+    vk_selected_log_probs(
+        &active_h,
+        &weights.lm_head,
+        labels,
+        flce_recommended_chunk_len_for_tensors(&active_h, &weights.lm_head),
     )
 }
 
