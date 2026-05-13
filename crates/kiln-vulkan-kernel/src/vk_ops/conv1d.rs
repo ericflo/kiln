@@ -17,7 +17,7 @@ use crate::vk_ops::silu::vk_silu;
 use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
@@ -99,12 +99,14 @@ pub fn vk_causal_conv1d_no_grad(
             )
         })?;
     }
-    Ok(VkTensor::from_buffer(
+    let out = VkTensor::from_buffer(
         out,
         vec![batch, channels, seq_len],
         VkDType::F32,
         Arc::clone(device),
-    ))
+    );
+    vk_causal_conv1d_advance_state_no_grad(x, conv_state, batch, channels, seq_len, kernel_size)?;
+    Ok(out)
 }
 
 /// Forward causal Conv1d linear pre-activation. Use this in training,
@@ -183,12 +185,57 @@ pub fn vk_causal_conv1d_pre_silu_no_grad(
             )
         })?;
     }
-    Ok(VkTensor::from_buffer(
+    let out = VkTensor::from_buffer(
         out,
         vec![batch, channels, seq_len],
         VkDType::F32,
         Arc::clone(device),
-    ))
+    );
+    vk_causal_conv1d_advance_state_no_grad(x, conv_state, batch, channels, seq_len, kernel_size)?;
+    Ok(out)
+}
+
+/// Advance the causal-conv state in place to the last `kernel_size - 1`
+/// inputs from `x`.
+///
+/// This mirrors the inference path's second dispatch
+/// (`causal_conv1d_state_advance.comp`) but stays in the `VkTensor` stack.
+/// Output computation and state advancement are deliberately separate
+/// dispatches so output threads never race with state writes.
+pub fn vk_causal_conv1d_advance_state_no_grad(
+    x: &VkTensor,
+    conv_state: &Arc<VulkanBuffer>,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        x.dtype() == VkDType::F32,
+        "vk_causal_conv1d_advance_state: F32 only"
+    );
+    anyhow::ensure!(
+        x.num_elements() == batch * channels * seq_len,
+        "vk_causal_conv1d_advance_state: x size mismatch"
+    );
+    anyhow::ensure!(
+        conv_state.size() as usize >= batch * channels * kernel_size.saturating_sub(1) * 4,
+        "vk_causal_conv1d_advance_state: conv_state buffer too small"
+    );
+    let workgroups = (batch * channels) as u32;
+    let push = [
+        batch as u32,
+        channels as u32,
+        seq_len as u32,
+        kernel_size as u32,
+    ];
+    dispatch_simple(
+        x.device(),
+        "causal_conv1d_state_advance",
+        &[x.buffer().handle(), conv_state.handle()],
+        &push,
+        workgroups,
+    )
 }
 
 fn vk_causal_conv1d_dx_no_grad(

@@ -294,6 +294,106 @@ pub fn vk_flash_sdpa_prefill_flat_no_grad(
     ))
 }
 
+/// Exact single-query GQA SDPA over immutable prompt K/V plus a mutable
+/// completion-tail K/V cache.
+///
+/// This is the no-grad decode primitive needed by GRPO reference scoring:
+/// prefix K/V can be shared by every completion in a group while each branch
+/// writes only its generated suffix rows.
+#[allow(clippy::too_many_arguments)]
+pub fn vk_flash_sdpa_decode_split_flat_no_grad(
+    q_flat: &VkTensor,
+    k_prefix: &VkTensor,
+    v_prefix: &VkTensor,
+    k_suffix: &VkTensor,
+    v_suffix: &VkTensor,
+    prefix_len: usize,
+    suffix_len: usize,
+    suffix_cap: usize,
+    heads_q: usize,
+    heads_kv: usize,
+    head_dim: usize,
+    scale: f32,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        q_flat.dtype() == VkDType::F32
+            && k_prefix.dtype() == VkDType::F32
+            && v_prefix.dtype() == VkDType::F32
+            && k_suffix.dtype() == VkDType::F32
+            && v_suffix.dtype() == VkDType::F32,
+        "vk_flash_sdpa_decode_split_flat: F32-only"
+    );
+    anyhow::ensure!(
+        q_flat.shape() == [1, heads_q * head_dim],
+        "vk_flash_sdpa_decode_split_flat: q shape {:?} != [1, {}]",
+        q_flat.shape(),
+        heads_q * head_dim
+    );
+    anyhow::ensure!(
+        k_prefix.shape() == [prefix_len, heads_kv * head_dim]
+            && v_prefix.shape() == [prefix_len, heads_kv * head_dim],
+        "vk_flash_sdpa_decode_split_flat: prefix K/V shape mismatch k={:?} v={:?}",
+        k_prefix.shape(),
+        v_prefix.shape()
+    );
+    anyhow::ensure!(
+        k_suffix.shape() == [suffix_cap, heads_kv * head_dim]
+            && v_suffix.shape() == [suffix_cap, heads_kv * head_dim],
+        "vk_flash_sdpa_decode_split_flat: suffix K/V shape mismatch k={:?} v={:?}",
+        k_suffix.shape(),
+        v_suffix.shape()
+    );
+    anyhow::ensure!(
+        suffix_len <= suffix_cap,
+        "vk_flash_sdpa_decode_split_flat: suffix_len {suffix_len} > suffix_cap {suffix_cap}"
+    );
+    anyhow::ensure!(
+        prefix_len + suffix_len > 0,
+        "vk_flash_sdpa_decode_split_flat: empty key window"
+    );
+    anyhow::ensure!(
+        heads_q % heads_kv == 0,
+        "vk_flash_sdpa_decode_split_flat: heads_q ({heads_q}) must be a multiple of heads_kv ({heads_kv})"
+    );
+    anyhow::ensure!(
+        head_dim > 0 && head_dim <= 256,
+        "vk_flash_sdpa_decode_split_flat: head_dim {head_dim} exceeds shader cap 256"
+    );
+
+    let device = q_flat.device();
+    let out_buf = alloc_f32(device, heads_q * head_dim)?;
+    let push = [
+        prefix_len as u32,
+        suffix_len as u32,
+        suffix_cap as u32,
+        heads_q as u32,
+        heads_kv as u32,
+        head_dim as u32,
+        scale.to_bits(),
+    ];
+    dispatch_simple_3d(
+        device,
+        "vk_flash_sdpa_decode_split_f32",
+        &[
+            q_flat.buffer().handle(),
+            k_prefix.buffer().handle(),
+            v_prefix.buffer().handle(),
+            k_suffix.buffer().handle(),
+            v_suffix.buffer().handle(),
+            out_buf.handle(),
+        ],
+        &push,
+        (heads_q as u32, 1, 1),
+    )?;
+
+    Ok(VkTensor::from_buffer(
+        out_buf,
+        vec![1, heads_q * head_dim],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
 fn vk_flash_sdpa_delta(
     grad_out: &VkTensor,
     out: &VkTensor,

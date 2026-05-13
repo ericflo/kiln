@@ -1,0 +1,82 @@
+// Exact single-query GQA SDPA over split K/V storage.
+//
+// q/out:       [1, heads_q, head_dim]
+// k_prefix/v_prefix: [prefix_len, heads_kv, head_dim]
+// k_suffix/v_suffix: [suffix_cap, heads_kv, head_dim]
+//
+// The active key window is prefix_len + suffix_len. Suffix capacity may be
+// larger than suffix_len; inactive rows are ignored.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint prefix_len;
+    uint suffix_len;
+    uint suffix_cap;
+    uint heads_q;
+    uint heads_kv;
+    uint head_dim;
+    float scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float q[]; };
+layout(binding = 1) readonly buffer KPrefixBuf { float k_prefix[]; };
+layout(binding = 2) readonly buffer VPrefixBuf { float v_prefix[]; };
+layout(binding = 3) readonly buffer KSuffixBuf { float k_suffix[]; };
+layout(binding = 4) readonly buffer VSuffixBuf { float v_suffix[]; };
+layout(binding = 5) writeonly buffer OutBuf { float data_out[]; };
+
+shared float reduce_sh[256];
+
+void main() {
+    uint hq = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (hq >= heads_q) return;
+
+    uint groups = heads_q / heads_kv;
+    uint hkv = hq / groups;
+    uint q_base = hq * head_dim;
+    float q_val = (tid < head_dim) ? q[q_base + tid] : 0.0;
+
+    float max_logit = -3.402823e38;
+    float sum_exp = 0.0;
+    float out_acc = 0.0;
+    uint total_len = prefix_len + suffix_len;
+
+    for (uint key_row = 0u; key_row < total_len; ++key_row) {
+        bool in_prefix = key_row < prefix_len;
+        uint row = in_prefix ? key_row : (key_row - prefix_len);
+        uint k_base = ((row * heads_kv + hkv) * head_dim);
+        float k_val = 0.0;
+        if (tid < head_dim) {
+            k_val = in_prefix ? k_prefix[k_base + tid] : k_suffix[k_base + tid];
+        }
+        reduce_sh[tid] = q_val * k_val;
+        barrier();
+        for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+            if (tid < stride) reduce_sh[tid] += reduce_sh[tid + stride];
+            barrier();
+        }
+        float logit = reduce_sh[0] * scale;
+        barrier();
+
+        float new_max = max(max_logit, logit);
+        float alpha = exp(max_logit - new_max);
+        float beta = exp(logit - new_max);
+        sum_exp = sum_exp * alpha + beta;
+        if (tid < head_dim) {
+            uint v_base = ((row * heads_kv + hkv) * head_dim);
+            float v_val = in_prefix ? v_prefix[v_base + tid] : v_suffix[v_base + tid];
+            out_acc = out_acc * alpha + beta * v_val;
+        }
+        max_logit = new_max;
+        barrier();
+    }
+
+    if (tid < head_dim) {
+        data_out[q_base + tid] = out_acc / sum_exp;
+    }
+}

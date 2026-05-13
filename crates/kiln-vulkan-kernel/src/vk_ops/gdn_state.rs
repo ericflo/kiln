@@ -13,6 +13,7 @@
 
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
+use ash::vk;
 use std::sync::Arc;
 
 /// One layer's recurrent + conv state buffers.
@@ -59,6 +60,55 @@ fn alloc_zeroed_f32(device: &Arc<VulkanDevice>, n_elements: usize) -> Result<Arc
     Ok(Arc::new(buf))
 }
 
+fn copy_device_buffer(
+    device: &Arc<VulkanDevice>,
+    src: &Arc<VulkanBuffer>,
+    bytes: usize,
+    label: &str,
+) -> Result<Arc<VulkanBuffer>> {
+    let dst = VulkanBuffer::create_device_local(
+        device.device(),
+        device.device_local_mem_type(),
+        bytes.max(4) as u64,
+    )
+    .with_context(|| format!("{label}: alloc dst buffer"))?;
+
+    let command_pool = device.transient_command_pool()?;
+    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        .command_pool(*command_pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.device().handle(), &alloc_info, 1)
+            .with_context(|| format!("{label}: allocate command buffer"))?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .device()
+            .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::builder().build())
+            .with_context(|| format!("{label}: begin command buffer"))?;
+        device.device().cmd_copy_buffer(
+            cmd,
+            src.handle(),
+            dst.handle(),
+            &[vk::BufferCopy::builder().size(bytes.max(4) as u64).build()],
+        );
+        device
+            .device()
+            .end_command_buffer(cmd)
+            .with_context(|| format!("{label}: end command buffer"))?;
+    }
+    device.submit_and_wait(cmd, label)?;
+    unsafe {
+        device
+            .device()
+            .free_command_buffers(*command_pool, &command_buffers);
+    }
+
+    Ok(Arc::new(dst))
+}
+
 impl VkLinearAttentionState {
     /// Create fresh zero-initialized state for `num_gdn_layers` GDN
     /// layers, with the per-layer dimensions provided.
@@ -86,6 +136,35 @@ impl VkLinearAttentionState {
                 recurrent_n_elements: recurrent_n,
                 conv_state: alloc_zeroed_f32(device, conv_n)?,
                 conv_n_elements: conv_n,
+            });
+        }
+        Ok(Self { layers })
+    }
+
+    /// Capture a branchable GPU-resident copy of every GDN state buffer.
+    ///
+    /// GRPO reference scoring needs to prefill the shared prompt once and then
+    /// evaluate several completion branches from the identical prompt state.
+    /// This copy stays entirely on the Vulkan device; it does not read state
+    /// back through CPU memory.
+    pub fn snapshot(&self, device: &Arc<VulkanDevice>) -> Result<Self> {
+        let mut layers = Vec::with_capacity(self.layers.len());
+        for (idx, layer) in self.layers.iter().enumerate() {
+            layers.push(VkGdnLayerState {
+                recurrent_state: copy_device_buffer(
+                    device,
+                    &layer.recurrent_state,
+                    layer.recurrent_n_elements * 4,
+                    &format!("VkLinearAttentionState snapshot recurrent layer {idx}"),
+                )?,
+                recurrent_n_elements: layer.recurrent_n_elements,
+                conv_state: copy_device_buffer(
+                    device,
+                    &layer.conv_state,
+                    layer.conv_n_elements * 4,
+                    &format!("VkLinearAttentionState snapshot conv layer {idx}"),
+                )?,
+                conv_n_elements: layer.conv_n_elements,
             });
         }
         Ok(Self { layers })

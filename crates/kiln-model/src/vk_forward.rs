@@ -21,20 +21,26 @@
 
 #![cfg(feature = "vulkan")]
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{DType, Device, Tensor, TensorId, Var};
 use kiln_core::config::ModelConfig;
-use kiln_vulkan_kernel::vk_autograd::{vk_backward, VkGradStore};
-use kiln_vulkan_kernel::vk_ops::attention::vk_flash_sdpa_prefill_flat;
+use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
+use kiln_vulkan_kernel::vk_ops::attention::{
+    vk_flash_sdpa_decode_split_flat_no_grad, vk_flash_sdpa_prefill_flat,
+};
 use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add, vk_mul};
 use kiln_vulkan_kernel::vk_ops::embedding::{
     upload_u32_ids, vk_embedding_lookup_bf16, vk_embedding_lookup_f32,
 };
-use kiln_vulkan_kernel::vk_ops::flce::{flce_active_chunk_len, vk_flce_loss};
+use kiln_vulkan_kernel::vk_ops::flce::{
+    flce_active_chunk_len, flce_recommended_chunk_len_for_tensors, vk_flce_loss,
+    vk_selected_log_probs,
+};
+use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
 use kiln_vulkan_kernel::vk_ops::matmul::vk_matmul;
 use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w;
-use kiln_vulkan_kernel::vk_ops::narrow::vk_narrow_lastdim;
+use kiln_vulkan_kernel::vk_ops::narrow::{vk_narrow_lastdim, vk_scatter_to_lastdim_slice_inplace};
 use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
 use kiln_vulkan_kernel::vk_ops::shape::{vk_reshape, vk_transpose_2d, vk_transpose_2d_no_grad};
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
@@ -336,18 +342,29 @@ pub fn vk_compute_rope_tables(
     inv_freq: &[f32],
     t: usize,
 ) -> Result<(VkTensor, VkTensor)> {
+    vk_compute_rope_tables_range(device, inv_freq, 0, t)
+}
+
+/// Compute RoPE cos/sin tables for positions [start, start + len).
+pub fn vk_compute_rope_tables_range(
+    device: &Arc<VulkanDevice>,
+    inv_freq: &[f32],
+    start: usize,
+    len: usize,
+) -> Result<(VkTensor, VkTensor)> {
     let half = inv_freq.len();
-    let mut cos = vec![0.0_f32; t * half];
-    let mut sin = vec![0.0_f32; t * half];
-    for ti in 0..t {
+    let mut cos = vec![0.0_f32; len * half];
+    let mut sin = vec![0.0_f32; len * half];
+    for ti in 0..len {
+        let pos = start + ti;
         for hi in 0..half {
-            let f = (ti as f32) * inv_freq[hi];
+            let f = (pos as f32) * inv_freq[hi];
             cos[ti * half + hi] = f.cos();
             sin[ti * half + hi] = f.sin();
         }
     }
-    let cos_t = Tensor::from_vec(cos, (t, half), &Device::Cpu)?;
-    let sin_t = Tensor::from_vec(sin, (t, half), &Device::Cpu)?;
+    let cos_t = Tensor::from_vec(cos, (len, half), &Device::Cpu)?;
+    let sin_t = Tensor::from_vec(sin, (len, half), &Device::Cpu)?;
     let cos_vk = VkTensor::from_candle(&cos_t, Arc::clone(device))?;
     let sin_vk = VkTensor::from_candle(&sin_t, Arc::clone(device))?;
     Ok((cos_vk, sin_vk))
@@ -394,6 +411,17 @@ pub fn vk_full_attention_attention_block_with_rope(
     lora: &VkLoraLayer,
     rope: Option<(&VkTensor, &VkTensor, usize)>,
 ) -> Result<VkTensor> {
+    let (after_attn, _k, _v) =
+        vk_full_attention_attention_block_with_rope_capture_kv(x, w, lora, rope)?;
+    Ok(after_attn)
+}
+
+fn vk_full_attention_qkv_with_rope(
+    x: &VkTensor,
+    w: &VkFullAttentionWeights,
+    lora: &VkLoraLayer,
+    rope: Option<(&VkTensor, &VkTensor, usize)>,
+) -> Result<(VkTensor, VkTensor, VkTensor, Option<VkTensor>)> {
     let t = x.shape()[0];
     let hidden = x.shape()[1];
     let q_dim = w.heads_q * w.head_dim;
@@ -445,6 +473,17 @@ pub fn vk_full_attention_attention_block_with_rope(
         (q, k)
     };
 
+    Ok((q, k, v, gate))
+}
+
+fn vk_full_attention_attention_block_with_rope_capture_kv(
+    x: &VkTensor,
+    w: &VkFullAttentionWeights,
+    lora: &VkLoraLayer,
+    rope: Option<(&VkTensor, &VkTensor, usize)>,
+) -> Result<(VkTensor, VkTensor, VkTensor)> {
+    let (q, k, v, gate) = vk_full_attention_qkv_with_rope(x, w, lora, rope)?;
+
     // Causal SDPA, GQA-aware
     let scale = 1.0 / (w.head_dim as f32).sqrt();
     let attn = vk_flash_sdpa_prefill_flat(&q, &k, &v, w.heads_q, w.heads_kv, w.head_dim, scale)?;
@@ -458,7 +497,8 @@ pub fn vk_full_attention_attention_block_with_rope(
 
     // O projection + residual
     let o_out = vk_linear_with_lora(&attn_gated, &w.o_proj, lora.o_proj.as_ref())?;
-    vk_add(x, &o_out)
+    let after_attn = vk_add(x, &o_out)?;
+    Ok((after_attn, k, v))
 }
 
 /// Full-attention MLP subblock from the post-attention residual state.
@@ -817,7 +857,7 @@ pub fn vk_model_forward_final_norm_with_state(
     weights: &VkModelWeights,
     lora_layers: &[VkLoraLayer],
     input_ids: &[u32],
-    mut state: Option<&mut kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState>,
+    mut state: Option<&mut VkLinearAttentionState>,
 ) -> Result<VkTensor> {
     anyhow::ensure!(!input_ids.is_empty(), "vk_model_forward: empty input");
     anyhow::ensure!(
@@ -871,6 +911,310 @@ pub fn vk_model_forward_final_norm_with_state(
     }
 
     vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)
+}
+
+#[derive(Clone)]
+struct VkFullAttentionPrefixKv {
+    k: VkTensor,
+    v: VkTensor,
+    heads_kv: usize,
+    head_dim: usize,
+}
+
+struct VkFullAttentionSuffixKv {
+    k: VkTensor,
+    v: VkTensor,
+    cap: usize,
+}
+
+pub struct VkGrpoReferencePrefix {
+    prompt_len: usize,
+    last_hidden: VkTensor,
+    full_attn: Vec<VkFullAttentionPrefixKv>,
+    gdn_state: VkLinearAttentionState,
+}
+
+struct VkGrpoReferenceBranch {
+    suffix_len: usize,
+    full_attn: Vec<VkFullAttentionSuffixKv>,
+    gdn_state: VkLinearAttentionState,
+}
+
+impl VkGrpoReferencePrefix {
+    fn branch(
+        &self,
+        device: &Arc<VulkanDevice>,
+        suffix_cap: usize,
+    ) -> Result<VkGrpoReferenceBranch> {
+        let cap = suffix_cap.max(1);
+        let mut full_attn = Vec::with_capacity(self.full_attn.len());
+        for prefix in &self.full_attn {
+            let dim = prefix.heads_kv * prefix.head_dim;
+            full_attn.push(VkFullAttentionSuffixKv {
+                k: VkTensor::alloc_uninit(Arc::clone(device), vec![cap, dim], VkDType::F32)?,
+                v: VkTensor::alloc_uninit(Arc::clone(device), vec![cap, dim], VkDType::F32)?,
+                cap,
+            });
+        }
+        Ok(VkGrpoReferenceBranch {
+            suffix_len: 0,
+            full_attn,
+            gdn_state: self.gdn_state.snapshot(device)?,
+        })
+    }
+}
+
+fn scatter_row(dst: &VkTensor, row: usize, src: &VkTensor) -> Result<()> {
+    anyhow::ensure!(dst.dtype() == VkDType::F32 && src.dtype() == VkDType::F32);
+    anyhow::ensure!(
+        dst.shape().len() == 2 && src.shape().len() == 2 && src.shape()[0] == 1,
+        "scatter_row expects dst [rows, hidden] and src [1, hidden]"
+    );
+    let rows = dst.shape()[0];
+    let hidden = dst.shape()[1];
+    anyhow::ensure!(row < rows, "scatter_row row {row} out of range {rows}");
+    anyhow::ensure!(
+        src.shape()[1] == hidden,
+        "scatter_row hidden mismatch dst={hidden} src={}",
+        src.shape()[1]
+    );
+    let dst_flat = vk_reshape(dst, &[1, rows * hidden])?;
+    let src_flat = vk_reshape(src, &[1, hidden])?;
+    vk_scatter_to_lastdim_slice_inplace(&dst_flat, &src_flat, row * hidden, hidden)
+}
+
+fn scatter_suffix_kv(cache: &VkTensor, row: usize, src: &VkTensor) -> Result<()> {
+    anyhow::ensure!(
+        cache.shape().len() == 2 && src.shape().len() == 2 && src.shape()[0] == 1,
+        "scatter_suffix_kv expects cache [cap, dim] and src [1, dim]"
+    );
+    let cap = cache.shape()[0];
+    let dim = cache.shape()[1];
+    anyhow::ensure!(row < cap, "suffix KV row {row} out of range {cap}");
+    anyhow::ensure!(
+        src.shape()[1] == dim,
+        "suffix KV dim mismatch cache={dim} src={}",
+        src.shape()[1]
+    );
+    let dst_flat = vk_reshape(cache, &[1, cap * dim])?;
+    let src_flat = vk_reshape(src, &[1, dim])?;
+    vk_scatter_to_lastdim_slice_inplace(&dst_flat, &src_flat, row * dim, dim)
+}
+
+/// Prefill the shared GRPO prompt once for reference scoring.
+///
+/// This captures full-attention K/V and the GDN recurrent/conv state in the
+/// native Vulkan tensor stack so every completion branch can continue from the
+/// exact same prompt state without recomputing or reading the prompt back.
+pub fn vk_grpo_reference_prefill_prompt(
+    weights: &VkModelWeights,
+    prompt_ids: &[u32],
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+) -> Result<VkGrpoReferencePrefix> {
+    anyhow::ensure!(
+        !prompt_ids.is_empty(),
+        "vk_grpo_reference_prefill_prompt: empty prompt"
+    );
+    let device = weights.embed_tokens.device();
+    let mut no_lora = Vec::with_capacity(weights.layers.len());
+    no_lora.resize_with(weights.layers.len(), VkLoraLayer::default);
+
+    let ids = upload_u32_ids(device, prompt_ids)?;
+    let mut h = match weights.embed_dtype {
+        VkDType::F32 => {
+            vk_embedding_lookup_f32(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+        VkDType::Bf16 => {
+            vk_embedding_lookup_bf16(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+    };
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(weights.rope_tables_for_len(device, prompt_ids.len())?)
+    } else {
+        None
+    };
+    let mut gdn_state = VkLinearAttentionState::zeros(
+        device,
+        num_gdn_layers,
+        1,
+        model_config.linear_num_value_heads,
+        model_config.linear_key_head_dim,
+        model_config.linear_value_head_dim,
+        2 * model_config.linear_num_key_heads * model_config.linear_key_head_dim
+            + model_config.linear_num_value_heads * model_config.linear_value_head_dim,
+        model_config.linear_conv_kernel_dim,
+    )?;
+
+    let mut full_attn = Vec::new();
+    let mut gdn_layer_idx = 0usize;
+    for (lw, ll) in weights.layers.iter().zip(no_lora.iter()) {
+        h = match lw {
+            VkLayerWeights::FullAttention(full) => {
+                let rope_arg = rope_tables
+                    .as_ref()
+                    .map(|(cos, sin)| (cos, sin, weights.rotary_dim));
+                let (after_attn, k, v) =
+                    vk_full_attention_attention_block_with_rope_capture_kv(&h, full, ll, rope_arg)?;
+                full_attn.push(VkFullAttentionPrefixKv {
+                    k: k.detach(),
+                    v: v.detach(),
+                    heads_kv: full.heads_kv,
+                    head_dim: full.head_dim,
+                });
+                vk_full_attention_mlp_block(&after_attn, full, ll)?
+            }
+            VkLayerWeights::LinearAttention(_) => {
+                let result = vk_transformer_layer_with_state(
+                    &h,
+                    lw,
+                    ll,
+                    Some((&mut gdn_state, gdn_layer_idx)),
+                )?;
+                gdn_layer_idx += 1;
+                result
+            }
+        };
+    }
+    let normed = vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)?;
+    let last_row = vk_index_select_rows(&normed, &[(prompt_ids.len() - 1) as u32])?.detach();
+
+    Ok(VkGrpoReferencePrefix {
+        prompt_len: prompt_ids.len(),
+        last_hidden: last_row,
+        full_attn,
+        gdn_state,
+    })
+}
+
+fn vk_grpo_reference_decode_one(
+    weights: &VkModelWeights,
+    prefix_state: &VkGrpoReferencePrefix,
+    branch: &mut VkGrpoReferenceBranch,
+    token_id: u32,
+    position: usize,
+) -> Result<VkTensor> {
+    let device = weights.embed_tokens.device();
+    let mut no_lora = Vec::with_capacity(weights.layers.len());
+    no_lora.resize_with(weights.layers.len(), VkLoraLayer::default);
+    let ids = upload_u32_ids(device, &[token_id])?;
+    let mut h = match weights.embed_dtype {
+        VkDType::F32 => {
+            vk_embedding_lookup_f32(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+        VkDType::Bf16 => {
+            vk_embedding_lookup_bf16(&weights.embed_tokens, &ids, weights.vocab, weights.hidden)?
+        }
+    };
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(vk_compute_rope_tables_range(
+            device,
+            &weights.rotary_inv_freq,
+            position,
+            1,
+        )?)
+    } else {
+        None
+    };
+
+    let mut full_attn_idx = 0usize;
+    let mut gdn_layer_idx = 0usize;
+    for (lw, ll) in weights.layers.iter().zip(no_lora.iter()) {
+        h = match lw {
+            VkLayerWeights::FullAttention(full) => {
+                let rope_arg = rope_tables
+                    .as_ref()
+                    .map(|(cos, sin)| (cos, sin, weights.rotary_dim));
+                let (q, k, v, gate) = vk_full_attention_qkv_with_rope(&h, full, ll, rope_arg)?;
+                let prefix = &prefix_state.full_attn[full_attn_idx];
+                let suffix = &branch.full_attn[full_attn_idx];
+                anyhow::ensure!(
+                    prefix.heads_kv == full.heads_kv && prefix.head_dim == full.head_dim,
+                    "GRPO reference prefix K/V metadata mismatch at full-attn layer {full_attn_idx}"
+                );
+                scatter_suffix_kv(&suffix.k, branch.suffix_len, &k)?;
+                scatter_suffix_kv(&suffix.v, branch.suffix_len, &v)?;
+                let scale = 1.0 / (full.head_dim as f32).sqrt();
+                let attn = vk_flash_sdpa_decode_split_flat_no_grad(
+                    &q,
+                    &prefix.k,
+                    &prefix.v,
+                    &suffix.k,
+                    &suffix.v,
+                    prefix_state.prompt_len,
+                    branch.suffix_len + 1,
+                    suffix.cap,
+                    full.heads_q,
+                    full.heads_kv,
+                    full.head_dim,
+                    scale,
+                )?;
+                let attn_gated = if let Some(gate) = gate {
+                    kiln_vulkan_kernel::vk_ops::sigmoid::vk_mul_sigmoid_gate(&attn, &gate)?
+                } else {
+                    attn
+                };
+                let o_out = vk_linear_with_lora(&attn_gated, &full.o_proj, ll.o_proj.as_ref())?;
+                let after_attn = vk_add(&h, &o_out)?;
+                full_attn_idx += 1;
+                vk_full_attention_mlp_block(&after_attn, full, ll)?
+            }
+            VkLayerWeights::LinearAttention(_) => {
+                let result = vk_transformer_layer_with_state(
+                    &h,
+                    lw,
+                    ll,
+                    Some((&mut branch.gdn_state, gdn_layer_idx)),
+                )?;
+                gdn_layer_idx += 1;
+                result
+            }
+        };
+    }
+    branch.suffix_len += 1;
+    vk_rmsnorm(&h, &weights.final_norm_weight, 1e-5)
+}
+
+/// Score completion-token labels from a prefilled GRPO prompt reference state.
+///
+/// `labels` must be exactly the active completion targets: the first label is
+/// scored from the prompt's last hidden row; subsequent labels are scored by
+/// feeding each previous completion token through a native Vulkan decode step.
+pub fn vk_grpo_reference_log_probs_from_prefix(
+    weights: &VkModelWeights,
+    prefix: &VkGrpoReferencePrefix,
+    labels: &[u32],
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        !labels.is_empty(),
+        "vk_grpo_reference_log_probs_from_prefix: empty labels"
+    );
+    let device = weights.embed_tokens.device();
+    let hidden_rows = VkTensor::alloc_uninit(
+        Arc::clone(device),
+        vec![labels.len(), weights.hidden],
+        VkDType::F32,
+    )?;
+    scatter_row(&hidden_rows, 0, &prefix.last_hidden)?;
+
+    let mut branch = prefix.branch(device, labels.len().saturating_sub(1))?;
+    for idx in 0..labels.len().saturating_sub(1) {
+        let h = vk_grpo_reference_decode_one(
+            weights,
+            prefix,
+            &mut branch,
+            labels[idx],
+            prefix.prompt_len + idx,
+        )?;
+        scatter_row(&hidden_rows, idx + 1, &h)?;
+    }
+
+    vk_selected_log_probs(
+        &hidden_rows,
+        &weights.lm_head,
+        labels,
+        flce_recommended_chunk_len_for_tensors(&hidden_rows, &weights.lm_head),
+    )
 }
 
 /// Full forward + FLCE with optional GDN state. This legacy helper trains on

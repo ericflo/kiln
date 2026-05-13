@@ -169,6 +169,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "vk_flash_sdpa_fwd_f32_offset",
         SPIR_V_VK_FLASH_SDPA_FWD_F32_OFFSET,
     ),
+    (
+        "vk_flash_sdpa_decode_split_f32",
+        SPIR_V_VK_FLASH_SDPA_DECODE_SPLIT_F32,
+    ),
     ("vk_flash_sdpa_delta_f32", SPIR_V_VK_FLASH_SDPA_DELTA_F32),
     (
         "vk_flash_sdpa_delta_f32_offset",

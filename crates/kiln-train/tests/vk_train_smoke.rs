@@ -25,17 +25,18 @@ use kiln_model::forward::{
     GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
 };
 use kiln_model::vk_forward::{
+    VkFullAttentionWeights, VkLayerWeights, VkLinearAttentionWeights, VkLoraLayer, VkLoraPair,
+    VkModelWeights, vk_grpo_reference_log_probs_from_prefix, vk_grpo_reference_prefill_prompt,
     vk_model_forward_final_norm_with_state, vk_model_forward_loss,
-    vk_model_forward_loss_with_state, VkFullAttentionWeights, VkLayerWeights,
-    VkLinearAttentionWeights, VkLoraLayer, VkLoraPair, VkModelWeights,
-};
-use kiln_train::vk_train::{
-    allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter, vk_init_lora_layers,
-    vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
-    vk_recompute_train_step_with_state_masked, vk_train_step, VkAdamWConfig,
+    vk_model_forward_loss_with_state,
 };
 use kiln_train::GrpoConfig;
 use kiln_train::Optimizer;
+use kiln_train::vk_train::{
+    VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
+    vk_init_lora_layers, vk_native_grpo_train_jsonl, vk_recompute_grpo_train_step_with_state,
+    vk_recompute_train_step_with_state_masked, vk_train_step,
+};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
 use std::sync::Arc;
@@ -1108,6 +1109,58 @@ fn vk_init_lora_layers_targets_full_attention_and_gdn_mlp() -> Result<()> {
 }
 
 #[test]
+fn vk_gdn_state_continuation_matches_monolithic_forward() -> Result<()> {
+    use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
+
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_gdn_model(&dev)?;
+    let no_lora = vec![VkLoraLayer::default(); model.layers.len()];
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let split_at = 5usize;
+
+    let mut mono_state = tiny_gdn_state(&dev)?;
+    let mono = vk_model_forward_final_norm_with_state(
+        &model,
+        &no_lora,
+        &input_ids,
+        Some(&mut mono_state),
+    )?;
+    let suffix_rows: Vec<u32> = (split_at..input_ids.len()).map(|idx| idx as u32).collect();
+    let mono_suffix = vk_index_select_rows(&mono, &suffix_rows)?;
+
+    let mut split_state = tiny_gdn_state(&dev)?;
+    let _prefix = vk_model_forward_final_norm_with_state(
+        &model,
+        &no_lora,
+        &input_ids[..split_at],
+        Some(&mut split_state),
+    )?;
+    let split_suffix = vk_model_forward_final_norm_with_state(
+        &model,
+        &no_lora,
+        &input_ids[split_at..],
+        Some(&mut split_state),
+    )?;
+
+    assert_eq!(mono_suffix.shape(), split_suffix.shape());
+    let mono_data = mono_suffix.to_vec_f32()?;
+    let split_data = split_suffix.to_vec_f32()?;
+    let max_abs = mono_data
+        .iter()
+        .zip(split_data.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_abs < 2e-4,
+        "GDN split continuation drifted from monolithic forward: max_abs={max_abs:e}"
+    );
+
+    let snap = split_state.snapshot(&dev)?;
+    assert_eq!(snap.layers.len(), split_state.layers.len());
+    Ok(())
+}
+
+#[test]
 fn grpo_jsonl_stats_counts_large_file_without_retaining_groups() -> Result<()> {
     let path = std::env::temp_dir().join(format!(
         "kiln-vk-grpo-large-stats-{}.jsonl",
@@ -1216,6 +1269,82 @@ fn grpo_ref_log_probs(
     let h = vk_model_forward_final_norm_with_state(model, &no_lora, input_ids, state)?;
     let active_h = vk_index_select_rows(&h, active_rows)?;
     vk_selected_log_probs(&active_h, &model.lm_head, labels, 8)
+}
+
+fn assert_close_vec(name: &str, got: &[f32], expected: &[f32], tol: f32) {
+    assert_eq!(got.len(), expected.len(), "{name}: length mismatch");
+    let max_abs = got
+        .iter()
+        .zip(expected.iter())
+        .map(|(g, e)| (g - e).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(
+        max_abs <= tol,
+        "{name}: max_abs={max_abs:e} exceeds tolerance {tol:e}; got={got:?} expected={expected:?}"
+    );
+}
+
+#[test]
+fn vk_grpo_reference_prefix_scorer_matches_monolithic_full_attention() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_model(&dev)?;
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let prompt_len = 5usize;
+    let active_rows: Vec<u32> = vec![4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+
+    let prefix = vk_grpo_reference_prefill_prompt(
+        &model,
+        &input_ids[..prompt_len],
+        &tiny_model_config(),
+        0,
+    )?;
+    let fast = vk_grpo_reference_log_probs_from_prefix(&model, &prefix, &labels)?;
+    let mono = grpo_ref_log_probs(&model, &input_ids, &active_rows, &labels, None)?;
+
+    assert_close_vec(
+        "full-attn prefix GRPO reference scorer",
+        &fast.to_vec_f32()?,
+        &mono.to_vec_f32()?,
+        5e-4,
+    );
+    Ok(())
+}
+
+#[test]
+fn vk_grpo_reference_prefix_scorer_matches_monolithic_gdn() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let model = build_tiny_gdn_model(&dev)?;
+    let config = tiny_gdn_model_config();
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let prompt_len = 5usize;
+    let active_rows: Vec<u32> = vec![4, 5, 6];
+    let labels: Vec<u32> = active_rows
+        .iter()
+        .map(|&row| input_ids[row as usize + 1])
+        .collect();
+
+    let prefix = vk_grpo_reference_prefill_prompt(&model, &input_ids[..prompt_len], &config, 1)?;
+    let fast = vk_grpo_reference_log_probs_from_prefix(&model, &prefix, &labels)?;
+    let mut mono_state = tiny_gdn_state(&dev)?;
+    let mono = grpo_ref_log_probs(
+        &model,
+        &input_ids,
+        &active_rows,
+        &labels,
+        Some(&mut mono_state),
+    )?;
+
+    assert_close_vec(
+        "GDN prefix GRPO reference scorer",
+        &fast.to_vec_f32()?,
+        &mono.to_vec_f32()?,
+        5e-4,
+    );
+    Ok(())
 }
 
 #[test]
