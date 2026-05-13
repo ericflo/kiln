@@ -17,6 +17,7 @@ use kiln_model::forward::{
 };
 use kiln_server::api;
 use kiln_server::state::AppState;
+use kiln_server::training_queue::QueuedJob;
 
 /// Create a tiny model config for testing.
 fn tiny_config() -> ModelConfig {
@@ -182,6 +183,128 @@ fn test_tokenizer() -> KilnTokenizer {
 
     let bytes = serde_json::to_vec(&json).unwrap();
     KilnTokenizer::from_bytes(&bytes).unwrap()
+}
+
+#[cfg(feature = "vulkan")]
+#[tokio::test]
+async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
+    if !kiln_model::backend::vulkan::vulkan_is_available() {
+        eprintln!("Vulkan unavailable, skipping route-level native GRPO dataset_path test");
+        return;
+    }
+
+    let config = tiny_config();
+    let device = Device::Cpu;
+    let weights = tiny_weights(&config, &device);
+
+    let runner_tokenizer = test_tokenizer();
+    let state_tokenizer = test_tokenizer();
+
+    let runner = ModelRunner::new(weights, runner_tokenizer, config.clone());
+    assert_eq!(
+        runner.backend_name(),
+        "vulkan",
+        "bare real backend should select Vulkan by default when Vulkan is available"
+    );
+
+    let adapter_dir = tempfile::tempdir().unwrap();
+    let state = AppState::new_real(
+        config,
+        runner,
+        state_tokenizer,
+        device.clone(),
+        adapter_dir.path().to_path_buf(),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+        "qwen3.5-4b-kiln".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
+    let state_for_assert = state.clone();
+    let app = api::router(state);
+
+    let dataset = tempfile::NamedTempFile::new().unwrap();
+    let first = json!({
+        "messages": [{"role": "user", "content": "t1"}],
+        "completions": [
+            {"text": "t2", "reward": 1.0},
+            {"text": "t3", "reward": 0.0}
+        ]
+    });
+    std::fs::write(
+        dataset.path(),
+        format!(
+            "{}\nthis is not json and must not be parsed at submit time\n",
+            first
+        ),
+    )
+    .unwrap();
+
+    let body = json!({
+        "dataset_path": format!("  {}  ", dataset.path().display()),
+        "config": {
+            "output_name": "api-jsonl-route",
+            "auto_load": false,
+            "lora_rank": 2
+        }
+    });
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/train/grpo")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+
+    if status != StatusCode::OK {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        panic!("Expected 200, got {status}: {body_str}");
+    }
+
+    let resp: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(resp["state"], "queued");
+    assert!(
+        resp["message"]
+            .as_str()
+            .unwrap()
+            .contains("Queued streamed GRPO training from dataset_path")
+    );
+    let job_id = resp["job_id"].as_str().unwrap().to_string();
+
+    {
+        let jobs = state_for_assert.training_jobs.read().unwrap();
+        let job = jobs.get(&job_id).expect("queued job should be tracked");
+        assert!(matches!(
+            job.job_type,
+            kiln_server::state::TrainingJobType::Grpo
+        ));
+        assert_eq!(job.state, kiln_train::TrainingState::Queued);
+        assert_eq!(job.adapter_name, "api-jsonl-route");
+    }
+
+    let queued = state_for_assert
+        .training_queue
+        .lock()
+        .unwrap()
+        .pop()
+        .expect("queued GRPO job");
+    assert_eq!(queued.job_id, job_id);
+    match queued.job {
+        QueuedJob::Grpo(req) => {
+            assert_eq!(req.groups.len(), 0);
+            assert_eq!(
+                req.dataset_path.as_deref(),
+                Some(dataset.path().to_str().unwrap()),
+                "route should trim and preserve dataset_path for the streaming worker"
+            );
+        }
+        QueuedJob::Sft(_) => panic!("expected queued GRPO job"),
+    }
 }
 
 #[tokio::test]
