@@ -881,12 +881,15 @@ pub fn sft_train(
     // Run the actual training body inside a closure so we can write the
     // outcome record (success or failure) before returning to the caller.
     let mut train_body = || -> Result<(PathBuf, f64)> {
-        // Tokenize all examples and build (input_ids, label_mask) pairs.
-        // Labels: we want to train on assistant responses only.
-        let tokenized: Vec<(Vec<u32>, Vec<bool>)> = examples
+        // Validate examples without retaining every tokenized long-context
+        // payload at once. The step loop tokenizes the current example on
+        // demand so full-file SFT jobs don't pin all input_ids/label masks for
+        // the entire run.
+        let valid_indices: Vec<usize> = examples
             .iter()
-            .filter_map(|ex| match tokenize_for_training(ex, tokenizer) {
-                Ok(t) => Some(t),
+            .enumerate()
+            .filter_map(|(idx, ex)| match tokenize_for_training(ex, tokenizer) {
+                Ok(_) => Some(idx),
                 Err(e) => {
                     tracing::warn!("skipping example: {e}");
                     None
@@ -894,7 +897,7 @@ pub fn sft_train(
             })
             .collect();
 
-        if tokenized.is_empty() {
+        if valid_indices.is_empty() {
             anyhow::bail!("no valid training examples after tokenization");
         }
 
@@ -919,7 +922,7 @@ pub fn sft_train(
             tracing::info!("gradient checkpointing disabled (KILN_NO_GRAD_CHECKPOINT=1)");
         }
 
-        let total_steps = config.epochs * tokenized.len();
+        let total_steps = config.epochs * valid_indices.len();
         let mut global_step = 0;
         let mut last_loss = 0.0;
 
@@ -928,19 +931,22 @@ pub fn sft_train(
         for epoch in 0..config.epochs {
             let mut epoch_loss = 0.0;
 
-            for (_ex_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
+            for &ex_idx in &valid_indices {
+                let (input_ids, label_mask) =
+                    tokenize_for_training(&examples[ex_idx], tokenizer)
+                        .with_context(|| format!("retokenize SFT example {ex_idx}"))?;
                 let loss_val;
 
-                let flce_provider = build_flce_provider(&backend, label_mask, model_config);
+                let flce_provider = build_flce_provider(&backend, &label_mask, model_config);
                 if let Some(ref segs) = segments {
                     // Gradient-checkpointed forward/backward
                     let (lv, accumulated_grads) = checkpointed_forward_backward(
                         &*backend,
-                        input_ids,
+                        &input_ids,
                         weights,
                         model_config,
                         &params,
-                        label_mask,
+                        &label_mask,
                         segs,
                         &device,
                         flce_provider,
@@ -958,11 +964,11 @@ pub fn sft_train(
                     // Standard (non-checkpointed) forward/backward
                     let (lv, grads) = standard_forward_backward(
                         &*backend,
-                        input_ids,
+                        &input_ids,
                         weights,
                         model_config,
                         &params,
-                        label_mask,
+                        &label_mask,
                         &device,
                         flce_provider,
                     )?;
@@ -1027,7 +1033,7 @@ pub fn sft_train(
                 }
             }
 
-            let avg_loss = epoch_loss / tokenized.len() as f64;
+            let avg_loss = epoch_loss / valid_indices.len() as f64;
             tracing::info!(
                 epoch = epoch + 1,
                 avg_loss = format!("{avg_loss:.6}"),
