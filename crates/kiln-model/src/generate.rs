@@ -35,6 +35,7 @@ use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::packed_weight_registry::GpuPackedWeightRegistry;
 use crate::paged_kv_cache::PagedKvCache;
+use crate::forward::lm_head_sample_backend_decode_if;
 use crate::sampling::{greedy_sample, sample_step, sample_with_full_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -884,6 +885,44 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
         block_table.push(block_id);
     }
     block_table
+}
+
+/// Legacy "lm_head → host sampler" batched path. Used when the backend
+/// doesn't expose the fused on-device sampler (CUDA / Metal use this
+/// path because their `linear_decode_sample` is not implemented yet;
+/// CPU + Vulkan with `top_k > kernel max` also fall through here),
+/// or for the batch > 1 case where the fused single-row kernel
+/// doesn't apply.
+fn run_legacy_lm_head_sample_batch(
+    backend: &dyn crate::backend::BackendRuntime,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    params: &[SamplingParams],
+    states: &[&mut PagedBatchedDecodeState],
+) -> Result<Vec<TokenId>> {
+    let logits = crate::forward::model_forward_head_backend_decode_if(
+        Some(backend),
+        hidden,
+        weights,
+        config,
+    )
+    .context("batched decode lm head")?;
+    let mut sampled = Vec::with_capacity(states.len());
+    for (idx, params) in params.iter().enumerate() {
+        let row = logits
+            .narrow(0, idx, 1)
+            .with_context(|| format!("batched decode lm head row {idx}"))?;
+        let token = if params.temperature == 0.0 {
+            greedy_sample(&row)?
+        } else {
+            let mut row_params = params.clone();
+            row_params.seed = states[idx].step_seed;
+            sample_with_full_params(&row, &row_params, &states[idx].generated_tokens)?
+        };
+        sampled.push(token);
+    }
+    Ok(sampled)
 }
 
 fn sample_first_decode_token(
@@ -2271,32 +2310,51 @@ impl ModelRunner {
                 )
                 .context("batched decode forward pass failed")?;
 
-                let logits = model_forward_head_backend_decode_if(
-                    Some(&*self.backend),
-                    &hidden,
-                    &self.weights,
-                    &self.config,
-                )
-                .context("batched decode lm head")?;
-                let mut sampled = Vec::with_capacity(states.len());
-                for (idx, params) in params.iter().enumerate() {
-                    let row = logits
-                        .narrow(0, idx, 1)
-                        .with_context(|| format!("batched decode lm head row {idx}"))?;
-                    let token = if params.temperature == 0.0 {
-                        greedy_sample(&row)?
+                // Single-row non-greedy: try the backend-fused fused
+                // sample path first. It does lm_head + penalty + top-k
+                // + softmax + min_p + top_p + categorical entirely
+                // on-device and reads back only the 4-byte token.
+                // Falls back to the legacy "lm_head + host sample"
+                // flow when the backend declines.
+                if row_count == 1 && params[0].temperature > 0.0 {
+                    let row_hidden = hidden
+                        .narrow(0, 0, 1)
+                        .context("batched decode hidden row 0")?;
+                    if let Some(token) = lm_head_sample_backend_decode_if(
+                        Some(&*self.backend),
+                        &row_hidden,
+                        &self.weights,
+                        &self.config,
+                        &params[0],
+                        states[0].step_seed,
+                        &states[0].generated_tokens,
+                    )
+                    .context("fused linear_decode_sample failed")?
+                    {
+                        vec![token]
                     } else {
-                        let mut row_params = params.clone();
-                        row_params.seed = states[idx].step_seed;
-                        sample_with_full_params(
-                            &row,
-                            &row_params,
-                            &states[idx].generated_tokens,
+                        // Backend declined (top_k > kernel max, dtype
+                        // mismatch, etc.) — fall through to the legacy
+                        // lm_head + host sampler.
+                        run_legacy_lm_head_sample_batch(
+                            &*self.backend,
+                            &hidden,
+                            &self.weights,
+                            &self.config,
+                            params,
+                            states,
                         )?
-                    };
-                    sampled.push(token);
+                    }
+                } else {
+                    run_legacy_lm_head_sample_batch(
+                        &*self.backend,
+                        &hidden,
+                        &self.weights,
+                        &self.config,
+                        params,
+                        states,
+                    )?
                 }
-                sampled
             }
         };
         let decode_duration = started.elapsed();

@@ -2911,6 +2911,243 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
         .ok_or_else(|| anyhow::anyhow!("linear argmax readback was empty"))
 }
 
+/// Single-token transposed linear projection + full Qwen3.5 stochastic
+/// sampling, fully fused on the Vulkan device. **Returns only the 4-byte
+/// sampled token id — the full-vocab logits never leave GPU memory.**
+///
+/// Pipeline (all on-device):
+/// 1. lm_head matmul → `logits` device buffer of size `[out_dim]`.
+/// 2. (Optional) `apply_token_penalties` scatter applies repetition,
+///    presence, and frequency penalties at history token indices.
+/// 3. `topk_sample` fused kernel does temperature + top-k + softmax +
+///    min-p + top-p + seeded categorical sample. Writes 1 u32 token.
+/// 4. Read back 4 bytes.
+///
+/// This is the Vulkan equivalent of CUDA/Metal's on-device sampling
+/// path. Replaces the legacy "linear_decode + full vocab readback +
+/// host sampler" flow for non-greedy decode steps.
+///
+/// `top_k` must be ≤ `TOPK_SAMPLE_KERNEL_K_MAX` (= 64). Callers should
+/// fall back to the legacy host path for larger top_k requests.
+pub const TOPK_SAMPLE_KERNEL_K_MAX: u32 = 64;
+
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_linear_decode_sample(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    weight_t: &VulkanBuffer,
+    packed_bf16_weights: bool,
+    hidden: usize,
+    out_dim: usize,
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    min_p: f32,
+    seed: u64,
+) -> Result<u32> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    anyhow::ensure!(out_dim > 0, "linear_decode_sample: out_dim must be nonzero");
+    anyhow::ensure!(
+        top_k > 0 && top_k <= TOPK_SAMPLE_KERNEL_K_MAX,
+        "linear_decode_sample: top_k {top_k} out of range (1..={})",
+        TOPK_SAMPLE_KERNEL_K_MAX
+    );
+    anyhow::ensure!(
+        history_indices.len() == history_counts.len(),
+        "linear_decode_sample: history indices/counts length mismatch ({} vs {})",
+        history_indices.len(),
+        history_counts.len()
+    );
+    let x_data = extract_tensor_bytes(x)?.0;
+    anyhow::ensure!(
+        x_data.len() == hidden * 4,
+        "linear_decode_sample: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        hidden * 4
+    );
+
+    // ---- Allocate the device-local buffers ----
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create linear_decode_sample x buffer")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &x_buf,
+            &x_data,
+        )
+        .context("failed to upload linear_decode_sample x buffer")?;
+    }
+
+    // Logits buffer is `[out_dim]` f32. Stays on device for the entire
+    // pipeline — never copied back to host.
+    let logits_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (out_dim * 4) as u64)
+            .context("failed to create linear_decode_sample logits buffer")?;
+
+    // ---- Step 1: lm_head matmul ----
+    let lm_glsl = if packed_bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode.comp"
+        )
+    };
+    let lm_spirv = crate::pipeline::ShaderPipeline::compile_shader(lm_glsl)?;
+    let lm_push: [u32; 2] = [hidden as u32, out_dim as u32];
+    let lm_handles = vec![x_buf.handle(), weight_t.handle(), logits_buf.handle()];
+    run_compute_pipeline(
+        vk_device,
+        &lm_spirv,
+        &lm_handles,
+        lm_handles.len(),
+        &lm_push,
+        out_dim.div_ceil(16) as u32,
+    )
+    .context("linear_decode_sample: lm_head dispatch failed")?;
+
+    // ---- Step 2: (optional) apply_token_penalties scatter ----
+    let penalties_active = !history_indices.is_empty()
+        && ((repetition_penalty.is_finite() && (repetition_penalty - 1.0).abs() > f32::EPSILON)
+            || (presence_penalty.is_finite() && presence_penalty != 0.0)
+            || (frequency_penalty.is_finite() && frequency_penalty != 0.0));
+    let _history_idx_buf;
+    let _history_cnt_buf;
+    if penalties_active {
+        let n_unique = history_indices.len() as u32;
+        let idx_buf = VulkanBuffer::create_device_local(
+            device,
+            device_local_mt,
+            (history_indices.len() * 4) as u64,
+        )
+        .context("failed to create penalty history-index buffer")?;
+        let cnt_buf = VulkanBuffer::create_device_local(
+            device,
+            device_local_mt,
+            (history_counts.len() * 4) as u64,
+        )
+        .context("failed to create penalty history-count buffer")?;
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &idx_buf,
+                bytemuck::cast_slice(history_indices),
+            )
+            .context("failed to upload penalty history-index buffer")?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &cnt_buf,
+                bytemuck::cast_slice(history_counts),
+            )
+            .context("failed to upload penalty history-count buffer")?;
+        }
+
+        let pen_glsl = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/apply_token_penalties.comp"
+        );
+        let pen_spirv = crate::pipeline::ShaderPipeline::compile_shader(pen_glsl)?;
+        // Push constants: u32 n_unique, u32 vocab_size, f32 rep, f32 presence, f32 frequency.
+        let pen_push: [u32; 5] = [
+            n_unique,
+            out_dim as u32,
+            repetition_penalty.to_bits(),
+            presence_penalty.to_bits(),
+            frequency_penalty.to_bits(),
+        ];
+        let pen_handles = vec![logits_buf.handle(), idx_buf.handle(), cnt_buf.handle()];
+        run_compute_pipeline(
+            vk_device,
+            &pen_spirv,
+            &pen_handles,
+            pen_handles.len(),
+            &pen_push,
+            n_unique.div_ceil(64),
+        )
+        .context("linear_decode_sample: apply_token_penalties dispatch failed")?;
+        // Keep buffers alive until the queue idles (run_compute_pipeline waits inside).
+        _history_idx_buf = Some(idx_buf);
+        _history_cnt_buf = Some(cnt_buf);
+    } else {
+        _history_idx_buf = None;
+        _history_cnt_buf = None;
+    }
+
+    // ---- Step 3: fused topk_sample → 4-byte token ----
+    let out_token_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
+        .context("failed to create linear_decode_sample out-token buffer")?;
+    let sample_glsl = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/topk_sample.comp"
+    );
+    let sample_spirv = crate::pipeline::ShaderPipeline::compile_shader(sample_glsl)?;
+    let seed_lo = (seed & 0xFFFF_FFFF) as u32;
+    let seed_hi = (seed >> 32) as u32;
+    // Push constants: u32 vocab_size, u32 top_k, f32 temperature, f32 top_p, f32 min_p, u32 seed_lo, u32 seed_hi
+    let sample_push: [u32; 7] = [
+        out_dim as u32,
+        top_k,
+        temperature.to_bits(),
+        top_p.to_bits(),
+        min_p.to_bits(),
+        seed_lo,
+        seed_hi,
+    ];
+    let sample_handles = vec![logits_buf.handle(), out_token_buf.handle()];
+    // The fused topk_sample shader is a SINGLE workgroup pass (its own
+    // tree reduction is inside the shader). Always dispatch x=1.
+    run_compute_pipeline(
+        vk_device,
+        &sample_spirv,
+        &sample_handles,
+        sample_handles.len(),
+        &sample_push,
+        1,
+    )
+    .context("linear_decode_sample: topk_sample dispatch failed")?;
+
+    // ---- Step 4: read back the 4-byte token ----
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_token_buf,
+        )
+        .context("failed to read back linear_decode_sample token")?
+    };
+    let tokens: &[u32] = bytemuck::cast_slice(&out_data);
+    tokens
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("linear_decode_sample readback was empty"))
+}
+
 /// Dispatch a batched single-token transposed linear projection and return one
 /// argmax token per batch row.
 ///

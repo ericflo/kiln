@@ -138,6 +138,11 @@ const SHADERS: &[(&str, &str)] = &[
         "linear_decode_argmax_batched_reduce",
         "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE",
     ),
+    (
+        "apply_token_penalties",
+        "SPIR_V_APPLY_TOKEN_PENALTIES",
+    ),
+    ("topk_sample", "SPIR_V_TOPK_SAMPLE"),
     ("mlp_gate_up_decode", "SPIR_V_MLP_GATE_UP_DECODE"),
     (
         "mlp_gate_up_decode_bf16w",

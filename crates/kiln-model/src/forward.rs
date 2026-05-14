@@ -5778,6 +5778,80 @@ fn lm_head_argmax_backend_decode_if(
     lm_head_argmax(x, embed_tokens_t)
 }
 
+/// Token-history aggregation for the fused on-device sampling path.
+/// Returns `(unique_indices, counts)` sorted by ascending token id so
+/// the on-device scatter is deterministic across runs.
+fn unique_history_counts(history: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for &t in history {
+        *counts.entry(t).or_default() += 1;
+    }
+    let mut idx = Vec::with_capacity(counts.len());
+    let mut cnt = Vec::with_capacity(counts.len());
+    for (k, v) in counts {
+        idx.push(k);
+        cnt.push(v);
+    }
+    (idx, cnt)
+}
+
+/// Hidden-state → sampled token, fully fused on-device when the backend
+/// supports it. Returns `Ok(Some(token))` when the fused path ran;
+/// `Ok(None)` when the backend declined (e.g. `top_k > kernel max`),
+/// signalling to the caller that the legacy host sampler should run.
+///
+/// `params` is the full sampling spec (Qwen3.5-shaped). `step_seed` is
+/// the per-step PRNG seed (overrides `params.seed` for this token);
+/// `history` is the slice of generated tokens so far. Pass `&[]` for
+/// the first decode token — penalties become a no-op under OpenAI
+/// semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn lm_head_sample_backend_decode_if(
+    backend: Option<&dyn BackendRuntime>,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    params: &kiln_core::sampling::SamplingParams,
+    step_seed: Option<u64>,
+    history: &[u32],
+) -> Result<Option<u32>> {
+    let Some(backend) = backend else {
+        return Ok(None);
+    };
+    if !backend.supports_linear_decode_sample(params.top_k) {
+        return Ok(None);
+    }
+    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+    let (history_indices, history_counts) = unique_history_counts(history);
+    let seed = step_seed.unwrap_or_else(|| {
+        // PRNG seed for un-seeded requests — derived from nanos +
+        // history hash so consecutive un-seeded tokens see distinct
+        // entropy without burning a kernel side channel for it.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let h = history.iter().fold(0xCBF29CE484222325u64, |acc, &t| {
+            (acc ^ t as u64).wrapping_mul(0x100000001B3)
+        });
+        nanos.wrapping_add(h)
+    });
+    backend.linear_decode_sample(
+        &normed,
+        &weights.embed_tokens_t,
+        &history_indices,
+        &history_counts,
+        params.repetition_penalty,
+        params.presence_penalty,
+        params.frequency_penalty,
+        params.temperature,
+        params.top_k,
+        params.top_p,
+        params.min_p,
+        seed,
+    )
+}
+
 fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> {
     #[cfg(feature = "metal")]
     {

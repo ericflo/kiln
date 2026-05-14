@@ -1,0 +1,62 @@
+// Apply OpenAI/HF-style token penalties to logits in place on the device.
+//
+// One thread per UNIQUE token id in the generated-token history. Each
+// thread reads its target logit, applies the three penalties (rep,
+// presence, frequency), and writes the updated value back. No global
+// barriers needed — each thread touches a distinct index.
+//
+// `repetition_penalty` (HF): sign-conditional. For logit > 0 divides by
+// `rep`; for logit < 0 multiplies. `rep == 1.0` is a no-op.
+// `presence_penalty` (OpenAI): unconditionally subtracts `presence`
+// from each unique history token's logit.
+// `frequency_penalty` (OpenAI): subtracts `frequency * count` per token.
+//
+// All three operate purely on the logits buffer; no other state lives
+// on-device between dispatches.
+
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_unique;
+    uint vocab_size;
+    float repetition;
+    float presence;
+    float frequency;
+};
+
+layout(binding = 0) buffer LogitsBuf { float logits[]; };
+layout(binding = 1) readonly buffer IndicesBuf { uint history_indices[]; };
+layout(binding = 2) readonly buffer CountsBuf { uint history_counts[]; };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n_unique) {
+        return;
+    }
+    uint idx = history_indices[tid];
+    if (idx >= vocab_size) {
+        return;
+    }
+    uint count = history_counts[tid];
+
+    float l = logits[idx];
+
+    // Repetition penalty (HF sign-conditional). The `!= 1.0` guard is
+    // free vs branchy code on Vulkan compute hardware.
+    if (repetition != 1.0) {
+        if (l > 0.0) {
+            l = l / repetition;
+        } else {
+            l = l * repetition;
+        }
+    }
+
+    // OpenAI-style additive penalties. Both default to 0 and become
+    // no-ops at zero, so we don't need extra guards.
+    l -= presence;
+    l -= frequency * float(count);
+
+    logits[idx] = l;
+}

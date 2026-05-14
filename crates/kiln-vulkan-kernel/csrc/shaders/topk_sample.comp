@@ -1,0 +1,227 @@
+// Fused top-K + temperature + softmax + min-p + top-p + categorical
+// sampling, in a SINGLE workgroup, returning only the 4-byte sampled
+// token id.
+//
+// Replaces the legacy "read back full vocab to host, sample on CPU"
+// flow on Vulkan. The full-vocab logits never leave GPU memory; only
+// the final token id is copied back.
+//
+// Pipeline within this one workgroup:
+//   1. Each thread maintains a local top-K candidate set in registers
+//      via insertion sort while striding through the vocab.
+//   2. Tree reduction across threads merges per-thread top-K arrays in
+//      shared memory until thread 0 holds the global top-K.
+//   3. Thread 0 applies temperature → softmax → min-p → top-p filters
+//      to the small (K-element) distribution.
+//   4. Thread 0 samples categorically using a seeded xorshift32 PRNG
+//      and writes the resulting token id to `out_token[0]`.
+//
+// `K_MAX` is the maximum top-K the shader can return. We hard-code 64
+// to balance shared memory usage against the user-facing top_k range
+// (Qwen3.5's recommended top_k is 20). When the request specifies a
+// top_k > K_MAX, the host falls back to the legacy readback path.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+// Workgroup config: 64 threads × K_MAX=64 candidates each ⇒
+// 64 * 64 * 8 bytes = 32 KB shared memory (within the Vulkan minimum
+// guarantee of 16 KB if we shrink later — see thread count tradeoff
+// in the dispatch wrapper).
+#define WORKGROUP_SIZE 64
+#define K_MAX          64
+
+layout(local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint vocab_size;
+    uint top_k;        // effective K, must be <= K_MAX
+    float temperature; // > 0; greedy (==0) handled by separate fused argmax kernel
+    float top_p;
+    float min_p;
+    uint seed_lo;      // PRNG seed (split across two u32 so callers can
+    uint seed_hi;      //   supply a u64; we mix into a single u32 below)
+};
+
+layout(binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(binding = 1) writeonly buffer OutTokenBuf { uint out_token[]; };
+
+shared float s_scores[WORKGROUP_SIZE * K_MAX];
+shared uint  s_indices[WORKGROUP_SIZE * K_MAX];
+
+// xorshift32 — fast, deterministic, sufficient for picking from a
+// K-element categorical distribution.
+uint xorshift32(inout uint state) {
+    uint x = state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state = x;
+    return x;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint K = top_k;
+
+    // Each thread maintains its own top-K in registers via insertion
+    // sort. K_MAX bounds the compile-time array size.
+    float local_scores[K_MAX];
+    uint  local_indices[K_MAX];
+    [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+        local_scores[i]  = -3.4028234663852886e38;
+        local_indices[i] = 0u;
+    }
+
+    // Stride through the vocab; each thread covers
+    // `ceil(vocab / WORKGROUP_SIZE)` indices.
+    for (uint v = tid; v < vocab_size; v += WORKGROUP_SIZE) {
+        float score = logits[v];
+        // Quick reject if the new score can't beat the smallest in our K.
+        if (K > 0 && score > local_scores[K - 1]) {
+            // Bubble down the new (score, idx) into the right slot.
+            int j = int(K) - 2;
+            while (j >= 0 && local_scores[j] < score) {
+                local_scores[j + 1]  = local_scores[j];
+                local_indices[j + 1] = local_indices[j];
+                j--;
+            }
+            local_scores[j + 1]  = score;
+            local_indices[j + 1] = v;
+        }
+    }
+
+    // Flush thread-local top-K to shared memory.
+    [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+        s_scores[tid * K_MAX + i]  = local_scores[i];
+        s_indices[tid * K_MAX + i] = local_indices[i];
+    }
+    barrier();
+
+    // Tree reduction: merge top-K from thread `tid + stride` into thread `tid`.
+    // After log2(WORKGROUP_SIZE) rounds, thread 0 holds the global top-K.
+    for (uint stride = WORKGROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            // Two-pointer merge of two sorted-descending K-arrays.
+            float a_scores[K_MAX];
+            uint  a_indices[K_MAX];
+            float b_scores[K_MAX];
+            uint  b_indices[K_MAX];
+            [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+                a_scores[i]  = s_scores[tid * K_MAX + i];
+                a_indices[i] = s_indices[tid * K_MAX + i];
+                b_scores[i]  = s_scores[(tid + stride) * K_MAX + i];
+                b_indices[i] = s_indices[(tid + stride) * K_MAX + i];
+            }
+            uint ai = 0;
+            uint bi = 0;
+            for (uint out_i = 0; out_i < K; out_i++) {
+                bool take_a = (ai < K) && ((bi >= K) || (a_scores[ai] >= b_scores[bi]));
+                if (take_a) {
+                    s_scores[tid * K_MAX + out_i]  = a_scores[ai];
+                    s_indices[tid * K_MAX + out_i] = a_indices[ai];
+                    ai++;
+                } else {
+                    s_scores[tid * K_MAX + out_i]  = b_scores[bi];
+                    s_indices[tid * K_MAX + out_i] = b_indices[bi];
+                    bi++;
+                }
+            }
+        }
+        barrier();
+    }
+
+    // Thread 0: softmax → min-p → top-p → categorical sample.
+    if (tid == 0u) {
+        // Temperature scale on the already-sorted top-K logits.
+        float top_scores[K_MAX];
+        uint  top_indices[K_MAX];
+        for (uint i = 0; i < K; i++) {
+            top_scores[i]  = s_scores[i] / temperature;
+            top_indices[i] = s_indices[i];
+        }
+
+        // Stable softmax over the K candidates.
+        float max_logit = top_scores[0];
+        float probs[K_MAX];
+        float sum = 0.0;
+        for (uint i = 0; i < K; i++) {
+            float p = exp(top_scores[i] - max_logit);
+            probs[i] = p;
+            sum += p;
+        }
+        // Guard against pathological all-NaN/all--inf inputs.
+        if (!(sum > 0.0)) {
+            out_token[0] = top_indices[0];
+            return;
+        }
+        for (uint i = 0; i < K; i++) {
+            probs[i] /= sum;
+        }
+
+        // Min-p filter: drop tokens below `min_p * max_prob`. Renormalize.
+        if (min_p > 0.0) {
+            float pmax = probs[0];
+            float threshold = min_p * pmax;
+            float keep_sum = 0.0;
+            for (uint i = 0; i < K; i++) {
+                if (probs[i] < threshold) {
+                    probs[i] = 0.0;
+                } else {
+                    keep_sum += probs[i];
+                }
+            }
+            if (keep_sum > 0.0) {
+                for (uint i = 0; i < K; i++) {
+                    probs[i] /= keep_sum;
+                }
+            }
+        }
+
+        // Top-p filter on the sorted (descending) array: cumulative
+        // sum, truncate at threshold, renormalize.
+        if (top_p > 0.0 && top_p < 1.0) {
+            float cumsum = 0.0;
+            uint cutoff = K;
+            for (uint i = 0; i < K; i++) {
+                cumsum += probs[i];
+                if (cumsum >= top_p) {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            float keep_sum = 0.0;
+            for (uint i = 0; i < cutoff; i++) {
+                keep_sum += probs[i];
+            }
+            if (keep_sum > 0.0) {
+                for (uint i = 0; i < cutoff; i++) {
+                    probs[i] /= keep_sum;
+                }
+            }
+            for (uint i = cutoff; i < K; i++) {
+                probs[i] = 0.0;
+            }
+        }
+
+        // Categorical sample using a seeded xorshift32 PRNG.
+        uint state = seed_lo ^ (seed_hi * 2654435761u);
+        if (state == 0u) state = 0x9E3779B9u; // avoid xorshift32 fixed point at 0
+        uint r_bits = xorshift32(state);
+        float r = float(r_bits) * (1.0 / 4294967295.0); // [0, 1]
+
+        float cumsum = 0.0;
+        uint sampled = top_indices[0];
+        for (uint i = 0; i < K; i++) {
+            cumsum += probs[i];
+            if (r < cumsum) {
+                sampled = top_indices[i];
+                break;
+            }
+            // Last-bucket fallthrough: keep updating so a rounding error
+            // can't leave `sampled` at the initial argmax.
+            sampled = top_indices[i];
+        }
+        out_token[0] = sampled;
+    }
+}

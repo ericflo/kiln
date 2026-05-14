@@ -2074,6 +2074,81 @@ impl BackendRuntime for VulkanBackend {
         self.has_vulkan() && self.linear_decode_enabled && self.linear_argmax_batch_enabled
     }
 
+    fn supports_linear_decode_sample(&self, top_k: u32) -> bool {
+        // The fused sample kernel only handles top_k in `1..=TOPK_SAMPLE_KERNEL_K_MAX`.
+        // Larger requests fall back to the host sampler.
+        self.has_vulkan()
+            && self.linear_decode_enabled
+            && top_k > 0
+            && top_k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX
+    }
+
+    fn linear_decode_sample(
+        &self,
+        x: &Tensor,
+        weight_t: &Tensor,
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
+    ) -> Result<Option<u32>> {
+        if !self.supports_linear_decode_sample(top_k) || x.dtype() != DType::F32 {
+            return Ok(None);
+        }
+        if !matches!(x.device(), Device::Cpu) || !matches!(weight_t.device(), Device::Cpu) {
+            return Ok(None);
+        }
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        if batch != 1 || seq_len != 1 {
+            return Ok(None);
+        }
+        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
+            return Ok(None);
+        };
+        if weight_hidden != hidden {
+            return Ok(None);
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let packed_bf16 = self.use_bf16_packed_linear_weight(weight_t);
+        let weight_buf = if packed_bf16 {
+            self.cached_bf16_packed_weight_buffer(weight_t)?
+        } else {
+            self.cached_f32_weight_buffer(weight_t)?
+        };
+        let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample(
+            vk_device,
+            x,
+            &weight_buf,
+            packed_bf16,
+            hidden,
+            out_dim,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            seed,
+        )
+        .context("fused linear_decode_sample dispatch failed")?;
+        Ok(Some(token))
+    }
+
     fn linear_decode_argmax_batch(
         &self,
         x: &Tensor,

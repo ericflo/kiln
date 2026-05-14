@@ -842,6 +842,44 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         false
     }
 
+    /// Whether the backend has a fused on-device stochastic-sampling
+    /// pipeline (lm_head + token penalties + top-k + softmax + min-p +
+    /// top-p + categorical sample). When `true`, the model runner
+    /// routes non-greedy decode through [`Self::linear_decode_sample`]
+    /// and reads back ONLY the 4-byte sampled token — no full-vocab
+    /// readback. Backends without this fast path (CUDA / Metal /
+    /// dummy) keep using candle's on-device sampling via the regular
+    /// `linear_decode` → `sample_with_full_params` flow.
+    fn supports_linear_decode_sample(&self, _top_k: u32) -> bool {
+        false
+    }
+
+    /// Fused stochastic decode: takes the same `(x, weight_t)` inputs
+    /// as `linear_decode_argmax` plus the full sampling-state vector
+    /// (token history + every Qwen3.5 sampler knob), runs the whole
+    /// pipeline on-device, and returns just the sampled token id.
+    /// Returns `Ok(None)` when the backend declines the request (e.g.
+    /// `top_k > kernel-supported max`) so the caller can fall back to
+    /// the legacy host sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn linear_decode_sample(
+        &self,
+        _x: &Tensor,
+        _weight_t: &Tensor,
+        _history_indices: &[u32],
+        _history_counts: &[u32],
+        _repetition_penalty: f32,
+        _presence_penalty: f32,
+        _frequency_penalty: f32,
+        _temperature: f32,
+        _top_k: u32,
+        _top_p: f32,
+        _min_p: f32,
+        _seed: u64,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     /// Batched single-token transposed linear projection with argmax reduction.
     ///
     /// Used by greedy native-batch LM-head decode when logits do not need to be
