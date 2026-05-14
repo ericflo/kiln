@@ -20,16 +20,19 @@ DIR=$(jq -r '.direction // "higher"' "$CFG" 2>/dev/null || echo "higher")
 # Pull all scores (non-null), the baseline (iter 0), and best by direction.
 jq -rs --arg dir "$DIR" '
   map(select(.score != null))
-  | (length) as $n
-  | (map(select(.slug == "baseline" or .iter == 0)) | .[0].score) as $base
-  | (if $dir == "lower"
-       then min_by(.score)
-       else max_by(.score)
-     end) as $best
-  | ($best.score - $base) as $delta
-  | (map(.score) | sort) as $sorted
-  | (($sorted | length) as $len | $sorted[($len/2|floor)]) as $median
-  | (map(.score - $median | fabs) | sort) as $devs
-  | (($devs | length) as $dlen | $devs[($dlen/2|floor)]) as $mad
-  | "N=\($n) BASELINE=\($base) BEST=\($best.score) BEST_SLUG=\($best.slug) BEST_DELTA=\($delta) MAD=\($mad) CONFIDENCE=\(if $mad > 0 then ($delta|fabs)/$mad else "inf" end)"
+  | if length == 0 then "N=0 BASELINE=null BEST=null BEST_SLUG=none BEST_DELTA=0 MAD=0 CONFIDENCE=na"
+    else
+      (length) as $n
+      | ((map(select(.slug == "baseline" or .iter == 0)) | .[0].score) // .[0].score) as $base
+      | (if $dir == "lower"
+           then min_by(.score)
+           else max_by(.score)
+         end) as $best
+      | ($best.score - $base) as $delta
+      | (map(.score) | sort) as $sorted
+      | (($sorted | length) as $len | $sorted[($len/2|floor)]) as $median
+      | (map(.score - $median | fabs) | sort) as $devs
+      | (($devs | length) as $dlen | $devs[($dlen/2|floor)]) as $mad
+      | "N=\($n) BASELINE=\($base) BEST=\($best.score) BEST_SLUG=\($best.slug) BEST_DELTA=\($delta) MAD=\($mad) CONFIDENCE=\(if $mad > 0 then ($delta|fabs)/$mad else "inf" end)"
+    end
 ' "$LOG"
