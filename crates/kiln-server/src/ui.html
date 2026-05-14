@@ -1201,6 +1201,76 @@ select {
 }
 .chat-controls #chat-adapter { width: auto; min-width: 180px; }
 .chat-controls #chat-temp    { width: 76px; }
+.chat-controls #chat-max-tokens { width: 90px; }
+.chat-controls .chat-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.chat-controls .chat-toggle-label input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.chat-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  background: var(--ink-850);
+  border-bottom: 1px solid var(--border);
+}
+.chat-advanced[hidden] { display: none; }
+.chat-advanced .chat-adv-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.chat-advanced .chat-adv-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 110px;
+}
+.chat-advanced .chat-adv-system { width: 100%; }
+.chat-advanced .chat-adv-stop   { flex: 1; min-width: 200px; }
+.chat-advanced .chat-adv-label {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.chat-advanced textarea,
+.chat-advanced input {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: 6px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.chat-advanced textarea { resize: vertical; min-height: 38px; max-height: 200px; line-height: 1.45; }
+
+.restore-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-5);
+  background: var(--ink-850);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
 .chat-messages {
   flex: 1;
   min-height: 320px;
@@ -3251,6 +3321,38 @@ select {
         </select>
         <label for="chat-temp">Temperature</label>
         <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
+        <label for="chat-max-tokens">Max tokens</label>
+        <input type="number" id="chat-max-tokens" value="1024" min="1" max="32768" step="1">
+        <label class="chat-toggle-label" title="Send chat_template_kwargs.enable_thinking — reasoning-capable templates (Qwen3.5, DeepSeek R1, …) will skip the <think> prefill when off.">
+          <input type="checkbox" id="chat-enable-thinking" checked>
+          <span>Thinking</span>
+        </label>
+        <span style="flex:1;"></span>
+        <button class="btn btn-sm btn-ghost" id="chat-toggle-advanced" type="button" aria-expanded="false" aria-controls="chat-advanced">⚙ Advanced</button>
+      </div>
+      <div class="chat-advanced" id="chat-advanced" hidden>
+        <label class="chat-adv-field chat-adv-system" for="chat-system">
+          <span class="chat-adv-label">System prompt</span>
+          <textarea id="chat-system" rows="2" placeholder="Optional. Prepended as a system-role message on every send."></textarea>
+        </label>
+        <div class="chat-adv-row">
+          <label class="chat-adv-field" for="chat-top-p">
+            <span class="chat-adv-label">top_p</span>
+            <input type="number" id="chat-top-p" placeholder="1.0" min="0" max="1" step="0.05">
+          </label>
+          <label class="chat-adv-field" for="chat-top-k">
+            <span class="chat-adv-label">top_k</span>
+            <input type="number" id="chat-top-k" placeholder="0" min="0" step="1">
+          </label>
+          <label class="chat-adv-field" for="chat-seed">
+            <span class="chat-adv-label">seed</span>
+            <input type="number" id="chat-seed" placeholder="random" step="1">
+          </label>
+          <label class="chat-adv-field chat-adv-stop" for="chat-stop">
+            <span class="chat-adv-label">stop (comma-separated)</span>
+            <input type="text" id="chat-stop" placeholder='e.g. ###, &lt;|endoftext|&gt;'>
+          </label>
+        </div>
       </div>
       <div class="chat-messages" id="chat-output"></div>
       <div class="chat-output-actions">
@@ -4735,6 +4837,197 @@ async function loadServedModelId() {
 }
 loadServedModelId();
 
+/* ---------------------------------------------------------------------
+   Playground settings persistence
+
+   Sampling controls + system prompt round-trip through localStorage so
+   reloading doesn't reset every knob. Conversation history is *not*
+   persisted by default — that would surprise people running quick
+   tests against different adapters. Use the "Restore last" affordance
+   in the empty state to bring back the previous session.
+   --------------------------------------------------------------------- */
+const PLAYGROUND_SETTINGS_KEY = 'kiln.playground.settings.v1';
+const PLAYGROUND_HISTORY_KEY  = 'kiln.playground.history.v1';
+
+function readPlaygroundSettings() {
+  try { return JSON.parse(localStorage.getItem(PLAYGROUND_SETTINGS_KEY)) || {}; }
+  catch { return {}; }
+}
+
+function writePlaygroundSettings(settings) {
+  try { localStorage.setItem(PLAYGROUND_SETTINGS_KEY, JSON.stringify(settings)); }
+  catch { /* storage full / disabled / private mode */ }
+}
+
+function capturePlaygroundSettings() {
+  const get = (id) => document.getElementById(id);
+  return {
+    temperature:     get('chat-temp')?.value ?? '0.0',
+    maxTokens:       get('chat-max-tokens')?.value ?? '1024',
+    enableThinking:  !!get('chat-enable-thinking')?.checked,
+    topP:            get('chat-top-p')?.value ?? '',
+    topK:            get('chat-top-k')?.value ?? '',
+    seed:            get('chat-seed')?.value ?? '',
+    stop:            get('chat-stop')?.value ?? '',
+    system:          get('chat-system')?.value ?? '',
+    advancedOpen:    !get('chat-advanced')?.hidden,
+    compareMode:     !!document.getElementById('chat-compare-toggle')?.checked,
+  };
+}
+
+function applyPlaygroundSettings(settings) {
+  if (!settings || typeof settings !== 'object') return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
+  set('chat-temp',       settings.temperature);
+  set('chat-max-tokens', settings.maxTokens);
+  set('chat-top-p',      settings.topP);
+  set('chat-top-k',      settings.topK);
+  set('chat-seed',       settings.seed);
+  set('chat-stop',       settings.stop);
+  set('chat-system',     settings.system);
+  const thinking = document.getElementById('chat-enable-thinking');
+  if (thinking && typeof settings.enableThinking === 'boolean') thinking.checked = settings.enableThinking;
+  const adv = document.getElementById('chat-advanced');
+  const advBtn = document.getElementById('chat-toggle-advanced');
+  if (adv && advBtn && settings.advancedOpen) {
+    adv.hidden = false;
+    advBtn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function persistPlaygroundSettingsSoon() {
+  if (persistPlaygroundSettingsSoon._h) clearTimeout(persistPlaygroundSettingsSoon._h);
+  persistPlaygroundSettingsSoon._h = setTimeout(() => {
+    writePlaygroundSettings(capturePlaygroundSettings());
+  }, 200);
+}
+
+function parseChatStopSequences(raw) {
+  if (!raw) return undefined;
+  const parts = String(raw).split(',').map(s => s.trim()).filter(Boolean);
+  return parts.length ? parts : undefined;
+}
+
+function parseOptionalPositiveInt(raw) {
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.floor(n);
+}
+
+function parseOptionalFloat(raw, { min, max } = {}) {
+  if (raw == null || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+  if (min != null && n < min) return undefined;
+  if (max != null && n > max) return undefined;
+  return n;
+}
+
+function buildChatRequestBody({ messages, temperature }) {
+  const body = {
+    messages,
+    stream: true,
+    temperature,
+  };
+  const maxTokens = parseOptionalPositiveInt(document.getElementById('chat-max-tokens')?.value);
+  body.max_tokens = maxTokens || 1024;
+
+  const topP = parseOptionalFloat(document.getElementById('chat-top-p')?.value, { min: 0, max: 1 });
+  if (topP !== undefined) body.top_p = topP;
+  const topK = parseOptionalPositiveInt(document.getElementById('chat-top-k')?.value);
+  if (topK !== undefined && topK > 0) body.top_k = topK;
+  const seed = parseOptionalPositiveInt(document.getElementById('chat-seed')?.value);
+  if (seed !== undefined) body.seed = seed;
+  const stop = parseChatStopSequences(document.getElementById('chat-stop')?.value);
+  if (stop) body.stop = stop;
+
+  const enableThinking = document.getElementById('chat-enable-thinking');
+  if (enableThinking && !enableThinking.checked) {
+    body.chat_template_kwargs = { enable_thinking: false };
+  }
+  return body;
+}
+
+function getSystemPromptMessage() {
+  const text = (document.getElementById('chat-system')?.value || '').trim();
+  return text ? { role: 'system', content: text } : null;
+}
+
+function serializableChatMessages() {
+  // Strip the volatile streaming-state fields. We persist role +
+  // content + reasoning only; on restore the message is "frozen"
+  // (non-pending, no timing) but its text is preserved.
+  return chatMessages
+    .filter(m => m.role !== 'assistant' || (m.content && !m.error))
+    .map(m => ({
+      role: m.role,
+      content: m.content || '',
+      reasoning: m.reasoning || '',
+      adapter: m.adapter || null,
+      temperature: m.temperature ?? null,
+    }));
+}
+
+function persistChatHistory() {
+  try {
+    const slim = serializableChatMessages();
+    if (!slim.length) {
+      localStorage.removeItem(PLAYGROUND_HISTORY_KEY);
+    } else {
+      localStorage.setItem(PLAYGROUND_HISTORY_KEY, JSON.stringify({ ts: Date.now(), messages: slim }));
+    }
+  } catch { /* ignore quota / disabled */ }
+}
+
+function readPersistedChatHistory() {
+  try { return JSON.parse(localStorage.getItem(PLAYGROUND_HISTORY_KEY)) || null; }
+  catch { return null; }
+}
+
+function restorePlaygroundHistoryBanner() {
+  const stash = readPersistedChatHistory();
+  if (!stash || !Array.isArray(stash.messages) || !stash.messages.length) return;
+  if (chatMessages.length) return;  // already populated (HMR / re-init)
+  const ageMin = Math.max(0, Math.round((Date.now() - (stash.ts || 0)) / 60000));
+  const out = document.getElementById('chat-output');
+  if (!out) return;
+  const banner = document.createElement('div');
+  banner.className = 'restore-banner';
+  banner.innerHTML = `
+    <div>
+      <strong>Restore previous chat?</strong>
+      <span style="color:var(--text-quiet);"> — ${stash.messages.length} message${stash.messages.length === 1 ? '' : 's'}${ageMin ? `, ${ageMin} min ago` : ''}.</span>
+    </div>
+    <div style="display:flex; gap:6px;">
+      <button class="btn btn-sm primary" type="button" data-restore="yes">Restore</button>
+      <button class="btn btn-sm" type="button" data-restore="no">Discard</button>
+    </div>`;
+  out.parentNode.insertBefore(banner, out);
+  banner.addEventListener('click', (ev) => {
+    const which = ev.target?.dataset?.restore;
+    if (!which) return;
+    if (which === 'yes') {
+      for (const m of stash.messages) {
+        chatMessages.push({
+          _id: newChatMsgId(),
+          role: m.role,
+          content: m.content || '',
+          reasoning: m.reasoning || '',
+          pending: false,
+          thinkOpen: false,
+          adapter: m.adapter || null,
+          temperature: m.temperature ?? null,
+        });
+      }
+      renderChat();
+    } else {
+      try { localStorage.removeItem(PLAYGROUND_HISTORY_KEY); } catch {}
+    }
+    banner.remove();
+  });
+}
+
 function formatChatDuration(ms) {
   if (ms == null || !Number.isFinite(ms)) return '—';
   if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -5009,15 +5302,20 @@ async function streamAssistantTurn(temp) {
   const adapter = document.getElementById('chat-adapter').value || undefined;
   const assistant = chatMessages[chatMessages.length - 1];
 
-  const body = {
-    messages: chatMessages
-      .filter(m => m.role !== 'assistant' || (m.content && !m.error))
-      .filter(m => m.content || m.role === 'system')
-      .map(m => ({ role: m.role, content: m.content })),
-    stream: true,
-    temperature: temp,
-    max_tokens: 1024,
-  };
+  // Snapshot the request shape on this assistant turn so the per-turn
+  // footer + the persisted history can show *what* produced this
+  // answer even after the user mutates the controls.
+  assistant.adapter = adapter || null;
+  assistant.temperature = temp;
+
+  const convo = chatMessages
+    .filter(m => m.role !== 'assistant' || (m.content && !m.error))
+    .filter(m => m.content || m.role === 'system')
+    .map(m => ({ role: m.role, content: m.content }));
+  const sys = getSystemPromptMessage();
+  const messages = sys ? [sys, ...convo] : convo;
+
+  const body = buildChatRequestBody({ messages, temperature: temp });
   if (servedModelId) body.model = servedModelId;
   if (adapter) body.adapter = adapter;
 
@@ -5116,6 +5414,7 @@ async function streamAssistantTurn(temp) {
     clearInterval(tickHandle);
     chatAbort = null;
     setChatGenerating(false);
+    persistChatHistory();
     renderChat();
   }
 }
@@ -5224,11 +5523,46 @@ document.getElementById('chat-clear').addEventListener('click', () => {
   chatMessages.length = 0;
   setChatGenerating(false);
   updateChatSendState();
+  persistChatHistory();
   renderChat();
 });
 document.getElementById('chat-output').addEventListener('click', handleChatActionClick);
 document.getElementById('chat-output').addEventListener('toggle', handleThinkToggle, true);
 document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
+
+/* ---------------------------------------------------------------------
+   Wire up advanced-settings toggle + persistence
+
+   The Advanced panel and every sampling control round-trip through
+   localStorage on input/change so a refresh restores the user's setup.
+   --------------------------------------------------------------------- */
+const chatAdvBtn = document.getElementById('chat-toggle-advanced');
+const chatAdvPanel = document.getElementById('chat-advanced');
+if (chatAdvBtn && chatAdvPanel) {
+  chatAdvBtn.addEventListener('click', () => {
+    const open = chatAdvPanel.hidden;
+    chatAdvPanel.hidden = !open;
+    chatAdvBtn.setAttribute('aria-expanded', String(open));
+    persistPlaygroundSettingsSoon();
+  });
+}
+
+const PLAYGROUND_SETTING_IDS = [
+  'chat-temp', 'chat-max-tokens', 'chat-enable-thinking',
+  'chat-top-p', 'chat-top-k', 'chat-seed', 'chat-stop', 'chat-system',
+];
+PLAYGROUND_SETTING_IDS.forEach(id => {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const ev = (el.type === 'checkbox') ? 'change' : 'input';
+  el.addEventListener(ev, persistPlaygroundSettingsSoon);
+});
+
+// Restore settings + last conversation on first load. Settings always
+// apply; conversation restore prompts a banner so users don't get a
+// stale conversation invisibly attached to a fresh request.
+applyPlaygroundSettings(readPlaygroundSettings());
+restorePlaygroundHistoryBanner();
 
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
 document.getElementById('upload-archive').addEventListener('change', handleUploadArchiveChange);
