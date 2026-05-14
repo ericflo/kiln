@@ -1243,6 +1243,7 @@ select {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
+  margin: 0;
 }
 .chat-msg.user      { align-self: flex-end; }
 .chat-msg.user pre  {
@@ -1273,6 +1274,122 @@ select {
   0%, 80%, 100% { opacity: 0.2; }
   40% { opacity: 1; }
 }
+
+/* Thinking / reasoning collapsible — shown live for reasoning-capable
+   models (Qwen3.5, DeepSeek R1, …) when the server splits the answer
+   into `delta.reasoning_content` + `delta.content`. Defaults expanded
+   while thinking is in progress, then auto-collapses with a duration
+   summary the moment the first content token arrives. */
+.chat-msg .think-block {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+  background:
+    repeating-linear-gradient(135deg,
+      var(--surface) 0 12px,
+      var(--surface-2) 12px 24px);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 6px;
+  overflow: hidden;
+}
+.chat-msg .think-block > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 6px 12px;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+.chat-msg .think-block > summary::-webkit-details-marker { display: none; }
+.chat-msg .think-block > summary::before {
+  content: '▸';
+  display: inline-block;
+  width: 10px;
+  font-family: ui-monospace, monospace;
+  transition: transform var(--t-fast) var(--ease-out);
+  color: var(--accent);
+}
+.chat-msg .think-block[open] > summary::before { transform: rotate(90deg); }
+.chat-msg .think-block .think-label { color: var(--text); }
+.chat-msg .think-block .think-meta { color: var(--text-quiet); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.chat-msg .think-block.live > summary { color: var(--accent); }
+.chat-msg .think-block.live > summary::after {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: chat-blink 1.2s var(--ease-out) infinite;
+  margin-left: 4px;
+}
+.chat-msg .think-block .think-body {
+  padding: 8px 12px 10px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+  border-top: 1px dashed var(--border);
+  background: var(--ink-900);
+}
+.chat-msg .think-body:empty::before {
+  content: 'Thinking…';
+  color: var(--text-quiet);
+  font-style: italic;
+}
+
+/* Per-turn footer: TTFT, total duration, tok/s, action buttons. Sits
+   under the assistant bubble; user bubbles render nothing here. */
+.chat-msg .turn-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: var(--text-2xs);
+  color: var(--text-quiet);
+}
+.chat-msg .turn-foot .stat { display: inline-flex; align-items: center; gap: 4px; }
+.chat-msg .turn-foot .stat strong { color: var(--text-muted); font-weight: 600; }
+.chat-msg .turn-foot .stat .sep { color: var(--border); margin: 0 2px; }
+.chat-msg .turn-foot .spacer { flex: 1; }
+.chat-msg .turn-foot .turn-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-quiet);
+  font-size: var(--text-2xs);
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.chat-msg .turn-foot .turn-btn:hover {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface);
+}
+.chat-msg .turn-foot .turn-btn:active { background: var(--surface-2); }
+
+.chat-msg .err-block {
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--danger-fg, var(--border));
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  color: var(--danger-fg, var(--text));
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  margin-top: 6px;
+}
 .chat-output-actions {
   display: flex;
   justify-content: flex-end;
@@ -1302,7 +1419,7 @@ select {
   position: relative;
   display: flex;
   gap: var(--space-2);
-  align-items: center;
+  align-items: flex-end;
   padding: var(--space-4) var(--space-5);
   background: var(--ink-900);
   border-top: 1px solid var(--border);
@@ -1311,6 +1428,25 @@ select {
   flex: 1;
   font-size: var(--text-md);
   padding: 10px var(--space-4);
+  font-family: inherit;
+  line-height: 1.45;
+  resize: none;
+  min-height: 42px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.chat-input-row #chat-send,
+.chat-input-row #chat-stop,
+.chat-input-row #chat-clear { flex-shrink: 0; }
+.form-help kbd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  color: var(--text-muted);
 }
 
 /* =====================================================================
@@ -3128,12 +3264,12 @@ select {
       </div>
       <div class="chat-input-row">
         <label class="sr-only" for="chat-input">Message</label>
-        <input type="text" id="chat-input" placeholder="Type a message and press Enter…" aria-describedby="chat-input-help">
+        <textarea id="chat-input" rows="1" placeholder="Type a message — Enter to send, Shift+Enter for a new line" aria-describedby="chat-input-help"></textarea>
         <button type="button" class="btn btn-primary" id="chat-send">Send</button>
         <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
         <button type="button" class="btn btn-ghost" id="chat-clear">Clear</button>
       </div>
-      <div class="form-help" id="chat-input-help" style="padding: 0 var(--space-5) var(--space-4);">Send a quick prompt to test the selected adapter or base model.</div>
+      <div class="form-help" id="chat-input-help" style="padding: 0 var(--space-5) var(--space-4);">Send a quick prompt to test the selected adapter or base model. <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.</div>
     </div>
   </section>
 
@@ -4599,6 +4735,94 @@ async function loadServedModelId() {
 }
 loadServedModelId();
 
+function formatChatDuration(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+}
+
+function approximateTokenCount(text) {
+  if (!text) return 0;
+  // Cheap token estimate: ~4 chars/token for English. Good enough for
+  // a "tokens/sec" readout that doesn't require a wire-side counter.
+  return Math.max(1, Math.round(text.length / 4));
+}
+
+function chatTokensPerSec(message) {
+  if (!message || !message.durationMs || message.durationMs <= 0) return null;
+  const tokens = approximateTokenCount(message.reasoning || '') + approximateTokenCount(message.content || '');
+  if (!tokens) return null;
+  return (tokens * 1000) / message.durationMs;
+}
+
+function renderAssistantBubble(m) {
+  const parts = [];
+  const hasReasoning = !!(m.reasoning && m.reasoning.length);
+  const hasContent   = !!(m.content   && m.content.length);
+
+  if (hasReasoning) {
+    // While content has not started arriving, keep the thinking block
+    // open so the user can watch the chain-of-thought stream live.
+    // Once content arrives, collapse by default but let the user
+    // pin-open if they had it open already.
+    const live = m.pending && !hasContent;
+    const open = live || m.thinkOpen;
+    const summary = (() => {
+      if (live) {
+        const elapsed = m.thinkStartMs ? formatChatDuration(performance.now() - m.thinkStartMs) : '';
+        return `<span class="think-label">Thinking</span>${elapsed ? `<span class="think-meta">· ${escapeHtml(elapsed)}</span>` : ''}`;
+      }
+      const dur = (m.thinkStartMs && m.thinkEndMs) ? formatChatDuration(m.thinkEndMs - m.thinkStartMs) : null;
+      return `<span class="think-label">Thought</span>${dur ? `<span class="think-meta">· for ${escapeHtml(dur)}</span>` : ''}`;
+    })();
+    parts.push(`
+      <details class="think-block${live ? ' live' : ''}"${open ? ' open' : ''} data-think-toggle="${escapeHtml(m._id)}">
+        <summary>${summary}</summary>
+        <div class="think-body">${escapeHtml(m.reasoning)}</div>
+      </details>
+    `);
+  }
+
+  // Main answer body — pending without any content shows a "Generating…"
+  // placeholder unless the reasoning block is already live (in which
+  // case the chain-of-thought is the visible activity).
+  let body = '';
+  if (m.error) {
+    body = `<div class="err-block">${escapeHtml(m.error)}</div>`;
+  } else if (hasContent) {
+    body = `<pre>${escapeHtml(m.content)}</pre>`;
+  } else if (m.pending && !hasReasoning) {
+    body = `<pre>Generating…</pre>`;
+  } else if (m.pending && hasReasoning && !hasContent) {
+    body = `<pre style="color:var(--text-quiet);font-style:italic;">Drafting answer…</pre>`;
+  } else if (!hasContent && !hasReasoning) {
+    body = `<pre style="color:var(--text-quiet);">(empty response)</pre>`;
+  }
+  parts.push(body);
+
+  // Per-turn footer with timing + actions. Hidden while we have nothing
+  // useful to display yet (no first-token timing and no content).
+  const showFoot = !!(m.ttftMs || m.durationMs || (!m.pending && hasContent));
+  if (showFoot) {
+    const stats = [];
+    if (m.ttftMs != null)     stats.push(`<span class="stat"><strong>TTFT</strong> ${escapeHtml(formatChatDuration(m.ttftMs))}</span>`);
+    if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
+    const tps = chatTokensPerSec(m);
+    if (tps != null)          stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
+    if (!m.pending && hasContent) {
+      stats.push(`<span class="spacer"></span>`);
+      stats.push(`<button class="turn-btn" type="button" data-chat-action="copy" data-chat-id="${escapeHtml(m._id)}" title="Copy assistant answer">⧉ copy</button>`);
+      stats.push(`<button class="turn-btn" type="button" data-chat-action="regenerate" data-chat-id="${escapeHtml(m._id)}" title="Regenerate this response">↻ regenerate</button>`);
+    } else if (m.pending) {
+      stats.push(`<span class="spacer"></span>`);
+      stats.push(`<button class="turn-btn" type="button" data-chat-action="stop" title="Stop generation">■ stop</button>`);
+    }
+    parts.push(`<div class="turn-foot">${stats.join('')}</div>`);
+  }
+
+  return parts.join('');
+}
+
 function renderChat() {
   const el = document.getElementById('chat-output');
   if (chatMessages.length === 0) {
@@ -4611,12 +4835,18 @@ function renderChat() {
     updateCopyChatResponseState();
     return;
   }
-  el.innerHTML = chatMessages.map(m => `
-    <div class="chat-msg ${m.role}${m.pending ? ' pending' : ''}">
+  el.innerHTML = chatMessages.map(m => {
+    if (m.role === 'assistant') {
+      return `<div class="chat-msg assistant${m.pending ? ' pending' : ''}">
+        <div class="role">assistant</div>
+        ${renderAssistantBubble(m)}
+      </div>`;
+    }
+    return `<div class="chat-msg ${m.role}">
       <div class="role">${m.role}</div>
-      <pre>${escapeHtml(m.pending && !m.content ? 'Generating…' : m.content)}</pre>
-    </div>
-  `).join('');
+      <pre>${escapeHtml(m.content)}</pre>
+    </div>`;
+  }).join('');
   el.scrollTop = el.scrollHeight;
   updateCopyChatResponseState();
 }
@@ -4723,6 +4953,30 @@ function formatQuickInferenceError(error) {
   ].join('\n');
 }
 
+let chatMsgIdCounter = 0;
+function newChatMsgId() { return `m${++chatMsgIdCounter}-${Date.now().toString(36)}`; }
+
+function makeAssistantPlaceholder() {
+  return {
+    _id: newChatMsgId(),
+    role: 'assistant',
+    content: '',
+    reasoning: '',
+    pending: true,
+    startMs: performance.now(),
+    firstTokenMs: null,
+    firstContentTokenMs: null,
+    lastTokenMs: null,
+    thinkStartMs: null,
+    thinkEndMs: null,
+    thinkOpen: false,
+    ttftMs: null,
+    durationMs: null,
+    error: null,
+    aborted: false,
+  };
+}
+
 async function sendChat() {
   if (chatAbort) return;
   const input = document.getElementById('chat-input');
@@ -4740,23 +4994,41 @@ async function sendChat() {
   }
 
   input.value = '';
+  autoresizeChatInput();
   updateChatSendState();
 
-  chatMessages.push({ role: 'user', content: msg });
-  chatMessages.push({ role: 'assistant', content: '', pending: true });
+  chatMessages.push({ _id: newChatMsgId(), role: 'user', content: msg });
+  chatMessages.push(makeAssistantPlaceholder());
   renderChat();
+  await streamAssistantTurn(temp);
+}
+
+async function streamAssistantTurn(temp) {
   setChatGenerating(true);
 
   const adapter = document.getElementById('chat-adapter').value || undefined;
+  const assistant = chatMessages[chatMessages.length - 1];
 
   const body = {
-    messages: chatMessages.filter(m => m.content).map(m => ({ role: m.role, content: m.content })),
+    messages: chatMessages
+      .filter(m => m.role !== 'assistant' || (m.content && !m.error))
+      .filter(m => m.content || m.role === 'system')
+      .map(m => ({ role: m.role, content: m.content })),
     stream: true,
     temperature: temp,
     max_tokens: 1024,
   };
   if (servedModelId) body.model = servedModelId;
   if (adapter) body.adapter = adapter;
+
+  // Tick the per-turn footer so users see the elapsed counter advance
+  // even before the first token lands. Cheap (200 ms cadence) and only
+  // runs while a turn is in flight.
+  const tickHandle = setInterval(() => {
+    if (!assistant.pending) return;
+    assistant.durationMs = performance.now() - assistant.startMs;
+    renderChat();
+  }, 200);
 
   try {
     const controller = new AbortController();
@@ -4778,6 +5050,7 @@ async function sendChat() {
     const decoder = new TextDecoder();
     let buf = '';
 
+    streamLoop:
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -4789,36 +5062,147 @@ async function sendChat() {
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         const payload = line.slice(6);
-        if (payload === '[DONE]') break;
+        if (payload === '[DONE]') break streamLoop;
         try {
           const chunk = JSON.parse(payload);
           const delta = chunk.choices?.[0]?.delta;
-          if (delta?.content) {
-            const last = chatMessages[chatMessages.length - 1];
-            last.pending = false;
-            last.content += delta.content;
+          if (!delta) continue;
+          const now = performance.now();
+          if (assistant.firstTokenMs == null) {
+            assistant.firstTokenMs = now;
+            assistant.ttftMs = now - assistant.startMs;
+          }
+          if (delta.reasoning_content) {
+            if (assistant.thinkStartMs == null) assistant.thinkStartMs = now;
+            assistant.reasoning += delta.reasoning_content;
+            assistant.pending = true;
+            assistant.lastTokenMs = now;
+            assistant.durationMs = now - assistant.startMs;
+            renderChat();
+          }
+          if (delta.content) {
+            if (assistant.thinkStartMs != null && assistant.thinkEndMs == null) {
+              assistant.thinkEndMs = now;
+            }
+            if (assistant.firstContentTokenMs == null) assistant.firstContentTokenMs = now;
+            assistant.content += delta.content;
+            assistant.pending = true;
+            assistant.lastTokenMs = now;
+            assistant.durationMs = now - assistant.startMs;
             renderChat();
           }
         } catch {}
       }
     }
-  } catch (e) {
-    const last = chatMessages[chatMessages.length - 1];
-    if (e.name === 'AbortError') {
-      removeEmptyPendingAssistant();
-    } else if (last?.role === 'assistant') {
-      last.pending = false;
-      last.content += formatQuickInferenceError(e);
-      renderChat();
+    assistant.pending = false;
+    assistant.durationMs = (assistant.lastTokenMs || performance.now()) - assistant.startMs;
+    if (assistant.thinkStartMs != null && assistant.thinkEndMs == null && assistant.content) {
+      assistant.thinkEndMs = assistant.lastTokenMs || performance.now();
     }
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      assistant.aborted = true;
+      assistant.pending = false;
+      // Keep partial output if anything streamed; drop the empty
+      // placeholder otherwise so the message list doesn't accrete
+      // ghosts on rapid stop-clicks.
+      if (!assistant.content && !assistant.reasoning) removeEmptyPendingAssistant();
+      else assistant.durationMs = (assistant.lastTokenMs || performance.now()) - assistant.startMs;
+    } else {
+      assistant.pending = false;
+      assistant.error = formatQuickInferenceError(e);
+    }
+  } finally {
+    clearInterval(tickHandle);
+    chatAbort = null;
+    setChatGenerating(false);
+    renderChat();
   }
-  chatAbort = null;
-  setChatGenerating(false);
+}
+
+function autoresizeChatInput() {
+  const input = document.getElementById('chat-input');
+  if (!input || input.tagName !== 'TEXTAREA') return;
+  input.style.height = 'auto';
+  const next = Math.min(input.scrollHeight, 180);
+  input.style.height = next + 'px';
+}
+
+async function regenerateAssistantMessage(messageId) {
+  if (chatAbort) return;
+  // Find the assistant message and the chain of user/assistant turns
+  // *before* it. We replace it in-place with a fresh placeholder and
+  // re-stream, so the user's prior message and the conversation
+  // upstream of it stay intact.
+  const idx = chatMessages.findIndex(m => m._id === messageId);
+  if (idx < 0 || chatMessages[idx].role !== 'assistant') return;
+  // Drop the target assistant message and any messages after it; the
+  // upstream context (everything before idx, ending in user) is what
+  // we want to re-send.
+  chatMessages.splice(idx);
+  // Push a fresh placeholder and stream against the trimmed history.
+  chatMessages.push(makeAssistantPlaceholder());
   renderChat();
+  const tempInput = document.getElementById('chat-temp');
+  let temp;
+  try {
+    temp = parseQuickInferenceTemperature(tempInput);
+  } catch (error) {
+    tempInput.focus();
+    toast(error.message, 'err');
+    chatMessages.pop();
+    renderChat();
+    return;
+  }
+  await streamAssistantTurn(temp);
+}
+
+function handleChatActionClick(event) {
+  const btn = event.target.closest('[data-chat-action]');
+  if (!btn) return;
+  const action = btn.dataset.chatAction;
+  if (action === 'stop') {
+    if (chatAbort) chatAbort.abort();
+    return;
+  }
+  const id = btn.dataset.chatId;
+  if (action === 'copy') {
+    const m = chatMessages.find(x => x._id === id);
+    if (!m || !m.content) return;
+    const writeText = navigator.clipboard?.writeText
+      ? navigator.clipboard.writeText.bind(navigator.clipboard)
+      : (text) => { fallbackCopyText(text); return Promise.resolve(); };
+    writeText(m.content).then(() => {
+      if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = m.content;
+      toast('Copied response');
+    }).catch(() => {
+      try { fallbackCopyText(m.content); toast('Copied response'); }
+      catch { toast('Could not copy response.', 'err'); }
+    });
+    return;
+  }
+  if (action === 'regenerate') {
+    regenerateAssistantMessage(id);
+    return;
+  }
+}
+
+function handleThinkToggle(event) {
+  // Persist whether the user has the thinking panel pinned-open so the
+  // next renderChat() (every streaming chunk) doesn't snap it shut.
+  const details = event.target.closest('details.think-block');
+  if (!details) return;
+  const id = details.dataset.thinkToggle;
+  if (!id) return;
+  const m = chatMessages.find(x => x._id === id);
+  if (m) m.thinkOpen = details.open;
 }
 
 document.getElementById('chat-send').addEventListener('click', sendChat);
-document.getElementById('chat-input').addEventListener('input', updateChatSendState);
+document.getElementById('chat-input').addEventListener('input', () => {
+  autoresizeChatInput();
+  updateChatSendState();
+});
 document.getElementById('chat-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
 });
@@ -4826,6 +5210,7 @@ document.querySelectorAll('[data-chat-starter-prompt]').forEach((button) => {
   button.addEventListener('click', () => {
     const input = document.getElementById('chat-input');
     input.value = button.dataset.chatStarterPrompt || '';
+    autoresizeChatInput();
     updateChatSendState();
     input.focus();
   });
@@ -4841,6 +5226,8 @@ document.getElementById('chat-clear').addEventListener('click', () => {
   updateChatSendState();
   renderChat();
 });
+document.getElementById('chat-output').addEventListener('click', handleChatActionClick);
+document.getElementById('chat-output').addEventListener('toggle', handleThinkToggle, true);
 document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
 
 document.getElementById('upload-name').addEventListener('input', handleUploadNameInput);
