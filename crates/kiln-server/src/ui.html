@@ -4137,10 +4137,10 @@ function renderTrainingQueue(data) {
   html += '</div>';
 
   if (!data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length)) {
-    html = `<div class="eval-empty">
+    html = `<div class="eval-empty empty">
       <div class="eval-empty-icon">🧪</div>
-      <div class="eval-empty-title">No training jobs yet</div>
-      <div class="eval-empty-body">Submit SFT examples to teach a correction, or use GRPO for scored completions. Datasets uploaded under Evals can be picked directly in the SFT/GRPO submit forms.</div>
+      <div class="eval-empty-title">No training jobs yet.</div>
+      <div class="eval-empty-body">Submit SFT examples to teach a correction, or use GRPO for scored completions. Datasets uploaded under Evals can be picked directly in the SFT/GRPO submit forms. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener">GRPO Guide</a>.</div>
       <button class="eval-empty-cta" type="button" onclick="document.getElementById('training-tab-sft').click();">Submit SFT</button>
     </div>`;
   }
@@ -6597,10 +6597,10 @@ function renderAdaptersAsCards(data) {
   const adapters = data.available || [];
   const active = data.active || '';
   if (!adapters.length) {
-    panel.innerHTML = `<div class="eval-empty">
+    panel.innerHTML = `<div class="eval-empty empty">
       <div class="eval-empty-icon">🧬</div>
-      <div class="eval-empty-title">No saved adapters</div>
-      <div class="eval-empty-body">Train one via the Training tab, or upload a PEFT-compatible <code>.tar.gz</code> archive below.</div>
+      <div class="eval-empty-title">No adapters found yet.</div>
+      <div class="eval-empty-body">Train one via the Training tab, or upload a PEFT-compatible <code>.tar.gz</code> archive below. New here? Read the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener">Quickstart</a> or the <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener">Troubleshooting</a> guide.</div>
       <button class="eval-empty-cta" type="button" data-focus-id="upload-name">Upload an adapter</button>
     </div>`;
     panel.querySelector('[data-focus-id]')?.addEventListener('click', ev => {
