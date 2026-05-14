@@ -139,6 +139,7 @@ mod tests {
             },
             system_prompt: None,
             strip_system_prompt: false,
+            suite_tools: None,
         }
     }
 

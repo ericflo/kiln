@@ -548,4 +548,40 @@ fn print_compare(result: &EvalResultPayload) {
             (best.metrics.accuracy - worst.metrics.accuracy) * 100.0
         );
     }
+    // Flip diff between the first two runs (baseline → candidate).
+    if let Some(diff) = compute_flip_diff(result) {
+        println!("\nflips: {} → {}", diff.baseline, diff.candidate);
+        println!(
+            "  both_pass: {}  both_fail: {}",
+            diff.both_pass, diff.both_fail
+        );
+        if !diff.improved.is_empty() {
+            println!(
+                "  ✓ improved ({}): {}",
+                diff.improved.len(),
+                diff.improved.join(", ")
+            );
+        }
+        if !diff.regressed.is_empty() {
+            println!(
+                "  ✗ regressed ({}): {}",
+                diff.regressed.len(),
+                diff.regressed.join(", ")
+            );
+        }
+    }
+}
+
+fn compute_flip_diff(result: &EvalResultPayload) -> Option<kiln_eval::FlipDiff> {
+    // Reuse the canonical flip-diff logic by reshaping into the real
+    // EvalResult type via a JSON round-trip. Cheap (the payload is
+    // typically a few KB) and avoids keeping two implementations in sync.
+    let synthetic = kiln_eval::EvalResult {
+        job_id: result.job_id.clone(),
+        state: kiln_eval::EvalJobState::Completed,
+        runs: result.runs.clone(),
+        progress: None,
+        error: None,
+    };
+    synthetic.flip_diff()
 }

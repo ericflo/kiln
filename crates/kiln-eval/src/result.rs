@@ -476,6 +476,78 @@ pub struct EvalResult {
     pub error: Option<String>,
 }
 
+impl EvalResult {
+    /// Compute the flip-diff between the first two `runs`. Returns `None`
+    /// when there are fewer than two runs (single-adapter result).
+    ///
+    /// The diff is computed against `runs[0]` as baseline and `runs[1]`
+    /// as candidate. Each entry in the returned diff is keyed by
+    /// `example_id` (using the *first* completion only — pass@k metrics
+    /// pre-aggregate before this point). Useful for surfacing "training
+    /// improved 12 examples and regressed 3" at a glance.
+    pub fn flip_diff(&self) -> Option<FlipDiff> {
+        if self.runs.len() < 2 {
+            return None;
+        }
+        let baseline = &self.runs[0];
+        let candidate = &self.runs[1];
+        let mut bmap: BTreeMap<String, EvalOutcomeKind> = BTreeMap::new();
+        for o in &baseline.outcomes {
+            if o.completion_index == 0 {
+                bmap.insert(o.example_id.clone(), o.kind);
+            }
+        }
+        let mut diff = FlipDiff::default();
+        for o in &candidate.outcomes {
+            if o.completion_index != 0 {
+                continue;
+            }
+            let prior = match bmap.get(&o.example_id) {
+                Some(k) => *k,
+                None => continue,
+            };
+            match (prior, o.kind) {
+                (EvalOutcomeKind::Pass, EvalOutcomeKind::Pass) => diff.both_pass += 1,
+                (EvalOutcomeKind::Pass, _) => {
+                    diff.regressed.push(o.example_id.clone())
+                }
+                (_, EvalOutcomeKind::Pass) => {
+                    diff.improved.push(o.example_id.clone())
+                }
+                _ => diff.both_fail += 1,
+            }
+        }
+        diff.baseline = baseline
+            .adapter
+            .clone()
+            .unwrap_or_else(|| "<base>".to_string());
+        diff.candidate = candidate
+            .adapter
+            .clone()
+            .unwrap_or_else(|| "<base>".to_string());
+        Some(diff)
+    }
+}
+
+/// Pass↔Fail flip diff between two adapter runs of the same suite.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FlipDiff {
+    pub baseline: String,
+    pub candidate: String,
+    /// Examples that passed under baseline but not under candidate
+    /// (regressions caused by the new adapter).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub regressed: Vec<String>,
+    /// Examples that didn't pass under baseline but pass under candidate
+    /// (improvements from the new adapter).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub improved: Vec<String>,
+    /// Examples that passed under both runs.
+    pub both_pass: u32,
+    /// Examples that failed under both runs.
+    pub both_fail: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,6 +576,70 @@ mod tests {
         assert!(lat.p90_ms >= 40.0);
         assert!((lat.mean_ms - 30.0).abs() < 0.001);
         assert_eq!(lat.max_ms, 50.0);
+    }
+
+    fn mk_run(adapter: &str, outcomes: Vec<ExampleOutcome>) -> SuiteResult {
+        SuiteResult {
+            suite_name: "test".into(),
+            adapter: Some(adapter.into()),
+            metrics: AggregateMetrics::default(),
+            outcomes,
+            started_at: "2026-05-14T00:00:00Z".into(),
+            finished_at: "2026-05-14T00:00:01Z".into(),
+            suite_hash: "deadbeef".into(),
+        }
+    }
+
+    #[test]
+    fn flip_diff_classifies_improvements_and_regressions() {
+        let baseline = mk_run(
+            "v0",
+            vec![
+                mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+                mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+                mk("c", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+                mk("d", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+            ],
+        );
+        let candidate = mk_run(
+            "v1",
+            vec![
+                // a: pass→fail = regression
+                mk("a", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+                // b: fail→pass = improvement
+                mk("b", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+                // c: pass→pass
+                mk("c", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+                // d: fail→fail
+                mk("d", 0, EvalOutcomeKind::Invalid, 0.0, 1.0),
+            ],
+        );
+        let result = EvalResult {
+            job_id: "j1".into(),
+            state: EvalJobState::Completed,
+            runs: vec![baseline, candidate],
+            progress: None,
+            error: None,
+        };
+        let diff = result.flip_diff().expect("two runs → flip diff");
+        assert_eq!(diff.baseline, "v0");
+        assert_eq!(diff.candidate, "v1");
+        assert_eq!(diff.both_pass, 1);
+        assert_eq!(diff.both_fail, 1);
+        assert_eq!(diff.improved, vec!["b".to_string()]);
+        assert_eq!(diff.regressed, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn flip_diff_returns_none_for_single_run() {
+        let result = EvalResult {
+            job_id: "j2".into(),
+            state: EvalJobState::Completed,
+            runs: vec![mk_run("v0", vec![mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0)])],
+            progress: None,
+            error: None,
+        };
+        assert!(result.flip_diff().is_none());
     }
 
     #[test]

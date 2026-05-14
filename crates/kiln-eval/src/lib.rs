@@ -32,7 +32,7 @@ pub mod synthesis;
 
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
-    LatencyStats, ScorerBreakdown, SuiteResult,
+    FlipDiff, LatencyStats, ReasoningLengthStats, ScorerBreakdown, SuiteResult, ToolBreakdown,
 };
 pub use scorers::{
     ArgsScoring, CodeStyle, NameMatch, NumericTolerance, Scorer, ScorerError, score_completion,
