@@ -189,47 +189,33 @@ One JSON object per line. Append-only. Never edit. Fields:
 
 ### Phase 0 — Intake (one-shot)
 
-1. Capture the user's verbal description of the capability. **Do not paraphrase to "improve" it** — copy their words.
-2. Ask only what you cannot infer:
-   - Where is the blind oracle? (a command, suite name, or "I'll paste the score back")
-   - What's the budget (max iterations, max examples per dataset, max epochs)?
-   - Any hard constraints? (style, language, refusal behaviour the dataset must respect)
-3. Write `capability.md`, `capability.config.json`, `capability.oracle.sh`. Commit.
-4. Run the **baseline**: `./capability.oracle.sh ""` (empty adapter = base model). Record as iter 0 with `slug="baseline"`.
+1. Capture the user's verbal description of the capability. **Do not paraphrase to "improve" it** — copy their words. If they describe a failure mode (*"model writes the wrong column in two-digit subtraction"*), keep the failure language too — it constrains hypothesis space usefully.
+2. Ask only what you cannot infer (use `AskUserQuestion`, one batch, multi-question):
+   - **Oracle**: registered suite name (preferred), an arbitrary shell command, or paste-back?
+   - **Direction**: is higher score better or lower score better?
+   - **Scorer field**: `accuracy` (exact-match style) or `mean_score` (graded)?
+   - **Budget**: max iterations, max examples per dataset, max epochs.
+   - **Anchor suite** (optional): a second blind eval for regression watch (§12).
+   - **Hard constraints**: style, language, refusal behaviour, system-prompt requirements.
+3. Run `templates/scaffold.sh <slug>`. Edit the produced `capability.md` and `capability.config.json` with the user's answers. The oracle is already `templates/oracle.sh` — if the user picked paste-back, replace it with `templates/oracle-paste.sh`.
+4. Commit the intake.
+5. Run **tiny-smoke** (§17) — 4-example training, no scoring. Confirms `kiln serve` is up and the helpers work. Delete the smoke adapter after.
+6. Run the **baseline**: `./capability.oracle.sh ""` (empty adapter = base model). Log it as iter 0 with `slug="baseline"`.
 
-The oracle wrapper is *your* file, not the eval's. Its job is to (a) call the user's eval, (b) parse exactly one number out, (c) print `SCORE=<float>` on stdout, (d) tell you NOTHING ELSE. A reference wrapper for kiln's blind-eval mode is at `templates/oracle.sh` (see §6).
+The oracle wrapper is *your* file, not the eval's. Its job is to (a) call the user's eval, (b) parse exactly one number out, (c) print `SCORE=<float>` on stdout, (d) tell you NOTHING ELSE. See §6 for the contract.
 
 ### Phase 1 — Hypothesise (every iteration)
 
-Before touching data, write `hypotheses/<slug>.md`:
+Before touching data, copy the template and fill it in:
 
-```markdown
-# Hypothesis: <slug>
-
-## Claim
-<One sentence. "X intervention will raise the capability score because Y."
-The Y matters — without a mechanism, your update after the result is just vibes.>
-
-## Mechanism
-<2–4 sentences. What latent computation are you trying to re-route? What
-shortcut are you trying to break? Why would prose teach a non-prose skill?>
-
-## Dataset shape
-- Size: <N>
-- Modality of supervision: <prose / symbolic / mixed / hybrid>
-- Distribution: <how examples vary; what's held constant>
-- Surface form held OUT: <anything you suspect the eval uses, kept *out* of training>
-
-## Risk
-<What would make this hypothesis wrong? What would the result look like
-if it's only memorisation?>
-
-## Falsification plan
-<If this raises the score by Δ, the next iteration should X. If it doesn't,
-the next iteration should Y. Decide BEFORE seeing the score.>
+```bash
+cp $SKILL/templates/hypothesis.md.tmpl hypotheses/<slug>.md
+# then edit each section. Don't skip the falsification plan.
 ```
 
-Falsification-plan-before-result is the single most important rule. It is the difference between iterating and rationalising.
+The template lives at `templates/hypothesis.md.tmpl`. **Falsification-plan-before-result is the single most important rule** — it is the difference between iterating and rationalising.
+
+A hypothesis file thinner than ~12 lines of body is almost always under-specified. If you can't think of a mechanism, a risk, and a falsification plan, you don't have a hypothesis worth running — pull from `capability.ideas.md` or the §4 taxonomy instead.
 
 ### Phase 2 — Construct (every iteration)
 
@@ -243,10 +229,13 @@ Rules:
 
 1. **No system prompt unless the user specified one in capability.md.** Spurious system prompts leak into the eval and inflate variance.
 2. **Generate, don't curate.** It is fine — often best — to write the dataset by hand or with prompts. Each line should be intentional. Cite your generation strategy in the hypothesis file.
-3. **Cap size aggressively.** Small (16–128) ablations train in seconds and yield cleaner causal signal. Only grow past 256 when you've ruled out small-N versions of the hypothesis.
-4. **Hold out the eval's surface form.** If the user hinted the eval uses two-digit problems, your dataset for `verbal-add-algorithm` should contain *three*-digit worked examples or zero numbers at all. Transfer is the point.
-5. **Prefer prose over symbols when both fit.** The skill's edge. Worked example: instead of `"5 + 8 = 13"`, write `"To add 5 and 8, notice that 5 needs 5 more to reach 10, take 5 from 8 leaving 3, so the sum is 10+3=13."` — and even better, write that *as the entire assistant turn*, leaving the user turn as `"How would you add 5 and 8?"`.
-6. **Vary framing widely, vary content narrowly.** 30 paraphrases of the same algorithm beats 30 different algorithms applied once.
+3. **Write the JSONL directly with the Write tool.** Don't spawn a subagent to generate the dataset — its summary will be lossy, and (worse) it lacks the firewall context. If you need to draft 64 examples, draft 64 examples; that's what you're here for.
+4. **Cap size aggressively.** Small (16–128) ablations train in seconds and yield cleaner causal signal. Only grow past 256 when you've ruled out small-N versions of the hypothesis.
+5. **Hold out the eval's surface form.** If the user hinted the eval uses two-digit problems, your dataset for `verbal-add-algorithm` should contain *three*-digit worked examples or zero numbers at all. Transfer is the point.
+6. **Prefer prose over symbols when both fit.** The skill's edge. Worked example: instead of `"5 + 8 = 13"`, write `"To add 5 and 8, notice that 5 needs 5 more to reach 10, take 5 from 8 leaving 3, so the sum is 10+3=13."` — and even better, write that *as the entire assistant turn*, leaving the user turn as `"How would you add 5 and 8?"`.
+7. **Vary framing widely, vary content narrowly.** 30 paraphrases of the same algorithm beats 30 different algorithms applied once.
+8. **Assistant-turn length: medium.** Aim for 50–300 tokens per assistant turn. Very short (<20 tokens) doesn't teach; very long (>500 tokens) wastes training compute and steers the model toward verbosity. Anchor examples (§11) are the explicit exception — they're meant to be short.
+9. **Combining previously-kept datasets is a new ablation, not a stack.** If A and B both worked separately and you want to try A+B, concatenate the files into a new `datasets/a-plus-b.jsonl`, write a *fresh* hypothesis explaining what you expect from the combination, and treat the result as its own data point. Loading two adapters is not allowed; combining datasets is.
 
 Validate the file before training:
 
@@ -415,34 +404,21 @@ If the user controls the eval and `N` could be raised, ask them once (without as
 
 ## 6. The oracle wrapper
 
-The blind eval is **whatever the user provides**, normalised through `capability.oracle.sh`. The wrapper's job is *containment*: it must reduce arbitrarily noisy output to one line of `SCORE=<float>`.
+The blind eval is **whatever the user provides**, normalised through `capability.oracle.sh`. The wrapper's job is *containment*: it must reduce arbitrarily noisy output to one line of `SCORE=<float>` (optionally with `N=<int>`).
 
-`templates/oracle.sh` ships a reference for the common case of a kiln registered eval suite:
+Three references ship in `templates/`:
 
-```bash
-#!/bin/bash
-set -euo pipefail
-# capability.oracle.sh — blind eval wrapper. Prints SCORE=<float> N=<int>.
-# Configured via capability.config.json: { "eval_suite": "<name>", "server": "..." }
-SUITE="$(jq -r '.eval_suite' capability.config.json)"
-SERVER="$(jq -r '.server // "http://localhost:8420"' capability.config.json)"
-ADAPTER="${1:-}"
+- **`oracle.sh`** — calls a kiln-registered eval suite via `kiln-eval run --watch --json`, then reads only `summary.<scorer_field>` and `summary.num_examples`, falling back to `runs[0].metrics.*` for single-adapter runs (the `summary.*` aggregate is only populated for multi-adapter `compare` runs in current kiln). Everything outside those three fields is dropped. This is the default after `scaffold.sh`.
+- **`oracle-paste.sh`** — prompts the user on stderr, reads one float from stdin (or `SCORE=<f> N=<i>` form), prints exactly `SCORE=<f>` on stdout. The agent sees nothing it shouldn't.
+- (Custom) — the user can replace `capability.oracle.sh` with any script that prints `SCORE=<float>` as its last stdout line. The contract is the only thing that matters.
 
-JOB_JSON=$(kiln-eval --server "$SERVER" run \
-  --suite "$SUITE" --adapter "$ADAPTER" --watch --json)
-SCORE=$(echo "$JOB_JSON" | jq -r '.summary.accuracy // .summary.mean_score // empty')
-N=$(echo "$JOB_JSON" | jq -r '.summary.num_examples // empty')
+**Contract.** The wrapper:
 
-if [ -z "$SCORE" ]; then
-  echo "ORACLE_ERROR: could not parse score from kiln-eval output" >&2
-  exit 2
-fi
-echo "SCORE=$SCORE${N:+ N=$N}"
-```
+1. Receives one positional arg — the adapter name (empty string = base model).
+2. Returns exit 0 on success and prints `SCORE=<float>` (and optionally ` N=<int>`) as its **last** stdout line. Other stdout is allowed but ignored — the consuming helpers (`train_and_score.sh`, log helpers) only `grep` for `SCORE=` / `N=`.
+3. Returns a non-zero exit on failure and prints `ORACLE_ERROR: <reason>` on stderr. The skill agent treats this as `status="oracle_error"` and logs it via `log_iter.sh <slug> oracle_error`.
 
-The wrapper **strips** `runs[].response`, `runs[].judgment`, per-example anything. The agent never reads the JSON; only `SCORE=` is consumed.
-
-**If the user wants a fully human-in-the-loop oracle**, `capability.oracle.sh` should `read` from stdin or paste-back. The skill should ask the user once at intake which mode and write the appropriate wrapper.
+If the wrapper ever prints text that resembles per-example output (transcripts, judgments, the eval's prompts), it is **compromised** — fix it, recommit, and log a `firewall_breach` line.
 
 ---
 
