@@ -11,7 +11,7 @@ Inspired by [pi-autoresearch](https://github.com/davebcn87/pi-autoresearch). Tha
 
 ### Skill inventory
 
-The skill ships with one document and seven helper scripts. Reference them by absolute path (`.agents/skills/sft-capability-creator/...`) or via a `$SKILL` shell var as in §18.
+The skill ships with one document and eight helper scripts. Reference them by absolute path (`.agents/skills/sft-capability-creator/...`) or via a `$SKILL` shell var as in §19.
 
 | File | Purpose |
 |------|---------|
@@ -189,18 +189,33 @@ One JSON object per line. Append-only. Never edit. Fields:
 
 ### Phase 0 — Intake (one-shot)
 
-1. Capture the user's verbal description of the capability. **Do not paraphrase to "improve" it** — copy their words. If they describe a failure mode (*"model writes the wrong column in two-digit subtraction"*), keep the failure language too — it constrains hypothesis space usefully.
-2. Ask only what you cannot infer (use `AskUserQuestion`, one batch, multi-question):
+1. **Capture the user's verbal description.** **Do not paraphrase to "improve" it** — copy their words. If they describe a failure mode (*"model writes the wrong column in two-digit subtraction"*), keep the failure language too — it constrains hypothesis space usefully.
+
+2. **Scope.** If the description is broad (*"make it better at coding"*, *"improve reasoning"*), ask the user to narrow it before starting. "Coding" is dozens of capabilities; "reasoning" is hundreds. The skill works on capabilities that are:
+   - **Specific** — *"two-digit subtraction with borrowing"*, not *"math"*.
+   - **Evaluable** — there is an oracle that scores instances of this capability with a single number.
+   - **Decoupled** — the capability has a name distinct from other capabilities, so a positive result is interpretable.
+
+   If you cannot get specificity, propose 2–3 sharper sub-capabilities and ask the user which to start with. *"Coding"* might become *"Python syntax fluency on small functions"*, *"identifying which library to call"*, or *"closing braces correctly"*. Pick one; you can run multiple sessions later.
+
+3. **Interview** (use `AskUserQuestion`, one batch, multi-question):
    - **Oracle**: registered suite name (preferred), an arbitrary shell command, or paste-back?
    - **Direction**: is higher score better or lower score better?
    - **Scorer field**: `accuracy` (exact-match style) or `mean_score` (graded)?
    - **Budget**: max iterations, max examples per dataset, max epochs.
    - **Anchor suite** (optional): a second blind eval for regression watch (§12).
    - **Hard constraints**: style, language, refusal behaviour, system-prompt requirements.
-3. Run `templates/scaffold.sh <slug>`. Edit the produced `capability.md` and `capability.config.json` with the user's answers. The oracle is already `templates/oracle.sh` — if the user picked paste-back, replace it with `templates/oracle-paste.sh`.
-4. Commit the intake.
-5. Run **tiny-smoke** (§17) — 4-example training, no scoring. Confirms `kiln serve` is up and the helpers work. Delete the smoke adapter after.
-6. Run the **baseline**: `./capability.oracle.sh ""` (empty adapter = base model). Log it as iter 0 with `slug="baseline"`.
+
+4. **Scaffold.** Run `templates/scaffold.sh <slug>`. Edit the produced `capability.md` and `capability.config.json` with the user's answers. The oracle is already `templates/oracle.sh` — if the user picked paste-back, replace it with `templates/oracle-paste.sh`.
+
+5. **Commit** the intake.
+
+6. **Tiny-smoke** (§17) — 4-example training, no scoring. Confirms `kiln serve` is up and the helpers work. Delete the smoke adapter after.
+
+7. **Baseline.** `./capability.oracle.sh ""` (empty adapter = base model). Log as iter 0 with `slug="baseline"`. Inspect the baseline score before continuing:
+   - **Baseline = 0.0 or 0.01** (zero floor) — the model has essentially no capability. Read §11 on answer-form before generating iter 1; the model may be failing to produce the *form* the eval wants more than the *content*. The very first ablation should be heavily anchored.
+   - **Baseline = 1.0 or 0.99** (ceiling) — the model is already saturated. Either the eval is too easy or the capability isn't a deficiency. Stop and report.
+   - **Baseline in (0.1, 0.9)** — healthy. Proceed to iter 1.
 
 The oracle wrapper is *your* file, not the eval's. Its job is to (a) call the user's eval, (b) parse exactly one number out, (c) print `SCORE=<float>` on stdout, (d) tell you NOTHING ELSE. See §6 for the contract.
 
@@ -587,7 +602,25 @@ bash <skill>/train_and_score.sh numeric-drill-control
 
 The pattern is: **T-prose → anchor-fix → triangulate with control → refine winner**. The first four iterations buy you a real causal claim. Everything after is gain-chasing within an understood mechanism.
 
-## 15. Anti-patterns (read this list every session)
+## 15. Surprising patterns (collected from real sessions)
+
+Patterns that recur often enough to be worth naming up front. None of these are rules — they are *priors* to update against.
+
+- **Anchor examples (§11) lift score even when prose alone didn't.** A prose dataset that produces Δ = −0.02 often produces Δ = +0.05 after adding 10–20 % terminal-form anchors. The prose was teaching; the form was masking. Always re-run a borderline negative result with anchors before retiring the family.
+
+- **Bigger data wins less than you expect at rank 4.** Doubling the dataset (64 → 128) typically gains less than 0.5× of what the first 64 gained. Quadrupling (64 → 256) sometimes regresses. Low rank is bandwidth-limited; more examples mostly average within the bandwidth. Try `<slug>-rank16` instead of `<slug>-bigger` when a winner plateaus.
+
+- **Same dataset, shuffled order, different score.** SFT is sensitive to example order at low rank. A 0.02–0.05 swing from shuffle alone is normal. This is *the* reason small-N evals need the shuffle confirmation run (§5).
+
+- **A discarded "control" ablation often contains the real winner.** Triangulation ablations (§3 Phase 6, item 2) are designed to falsify the prose mechanism. When they accidentally *outperform* the prose winner, the experiment has flipped — the prose was a confound; the actual lift came from something the control ran. Pivot.
+
+- **Identical scores across 3 consecutive ablations** usually mean the score is saturated by something the dataset can't move — e.g. a tokenizer quirk, an answer-format mismatch the anchors didn't catch, or the eval is testing latent knowledge SFT can't add. Stop iterating on the surface; question the eval interface in `notes` (the user can confirm without leaking content).
+
+- **The first kept result is the loudest.** First-time signal is exciting and easy to over-attribute. Run an explicit triangulation ablation (a *different* family targeting the same capability) before basing the next 5 iterations on the first winner.
+
+- **Meta-questions transfer surprisingly well.** "How would you approach this kind of problem?" as the user turn, with a procedural answer, often outscores "Here's a specific instance; solve it" as the user turn with a worked solution. The meta route forces the model to learn the rule, not the instance.
+
+## 16. Anti-patterns (read this list every session)
 
 - **Peeking.** Reading suite files, judgment outputs, per-example transcripts. Hard veto. See §1.
 - **Eval-shaped training data.** Copying the eval's prompt template into your dataset. Even if you've never *read* the eval, if your data looks like the eval, transfer collapses into memorisation.
@@ -602,7 +635,7 @@ The pattern is: **T-prose → anchor-fix → triangulate with control → refine
 
 ---
 
-## 16. Adapter hygiene
+## 17. Adapter hygiene
 
 After 20 iterations you have 20 `cap-*` adapters on the server. They consume disk and clutter `kiln adapters list`. **Do not delete them mid-session** — `capability.jsonl` references them by name and your archaeology trail dies without them. After finalisation (§9 final summary), keep the best 3–5 adapters and delete the rest:
 
@@ -616,7 +649,7 @@ kiln adapters delete cap-<slug>
 
 If you genuinely need to free space mid-session, prefer **unloading** (the active-memory step) over **deleting** (the on-disk step). `kiln adapters unload` reverts to base; the weights remain on disk for the next eval call.
 
-## 17. Tiny-smoke discipline (validate infra before paying for an ablation)
+## 18. Tiny-smoke discipline (validate infra before paying for an ablation)
 
 Before the very first real ablation, run a **tiny smoke** — 4 examples, 1 epoch, rank 4 — using `train_and_score.sh --no-score`. Goals:
 
@@ -627,7 +660,7 @@ Before the very first real ablation, run a **tiny smoke** — 4 examples, 1 epoc
 
 A 4-example training run finishes in ~20 s. If anything is wrong, you find out in seconds rather than after a 5-minute real ablation. Delete the smoke adapter after (`kiln adapters delete cap-smoke`).
 
-## 18. One-screen quickstart (the actual loop)
+## 19. One-screen quickstart (the actual loop)
 
 ```bash
 # Skill ships at .agents/skills/sft-capability-creator/. Templates at

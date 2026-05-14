@@ -61,10 +61,17 @@ if [ ! -f capability.config.json ]; then
   "base_model": "Qwen/Qwen3.5-4B",
   "server": "http://localhost:8420",
   "max_iterations": 20,
+  "dataset_size_cap": 128,
   "direction": "higher",
   "eval_suite": "<REPLACE-WITH-SUITE-NAME-OR-PASTE>",
   "scorer_field": "accuracy",
-  "oracle_mode": "kiln"
+  "oracle_mode": "kiln",
+  "training_defaults": {
+    "lr": "1e-4",
+    "epochs": 1,
+    "lora_rank": 4
+  },
+  "anchor_suite": null
 }
 JSON
 fi
