@@ -43,6 +43,7 @@ pub struct PagedKvCache {
     fp8: bool,
     /// Per-layer FP8 scale factors: (k_scale, v_scale).
     /// Global scale across the entire pool. Updated on writes.
+    #[allow(dead_code)]
     fp8_scales: Vec<(f32, f32)>,
     /// The original compute dtype for dequantization.
     compute_dtype: DType,

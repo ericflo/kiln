@@ -12,7 +12,7 @@
 
 use crate::vk_tensor::{VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
@@ -580,7 +580,7 @@ fn cpu_chunk_prep_bwd(
     let ddec = d_decay_last_col.to_vec_f32()?;
     let dpl = d_p_last.to_vec_f32()?;
     let gd = g.to_vec_f32()?;
-    let vd = v.to_vec_f32()?;
+    let _vd = v.to_vec_f32()?;
     let kkd = kkt.to_vec_f32()?;
     let qkd = qkt.to_vec_f32()?;
     let kse = ks_entry.to_vec_f32()?;

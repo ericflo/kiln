@@ -32,8 +32,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context as _;
-use candle_core::backend::BackendStorage;
 use candle_core::op::BackpropOp;
 use candle_core::{CpuStorage, CustomOp3, DType, Layout, Shape, Storage, Tensor};
 

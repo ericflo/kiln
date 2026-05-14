@@ -15,7 +15,7 @@ use crate::vk_ops::dispatch_simple_2d;
 use crate::vk_ops::shape::vk_transpose_2d_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 
 fn dispatch_matmul_f32(

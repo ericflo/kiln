@@ -57,6 +57,7 @@ fn upload_u32(device: &Arc<VulkanDevice>, data: &[u32]) -> Result<Arc<VulkanBuff
 }
 
 /// Computed in `flce_forward_workspace`, used by the backward op.
+#[allow(dead_code)]
 struct FlceState {
     weight_t: VkTensor, // [hidden, vocab] - transposed weight
     labels_buf: Arc<VulkanBuffer>,

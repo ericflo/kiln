@@ -3176,6 +3176,11 @@ async fn generate_real_batched_streaming(
 
             let mut reasoning_splitter = ReasoningSplitter::new(prompt_starts_in_reasoning);
             let deadline = tokio::time::Instant::now() + timeout;
+            // Initial `false` is dead under the current control flow —
+            // every non-timeout branch returns from the closure rather
+            // than breaking the loop, so `timed_out` is only ever read
+            // *after* the deadline arm assigns `true`. Kept for clarity.
+            #[allow(unused_assignments)]
             let mut timed_out = false;
 
             loop {
@@ -4025,6 +4030,11 @@ async fn generate_real_streaming(
             // the async runtime. The receiver is moved into each spawn_blocking
             // call and returned along with the result so we can reuse it.
             let mut maybe_rx = Some(sync_rx);
+            // Initial `false` is dead under the current control flow —
+            // every non-timeout branch returns from the closure rather
+            // than breaking the loop, so `timed_out` is only ever read
+            // *after* the deadline arm assigns `true`. Kept for clarity.
+            #[allow(unused_assignments)]
             let mut timed_out = false;
             let deadline = tokio::time::Instant::now() + timeout;
 
@@ -5842,37 +5852,12 @@ fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingPara
     base
 }
 
-/// Resolve a [`SamplingParams`] from a batch completion request. Mirrors
-/// [`sampling_params_for_chat_request`] field-for-field so the two
-/// endpoints stay in sync.
-fn sampling_params_for_batch_request(req: &BatchCompletionRequest) -> SamplingParams {
-    let mut base = preset_or_default(req.sampling_preset.as_deref());
-    if let Some(t) = req.temperature {
-        base.temperature = t;
-    }
-    if let Some(p) = req.top_p {
-        base.top_p = p;
-    }
-    if let Some(k) = req.top_k {
-        base.top_k = k;
-    }
-    if let Some(mp) = req.min_p {
-        base.min_p = mp;
-    }
-    if let Some(pp) = req.presence_penalty {
-        base.presence_penalty = pp;
-    }
-    if let Some(fp) = req.frequency_penalty {
-        base.frequency_penalty = fp;
-    }
-    if let Some(rp) = req.repetition_penalty {
-        base.repetition_penalty = rp;
-    }
-    base.max_tokens = batch_request_max_tokens(req);
-    base.stop = normalized_stop_for_generation(req.stop.as_deref());
-    base.seed = req.seed;
-    base
-}
+// NOTE: batch-request → SamplingParams conversion lives implicitly in
+// the batch handler, which builds synthetic per-prompt
+// `ChatCompletionRequest`s and routes them through
+// `sampling_params_for_chat_request`. The previously-separate
+// `sampling_params_for_batch_request` was dead code — every batch
+// field already plumbs through the synthetic-request path.
 
 /// Default values used to fill in omitted request fields when computing
 /// cache keys. These MUST match the Qwen3.5-thinking-general start point

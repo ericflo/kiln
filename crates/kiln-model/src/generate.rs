@@ -23,7 +23,7 @@ use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_head_backend_decode_if,
+    GpuWeights, LinearAttentionState, model_forward,
     model_forward_paged, model_forward_paged_batched_decode_hidden,
     model_forward_paged_decode_contiguous_batch_greedy, model_forward_paged_last_token,
     model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,

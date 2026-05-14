@@ -6222,6 +6222,7 @@ fn compute_w_chunk_fallback(
     Ok(Tensor::cat(&w_rows, 2)?)
 }
 
+#[allow(dead_code)]
 fn compute_chunk_body_reference(
     a_strict: &Tensor,
     b_mask: &Tensor,
@@ -11923,6 +11924,7 @@ fn gqa_attention_paged_with_rope_tables(
 
 /// Apply a causal (lower-triangular) mask to attention scores.
 /// Sets future positions to -inf so softmax zeroes them out.
+#[allow(dead_code)]
 fn apply_causal_mask(scores: &Tensor, seq_len: usize) -> Result<Tensor> {
     apply_causal_mask_with_offset(scores, seq_len, seq_len, 0)
 }
@@ -13286,7 +13288,7 @@ pub fn model_forward_paged_next_token_greedy(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn model_forward_paged_with_graph_inputs(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],

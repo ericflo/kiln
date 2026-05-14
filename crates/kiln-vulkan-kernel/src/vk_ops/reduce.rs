@@ -11,7 +11,7 @@ use crate::vk_ops::elementwise::vk_sub_no_grad;
 use crate::vk_ops::{dispatch_simple, for_each_1d_tile, vk_1d_tile_elements};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::Arc;
 
 fn alloc_f32_buffer(device: &Arc<VulkanDevice>, n_elements: usize) -> Result<Arc<VulkanBuffer>> {
