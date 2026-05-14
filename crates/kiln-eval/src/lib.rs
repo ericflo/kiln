@@ -23,6 +23,7 @@
 //! `EvalResult` so callers see the same shape whether they kick off an eval
 //! over HTTP, the CLI, or the post-training auto-eval hook.
 
+pub mod builtin;
 pub mod qwen3;
 pub mod result;
 pub mod scorers;
@@ -40,6 +41,7 @@ pub use suite::{
     EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
     EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
 };
+pub use builtin::{QWEN3_AGENTIC_CORE, qwen3_agentic_core};
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,
     SynthesisStats, SynthesisStrategy, auto_detect_scorer, synthesize_suite,

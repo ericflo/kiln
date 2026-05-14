@@ -324,9 +324,18 @@ async fn main() -> Result<()> {
         }
     }
     if suite_dir.exists() {
-        state.suite_registry = Some(Arc::new(kiln_server::eval::SuiteRegistry::new(
-            suite_dir.clone(),
-        )));
+        let registry = kiln_server::eval::SuiteRegistry::new(suite_dir.clone());
+        // Install the built-in Qwen3.5 agentic-core suite so users can
+        // `kiln-eval run --suite qwen3.5-agentic-core` without authoring
+        // anything. Idempotent — the registry's `save(force=true)` is a
+        // no-op when content is unchanged at the file-system level.
+        if let Err(err) = registry.install_qwen3_agentic_core() {
+            tracing::warn!(
+                error = %err,
+                "failed to install built-in qwen3.5-agentic-core eval suite (continuing)"
+            );
+        }
+        state.suite_registry = Some(Arc::new(registry));
     }
     if dataset_dir.exists() {
         state.dataset_registry = Some(Arc::new(kiln_server::eval::DatasetRegistry::new(

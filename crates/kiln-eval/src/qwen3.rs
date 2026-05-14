@@ -340,28 +340,70 @@ fn parse_qwen3_xml_body(body: &str) -> Option<ParsedToolCall> {
 }
 
 /// XML parameter values are raw strings. The chat template renders nested
-/// objects/lists via `tojson`, so we attempt a JSON parse to recover
-/// structure; on failure we keep the value as a string. This lets eval
-/// scorers compare structurally for list/dict args while leaving prose
-/// args alone.
+/// objects/lists via `tojson`, but primitives go through `value | string`,
+/// so a bool `false` is emitted as the literal token `False` (Python's
+/// `str(False)`) and an int `42` as `"42"`. To make structural comparison
+/// against JSON targets work, we coerce stringified primitives back into
+/// their JSON form when the value is unambiguously a primitive (single
+/// short token with no whitespace).
 fn parse_xml_value(s: &str) -> serde_json::Value {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return serde_json::Value::String(String::new());
     }
-    // Heuristic: only attempt JSON when the value starts with a structural
-    // delimiter. Don't parse bare `42` as a number — for Qwen3.5 args, a
-    // bare integer in a `count` field really is the string "42" if the
-    // model emitted it without quotes. Numeric args are exceptionally rare
-    // in XML form because the chat template renders the source value as
-    // `value | string` (so the upstream dict had a string anyway).
+    // Object / array: try strict JSON parse first.
     let first = trimmed.chars().next().unwrap();
     if first == '{' || first == '[' {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
             return v;
         }
     }
+    // Bool / null primitives — accept Python-style ("True"/"False"/"None")
+    // and JSON-style ("true"/"false"/"null") tokens emitted by the chat
+    // template. Only kick in when the *entire* trimmed body is the token,
+    // so prose values that happen to contain "false" mid-sentence stay
+    // strings.
+    if !trimmed.contains('\n') {
+        match trimmed {
+            "true" | "True" => return serde_json::Value::Bool(true),
+            "false" | "False" => return serde_json::Value::Bool(false),
+            "null" | "None" => return serde_json::Value::Null,
+            _ => {}
+        }
+        // Number coercion — only when the *entire* trimmed body is one
+        // numeric token. We reject leading-zero non-numbers like "0123"
+        // by going through serde_json's parser which preserves precision.
+        if looks_like_number(trimmed) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if v.is_number() {
+                    return v;
+                }
+            }
+        }
+    }
     serde_json::Value::String(s.to_string())
+}
+
+fn looks_like_number(s: &str) -> bool {
+    let mut chars = s.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None => return false,
+    };
+    if !(first.is_ascii_digit() || first == '-' || first == '+') {
+        return false;
+    }
+    let mut saw_digit = first.is_ascii_digit();
+    for c in chars {
+        if c.is_ascii_digit() {
+            saw_digit = true;
+        } else if c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+            // allowed in numbers; we let serde_json validate the full shape
+        } else {
+            return false;
+        }
+    }
+    saw_digit
 }
 
 /// Look for fenced ```` ```tool_call``` ```` blocks. Returns Some(vec) when at
@@ -658,7 +700,9 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].name, "a");
         assert_eq!(calls[1].name, "b");
-        assert_eq!(calls[1].arguments.get("x"), Some(&serde_json::json!("1")));
+        // Bare numeric tokens get coerced to JSON numbers (matches what
+        // the chat template produces from a source-side `int` value).
+        assert_eq!(calls[1].arguments.get("x"), Some(&serde_json::json!(1)));
     }
 
     #[test]

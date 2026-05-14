@@ -838,7 +838,9 @@ mod tests {
 
     #[test]
     fn thinking_before_xml_call_is_ignored() {
-        let target = r#"{"tool_calls":[{"name":"f","arguments":{"x":"1"}}]}"#;
+        // Numeric XML args coerce to JSON numbers (matches what the chat
+        // template emits from a source-side int).
+        let target = r#"{"tool_calls":[{"name":"f","arguments":{"x":1}}]}"#;
         let pred = "<think>\nI should call f with x=1.\n</think>\n\n<tool_call>\n<function=f>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>";
         let (s, kind, _) = score(
             &ex(target),

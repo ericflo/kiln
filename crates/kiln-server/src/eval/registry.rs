@@ -145,6 +145,15 @@ impl SuiteRegistry {
         }
         Ok(())
     }
+
+    /// Install the bundled Qwen3.5 agentic-core suite. Idempotent — when
+    /// the suite already exists with the same content hash, no-op; otherwise
+    /// overwrites in place. Called from server startup so the suite is
+    /// always present for users without explicit registration.
+    pub fn install_qwen3_agentic_core(&self) -> Result<PathBuf, SuiteRegistryError> {
+        let suite = kiln_eval::qwen3_agentic_core();
+        self.save(&suite, true)
+    }
 }
 
 #[cfg(test)]
