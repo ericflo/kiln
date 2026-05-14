@@ -213,6 +213,12 @@ pub struct SynthesisConfig {
     /// prompt is huge (multi-KB tool catalogue) and you want a clean eval.
     #[serde(default)]
     pub strip_system_prompt: bool,
+    /// Suite-level tool catalogue to attach to the resulting suite. When
+    /// `None` the suite has no `tools` and the chat template renders no
+    /// `<tools>` block. Useful when the bridge converter has the tool
+    /// schema available but didn't attach it per-conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suite_tools: Option<Vec<serde_json::Value>>,
 }
 
 impl SynthesisConfig {
@@ -228,6 +234,7 @@ impl SynthesisConfig {
             sampling: Sampling::default(),
             system_prompt: None,
             strip_system_prompt: false,
+            suite_tools: None,
         }
     }
 }
@@ -475,9 +482,23 @@ where
     let cap = config.sampling.max_examples;
     let mut reservoir: Vec<EvalExample> = Vec::new();
     let mut dedup_keys: HashSet<String> = HashSet::new();
+    // Track the `tools` field stuffed into `SftConversation::extra` so
+    // we can auto-promote it to the suite-level tools catalogue when
+    // every trajectory agrees on it (or the caller didn't pass one).
+    let mut tools_witness: Option<Vec<serde_json::Value>> = None;
+    let mut tools_inconsistent = false;
 
     for conv in conversations.into_iter() {
         stats.trajectories_seen += 1;
+        if !tools_inconsistent {
+            if let Some(t) = extract_tools_from_extra(&conv.extra) {
+                match &tools_witness {
+                    None => tools_witness = Some(t),
+                    Some(prev) if prev != &t => tools_inconsistent = true,
+                    _ => {}
+                }
+            }
+        }
         let candidates = match decompose(&conv, config) {
             Ok(c) => c,
             Err(e) => match e {
@@ -592,6 +613,19 @@ where
         },
     };
 
+    // If every trajectory carried the same `tools` payload in `extra`,
+    // promote that to the suite-level tool catalogue. This is the common
+    // case for SFT JSONL produced by the kiln_bridge.py converter: each
+    // line has `tools: [...]` so the chat template renders the `<tools>`
+    // block during training. Surfacing it on the eval suite makes the
+    // prompts at eval time match the prompts at train time.
+    let auto_detect_tools = if tools_inconsistent {
+        None
+    } else {
+        tools_witness
+    };
+    let suite_tools = config.suite_tools.clone().or(auto_detect_tools);
+
     let suite = EvalSuite {
         name: config.suite_name.clone(),
         description: config.description.clone(),
@@ -600,7 +634,7 @@ where
         system_prompt: config.system_prompt.clone(),
         examples: reservoir,
         schema_version: 1,
-        tools: None,
+        tools: suite_tools,
     };
     Ok((suite, stats))
 }
@@ -1129,6 +1163,25 @@ fn to_chat_messages(messages: &[SftMessage]) -> Vec<EvalChatMessage> {
         .collect()
 }
 
+/// Pull a `tools` field out of the trajectory's extra metadata. Accepts
+/// both an array of tool objects and a `{"tools": [...]}` envelope. The
+/// kiln_bridge.py converter writes one of these shapes per line so we
+/// can auto-promote at synthesis time.
+fn extract_tools_from_extra(
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<serde_json::Value>> {
+    let value = extra.get("tools")?;
+    if let Some(arr) = value.as_array() {
+        return Some(arr.clone());
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(arr) = obj.get("tools").and_then(|v| v.as_array()) {
+            return Some(arr.clone());
+        }
+    }
+    None
+}
+
 fn trajectory_metadata(conv: &SftConversation) -> Option<serde_json::Value> {
     if conv.extra.is_empty() {
         return None;
@@ -1536,6 +1589,51 @@ mod tests {
         assert!(target.contains("\"tool_calls\""), "{target}");
         assert!(target.contains("\"set\""));
         assert!(target.contains("\"k\""));
+    }
+
+    #[test]
+    fn synth_auto_promotes_tools_from_extra() {
+        let tools = serde_json::json!([{
+            "type": "function",
+            "function": {"name": "search", "parameters": {"type": "object"}}
+        }]);
+        let mut conv1 = conv(&[("user", "q"), ("assistant", "a")]);
+        conv1.extra.insert("tools".into(), tools.clone());
+        let mut conv2 = conv(&[("user", "q2"), ("assistant", "a2")]);
+        conv2.extra.insert("tools".into(), tools.clone());
+        let cfg = SynthesisConfig::new("toolful");
+        let (suite, _) = synthesize_suite(vec![conv1, conv2], &cfg).unwrap();
+        assert!(suite.tools.as_ref().map_or(false, |t| t.len() == 1));
+    }
+
+    #[test]
+    fn synth_skips_auto_tools_when_inconsistent() {
+        let t1 = serde_json::json!([{"type":"function","function":{"name":"a"}}]);
+        let t2 = serde_json::json!([{"type":"function","function":{"name":"b"}}]);
+        let mut c1 = conv(&[("user", "q"), ("assistant", "a")]);
+        c1.extra.insert("tools".into(), t1);
+        let mut c2 = conv(&[("user", "q2"), ("assistant", "a2")]);
+        c2.extra.insert("tools".into(), t2);
+        let cfg = SynthesisConfig::new("mismatched");
+        let (suite, _) = synthesize_suite(vec![c1, c2], &cfg).unwrap();
+        assert!(suite.tools.is_none(), "inconsistent extras should leave tools=None");
+    }
+
+    #[test]
+    fn synth_explicit_suite_tools_wins_over_auto_pick() {
+        let mut c = conv(&[("user", "q"), ("assistant", "a")]);
+        c.extra.insert(
+            "tools".into(),
+            serde_json::json!([{"type":"function","function":{"name":"auto"}}]),
+        );
+        let mut cfg = SynthesisConfig::new("override");
+        cfg.suite_tools = Some(vec![serde_json::json!({
+            "type":"function","function":{"name":"explicit"}
+        })]);
+        let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
+        let tools = suite.tools.as_ref().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "explicit");
     }
 
     #[test]
