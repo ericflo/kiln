@@ -4189,7 +4189,7 @@ function renderTrainingCard(j, state) {
   return `<div class="${cardClass}" data-train-job-id="${escapeHtml(j.job_id)}">
     <div class="training-card-head">
       ${stateBadge}
-      <span class="training-card-name">${adapterLabel}</span>
+      <span class="training-card-name"><span class="hint" style="font-weight:400;margin-right:4px;">Adapter:</span>${adapterLabel}</span>
       <span class="training-card-type ${escapeHtml(jobType)}">${escapeHtml(jobType)}</span>
       <span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(shortId(j.job_id))}</span>
       ${cancelBtn}
@@ -6611,9 +6611,9 @@ function renderAdaptersAsCards(data) {
   }
   const cards = adapters.map(a => {
     const isActive = a.name === active;
-    return `<div class="adapter-card ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
+    return `<div class="adapter-card adapter-item ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
       ${isActive ? '<span class="adapter-card-active-pill">active</span>' : ''}
-      <div class="adapter-card-name">${escapeHtml(a.name)}</div>
+      <div class="adapter-card-name adapter-name">${escapeHtml(a.name)}</div>
       <div class="adapter-card-meta">
         <span><span class="tabular-nums">${fmtBytes(a.size_bytes)}</span> on disk</span>
         ${a.modified_at ? `<span title="${escapeHtml(a.modified_at)}">${escapeHtml(a.modified_at.split('T')[0])}</span>` : ''}
