@@ -30,7 +30,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        # Use the rustup that's pre-installed on every GitHub-hosted runner
+        # (Linux + macOS) instead of an external action — no third-party
+        # versioning to drift. Fixes the chronic macOS Metal failure where
+        # `dtolnay/rust-toolchain@stable` was invoking `rustup-init` with a
+        # `fetch` subcommand the bundled rustup-init doesn't recognize.
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -66,7 +74,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        # Use the rustup that's pre-installed on every GitHub-hosted runner
+        # (Linux + macOS) instead of an external action — no third-party
+        # versioning to drift. Fixes the chronic macOS Metal failure where
+        # `dtolnay/rust-toolchain@stable` was invoking `rustup-init` with a
+        # `fetch` subcommand the bundled rustup-init doesn't recognize.
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -87,7 +103,15 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        # Use the rustup that's pre-installed on every GitHub-hosted runner
+        # (Linux + macOS) instead of an external action — no third-party
+        # versioning to drift. Fixes the chronic macOS Metal failure where
+        # `dtolnay/rust-toolchain@stable` was invoking `rustup-init` with a
+        # `fetch` subcommand the bundled rustup-init doesn't recognize.
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
 
       - name: Install Vulkan shader tools
         run: |
