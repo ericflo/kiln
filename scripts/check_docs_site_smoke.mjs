@@ -943,7 +943,8 @@ function validateCliHelpOnboardingCopy() {
     ['TRAIN_OVERVIEW', [
       'SFT reads JSONL',
       'messages array',
-      'GRPO reads one JSON request/batch',
+      'GRPO reads',
+      'one JSON request/batch',
       'groups',
       'prompt messages',
       'candidate completions',
