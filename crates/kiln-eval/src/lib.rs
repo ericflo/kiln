@@ -29,6 +29,7 @@ pub mod result;
 pub mod scorers;
 pub mod suite;
 pub mod synthesis;
+pub mod trajectory;
 
 pub use result::{
     AggregateMetrics, EvalJobState, EvalOutcomeKind, EvalProgress, EvalResult, ExampleOutcome,
@@ -45,6 +46,9 @@ pub use builtin::{QWEN3_AGENTIC_CORE, qwen3_agentic_core};
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,
     SynthesisStats, SynthesisStrategy, auto_detect_scorer, synthesize_suite,
+};
+pub use trajectory::{
+    AnthropicBlock, AnthropicContent, AnthropicMessage, anthropic_turn_to_sft_conversation,
 };
 
 /// Schema version of suite JSON files. Bumped when an incompatible field is
