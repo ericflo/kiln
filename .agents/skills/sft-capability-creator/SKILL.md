@@ -25,6 +25,7 @@ The skill ships with one document and eight helper scripts. Reference them by ab
 | `templates/annotate.sh` | Add `asi.*` fields + `notes` to the most-recent log entry. (§3 Phase 5, §7) |
 | `templates/confidence.sh` | MAD-based confidence stats from the log. (§5) |
 | `templates/status.sh` | One-screen session summary for resume / between iterations. (§8) |
+| `templates/summary.sh` | Final-summary markdown — winners, near-misses, errors, confidence. (§9) |
 | `install.sh` | Symlink the skill into `.claude/skills/`. |
 
 ---
@@ -453,13 +454,14 @@ Read `capability.md` and the tail of `capability.jsonl` at the start of every it
 
 A fresh agent invoked in a directory with an existing `sft-cap.<slug>/`:
 
-1. Run `$SKILL/templates/status.sh` — one-screen summary (suite, scorer, best, MAD, confidence, recent ledger, slugs in use).
-2. Read `capability.md` end to end.
-3. Read `capability.ideas.md` and `capability.config.json`.
-4. Scan `hypotheses/*.md` for any file whose slug does **not** appear in `capability.jsonl` — that is an interrupted run; either complete it or log it as `status=crash` with a note.
-5. `kiln adapters list | grep cap-` to confirm trained adapters match the log. Adapters present without a log line are orphan training runs; either claim them by writing a hypothesis post-hoc (and marking the entry `recovered=true` in `notes`) or `kiln adapters delete cap-<slug>`.
-6. Re-baseline (§13). Append as a new `slug=baseline` line — do not overwrite the old one. Later confidence math uses the most-recent `slug=="baseline" or iter==0`.
-7. Continue from where the log ends.
+1. **Re-read this SKILL.md.** Discipline is the whole game; do not operate from a hazy memory of the protocol.
+2. Run `$SKILL/templates/status.sh` — one-screen summary (suite, scorer, best, MAD, confidence, recent ledger, slugs in use).
+3. Read `capability.md` end to end.
+4. Read `capability.ideas.md` and `capability.config.json`. Note the `kiln_server_version_at_scaffold` field — if `curl /health` reports a different version now, anomalous results are suspect.
+5. Scan `hypotheses/*.md` for any file whose slug does **not** appear in `capability.jsonl` — that is an interrupted run; either complete it or log it as `status=crash` with a note.
+6. `kiln adapters list | grep cap-` to confirm trained adapters match the log. Adapters present without a log line are orphan training runs; either claim them by writing a hypothesis post-hoc (and marking the entry `recovered=true` in `notes`) or `kiln adapters delete cap-<slug>`.
+7. Re-baseline (§13). Append as a new `slug=baseline` line — do not overwrite the old one. Later confidence math uses the most-recent `slug=="baseline" or iter==0`.
+8. Continue from where the log ends.
 
 No further questions to the user unless the budget is exhausted or the oracle is misconfigured.
 
@@ -474,12 +476,17 @@ Stop and report when **any** of:
 - An oracle error has occurred twice in a row.
 - The user interrupts.
 
-When stopping, write a final summary to the bottom of `capability.md`:
+When stopping, generate the final-summary skeleton with the helper and edit in the narrative parts:
 
-- Best adapter (slug, score, delta from baseline).
-- Top 3 hypotheses that worked, with one-line mechanism for each.
-- Top 3 dead ends, with falsifying evidence.
-- One paragraph of advice for whoever runs the next round.
+```bash
+bash $SKILL/templates/summary.sh >> capability.md
+```
+
+That helper produces a markdown block with: best adapter (slug, score, delta), top 5 kept ablations, near-miss discards, error/breach roll-up, and the latest confidence stats. After running it, edit `capability.md` to add:
+
+- One-line mechanism per kept ablation in the top-5 table (what was the *route*, not just the slug).
+- Top 3 dead ends with one-line falsifying evidence each.
+- One paragraph of advice for whoever runs the next round — what to try first, what to skip, where the ceiling seems to be.
 
 Crystallised intelligence is not "the best dataset I found" — it is **the map of which families are alive and dead in this capability**.
 

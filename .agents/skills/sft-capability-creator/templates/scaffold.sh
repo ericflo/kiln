@@ -55,11 +55,16 @@ MD
 fi
 
 if [ ! -f capability.config.json ]; then
-  cat > capability.config.json <<'JSON'
+  # Best-effort: record the kiln server version at scaffold time so
+  # anomalous results post-server-restart can be flagged.
+  KILN_VER=$(curl -fsS http://localhost:8420/health 2>/dev/null | jq -r '.version // empty' || true)
+  KILN_VER="${KILN_VER:-unknown}"
+  cat > capability.config.json <<JSON
 {
   "workdir": ".",
   "base_model": "Qwen/Qwen3.5-4B",
   "server": "http://localhost:8420",
+  "kiln_server_version_at_scaffold": "$KILN_VER",
   "max_iterations": 20,
   "dataset_size_cap": 128,
   "direction": "higher",
