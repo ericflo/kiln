@@ -28,7 +28,7 @@
 
 ---
 
-Kiln serves a language model, trains it, and evaluates it from one process on one GPU. You submit corrections or scored completions over HTTP and the model improves in seconds; you upload an SFT dataset and Kiln synthesizes an eval suite from it; you A/B-judge two adapters in the dashboard and your picks become a local judge LoRA. No restarts, no separate training pipeline, no second copy of the weights.
+Kiln serves a language model, trains it, and evaluates it — same process, same GPU. You submit corrections or scored completions over HTTP and the model improves in seconds; you upload an SFT dataset and Kiln synthesizes an eval suite from it; you A/B-judge two adapters in the dashboard and your picks become a local judge LoRA. No restarts, no separate training pipeline, no second copy of the weights.
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
