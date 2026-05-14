@@ -10,8 +10,19 @@
 
 set -euo pipefail
 
-SLUG="$1"; STATUS="$2"; SCORE="$3"; N="${4:-}"
+SLUG="$1"; STATUS="$2"; SCORE="${3:-}"; N="${4:-}"
 HYP_FILE="${5-}"; DS_FILE="${6-}"; ADAPTER="${7-}"; LOSS="${8-}"; ELAPSED="${9-}"
+
+# Crash / oracle_error / firewall_breach entries have no score. Mark
+# them with a JSON null score and zero delta — they exist only for the
+# experimental record and the resume-time crash-recovery scan.
+NO_SCORE_STATES="crash|oracle_error|firewall_breach"
+if echo "$STATUS" | grep -qE "^($NO_SCORE_STATES)$" || [ -z "$SCORE" ]; then
+  SCORE_JSON=null
+  SCORE=0     # awk-safe placeholder; the JSON will say null.
+else
+  SCORE_JSON="$SCORE"
+fi
 
 LOG=capability.jsonl
 CFG=capability.config.json
@@ -30,7 +41,7 @@ else
   ITER=0
 fi
 
-if [ "$PREV_BEST" = "null" ]; then
+if [ "$PREV_BEST" = "null" ] || [ "$SCORE_JSON" = "null" ]; then
   DELTA=0
 else
   DELTA=$(awk -v a="$SCORE" -v b="$PREV_BEST" -v d="$DIR" 'BEGIN {
@@ -55,7 +66,7 @@ jq -nc \
   --arg slug "$SLUG" \
   --arg ts "$TS" \
   --arg status "$STATUS" \
-  --argjson score "$SCORE" \
+  --argjson score "$SCORE_JSON" \
   --argjson n "${N:-0}" \
   --argjson delta "$DELTA" \
   --arg hypothesis "$CLAIM" \

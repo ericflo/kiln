@@ -274,8 +274,10 @@ Defaults are deliberate: low rank (4), single epoch, mild LR. These keep the abl
 
 If a previous adapter by this slug exists, you have two choices:
 
-- **Replay the slug** (overwrite): only when iterating on the *same* hypothesis with a small data tweak. Re-use the slug, append a new log line, leave `delta` honest.
-- **Fork the slug**: rename to `<slug>-v2` and treat it as a new ablation. Default to this.
+- **Replay** (overwrite): only when **all** of (a) the hypothesis is unchanged, (b) the data delta is a typo fix / order shuffle / single-example swap, (c) the previous log line was a `crash` or `oracle_error`. Re-use the slug, append a new log line, leave `delta` honest.
+- **Fork** (new slug): when the hypothesis has changed at all, the data is intentionally different, or you're testing a hyperparameter. Suffix with the change: `-anchored`, `-rank16`, `-3ep`, `-shuffle1`, `-bigger`. **This is the default**, because forking is the only way an ablation's identity survives the experimental record.
+
+Same-slug overwrite obliterates the previous adapter weights but **not** the previous log entry. The dataset file at `datasets/<slug>.jsonl` is the one on disk now; the dataset that produced the *previous* entry is gone. If you can't bear losing it, fork.
 
 Capture the trained adapter name + final loss into `adapters/<slug>.txt` and the JSONL entry. Final loss is *advisory only* — it correlates weakly with capability uplift and you should never `keep` on loss alone.
 
@@ -308,7 +310,13 @@ Pick the next hypothesis. Order of preference:
 2. **Triangulate.** Run an explicitly *different* hypothesis next, even if you have a winner, to confirm the win isn't coincidence. If a clearly-different ablation also helps, the capability has multiple handles; if a clearly-different ablation does not help, your winner is more specific and probably real.
 3. **Cool down winners; warm up new families.** When a family stops yielding gains across 2 consecutive ablations, retire it to `capability.md`'s "dead ends" and pull a hypothesis from `capability.ideas.md`.
 
+**Use the ideas backlog actively.** When you write a hypothesis file, you almost always think of 1–3 *other* directions you couldn't pursue this iteration. Append each as a bullet to `capability.ideas.md` **immediately** — `- <slug>: <one-sentence claim>`. The list is your safety net for steps 2 and 3 above. On resume, the agent skims the backlog before generating a fresh hypothesis. Prune entries when tried or proven irrelevant.
+
 **Never thrash.** If you've discarded the same direction twice, write it off in the dead-ends section and try something structurally different.
+
+### Kept datasets are immutable
+
+A dataset whose log entry has `status="kept"` is part of the experimental record. **Do not edit `datasets/<slug>.jsonl` after the entry is written.** If you want to try a variant, fork the slug (§3 Phase 3). Mutating a kept dataset breaks every future result that compares against it and silently corrupts the noise floor. The same goes for the hypothesis file. If you spot a typo, fix only `notes` via `annotate.sh`, never the original files.
 
 ---
 
@@ -392,6 +400,16 @@ Most blind evals are small (n=10–50) and noisy. Treat the first `keep` with su
 - **< 1.0×**: within noise. Default to `discard`.
 
 When confidence is borderline, **don't move on**. Spending one extra iteration to confirm a real win is cheaper than chasing a phantom for ten.
+
+### Small-N evals (n < 10)
+
+If the oracle reports `N < 10`, one example flipping is a huge swing — at n=4, a single fail moves accuracy by 0.25. **At this scale MAD is dominated by sampling noise, not the dataset intervention.** Override the table above:
+
+- Discard anything with `delta < 1 / max(N, 4)` regardless of MAD. That's roughly "one example's worth of swing".
+- Before `kept`, *require* a confirmation run with a shuffled dataset (slug `<slug>-shuffle`). Only `kept` if both score above the small-N threshold.
+- Note small-N status in the entry's `notes` so a future skim doesn't take a 0.4→0.6 jump at face value.
+
+If the user controls the eval and `N` could be raised, ask them once (without asking for content) whether expanding the eval to ≥20 items is feasible. More items costs eval time; less noise saves iterations. Net usually wins.
 
 ---
 
