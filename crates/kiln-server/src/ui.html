@@ -1460,6 +1460,135 @@ select {
   white-space: pre-wrap;
   margin-top: 6px;
 }
+
+/* Rendered markdown for finished assistant turns. We deliberately
+   keep this scoped under .chat-msg .md-body so the renderer's tag
+   choices don't leak into the rest of the dashboard (the eval-
+   detail and judgment panels render their own way). */
+.chat-msg .md-body {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  color: var(--text);
+}
+.chat-msg .md-body > * + * { margin-top: 8px; }
+.chat-msg .md-body p { margin: 0; }
+.chat-msg .md-body h1, .chat-msg .md-body h2, .chat-msg .md-body h3,
+.chat-msg .md-body h4, .chat-msg .md-body h5, .chat-msg .md-body h6 {
+  margin: 0;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+}
+.chat-msg .md-body h1 { font-size: 1.25em; }
+.chat-msg .md-body h2 { font-size: 1.15em; }
+.chat-msg .md-body h3 { font-size: 1.05em; }
+.chat-msg .md-body h4, .chat-msg .md-body h5, .chat-msg .md-body h6 { font-size: 1em; }
+.chat-msg .md-body ul, .chat-msg .md-body ol { margin: 0; padding-left: 22px; }
+.chat-msg .md-body li + li { margin-top: 2px; }
+.chat-msg .md-body code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  background: var(--ink-900);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--kiln-200, var(--text));
+}
+.chat-msg .md-body pre.md-code {
+  margin: 0;
+  background: var(--ink-900);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  padding: 10px 12px;
+  overflow-x: auto;
+  position: relative;
+}
+.chat-msg .md-body pre.md-code code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.5;
+  color: var(--text);
+}
+.chat-msg .md-body pre.md-code[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-quiet);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+.chat-msg .md-body blockquote {
+  margin: 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--kiln-700, var(--border));
+  color: var(--text-muted);
+  font-style: italic;
+}
+.chat-msg .md-body a { color: var(--accent); text-decoration: underline; }
+.chat-msg .md-body a:hover { text-decoration: none; }
+.chat-msg .md-body hr { border: 0; border-top: 1px solid var(--border); margin: 8px 0; }
+
+/* Edit / inline-edit affordance on user messages. The pencil floats
+   over the user bubble so the layout doesn't reflow on hover; click
+   swaps the <pre> for a textarea + save/cancel row. */
+.chat-msg.user { position: relative; }
+.chat-msg.user .user-edit-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+.chat-msg.user:hover .user-edit-btn,
+.chat-msg.user:focus-within .user-edit-btn { opacity: 1; }
+.chat-msg.user.editing pre { display: none; }
+.chat-msg.user .user-edit-area {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, 80vw);
+  background: var(--surface);
+  border: 1px solid var(--kiln-700);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+}
+.chat-msg.user.editing .user-edit-area { display: flex; }
+.chat-msg.user .user-edit-area textarea {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  resize: vertical;
+  min-height: 60px;
+  padding: 0;
+  outline: none;
+}
+.chat-msg.user .user-edit-area .user-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
 .chat-output-actions {
   display: flex;
   justify-content: flex-end;
@@ -5028,6 +5157,121 @@ function restorePlaygroundHistoryBanner() {
   });
 }
 
+/* ---------------------------------------------------------------------
+   Tiny safe-by-construction markdown renderer
+
+   Lives inside the playground because we don't want to ship marked.js
+   or any pin-anything for the dashboard. Handles only what assistant
+   completions actually emit:
+
+     - Fenced code blocks (``` and ~~~) with optional language tag.
+     - Inline `code`.
+     - **bold**, *italic*, ~~strike~~.
+     - ATX headers (#…######).
+     - Unordered / ordered lists.
+     - Block quotes (>).
+     - Horizontal rules (---).
+     - Inline [text](url) links — http/https/relative only.
+
+   Everything else falls through as escaped text, so a model that emits
+   raw HTML can't inject anything dangerous. We HTML-escape on the way
+   in and only re-introduce tags from a fixed, restricted set.
+   --------------------------------------------------------------------- */
+function _mdInline(text) {
+  // The caller has already HTML-escaped `text`. We now re-introduce a
+  // small set of inline tags; each placeholder we emit uses entities so
+  // none can be mistaken for re-entrant markdown by a later pass.
+
+  // Inline code: backticked spans. Greedy on inner content but stops at
+  // the matching backtick run length (e.g. ``foo`bar`` works).
+  text = text.replace(/(`+)([^`]+?)\1/g, (_, ticks, body) =>
+    `<code>${body.replace(/\n/g, ' ')}</code>`);
+
+  // Links: [text](url). Allow http(s) and relative paths; reject `javascript:`
+  // and other schemes outright so a model can't smuggle XSS through here.
+  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, href) => {
+    const ok = /^(https?:\/\/|\/|\.{1,2}\/|#)/.test(href);
+    if (!ok) return m;
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+  });
+
+  // **bold** and __bold__
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/__([^_\n]+)__/g, '<strong>$1</strong>');
+
+  // *italic* and _italic_ — narrower than bold so we don't eat **bold**.
+  text = text.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s.,;:!?)\]]|$)/g, '$1<em>$2</em>');
+  text = text.replace(/(^|[\s(])_([^_\n]+)_(?=[\s.,;:!?)\]]|$)/g, '$1<em>$2</em>');
+
+  // ~~strike~~
+  text = text.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+  return text;
+}
+
+function renderMarkdown(raw) {
+  if (!raw) return '';
+  // 1) Escape, but extract fenced code blocks first so their contents
+  //    don't get interpreted as inline markdown.
+  const fenced = [];
+  const fenceRe = /```([a-zA-Z0-9_+\-.]*)\n([\s\S]*?)```|~~~([a-zA-Z0-9_+\-.]*)\n([\s\S]*?)~~~/g;
+  const withPlaceholders = raw.replace(fenceRe, (_m, lang1, body1, lang2, body2) => {
+    const lang = (lang1 || lang2 || '').trim();
+    const body = body1 != null ? body1 : body2;
+    const idx = fenced.length;
+    fenced.push({ lang, body });
+    return ` FENCE${idx} `;
+  });
+  const escaped = escapeHtml(withPlaceholders);
+
+  // 2) Split into block-level pieces by blank-line runs. Each block is
+  //    classified once (header / list / quote / hr / paragraph).
+  const blocks = escaped.split(/\n{2,}/);
+  const html = blocks.map(block => {
+    if (!block.trim()) return '';
+
+    // Fenced-code placeholder: emit verbatim, no inline processing.
+    const fenceMatch = block.match(/^ FENCE(\d+) $/);
+    if (fenceMatch) {
+      const { lang, body } = fenced[Number(fenceMatch[1])];
+      const escBody = escapeHtml(body.replace(/\n$/, ''));
+      const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : '';
+      return `<pre class="md-code"${langAttr}><code>${escBody}</code></pre>`;
+    }
+
+    // Horizontal rule.
+    if (/^---+$/.test(block.trim())) return `<hr>`;
+
+    // ATX header (# …)
+    const h = block.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      return `<h${level}>${_mdInline(h[2])}</h${level}>`;
+    }
+
+    // Block quote — every line starts with `>`.
+    if (/^>/.test(block) && block.split('\n').every(l => /^>\s?/.test(l) || !l.trim())) {
+      const inner = block.split('\n').map(l => l.replace(/^>\s?/, '')).join('\n');
+      return `<blockquote>${_mdInline(inner).replace(/\n/g, '<br>')}</blockquote>`;
+    }
+
+    // Lists: an unordered if every non-empty line matches `- |* `, or
+    // ordered if every non-empty line matches `\d+\.`. Mixed → paragraph.
+    const lines = block.split('\n');
+    if (lines.every(l => !l.trim() || /^\s*[-*]\s+/.test(l))) {
+      const items = lines.filter(l => l.trim()).map(l => l.replace(/^\s*[-*]\s+/, ''));
+      return `<ul>${items.map(i => `<li>${_mdInline(i)}</li>`).join('')}</ul>`;
+    }
+    if (lines.every(l => !l.trim() || /^\s*\d+\.\s+/.test(l))) {
+      const items = lines.filter(l => l.trim()).map(l => l.replace(/^\s*\d+\.\s+/, ''));
+      return `<ol>${items.map(i => `<li>${_mdInline(i)}</li>`).join('')}</ol>`;
+    }
+
+    // Plain paragraph. Soft line breaks become <br>.
+    return `<p>${_mdInline(block).replace(/\n/g, '<br>')}</p>`;
+  }).join('');
+  return html;
+}
+
 function formatChatDuration(ms) {
   if (ms == null || !Number.isFinite(ms)) return '—';
   if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -5078,12 +5322,17 @@ function renderAssistantBubble(m) {
 
   // Main answer body — pending without any content shows a "Generating…"
   // placeholder unless the reasoning block is already live (in which
-  // case the chain-of-thought is the visible activity).
+  // case the chain-of-thought is the visible activity). Finished
+  // answers go through the lightweight markdown renderer; still-
+  // streaming output stays in a plain <pre> so partial fences and
+  // mid-list states don't render as flicker.
   let body = '';
   if (m.error) {
     body = `<div class="err-block">${escapeHtml(m.error)}</div>`;
-  } else if (hasContent) {
+  } else if (hasContent && m.pending) {
     body = `<pre>${escapeHtml(m.content)}</pre>`;
+  } else if (hasContent) {
+    body = `<div class="md-body">${renderMarkdown(m.content)}</div>`;
   } else if (m.pending && !hasReasoning) {
     body = `<pre>Generating…</pre>`;
   } else if (m.pending && hasReasoning && !hasContent) {
@@ -5133,6 +5382,32 @@ function renderChat() {
       return `<div class="chat-msg assistant${m.pending ? ' pending' : ''}">
         <div class="role">assistant</div>
         ${renderAssistantBubble(m)}
+      </div>`;
+    }
+    if (m.role === 'user') {
+      // Inline-edit affordance: pencil floats on hover; clicking
+      // promotes the row to an editable textarea + save/cancel
+      // controls. Save trims downstream messages and re-streams.
+      return `<div class="chat-msg user${m._editing ? ' editing' : ''}">
+        <div class="role">user</div>
+        <pre>${escapeHtml(m.content)}</pre>
+        <button class="user-edit-btn" type="button" data-chat-action="edit" data-chat-id="${escapeHtml(m._id)}" title="Edit and resend">✎</button>
+        <div class="user-edit-area">
+          <textarea class="user-edit-input">${escapeHtml(m.content)}</textarea>
+          <div class="user-edit-actions">
+            <button class="btn btn-sm" type="button" data-chat-action="edit-cancel" data-chat-id="${escapeHtml(m._id)}">Cancel</button>
+            <button class="btn btn-sm primary" type="button" data-chat-action="edit-save" data-chat-id="${escapeHtml(m._id)}">Save & resend</button>
+          </div>
+        </div>
+      </div>`;
+    }
+    if (m.role === 'system') {
+      // System messages aren't typically pushed into chatMessages
+      // (we synthesize from the system-prompt textarea), but render
+      // defensively in case a future flow drops one in.
+      return `<div class="chat-msg system">
+        <div class="role">system</div>
+        <pre>${escapeHtml(m.content)}</pre>
       </div>`;
     }
     return `<div class="chat-msg ${m.role}">
@@ -5482,6 +5757,56 @@ function handleChatActionClick(event) {
   }
   if (action === 'regenerate') {
     regenerateAssistantMessage(id);
+    return;
+  }
+  if (action === 'edit') {
+    const m = chatMessages.find(x => x._id === id);
+    if (!m || m.role !== 'user') return;
+    m._editing = true;
+    renderChat();
+    // After re-render, focus the new textarea so the user starts typing.
+    const ta = document.querySelector(`.chat-msg.user.editing[data-edit-host="${id}"] .user-edit-input`)
+      || document.querySelector('.chat-msg.user.editing .user-edit-input');
+    if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+    return;
+  }
+  if (action === 'edit-cancel') {
+    const m = chatMessages.find(x => x._id === id);
+    if (!m) return;
+    m._editing = false;
+    renderChat();
+    return;
+  }
+  if (action === 'edit-save') {
+    const m = chatMessages.find(x => x._id === id);
+    if (!m || m.role !== 'user') return;
+    const host = btn.closest('.chat-msg.user');
+    const ta = host?.querySelector('.user-edit-input');
+    const next = (ta?.value || '').trim();
+    if (!next) {
+      toast('Message can not be empty.', 'err');
+      return;
+    }
+    if (chatAbort) chatAbort.abort();
+    const idx = chatMessages.indexOf(m);
+    m.content = next;
+    m._editing = false;
+    // Drop everything after this user turn — we're re-running from here.
+    chatMessages.splice(idx + 1);
+    chatMessages.push(makeAssistantPlaceholder());
+    renderChat();
+    const tempInput = document.getElementById('chat-temp');
+    let temp;
+    try {
+      temp = parseQuickInferenceTemperature(tempInput);
+    } catch (error) {
+      tempInput.focus();
+      toast(error.message, 'err');
+      chatMessages.pop();
+      renderChat();
+      return;
+    }
+    streamAssistantTurn(temp);
     return;
   }
 }
