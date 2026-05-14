@@ -1447,6 +1447,10 @@ select {
   background: var(--surface);
 }
 .chat-msg .turn-foot .turn-btn:active { background: var(--surface-2); }
+.chat-msg .turn-foot .stat.finish-warn {
+  color: var(--warning-fg, var(--accent));
+  cursor: help;
+}
 .chat-msg .turn-foot .badge-tag {
   display: inline-flex;
   align-items: center;
@@ -5389,6 +5393,14 @@ function renderAssistantBubble(m) {
     if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
     const tps = chatTokensPerSec(m);
     if (tps != null)          stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
+    if (!m.pending && m.finishReason && m.finishReason !== 'stop') {
+      const kind = m.finishReason === 'length' ? 'truncated' : m.finishReason;
+      const cls = m.finishReason === 'length' ? 'stat finish-warn' : 'stat';
+      const title = m.finishReason === 'length'
+        ? 'Response was cut off — increase Max tokens to let the model finish.'
+        : `Generation ended with finish_reason=${m.finishReason}.`;
+      stats.push(`<span class="${cls}" title="${escapeHtml(title)}"><strong>⚠</strong> ${escapeHtml(kind)}</span>`);
+    }
     stats.push(`<span class="spacer"></span>`);
     if (!m.pending && m.error) {
       stats.push(`<button class="turn-btn" type="button" data-chat-action="regenerate" data-chat-id="${escapeHtml(m._id)}" title="Retry this request">↻ retry</button>`);
@@ -5715,7 +5727,11 @@ async function streamAssistantTurn(temp) {
         if (payload === '[DONE]') break streamLoop;
         try {
           const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta;
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta;
+          if (choice?.finish_reason) {
+            assistant.finishReason = choice.finish_reason;
+          }
           if (!delta) continue;
           const now = performance.now();
           if (assistant.firstTokenMs == null) {
@@ -8329,7 +8345,9 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
         if (payload === '[DONE]') break streamLoop;
         try {
           const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta;
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta;
+          if (choice?.finish_reason) m.finishReason = choice.finish_reason;
           if (!delta) continue;
           const now = performance.now();
           if (m.firstTokenMs == null) { m.firstTokenMs = now; m.ttftMs = now - m.startMs; }

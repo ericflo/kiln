@@ -330,19 +330,13 @@ async fn cmd_probe(client: &reqwest::Client, server: &str, args: ProbeArgs) -> R
         system_prompt: None,
         examples: vec![EvalExample {
             id: Some("probe".into()),
-            messages: vec![EvalChatMessage {
-                role: "user".into(),
-                content: args.prompt,
-            }],
+            messages: vec![EvalChatMessage::new("user", args.prompt)],
             target: Some(args.target),
-            aliases: vec![],
             tags: vec!["probe".into()],
-            metadata: None,
-            scorer: None,
-            generation: None,
-            weight: 1.0,
+            ..Default::default()
         }],
         schema_version: 1,
+        tools: None,
     };
     let body = serde_json::json!({
         "inline_suite": suite,

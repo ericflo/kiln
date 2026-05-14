@@ -76,18 +76,9 @@ mod tests {
 
     fn ex(target: Option<&str>) -> EvalExample {
         EvalExample {
-            id: None,
-            messages: vec![EvalChatMessage {
-                role: "user".into(),
-                content: "q".into(),
-            }],
+            messages: vec![EvalChatMessage::new("user", "q")],
             target: target.map(str::to_string),
-            aliases: Vec::new(),
-            tags: Vec::new(),
-            metadata: None,
-            scorer: None,
-            generation: None,
-            weight: 1.0,
+            ..Default::default()
         }
     }
 

@@ -583,6 +583,7 @@ where
         system_prompt: config.system_prompt.clone(),
         examples: reservoir,
         schema_version: 1,
+        tools: None,
     };
     Ok((suite, stats))
 }
@@ -622,6 +623,7 @@ fn decompose(
                 scorer: None,
                 generation: None,
                 weight: 1.0,
+                tools: None,
             }])
         }
         SynthesisStrategy::FirstAssistantTurn => {
@@ -651,6 +653,7 @@ fn decompose(
                 scorer: None,
                 generation: None,
                 weight: 1.0,
+                tools: None,
             }])
         }
         SynthesisStrategy::EveryAssistantTurn => Ok(every_assistant_turn(&messages, conv, false)),
@@ -704,6 +707,7 @@ fn every_assistant_turn(
             scorer: None,
             generation: None,
             weight: 1.0,
+            tools: None,
         });
     }
     out
@@ -933,16 +937,19 @@ fn trim_trailing_role<'a>(slice: &'a [SftMessage], role: &str) -> &'a [SftMessag
 }
 
 fn to_chat_messages(messages: &[SftMessage]) -> Vec<EvalChatMessage> {
-    // Tool messages are dropped from the synthesized prompt — the chat
-    // template would render them but most evals will struggle with raw
-    // tool-stream content. Future enhancement: keep them when the model's
-    // chat template supports the `tool` role.
+    // Preserve the full agentic shape, including `tool` role replies and
+    // assistant `tool_calls`. Qwen3.5's chat template renders these into
+    // its native XML form, so prompts that depend on prior tool exchanges
+    // (the "next-action prediction" eval flow) get the same input the
+    // model saw in production.
     messages
         .iter()
-        .filter(|m| m.role != "tool")
         .map(|m| EvalChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
+            tool_calls: m.tool_calls.clone(),
+            name: m.name.clone(),
+            tool_call_id: m.tool_call_id.clone(),
         })
         .collect()
 }

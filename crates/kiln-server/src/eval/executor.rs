@@ -115,8 +115,16 @@ async fn run_suite_inner(
 
         // Render chat template + tokenize once per example. For n>1 the
         // resulting `PreparedPrompt` is reused across every completion.
+        // Pass through the effective tool catalogue (per-example override
+        // or suite-level default) so Qwen3.5's `<tools>` block renders.
+        let effective_tools = example.effective_tools(suite.tools.as_deref());
         let prepared = match generator
-            .prepare(&example.messages, suite.system_prompt.as_deref(), &gen_params)
+            .prepare(
+                &example.messages,
+                suite.system_prompt.as_deref(),
+                effective_tools,
+                &gen_params,
+            )
             .await
         {
             Ok(p) => p,
@@ -253,6 +261,13 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     fn suite_with_numeric_answer() -> EvalSuite {
+        let mk = |id: &str, q: &str, a: &str| EvalExample {
+            id: Some(id.into()),
+            messages: vec![EvalChatMessage::new("user", q)],
+            target: Some(a.into()),
+            tags: vec!["easy".into()],
+            ..Default::default()
+        };
         EvalSuite {
             name: "math".into(),
             description: None,
@@ -263,37 +278,9 @@ mod tests {
             }),
             generation: EvalGenerationParams::default(),
             system_prompt: None,
-            examples: vec![
-                EvalExample {
-                    id: Some("e1".into()),
-                    messages: vec![EvalChatMessage {
-                        role: "user".into(),
-                        content: "1+1?".into(),
-                    }],
-                    target: Some("2".into()),
-                    aliases: Vec::new(),
-                    tags: vec!["easy".into()],
-                    metadata: None,
-                    scorer: None,
-                    generation: None,
-                    weight: 1.0,
-                },
-                EvalExample {
-                    id: Some("e2".into()),
-                    messages: vec![EvalChatMessage {
-                        role: "user".into(),
-                        content: "5+5?".into(),
-                    }],
-                    target: Some("10".into()),
-                    aliases: Vec::new(),
-                    tags: vec!["easy".into()],
-                    metadata: None,
-                    scorer: None,
-                    generation: None,
-                    weight: 1.0,
-                },
-            ],
+            examples: vec![mk("e1", "1+1?", "2"), mk("e2", "5+5?", "10")],
             schema_version: 1,
+            tools: None,
         }
     }
 

@@ -415,19 +415,14 @@ pub fn build_validation_suite(
             Some(kiln_eval::EvalExample {
                 id: Some(row.id.clone()),
                 messages: vec![
-                    kiln_eval::EvalChatMessage {
-                        role: "system".into(),
-                        content: "You are an impartial judge. Pick the better assistant reply. Output `Winner: A`, `Winner: B`, or `Winner: Tie`.".into(),
-                    },
-                    kiln_eval::EvalChatMessage {
-                        role: "user".into(),
-                        content: format_judge_prompt(row),
-                    },
+                    kiln_eval::EvalChatMessage::new(
+                        "system",
+                        "You are an impartial judge. Pick the better assistant reply. Output `Winner: A`, `Winner: B`, or `Winner: Tie`.",
+                    ),
+                    kiln_eval::EvalChatMessage::new("user", format_judge_prompt(row)),
                 ],
                 target: Some(target),
-                aliases: vec![],
                 tags: row.tags.clone(),
-                metadata: None,
                 scorer: Some(kiln_eval::Scorer::Regex {
                     pattern: r"(?i)Winner:\s*(A|B|Tie)".into(),
                     capture_group: Some(1),
@@ -438,7 +433,7 @@ pub fn build_validation_suite(
                     max_tokens: 64,
                     ..Default::default()
                 }),
-                weight: 1.0,
+                ..Default::default()
             })
         })
         .filter_map(|e| e)
@@ -467,6 +462,7 @@ pub fn build_validation_suite(
         system_prompt: None,
         examples,
         schema_version: 1,
+        tools: None,
     })
 }
 
@@ -485,10 +481,7 @@ mod tests {
     fn row(id: &str, winner: JudgmentWinner) -> JudgmentRow {
         JudgmentRow {
             id: id.into(),
-            prompt: vec![JudgmentMessage {
-                role: "user".into(),
-                content: "Q?".into(),
-            }],
+            prompt: vec![JudgmentMessage::new("user", "Q?")],
             adapter_a: None,
             adapter_b: Some("v1".into()),
             response_a: "answer A".into(),

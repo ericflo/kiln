@@ -165,19 +165,13 @@ mod tests {
             system_prompt: None,
             examples: vec![EvalExample {
                 id: Some("e1".into()),
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: "x".into(),
-                }],
+                messages: vec![EvalChatMessage::new("user", "x")],
                 target: Some("y".into()),
-                aliases: Vec::new(),
                 tags: vec!["smoke".into()],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
+                ..Default::default()
             }],
             schema_version: 1,
+            tools: None,
         }
     }
 

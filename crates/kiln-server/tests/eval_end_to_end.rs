@@ -16,6 +16,13 @@ use kiln_eval::scorers::Scorer;
 use kiln_server::eval::queue::{EvalJobInfo, EvalSubmissionKind, QueuedEvalJob};
 
 fn mk_suite() -> EvalSuite {
+    let mk = |id: &str, q: &str, a: &str| EvalExample {
+        id: Some(id.into()),
+        messages: vec![EvalChatMessage::new("user", q)],
+        target: Some(a.into()),
+        tags: vec!["smoke".into()],
+        ..Default::default()
+    };
     EvalSuite {
         name: "smoke".into(),
         description: None,
@@ -25,37 +32,9 @@ fn mk_suite() -> EvalSuite {
         },
         generation: EvalGenerationParams::default(),
         system_prompt: None,
-        examples: vec![
-            EvalExample {
-                id: Some("e1".into()),
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: "ping".into(),
-                }],
-                target: Some("pong".into()),
-                aliases: vec![],
-                tags: vec!["smoke".into()],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
-            },
-            EvalExample {
-                id: Some("e2".into()),
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: "other".into(),
-                }],
-                target: Some("never".into()),
-                aliases: vec![],
-                tags: vec!["smoke".into()],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
-            },
-        ],
+        examples: vec![mk("e1", "ping", "pong"), mk("e2", "other", "never")],
         schema_version: 1,
+        tools: None,
     }
 }
 

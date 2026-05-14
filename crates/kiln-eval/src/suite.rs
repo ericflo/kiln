@@ -80,10 +80,67 @@ impl Default for EvalGenerationParams {
 
 /// A single chat message (mirrors the API `Message` shape, kept here to
 /// keep `kiln-eval` independent of the server crate).
+///
+/// Carries the optional agentic fields (`tool_calls`, `tool_call_id`,
+/// `name`) so eval prompts can re-render multi-turn tool-use trajectories
+/// through Qwen3.5's chat template *exactly* as the model would have seen
+/// them in production. The fields are serialized only when set, so plain
+/// `{role, content}` JSON suites continue to round-trip unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvalChatMessage {
     pub role: String,
+    #[serde(default)]
     pub content: String,
+    /// OpenAI-style assistant tool calls. Each entry is typically
+    /// `{"id": "…", "type": "function", "function": {"name": "…", "arguments": "…"}}`.
+    /// Forwarded into the chat template so the Qwen3.5 `<tool_call>` XML
+    /// renders on prior assistant turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<serde_json::Value>>,
+    /// Tool name on `tool`-role messages. Some templates branch on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Which assistant tool-call this `tool`-role message answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl EvalChatMessage {
+    /// Construct a plain `{role, content}` message (back-compat with the
+    /// pre-tools shape). Tests and small fixtures use this everywhere; the
+    /// struct-literal form is preferred when any agentic field is set.
+    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            name: None,
+            tool_call_id: None,
+        }
+    }
+}
+
+impl Default for EvalChatMessage {
+    fn default() -> Self {
+        Self::new("", "")
+    }
+}
+
+impl Default for EvalExample {
+    fn default() -> Self {
+        Self {
+            id: None,
+            messages: Vec::new(),
+            target: None,
+            aliases: Vec::new(),
+            tags: Vec::new(),
+            metadata: None,
+            scorer: None,
+            generation: None,
+            weight: 1.0,
+            tools: None,
+        }
+    }
 }
 
 /// One eval example: a prompt, an expected answer / scoring target, optional
@@ -123,6 +180,11 @@ pub struct EvalExample {
     /// Optional weight contributing to the aggregate. Defaults to 1.0.
     #[serde(default = "default_weight")]
     pub weight: f32,
+    /// Optional tool catalogue for this example. Forwarded into the chat
+    /// template so Qwen3.5's `<tools>` system block renders with these
+    /// definitions. When `None`, the suite-level `tools` are used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
 }
 
 fn default_weight() -> f32 {
@@ -198,6 +260,27 @@ pub struct EvalSuite {
     /// compatibility with the first generation of suite files.
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
+    /// Tool catalogue rendered into every example's prompt. Lives on the
+    /// suite so authoring agentic evals stays terse — a 50-example suite
+    /// with one shared tool set declares the schema once here.
+    /// Per-example overrides win.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<serde_json::Value>>,
+}
+
+impl EvalExample {
+    /// Resolve the effective tool catalogue for this example given a
+    /// suite-level default. Per-example `tools` win; otherwise the suite
+    /// fallback is used.
+    pub fn effective_tools<'a>(
+        &'a self,
+        suite_default: Option<&'a [serde_json::Value]>,
+    ) -> Option<&'a [serde_json::Value]> {
+        self.tools
+            .as_deref()
+            .or(suite_default)
+            .filter(|t| !t.is_empty())
+    }
 }
 
 fn default_schema_version() -> u32 {
@@ -363,18 +446,26 @@ mod tests {
 
     fn ex(role: &str, content: &str, target: &str) -> EvalExample {
         EvalExample {
-            id: None,
-            messages: vec![EvalChatMessage {
-                role: role.to_string(),
-                content: content.to_string(),
-            }],
+            messages: vec![EvalChatMessage::new(role, content)],
             target: Some(target.to_string()),
-            aliases: Vec::new(),
-            tags: Vec::new(),
-            metadata: None,
-            scorer: None,
-            generation: None,
-            weight: 1.0,
+            ..Default::default()
+        }
+    }
+
+    fn mk_suite(
+        name: &str,
+        scorer: Scorer,
+        examples: Vec<EvalExample>,
+    ) -> EvalSuite {
+        EvalSuite {
+            name: name.into(),
+            description: None,
+            default_scorer: scorer,
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples,
+            schema_version: 1,
+            tools: None,
         }
     }
 
@@ -391,46 +482,34 @@ mod tests {
 
     #[test]
     fn suite_validate_rejects_empty_name_and_examples() {
-        let suite = EvalSuite {
-            name: "".into(),
-            description: None,
-            default_scorer: Scorer::ExactMatch {
+        let suite = mk_suite(
+            "",
+            Scorer::ExactMatch {
                 case_sensitive: false,
                 strip_whitespace: true,
             },
-            generation: EvalGenerationParams::default(),
-            system_prompt: None,
-            examples: vec![ex("user", "x", "y")],
-            schema_version: 1,
-        };
+            vec![ex("user", "x", "y")],
+        );
         assert!(suite.validate().is_err());
 
-        let suite = EvalSuite {
-            name: "ok".into(),
-            description: None,
-            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
-            generation: EvalGenerationParams::default(),
-            system_prompt: None,
-            examples: vec![],
-            schema_version: 1,
-        };
+        let suite = mk_suite(
+            "ok",
+            Scorer::NumericTolerance(NumericTolerance::default()),
+            vec![],
+        );
         assert!(suite.validate().is_err());
     }
 
     #[test]
     fn suite_rejects_bad_name() {
-        let suite = EvalSuite {
-            name: "bad/name".into(),
-            description: None,
-            default_scorer: Scorer::ExactMatch {
+        let suite = mk_suite(
+            "bad/name",
+            Scorer::ExactMatch {
                 case_sensitive: false,
                 strip_whitespace: true,
             },
-            generation: EvalGenerationParams::default(),
-            system_prompt: None,
-            examples: vec![ex("user", "x", "y")],
-            schema_version: 1,
-        };
+            vec![ex("user", "x", "y")],
+        );
         assert!(suite.validate().is_err());
     }
 
@@ -440,15 +519,11 @@ mod tests {
         e1.tags = vec!["math".into(), "easy".into()];
         let mut e2 = ex("user", "b", "2");
         e2.tags = vec!["math".into()];
-        let suite = EvalSuite {
-            name: "math".into(),
-            description: None,
-            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
-            generation: EvalGenerationParams::default(),
-            system_prompt: None,
-            examples: vec![e1, e2],
-            schema_version: 1,
-        };
+        let suite = mk_suite(
+            "math",
+            Scorer::NumericTolerance(NumericTolerance::default()),
+            vec![e1, e2],
+        );
         let s = suite.summary();
         assert_eq!(s.num_examples, 2);
         assert_eq!(s.tags.get("math"), Some(&2));
@@ -458,15 +533,12 @@ mod tests {
     #[test]
     fn load_json_and_jsonl_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let suite = EvalSuite {
-            name: "math".into(),
-            description: Some("toy".into()),
-            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
-            generation: EvalGenerationParams::default(),
-            system_prompt: None,
-            examples: vec![ex("user", "1+1?", "2")],
-            schema_version: 1,
-        };
+        let mut suite = mk_suite(
+            "math",
+            Scorer::NumericTolerance(NumericTolerance::default()),
+            vec![ex("user", "1+1?", "2")],
+        );
+        suite.description = Some("toy".into());
         let json = serde_json::to_string(&suite).unwrap();
         let p = dir.path().join("s.json");
         std::fs::write(&p, &json).unwrap();

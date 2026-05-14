@@ -67,10 +67,14 @@ pub trait EvalGenerator: Send + Sync {
     >;
 
     /// Render chat template + tokenize. Called once per example.
+    /// `tools` is the effective tool catalogue (per-example override or
+    /// suite-level default). When `None` or empty, no `<tools>` block is
+    /// rendered into the prompt.
     fn prepare(
         &self,
         messages: &[EvalChatMessage],
         system_prompt: Option<&str>,
+        tools: Option<&[serde_json::Value]>,
         params: &EvalGenerationParams,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
@@ -100,9 +104,9 @@ impl LiveEvalGenerator {
     }
 
     /// Convert eval messages into the API `Message` shape that
-    /// `render_prompt_text` consumes. Eval suites only carry role+content;
-    /// the rest of the API fields (`tool_calls`, `name`, `tool_call_id`,
-    /// `reasoning_content`) default to `None`.
+    /// `render_prompt_text` consumes. Carries the optional agentic fields
+    /// (`tool_calls`, `name`, `tool_call_id`) through so multi-turn tool
+    /// trajectories render correctly via Qwen3.5's chat template.
     fn to_api_messages(
         messages: &[EvalChatMessage],
         system_prompt: Option<&str>,
@@ -129,9 +133,9 @@ impl LiveEvalGenerator {
                 role: m.role.clone(),
                 content: m.content.clone(),
                 reasoning_content: None,
-                tool_calls: None,
-                name: None,
-                tool_call_id: None,
+                tool_calls: m.tool_calls.clone(),
+                name: m.name.clone(),
+                tool_call_id: m.tool_call_id.clone(),
             });
         }
         out
@@ -196,6 +200,7 @@ impl EvalGenerator for LiveEvalGenerator {
         &self,
         messages: &[EvalChatMessage],
         system_prompt: Option<&str>,
+        tools: Option<&[serde_json::Value]>,
         params: &EvalGenerationParams,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
@@ -203,6 +208,7 @@ impl EvalGenerator for LiveEvalGenerator {
         let state = self.state.clone();
         let api_messages = Self::to_api_messages(messages, system_prompt);
         let kwargs = params.chat_template_kwargs.clone();
+        let tools_owned: Option<Vec<serde_json::Value>> = tools.map(|t| t.to_vec());
         Box::pin(async move {
             // render + tokenize hit `state.rendered_prompt_cache` and
             // `state.prompt_token_cache` respectively, so re-running the
@@ -210,9 +216,14 @@ impl EvalGenerator for LiveEvalGenerator {
             // also acquire short locks; spawn_blocking keeps us off the
             // runtime.
             tokio::task::spawn_blocking(move || -> Result<PreparedPrompt, String> {
-                let prompt =
-                    render_prompt_text(&state, &api_messages, None, None, kwargs.as_ref())
-                        .map_err(|e| format!("chat template render: {e:?}"))?;
+                let prompt = render_prompt_text(
+                    &state,
+                    &api_messages,
+                    tools_owned.as_deref(),
+                    None,
+                    kwargs.as_ref(),
+                )
+                .map_err(|e| format!("chat template render: {e:?}"))?;
                 let tokens = encode_prompt_tokens(&state, &prompt)
                     .map_err(|e| format!("tokenize: {e:?}"))?;
                 Ok(PreparedPrompt { tokens })
@@ -326,10 +337,7 @@ pub struct LiveJudgeRunner<'a> {
 
 impl<'a> JudgeRunner for LiveJudgeRunner<'a> {
     fn judge(&self, adapter: Option<&str>, prompt: &str) -> Option<String> {
-        let messages = vec![EvalChatMessage {
-            role: "user".into(),
-            content: prompt.to_string(),
-        }];
+        let messages = vec![EvalChatMessage::new("user", prompt)];
         let params = EvalGenerationParams {
             temperature: 0.0,
             top_p: 1.0,
@@ -340,7 +348,7 @@ impl<'a> JudgeRunner for LiveJudgeRunner<'a> {
             seed: Some(0xC0FFEE),
             chat_template_kwargs: None,
         };
-        let prep_fut = self.generator.prepare(&messages, None, &params);
+        let prep_fut = self.generator.prepare(&messages, None, None, &params);
         let prepared = match self.runtime.block_on(prep_fut) {
             Ok(p) => p,
             Err(e) => {
@@ -416,6 +424,7 @@ impl EvalGenerator for MockEvalGenerator {
         &self,
         messages: &[EvalChatMessage],
         _system_prompt: Option<&str>,
+        _tools: Option<&[serde_json::Value]>,
         _params: &EvalGenerationParams,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<PreparedPrompt, String>> + Send + '_>,
@@ -478,12 +487,9 @@ mod tests {
     #[tokio::test]
     async fn mock_generator_three_phase_round_trip() {
         let g = MockEvalGenerator::new();
-        let messages = vec![EvalChatMessage {
-            role: "user".into(),
-            content: "hi".into(),
-        }];
+        let messages = vec![EvalChatMessage::new("user", "hi")];
         let params = EvalGenerationParams::default();
-        let prepared = g.prepare(&messages, None, &params).await.unwrap();
+        let prepared = g.prepare(&messages, None, None, &params).await.unwrap();
         let prev = g.set_adapter(Some("foo")).await.unwrap();
         assert_eq!(prev, None);
         let r = g.run(&prepared, &params, 0, Some("foo")).await.unwrap();

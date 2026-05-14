@@ -198,20 +198,12 @@ mod tests {
             generation: EvalGenerationParams::default(),
             system_prompt: None,
             examples: vec![EvalExample {
-                id: None,
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: "x".into(),
-                }],
+                messages: vec![EvalChatMessage::new("user", "x")],
                 target: Some("x".into()),
-                aliases: Vec::new(),
-                tags: Vec::new(),
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
+                ..Default::default()
             }],
             schema_version: 1,
+            tools: None,
         }
     }
 

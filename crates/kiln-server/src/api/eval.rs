@@ -1032,19 +1032,12 @@ mod tests {
             system_prompt: None,
             examples: vec![EvalExample {
                 id: Some("e1".into()),
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: "1+1?".into(),
-                }],
+                messages: vec![EvalChatMessage::new("user", "1+1?")],
                 target: Some("2".into()),
-                aliases: vec![],
-                tags: vec![],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
+                ..Default::default()
             }],
             schema_version: 1,
+            tools: None,
         }
     }
 

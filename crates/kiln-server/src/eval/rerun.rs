@@ -60,6 +60,7 @@ pub fn rerun_filtered_suite(
         system_prompt: suite.system_prompt.clone(),
         examples: filtered,
         schema_version: suite.schema_version,
+        tools: suite.tools.clone(),
     })
 }
 
@@ -74,17 +75,9 @@ mod tests {
         let examples = (0..n)
             .map(|i| EvalExample {
                 id: Some(format!("e{i}")),
-                messages: vec![EvalChatMessage {
-                    role: "user".into(),
-                    content: format!("Q{i}"),
-                }],
+                messages: vec![EvalChatMessage::new("user", format!("Q{i}"))],
                 target: Some(format!("{i}")),
-                aliases: vec![],
-                tags: vec![],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
+                ..Default::default()
             })
             .collect();
         EvalSuite {
@@ -95,6 +88,7 @@ mod tests {
             system_prompt: None,
             examples,
             schema_version: 1,
+            tools: None,
         }
     }
 

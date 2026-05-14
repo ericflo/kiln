@@ -115,18 +115,9 @@ mod tests {
 
     fn ex() -> EvalExample {
         EvalExample {
-            id: None,
-            messages: vec![EvalChatMessage {
-                role: "user".into(),
-                content: "What is the capital of France?".into(),
-            }],
+            messages: vec![EvalChatMessage::new("user", "What is the capital of France?")],
             target: Some("Paris".into()),
-            aliases: Vec::new(),
-            tags: Vec::new(),
-            metadata: None,
-            scorer: None,
-            generation: None,
-            weight: 1.0,
+            ..Default::default()
         }
     }
 

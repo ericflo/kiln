@@ -1000,19 +1000,12 @@ mod tests {
             system_prompt: None,
             examples: vec![kiln_eval::EvalExample {
                 id: Some("e1".into()),
-                messages: vec![kiln_eval::EvalChatMessage {
-                    role: "user".into(),
-                    content: "x".into(),
-                }],
+                messages: vec![kiln_eval::EvalChatMessage::new("user", "x")],
                 target: Some("x".into()),
-                aliases: vec![],
-                tags: vec![],
-                metadata: None,
-                scorer: None,
-                generation: None,
-                weight: 1.0,
+                ..Default::default()
             }],
             schema_version: 1,
+            tools: None,
         };
         reg.save(&suite, false).unwrap();
         state.suite_registry = Some(Arc::new(reg));
