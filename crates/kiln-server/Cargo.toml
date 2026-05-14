@@ -75,3 +75,6 @@ tower = { workspace = true, features = ["util"] }
 # Integration tests use filetime to pre-age fake composed-cache entries so
 # LRU eviction order is deterministic.
 filetime = "0.2"
+# Used in chat-template integration tests to construct a stand-in tokenizer
+# from a minimal in-memory vocab JSON before applying the chat template.
+tokenizers = { workspace = true }
