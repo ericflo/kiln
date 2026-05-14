@@ -1008,7 +1008,7 @@ function validateCliHelpOnboardingCopy() {
 
   assertMatches(
     cliParser,
-    /Path to one GRPO JSON request\/batch with groups, prompt messages, candidate completions, text, and reward scores/,
+    /Path to one GRPO JSON request\/batch, or JSONL with one group per line/,
     'crates/kiln-server/src/cli.rs: TrainCommands::Grpo file arg payload help',
   );
 
