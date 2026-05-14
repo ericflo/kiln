@@ -9,6 +9,24 @@ description: Autonomous SFT-dataset experiment loop for eliciting a verbally des
 
 Inspired by [pi-autoresearch](https://github.com/davebcn87/pi-autoresearch). That tool optimises a metric whose definition the agent knows; this skill optimises a metric whose definition the agent **must not know**. The discipline is harder. The payoff is crystallised, transferable capability — datasets that teach a frame in words and elicit the frame across modalities.
 
+### Skill inventory
+
+The skill ships with one document and seven helper scripts. Reference them by absolute path (`.agents/skills/sft-capability-creator/...`) or via a `$SKILL` shell var as in §18.
+
+| File | Purpose |
+|------|---------|
+| `SKILL.md` | This document. Authoritative procedure. |
+| `templates/scaffold.sh` | Create `sft-cap.<slug>/` with `capability.md`, `capability.config.json`, etc. (§2, §3 Phase 0) |
+| `templates/oracle.sh` | Blind kiln-eval wrapper. Emits only `SCORE=<f> N=<i>`. (§1, §6) |
+| `templates/oracle-paste.sh` | Human-in-the-loop oracle variant. (§6) |
+| `templates/hypothesis.md.tmpl` | Pre-experiment hypothesis form. (§3 Phase 1) |
+| `templates/train_and_score.sh` | Async SFT train → poll → blind-score → one summary line. (§3 Phases 3–4) |
+| `templates/log_iter.sh` | Append one structured `capability.jsonl` line. (§3 Phase 5) |
+| `templates/annotate.sh` | Add `asi.*` fields + `notes` to the most-recent log entry. (§3 Phase 5, §7) |
+| `templates/confidence.sh` | MAD-based confidence stats from the log. (§5) |
+| `templates/status.sh` | One-screen session summary for resume / between iterations. (§8) |
+| `install.sh` | Symlink the skill into `.claude/skills/`. |
+
 ---
 
 ## 0. Mental model
@@ -58,6 +76,10 @@ If you catch yourself reading a suite file or looking at a per-example output, *
 ### Operational rule for the agent
 
 Before any `Read` / `Bash cat` / `Bash grep` / `Bash jq` call against a path under `adapters/.eval/`, pause and write a one-line note to yourself ("am I about to peek?"). Almost every legitimate operation you need only touches `sft-cap.<slug>/`, `Qwen3.5-4B/adapters/cap-*/lineage.json` (your own training records), and the oracle wrapper's stdout. If you don't need it for the loop, don't read it.
+
+### Sub-agents inherit the firewall
+
+If you spawn a sub-agent (general-purpose, Explore, or any other) you MUST give it the same firewall in its prompt: *"Do not read any file under `adapters/.eval/`; the eval is blind."* A sub-agent that searches the codebase and helpfully surfaces eval contents in its summary breaks the experiment just as completely as if you read the files yourself. Prefer Bash + jq + grep for routine tasks over spawning a sub-agent on this skill's working directory — sub-agents are a poor fit for blind-eval discipline.
 
 ---
 
@@ -422,12 +444,13 @@ Read `capability.md` and the tail of `capability.jsonl` at the start of every it
 
 A fresh agent invoked in a directory with an existing `sft-cap.<slug>/`:
 
-1. Read `capability.md` end to end.
-2. Read the last 10 lines of `capability.jsonl`.
+1. Run `$SKILL/templates/status.sh` — one-screen summary (suite, scorer, best, MAD, confidence, recent ledger, slugs in use).
+2. Read `capability.md` end to end.
 3. Read `capability.ideas.md` and `capability.config.json`.
-4. Scan `hypotheses/*.md` for any iteration whose JSONL entry is missing — that is an interrupted run; recover or mark crashed.
-5. `kiln adapters list | grep cap-` to confirm trained adapters match the log.
-6. Continue from where the log ends.
+4. Scan `hypotheses/*.md` for any file whose slug does **not** appear in `capability.jsonl` — that is an interrupted run; either complete it or log it as `status=crash` with a note.
+5. `kiln adapters list | grep cap-` to confirm trained adapters match the log. Adapters present without a log line are orphan training runs; either claim them by writing a hypothesis post-hoc (and marking the entry `recovered=true` in `notes`) or `kiln adapters delete cap-<slug>`.
+6. Re-baseline (§13). Append as a new `slug=baseline` line — do not overwrite the old one. Later confidence math uses the most-recent `slug=="baseline" or iter==0`.
+7. Continue from where the log ends.
 
 No further questions to the user unless the budget is exhausted or the oracle is misconfigured.
 
@@ -585,7 +608,32 @@ The pattern is: **T-prose → anchor-fix → triangulate with control → refine
 
 ---
 
-## 16. One-screen quickstart (the actual loop)
+## 16. Adapter hygiene
+
+After 20 iterations you have 20 `cap-*` adapters on the server. They consume disk and clutter `kiln adapters list`. **Do not delete them mid-session** — `capability.jsonl` references them by name and your archaeology trail dies without them. After finalisation (§9 final summary), keep the best 3–5 adapters and delete the rest:
+
+```bash
+# Inspect what's allocatable.
+kiln adapters list | grep '^  cap-'
+
+# Delete a single ablation's adapter.
+kiln adapters delete cap-<slug>
+```
+
+If you genuinely need to free space mid-session, prefer **unloading** (the active-memory step) over **deleting** (the on-disk step). `kiln adapters unload` reverts to base; the weights remain on disk for the next eval call.
+
+## 17. Tiny-smoke discipline (validate infra before paying for an ablation)
+
+Before the very first real ablation, run a **tiny smoke** — 4 examples, 1 epoch, rank 4 — using `train_and_score.sh --no-score`. Goals:
+
+- Confirm `kiln serve` is up and accepting jobs.
+- Confirm dataset format is valid.
+- Confirm the adapter directory gets a `cap-smoke` entry.
+- Confirm `train_and_score.sh` returns `ADAPTER=… LOSS=… ELAPSED=…`.
+
+A 4-example training run finishes in ~20 s. If anything is wrong, you find out in seconds rather than after a 5-minute real ablation. Delete the smoke adapter after (`kiln adapters delete cap-smoke`).
+
+## 18. One-screen quickstart (the actual loop)
 
 ```bash
 # Skill ships at .agents/skills/sft-capability-creator/. Templates at
@@ -604,11 +652,19 @@ cd sft-cap.$SLUG
 # wants paste-back mode, replace with $SKILL/templates/oracle-paste.sh.
 git add -A && git commit -m "cap[$SLUG]: intake"
 
+# Tiny-smoke (§17) — run once at the very start of a session.
+echo '{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"hello"}]}' > datasets/smoke.jsonl
+echo '{"messages":[{"role":"user","content":"ok"},{"role":"assistant","content":"yes"}]}' >> datasets/smoke.jsonl
+bash $SKILL/templates/train_and_score.sh smoke --no-score   # confirms infra
+kiln adapters delete cap-smoke
+rm -f datasets/smoke.jsonl adapters/smoke.txt
+
 # Re-baseline (§13). Always.
 ./capability.oracle.sh ""             # -> SCORE=0.36 N=25
 bash $SKILL/templates/log_iter.sh baseline kept 0.36 25 "" "" "" 0 0
 
 # Loop — one iteration:
+bash $SKILL/templates/status.sh        # see what's been tried
 ABL=verbal-borrow-algorithm
 cp $SKILL/templates/hypothesis.md.tmpl hypotheses/$ABL.md
 # Fill in hypotheses/$ABL.md (claim, mechanism, dataset shape, risk,
@@ -630,10 +686,14 @@ STATUS=kept                            # or discard
 bash $SKILL/templates/log_iter.sh $ABL $STATUS $SCORE $N \
   hypotheses/$ABL.md datasets/$ABL.jsonl cap-$ABL $LOSS $ELAPSED
 
-# Annotate the just-appended entry with `asi` (what was learned).
-# Easiest: edit the last line of capability.jsonl in place (with jq).
-# Update capability.md "what's been tried" with a one-liner.
+# Annotate the just-appended entry. asi.* fields survive resume.
+bash $SKILL/templates/annotate.sh \
+  --what_worked "prose stabilised borrow routing" \
+  --what_failed "" \
+  --next_focus "anchor 20% to fix answer-form drift if confidence < 2x" \
+  --notes ""
 
+# Update capability.md "what's been tried" with a one-liner.
 bash $SKILL/templates/confidence.sh   # advisory only
 git add -A && git commit -m "cap[$ABL]: $STATUS"
 
