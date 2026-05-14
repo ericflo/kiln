@@ -5372,7 +5372,17 @@ function renderAssistantBubble(m) {
   } else if (hasContent) {
     body = `<div class="md-body">${renderMarkdown(m.content)}</div>`;
   } else if (m.pending && !hasReasoning) {
-    body = `<pre>Generating…</pre>`;
+    // After ~5 s with no token, swap the bare "Generating…" placeholder
+    // for a hint about prompt-processing latency + an explicit Stop
+    // reminder. Cheap UX guard against the most common "is it stuck?"
+    // moment: long prompts or a cold model where the model is still
+    // doing prefill before the first token streams.
+    const waited = m.startMs != null ? (performance.now() - m.startMs) : 0;
+    if (waited > 5000) {
+      body = `<pre style="color:var(--text-muted);">Waiting for first token (${escapeHtml(formatChatDuration(waited))}) — long prompts or a cold model can take several seconds. Use the Stop button if this is hung.</pre>`;
+    } else {
+      body = `<pre>Generating…</pre>`;
+    }
   } else if (m.pending && hasReasoning && !hasContent) {
     body = `<pre style="color:var(--text-quiet);font-style:italic;">Drafting answer…</pre>`;
   } else if (!hasContent && !hasReasoning) {
@@ -5721,9 +5731,17 @@ async function streamAssistantTurn(temp) {
       const lines = buf.split('\n');
       buf = lines.pop();
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6);
+      for (let line of lines) {
+        // Strip CR for servers that emit `\r\n` line terminators (some
+        // proxies, some SSE polyfills). Without this, `payload` ends in
+        // `\r` and the `=== '[DONE]'` check never matches, so the loop
+        // only exits when the server closes the socket — which can be
+        // significantly after [DONE] in keep-alive setups.
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (!line.startsWith('data:')) continue;
+        // The SSE spec allows `data:value` (no space) too; accept both.
+        let payload = line.slice(5);
+        if (payload.startsWith(' ')) payload = payload.slice(1);
         if (payload === '[DONE]') break streamLoop;
         try {
           const chunk = JSON.parse(payload);
@@ -5757,7 +5775,12 @@ async function streamAssistantTurn(temp) {
             assistant.durationMs = now - assistant.startMs;
             renderChat();
           }
-        } catch {}
+        } catch (parseErr) {
+          // Don't swallow the *whole* stream when one chunk is
+          // malformed. Log so we can see this in a user's devtools if
+          // they report a stuck stream.
+          console.warn('[playground] skipped malformed SSE chunk', parseErr, payload.slice(0, 120));
+        }
       }
     }
     assistant.pending = false;
@@ -5770,20 +5793,29 @@ async function streamAssistantTurn(temp) {
       assistant.aborted = true;
       assistant.pending = false;
       // Keep partial output if anything streamed; drop the empty
-      // placeholder otherwise so the message list doesn't accrete
-      // ghosts on rapid stop-clicks.
-      if (!assistant.content && !assistant.reasoning) removeEmptyPendingAssistant();
-      else assistant.durationMs = (assistant.lastTokenMs || performance.now()) - assistant.startMs;
+      // placeholder + its paired user message otherwise so the user
+      // doesn't accrue empty turns on rapid stop-clicks. (The original
+      // behavior popped only the placeholder, leaving an orphaned
+      // user turn that re-sent the same prompt on the next regen.)
+      if (!assistant.content && !assistant.reasoning) {
+        chatMessages.pop();  // assistant placeholder
+      } else {
+        assistant.durationMs = (assistant.lastTokenMs || performance.now()) - assistant.startMs;
+      }
     } else {
       assistant.pending = false;
       assistant.error = formatQuickInferenceError(e);
     }
   } finally {
+    // Order matters here: clear the abort handle *and* the UI flag
+    // before anything that could throw (renderChat → renderMarkdown →
+    // arbitrary user content), so a render failure can't leave the
+    // Send button stuck on "Generating…" forever.
     clearInterval(tickHandle);
     chatAbort = null;
     setChatGenerating(false);
-    persistChatHistory();
-    renderChat();
+    try { persistChatHistory(); } catch (e) { console.warn('[playground] persistChatHistory threw', e); }
+    try { renderChat(); }        catch (e) { console.warn('[playground] renderChat threw', e); }
   }
 }
 
@@ -8339,9 +8371,11 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const payload = line.slice(6);
+      for (let line of lines) {
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+        if (!line.startsWith('data:')) continue;
+        let payload = line.slice(5);
+        if (payload.startsWith(' ')) payload = payload.slice(1);
         if (payload === '[DONE]') break streamLoop;
         try {
           const chunk = JSON.parse(payload);
@@ -8362,7 +8396,9 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
           m.lastTokenMs = now;
           m.durationMs = now - m.startMs;
           _renderCompareSide(side, m);
-        } catch {}
+        } catch (parseErr) {
+          console.warn('[playground compare] skipped malformed SSE chunk', parseErr, payload.slice(0, 120));
+        }
       }
     }
     m.pending = false;
