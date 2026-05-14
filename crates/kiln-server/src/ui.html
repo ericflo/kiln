@@ -130,6 +130,13 @@
 
 /* Base reset */
 * { margin: 0; padding: 0; box-sizing: border-box; }
+/* Honor the `hidden` HTML attribute even when a class sets an explicit
+   `display`. Without this override, our modal-backdrop / cmdk-backdrop
+   rules (display: grid) win over the user-agent `[hidden] { display: none }`
+   default — leaving the Cmd-K palette, the eval/training/adapter drill-in
+   modals, and the drill-internal compare/tags rows permanently rendered
+   on top of the dashboard. */
+[hidden] { display: none !important; }
 *:focus { outline: none; }
 *:focus-visible {
   outline: 2px solid var(--accent);
