@@ -62,6 +62,20 @@ pub struct ExampleOutcome {
     /// re-join against the suite).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Qwen3.5 `<think>…</think>` reasoning extracted from the raw completion,
+    /// when present. Stored separately so dashboards can show "the model
+    /// thought for 432 chars before answering" without re-parsing on every
+    /// render. `None` means the completion contained no thinking block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+    /// True when the model emitted an opening `<think>` that was never
+    /// closed by `</think>`. These outcomes typically grade as Invalid.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unclosed_thinking: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Latency stats expressed as p50/p90/p99 in milliseconds.
@@ -317,6 +331,8 @@ mod tests {
             completion_tokens: Some(20),
             latency_ms: Some(lat),
             tags: Vec::new(),
+            reasoning_text: None,
+            unclosed_thinking: false,
         }
     }
 

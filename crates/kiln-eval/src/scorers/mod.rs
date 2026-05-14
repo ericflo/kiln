@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::qwen3::split_thinking;
 use crate::result::{EvalOutcomeKind, ExampleOutcome};
 use crate::suite::EvalExample;
 
@@ -205,36 +206,76 @@ pub fn score_completion(
     judge_runner: &dyn JudgeRunner,
 ) -> Result<ExampleOutcome, ScorerError> {
     let example_id = example.resolved_id();
+    // Qwen3.5 emits `<think>…</think>` reasoning before its answer. Strip
+    // that for every scorer so we never score the reasoning as if it were
+    // the model's actual response — except for `LlmJudge` and `ToolCall`,
+    // which have format-aware handling of their own. The raw completion
+    // is preserved on the outcome so dashboards can still show full text.
+    let split = split_thinking(completion_text);
+    let answer_for_scorer: &str = match scorer {
+        // ToolCall has its own thinking-aware extractor that knows to look
+        // for `<tool_call>` after `</think>`. LlmJudge wants the full
+        // response so the judge can grade reasoning *and* answer.
+        Scorer::ToolCall { .. } | Scorer::LlmJudge { .. } => completion_text,
+        // For the composite scorers, individual subscorers will re-strip.
+        Scorer::All { .. } | Scorer::Any { .. } => completion_text,
+        _ => {
+            if split.unclosed {
+                // Unclosed thinking: never going to score well against an
+                // answer-shape target. Short-circuit to Invalid.
+                let outcome = ExampleOutcome {
+                    example_id,
+                    completion_index: 0,
+                    completion_text: completion_text.to_string(),
+                    kind: EvalOutcomeKind::Invalid,
+                    score: 0.0,
+                    detail: Some("model emitted <think> but never closed it".to_string()),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    latency_ms: None,
+                    tags: example.tags.clone(),
+                    reasoning_text: split.reasoning.map(str::to_string),
+                    unclosed_thinking: true,
+                };
+                return Ok(outcome);
+            }
+            if split.had_thinking {
+                split.answer
+            } else {
+                completion_text
+            }
+        }
+    };
     let (score, kind, detail) = match scorer {
         Scorer::ExactMatch {
             case_sensitive,
             strip_whitespace,
-        } => exact_match::score(example, completion_text, *case_sensitive, *strip_whitespace)?,
+        } => exact_match::score(example, answer_for_scorer, *case_sensitive, *strip_whitespace)?,
         Scorer::Contains {
             phrases,
             mode,
             case_sensitive,
-        } => contains::score(completion_text, phrases, *mode, *case_sensitive),
+        } => contains::score(answer_for_scorer, phrases, *mode, *case_sensitive),
         Scorer::Regex {
             pattern,
             capture_group,
             case_sensitive,
-        } => regex_match::score(example, completion_text, pattern, *capture_group, *case_sensitive)?,
+        } => regex_match::score(example, answer_for_scorer, pattern, *capture_group, *case_sensitive)?,
         Scorer::JsonValidity {
             require_object,
             required_paths,
-        } => json_validity::score(example, completion_text, *require_object, required_paths),
+        } => json_validity::score(example, answer_for_scorer, *require_object, required_paths),
         Scorer::MultipleChoice { choices } => {
-            multiple_choice::score(example, completion_text, choices)?
+            multiple_choice::score(example, answer_for_scorer, choices)?
         }
-        Scorer::NumericTolerance(tol) => numeric::score(example, completion_text, tol)?,
+        Scorer::NumericTolerance(tol) => numeric::score(example, answer_for_scorer, tol)?,
         Scorer::LlmJudge {
             judge_adapter,
             template,
             score_regex,
         } => llm_judge::score(
             example,
-            completion_text,
+            answer_for_scorer,
             judge_adapter.as_deref(),
             template,
             score_regex,
@@ -246,14 +287,14 @@ pub fn score_completion(
             weights,
         } => tool_call::score(
             example,
-            completion_text,
+            answer_for_scorer,
             name_match,
             args,
             weights.as_ref(),
             judge_runner,
         )?,
         Scorer::Code { language, style } => {
-            code::score(example, completion_text, language.as_deref(), style)?
+            code::score(example, answer_for_scorer, language.as_deref(), style)?
         }
         Scorer::All { scorers } => {
             if scorers.is_empty() {
@@ -342,6 +383,8 @@ pub fn score_completion(
         completion_tokens: None,
         latency_ms: None,
         tags: example.tags.clone(),
+        reasoning_text: split.reasoning.map(str::to_string),
+        unclosed_thinking: split.unclosed,
     })
 }
 
@@ -387,6 +430,97 @@ mod tests {
             generation: None,
             weight: 1.0,
         }
+    }
+
+    #[test]
+    fn exact_match_strips_thinking_before_comparing() {
+        // The Qwen3.5 chat template prefills `<think>\n` and the model
+        // closes with `</think>` before the answer. The scorer must grade
+        // the answer portion only.
+        let scorer = Scorer::ExactMatch {
+            case_sensitive: false,
+            strip_whitespace: true,
+        };
+        let e = ex(Some("Paris"));
+        let raw = "<think>\nThe capital of France is Paris.\n</think>\n\nParis";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Pass, "detail={:?}", out.detail);
+        // Outcome retains both raw text and parsed reasoning.
+        assert_eq!(out.completion_text, raw);
+        assert_eq!(
+            out.reasoning_text.as_deref(),
+            Some("The capital of France is Paris.")
+        );
+    }
+
+    #[test]
+    fn contains_does_not_match_phrases_inside_thinking() {
+        let scorer = Scorer::Contains {
+            phrases: vec!["paris".into()],
+            mode: contains::ContainsMode::Any,
+            case_sensitive: false,
+        };
+        let e = ex(Some(""));
+        // Reasoning mentions "Paris" but the answer says "London".
+        let raw = "<think>\nThe user expects Paris but I'll respond London.\n</think>\n\nLondon";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(
+            out.kind,
+            EvalOutcomeKind::Fail,
+            "thinking-only matches should not count: detail={:?}",
+            out.detail
+        );
+    }
+
+    #[test]
+    fn unclosed_thinking_is_marked_invalid() {
+        let scorer = Scorer::ExactMatch {
+            case_sensitive: false,
+            strip_whitespace: true,
+        };
+        let e = ex(Some("Paris"));
+        let raw = "<think>\nstill thinking";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Invalid);
+        assert!(out.unclosed_thinking);
+    }
+
+    #[test]
+    fn multiple_choice_extracts_answer_after_thinking() {
+        let scorer = Scorer::MultipleChoice {
+            choices: vec!["A".into(), "B".into(), "C".into(), "D".into()],
+        };
+        let e = ex(Some("B"));
+        let raw = "<think>\nA seems plausible but B is correct.\n</think>\n\nThe answer is B.";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn numeric_tolerance_ignores_numbers_in_thinking() {
+        let scorer = Scorer::NumericTolerance(NumericTolerance {
+            atol: 0.0,
+            rtol: 0.0,
+            integer_only: true,
+        });
+        let e = ex(Some("42"));
+        // The thinking trail has many distractors; the post-think answer
+        // is unambiguous.
+        let raw = "<think>\nMaybe 12, 17, 99 or something else.\n</think>\n\n42";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn json_validity_parses_answer_only() {
+        let scorer = Scorer::JsonValidity {
+            require_object: true,
+            required_paths: Vec::new(),
+        };
+        let e = ex(None);
+        let raw = "<think>\nDeciding which JSON to emit.\n</think>\n\n{\"ok\": true}";
+        let out = score_completion(&scorer, &e, raw, &NoopJudgeRunner).unwrap();
+        assert_eq!(out.kind, EvalOutcomeKind::Pass);
     }
 
     #[test]

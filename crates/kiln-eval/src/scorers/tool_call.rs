@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::qwen3::{ParsedToolCall, ToolCallFormat, extract_tool_calls, split_thinking};
 use crate::result::EvalOutcomeKind;
 use crate::scorers::{
     JudgeRunner, Scorer, ScorerError, bash, code::extract_block, score_completion,
@@ -132,25 +133,35 @@ pub(super) fn score(
     let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
         kind: "tool_call",
     })?;
-    let target_call = match extract_tool_call(target_raw) {
-        Some(t) => t,
-        None => {
-            return Err(ScorerError::MissingTarget {
-                kind: "tool_call (target had no parseable tool call)",
-            });
-        }
-    };
-    let predicted_call = match extract_tool_call(completion_text) {
-        Some(p) => p,
-        None => {
-            return Ok((
-                0.0,
-                EvalOutcomeKind::Invalid,
-                Some("no tool_call found in completion".into()),
-            ));
-        }
-    };
+    let target_calls = extract_tool_calls(target_raw);
+    if target_calls.is_empty() {
+        return Err(ScorerError::MissingTarget {
+            kind: "tool_call (target had no parseable tool call)",
+        });
+    }
+    let predicted_calls = extract_tool_calls(completion_text);
+    if predicted_calls.is_empty() {
+        // No call was emitted. Surface why: thinking-only completions, or
+        // a textual refusal, or just a free-form answer where a call was
+        // expected. The split_thinking probe lets us mention reasoning
+        // length so users can spot the "model thought but never acted"
+        // pattern in dashboards.
+        let probe = split_thinking(completion_text);
+        let detail = if probe.unclosed {
+            "no tool_call found (thinking block never closed)".to_string()
+        } else if probe.had_thinking && probe.answer.trim().is_empty() {
+            "no tool_call found (model emitted thinking but no answer)".to_string()
+        } else {
+            "no tool_call found in completion".to_string()
+        };
+        return Ok((0.0, EvalOutcomeKind::Invalid, Some(detail)));
+    }
 
+    // Multi-call target: score each call against the target at the same
+    // position, then average. Extra predicted calls penalize the score;
+    // missing predicted calls show up as misses.
+    let pairs = pair_calls(&target_calls, &predicted_calls);
+    let pair_count = pairs.len() as f32;
     let weights = weights.copied().unwrap_or_default();
     let total_weight = weights.name + weights.structure + weights.content;
     let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
@@ -158,24 +169,119 @@ pub(super) fn score(
     let s_w = weights.structure / total_weight;
     let c_w = weights.content / total_weight;
 
-    let (name_score, name_detail) = score_name(&predicted_call.name, &target_call.name, name_match);
-    let (struct_score, struct_detail) =
-        score_structural(&predicted_call.arguments, &target_call.arguments);
-    let (content_score, content_detail) = score_content(
-        example,
-        &predicted_call.arguments,
-        &target_call.arguments,
-        args,
-        judge_runner,
-    )?;
+    let mut combined_sum = 0.0f32;
+    let mut all_name_perfect = true;
+    let mut details: Vec<String> = Vec::new();
+    for (i, pair) in pairs.iter().enumerate() {
+        let (combined, name_perfect, mut detail) =
+            score_pair(example, pair, name_match, args, &weights, judge_runner)?;
+        if !name_perfect {
+            all_name_perfect = false;
+        }
+        combined_sum += combined;
+        // Annotate per-call details with the index when there's more than
+        // one. Single-call evals stay terse.
+        if pair_count > 1.0 {
+            detail = format!("[{}] {}", i, detail);
+        }
+        details.push(detail);
+    }
+    let combined_avg = combined_sum / pair_count.max(1.0);
 
-    let combined = name_score * n_w + struct_score * s_w + content_score * c_w;
-    let kind = if name_score >= 1.0 && combined >= TOOL_CALL_PASS_THRESHOLD {
+    // Penalty for extra predicted calls beyond the target count: each one
+    // costs `0.25 / target_count` of the final score, so a model that fires
+    // twice as many tool calls as expected lands in Fail territory even if
+    // each call looks plausible.
+    let excess = predicted_calls.len().saturating_sub(target_calls.len());
+    let excess_penalty = if target_calls.is_empty() {
+        0.0
+    } else {
+        (excess as f32) * (0.25 / target_calls.len() as f32)
+    };
+    let combined = (combined_avg - excess_penalty).clamp(0.0, 1.0);
+
+    let _ = (n_w, s_w, c_w); // weights consumed inside score_pair
+    let kind = if all_name_perfect && combined >= TOOL_CALL_PASS_THRESHOLD {
         EvalOutcomeKind::Pass
     } else {
         EvalOutcomeKind::Fail
     };
 
+    let mut detail = details.join(" || ");
+    if excess > 0 {
+        detail.push_str(&format!(" || excess_calls={}", excess));
+    }
+    if predicted_calls
+        .iter()
+        .any(|c| c.format != ToolCallFormat::Qwen3Xml)
+    {
+        // Non-blocking diagnostic — many upstream datasets store calls in
+        // JSON form, so JSON predictions are still valid output. But for
+        // Qwen3.5 the *native* output is XML, so a JSON-only completion is
+        // a sign that the model produced a free-form answer rather than
+        // using the chat template's tool-call grammar.
+        let fmts: Vec<&'static str> = predicted_calls
+            .iter()
+            .map(|c| match c.format {
+                ToolCallFormat::Qwen3Xml => "xml",
+                ToolCallFormat::JsonInline => "json",
+                ToolCallFormat::OpenAi => "openai",
+                ToolCallFormat::Fenced => "fenced",
+            })
+            .collect();
+        detail.push_str(&format!(" || formats=[{}]", fmts.join(",")));
+    }
+
+    Ok((combined, kind, Some(detail)))
+}
+
+struct CallPair<'a> {
+    target: &'a ParsedToolCall,
+    predicted: Option<&'a ParsedToolCall>,
+}
+
+fn pair_calls<'a>(
+    targets: &'a [ParsedToolCall],
+    predicted: &'a [ParsedToolCall],
+) -> Vec<CallPair<'a>> {
+    let mut out = Vec::with_capacity(targets.len());
+    for (i, t) in targets.iter().enumerate() {
+        out.push(CallPair {
+            target: t,
+            predicted: predicted.get(i),
+        });
+    }
+    out
+}
+
+fn score_pair(
+    example: &EvalExample,
+    pair: &CallPair<'_>,
+    name_match: &NameMatch,
+    args: &ArgsScoring,
+    weights: &ToolCallWeights,
+    judge_runner: &dyn JudgeRunner,
+) -> Result<(f32, bool, String), ScorerError> {
+    let total_weight = weights.name + weights.structure + weights.content;
+    let total_weight = if total_weight <= 0.0 { 1.0 } else { total_weight };
+    let n_w = weights.name / total_weight;
+    let s_w = weights.structure / total_weight;
+    let c_w = weights.content / total_weight;
+
+    let Some(predicted) = pair.predicted else {
+        return Ok((
+            0.0,
+            false,
+            format!("missing predicted call (expected `{}`)", pair.target.name),
+        ));
+    };
+    let target_args = serde_json::Value::Object(pair.target.arguments.clone());
+    let predicted_args = serde_json::Value::Object(predicted.arguments.clone());
+    let (name_score, name_detail) = score_name(&predicted.name, &pair.target.name, name_match);
+    let (struct_score, struct_detail) = score_structural(&predicted_args, &target_args);
+    let (content_score, content_detail) =
+        score_content(example, &predicted_args, &target_args, args, judge_runner)?;
+    let combined = name_score * n_w + struct_score * s_w + content_score * c_w;
     let detail = format!(
         "name={:.2} {} | struct={:.2} {} | content={:.2} {}",
         name_score,
@@ -185,137 +291,7 @@ pub(super) fn score(
         content_score,
         content_detail.as_deref().unwrap_or(""),
     );
-    Ok((combined.clamp(0.0, 1.0), kind, Some(detail)))
-}
-
-#[derive(Debug, Clone)]
-struct ToolCall {
-    name: String,
-    arguments: serde_json::Value,
-}
-
-/// Extract the first tool call from a string. Accepts:
-/// - Canonical `{"tool_calls":[{"name", "arguments"}]}`
-/// - Plain `{"name", "arguments"}`
-/// - OpenAI `{"function": {"name", "arguments"}}` (arguments may be a JSON-encoded string)
-/// - Fenced ```tool_call ... ``` or `<tool_call>...</tool_call>` blocks
-fn extract_tool_call(text: &str) -> Option<ToolCall> {
-    let body = unwrap_tool_call_fence(text).unwrap_or_else(|| text.trim().to_string());
-    let trimmed = body.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
-        return extract_from_anywhere(text);
-    }
-    let parsed: serde_json::Value = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(_) => return extract_from_anywhere(text),
-    };
-    if let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array()) {
-        let first = calls.first()?;
-        return Some(call_from_object(first.clone()));
-    }
-    Some(call_from_object(parsed))
-}
-
-/// Scan a free-form completion for the first inline JSON object that
-/// looks like a tool call (useful when the model wrote prose first then
-/// the JSON). Performs a brace-balanced extraction so we don't grab a
-/// partial object.
-fn extract_from_anywhere(text: &str) -> Option<ToolCall> {
-    let bytes = text.as_bytes();
-    let mut start: Option<usize> = None;
-    for (i, b) in bytes.iter().enumerate() {
-        if *b == b'{' {
-            // Verify this looks tool-call-shaped by peeking ahead for "name" key.
-            let head = &text[i..text.len().min(i + 256)];
-            if head.contains("\"name\"") || head.contains("\"function\"") || head.contains("\"tool_call\"") {
-                start = Some(i);
-                break;
-            }
-        }
-    }
-    let start = start?;
-    let mut depth = 0i64;
-    let mut in_str = false;
-    let mut escape = false;
-    for (i, b) in bytes.iter().enumerate().skip(start) {
-        let c = *b;
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_str {
-            if c == b'\\' {
-                escape = true;
-            } else if c == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        if c == b'"' {
-            in_str = true;
-        } else if c == b'{' {
-            depth += 1;
-        } else if c == b'}' {
-            depth -= 1;
-            if depth == 0 {
-                let body = &text[start..=i];
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(body) {
-                    return Some(call_from_object(parsed));
-                }
-                return None;
-            }
-        }
-    }
-    None
-}
-
-fn unwrap_tool_call_fence(text: &str) -> Option<String> {
-    if let Some(rest) = text.split_once("```tool_call") {
-        let after = rest.1.trim_start_matches('\n');
-        return Some(after.split("```").next().unwrap_or("").trim().to_string());
-    }
-    if let Some(rest) = text.split_once("<tool_call>") {
-        return Some(
-            rest.1
-                .split("</tool_call>")
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-        );
-    }
-    None
-}
-
-fn call_from_object(value: serde_json::Value) -> ToolCall {
-    // Optional wrappers: {"tool_call": {...}} or {"function": {...}}.
-    let value = if let Some(inner) = value.get("tool_call") {
-        inner.clone()
-    } else if let Some(inner) = value.get("function") {
-        inner.clone()
-    } else {
-        value
-    };
-    let name = value
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let arguments = value.get("arguments").cloned().unwrap_or_else(|| {
-        // Some shapes use "input" or "parameters".
-        value
-            .get("input")
-            .cloned()
-            .or_else(|| value.get("parameters").cloned())
-            .unwrap_or(serde_json::Value::Null)
-    });
-    let arguments = match arguments {
-        serde_json::Value::String(s) => {
-            serde_json::from_str(&s).unwrap_or(serde_json::Value::String(s))
-        }
-        other => other,
-    };
-    ToolCall { name, arguments }
+    Ok((combined, name_score >= 1.0, detail))
 }
 
 fn score_name(
@@ -817,25 +793,128 @@ mod tests {
 
     #[test]
     fn extract_tool_call_handles_openai_arguments_string() {
+        use crate::qwen3::extract_first_tool_call;
         let s = r#"{"tool_calls":[{"function":{"name":"f","arguments":"{\"a\":1}"}}]}"#;
-        let tc = extract_tool_call(s).unwrap();
+        let tc = extract_first_tool_call(s).unwrap();
         assert_eq!(tc.name, "f");
-        assert_eq!(tc.arguments, serde_json::json!({"a": 1}));
+        assert_eq!(tc.arguments.get("a"), Some(&serde_json::json!(1)));
     }
 
     #[test]
     fn extract_tool_call_handles_inline_prose_then_json() {
+        use crate::qwen3::extract_first_tool_call;
         let s = "let me search.\n{\"name\":\"search\",\"arguments\":{\"q\":\"x\"}}\nokay.";
-        let tc = extract_tool_call(s).unwrap();
+        let tc = extract_first_tool_call(s).unwrap();
         assert_eq!(tc.name, "search");
-        assert_eq!(tc.arguments, serde_json::json!({"q":"x"}));
+        assert_eq!(tc.arguments.get("q"), Some(&serde_json::json!("x")));
     }
 
     #[test]
     fn extract_tool_call_handles_tool_call_fence() {
+        use crate::qwen3::extract_first_tool_call;
         let s = "I'll run a search.\n```tool_call\n{\"name\":\"search\",\"arguments\":{\"q\":\"hi\"}}\n```\n";
-        let tc = extract_tool_call(s).unwrap();
+        let tc = extract_first_tool_call(s).unwrap();
         assert_eq!(tc.name, "search");
+    }
+
+    #[test]
+    fn extract_tool_call_handles_qwen3_xml() {
+        use crate::qwen3::extract_first_tool_call;
+        let s = "<tool_call>\n<function=search>\n<parameter=q>\nhi\n</parameter>\n</function>\n</tool_call>";
+        let tc = extract_first_tool_call(s).unwrap();
+        assert_eq!(tc.name, "search");
+        assert_eq!(tc.arguments.get("q"), Some(&serde_json::json!("hi")));
+    }
+
+    #[test]
+    fn xml_completion_scores_against_json_target() {
+        // Real Qwen3.5 output is XML; suite targets are typically stored
+        // as canonical JSON. The scorer must compare the structured form.
+        let target = r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris"}}]}"#;
+        let pred = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
+        let (s, kind, _) = score(
+            &ex(target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Structural,
+            None,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert!(s > 0.95, "score was {s}");
+        assert_eq!(kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn thinking_before_xml_call_is_ignored() {
+        let target = r#"{"tool_calls":[{"name":"f","arguments":{"x":"1"}}]}"#;
+        let pred = "<think>\nI should call f with x=1.\n</think>\n\n<tool_call>\n<function=f>\n<parameter=x>\n1\n</parameter>\n</function>\n</tool_call>";
+        let (s, kind, _) = score(
+            &ex(target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Structural,
+            None,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert!(s > 0.95);
+        assert_eq!(kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn extra_predicted_call_penalizes_score() {
+        let target = r#"{"tool_calls":[{"name":"f","arguments":{}}]}"#;
+        // Two XML calls when one was expected.
+        let pred = "<tool_call>\n<function=f>\n</function>\n</tool_call>\n<tool_call>\n<function=g>\n</function>\n</tool_call>";
+        let (s, _, detail) = score(
+            &ex(target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Structural,
+            None,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert!(detail.as_deref().unwrap().contains("excess_calls=1"));
+        // Single excess subtracts 0.25/1 = 0.25 from the per-pair score.
+        assert!(s < 1.0, "score was {s}");
+    }
+
+    #[test]
+    fn multi_call_target_pairs_in_order() {
+        let target =
+            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>\n<tool_call>\n<function=b>\n</function>\n</tool_call>";
+        let (_, kind, _) = score(
+            &ex(target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Structural,
+            None,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Pass);
+    }
+
+    #[test]
+    fn missing_second_call_drops_score() {
+        let target =
+            r#"{"tool_calls":[{"name":"a","arguments":{}},{"name":"b","arguments":{}}]}"#;
+        let pred = "<tool_call>\n<function=a>\n</function>\n</tool_call>";
+        let (s, kind, detail) = score(
+            &ex(target),
+            pred,
+            &NameMatch::CaseInsensitive,
+            &ArgsScoring::Structural,
+            None,
+            &NoopJudgeRunner,
+        )
+        .unwrap();
+        assert_eq!(kind, EvalOutcomeKind::Fail);
+        assert!(s < 0.6, "score was {s}");
+        assert!(detail.as_deref().unwrap().contains("missing predicted call"));
     }
 
     #[test]

@@ -132,6 +132,8 @@ async fn run_suite_inner(
                     completion_tokens: None,
                     latency_ms: None,
                     tags: example.tags.clone(),
+                    reasoning_text: None,
+                    unclosed_thinking: false,
                 };
                 completions_seen += 1;
                 outcomes.push(outcome);
@@ -168,6 +170,8 @@ async fn run_suite_inner(
                     completion_tokens: None,
                     latency_ms: None,
                     tags: example.tags.clone(),
+                    reasoning_text: None,
+                    unclosed_thinking: false,
                 },
             };
             if matches!(outcome.kind, EvalOutcomeKind::Pass) {

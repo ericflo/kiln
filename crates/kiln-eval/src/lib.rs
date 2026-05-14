@@ -23,6 +23,7 @@
 //! `EvalResult` so callers see the same shape whether they kick off an eval
 //! over HTTP, the CLI, or the post-training auto-eval hook.
 
+pub mod qwen3;
 pub mod result;
 pub mod scorers;
 pub mod suite;
