@@ -3255,6 +3255,25 @@ function selectPage(name) {
     u.hash = name;
     history.replaceState(null, '', u);
   }
+  // Lazy-refresh page-scoped data when activating a tab. Avoids firing
+  // /v1/eval/* and /v1/judgments/* at page load when the user might never
+  // visit the Evals page — and catches the case of someone landing on
+  // #evals via deep link without having to mirror the polling guard.
+  if (name === 'evals') refreshActiveEvalSubTab();
+}
+
+// Trigger the refresh function matching the currently-active Evals sub-tab.
+// Mirrors the polling guard at the bottom of the file so the same selection
+// logic isn't duplicated across initial-load + polling + nav-click paths.
+function refreshActiveEvalSubTab() {
+  if (typeof refreshDatasets !== 'function') return; // not yet defined
+  const evalsPage = document.getElementById('page-evals');
+  const active = evalsPage?.querySelector('.tab.active')?.dataset?.tab;
+  if (active === 'jobs')           refreshEvalJobs();
+  else if (active === 'datasets')  refreshDatasets();
+  else if (active === 'suites')    refreshSuites();
+  else if (active === 'judgments') refreshJudgments();
+  else                             refreshDatasets(); // default sub-tab
 }
 document.querySelectorAll('.primary-tab').forEach(tab => {
   tab.addEventListener('click', () => selectPage(tab.dataset.page));
@@ -6131,12 +6150,15 @@ if (!localStorage.getItem('kiln-evals-onboarded')) {
   document.getElementById('evals-onboarding').hidden = false;
 }
 
-// Initial population of adapter dropdowns + eval lists.
+// Initial adapter dropdown population is universal (used by Training and
+// Playground forms too). Eval-scoped lists are lazy: they fetch when the
+// Evals page is first activated (see selectPage / refreshActiveEvalSubTab)
+// and on every polling tick while the page is visible (below). This avoids
+// 4× /v1/eval/* + /v1/judgments fetches firing on every dashboard load.
 refreshAdapterDropdowns();
-refreshDatasets();
-refreshSuites();
-refreshEvalJobs();
-refreshJudgments();
+if (document.getElementById('page-evals')?.classList.contains('active')) {
+  refreshActiveEvalSubTab();
+}
 
 // Periodic refresh — only updates the active sub-tab so we don't thrash.
 // Jobs tab refreshes every 1500ms (so a running job's progress feels alive),
