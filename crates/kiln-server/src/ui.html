@@ -1289,12 +1289,12 @@ select {
   flex-direction: column;
   gap: 6px;
   max-width: 92%;
-  animation: chat-msg-in var(--t-base) var(--ease-out);
 }
-@keyframes chat-msg-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+/* No entrance animation on .chat-msg — streaming chunks re-render the
+   bubble many times per second, and an opacity/translate animation
+   here used to restart on every render. The result was a strobe-y
+   relayout that looked seizure-inducing. If we ever want a slide-in
+   back, scope it to a one-shot class added on first mount only. */
 .chat-msg .role {
   font-size: var(--text-2xs);
   text-transform: uppercase;
@@ -1330,15 +1330,17 @@ select {
   position: relative;
   color: var(--text-muted);
 }
+/* Static block-cursor caret instead of a blinking dot. The dot used
+   an infinite animation, and because the <pre> is recreated on every
+   streaming chunk, the animation kept restarting at frame 0 — which
+   read as relentless flicker. A non-animated caret is calmer and
+   still signals "more text coming". */
 .chat-msg.pending pre::after {
-  content: '';
+  content: '▍';
   display: inline-block;
-  width: 6px; height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  margin-left: 6px;
-  vertical-align: middle;
-  animation: chat-blink 1.2s var(--ease-out) infinite;
+  margin-left: 2px;
+  color: var(--accent);
+  opacity: 0.7;
 }
 @keyframes chat-blink {
   0%, 80%, 100% { opacity: 0.2; }
@@ -5462,6 +5464,40 @@ function updateChatTurnCount() {
   }
 }
 
+/* In-place update of a single assistant bubble's contents — replaces
+   only the children of the existing `[data-msg-id]` wrapper, so every
+   *other* bubble's DOM is left untouched. Streaming chunks call this
+   instead of the global `renderChat()` to avoid the relayout-and-
+   re-animate storm that re-creating every <div> caused. Falls back to
+   a full render when the bubble isn't in the DOM yet (first paint).
+
+   Note: scroll affinity is *not* sampled here. A targeted innerHTML
+   update doesn't reset scrollTop, so we'd actively fight the user's
+   scroll position if we tried to re-pin. The full `renderChat()` —
+   used on user-message push, clear, and turn end — still handles
+   sticking to the bottom on layout-changing events. */
+function patchAssistantBubble(m) {
+  const wrapper = document.querySelector(`.chat-msg.assistant[data-msg-id="${cssEscape(m._id)}"]`);
+  if (!wrapper) { renderChat(); return; }
+  wrapper.className = `chat-msg assistant${m.pending ? ' pending' : ''}`;
+  wrapper.innerHTML = `<div class="role">assistant</div>${renderAssistantBubble(m)}`;
+  // If user was pinned to the bottom, follow the growing bubble.
+  const out = document.getElementById('chat-output');
+  if (out) {
+    const slack = out.scrollHeight - out.scrollTop - out.clientHeight;
+    if (slack <= 24) out.scrollTop = out.scrollHeight;
+  }
+  // Refresh footer-derived state without a global render.
+  updateCopyChatResponseState();
+}
+
+// Tiny CSS.escape polyfill — we control the IDs (alphanumeric + `-`),
+// but be defensive against future ID schemes that include CSS-special
+// characters like `.` or `:`.
+function cssEscape(s) {
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, c => '\\' + c);
+}
+
 function renderChat() {
   const el = document.getElementById('chat-output');
   if (chatMessages.length === 0) {
@@ -5477,7 +5513,7 @@ function renderChat() {
   captureScrollAffinity();
   el.innerHTML = chatMessages.map(m => {
     if (m.role === 'assistant') {
-      return `<div class="chat-msg assistant${m.pending ? ' pending' : ''}">
+      return `<div class="chat-msg assistant${m.pending ? ' pending' : ''}" data-msg-id="${escapeHtml(m._id)}">
         <div class="role">assistant</div>
         ${renderAssistantBubble(m)}
       </div>`;
@@ -5694,13 +5730,15 @@ async function streamAssistantTurn(temp) {
   if (adapter) body.adapter = adapter;
 
   // Tick the per-turn footer so users see the elapsed counter advance
-  // even before the first token lands. Cheap (200 ms cadence) and only
-  // runs while a turn is in flight.
+  // even before the first token lands. 500 ms cadence — fast enough
+  // for a visible counter, slow enough to never feel jittery — and we
+  // patch only the assistant bubble in place (not a full re-render)
+  // so neighboring bubbles don't relayout.
   const tickHandle = setInterval(() => {
     if (!assistant.pending) return;
     assistant.durationMs = performance.now() - assistant.startMs;
-    renderChat();
-  }, 200);
+    patchAssistantBubble(assistant);
+  }, 500);
 
   try {
     const controller = new AbortController();
@@ -5762,7 +5800,7 @@ async function streamAssistantTurn(temp) {
             assistant.pending = true;
             assistant.lastTokenMs = now;
             assistant.durationMs = now - assistant.startMs;
-            renderChat();
+            patchAssistantBubble(assistant);
           }
           if (delta.content) {
             if (assistant.thinkStartMs != null && assistant.thinkEndMs == null) {
@@ -5773,7 +5811,7 @@ async function streamAssistantTurn(temp) {
             assistant.pending = true;
             assistant.lastTokenMs = now;
             assistant.durationMs = now - assistant.startMs;
-            renderChat();
+            patchAssistantBubble(assistant);
           }
         } catch (parseErr) {
           // Don't swallow the *whole* stream when one chunk is
