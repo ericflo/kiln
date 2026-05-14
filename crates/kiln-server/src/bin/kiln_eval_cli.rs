@@ -444,6 +444,19 @@ fn print_human(result: &EvalResultPayload) {
                 r.metrics.latency.mean_ms,
             );
         }
+        if !r.metrics.by_scorer.is_empty() && r.metrics.by_scorer.len() > 1 {
+            // Only worth showing when more than one scorer is in play —
+            // single-scorer suites read this off the suite header.
+            println!("  by scorer:");
+            for br in &r.metrics.by_scorer {
+                println!(
+                    "    {:<24}  {:>5.1}%  ({} examples)",
+                    br.scorer_kind,
+                    br.pass_rate * 100.0,
+                    br.num_examples
+                );
+            }
+        }
         if !r.metrics.pass_rate_by_tag.is_empty() {
             println!("  by tag:");
             for (tag, rate) in &r.metrics.pass_rate_by_tag {
