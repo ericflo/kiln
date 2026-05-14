@@ -3486,13 +3486,22 @@ select {
           <option value="">Base model</option>
         </select>
         <label for="chat-temp">Temperature</label>
-        <input type="number" id="chat-temp" value="0.0" min="0" max="2" step="0.1">
+        <input type="number" id="chat-temp" value="1.0" min="0" max="2" step="0.1" title="Qwen3.5 thinking-general default is 1.0. Lower for more deterministic output; 0.0 = greedy.">
         <label for="chat-max-tokens">Max tokens</label>
         <input type="number" id="chat-max-tokens" value="1024" min="1" max="32768" step="1">
         <label class="chat-toggle-label" title="Send chat_template_kwargs.enable_thinking — reasoning-capable templates (Qwen3.5, DeepSeek R1, …) will skip the <think> prefill when off.">
           <input type="checkbox" id="chat-enable-thinking" checked>
           <span>Thinking</span>
         </label>
+        <label for="chat-preset" title="Apply one of Qwen3.5's officially recommended sampling profiles.">Preset</label>
+        <select id="chat-preset">
+          <option value="qwen3-thinking-general" selected>Thinking · general (Qwen3.5 default)</option>
+          <option value="qwen3-thinking-coding">Thinking · coding (temp=0.6)</option>
+          <option value="qwen3-non-thinking-general">Non-thinking · general (temp=0.7)</option>
+          <option value="qwen3-non-thinking-reasoning">Non-thinking · reasoning (temp=1.0)</option>
+          <option value="greedy">Greedy (deterministic)</option>
+          <option value="custom">Custom (don't touch fields)</option>
+        </select>
         <span style="flex:1;"></span>
         <button class="btn btn-sm btn-ghost" id="chat-toggle-advanced" type="button" aria-expanded="false" aria-controls="chat-advanced">⚙ Advanced</button>
       </div>
@@ -3502,13 +3511,29 @@ select {
           <textarea id="chat-system" rows="2" placeholder="Optional. Prepended as a system-role message on every send."></textarea>
         </label>
         <div class="chat-adv-row">
-          <label class="chat-adv-field" for="chat-top-p">
+          <label class="chat-adv-field" for="chat-top-p" title="Qwen3.5 thinking-general default: 0.95. Set to 1.0 to disable nucleus filtering.">
             <span class="chat-adv-label">top_p</span>
-            <input type="number" id="chat-top-p" placeholder="1.0" min="0" max="1" step="0.05">
+            <input type="number" id="chat-top-p" value="0.95" min="0" max="1" step="0.05">
           </label>
-          <label class="chat-adv-field" for="chat-top-k">
+          <label class="chat-adv-field" for="chat-top-k" title="Qwen3.5 recommends top_k=20. 0 disables top-k filtering.">
             <span class="chat-adv-label">top_k</span>
-            <input type="number" id="chat-top-k" placeholder="0" min="0" step="1">
+            <input type="number" id="chat-top-k" value="20" min="0" step="1">
+          </label>
+          <label class="chat-adv-field" for="chat-min-p" title="Min-p: drop tokens whose probability is below min_p * max_prob. Default 0.0 (off).">
+            <span class="chat-adv-label">min_p</span>
+            <input type="number" id="chat-min-p" value="0.0" min="0" max="1" step="0.01">
+          </label>
+          <label class="chat-adv-field" for="chat-presence-penalty" title="OpenAI-style presence penalty. Qwen3.5 thinking-general default: 1.5. Set 0.0 for coding tasks.">
+            <span class="chat-adv-label">presence_penalty</span>
+            <input type="number" id="chat-presence-penalty" value="1.5" min="-2" max="2" step="0.1">
+          </label>
+          <label class="chat-adv-field" for="chat-frequency-penalty" title="OpenAI-style frequency penalty. Default 0.0.">
+            <span class="chat-adv-label">frequency_penalty</span>
+            <input type="number" id="chat-frequency-penalty" value="0.0" min="-2" max="2" step="0.1">
+          </label>
+          <label class="chat-adv-field" for="chat-repetition-penalty" title="HuggingFace-style repetition penalty. 1.0 = no-op.">
+            <span class="chat-adv-label">repetition_penalty</span>
+            <input type="number" id="chat-repetition-penalty" value="1.0" min="0.5" max="2" step="0.05">
           </label>
           <label class="chat-adv-field" for="chat-seed">
             <span class="chat-adv-label">seed</span>
@@ -5031,29 +5056,39 @@ function writePlaygroundSettings(settings) {
 function capturePlaygroundSettings() {
   const get = (id) => document.getElementById(id);
   return {
-    temperature:     get('chat-temp')?.value ?? '0.0',
-    maxTokens:       get('chat-max-tokens')?.value ?? '1024',
-    enableThinking:  !!get('chat-enable-thinking')?.checked,
-    topP:            get('chat-top-p')?.value ?? '',
-    topK:            get('chat-top-k')?.value ?? '',
-    seed:            get('chat-seed')?.value ?? '',
-    stop:            get('chat-stop')?.value ?? '',
-    system:          get('chat-system')?.value ?? '',
-    advancedOpen:    !get('chat-advanced')?.hidden,
-    compareMode:     !!document.getElementById('chat-compare-toggle')?.checked,
+    temperature:        get('chat-temp')?.value ?? '1.0',
+    maxTokens:          get('chat-max-tokens')?.value ?? '1024',
+    enableThinking:     !!get('chat-enable-thinking')?.checked,
+    preset:             get('chat-preset')?.value ?? 'qwen3-thinking-general',
+    topP:               get('chat-top-p')?.value ?? '',
+    topK:               get('chat-top-k')?.value ?? '',
+    minP:               get('chat-min-p')?.value ?? '',
+    presencePenalty:    get('chat-presence-penalty')?.value ?? '',
+    frequencyPenalty:   get('chat-frequency-penalty')?.value ?? '',
+    repetitionPenalty:  get('chat-repetition-penalty')?.value ?? '',
+    seed:               get('chat-seed')?.value ?? '',
+    stop:               get('chat-stop')?.value ?? '',
+    system:             get('chat-system')?.value ?? '',
+    advancedOpen:       !get('chat-advanced')?.hidden,
+    compareMode:        !!document.getElementById('chat-compare-toggle')?.checked,
   };
 }
 
 function applyPlaygroundSettings(settings) {
   if (!settings || typeof settings !== 'object') return;
   const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
-  set('chat-temp',       settings.temperature);
-  set('chat-max-tokens', settings.maxTokens);
-  set('chat-top-p',      settings.topP);
-  set('chat-top-k',      settings.topK);
-  set('chat-seed',       settings.seed);
-  set('chat-stop',       settings.stop);
-  set('chat-system',     settings.system);
+  set('chat-temp',                settings.temperature);
+  set('chat-max-tokens',          settings.maxTokens);
+  set('chat-preset',              settings.preset);
+  set('chat-top-p',               settings.topP);
+  set('chat-top-k',               settings.topK);
+  set('chat-min-p',               settings.minP);
+  set('chat-presence-penalty',    settings.presencePenalty);
+  set('chat-frequency-penalty',   settings.frequencyPenalty);
+  set('chat-repetition-penalty',  settings.repetitionPenalty);
+  set('chat-seed',                settings.seed);
+  set('chat-stop',                settings.stop);
+  set('chat-system',              settings.system);
   const thinking = document.getElementById('chat-enable-thinking');
   if (thinking && typeof settings.enableThinking === 'boolean') thinking.checked = settings.enableThinking;
   const adv = document.getElementById('chat-advanced');
@@ -5062,6 +5097,55 @@ function applyPlaygroundSettings(settings) {
     adv.hidden = false;
     advBtn.setAttribute('aria-expanded', 'true');
   }
+}
+
+/// Apply a Qwen3.5 preset by filling in every sampling input + the
+/// thinking toggle. Mirrors the SamplingParams::qwen3_* helpers in
+/// kiln-core so the UI shows the same numbers the server would pick if
+/// the client sent `"sampling_preset": "..."`.
+const QWEN3_PRESETS = {
+  'qwen3-thinking-general': {
+    temperature: '1.0', topP: '0.95', topK: '20', minP: '0.0',
+    presencePenalty: '1.5', frequencyPenalty: '0.0', repetitionPenalty: '1.0',
+    enableThinking: true,
+  },
+  'qwen3-thinking-coding': {
+    temperature: '0.6', topP: '0.95', topK: '20', minP: '0.0',
+    presencePenalty: '0.0', frequencyPenalty: '0.0', repetitionPenalty: '1.0',
+    enableThinking: true,
+  },
+  'qwen3-non-thinking-general': {
+    temperature: '0.7', topP: '0.8', topK: '20', minP: '0.0',
+    presencePenalty: '1.5', frequencyPenalty: '0.0', repetitionPenalty: '1.0',
+    enableThinking: false,
+  },
+  'qwen3-non-thinking-reasoning': {
+    temperature: '1.0', topP: '0.95', topK: '20', minP: '0.0',
+    presencePenalty: '1.5', frequencyPenalty: '0.0', repetitionPenalty: '1.0',
+    enableThinking: false,
+  },
+  'greedy': {
+    temperature: '0.0', topP: '1.0', topK: '0', minP: '0.0',
+    presencePenalty: '0.0', frequencyPenalty: '0.0', repetitionPenalty: '1.0',
+    enableThinking: true,
+  },
+};
+
+function applyChatPreset(name) {
+  if (name === 'custom') return;
+  const preset = QWEN3_PRESETS[name];
+  if (!preset) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+  set('chat-temp',               preset.temperature);
+  set('chat-top-p',              preset.topP);
+  set('chat-top-k',              preset.topK);
+  set('chat-min-p',              preset.minP);
+  set('chat-presence-penalty',   preset.presencePenalty);
+  set('chat-frequency-penalty',  preset.frequencyPenalty);
+  set('chat-repetition-penalty', preset.repetitionPenalty);
+  const thinking = document.getElementById('chat-enable-thinking');
+  if (thinking) thinking.checked = preset.enableThinking;
+  persistPlaygroundSettingsSoon();
 }
 
 function persistPlaygroundSettingsSoon() {
@@ -5105,7 +5189,24 @@ function buildChatRequestBody({ messages, temperature }) {
   const topP = parseOptionalFloat(document.getElementById('chat-top-p')?.value, { min: 0, max: 1 });
   if (topP !== undefined) body.top_p = topP;
   const topK = parseOptionalPositiveInt(document.getElementById('chat-top-k')?.value);
-  if (topK !== undefined && topK > 0) body.top_k = topK;
+  if (topK !== undefined) body.top_k = topK; // 0 disables; still send so server doesn't fall back to its default of 20
+  const minP = parseOptionalFloat(document.getElementById('chat-min-p')?.value, { min: 0, max: 1 });
+  if (minP !== undefined) body.min_p = minP;
+  const presencePenalty = parseOptionalFloat(
+    document.getElementById('chat-presence-penalty')?.value,
+    { min: -2, max: 2 },
+  );
+  if (presencePenalty !== undefined) body.presence_penalty = presencePenalty;
+  const frequencyPenalty = parseOptionalFloat(
+    document.getElementById('chat-frequency-penalty')?.value,
+    { min: -2, max: 2 },
+  );
+  if (frequencyPenalty !== undefined) body.frequency_penalty = frequencyPenalty;
+  const repetitionPenalty = parseOptionalFloat(
+    document.getElementById('chat-repetition-penalty')?.value,
+    { min: 0, max: 4 },
+  );
+  if (repetitionPenalty !== undefined) body.repetition_penalty = repetitionPenalty;
   const seed = parseOptionalPositiveInt(document.getElementById('chat-seed')?.value);
   if (seed !== undefined) body.seed = seed;
   const stop = parseChatStopSequences(document.getElementById('chat-stop')?.value);
@@ -6094,14 +6195,61 @@ if (chatAdvBtn && chatAdvPanel) {
 
 const PLAYGROUND_SETTING_IDS = [
   'chat-temp', 'chat-max-tokens', 'chat-enable-thinking',
-  'chat-top-p', 'chat-top-k', 'chat-seed', 'chat-stop', 'chat-system',
+  'chat-preset',
+  'chat-top-p', 'chat-top-k', 'chat-min-p',
+  'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
+  'chat-seed', 'chat-stop', 'chat-system',
 ];
 PLAYGROUND_SETTING_IDS.forEach(id => {
   const el = document.getElementById(id);
   if (!el) return;
-  const ev = (el.type === 'checkbox') ? 'change' : 'input';
+  const ev = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
   el.addEventListener(ev, persistPlaygroundSettingsSoon);
 });
+
+// Wire the preset dropdown: changing it applies the preset's values
+// to every advanced sampling input and flips the thinking toggle. Any
+// later manual edit silently switches the selector to "custom" so the
+// preset isn't lying about what's actually in the form.
+const presetSelect = document.getElementById('chat-preset');
+if (presetSelect) {
+  presetSelect.addEventListener('change', (e) => {
+    applyChatPreset(e.target.value);
+  });
+  const FIELDS_THAT_DESYNC_PRESET = [
+    'chat-temp', 'chat-top-p', 'chat-top-k', 'chat-min-p',
+    'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
+  ];
+  FIELDS_THAT_DESYNC_PRESET.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      // Only mark custom if the user manually changed *after* page load.
+      // We compare current value against the preset's spec.
+      const currentPreset = presetSelect.value;
+      const preset = QWEN3_PRESETS[currentPreset];
+      if (!preset) return;
+      const map = {
+        'chat-temp': 'temperature', 'chat-top-p': 'topP', 'chat-top-k': 'topK',
+        'chat-min-p': 'minP', 'chat-presence-penalty': 'presencePenalty',
+        'chat-frequency-penalty': 'frequencyPenalty', 'chat-repetition-penalty': 'repetitionPenalty',
+      };
+      if (String(el.value) !== String(preset[map[id]])) {
+        presetSelect.value = 'custom';
+      }
+    });
+  });
+  // The thinking checkbox also affects which preset is "consistent".
+  const thinkingEl = document.getElementById('chat-enable-thinking');
+  if (thinkingEl) {
+    thinkingEl.addEventListener('change', () => {
+      const preset = QWEN3_PRESETS[presetSelect.value];
+      if (preset && preset.enableThinking !== thinkingEl.checked) {
+        presetSelect.value = 'custom';
+      }
+    });
+  }
+}
 
 // Restore settings + last conversation on first load. Settings always
 // apply; conversation restore prompts a banner so users don't get a

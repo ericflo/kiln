@@ -329,14 +329,18 @@ fn build_sampling(params: &EvalGenerationParams, completion_index: usize) -> Sam
     } else {
         params.stop.clone()
     };
+    // Evals want determinism — start from greedy and only override the
+    // fields the eval suite actually set. The Qwen3.5 sampling
+    // defaults are tuned for interactive generation, not for verifiable-
+    // reward scoring.
     SamplingParams {
         temperature: params.temperature,
         top_p: params.top_p,
         top_k: params.top_k,
         max_tokens: params.max_tokens,
-        repetition_penalty: 1.0,
         stop,
         seed,
+        ..SamplingParams::greedy()
     }
 }
 

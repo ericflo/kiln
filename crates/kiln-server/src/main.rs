@@ -513,6 +513,7 @@ fn spawn_backend_prewarm(state: AppState) {
                 repetition_penalty: 1.0,
                 stop: Vec::new(),
                 seed: Some(42),
+                ..SamplingParams::default()
             };
             // Warm several paged blocks plus a decode step. Short one-block
             // prewarm misses the multi-block prompt shapes that desktop chat

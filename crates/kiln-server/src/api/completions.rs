@@ -652,8 +652,8 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
         return Ok(None);
     }
 
-    let temperature = req.temperature.unwrap_or(1.0);
-    let top_k = req.top_k.unwrap_or(0);
+    let temperature = requested_or_default_temperature(req.temperature);
+    let top_k = requested_or_default_top_k(req.top_k);
     let max_tokens = chat_request_max_tokens(req);
     if max_tokens != 0
         && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
@@ -668,7 +668,7 @@ fn deterministic_chat_request_cache_key_from_chat_choice_with_vocab_size(
             temperature,
             max_tokens,
             stop,
-            req.top_p.unwrap_or(1.0),
+            requested_or_default_top_p(req.top_p),
             top_k,
             seed,
             vocab_size,
@@ -785,8 +785,8 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
         return Ok(None);
     }
 
-    let temperature = req.temperature.unwrap_or(1.0);
-    let top_k = req.top_k.unwrap_or(0);
+    let temperature = requested_or_default_temperature(req.temperature);
+    let top_k = requested_or_default_top_k(req.top_k);
     let max_tokens = batch_request_max_tokens(req);
     if max_tokens != 0
         && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
@@ -801,7 +801,7 @@ fn deterministic_chat_choices_cache_key_from_batch_prompt_with_vocab_size(
             temperature,
             max_tokens,
             stop,
-            req.top_p.unwrap_or(1.0),
+            requested_or_default_top_p(req.top_p),
             top_k,
             seed,
             vocab_size,
@@ -850,8 +850,8 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
         return Ok(None);
     }
 
-    let temperature = req.temperature.unwrap_or(1.0);
-    let top_k = req.top_k.unwrap_or(0);
+    let temperature = requested_or_default_temperature(req.temperature);
+    let top_k = requested_or_default_top_k(req.top_k);
     let max_tokens = batch_request_max_tokens(req);
     if max_tokens != 0
         && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
@@ -866,7 +866,7 @@ fn deterministic_chat_request_cache_key_from_batch_prompt_with_vocab_size(
             temperature,
             max_tokens,
             stop,
-            req.top_p.unwrap_or(1.0),
+            requested_or_default_top_p(req.top_p),
             top_k,
             seed,
             vocab_size,
@@ -1687,6 +1687,31 @@ pub struct ChatCompletionRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<u32>,
+    /// Min-p sampling — drop tokens below `min_p * max_prob`. 0.0 = off.
+    /// Qwen3.5's recommended default is 0.0 for all four sampling profiles.
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// OpenAI-style presence penalty (-2.0 ..= 2.0). For each token id
+    /// emitted at least once, subtract `presence_penalty` from its logit.
+    /// Defaults to 1.5 (Qwen3.5 thinking-general recommendation) when
+    /// omitted — set explicitly to 0.0 to disable.
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    /// OpenAI-style frequency penalty (-2.0 ..= 2.0). For each token id
+    /// in the generated prefix, subtract `frequency_penalty * count`
+    /// from its logit. Default 0.0.
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    /// HuggingFace-style repetition penalty (1.0 = no-op). Default 1.0.
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    /// Kiln extension: pick a Qwen3.5-recommended sampling profile in
+    /// one shot. Recognized values: `"qwen3-thinking-general"`,
+    /// `"qwen3-thinking-coding"`, `"qwen3-non-thinking-general"`,
+    /// `"qwen3-non-thinking-reasoning"`, `"greedy"`. Explicit
+    /// `temperature`/`top_p`/etc still override the preset.
+    #[serde(default)]
+    pub sampling_preset: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     /// OpenAI newer-name alias for `max_tokens`. `max_tokens` wins when both
@@ -2076,15 +2101,7 @@ async fn chat_completions_inner(
         ));
     }
 
-    let sampling = SamplingParams {
-        temperature: req.temperature.unwrap_or(1.0),
-        top_p: req.top_p.unwrap_or(1.0),
-        top_k: req.top_k.unwrap_or(0),
-        max_tokens: chat_request_max_tokens(&req),
-        stop: normalized_stop_for_generation(req.stop.as_deref()),
-        seed: req.seed,
-        ..Default::default()
-    };
+    let sampling = sampling_params_for_chat_request(&req);
 
     // Validate adapter / adapters mutual exclusion. Done up front (before
     // backend dispatch) so 400-on-misuse is observable from any backend.
@@ -4409,6 +4426,21 @@ pub struct BatchCompletionRequest {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<u32>,
+    /// See [`ChatCompletionRequest::min_p`].
+    #[serde(default)]
+    pub min_p: Option<f32>,
+    /// See [`ChatCompletionRequest::presence_penalty`].
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
+    /// See [`ChatCompletionRequest::frequency_penalty`].
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    /// See [`ChatCompletionRequest::repetition_penalty`].
+    #[serde(default)]
+    pub repetition_penalty: Option<f32>,
+    /// See [`ChatCompletionRequest::sampling_preset`].
+    #[serde(default)]
+    pub sampling_preset: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<usize>,
     /// OpenAI newer-name alias for `max_tokens`. `max_tokens` wins when both
@@ -4571,8 +4603,8 @@ fn deterministic_batch_cache_key_with_vocab_size(
         return None;
     }
 
-    let temperature = req.temperature.unwrap_or(1.0);
-    let top_k = req.top_k.unwrap_or(0);
+    let temperature = requested_or_default_temperature(req.temperature);
+    let top_k = requested_or_default_top_k(req.top_k);
     let max_tokens = batch_request_max_tokens(req);
     if max_tokens != 0
         && !SamplingParams::values_are_effectively_greedy(temperature, top_k)
@@ -4585,7 +4617,7 @@ fn deterministic_batch_cache_key_with_vocab_size(
             temperature,
             max_tokens,
             &req.stop.clone().unwrap_or_default(),
-            req.top_p.unwrap_or(1.0),
+            requested_or_default_top_p(req.top_p),
             top_k,
             req.seed,
             vocab_size,
@@ -5419,6 +5451,11 @@ async fn batch_completions_inner(
         let temperature = req.temperature;
         let top_p = req.top_p;
         let top_k = req.top_k;
+        let min_p = req.min_p;
+        let presence_penalty = req.presence_penalty;
+        let frequency_penalty = req.frequency_penalty;
+        let repetition_penalty = req.repetition_penalty;
+        let sampling_preset = req.sampling_preset.clone();
         let max_tokens = req.max_tokens;
         let max_completion_tokens = req.max_completion_tokens;
         let seed = req.seed;
@@ -5463,6 +5500,11 @@ async fn batch_completions_inner(
                         temperature,
                         top_p,
                         top_k,
+                        min_p,
+                        presence_penalty,
+                        frequency_penalty,
+                        repetition_penalty,
+                        sampling_preset: sampling_preset.clone(),
                         max_tokens,
                         max_completion_tokens,
                         stream: false,
@@ -5595,7 +5637,10 @@ async fn batch_completions_inner(
 }
 
 fn request_values_are_effectively_greedy(temperature: Option<f32>, top_k: Option<u32>) -> bool {
-    SamplingParams::values_are_effectively_greedy(temperature.unwrap_or(1.0), top_k.unwrap_or(0))
+    SamplingParams::values_are_effectively_greedy(
+        requested_or_default_temperature(temperature),
+        requested_or_default_top_k(top_k),
+    )
 }
 
 fn batch_can_clone_deterministic_completions(req: &BatchCompletionRequest) -> bool {
@@ -5678,6 +5723,11 @@ async fn generate_multi_chat_response(
             temperature: req.temperature,
             top_p: req.top_p,
             top_k: req.top_k,
+            min_p: req.min_p,
+            presence_penalty: req.presence_penalty,
+            frequency_penalty: req.frequency_penalty,
+            repetition_penalty: req.repetition_penalty,
+            sampling_preset: req.sampling_preset.clone(),
             max_tokens: req.max_tokens,
             max_completion_tokens: req.max_completion_tokens,
             stream: false,
@@ -5758,15 +5808,103 @@ fn chat_response_from_multi_responses(
 /// The adapter is intentionally not re-resolved here — the caller (the batch
 /// handler) resolves the adapter once for the whole batch. This avoids
 /// pointless write-locking and re-loading the same adapter N times.
+/// Resolve a [`SamplingParams`] from a chat completion request. The
+/// starting point is the Qwen3.5 thinking-general profile (or a named
+/// preset if the request specified one); explicit fields on the request
+/// override the preset values, so callers that send no sampling fields
+/// get the model-card recommendation by default.
 fn sampling_params_for_chat_request(req: &ChatCompletionRequest) -> SamplingParams {
-    SamplingParams {
-        temperature: req.temperature.unwrap_or(1.0),
-        top_p: req.top_p.unwrap_or(1.0),
-        top_k: req.top_k.unwrap_or(0),
-        max_tokens: chat_request_max_tokens(&req),
-        stop: normalized_stop_for_generation(req.stop.as_deref()),
-        seed: req.seed,
-        ..Default::default()
+    let mut base = preset_or_default(req.sampling_preset.as_deref());
+    if let Some(t) = req.temperature {
+        base.temperature = t;
+    }
+    if let Some(p) = req.top_p {
+        base.top_p = p;
+    }
+    if let Some(k) = req.top_k {
+        base.top_k = k;
+    }
+    if let Some(mp) = req.min_p {
+        base.min_p = mp;
+    }
+    if let Some(pp) = req.presence_penalty {
+        base.presence_penalty = pp;
+    }
+    if let Some(fp) = req.frequency_penalty {
+        base.frequency_penalty = fp;
+    }
+    if let Some(rp) = req.repetition_penalty {
+        base.repetition_penalty = rp;
+    }
+    base.max_tokens = chat_request_max_tokens(req);
+    base.stop = normalized_stop_for_generation(req.stop.as_deref());
+    base.seed = req.seed;
+    base
+}
+
+/// Resolve a [`SamplingParams`] from a batch completion request. Mirrors
+/// [`sampling_params_for_chat_request`] field-for-field so the two
+/// endpoints stay in sync.
+fn sampling_params_for_batch_request(req: &BatchCompletionRequest) -> SamplingParams {
+    let mut base = preset_or_default(req.sampling_preset.as_deref());
+    if let Some(t) = req.temperature {
+        base.temperature = t;
+    }
+    if let Some(p) = req.top_p {
+        base.top_p = p;
+    }
+    if let Some(k) = req.top_k {
+        base.top_k = k;
+    }
+    if let Some(mp) = req.min_p {
+        base.min_p = mp;
+    }
+    if let Some(pp) = req.presence_penalty {
+        base.presence_penalty = pp;
+    }
+    if let Some(fp) = req.frequency_penalty {
+        base.frequency_penalty = fp;
+    }
+    if let Some(rp) = req.repetition_penalty {
+        base.repetition_penalty = rp;
+    }
+    base.max_tokens = batch_request_max_tokens(req);
+    base.stop = normalized_stop_for_generation(req.stop.as_deref());
+    base.seed = req.seed;
+    base
+}
+
+/// Default values used to fill in omitted request fields when computing
+/// cache keys. These MUST match the Qwen3.5-thinking-general start point
+/// used by [`sampling_params_for_chat_request`] — if they diverge, cache
+/// hits will silently use stale completions sampled at different
+/// settings than the current request would produce.
+pub(crate) fn requested_or_default_temperature(v: Option<f32>) -> f32 {
+    v.unwrap_or(1.0)
+}
+pub(crate) fn requested_or_default_top_p(v: Option<f32>) -> f32 {
+    v.unwrap_or(0.95)
+}
+pub(crate) fn requested_or_default_top_k(v: Option<u32>) -> u32 {
+    v.unwrap_or(20)
+}
+
+/// Map a `sampling_preset` string to its corresponding [`SamplingParams`]
+/// starting point. Unknown values silently fall back to the Qwen3.5
+/// thinking-general default — same shape a user gets with no preset.
+fn preset_or_default(name: Option<&str>) -> SamplingParams {
+    match name.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("greedy") => SamplingParams::greedy(),
+        Some("qwen3-thinking-coding") | Some("qwen3.5-thinking-coding") => {
+            SamplingParams::qwen3_thinking_coding()
+        }
+        Some("qwen3-non-thinking-general") | Some("qwen3.5-non-thinking-general") => {
+            SamplingParams::qwen3_non_thinking_general()
+        }
+        Some("qwen3-non-thinking-reasoning") | Some("qwen3.5-non-thinking-reasoning") => {
+            SamplingParams::qwen3_non_thinking_reasoning()
+        }
+        _ => SamplingParams::qwen3_thinking_general(),
     }
 }
 
@@ -7158,9 +7296,10 @@ mod tests {
         let seeded_full_distribution = SamplingParams {
             temperature: 0.7,
             top_p: 1.0,
+            top_k: 0,
             max_tokens: 4,
             seed: Some(1),
-            ..Default::default()
+            ..SamplingParams::greedy()
         };
         let seeded_top_p_above_one = SamplingParams {
             top_p: 1.5,
@@ -7366,13 +7505,13 @@ mod tests {
             "seeded sampled chat n>1 cache keys should split by base seed"
         );
         let sampled_full_distribution = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":1.0,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":1.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_above_one = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":1.5,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":1.5,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_zero = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":0.0,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":0.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_k_disabled = parse_request(
             r#"{"messages":[{"role":"user","content":"sampled choices full top p"}],"n":4,"temperature":0.7,"top_p":1.0,"top_k":248320,"max_tokens":4,"seed":1}"#,
@@ -7380,9 +7519,10 @@ mod tests {
         let sampled_full_distribution_sampling = SamplingParams {
             temperature: 0.7,
             top_p: 1.0,
+            top_k: 0,
             max_tokens: 4,
             seed: Some(1),
-            ..Default::default()
+            ..SamplingParams::greedy()
         };
         let sampled_top_p_above_one_sampling = SamplingParams {
             top_p: 1.5,
@@ -7556,14 +7696,18 @@ mod tests {
             deterministic_chat_request_cache_key(&sampled_b, &sampled_sampling_b).unwrap(),
             "seeded sampled request-cache keys must still split by seed"
         );
+        // top_k=0 explicit in the JSON because the kiln default is 20 —
+        // this test is specifically validating top_k=disabled vs
+        // top_k>=vocab equivalence, so we have to opt out of the model
+        // default to get the "disabled" semantics it asserts on.
         let sampled_full_distribution = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":1.0,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":1.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_above_one = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":1.5,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":1.5,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_zero = parse_request(
-            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":0.0,"max_tokens":4,"seed":1}"#,
+            r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":0.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_k_disabled = parse_request(
             r#"{"messages":[{"role":"user","content":"sampled chat full top p"}],"temperature":0.7,"top_p":1.0,"top_k":248320,"max_tokens":4,"seed":1}"#,
@@ -7571,9 +7715,10 @@ mod tests {
         let sampled_full_distribution_sampling = SamplingParams {
             temperature: 0.7,
             top_p: 1.0,
+            top_k: 0,
             max_tokens: 4,
             seed: Some(1),
-            ..Default::default()
+            ..SamplingParams::greedy()
         };
         let sampled_top_p_above_one_sampling = SamplingParams {
             top_p: 1.5,
@@ -8136,13 +8281,13 @@ mod tests {
             "seeded sampled batch-cache keys must still split by seed"
         );
         let sampled_full_distribution = parse_batch_request(
-            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":1.0,"max_tokens":4,"seed":1}"#,
+            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":1.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_above_one = parse_batch_request(
-            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":1.5,"max_tokens":4,"seed":1}"#,
+            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":1.5,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_p_zero = parse_batch_request(
-            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":0.0,"max_tokens":4,"seed":1}"#,
+            r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":0.0,"top_k":0,"max_tokens":4,"seed":1}"#,
         );
         let sampled_top_k_disabled = parse_batch_request(
             r#"{"prompts":[[{"role":"user","content":"sampled batch full top p"}]],"n":1,"temperature":0.7,"top_p":1.0,"top_k":248320,"max_tokens":4,"seed":1}"#,
@@ -11008,9 +11153,9 @@ mod tests {
         });
         let req = parse_request(&base.to_string());
         let sampling = SamplingParams {
-            temperature: req.temperature.unwrap_or(1.0),
-            top_p: req.top_p.unwrap_or(1.0),
-            top_k: req.top_k.unwrap_or(0),
+            temperature: requested_or_default_temperature(req.temperature),
+            top_p: requested_or_default_top_p(req.top_p),
+            top_k: requested_or_default_top_k(req.top_k),
             max_tokens: chat_request_max_tokens(&req),
             stop: normalized_stop_for_generation(req.stop.as_deref()),
             seed: req.seed,

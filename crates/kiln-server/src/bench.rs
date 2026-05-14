@@ -630,6 +630,7 @@ fn bench_inference(
         repetition_penalty: 1.0,
         stop: vec![],
         seed: Some(seed),
+        ..SamplingParams::default()
     };
 
     // Warmup
@@ -1500,6 +1501,7 @@ fn bench_latency_skiplayer(
         repetition_penalty: 1.0,
         stop: vec![],
         seed: Some(seed),
+        ..SamplingParams::default()
     };
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
@@ -1734,6 +1736,7 @@ fn bench_latency_paged_skiplayer(
         repetition_penalty: 1.0,
         stop: vec![],
         seed: Some(seed),
+        ..SamplingParams::default()
     };
 
     while num_tokens < max_output_tokens {
@@ -2030,6 +2033,7 @@ fn bench_latency_paged_mtp(
         repetition_penalty: 1.0,
         stop: vec![],
         seed: Some(seed),
+        ..SamplingParams::default()
     };
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
