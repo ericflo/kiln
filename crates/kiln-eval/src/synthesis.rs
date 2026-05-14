@@ -336,7 +336,12 @@ pub fn auto_detect_scorer(target: &str) -> Scorer {
 
 fn looks_like_tool_call_target(s: &str) -> bool {
     let trimmed = s.trim();
-    if !(trimmed.starts_with('{') || trimmed.starts_with("```tool_call") || trimmed.starts_with("<tool_call>")) {
+    // Qwen3.5's native XML form is the most common target shape after
+    // we canonicalize trajectories — but it doesn't start with '{'.
+    if trimmed.starts_with("<tool_call>") || trimmed.starts_with("```tool_call") {
+        return true;
+    }
+    if !trimmed.starts_with('{') {
         return false;
     }
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
@@ -352,7 +357,7 @@ fn looks_like_tool_call_target(s: &str) -> bool {
             }
         }
     }
-    trimmed.starts_with("```tool_call") || trimmed.starts_with("<tool_call>")
+    false
 }
 
 fn detect_code_language(s: &str) -> Option<String> {

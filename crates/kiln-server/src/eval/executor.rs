@@ -81,6 +81,7 @@ async fn run_suite_inner(
     let mut weights: BTreeMap<String, f32> = BTreeMap::new();
     let mut tags_by_example: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut scorer_kind_by_example: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut target_tool_by_example: BTreeMap<String, String> = BTreeMap::new();
     let mut running_pass: u32 = 0;
     let mut running_score: f32 = 0.0;
     let mut completions_seen: u32 = 0;
@@ -106,6 +107,16 @@ async fn run_suite_inner(
         tags_by_example.insert(example_id.clone(), example.tags.clone());
         let scorer = example.scorer.as_ref().unwrap_or(&suite.default_scorer);
         scorer_kind_by_example.insert(example_id.clone(), scorer.kind_label());
+        // For tool_call-scored examples, snapshot the target tool name so
+        // the aggregate can break out pass-rate per tool. Cheap parse of
+        // the target — uses the same extractor the scorer does.
+        if matches!(scorer, kiln_eval::scorers::Scorer::ToolCall { .. }) {
+            if let Some(target) = example.target.as_deref() {
+                if let Some(call) = kiln_eval::qwen3::extract_first_tool_call(target) {
+                    target_tool_by_example.insert(example_id.clone(), call.name);
+                }
+            }
+        }
         let gen_params = example
             .generation
             .as_ref()
@@ -210,11 +221,12 @@ async fn run_suite_inner(
     }
 
     let elapsed = start_instant.elapsed().as_secs_f64();
-    let metrics = AggregateMetrics::compute(
+    let metrics = AggregateMetrics::compute_with_tools(
         &outcomes,
         &weights,
         &tags_by_example,
         &scorer_kind_by_example,
+        &target_tool_by_example,
         elapsed,
     );
     let finished_at = chrono::Utc::now();

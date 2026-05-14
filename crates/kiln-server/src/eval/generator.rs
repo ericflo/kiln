@@ -317,13 +317,25 @@ impl EvalGenerator for LiveEvalGenerator {
 
 fn build_sampling(params: &EvalGenerationParams, completion_index: usize) -> SamplingParams {
     let seed = params.seed.map(|s| s.wrapping_add(completion_index as u64));
+    // When the suite/example author didn't set explicit stop strings,
+    // default to Qwen3.5's assistant turn terminators. Without this an
+    // eval can run past `<|im_end|>` into a second `assistant\n<think>`
+    // pseudo-turn and confuse downstream scoring. The base server EOS
+    // already terminates on the EOS token, but the extra stop string is
+    // a belt-and-suspenders guard against templates that occasionally
+    // emit the literal `<|im_end|>` text.
+    let stop = if params.stop.is_empty() {
+        vec!["<|im_end|>".to_string()]
+    } else {
+        params.stop.clone()
+    };
     SamplingParams {
         temperature: params.temperature,
         top_p: params.top_p,
         top_k: params.top_k,
         max_tokens: params.max_tokens,
         repetition_penalty: 1.0,
-        stop: params.stop.clone(),
+        stop,
         seed,
     }
 }

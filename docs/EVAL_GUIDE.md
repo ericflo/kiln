@@ -478,3 +478,152 @@ saved to disk so you can inspect them, but kiln won't auto-load them.
 
 **Slice a suite by difficulty.** Tag every example (`"tags": ["easy"]` /
 `["hard"]`) and read `pass_rate_by_tag` to see where the model breaks.
+
+## Qwen3.5-native chat format
+
+Kiln only targets Qwen3.5-4B, so the eval system is *precise* about the
+model's wire format. Three things matter:
+
+### 1. Thinking blocks are stripped before scoring
+
+Qwen3.5's chat template prefills `<think>\n` into every assistant turn,
+so the raw completion looks like:
+
+```
+<think>
+Let me work out the capital of France.
+</think>
+
+Paris
+```
+
+Every scorer except `tool_call` and `llm_judge` strips the
+`<think>…</think>` block before comparing — so an `exact_match` target
+of `Paris` passes even when reasoning is verbose. Scorers see the *answer*,
+not the chain-of-thought.
+
+The reasoning text is preserved on each `ExampleOutcome` as
+`reasoning_text`, so dashboards can render "thought 432 chars before
+answering" without re-parsing. The aggregate metrics include a
+`reasoning_length` histogram (mean / p50 / p90 / max) across the run, and
+`num_unclosed_thinking` flags completions that opened `<think>` but never
+closed it (typically max_tokens hit inside reasoning).
+
+To disable thinking on a per-example basis, set
+`"generation": {"chat_template_kwargs": {"enable_thinking": false}}` —
+Qwen3.5's template will then prefill an empty `<think>\n\n</think>\n\n`
+block.
+
+### 2. Tool calls — XML and JSON both score
+
+Qwen3.5's *native* tool-call wire form is XML:
+
+```
+<tool_call>
+<function=get_weather>
+<parameter=city>
+Paris
+</parameter>
+<parameter=units>
+celsius
+</parameter>
+</function>
+</tool_call>
+```
+
+`Scorer::ToolCall` parses every format Kiln has seen (Qwen3.5 XML,
+canonical JSON `{"tool_calls":[…]}`, OpenAI `function.arguments` strings,
+fenced ```` ```tool_call``` ```` blocks) into the same structured
+`ParsedToolCall` and compares structurally. A target stored as JSON
+canonical scores correctly against a model that emitted Qwen3.5 XML, and
+vice versa.
+
+Numeric and boolean XML params auto-coerce to their JSON shape, so a
+target of `{"replace_all": false}` compares correctly against a model
+that wrote `<parameter=replace_all>\nfalse\n</parameter>`. Both `False`
+(Python `str()`) and `false` (JSON) tokens are recognized.
+
+Multi-call targets pair calls positionally; excess predicted calls
+subtract `0.25 / target_count` from the score, and missing calls fail
+the corresponding pair. The scorer detail string surfaces the actual
+on-the-wire formats (`formats=[xml,json]`) so you can spot a model that
+regressed from native XML to JSON.
+
+### 3. Tools belong on the suite
+
+Agentic suites declare their tool catalogue once on the suite itself:
+
+```json
+{
+  "name": "weather-agent",
+  "default_scorer": {"kind": "tool_call"},
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Return current weather for a city.",
+        "parameters": {
+          "type": "object",
+          "properties": {"city": {"type": "string"}},
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "examples": [...]
+}
+```
+
+The executor passes these into the chat template so the Qwen3.5
+`<tools>` system block renders into every prompt automatically. Per-example
+`tools` override the suite default — useful when one example needs a
+broader catalogue than the rest.
+
+For agentic suites, the result includes `pass_rate_by_tool`: a map from
+tool name to `(num_examples, num_pass, pass_rate)`. So you can spot a
+model that nails `Read` but flubs `Edit` without writing per-tool tags
+yourself.
+
+## Built-in: `qwen3.5-agentic-core`
+
+Kiln ships a hand-crafted 24-example agentic eval suite under the name
+`qwen3.5-agentic-core`. It auto-registers at server startup, so:
+
+```bash
+kiln-eval run --suite qwen3.5-agentic-core --adapter my-trained-adapter --watch
+```
+
+…just works without authoring anything. The suite covers:
+
+- Pure no-tool answers (the model must NOT invoke a tool for things it
+  already knows).
+- Single tool calls with exact args / paraphrase-tolerant args /
+  ambiguous tool selection.
+- Multi-step trajectory followups (assistant emits a tool call, the
+  tool returns a result, what does the model say next?).
+- Thinking-then-answer probes.
+- Code generation, JSON output validation, MCQ, numeric tolerance.
+- Tool-call refusals (the model must NOT invoke tools that aren't in
+  the catalogue).
+
+Use it as a regression gate after every training run.
+
+## Synthesis strategies (agentic)
+
+Two strategies on top of `final_assistant` / `first_assistant_turn` /
+`every_assistant_turn` / `tool_call_predict` cover the agentic-eval
+shapes that matter:
+
+- **`tool_response_followup`** — One example per
+  `(assistant tool_call → tool result(s) → next assistant)` triple.
+  Prompt ends on the tool response so the model is asked "given this
+  tool output, what do you do next?".
+- **`end_of_trajectory_answer`** — Prompt = full trajectory up through
+  the last tool result, target = the closing assistant turn. Filters
+  out non-agentic conversations.
+
+`final_assistant` and `first_assistant_turn` now canonicalize raw
+Qwen3.5 XML tool calls in `assistant.content` into the JSON envelope
+automatically, so SFT data captured from a base Qwen3.5 model
+(no structured `tool_calls`) still produces clean tool-call targets.

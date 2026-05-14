@@ -148,17 +148,80 @@ pub struct AggregateMetrics {
     pub pass_rate_by_tag: BTreeMap<String, f32>,
     /// Per-scorer-kind breakdown when the suite mixes scorers.
     pub by_scorer: Vec<ScorerBreakdown>,
+    /// Per-tool-name pass rate, surfaced only when the suite exercises
+    /// tool calls. The key is the target tool name (e.g. "get_weather");
+    /// the value is `(num_examples_targeting_this_tool, passed)`. Lets
+    /// users immediately spot "the model nails Read but flubs Edit".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pass_rate_by_tool: BTreeMap<String, ToolBreakdown>,
+    /// Distribution of reasoning lengths (chars in the `<think>…</think>`
+    /// block). Zero when no example produced a reasoning trace.
+    #[serde(default)]
+    pub reasoning_length: ReasoningLengthStats,
+    /// Number of completions that emitted an opening `<think>` but never
+    /// closed it. Surfaced separately because these are a distinct class
+    /// of failure (generation timed out / hit max_tokens inside reasoning).
+    #[serde(default)]
+    pub num_unclosed_thinking: u32,
+    /// Number of completions whose tool call wasn't in Qwen3.5's native
+    /// XML form. Non-fatal but a useful "the model regressed from XML to
+    /// JSON" signal during fine-tuning.
+    #[serde(default)]
+    pub num_non_xml_tool_calls: u32,
+}
+
+/// Per-tool aggregate counts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolBreakdown {
+    pub num_examples: u32,
+    pub num_pass: u32,
+    pub pass_rate: f32,
+}
+
+/// Compact summary of reasoning-block lengths across a suite run.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReasoningLengthStats {
+    pub num_with_thinking: u32,
+    pub mean_chars: f64,
+    pub p50_chars: u32,
+    pub p90_chars: u32,
+    pub max_chars: u32,
 }
 
 impl AggregateMetrics {
     /// Compute aggregate metrics from a vector of per-example outcomes and
     /// the example weights they map to. Latency samples are read from
     /// `ExampleOutcome::latency_ms` where present.
+    ///
+    /// `target_tool_by_example` is an optional map from example_id to the
+    /// target tool name (parsed from the example's `target` field by the
+    /// executor). When present, the result includes a per-tool pass-rate
+    /// breakdown — invaluable for agentic-suite dashboards.
     pub fn compute(
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
         tags_by_example: &BTreeMap<String, Vec<String>>,
         scorer_kind_by_example: &BTreeMap<String, &'static str>,
+        elapsed_secs: f64,
+    ) -> Self {
+        Self::compute_with_tools(
+            outcomes,
+            weights,
+            tags_by_example,
+            scorer_kind_by_example,
+            &BTreeMap::new(),
+            elapsed_secs,
+        )
+    }
+
+    /// Same as [`Self::compute`] but takes per-example target tool names
+    /// so the aggregate carries a per-tool pass-rate breakdown.
+    pub fn compute_with_tools(
+        outcomes: &[ExampleOutcome],
+        weights: &BTreeMap<String, f32>,
+        tags_by_example: &BTreeMap<String, Vec<String>>,
+        scorer_kind_by_example: &BTreeMap<String, &'static str>,
+        target_tool_by_example: &BTreeMap<String, String>,
         elapsed_secs: f64,
     ) -> Self {
         let mut num_pass = 0u32;
@@ -176,6 +239,13 @@ impl AggregateMetrics {
         let mut tag_pass: BTreeMap<String, (u32, u32)> = BTreeMap::new();
         // by scorer kind
         let mut scorer_acc: BTreeMap<&'static str, (u32, f32, u32)> = BTreeMap::new();
+        // per-tool pass-rate
+        let mut tool_pass: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        // reasoning-length samples
+        let mut reasoning_lens: Vec<u32> = Vec::new();
+        let mut num_unclosed_thinking = 0u32;
+        // qwen3-format diagnostic — extracted from the scorer's detail.
+        let mut num_non_xml_tool_calls = 0u32;
 
         for out in outcomes {
             match out.kind {
@@ -209,6 +279,31 @@ impl AggregateMetrics {
                             entry.1 += 1;
                         }
                     }
+                }
+                if let Some(tool) = target_tool_by_example.get(&out.example_id) {
+                    let entry = tool_pass.entry(tool.clone()).or_insert((0, 0));
+                    entry.0 += 1;
+                    if matches!(out.kind, EvalOutcomeKind::Pass) {
+                        entry.1 += 1;
+                    }
+                }
+            }
+            if out.unclosed_thinking {
+                num_unclosed_thinking += 1;
+            }
+            if let Some(text) = out.reasoning_text.as_deref() {
+                reasoning_lens.push(text.chars().count() as u32);
+            }
+            // Scorer detail of the form "... formats=[json,...]" marks a
+            // non-Qwen3.5-XML emission. Cheap textual check — the canonical
+            // alternative is to plumb a typed format flag through the
+            // outcome but the textual check is good enough for an
+            // aggregate stat.
+            if let Some(detail) = out.detail.as_deref() {
+                if detail.contains("formats=") && !detail.contains("formats=[xml")
+                    && !detail.contains("formats=[xml,")
+                {
+                    num_non_xml_tool_calls += 1;
                 }
             }
             if let Some(kind) = scorer_kind_by_example.get(&out.example_id) {
@@ -254,6 +349,22 @@ impl AggregateMetrics {
             })
             .collect();
 
+        let pass_rate_by_tool = tool_pass
+            .into_iter()
+            .map(|(tool, (n, p))| {
+                let rate = if n > 0 { p as f32 / n as f32 } else { 0.0 };
+                (
+                    tool,
+                    ToolBreakdown {
+                        num_examples: n,
+                        num_pass: p,
+                        pass_rate: rate,
+                    },
+                )
+            })
+            .collect();
+        let reasoning_length = compute_reasoning_stats(&reasoning_lens);
+
         Self {
             num_examples,
             num_pass,
@@ -269,7 +380,32 @@ impl AggregateMetrics {
             elapsed_secs,
             pass_rate_by_tag,
             by_scorer,
+            pass_rate_by_tool,
+            reasoning_length,
+            num_unclosed_thinking,
+            num_non_xml_tool_calls,
         }
+    }
+}
+
+fn compute_reasoning_stats(samples: &[u32]) -> ReasoningLengthStats {
+    if samples.is_empty() {
+        return ReasoningLengthStats::default();
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let p = |q: f64| -> u32 {
+        let idx = ((q * (n as f64 - 1.0)).round() as usize).min(n - 1);
+        sorted[idx]
+    };
+    let total: u64 = sorted.iter().map(|x| *x as u64).sum();
+    ReasoningLengthStats {
+        num_with_thinking: n as u32,
+        mean_chars: total as f64 / n as f64,
+        p50_chars: p(0.5),
+        p90_chars: p(0.9),
+        max_chars: *sorted.last().unwrap_or(&0),
     }
 }
 
