@@ -35,7 +35,7 @@ use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::packed_weight_registry::GpuPackedWeightRegistry;
 use crate::paged_kv_cache::PagedKvCache;
-use crate::sampling::{greedy_sample, sample_with_params};
+use crate::sampling::{greedy_sample, sample_step, sample_with_full_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -893,13 +893,10 @@ fn sample_first_decode_token(
     if params.is_effectively_greedy() {
         Ok(greedy_sample(logits)?)
     } else {
-        Ok(sample_with_params(
-            logits,
-            params.temperature,
-            params.top_p,
-            params.top_k,
-            params.seed,
-        )?)
+        // First decode token has no generated history yet — penalties
+        // become a no-op even when set, which is the correct OpenAI
+        // semantics (penalties apply to *generated* tokens only).
+        Ok(sample_with_full_params(logits, params, &[])?)
     }
 }
 
@@ -1281,13 +1278,7 @@ impl ModelRunner {
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+            sample_step(&logits, params, step_seed, &[])?
         };
 
         for _step in 0..params.max_tokens {
@@ -1358,13 +1349,7 @@ impl ModelRunner {
             next_token = if params.is_effectively_greedy() {
                 greedy_sample(&logits)?
             } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
+                sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
 
@@ -1412,13 +1397,7 @@ impl ModelRunner {
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+            sample_step(&logits, params, step_seed, &[])?
         };
 
         for _step in 0..params.max_tokens {
@@ -1479,13 +1458,7 @@ impl ModelRunner {
             next_token = if params.is_effectively_greedy() {
                 greedy_sample(&logits)?
             } else {
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
+                sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
 
@@ -2145,13 +2118,7 @@ impl ModelRunner {
         let next_token = if params.temperature == 0.0 {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                params.seed,
-            )?
+            sample_step(&logits, params, params.seed, &[])?
         };
 
         let registration = self.completed_prompt_registration(
@@ -2285,13 +2252,9 @@ impl ModelRunner {
                 let token = if params[0].temperature == 0.0 {
                     greedy_sample(&row)?
                 } else {
-                    sample_with_params(
-                        &row,
-                        params[0].temperature,
-                        params[0].top_p,
-                        params[0].top_k,
-                        states[0].step_seed,
-                    )?
+                    let mut row_params = params[0].clone();
+                    row_params.seed = states[0].step_seed;
+                    sample_with_full_params(&row, &row_params, &states[0].generated_tokens)?
                 };
                 vec![token]
             } else {
@@ -2323,12 +2286,12 @@ impl ModelRunner {
                     let token = if params.temperature == 0.0 {
                         greedy_sample(&row)?
                     } else {
-                        sample_with_params(
+                        let mut row_params = params.clone();
+                        row_params.seed = states[idx].step_seed;
+                        sample_with_full_params(
                             &row,
-                            params.temperature,
-                            params.top_p,
-                            params.top_k,
-                            states[idx].step_seed,
+                            &row_params,
+                            &states[idx].generated_tokens,
                         )?
                     };
                     sampled.push(token);
@@ -2415,13 +2378,7 @@ impl ModelRunner {
         let next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+            sample_step(&logits, params, step_seed, &[])?
         };
         self.decode_from_prefill_token(
             next_token,
@@ -2742,13 +2699,7 @@ impl ModelRunner {
         let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )
+            sample_step(&logits, params, step_seed, &[])
         }?;
         if skip_gdn_state_readback {
             linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
@@ -2915,13 +2866,7 @@ impl ModelRunner {
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+            sample_step(&logits, params, step_seed, &[])?
         };
 
         for _step in 0..params.max_tokens {
@@ -3078,13 +3023,7 @@ impl ModelRunner {
                 if params.is_effectively_greedy() {
                     greedy_sample(&logits)?
                 } else {
-                    sample_with_params(
-                        &logits,
-                        params.temperature,
-                        params.top_p,
-                        params.top_k,
-                        step_seed,
-                    )?
+                    sample_step(&logits, params, step_seed, &[])?
                 }
             }
         };
@@ -3170,13 +3109,7 @@ impl ModelRunner {
                     )?
                 };
                 seq_len += 1;
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
+                sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
 
@@ -3453,13 +3386,7 @@ impl ModelRunner {
                 if params.is_effectively_greedy() {
                     greedy_sample(&logits)?
                 } else {
-                    sample_with_params(
-                        &logits,
-                        params.temperature,
-                        params.top_p,
-                        params.top_k,
-                        step_seed,
-                    )?
+                    sample_step(&logits, params, step_seed, &[])?
                 }
             }
         };
@@ -3536,13 +3463,7 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                 )?;
                 seq_len += 1;
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
+                sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
 
@@ -3641,13 +3562,7 @@ impl ModelRunner {
         let mut last_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                params.seed,
-            )?
+            sample_step(&logits, params, params.seed, &[])?
         };
 
         loop {
@@ -4158,13 +4073,7 @@ impl ModelRunner {
         let mut last_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                params.seed,
-            )?
+            sample_step(&logits, params, params.seed, &[])?
         };
 
         loop {
@@ -5644,13 +5553,7 @@ impl ModelRunner {
         let mut next_token = if params.is_effectively_greedy() {
             greedy_sample(&logits)?
         } else {
-            sample_with_params(
-                &logits,
-                params.temperature,
-                params.top_p,
-                params.top_k,
-                step_seed,
-            )?
+            sample_step(&logits, params, step_seed, &[])?
         };
 
         for _step in 0..params.max_tokens {
@@ -5747,13 +5650,7 @@ impl ModelRunner {
                     }
                 };
                 seq_len += 1;
-                sample_with_params(
-                    &logits,
-                    params.temperature,
-                    params.top_p,
-                    params.top_k,
-                    step_seed,
-                )?
+                sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
 

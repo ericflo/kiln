@@ -69,6 +69,290 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     Ok(ids.to_vec1::<u32>()?)
 }
 
+/// Sample one decode step with full Qwen3.5 sampling support. Wraps
+/// [`sample_with_full_params`] with a stepwise seed override so callers
+/// can advance the seed per token without cloning `SamplingParams` at
+/// every call site.
+///
+/// `step_seed` overrides `params.seed` for this step only (it does NOT
+/// mutate `params`). Pass `None` for unseeded sampling.
+/// `history` is the slice of generated token ids so far — pass `&[]`
+/// for the first decode token (no penalties apply).
+pub fn sample_step(
+    logits: &Tensor,
+    params: &kiln_core::sampling::SamplingParams,
+    step_seed: Option<u64>,
+    history: &[u32],
+) -> Result<u32> {
+    if params.is_effectively_greedy() {
+        return greedy_sample(logits);
+    }
+    // Cheap struct copy — the only field that ever differs per step is
+    // `seed`. Cloning the small `Vec<String>` stop list is negligible
+    // compared to the forward pass that produced the logits.
+    let mut effective = params.clone();
+    effective.seed = step_seed;
+    sample_with_full_params(logits, &effective, history)
+}
+
+/// Comprehensive sampler. Applies, in order:
+///
+/// 1. Repetition penalty (HF-style, sign-conditional).
+/// 2. Presence + frequency penalty (OpenAI-style, subtractive).
+/// 3. Temperature scaling.
+/// 4. Top-k filtering.
+/// 5. Min-p filtering.
+/// 6. Top-p (nucleus) filtering.
+/// 7. Categorical sample.
+///
+/// **Performance**: the penalties are applied on-device via `index_add`
+/// over the small set of *unique* history token ids — typical history
+/// is hundreds of tokens with maybe ~tens of unique ids active at any
+/// given step, so the on-device work is microseconds. After the
+/// penalty pass the sampler routes through the existing fast top-k
+/// path, transferring only top_k (idx, value) pairs to host. The
+/// host-side work that remains (softmax over top_k, min_p, top_p,
+/// categorical) operates on tens of values, not the full vocab.
+///
+/// When every penalty is a no-op AND `min_p == 0`, this short-circuits
+/// to the legacy [`sample_with_params`] for byte-identical behavior
+/// with the pre-Qwen3.5 sampler.
+pub fn sample_with_full_params(
+    logits: &Tensor,
+    params: &kiln_core::sampling::SamplingParams,
+    token_history: &[u32],
+) -> Result<u32> {
+    use kiln_core::sampling::SamplingParams as SP;
+
+    if params.is_effectively_greedy() {
+        return greedy_sample(logits);
+    }
+    let penalties_no_op = params.token_penalties_are_no_op() || token_history.is_empty();
+    let min_p_no_op = SP::min_p_is_disabled(params.min_p);
+    if penalties_no_op && min_p_no_op {
+        return sample_with_params(
+            logits,
+            params.temperature,
+            params.top_p,
+            params.top_k,
+            params.seed,
+        );
+    }
+
+    // Apply penalties on-device — produces a new logits tensor with
+    // history-token logits adjusted. The bulk of the vocab is
+    // untouched, so this scales with |unique history| not |vocab|.
+    let adjusted_logits = if penalties_no_op {
+        last_position_logits(logits)?
+    } else {
+        apply_penalties_on_device(
+            logits,
+            token_history,
+            params.repetition_penalty,
+            params.presence_penalty,
+            params.frequency_penalty,
+        )?
+    };
+
+    // Now route through the existing top-k fast path with min_p added
+    // as a post-top-k host-side filter.
+    sample_from_adjusted_logits(
+        &adjusted_logits,
+        params.temperature,
+        params.top_p,
+        params.top_k,
+        params.min_p,
+        params.seed,
+    )
+}
+
+/// Apply repetition / presence / frequency penalties to the logits on
+/// the device that holds them. Returns a new tensor of the same shape
+/// as `last_position_logits(logits)`.
+///
+/// Strategy: gather the small slice of current logits at the unique
+/// history token ids, compute the post-penalty values on host (a few
+/// hundred floats max), then index_add the delta back into the logits
+/// tensor on-device.
+fn apply_penalties_on_device(
+    logits: &Tensor,
+    history: &[u32],
+    repetition: f32,
+    presence: f32,
+    frequency: f32,
+) -> Result<Tensor> {
+    let flat = last_position_logits(logits)?;
+    let flat = flat.to_dtype(DType::F32)?;
+    let device = flat.device().clone();
+
+    // Count unique history tokens.
+    let mut counts: std::collections::HashMap<u32, u32> = std::collections::HashMap::with_capacity(history.len());
+    for &t in history {
+        *counts.entry(t).or_default() += 1;
+    }
+    if counts.is_empty() {
+        return Ok(flat);
+    }
+    // Stable ordering for the indices tensor — keeps the on-device
+    // scatter deterministic across runs.
+    let mut unique: Vec<u32> = counts.keys().copied().collect();
+    unique.sort_unstable();
+
+    // Gather current logit values for those token ids.
+    let indices = Tensor::new(unique.as_slice(), &device)?;
+    let current: Vec<f32> = flat.index_select(&indices, 0)?.to_vec1()?;
+
+    let rep_active = repetition.is_finite()
+        && repetition > 0.0
+        && (repetition - 1.0).abs() > f32::EPSILON;
+    let presence_active = presence.is_finite() && presence != 0.0;
+    let frequency_active = frequency.is_finite() && frequency != 0.0;
+
+    let mut deltas: Vec<f32> = Vec::with_capacity(unique.len());
+    for (i, &tok) in unique.iter().enumerate() {
+        let orig = current[i];
+        let mut new = orig;
+        if rep_active {
+            new = if new > 0.0 { new / repetition } else { new * repetition };
+        }
+        if presence_active {
+            new -= presence;
+        }
+        if frequency_active {
+            let count = counts.get(&tok).copied().unwrap_or(0);
+            new -= frequency * count as f32;
+        }
+        deltas.push(new - orig);
+    }
+
+    let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
+    // `index_add` returns a new tensor with `source` added at the given
+    // `indices` along dim 0. Available on every backend candle ships
+    // (CPU, CUDA, Metal, Vulkan-via-candle), so no backend-specific
+    // branching needed here.
+    Ok(flat.index_add(&indices, &delta_tensor, 0)?)
+}
+
+/// Sample from an already-temperature-pre-scaling logits tensor with
+/// the standard top-k → softmax → min_p → top_p → categorical pipeline.
+/// Mirrors the legacy [`sample_with_params`] fast paths bit-for-bit
+/// when `min_p == 0`, then adds the host-side min_p filter on the
+/// truncated top-k subset.
+fn sample_from_adjusted_logits(
+    flat_logits: &Tensor,
+    temperature: f32,
+    top_p: f32,
+    top_k: u32,
+    min_p: f32,
+    seed: Option<u64>,
+) -> Result<u32> {
+    use kiln_core::sampling::SamplingParams as SP;
+    if SP::values_are_effectively_greedy(temperature, top_k) {
+        return greedy_sample(flat_logits);
+    }
+    let vocab_size = flat_logits.dims1()?;
+
+    let scaled = flat_logits.affine(1.0 / temperature as f64, 0.0)?;
+
+    // Default sampling stays on-device for GPU backends when there's no
+    // filter active AT ALL — this is the gumbel-softmax fast path.
+    let min_p_no_op = SP::min_p_is_disabled(min_p);
+    if seed.is_none()
+        && SP::top_p_disables_nucleus_filter(top_p)
+        && (top_k == 0 || top_k as usize >= vocab_size)
+        && min_p_no_op
+        && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
+    {
+        let sampled = gumbel_softmax(&scaled, 1.0, 0)?;
+        return Ok(sampled.to_scalar::<u32>()?);
+    }
+    if SP::top_p_disables_nucleus_filter(top_p)
+        && (top_k == 0 || top_k as usize >= vocab_size)
+        && min_p_no_op
+    {
+        return sample_full_distribution_unsorted(&scaled, seed);
+    }
+
+    // Fetch top-k (idx, logit) pairs — same machinery the legacy
+    // sampler uses. Min_p is a host-side filter applied after softmax.
+    let indexed: Vec<(u32, f32)> = if top_k > 0 && (top_k as usize) < vocab_size {
+        match try_topk_on_device(&scaled, top_k as usize) {
+            Ok(pairs) => pairs,
+            Err(_) => topk_via_host_sort(&scaled, Some(top_k as usize))?,
+        }
+    } else {
+        topk_via_host_sort(&scaled, None)?
+    };
+    if indexed.is_empty() {
+        anyhow::bail!("no candidates after filtering");
+    }
+
+    // Stable softmax over the truncated set.
+    let max_logit = indexed[0].1;
+    let mut probs: Vec<(u32, f32)> = indexed
+        .iter()
+        .map(|&(idx, logit)| (idx, (logit - max_logit).exp()))
+        .collect();
+    let sum: f32 = probs.iter().map(|(_, p)| p).sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Ok(probs.first().map(|&(idx, _)| idx).unwrap_or(0));
+    }
+    for (_, p) in probs.iter_mut() {
+        *p /= sum;
+    }
+
+    // Min-p filtering, applied to the post-softmax top-k subset.
+    if !min_p_no_op {
+        let pmax = probs.first().map(|&(_, p)| p).unwrap_or(0.0);
+        let threshold = min_p * pmax;
+        probs.retain(|&(_, p)| p >= threshold);
+        if probs.is_empty() {
+            return Ok(indexed[0].0);
+        }
+        let s: f32 = probs.iter().map(|(_, p)| p).sum();
+        if s > 0.0 {
+            for (_, p) in probs.iter_mut() {
+                *p /= s;
+            }
+        }
+    }
+
+    // Top-p (nucleus) filtering.
+    if top_p > 0.0 && top_p < 1.0 {
+        let mut cumsum = 0.0_f32;
+        let mut cutoff = probs.len();
+        for (i, (_, p)) in probs.iter().enumerate() {
+            cumsum += p;
+            if cumsum >= top_p {
+                cutoff = i + 1;
+                break;
+            }
+        }
+        probs.truncate(cutoff);
+        let s: f32 = probs.iter().map(|(_, p)| p).sum();
+        if s > 0.0 {
+            for (_, p) in probs.iter_mut() {
+                *p /= s;
+            }
+        }
+    }
+
+    // Categorical sample.
+    let mut rng: StdRng = match seed {
+        Some(s) => StdRng::seed_from_u64(s),
+        None => rand::make_rng::<StdRng>(),
+    };
+    let r: f32 = rng.random();
+    let mut cumsum = 0.0_f32;
+    for &(idx, p) in &probs {
+        cumsum += p;
+        if r < cumsum {
+            return Ok(idx);
+        }
+    }
+    Ok(probs.last().context("no candidates after filtering")?.0)
+}
+
 /// Parameterized sampling with temperature, top-k, and top-p (nucleus) filtering.
 ///
 /// `logits`: tensor of shape `[..., vocab_size]`. Only the last position is sampled.
@@ -253,10 +537,75 @@ fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> 
     Ok(indices.into_iter().zip(values).collect())
 }
 
-/// Pull the full distribution to host, sort descending, and optionally truncate
-/// to the top-k entries. Used as a fallback when the on-device sort cannot run.
+/// Pull the full distribution to host and return the top-k `(idx, value)`
+/// pairs in descending order. When `top_k` is small (under ~1024 — the
+/// regime Qwen3.5's default of 20 always falls into) we use a min-heap
+/// based partial selection in O(V log K) instead of a full O(V log V)
+/// sort. For Qwen3.5-4B (V=152,064, K=20) this is ~4× fewer comparisons.
+///
+/// When `top_k` is `None` or large, falls back to the full sort. The
+/// CPU/Vulkan fast path benefits the most from this — CUDA/Metal use
+/// `try_topk_on_device` which never reaches this fallback under normal
+/// operation.
 fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32, f32)>> {
     let values: Vec<f32> = scaled.to_vec1()?;
+    let vocab = values.len();
+
+    // Heap-based partial selection. Only worth the bookkeeping when
+    // k << V; the crossover is roughly k < log2(V) — i.e. for our
+    // 152k vocab, k < 17 starts saving meaningful time. We pick a
+    // wider threshold of 1024 to also cover users who set top_k higher
+    // than Qwen3.5's default of 20.
+    if let Some(k) = top_k.filter(|&k| k > 0 && k < vocab && k <= 1024) {
+        use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
+
+        #[derive(Copy, Clone)]
+        struct MinEntry(f32, u32);
+        impl PartialEq for MinEntry {
+            fn eq(&self, o: &Self) -> bool { self.0 == o.0 && self.1 == o.1 }
+        }
+        impl Eq for MinEntry {}
+        // BinaryHeap is a max-heap; invert ordering so we get a min-heap.
+        impl PartialOrd for MinEntry {
+            fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        impl Ord for MinEntry {
+            fn cmp(&self, o: &Self) -> Ordering {
+                // Reversed: smaller value is "greater" in heap terms so
+                // that pop() yields the smallest. NaN-safe.
+                o.0.partial_cmp(&self.0)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| o.1.cmp(&self.1))
+            }
+        }
+
+        let mut heap: BinaryHeap<MinEntry> = BinaryHeap::with_capacity(k + 1);
+        for (i, &v) in values.iter().enumerate() {
+            if heap.len() < k {
+                heap.push(MinEntry(v, i as u32));
+            } else if let Some(min) = heap.peek() {
+                // Push only if this value beats the current heap min.
+                if v.partial_cmp(&min.0) == Some(Ordering::Greater) {
+                    heap.pop();
+                    heap.push(MinEntry(v, i as u32));
+                }
+            }
+        }
+        // `into_sorted_vec` returns entries in *ascending* order of our
+        // reversed Ord — which is descending by actual value. That's
+        // exactly the order we want (largest first), no reversal needed.
+        let out: Vec<(u32, f32)> = heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(|e| (e.1, e.0))
+            .collect();
+        return Ok(out);
+    }
+
+    // Full sort fallback (top_k unset or larger than the heap threshold).
     let mut indexed: Vec<(u32, f32)> = values
         .into_iter()
         .enumerate()
@@ -557,6 +906,294 @@ mod tests {
         let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let token = sample_with_params(&logits, 1.0, 1.0, 0, None)?;
         assert!(token < 4, "sampled token out of range: {token}");
+        Ok(())
+    }
+
+    // ---- sample_with_full_params + penalty tests ---------------------------
+
+    fn full_params_with_seed(
+        seed: u64,
+    ) -> kiln_core::sampling::SamplingParams {
+        kiln_core::sampling::SamplingParams {
+            seed: Some(seed),
+            ..kiln_core::sampling::SamplingParams::greedy()
+        }
+    }
+
+    #[test]
+    fn test_full_params_greedy_short_circuits() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let mut params = full_params_with_seed(42);
+        params.temperature = 0.0;
+        let token = sample_with_full_params(&logits, &params, &[])?;
+        assert_eq!(token, 1, "temperature=0 must be greedy");
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_params_no_op_path_matches_legacy() -> Result<()> {
+        // With penalties off, min_p=0, the full sampler must produce the
+        // same token as the legacy sample_with_params for any given seed.
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let mut params = full_params_with_seed(123);
+        params.temperature = 1.0;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.min_p = 0.0;
+        params.repetition_penalty = 1.0;
+        params.presence_penalty = 0.0;
+        params.frequency_penalty = 0.0;
+        let history: Vec<u32> = vec![1, 2, 3]; // ignored when penalties no-op
+        let a = sample_with_full_params(&logits, &params, &history)?;
+        let b = sample_with_params(&logits, 1.0, 1.0, 0, Some(123))?;
+        assert_eq!(a, b, "no-op penalty path must match legacy sampler");
+        Ok(())
+    }
+
+    #[test]
+    fn test_min_p_drops_low_probability_tokens() -> Result<()> {
+        let device = Device::Cpu;
+        // Token 0 dominates the distribution (~99%); tokens 1-3 are tiny.
+        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
+        let mut params = full_params_with_seed(7);
+        params.temperature = 1.0;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.min_p = 0.5; // require >= 50% of max probability
+        for seed in 0..20 {
+            params.seed = Some(seed);
+            let token = sample_with_full_params(&logits, &params, &[])?;
+            assert_eq!(token, 0, "min_p=0.5 should drop all tokens but 0");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_repetition_penalty_avoids_repeated_token() -> Result<()> {
+        let device = Device::Cpu;
+        // Token 1 is the natural argmax. With a strong repetition
+        // penalty AND token 1 in history, the sampler should prefer
+        // another token.
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1e-6; // near-greedy so the result is dominated by the highest logit
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.repetition_penalty = 100.0; // crush the repeated-token logit
+        let token = sample_with_full_params(&logits, &params, &[1])?;
+        assert_ne!(
+            token, 1,
+            "strong repetition penalty must move us off the repeated token"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_presence_penalty_suppresses_seen_tokens() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1e-6;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.presence_penalty = 10.0; // massive subtraction
+        // Token 1 was emitted once before. After presence penalty,
+        // logit[1] becomes 5 - 10 = -5, well below logit[2] = 4.
+        let token = sample_with_full_params(&logits, &params, &[1])?;
+        assert_eq!(
+            token, 2,
+            "presence penalty should redirect to next-best token"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_frequency_penalty_scales_with_count() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1e-6;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        params.frequency_penalty = 1.0;
+        // History: token 1 appears 5 times. Logit becomes 5 - 5 = 0;
+        // token 2 still at 4 wins.
+        let token = sample_with_full_params(&logits, &params, &[1, 1, 1, 1, 1])?;
+        assert_eq!(
+            token, 2,
+            "frequency penalty must scale with count of occurrences"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_combined_penalties_compose() -> Result<()> {
+        // Confirm that repetition + presence + frequency stack
+        // additively on the same token without one stomping the other.
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1e-6;
+        params.top_p = 1.0;
+        params.top_k = 0;
+        // History: token 0 appears 3 times. With rep=2.0, presence=1.0,
+        // frequency=1.0:
+        //   logit[0] = (10 / 2) - 1 - 3*1 = 5 - 4 = 1, equal to the others.
+        // Sampler should now no longer prefer token 0.
+        params.repetition_penalty = 2.0;
+        params.presence_penalty = 1.0;
+        params.frequency_penalty = 1.0;
+        let token = sample_with_full_params(&logits, &params, &[0, 0, 0])?;
+        assert_ne!(
+            token, 0,
+            "combined penalties must dethrone the dominant repeated token"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_min_p_combined_with_top_k() -> Result<()> {
+        let device = Device::Cpu;
+        // 6 tokens with descending logits.
+        let logits = Tensor::new(&[5.0_f32, 4.5, 4.0, 1.0, 0.5, 0.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1.0;
+        params.top_p = 1.0;
+        params.top_k = 4;
+        params.min_p = 0.3;
+        // Top-4 considered: [0, 1, 2, 3]. min_p drops low-prob tail.
+        for seed in 0..40 {
+            params.seed = Some(seed);
+            let token = sample_with_full_params(&logits, &params, &[])?;
+            // The very-low-probability tokens (indices 3+) shouldn't
+            // make the cut.
+            assert!(
+                token < 3,
+                "min_p combined with top_k must yield a high-prob token (got {token}, seed={seed})"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_history_with_penalties_no_op() -> Result<()> {
+        // No generated tokens yet → penalties should be inert.
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let mut params = full_params_with_seed(0);
+        params.temperature = 1e-6;
+        params.repetition_penalty = 100.0;
+        params.presence_penalty = 100.0;
+        params.frequency_penalty = 100.0;
+        let token = sample_with_full_params(&logits, &params, &[])?;
+        assert_eq!(token, 0, "empty history must leave logits untouched");
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_topk_heap_matches_full_sort() -> Result<()> {
+        // The heap-based partial-top-k path must produce the same
+        // (index, value) pairs as the legacy full-sort path. Run on a
+        // realistic-sized vocab to exercise the actual code path.
+        let device = Device::Cpu;
+        let values: Vec<f32> = (0..152_064)
+            .map(|i| ((i as f32) * 0.137).sin() * 7.5 + (i as f32) * 0.0001)
+            .collect();
+        let logits = Tensor::new(values.as_slice(), &device)?;
+        for &k in &[1, 20, 50, 200, 1024] {
+            let heap = topk_via_host_sort(&logits, Some(k))?;
+            let mut full: Vec<(u32, f32)> = values
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (i as u32, v))
+                .collect();
+            full.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            full.truncate(k);
+            assert_eq!(
+                heap.len(),
+                full.len(),
+                "heap path produced wrong length for k={k}"
+            );
+            // Compare only the *set* of indices since equal-value
+            // ties can break either direction across the two paths.
+            let heap_set: std::collections::BTreeSet<u32> =
+                heap.iter().map(|&(i, _)| i).collect();
+            let full_set: std::collections::BTreeSet<u32> =
+                full.iter().map(|&(i, _)| i).collect();
+            assert_eq!(
+                heap_set, full_set,
+                "heap top-k disagrees with full-sort top-k at k={k}"
+            );
+            // Values should be in descending order.
+            for w in heap.windows(2) {
+                assert!(
+                    w[0].1 >= w[1].1,
+                    "heap output not descending at k={k}: {:?}",
+                    w
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn test_penalty_path_perf_budget() -> Result<()> {
+        // The penalty pass for the common Qwen3.5 case (presence_penalty=1.5,
+        // a few hundred history tokens, top_k=20) must complete in well
+        // under the time of a single decode forward pass. We measure
+        // the host-side cost only — real-backend perf is similar or
+        // better since `index_add` runs on-device on CUDA/Metal.
+        //
+        // Debug builds are 10-20× slower than release; the test is
+        // gated on release-only via `cfg(not(debug_assertions))`.
+        let device = Device::Cpu;
+        let values: Vec<f32> = (0..152_064).map(|i| (i as f32 * 0.001).sin()).collect();
+        let logits = Tensor::new(values.as_slice(), &device)?;
+        let history: Vec<u32> = (0..500).map(|i| (i * 17 + 3) as u32).collect();
+        let mut params = full_params_with_seed(1);
+        params.temperature = 1.0;
+        params.top_p = 0.95;
+        params.top_k = 20;
+        params.min_p = 0.0;
+        params.presence_penalty = 1.5;
+
+        let start = std::time::Instant::now();
+        for seed in 0..32 {
+            params.seed = Some(seed);
+            let _ = sample_with_full_params(&logits, &params, &history)?;
+        }
+        let elapsed = start.elapsed();
+        let per_call = elapsed / 32;
+        // 5ms host budget on a 152k vocab is generous. On a modern CPU
+        // the partial-top-k heap + small history scatter lands well
+        // under 1 ms per token.
+        assert!(
+            per_call < std::time::Duration::from_millis(5),
+            "penalty path took {:?} per call (release-mode budget 5ms) — regression?",
+            per_call,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_seed_determinism_with_full_params() -> Result<()> {
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.5, -1.0], &device)?;
+        let mut params = full_params_with_seed(42);
+        params.temperature = 0.8;
+        params.top_p = 0.9;
+        params.top_k = 4;
+        params.min_p = 0.05;
+        params.presence_penalty = 1.5;
+        let history = vec![2, 3, 2];
+        let a = sample_with_full_params(&logits, &params, &history)?;
+        let b = sample_with_full_params(&logits, &params, &history)?;
+        assert_eq!(a, b, "same seed must produce same token under full params");
         Ok(())
     }
 }
