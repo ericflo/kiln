@@ -138,6 +138,18 @@ pub enum SynthesisStrategy {
     /// Same as `EveryAssistantTurn` but filters to turns that emit a tool
     /// call (JSON-shaped or fenced ```tool_call blocks).
     ToolCallPredict,
+    /// Tests the model's next-step response *after* a tool returns a
+    /// result. One example per `(assistant tool_call → tool result → next
+    /// assistant)` triple. Prompt includes the preceding tool exchange in
+    /// full; target is the next assistant turn (prose, another tool call,
+    /// or a final answer). Best Qwen3.5 agentic-reasoning probe.
+    ToolResponseFollowup,
+    /// Final-answer eval for agent runs: prompt = trajectory up through
+    /// the last tool result, target = the closing assistant turn (which
+    /// in Qwen3.5 is the "I've finished, here's the result" prose).
+    /// Filters out trajectories without any tool exchanges so the test
+    /// stays focused on agent endings.
+    EndOfTrajectoryAnswer,
 }
 
 impl Default for SynthesisStrategy {
@@ -599,9 +611,17 @@ fn decompose(
     }
     match config.strategy {
         SynthesisStrategy::FinalAssistant => {
+            // Find the last assistant turn that yields a usable target —
+            // either a structured `tool_calls` payload, parseable XML, or
+            // non-empty content. This lets agentic trajectories that store
+            // tool calls in the raw assistant content (no `tool_calls`
+            // field) canonicalize cleanly into JSON targets.
             let last_assistant_idx = messages
                 .iter()
-                .rposition(|m| m.role == "assistant" && !m.content.trim().is_empty())
+                .enumerate()
+                .rev()
+                .find(|(_, m)| m.role == "assistant" && assistant_target(m).is_some())
+                .map(|(i, _)| i)
                 .ok_or(SynthesisError::NoApplicableTurns)?;
             let prompt = &messages[..last_assistant_idx];
             if prompt.is_empty() {
@@ -613,13 +633,18 @@ fn decompose(
             if prompt.is_empty() {
                 return Err(SynthesisError::NoApplicableTurns);
             }
+            let (target_text, target_kind) = assistant_target(&messages[last_assistant_idx])
+                .ok_or(SynthesisError::NoApplicableTurns)?;
             Ok(vec![EvalExample {
                 id: None,
                 messages: to_chat_messages(prompt),
-                target: Some(messages[last_assistant_idx].content.clone()),
+                target: Some(target_text),
                 aliases: Vec::new(),
-                tags: vec!["synth:final_assistant".into()],
-                metadata: trajectory_metadata(conv),
+                tags: vec![
+                    "synth:final_assistant".into(),
+                    target_kind.tag().to_string(),
+                ],
+                metadata: trajectory_metadata_with_kind(conv, &target_kind),
                 scorer: None,
                 generation: None,
                 weight: 1.0,
@@ -635,7 +660,7 @@ fn decompose(
                 .iter()
                 .enumerate()
                 .skip(first_user_idx)
-                .find(|(_, m)| m.role == "assistant" && !m.content.trim().is_empty())
+                .find(|(_, m)| m.role == "assistant" && assistant_target(m).is_some())
                 .map(|(i, _)| i)
                 .ok_or(SynthesisError::NoApplicableTurns)?;
             let prompt = &messages[..first_assistant_idx];
@@ -643,13 +668,18 @@ fn decompose(
             if prompt.is_empty() {
                 return Err(SynthesisError::NoApplicableTurns);
             }
+            let (target_text, target_kind) = assistant_target(&messages[first_assistant_idx])
+                .ok_or(SynthesisError::NoApplicableTurns)?;
             Ok(vec![EvalExample {
                 id: None,
                 messages: to_chat_messages(prompt),
-                target: Some(messages[first_assistant_idx].content.clone()),
+                target: Some(target_text),
                 aliases: Vec::new(),
-                tags: vec!["synth:first_assistant".into()],
-                metadata: trajectory_metadata(conv),
+                tags: vec![
+                    "synth:first_assistant".into(),
+                    target_kind.tag().to_string(),
+                ],
+                metadata: trajectory_metadata_with_kind(conv, &target_kind),
                 scorer: None,
                 generation: None,
                 weight: 1.0,
@@ -658,7 +688,134 @@ fn decompose(
         }
         SynthesisStrategy::EveryAssistantTurn => Ok(every_assistant_turn(&messages, conv, false)),
         SynthesisStrategy::ToolCallPredict => Ok(every_assistant_turn(&messages, conv, true)),
+        SynthesisStrategy::ToolResponseFollowup => Ok(tool_response_followup(&messages, conv)),
+        SynthesisStrategy::EndOfTrajectoryAnswer => Ok(end_of_trajectory_answer(&messages, conv)),
     }
+}
+
+/// Build one example per `(assistant_with_tool_calls, tool_result(s), next_assistant)`
+/// triple. The eval prompt ends on a `tool`-role message, so the model is
+/// asked: "given this tool result, what do you do next?".
+fn tool_response_followup(
+    messages: &[SftMessage],
+    conv: &SftConversation,
+) -> Vec<EvalExample> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < messages.len() {
+        // Look for assistant with tool_calls at `i`.
+        let m = &messages[i];
+        if m.role != "assistant"
+            || !m
+                .tool_calls
+                .as_ref()
+                .map(|tc| !tc.is_empty())
+                .unwrap_or(false)
+        {
+            i += 1;
+            continue;
+        }
+        // Walk through following `tool` messages.
+        let tool_start = i + 1;
+        let mut tool_end = tool_start;
+        while tool_end < messages.len() && messages[tool_end].role == "tool" {
+            tool_end += 1;
+        }
+        if tool_end == tool_start {
+            i += 1;
+            continue;
+        }
+        // Need a subsequent assistant turn to be the target.
+        if tool_end >= messages.len() {
+            break;
+        }
+        let next = &messages[tool_end];
+        if next.role != "assistant" {
+            i = tool_end;
+            continue;
+        }
+        let (target_text, target_kind) = match assistant_target(next) {
+            Some(pair) => pair,
+            None => {
+                i = tool_end;
+                continue;
+            }
+        };
+        // Prompt = everything up to and including the tool responses.
+        let prompt = &messages[..tool_end];
+        if prompt.is_empty() {
+            i = tool_end;
+            continue;
+        }
+        out.push(EvalExample {
+            id: None,
+            messages: to_chat_messages(prompt),
+            target: Some(target_text),
+            aliases: Vec::new(),
+            tags: vec![
+                "synth:tool_response_followup".into(),
+                format!("synth:turn_{tool_end}"),
+                target_kind.tag().to_string(),
+            ],
+            metadata: trajectory_metadata_with_kind(conv, &target_kind),
+            scorer: None,
+            generation: None,
+            weight: 1.0,
+            tools: None,
+        });
+        i = tool_end + 1;
+    }
+    out
+}
+
+/// Final-answer eval for trajectories that include at least one tool
+/// exchange. Prompt = messages[0..last_assistant], target = last assistant
+/// turn. Empty when there's no tool turn or no assistant turn after the
+/// last tool response.
+fn end_of_trajectory_answer(
+    messages: &[SftMessage],
+    conv: &SftConversation,
+) -> Vec<EvalExample> {
+    if !messages.iter().any(|m| m.role == "tool") {
+        return Vec::new();
+    }
+    let last_tool = match messages.iter().rposition(|m| m.role == "tool") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    // Find the first assistant turn AFTER the last tool result.
+    let final_assistant = match messages
+        .iter()
+        .enumerate()
+        .skip(last_tool + 1)
+        .find(|(_, m)| m.role == "assistant")
+    {
+        Some((idx, _)) => idx,
+        None => return Vec::new(),
+    };
+    let (target_text, target_kind) = match assistant_target(&messages[final_assistant]) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let prompt = &messages[..final_assistant];
+    if prompt.is_empty() {
+        return Vec::new();
+    }
+    vec![EvalExample {
+        id: None,
+        messages: to_chat_messages(prompt),
+        target: Some(target_text),
+        aliases: Vec::new(),
+        tags: vec![
+            "synth:end_of_trajectory".into(),
+            target_kind.tag().to_string(),
+        ],
+        metadata: trajectory_metadata_with_kind(conv, &target_kind),
+        scorer: None,
+        generation: None,
+        weight: 1.0,
+        tools: None,
+    }]
 }
 
 fn every_assistant_turn(
@@ -733,6 +890,19 @@ fn assistant_target(m: &SftMessage) -> Option<(String, AssistantTargetKind)> {
     }
     if let Some(json) = extract_tool_call_from_content(content) {
         return Some((json, AssistantTargetKind::ToolCall));
+    }
+    // Qwen3.5 native XML tool call embedded in `content` (rare in upstream
+    // SFT, but appears in trajectories captured directly from Qwen3.5
+    // base-model outputs). Canonicalize to the JSON target shape so the
+    // tool_call scorer compares structurally.
+    let qwen_calls = crate::qwen3::extract_tool_calls(content);
+    if !qwen_calls.is_empty() {
+        let arr: Vec<serde_json::Value> = qwen_calls
+            .iter()
+            .map(|c| c.to_canonical_json())
+            .collect();
+        let canonical = serde_json::json!({"tool_calls": arr});
+        return Some((canonical.to_string(), AssistantTargetKind::ToolCall));
     }
     if let Some((language, block)) = extract_first_code_block(content) {
         return Some((block, AssistantTargetKind::Code { language }));
@@ -1261,6 +1431,106 @@ mod tests {
         cfg.strategy = SynthesisStrategy::FinalAssistant;
         let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
         assert_eq!(suite.examples[0].target.as_deref(), Some("real"));
+    }
+
+    fn msg_with_tc(
+        role: &str,
+        content: &str,
+        tool_calls: Option<Vec<serde_json::Value>>,
+    ) -> SftMessage {
+        SftMessage {
+            role: role.into(),
+            content: content.into(),
+            tool_calls,
+            name: None,
+            tool_call_id: None,
+        }
+    }
+
+    fn tool_msg(content: &str) -> SftMessage {
+        SftMessage {
+            role: "tool".into(),
+            content: content.into(),
+            tool_calls: None,
+            name: Some("get_weather".into()),
+            tool_call_id: Some("call_1".into()),
+        }
+    }
+
+    #[test]
+    fn tool_response_followup_emits_per_tool_result() {
+        let assistant_tc = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}
+        })];
+        let conv = SftConversation {
+            messages: vec![
+                msg("system", "be helpful"),
+                msg("user", "weather in paris"),
+                msg_with_tc("assistant", "", Some(assistant_tc)),
+                tool_msg("18C, cloudy"),
+                msg("assistant", "It's 18°C and cloudy in Paris."),
+            ],
+            extra: Default::default(),
+        };
+        let mut cfg = SynthesisConfig::new("test");
+        cfg.strategy = SynthesisStrategy::ToolResponseFollowup;
+        let (suite, _) = synthesize_suite(vec![conv], &cfg).unwrap();
+        assert_eq!(suite.examples.len(), 1);
+        let ex = &suite.examples[0];
+        // Prompt ends on the tool response so the model sees the result.
+        assert_eq!(ex.messages.last().unwrap().role, "tool");
+        assert_eq!(ex.target.as_deref(), Some("It's 18°C and cloudy in Paris."));
+        assert!(ex.tags.iter().any(|t| t == "synth:tool_response_followup"));
+    }
+
+    #[test]
+    fn end_of_trajectory_answer_requires_a_tool_exchange() {
+        // No tool exchange — strategy must skip.
+        let plain = conv(&[("user", "q"), ("assistant", "a")]);
+        let mut cfg = SynthesisConfig::new("plain");
+        cfg.strategy = SynthesisStrategy::EndOfTrajectoryAnswer;
+        let res = synthesize_suite(vec![plain], &cfg);
+        assert!(matches!(res, Err(SynthesisError::NoExamples)));
+
+        // With a tool exchange the synthesizer keeps the final assistant.
+        let assistant_tc = vec![serde_json::json!({
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "f", "arguments": "{}"}
+        })];
+        let agentic = SftConversation {
+            messages: vec![
+                msg("user", "q"),
+                msg_with_tc("assistant", "", Some(assistant_tc)),
+                tool_msg("ok"),
+                msg("assistant", "Done."),
+            ],
+            extra: Default::default(),
+        };
+        let mut cfg = SynthesisConfig::new("agentic");
+        cfg.strategy = SynthesisStrategy::EndOfTrajectoryAnswer;
+        let (suite, _) = synthesize_suite(vec![agentic], &cfg).unwrap();
+        assert_eq!(suite.examples.len(), 1);
+        assert_eq!(suite.examples[0].target.as_deref(), Some("Done."));
+    }
+
+    #[test]
+    fn qwen3_xml_content_canonicalizes_to_tool_call_target() {
+        // Some trajectories store assistant tool calls as the raw Qwen3.5
+        // XML content (no structured `tool_calls` field). Synthesis must
+        // detect and canonicalize so the tool_call scorer can compare.
+        let raw_xml = "<tool_call>\n<function=set>\n<parameter=k>\nv\n</parameter>\n</function>\n</tool_call>";
+        let c = conv(&[("user", "do it"), ("assistant", raw_xml)]);
+        let mut cfg = SynthesisConfig::new("xml-target");
+        cfg.strategy = SynthesisStrategy::FinalAssistant;
+        let (suite, _) = synthesize_suite(vec![c], &cfg).unwrap();
+        let target = suite.examples[0].target.as_deref().unwrap();
+        // Target was canonicalized into the JSON tool_calls envelope.
+        assert!(target.contains("\"tool_calls\""), "{target}");
+        assert!(target.contains("\"set\""));
+        assert!(target.contains("\"k\""));
     }
 
     #[test]
