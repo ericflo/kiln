@@ -128,6 +128,7 @@ pub(super) fn score(
     name_match: &NameMatch,
     args: &ArgsScoring,
     weights: Option<&ToolCallWeights>,
+    require_xml_format: bool,
     judge_runner: &dyn JudgeRunner,
 ) -> Result<(f32, EvalOutcomeKind, Option<String>), ScorerError> {
     let target_raw = example.target.as_deref().ok_or(ScorerError::MissingTarget {
@@ -140,6 +141,25 @@ pub(super) fn score(
         });
     }
     let predicted_calls = extract_tool_calls(completion_text);
+    // Strict-format mode: if every predicted call is NOT in Qwen3.5
+    // native XML, mark the example Invalid. The argument is that a
+    // model trained on Qwen3.5's native format should never emit JSON
+    // here, so a JSON prediction is a regression worth flagging
+    // distinctly from a wrong-tool prediction.
+    if require_xml_format
+        && !predicted_calls.is_empty()
+        && predicted_calls
+            .iter()
+            .all(|c| c.format != ToolCallFormat::Qwen3Xml)
+    {
+        return Ok((
+            0.0,
+            EvalOutcomeKind::Invalid,
+            Some(
+                "non-XML tool call emitted (require_xml_format=true)".to_string(),
+            ),
+        ));
+    }
     if predicted_calls.is_empty() {
         // No call was emitted. Surface why: thinking-only completions, or
         // a textual refusal, or just a free-form answer where a call was
@@ -685,6 +705,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -702,6 +723,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -718,6 +740,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::KeysOnly,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -747,6 +770,7 @@ mod tests {
                 extra_key_penalty: 0.1,
             },
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -776,6 +800,7 @@ mod tests {
                 extra_key_penalty: 0.0,
             },
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -829,6 +854,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -848,6 +874,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -866,6 +893,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -885,6 +913,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -902,6 +931,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();
@@ -918,6 +948,7 @@ mod tests {
             &NameMatch::CaseInsensitive,
             &ArgsScoring::Structural,
             None,
+            false,
             &NoopJudgeRunner,
         )
         .unwrap();

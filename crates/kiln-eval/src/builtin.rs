@@ -484,6 +484,7 @@ fn ex_tool_call(
         name_match: NameMatch::CaseInsensitive,
         args: ArgsScoring::Auto,
         weights: None,
+        require_xml_format: false,
     });
     ex
 }
@@ -499,6 +500,7 @@ fn ex_tool_call_structural(
         name_match: NameMatch::CaseInsensitive,
         args: ArgsScoring::Structural,
         weights: None,
+        require_xml_format: false,
     });
     ex
 }
@@ -539,6 +541,7 @@ fn ex_tool_call_one_arg(
             extra_key_penalty: 0.0,
         },
         weights: None,
+        require_xml_format: false,
     });
     ex
 }
@@ -563,6 +566,7 @@ fn ex_tool_call_oneof(
         },
         args: ArgsScoring::KeysOnly,
         weights: None,
+        require_xml_format: false,
     });
     ex
 }
@@ -586,6 +590,7 @@ fn ex_tool_call_per_key(
             extra_key_penalty: 0.0,
         },
         weights: None,
+        require_xml_format: false,
     });
     ex
 }

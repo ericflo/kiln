@@ -294,6 +294,7 @@ pub fn auto_detect_scorer(target: &str) -> Scorer {
             name_match: crate::scorers::NameMatch::CaseInsensitive,
             args: crate::scorers::ArgsScoring::Auto,
             weights: None,
+            require_xml_format: false,
         };
     }
 

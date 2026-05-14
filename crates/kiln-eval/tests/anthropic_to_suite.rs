@@ -125,6 +125,7 @@ fn synthesized_target_scores_against_qwen3_xml_completion() {
         name_match: NameMatch::CaseInsensitive,
         args: ArgsScoring::Structural,
         weights: None,
+        require_xml_format: false,
     };
 
     // Model emits the canonical Qwen3.5 XML for the same call.

@@ -32,6 +32,7 @@ fn tool_call_scorer() -> Scorer {
         name_match: NameMatch::CaseInsensitive,
         args: ArgsScoring::Structural,
         weights: None,
+        require_xml_format: false,
     }
 }
 
@@ -130,6 +131,7 @@ fn boolean_arg_in_edit_tool_recovers_as_string_in_auto_mode() {
         name_match: NameMatch::CaseInsensitive,
         args: ArgsScoring::Auto,
         weights: None,
+        require_xml_format: false,
     };
     let outcome =
         score_completion(&auto_scorer, &ex(target), xml, &NoopJudgeRunner).unwrap();
@@ -166,6 +168,7 @@ fn read_tool_with_path_arg_passes_strict_per_key_check() {
             extra_key_penalty: 0.5,
         },
         weights: None,
+        require_xml_format: false,
     };
     let outcome = score_completion(&strict, &ex(target), xml, &NoopJudgeRunner).unwrap();
     assert_eq!(outcome.kind, EvalOutcomeKind::Pass);
@@ -247,6 +250,46 @@ fn json_response_when_xml_expected_still_scores_correctly() {
         "expected format diagnostic in detail: {:?}",
         outcome.detail
     );
+}
+
+#[test]
+fn require_xml_format_marks_json_emission_as_invalid() {
+    let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
+    // Model emitted JSON instead of XML.
+    let raw = r#"{"tool_calls": [{"name": "Edit", "arguments": {"file_path": "/a"}}]}"#;
+    let strict = Scorer::ToolCall {
+        name_match: NameMatch::CaseInsensitive,
+        args: ArgsScoring::Structural,
+        weights: None,
+        require_xml_format: true,
+    };
+    let outcome = score_completion(&strict, &ex(target), raw, &NoopJudgeRunner).unwrap();
+    assert_eq!(
+        outcome.kind,
+        EvalOutcomeKind::Invalid,
+        "JSON-format prediction should be Invalid under require_xml_format: {:?}",
+        outcome.detail
+    );
+    assert!(
+        outcome
+            .detail
+            .as_deref()
+            .map_or(false, |d| d.contains("non-XML"))
+    );
+}
+
+#[test]
+fn require_xml_format_still_passes_xml_emission() {
+    let target = anthropic_to_canonical("Edit", serde_json::json!({"file_path": "/a"}));
+    let xml = "<tool_call>\n<function=Edit>\n<parameter=file_path>\n/a\n</parameter>\n</function>\n</tool_call>";
+    let strict = Scorer::ToolCall {
+        name_match: NameMatch::CaseInsensitive,
+        args: ArgsScoring::Structural,
+        weights: None,
+        require_xml_format: true,
+    };
+    let outcome = score_completion(&strict, &ex(target), xml, &NoopJudgeRunner).unwrap();
+    assert_eq!(outcome.kind, EvalOutcomeKind::Pass);
 }
 
 #[test]

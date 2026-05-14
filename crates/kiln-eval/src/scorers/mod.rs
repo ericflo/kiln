@@ -116,6 +116,15 @@ pub enum Scorer {
         /// weighted by these values. Default (None) gives equal weight.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         weights: Option<tool_call::ToolCallWeights>,
+        /// When true, predictions in any format *other* than Qwen3.5's
+        /// native XML (`<tool_call><function=…>…</function></tool_call>`)
+        /// are downgraded to Fail with kind `Invalid`. Use this on suites
+        /// that explicitly train the model on the native format —
+        /// otherwise the model can score Pass while emitting JSON, which
+        /// won't actually round-trip through the chat template at
+        /// inference time.
+        #[serde(default, skip_serializing_if = "is_false")]
+        require_xml_format: bool,
     },
     /// Code-output scorer: extracts the first fenced code block from the
     /// completion (and from the target) and scores their relationship.
@@ -138,6 +147,9 @@ pub enum Scorer {
 
 fn default_true() -> bool {
     true
+}
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 fn default_choices() -> Vec<String> {
     vec!["A".into(), "B".into(), "C".into(), "D".into()]
@@ -285,12 +297,14 @@ pub fn score_completion(
             name_match,
             args,
             weights,
+            require_xml_format,
         } => tool_call::score(
             example,
             answer_for_scorer,
             name_match,
             args,
             weights.as_ref(),
+            *require_xml_format,
             judge_runner,
         )?,
         Scorer::Code { language, style } => {
