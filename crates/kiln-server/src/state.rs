@@ -1744,12 +1744,19 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
-        let batching_engine = matches!(
+        // Batching engine is on by default — the eval system, the judgment
+        // flywheel, and the high-throughput chat/completion paths all
+        // depend on it, and starting up with it disabled means the first
+        // /v1/eval/run a user hits errors with "batching engine not
+        // initialized" before they even know the env var exists. Opt-out
+        // via `KILN_BATCHING_ENGINE=0` for the rare debug case where you
+        // want to bisect the batching actor itself.
+        let batching_engine_disabled = matches!(
             std::env::var("KILN_BATCHING_ENGINE").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE")
-        )
-        .then(|| {
-            tracing::info!("KILN_BATCHING_ENGINE enabled — routing streaming and non-streaming real completions through batching actor");
+            Ok("0") | Ok("false") | Ok("FALSE") | Ok("off") | Ok("OFF")
+        );
+        let batching_engine = (!batching_engine_disabled).then(|| {
+            tracing::info!("batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)");
             crate::batching_engine::BatchingEngineHandle::start(Arc::new(
                 crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),

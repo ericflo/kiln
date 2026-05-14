@@ -221,12 +221,6 @@ async fn main() -> Result<()> {
         }
 
         tracing::debug!(adapter_dir = %adapter_dir.display(), "model loaded — real inference mode");
-        if matches!(
-            std::env::var("KILN_BATCHING_ENGINE").as_deref(),
-            Ok("1") | Ok("true") | Ok("TRUE")
-        ) {
-            tracing::debug!("real non-streaming batching actor requested via KILN_BATCHING_ENGINE");
-        }
         tracing::debug!(
             "training endpoints available — in-process LoRA training (no sidecar needed)"
         );
