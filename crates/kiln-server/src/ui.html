@@ -2631,7 +2631,7 @@ select {
           <div class="form-row">
             <div class="form-group" style="margin-bottom: 0;">
               <label for="merge-output-name">Output name</label>
-              <input type="text" id="merge-output-name" value="merged-adapter" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
+              <input type="text" id="merge-output-name" placeholder="merged-adapter" aria-describedby="merge-output-name-help">
               <div class="form-help" id="merge-output-name-help">Saved adapter name. Keep it short and path-safe.</div>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
@@ -3875,15 +3875,9 @@ function mergeReadinessState() {
     return { ready: false, message: 'Merging adapters…' };
   }
 
-  const outputEl = document.getElementById('merge-output-name');
-  const outputName = outputEl ? outputEl.value.trim() : '';
-  if (!outputName) {
-    return { ready: false, message: 'Enter a path-safe output adapter name to enable merge.' };
-  }
-  if (!isPathSafeAdapterDirectoryName(outputName)) {
-    return { ready: false, message: 'Output name must be a single path-safe adapter name, not a path.' };
-  }
-
+  // Source selection comes first: you can't name an output for a merge
+  // that has no inputs, and the helper text reads more naturally when the
+  // user is asked to pick sources before they're asked to name the result.
   const list = document.getElementById('merge-sources');
   const rows = list ? Array.from(list.querySelectorAll('.merge-source')) : [];
   const selected = [];
@@ -3902,6 +3896,15 @@ function mergeReadinessState() {
   }
   if (new Set(selected).size !== selected.length) {
     return { ready: false, message: 'Choose distinct source adapters; duplicates cannot be merged.' };
+  }
+
+  const outputEl = document.getElementById('merge-output-name');
+  const outputName = outputEl ? outputEl.value.trim() : '';
+  if (!outputName) {
+    return { ready: false, message: 'Enter a path-safe output adapter name to enable merge.' };
+  }
+  if (!isPathSafeAdapterDirectoryName(outputName)) {
+    return { ready: false, message: 'Output name must be a single path-safe adapter name, not a path.' };
   }
 
   const mode = document.getElementById('merge-mode')?.value;
