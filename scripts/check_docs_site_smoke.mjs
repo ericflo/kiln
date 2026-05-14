@@ -1637,6 +1637,59 @@ function chromiumPath() {
   return path;
 }
 
+// Chromium launch flags tuned for headless CI containers.
+//
+// `--disable-dev-shm-usage` is the canonical fix for the
+// "Timed out after N ms while waiting for the WS endpoint URL to appear in
+// stdout!" failure: GitHub Actions runners give /dev/shm only ~64 MiB, the
+// Chromium renderer fills it during early init, the renderer dies before
+// printing the DevTools WebSocket URL, and Puppeteer's launch then times
+// out. Routing shared memory through /tmp avoids the cliff entirely.
+//
+// The other flags shave several seconds off cold start (no GPU init, no
+// extension load, no first-run prompts, no zygote prefork) and remove
+// failure modes that don't matter for a headless DOM scrape.
+const CHROMIUM_CI_FLAGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--no-zygote',
+  '--disable-extensions',
+  '--disable-background-networking',
+  '--disable-default-apps',
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--mute-audio',
+  '--hide-scrollbars',
+];
+
+const CHROMIUM_LAUNCH_TIMEOUT_MS = 90_000;
+const CHROMIUM_LAUNCH_ATTEMPTS = 3;
+
+async function launchChromiumWithRetry(puppeteer) {
+  let lastErr;
+  for (let attempt = 1; attempt <= CHROMIUM_LAUNCH_ATTEMPTS; attempt++) {
+    try {
+      return await puppeteer.launch({
+        executablePath: chromiumPath(),
+        headless: true,
+        args: CHROMIUM_CI_FLAGS,
+        timeout: CHROMIUM_LAUNCH_TIMEOUT_MS,
+        protocolTimeout: CHROMIUM_LAUNCH_TIMEOUT_MS,
+        dumpio: attempt > 1,
+      });
+    } catch (err) {
+      lastErr = err;
+      console.warn(`Chromium launch attempt ${attempt}/${CHROMIUM_LAUNCH_ATTEMPTS} failed: ${err && err.message ? err.message : err}`);
+      if (attempt < CHROMIUM_LAUNCH_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 2000 * attempt));
+      }
+    }
+  }
+  fail(`Chromium failed to launch after ${CHROMIUM_LAUNCH_ATTEMPTS} attempts: ${lastErr && lastErr.message ? lastErr.message : lastErr}`);
+}
+
 function formatLikelyOverflowingElements(elements) {
   if (!elements || elements.length === 0) return 'none found';
   return elements
@@ -1668,11 +1721,7 @@ async function runSmoke() {
   validateMarkdownLocalLinks();
 
   const puppeteer = await loadPuppeteer();
-  const browser = await puppeteer.launch({
-    executablePath: chromiumPath(),
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
+  const browser = await launchChromiumWithRetry(puppeteer);
 
   try {
     await validateEmbeddedUiControlAccessibleNames(browser);
