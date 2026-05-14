@@ -397,28 +397,20 @@ async fn main() -> Result<()> {
         ModelBackend::Mock { .. } => None,
     };
 
-    let serve = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_flag, engine_for_shutdown));
+    // Serve until the shutdown signal triggers + axum drains. The drain
+    // is bounded by a watchdog set up *inside* `shutdown_signal` once
+    // the signal actually fires — see comments there. We deliberately
+    // don't wrap `axum::serve` itself in a timeout, because that would
+    // cap *total server uptime*, not just the drain. (Lesson learned.)
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(
+            shutdown_flag,
+            engine_for_shutdown,
+            shutdown_timeout_secs,
+        ))
+        .await?;
 
-    // Cap the total time we'll wait for in-flight requests to drain.
-    // Without this cap, axum's graceful drain can hang indefinitely on
-    // a streaming SSE connection that's mid-generation.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(shutdown_timeout_secs),
-        serve,
-    )
-    .await
-    {
-        Ok(Ok(())) => tracing::info!("server stopped cleanly"),
-        Ok(Err(e)) => tracing::error!(error = %e, "server stopped with error"),
-        Err(_) => {
-            tracing::warn!(
-                timeout_secs = shutdown_timeout_secs,
-                "graceful-shutdown drain hit timeout — forcing exit"
-            );
-        }
-    }
-
+    tracing::info!("server stopped cleanly");
     Ok(())
 }
 
@@ -640,9 +632,15 @@ fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {}
 /// Wait for SIGTERM or SIGINT, then signal shutdown. Receiving a *second*
 /// signal while still draining short-circuits straight to process exit so
 /// users hammering Ctrl+C never have to wait.
+///
+/// `drain_timeout_secs` is the hard ceiling on how long we'll wait for
+/// in-flight requests to finish *after* the signal fires. Once a signal
+/// triggers, a detached watchdog will force-exit the process at the
+/// timeout even if axum's drain hasn't returned yet.
 async fn shutdown_signal(
     shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     engine: Option<kiln_server::batching_engine::BatchingEngineHandle>,
+    drain_timeout_secs: u64,
 ) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -683,6 +681,18 @@ async fn shutdown_signal(
             Err(e) => tracing::warn!(error = %e, "batching engine stop failed (continuing)"),
         }
     }
+
+    // Watchdog: if axum's graceful drain hasn't returned by the
+    // configured timeout, force-exit. Spawned detached so we return
+    // immediately and the drain can proceed in parallel.
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(drain_timeout_secs)).await;
+        tracing::warn!(
+            timeout_secs = drain_timeout_secs,
+            "graceful-shutdown drain hit timeout — forcing exit"
+        );
+        std::process::exit(0);
+    });
 
     // Watch for a second signal — if the user hammers Ctrl+C, exit
     // immediately instead of waiting for the drain. Spawning a detached
