@@ -312,6 +312,20 @@ async fn executor_runs_schema_validation_when_tools_declared() {
     .unwrap();
     assert_eq!(result.metrics.num_schema_missing_required, 1);
     assert_eq!(result.metrics.num_schema_extra_unknown, 1);
+    // The outcome's detail string carries the schema diagnostic so dashboards
+    // can show "missing=city, extra=zone" inline next to the failure.
+    let detail = result.outcomes[0]
+        .detail
+        .as_deref()
+        .unwrap_or_default();
+    assert!(
+        detail.contains("missing=city"),
+        "outcome detail missing schema note: {detail}"
+    );
+    assert!(
+        detail.contains("extra=zone"),
+        "outcome detail missing schema note: {detail}"
+    );
 }
 
 #[tokio::test]

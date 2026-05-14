@@ -171,6 +171,7 @@ async fn run_suite_inner(
             let result = generator
                 .run(&prepared, &gen_params, completion_idx, adapter)
                 .await;
+            let mut pending_schema_detail: Option<kiln_eval::qwen3::SchemaCheck> = None;
             let outcome = match result {
                 Ok(completion) => {
                     // For tool-call-scored examples, capture the *predicted*
@@ -202,6 +203,7 @@ async fn run_suite_inner(
                                             chk.extra_unknown.len() as u32,
                                         ),
                                     );
+                                    pending_schema_detail = Some(chk);
                                 }
                             }
                         }
@@ -212,6 +214,29 @@ async fn run_suite_inner(
                     o.prompt_tokens = Some(completion.prompt_tokens);
                     o.completion_tokens = Some(completion.completion_tokens);
                     o.latency_ms = Some(completion.latency_ms);
+                    if let Some(chk) = pending_schema_detail.as_ref() {
+                        if !chk.is_clean() {
+                            let mut parts = Vec::new();
+                            if !chk.missing_required.is_empty() {
+                                parts.push(format!(
+                                    "missing={}",
+                                    chk.missing_required.join(",")
+                                ));
+                            }
+                            if !chk.extra_unknown.is_empty() {
+                                parts.push(format!(
+                                    "extra={}",
+                                    chk.extra_unknown.join(",")
+                                ));
+                            }
+                            let schema_note = format!(" || schema: {}", parts.join(" "));
+                            o.detail = Some(
+                                o.detail
+                                    .map(|d| d + &schema_note)
+                                    .unwrap_or_else(|| schema_note.trim_start_matches(" || ").to_string()),
+                            );
+                        }
+                    }
                     o
                 }
                 Err(err) => ExampleOutcome {
