@@ -1201,7 +1201,6 @@ select {
 }
 .chat-controls #chat-adapter { width: auto; min-width: 180px; }
 .chat-controls #chat-temp    { width: 76px; }
-.chat-controls #chat-max-tokens { width: 90px; }
 .chat-controls .chat-toggle-label {
   display: inline-flex;
   align-items: center;
@@ -3487,8 +3486,6 @@ select {
         </select>
         <label for="chat-temp">Temperature</label>
         <input type="number" id="chat-temp" value="1.0" min="0" max="2" step="0.1" title="Qwen3.5 thinking-general default is 1.0. Lower for more deterministic output; 0.0 = greedy.">
-        <label for="chat-max-tokens">Max tokens</label>
-        <input type="number" id="chat-max-tokens" value="1024" min="1" max="32768" step="1">
         <label class="chat-toggle-label" title="Send chat_template_kwargs.enable_thinking — reasoning-capable templates (Qwen3.5, DeepSeek R1, …) will skip the <think> prefill when off.">
           <input type="checkbox" id="chat-enable-thinking" checked>
           <span>Thinking</span>
@@ -3511,6 +3508,10 @@ select {
           <textarea id="chat-system" rows="2" placeholder="Optional. Prepended as a system-role message on every send."></textarea>
         </label>
         <div class="chat-adv-row">
+          <label class="chat-adv-field" for="chat-max-tokens" title="Cap on response length. Default 16384 leaves room for reasoning + answer; raise for long completions or lower to truncate.">
+            <span class="chat-adv-label">max_tokens</span>
+            <input type="number" id="chat-max-tokens" value="16384" min="1" max="131072" step="1">
+          </label>
           <label class="chat-adv-field" for="chat-top-p" title="Qwen3.5 thinking-general default: 0.95. Set to 1.0 to disable nucleus filtering.">
             <span class="chat-adv-label">top_p</span>
             <input type="number" id="chat-top-p" value="0.95" min="0" max="1" step="0.05">
@@ -5057,7 +5058,7 @@ function capturePlaygroundSettings() {
   const get = (id) => document.getElementById(id);
   return {
     temperature:        get('chat-temp')?.value ?? '1.0',
-    maxTokens:          get('chat-max-tokens')?.value ?? '1024',
+    maxTokens:          get('chat-max-tokens')?.value ?? '16384',
     enableThinking:     !!get('chat-enable-thinking')?.checked,
     preset:             get('chat-preset')?.value ?? 'qwen3-thinking-general',
     topP:               get('chat-top-p')?.value ?? '',
@@ -5078,7 +5079,15 @@ function applyPlaygroundSettings(settings) {
   if (!settings || typeof settings !== 'object') return;
   const set = (id, v) => { const el = document.getElementById(id); if (el != null && v != null) el.value = v; };
   set('chat-temp',                settings.temperature);
-  set('chat-max-tokens',          settings.maxTokens);
+  // One-shot migration: the old default was '1024', which is too low
+  // for thinking-capable models (the reasoning block alone routinely
+  // exceeds it and the answer arrives "truncated"). Anyone with
+  // '1024' persisted is almost certainly riding the old default
+  // rather than having explicitly chosen it, so upgrade to the new
+  // 16384 default. Users who really want 1024 can re-set it.
+  if (settings.maxTokens && settings.maxTokens !== '1024') {
+    set('chat-max-tokens', settings.maxTokens);
+  }
   set('chat-preset',              settings.preset);
   set('chat-top-p',               settings.topP);
   set('chat-top-k',               settings.topK);
@@ -5184,7 +5193,7 @@ function buildChatRequestBody({ messages, temperature }) {
     temperature,
   };
   const maxTokens = parseOptionalPositiveInt(document.getElementById('chat-max-tokens')?.value);
-  body.max_tokens = maxTokens || 1024;
+  body.max_tokens = maxTokens || 16384;
 
   const topP = parseOptionalFloat(document.getElementById('chat-top-p')?.value, { min: 0, max: 1 });
   if (topP !== undefined) body.top_p = topP;
