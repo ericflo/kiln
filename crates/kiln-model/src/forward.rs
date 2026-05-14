@@ -14894,6 +14894,49 @@ mod tests {
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Regression test for the 2026-05-12 → 2026-05-14 silent inference
+    /// outage. Commit 997a608f widened `drop_projection_transposes_enabled`
+    /// from "training is engaged" to "Vulkan is the active backend OR
+    /// training is engaged" — which silently replaced every projection
+    /// transpose tensor (`in_proj_qkv_t`, `in_proj_z_t`, `out_proj_t`,
+    /// `q_proj_t`, etc.) with `Tensor::zeros((1,), DType::BF16, ...)` at
+    /// load time. Inference reads those caches directly via
+    /// `backend.linear_prefill_apply`, and the GDN prefill kernel then
+    /// bailed out with `only 2d matrixes are supported [1, T, hidden] [1]`
+    /// on every single /v1/chat/completions request. The fix narrowed the
+    /// gate back to "training is engaged" (KILN_VK_NATIVE_TRAINING set);
+    /// `keep_projection_originals_enabled()` stays Vulkan-aware because
+    /// the trainer needs the originals later.
+    ///
+    /// This test pins the contract: turning Vulkan on must NOT drop
+    /// transposes by itself.
+    #[test]
+    fn vulkan_active_alone_does_not_drop_projection_transposes() {
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialized by RESIDENCY_ENV_LOCK.
+        unsafe {
+            std::env::remove_var("KILN_VK_NATIVE_TRAINING");
+            std::env::remove_var("KILN_KEEP_PROJECTION_TRANSPOSES");
+        }
+        let _vk = crate::backend::test_only_set_vulkan_active(true);
+        assert!(
+            !drop_projection_transposes_enabled(),
+            "drop_projection_transposes_enabled() must NOT return true just \
+             because Vulkan is active — that breaks every chat completion on \
+             Vulkan with `only 2d matrixes are supported [..., hidden] [1]`. \
+             Only KILN_VK_NATIVE_TRAINING should opt in to dropping transposes."
+        );
+        // Sanity: enabling training mode flips it on.
+        // SAFETY: env mutation serialized by RESIDENCY_ENV_LOCK.
+        unsafe { std::env::set_var("KILN_VK_NATIVE_TRAINING", "1") };
+        assert!(
+            drop_projection_transposes_enabled(),
+            "KILN_VK_NATIVE_TRAINING=1 should still enable transpose drop"
+        );
+        // SAFETY: env cleanup serialized by RESIDENCY_ENV_LOCK.
+        unsafe { std::env::remove_var("KILN_VK_NATIVE_TRAINING") };
+    }
+
     /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {

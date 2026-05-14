@@ -47,6 +47,27 @@ pub fn vulkan_active() -> bool {
     VULKAN_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Test-only helper: lets unit tests assert the behavior of
+/// `vulkan_active()`-gated code without polluting other tests' view of the
+/// flag. Reset to the prior value via the returned guard.
+#[cfg(test)]
+pub fn test_only_set_vulkan_active(value: bool) -> VulkanActiveGuard {
+    let prev = VULKAN_ACTIVE.swap(value, Ordering::Relaxed);
+    VulkanActiveGuard { prev }
+}
+
+#[cfg(test)]
+pub struct VulkanActiveGuard {
+    prev: bool,
+}
+
+#[cfg(test)]
+impl Drop for VulkanActiveGuard {
+    fn drop(&mut self) {
+        VULKAN_ACTIVE.store(self.prev, Ordering::Relaxed);
+    }
+}
+
 pub mod cpu;
 
 #[cfg(feature = "cuda")]
