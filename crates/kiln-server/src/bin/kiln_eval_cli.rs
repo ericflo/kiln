@@ -462,6 +462,27 @@ fn print_human(result: &EvalResultPayload) {
                 );
             }
         }
+        if !r.metrics.confusion_by_tool.is_empty() {
+            // Only show entries where the model picked something *different*
+            // from the target (or skipped) — the matrix is mostly diagonal
+            // on a passing run, no need to print every cell.
+            let mut printed_header = false;
+            for (target, row) in &r.metrics.confusion_by_tool {
+                for (predicted, count) in row {
+                    if predicted == target {
+                        continue;
+                    }
+                    if !printed_header {
+                        println!("  confusion (target → predicted):");
+                        printed_header = true;
+                    }
+                    println!(
+                        "    {:<20} → {:<20}  ×{}",
+                        target, predicted, count
+                    );
+                }
+            }
+        }
         if r.metrics.reasoning_length.num_with_thinking > 0 {
             println!(
                 "  reasoning: n={}  mean={:.0} chars  p50={}  p90={}  max={}",

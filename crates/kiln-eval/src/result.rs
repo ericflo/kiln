@@ -168,6 +168,13 @@ pub struct AggregateMetrics {
     /// JSON" signal during fine-tuning.
     #[serde(default)]
     pub num_non_xml_tool_calls: u32,
+    /// Tool-confusion matrix: `target_tool → predicted_tool → count`.
+    /// Populated for any example whose scorer was `ToolCall`. A target on
+    /// `Read` whose model emitted `Write` shows up as
+    /// `confusion_by_tool["Read"]["Write"] = 1`. Lets users see "the model
+    /// confuses Edit/Write 4 times" in one glance.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub confusion_by_tool: BTreeMap<String, BTreeMap<String, u32>>,
 }
 
 /// Per-tool aggregate counts.
@@ -210,18 +217,24 @@ impl AggregateMetrics {
             tags_by_example,
             scorer_kind_by_example,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             elapsed_secs,
         )
     }
 
     /// Same as [`Self::compute`] but takes per-example target tool names
-    /// so the aggregate carries a per-tool pass-rate breakdown.
+    /// + predicted tool names so the aggregate carries per-tool pass-rate
+    /// breakdown AND a tool-confusion matrix.
+    ///
+    /// `predicted_tool_by_outcome` is keyed by `(example_id,
+    /// completion_index)` so n>1 runs don't conflate predictions.
     pub fn compute_with_tools(
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
         tags_by_example: &BTreeMap<String, Vec<String>>,
         scorer_kind_by_example: &BTreeMap<String, &'static str>,
         target_tool_by_example: &BTreeMap<String, String>,
+        predicted_tool_by_outcome: &BTreeMap<(String, usize), String>,
         elapsed_secs: f64,
     ) -> Self {
         let mut num_pass = 0u32;
@@ -241,6 +254,8 @@ impl AggregateMetrics {
         let mut scorer_acc: BTreeMap<&'static str, (u32, f32, u32)> = BTreeMap::new();
         // per-tool pass-rate
         let mut tool_pass: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        // confusion matrix: target_tool → predicted_tool → count
+        let mut confusion: BTreeMap<String, BTreeMap<String, u32>> = BTreeMap::new();
         // reasoning-length samples
         let mut reasoning_lens: Vec<u32> = Vec::new();
         let mut num_unclosed_thinking = 0u32;
@@ -286,6 +301,15 @@ impl AggregateMetrics {
                     if matches!(out.kind, EvalOutcomeKind::Pass) {
                         entry.1 += 1;
                     }
+                    let predicted = predicted_tool_by_outcome
+                        .get(&(out.example_id.clone(), out.completion_index))
+                        .cloned()
+                        .unwrap_or_else(|| "<none>".to_string());
+                    *confusion
+                        .entry(tool.clone())
+                        .or_default()
+                        .entry(predicted)
+                        .or_insert(0) += 1;
                 }
             }
             if out.unclosed_thinking {
@@ -384,6 +408,7 @@ impl AggregateMetrics {
             reasoning_length,
             num_unclosed_thinking,
             num_non_xml_tool_calls,
+            confusion_by_tool: confusion,
         }
     }
 }

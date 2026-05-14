@@ -82,6 +82,7 @@ async fn run_suite_inner(
     let mut tags_by_example: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut scorer_kind_by_example: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut target_tool_by_example: BTreeMap<String, String> = BTreeMap::new();
+    let mut predicted_tool_by_outcome: BTreeMap<(String, usize), String> = BTreeMap::new();
     let mut running_pass: u32 = 0;
     let mut running_score: f32 = 0.0;
     let mut completions_seen: u32 = 0;
@@ -170,6 +171,18 @@ async fn run_suite_inner(
                 .await;
             let outcome = match result {
                 Ok(completion) => {
+                    // For tool-call-scored examples, capture the *predicted*
+                    // tool name from the completion text (independent of
+                    // scoring) so the aggregate can build a confusion matrix
+                    // — `target=Read, predicted=Write` is exactly the kind
+                    // of confusion users want to see surfaced.
+                    if matches!(scorer, kiln_eval::scorers::Scorer::ToolCall { .. }) {
+                        let predicted = kiln_eval::qwen3::extract_first_tool_call(&completion.text)
+                            .map(|c| c.name)
+                            .unwrap_or_else(|| "<none>".to_string());
+                        predicted_tool_by_outcome
+                            .insert((example_id.clone(), completion_idx), predicted);
+                    }
                     let mut o = score_completion(scorer, example, &completion.text, judge_runner)
                         .map_err(|e| EvalExecutionError::Scorer(format!("{e}")))?;
                     o.completion_index = completion_idx;
@@ -227,6 +240,7 @@ async fn run_suite_inner(
         &tags_by_example,
         &scorer_kind_by_example,
         &target_tool_by_example,
+        &predicted_tool_by_outcome,
         elapsed,
     );
     let finished_at = chrono::Utc::now();

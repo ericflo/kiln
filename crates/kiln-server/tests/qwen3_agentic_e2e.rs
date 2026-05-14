@@ -233,6 +233,21 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
     // No unclosed thinking and no non-XML format mismatch in this run.
     assert_eq!(result.metrics.num_unclosed_thinking, 0);
     assert_eq!(result.metrics.num_non_xml_tool_calls, 0);
+
+    // Confusion matrix captures the one Read → Write swap.
+    let read_row = result
+        .metrics
+        .confusion_by_tool
+        .get("Read")
+        .expect("Read row present in confusion matrix");
+    assert_eq!(read_row.get("Read").copied(), Some(1));
+    assert_eq!(read_row.get("Write").copied(), Some(1));
+    let weather_row = result
+        .metrics
+        .confusion_by_tool
+        .get("get_weather")
+        .expect("weather row present in confusion matrix");
+    assert_eq!(weather_row.get("get_weather").copied(), Some(2));
 }
 
 #[tokio::test]
