@@ -505,6 +505,15 @@ fn print_human(result: &EvalResultPayload) {
                 r.metrics.num_non_xml_tool_calls
             );
         }
+        if r.metrics.num_schema_missing_required > 0
+            || r.metrics.num_schema_extra_unknown > 0
+        {
+            println!(
+                "  schema: missing-required={}  extra-unknown={}",
+                r.metrics.num_schema_missing_required,
+                r.metrics.num_schema_extra_unknown,
+            );
+        }
     }
 }
 

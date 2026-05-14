@@ -597,6 +597,101 @@ fn find_first_tool_call_object(text: &str) -> Option<serde_json::Value> {
     None
 }
 
+/// Outcome of validating a tool call's arguments against the declared
+/// tool schema. The structure is intentionally narrow: just the two
+/// errors Qwen3.5 actually makes in production (missing required args
+/// and extra unknown args). A heavy JSON-Schema validator would catch
+/// type mismatches too but those rarely surface in agentic eval — the
+/// chat template's `arguments | string` coercion erases type info on
+/// the way out, so type strictness creates more noise than signal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SchemaCheck {
+    /// Required keys declared in the tool schema that the prediction
+    /// didn't emit.
+    pub missing_required: Vec<String>,
+    /// Keys the model emitted that aren't declared on the tool. Often
+    /// hallucinated extras — the surrounding scorer can choose whether
+    /// to penalize.
+    pub extra_unknown: Vec<String>,
+    /// True when the tool's schema didn't include a `parameters.properties`
+    /// section, so no key-level validation could run (some tool catalogs
+    /// declare only `description` + `name`).
+    pub no_schema: bool,
+}
+
+impl SchemaCheck {
+    pub fn is_clean(&self) -> bool {
+        self.missing_required.is_empty() && self.extra_unknown.is_empty()
+    }
+}
+
+/// Validate a predicted tool call's arguments against the OpenAI-style
+/// tool definition. Accepts both nested (`{type:"function",function:{
+/// name,parameters:{...}}}`) and flat (`{name, parameters:{...}}`)
+/// shapes. Returns `None` when no tool with the matching name is found
+/// in the catalogue.
+pub fn validate_against_schema(
+    call: &ParsedToolCall,
+    tools: &[serde_json::Value],
+) -> Option<SchemaCheck> {
+    let parameters = lookup_tool_parameters(tools, &call.name)?;
+    let properties = parameters
+        .get("properties")
+        .and_then(|v| v.as_object());
+    let required: Vec<String> = parameters
+        .get("required")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(props) = properties else {
+        return Some(SchemaCheck {
+            no_schema: true,
+            ..Default::default()
+        });
+    };
+    let mut missing: Vec<String> = Vec::new();
+    for r in &required {
+        if !call.arguments.contains_key(r) {
+            missing.push(r.clone());
+        }
+    }
+    let mut extra: Vec<String> = Vec::new();
+    for k in call.arguments.keys() {
+        if !props.contains_key(k) {
+            extra.push(k.clone());
+        }
+    }
+    Some(SchemaCheck {
+        missing_required: missing,
+        extra_unknown: extra,
+        no_schema: false,
+    })
+}
+
+fn lookup_tool_parameters<'a>(
+    tools: &'a [serde_json::Value],
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    for t in tools {
+        let candidate_name = t
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|v| v.as_str());
+        if candidate_name == Some(name) {
+            return t
+                .get("function")
+                .and_then(|f| f.get("parameters"))
+                .or_else(|| t.get("parameters"));
+        }
+    }
+    None
+}
+
 /// Unwrap the `<tool_response>…</tool_response>` envelope Qwen3.5's chat
 /// template puts around tool replies. Returns `None` when the wrapper isn't
 /// present, so callers can pass any content through unchanged.
@@ -795,6 +890,75 @@ mod tests {
             Some("hello")
         );
         assert_eq!(strip_tool_response_wrapper("plain reply"), None);
+    }
+
+    #[test]
+    fn schema_check_flags_missing_required_and_extra_unknown() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "units": {"type": "string"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        })];
+        let call = ParsedToolCall {
+            name: "get_weather".into(),
+            arguments: serde_json::Map::from_iter([
+                ("units".to_string(), serde_json::json!("c")),
+                ("zone".to_string(), serde_json::json!("EU")),
+            ]),
+            format: ToolCallFormat::Qwen3Xml,
+        };
+        let check = validate_against_schema(&call, &tools).expect("tool found");
+        assert_eq!(check.missing_required, vec!["city"]);
+        assert_eq!(check.extra_unknown, vec!["zone"]);
+        assert!(!check.is_clean());
+    }
+
+    #[test]
+    fn schema_check_clean_when_all_required_present_and_no_extras() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "read",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }
+            }
+        })];
+        let call = ParsedToolCall {
+            name: "read".into(),
+            arguments: serde_json::Map::from_iter([(
+                "path".to_string(),
+                serde_json::json!("/x"),
+            )]),
+            format: ToolCallFormat::Qwen3Xml,
+        };
+        let check = validate_against_schema(&call, &tools).unwrap();
+        assert!(check.is_clean());
+    }
+
+    #[test]
+    fn schema_check_missing_tool_returns_none() {
+        let tools = vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "other", "parameters": {"type":"object","properties":{}}}
+        })];
+        let call = ParsedToolCall {
+            name: "unknown".into(),
+            arguments: serde_json::Map::new(),
+            format: ToolCallFormat::Qwen3Xml,
+        };
+        assert!(validate_against_schema(&call, &tools).is_none());
     }
 
     #[test]

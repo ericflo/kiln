@@ -251,6 +251,70 @@ async fn executor_e2e_with_realistic_qwen3_xml_replies() {
 }
 
 #[tokio::test]
+async fn executor_runs_schema_validation_when_tools_declared() {
+    use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
+    use kiln_eval::EvalExample;
+
+    let tools = vec![serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "units": {"type": "string"}
+                },
+                "required": ["city"]
+            }
+        }
+    })];
+
+    let suite = EvalSuite {
+        name: "schema-probe".into(),
+        description: None,
+        default_scorer: Scorer::ToolCall {
+            name_match: NameMatch::CaseInsensitive,
+            args: ArgsScoring::KeysOnly,
+            weights: None,
+        },
+        generation: EvalGenerationParams::default(),
+        system_prompt: None,
+        examples: vec![EvalExample {
+            id: Some("weather".into()),
+            messages: vec![EvalChatMessage::new("user", "weather paris")],
+            target: Some(
+                r#"{"tool_calls":[{"name":"get_weather","arguments":{"city":"Paris","units":"c"}}]}"#
+                    .into(),
+            ),
+            ..Default::default()
+        }],
+        schema_version: 1,
+        tools: Some(tools),
+    };
+
+    // Model emits the call but invents a `zone` arg and forgets `city`.
+    let replies = vec![xml_call(
+        "get_weather",
+        &[("zone", "Europe"), ("units", "c")],
+    )];
+    let gen_ = Arc::new(OrderedMockGenerator::new(replies)) as Arc<dyn EvalGenerator>;
+    let result = run_suite_against_adapter(
+        &suite,
+        None,
+        None,
+        gen_,
+        None,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(NoopJudgeRunner) as Arc<dyn JudgeRunner>,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.metrics.num_schema_missing_required, 1);
+    assert_eq!(result.metrics.num_schema_extra_unknown, 1);
+}
+
+#[tokio::test]
 async fn executor_flags_non_xml_tool_call_in_metrics() {
     use kiln_eval::scorers::{ArgsScoring, NameMatch, Scorer};
     use kiln_eval::EvalExample;

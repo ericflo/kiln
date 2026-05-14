@@ -83,6 +83,8 @@ async fn run_suite_inner(
     let mut scorer_kind_by_example: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut target_tool_by_example: BTreeMap<String, String> = BTreeMap::new();
     let mut predicted_tool_by_outcome: BTreeMap<(String, usize), String> = BTreeMap::new();
+    let mut schema_violations_by_outcome: BTreeMap<(String, usize), (u32, u32)> =
+        BTreeMap::new();
     let mut running_pass: u32 = 0;
     let mut running_score: f32 = 0.0;
     let mut completions_seen: u32 = 0;
@@ -177,11 +179,32 @@ async fn run_suite_inner(
                     // — `target=Read, predicted=Write` is exactly the kind
                     // of confusion users want to see surfaced.
                     if matches!(scorer, kiln_eval::scorers::Scorer::ToolCall { .. }) {
-                        let predicted = kiln_eval::qwen3::extract_first_tool_call(&completion.text)
-                            .map(|c| c.name)
+                        let parsed = kiln_eval::qwen3::extract_first_tool_call(&completion.text);
+                        let predicted = parsed
+                            .as_ref()
+                            .map(|c| c.name.clone())
                             .unwrap_or_else(|| "<none>".to_string());
                         predicted_tool_by_outcome
                             .insert((example_id.clone(), completion_idx), predicted);
+                        // Schema check: when the suite/example declares a
+                        // `tools` catalogue, validate the predicted call's
+                        // args against the tool's declared parameters.
+                        if let Some(call) = parsed.as_ref() {
+                            if let Some(catalogue) = example.effective_tools(suite.tools.as_deref())
+                            {
+                                if let Some(chk) =
+                                    kiln_eval::qwen3::validate_against_schema(call, catalogue)
+                                {
+                                    schema_violations_by_outcome.insert(
+                                        (example_id.clone(), completion_idx),
+                                        (
+                                            chk.missing_required.len() as u32,
+                                            chk.extra_unknown.len() as u32,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                     }
                     let mut o = score_completion(scorer, example, &completion.text, judge_runner)
                         .map_err(|e| EvalExecutionError::Scorer(format!("{e}")))?;
@@ -234,13 +257,14 @@ async fn run_suite_inner(
     }
 
     let elapsed = start_instant.elapsed().as_secs_f64();
-    let metrics = AggregateMetrics::compute_with_tools(
+    let metrics = AggregateMetrics::compute_with_tools_full(
         &outcomes,
         &weights,
         &tags_by_example,
         &scorer_kind_by_example,
         &target_tool_by_example,
         &predicted_tool_by_outcome,
+        &schema_violations_by_outcome,
         elapsed,
     );
     let finished_at = chrono::Utc::now();

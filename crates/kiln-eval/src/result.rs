@@ -175,6 +175,17 @@ pub struct AggregateMetrics {
     /// confuses Edit/Write 4 times" in one glance.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub confusion_by_tool: BTreeMap<String, BTreeMap<String, u32>>,
+    /// Number of predicted tool calls that missed a required arg in the
+    /// declared schema. Only meaningful when the suite has a `tools`
+    /// catalogue. A passing scorer might still log a schema violation if
+    /// the *target* itself was missing the required field (rare — that's
+    /// a data-quality bug worth surfacing).
+    #[serde(default)]
+    pub num_schema_missing_required: u32,
+    /// Number of predicted tool calls with arg keys not declared on the
+    /// tool. Usually the model hallucinating extra kwargs.
+    #[serde(default)]
+    pub num_schema_extra_unknown: u32,
 }
 
 /// Per-tool aggregate counts.
@@ -228,6 +239,9 @@ impl AggregateMetrics {
     ///
     /// `predicted_tool_by_outcome` is keyed by `(example_id,
     /// completion_index)` so n>1 runs don't conflate predictions.
+    /// `schema_violations_by_outcome` carries the (missing, extra) tally
+    /// per outcome — those are populated by the executor only when the
+    /// suite declared a `tools` catalogue.
     pub fn compute_with_tools(
         outcomes: &[ExampleOutcome],
         weights: &BTreeMap<String, f32>,
@@ -235,6 +249,31 @@ impl AggregateMetrics {
         scorer_kind_by_example: &BTreeMap<String, &'static str>,
         target_tool_by_example: &BTreeMap<String, String>,
         predicted_tool_by_outcome: &BTreeMap<(String, usize), String>,
+        elapsed_secs: f64,
+    ) -> Self {
+        Self::compute_with_tools_full(
+            outcomes,
+            weights,
+            tags_by_example,
+            scorer_kind_by_example,
+            target_tool_by_example,
+            predicted_tool_by_outcome,
+            &BTreeMap::new(),
+            elapsed_secs,
+        )
+    }
+
+    /// Most-comprehensive aggregator: takes per-outcome schema-violation
+    /// counts in addition to the basic per-tool maps. Keyed the same way
+    /// as `predicted_tool_by_outcome`.
+    pub fn compute_with_tools_full(
+        outcomes: &[ExampleOutcome],
+        weights: &BTreeMap<String, f32>,
+        tags_by_example: &BTreeMap<String, Vec<String>>,
+        scorer_kind_by_example: &BTreeMap<String, &'static str>,
+        target_tool_by_example: &BTreeMap<String, String>,
+        predicted_tool_by_outcome: &BTreeMap<(String, usize), String>,
+        schema_violations_by_outcome: &BTreeMap<(String, usize), (u32, u32)>,
         elapsed_secs: f64,
     ) -> Self {
         let mut num_pass = 0u32;
@@ -261,6 +300,9 @@ impl AggregateMetrics {
         let mut num_unclosed_thinking = 0u32;
         // qwen3-format diagnostic — extracted from the scorer's detail.
         let mut num_non_xml_tool_calls = 0u32;
+        // schema-violation tallies sourced from the per-outcome map.
+        let mut num_schema_missing_required = 0u32;
+        let mut num_schema_extra_unknown = 0u32;
 
         for out in outcomes {
             match out.kind {
@@ -329,6 +371,12 @@ impl AggregateMetrics {
                 {
                     num_non_xml_tool_calls += 1;
                 }
+            }
+            if let Some((missing, extra)) =
+                schema_violations_by_outcome.get(&(out.example_id.clone(), out.completion_index))
+            {
+                num_schema_missing_required += missing;
+                num_schema_extra_unknown += extra;
             }
             if let Some(kind) = scorer_kind_by_example.get(&out.example_id) {
                 let entry = scorer_acc.entry(*kind).or_insert((0, 0.0, 0));
@@ -409,6 +457,8 @@ impl AggregateMetrics {
             num_unclosed_thinking,
             num_non_xml_tool_calls,
             confusion_by_tool: confusion,
+            num_schema_missing_required,
+            num_schema_extra_unknown,
         }
     }
 }
