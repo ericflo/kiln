@@ -1409,6 +1409,1014 @@ select {
   .hero-cell { padding: var(--space-4); }
   .hero-num { font-size: var(--text-2xl); }
 }
+
+/* =====================================================================
+   Evals page — datasets, suites, jobs, judgments
+   ===================================================================== */
+
+.evals-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  flex-wrap: wrap;
+}
+.evals-toolbar .search-input {
+  flex: 1;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  font-family: inherit;
+}
+.evals-toolbar .filter-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all 80ms ease;
+  font-family: inherit;
+}
+.evals-toolbar .filter-pill:hover { border-color: var(--border-strong); color: var(--text); }
+.evals-toolbar .filter-pill.active {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--kiln-200);
+}
+.evals-toolbar .filter-pill .pill-count {
+  margin-left: 6px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-quiet);
+}
+.evals-toolbar .filter-pill.active .pill-count { color: var(--kiln-300); }
+
+/* List rows for datasets/suites/judgments */
+.eval-row {
+  display: grid;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  transition: background 80ms ease;
+}
+.eval-row:hover { background: rgba(255, 255, 255, 0.025); }
+.eval-row.eval-row-clickable { cursor: pointer; }
+.eval-row .row-title { font-weight: 500; color: var(--text); }
+.eval-row .row-sub { color: var(--text-quiet); font-size: var(--text-xs); margin-top: 2px; }
+.eval-row .row-actions { display: flex; gap: var(--space-1); justify-content: flex-end; }
+
+.eval-row-datasets   { grid-template-columns: 1.7fr 1.1fr 1.1fr 1.4fr auto; }
+.eval-row-suites     { grid-template-columns: 1.6fr 0.9fr 1fr auto; }
+.eval-row-judgments  { grid-template-columns: 1.7fr 0.7fr 1.5fr auto; }
+.eval-row-jobs       { grid-template-columns: 1fr; align-items: stretch; }
+
+/* Outcome badges — strong color mapping */
+.outcome-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+.outcome-badge::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+}
+.outcome-badge.pass    { background: var(--success-bg); color: var(--success-fg); border: 1px solid var(--success-bd); }
+.outcome-badge.pass::before    { background: var(--success-fg); }
+.outcome-badge.fail    { background: var(--danger-bg);  color: var(--danger-fg);  border: 1px solid var(--danger-bd); }
+.outcome-badge.fail::before    { background: var(--danger-fg); }
+.outcome-badge.invalid { background: var(--warning-bg); color: var(--warning-fg); border: 1px solid var(--warning-bd); }
+.outcome-badge.invalid::before { background: var(--warning-fg); }
+.outcome-badge.error   { background: rgba(140, 140, 160, 0.12); color: var(--text-muted); border: 1px solid var(--border); }
+.outcome-badge.error::before   { background: var(--text-muted); }
+
+/* Job state pill */
+.job-state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--border);
+}
+.job-state-pill::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+}
+.job-state-pill.queued    { color: var(--text-muted); background: var(--surface-2); }
+.job-state-pill.queued::before    { background: var(--text-muted); }
+.job-state-pill.running   { color: var(--info-fg); background: var(--info-bg); border-color: var(--info-bd); }
+.job-state-pill.running::before   { background: var(--info-fg); animation: pulseDot 1.4s ease-in-out infinite; }
+.job-state-pill.completed { color: var(--success-fg); background: var(--success-bg); border-color: var(--success-bd); }
+.job-state-pill.completed::before { background: var(--success-fg); }
+.job-state-pill.failed    { color: var(--danger-fg); background: var(--danger-bg); border-color: var(--danger-bd); }
+.job-state-pill.failed::before    { background: var(--danger-fg); }
+.job-state-pill.cancelled { color: var(--text-quiet); background: var(--surface-2); }
+.job-state-pill.cancelled::before { background: var(--text-quiet); }
+
+@keyframes pulseDot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.4); opacity: 0.45; }
+}
+
+/* The big-deal accuracy ring */
+.acc-ring {
+  display: inline-grid;
+  place-items: center;
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  background: conic-gradient(var(--ring-color, var(--accent)) calc(var(--ring-pct, 0) * 1%), var(--surface-3) 0);
+  position: relative;
+  flex-shrink: 0;
+}
+.acc-ring::before {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  background: var(--surface);
+  border-radius: 50%;
+}
+.acc-ring .acc-ring-num {
+  position: relative;
+  font-size: var(--text-md);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.acc-ring.tiny { width: 38px; height: 38px; }
+.acc-ring.tiny::before { inset: 4px; }
+.acc-ring.tiny .acc-ring-num { font-size: 11px; }
+.acc-ring.large { width: 96px; height: 96px; }
+.acc-ring.large::before { inset: 7px; }
+.acc-ring.large .acc-ring-num { font-size: var(--text-2xl); }
+
+/* Job card (rich Jobs tab) */
+.job-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-4);
+  display: flex;
+  gap: var(--space-4);
+  align-items: stretch;
+  transition: border-color 80ms ease;
+  cursor: pointer;
+  margin-bottom: var(--space-3);
+}
+.job-card:hover { border-color: var(--border-strong); }
+.job-card.active { border-color: var(--accent); }
+.job-card .job-card-meta {
+  display: flex; flex-direction: column; gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.job-card .job-card-suite {
+  font-weight: 600; color: var(--text); font-size: var(--text-md);
+}
+.job-card .job-card-sub {
+  color: var(--text-quiet); font-size: var(--text-xs);
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+}
+.job-card .job-card-progress {
+  display: flex; gap: var(--space-2); align-items: center;
+  margin-top: 4px;
+}
+.job-card .progress-bar-wrap {
+  flex: 1;
+  height: 6px;
+  background: var(--surface-3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.job-card .progress-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--kiln-300));
+  transition: width 250ms ease;
+}
+
+/* Drill-in modal */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(2px);
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+}
+.modal-shell {
+  background: var(--canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  width: min(1280px, 100%);
+  height: min(86vh, 900px);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+}
+.modal-head {
+  display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.modal-head h2 {
+  margin: 0; font-size: var(--text-lg); font-weight: 600;
+  flex: 1; min-width: 0;
+}
+.modal-head .modal-meta { color: var(--text-quiet); font-size: var(--text-xs); }
+.modal-close {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  width: 32px; height: 32px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: grid; place-items: center;
+  font-size: 18px;
+  font-family: inherit;
+}
+.modal-close:hover { background: var(--surface); border-color: var(--border-strong); }
+
+.modal-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) minmax(0, 2fr);
+  min-height: 0;
+}
+.modal-sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--surface-2);
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+.modal-content {
+  display: flex; flex-direction: column;
+  min-height: 0;
+  background: var(--canvas);
+}
+
+/* Headline strip in drill-in: per-adapter accuracy + counts */
+.drill-headline {
+  display: flex; gap: var(--space-3); align-items: center;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.drill-headline .acc-ring { margin-right: var(--space-2); }
+.drill-counts {
+  display: flex; gap: var(--space-3); flex-wrap: wrap;
+  font-size: var(--text-xs);
+}
+.drill-counts .count-cell {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.drill-counts .count-cell .count-num {
+  font-size: var(--text-md); font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.drill-counts .count-cell .count-label {
+  text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; color: var(--text-quiet);
+}
+
+/* Tag bars */
+.tag-bars { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tag-bar { display: grid; grid-template-columns: minmax(80px, 130px) 1fr 50px; gap: var(--space-2); align-items: center; font-size: var(--text-xs); }
+.tag-bar .tag-name { color: var(--text-2); font-weight: 500; }
+.tag-bar .tag-track { background: var(--surface-3); border-radius: 3px; height: 6px; overflow: hidden; }
+.tag-bar .tag-fill { height: 100%; background: linear-gradient(90deg, var(--success-fg), var(--kiln-300)); transition: width 200ms ease; }
+.tag-bar .tag-pct { font-variant-numeric: tabular-nums; color: var(--text-2); text-align: right; font-weight: 600; }
+
+/* Outcome list inside drill-in */
+.outcomes-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0;
+  scroll-behavior: smooth;
+}
+.outcome-item {
+  border-bottom: 1px solid var(--border);
+  padding: var(--space-3) var(--space-5);
+  cursor: pointer;
+  transition: background 80ms ease;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: var(--space-3);
+  align-items: center;
+}
+.outcome-item:hover { background: rgba(255, 255, 255, 0.02); }
+.outcome-item.selected { background: var(--accent-soft); border-left: 3px solid var(--accent); padding-left: calc(var(--space-5) - 3px); }
+.outcome-item .outcome-preview {
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.outcome-item .outcome-meta {
+  display: flex; gap: 8px; align-items: center;
+  font-size: 11px; color: var(--text-quiet);
+}
+
+/* Outcome detail panel */
+.outcome-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+.outcome-detail .detail-empty {
+  padding: var(--space-10);
+  text-align: center;
+  color: var(--text-quiet);
+}
+.outcome-detail .detail-section {
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+.outcome-detail .detail-section h4 {
+  margin: 0 0 var(--space-2) 0;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-quiet);
+}
+.outcome-detail .messages-list { display: flex; flex-direction: column; gap: var(--space-2); }
+.outcome-detail .chat-msg {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+.outcome-detail .chat-msg .role {
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-quiet);
+  margin-bottom: 4px;
+}
+.outcome-detail .chat-msg .role.user      { color: var(--info-fg); }
+.outcome-detail .chat-msg .role.assistant { color: var(--success-fg); }
+.outcome-detail .chat-msg .role.system    { color: var(--text-muted); }
+.outcome-detail .chat-msg .role.tool      { color: var(--warning-fg); }
+.outcome-detail .chat-msg .body {
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+  max-height: 240px; overflow-y: auto;
+}
+
+/* Side-by-side target vs got */
+.detail-tg { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); }
+.detail-tg .tg-cell {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+}
+.detail-tg .tg-cell.tg-pass { border-color: var(--success-bd); background: var(--success-bg); }
+.detail-tg .tg-cell.tg-fail { border-color: var(--danger-bd); background: var(--danger-bg); }
+.detail-tg .tg-cell .tg-label {
+  font-size: var(--text-2xs); font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-quiet); margin-bottom: 6px;
+}
+.detail-tg .tg-cell pre {
+  margin: 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+  max-height: 320px; overflow: auto;
+}
+
+/* Compare-mode stacked-bar matrix */
+.compare-matrix {
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.compare-matrix .compare-row {
+  display: grid;
+  grid-template-columns: 130px 1fr 60px;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--text-xs);
+}
+.compare-matrix .compare-row .compare-name { font-weight: 600; color: var(--text-2); }
+.compare-matrix .compare-row .compare-bar {
+  display: flex;
+  height: 12px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--surface-3);
+}
+.compare-matrix .compare-row .compare-bar .seg-pass    { background: var(--success-fg); }
+.compare-matrix .compare-row .compare-bar .seg-fail    { background: var(--danger-fg); }
+.compare-matrix .compare-row .compare-bar .seg-invalid { background: var(--warning-fg); }
+.compare-matrix .compare-row .compare-bar .seg-error   { background: var(--text-quiet); }
+.compare-matrix .compare-row .compare-acc {
+  font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; color: var(--text);
+}
+
+/* Streaming ticker (running jobs) */
+.live-ticker {
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--text-xs);
+  display: flex; flex-direction: column; gap: 4px;
+  max-height: 140px; overflow-y: auto;
+}
+.live-ticker .live-ticker-row {
+  display: flex; gap: var(--space-2); align-items: center;
+  font-family: var(--font-mono); font-size: 11px;
+}
+.live-ticker .live-ticker-row .lt-time { color: var(--text-quiet); }
+
+/* Judgment view styling */
+.judgment-pair-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.judgment-reply {
+  border: 2px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--surface);
+  min-height: 240px;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  transition: all 80ms ease;
+}
+.judgment-reply:hover { border-color: var(--border-strong); }
+.judgment-reply.judgment-reply-a:hover { border-color: var(--info-fg); }
+.judgment-reply.judgment-reply-b:hover { border-color: var(--kiln-400); }
+.judgment-reply .judgment-tag {
+  font-size: var(--text-2xs); font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-quiet); margin-bottom: 6px;
+  display: flex; gap: var(--space-2); align-items: center;
+}
+.judgment-reply.judgment-reply-a .judgment-tag::before {
+  content: 'A'; display: inline-grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--info-bg); color: var(--info-fg); border: 1px solid var(--info-bd);
+  font-weight: 700;
+}
+.judgment-reply.judgment-reply-b .judgment-tag::before {
+  content: 'B'; display: inline-grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--kiln-200); border: 1px solid var(--accent);
+  font-weight: 700;
+}
+.judgment-reply .judgment-body {
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+  flex: 1; overflow-y: auto; max-height: 380px;
+}
+
+.judgment-actions {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto 1fr;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface-2);
+  border-radius: var(--radius-md);
+  align-items: center;
+}
+.judgment-actions .judge-btn {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 12px 18px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 80ms ease;
+  display: flex; gap: var(--space-2); align-items: center; justify-content: center;
+}
+.judgment-actions .judge-btn:hover { border-color: var(--border-strong); }
+.judgment-actions .judge-btn.judge-a:hover { background: var(--info-bg); border-color: var(--info-fg); color: var(--info-fg); }
+.judgment-actions .judge-btn.judge-b:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--kiln-200); }
+.judgment-actions .judge-btn.judge-tie:hover  { background: var(--warning-bg); border-color: var(--warning-fg); color: var(--warning-fg); }
+.judgment-actions .judge-btn.judge-skip:hover { background: var(--surface-3); }
+.judgment-actions .judge-kbd {
+  background: var(--surface-3); padding: 2px 6px; border-radius: 4px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  color: var(--text-2); border: 1px solid var(--border);
+}
+.judgment-actions .judge-meta {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  font-size: var(--text-xs); color: var(--text-quiet); padding: 0 var(--space-3);
+}
+.judgment-actions .judge-meta-fields {
+  display: flex; gap: var(--space-2); align-items: center;
+  font-size: var(--text-xs); padding: 0 var(--space-3);
+}
+.judgment-actions .judge-meta-fields input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  padding: 4px 8px;
+  font-family: inherit; font-size: var(--text-xs);
+}
+
+/* Empty states */
+.eval-empty {
+  padding: var(--space-10) var(--space-5);
+  text-align: center;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.eval-empty .eval-empty-icon {
+  font-size: 36px; margin-bottom: var(--space-3); opacity: 0.6;
+}
+.eval-empty .eval-empty-title {
+  font-size: var(--text-md); font-weight: 600; color: var(--text); margin-bottom: var(--space-2);
+}
+.eval-empty .eval-empty-body {
+  color: var(--text-quiet); font-size: var(--text-xs); max-width: 420px; margin: 0 auto var(--space-3); line-height: 1.6;
+}
+.eval-empty .eval-empty-cta {
+  display: inline-flex; gap: var(--space-2); align-items: center;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: var(--radius-md);
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+.eval-empty .eval-empty-cta:hover { background: var(--accent-hover); }
+
+/* Tag chips */
+.tag-chip {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--text-2);
+  margin-right: 4px;
+  font-weight: 500;
+}
+
+/* Compare delta badge */
+.delta-badge {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: var(--text-2xs); font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.delta-badge.delta-up   { background: var(--success-bg); color: var(--success-fg); border: 1px solid var(--success-bd); }
+.delta-badge.delta-down { background: var(--danger-bg);  color: var(--danger-fg);  border: 1px solid var(--danger-bd); }
+.delta-badge.delta-flat { background: var(--surface-2); color: var(--text-quiet); border: 1px solid var(--border); }
+
+/* Sparkline (suite history) */
+.spark {
+  display: inline-block;
+  height: 18px;
+  width: 64px;
+  vertical-align: middle;
+}
+.spark path { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.spark .spark-area { fill: var(--accent-soft); stroke: none; }
+
+/* Scorer kind badge */
+.scorer-badge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+
+/* Reusable section header */
+.eval-section-head {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: var(--text-xs); font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-quiet);
+}
+
+/* Token streaming cursor */
+.token-cursor::after {
+  content: '▊';
+  margin-left: 1px;
+  animation: blinkCursor 1s steps(2) infinite;
+  color: var(--accent);
+}
+@keyframes blinkCursor { 50% { opacity: 0; } }
+
+/* Wide responsive: stack the modal sidebar at narrow widths */
+@media (max-width: 900px) {
+  .modal-body { grid-template-columns: 1fr; }
+  .modal-sidebar { border-right: none; border-bottom: 1px solid var(--border); max-height: 50vh; }
+  .judgment-pair-grid { grid-template-columns: 1fr; }
+  .detail-tg { grid-template-columns: 1fr; }
+}
+
+/* =====================================================================
+   Command palette (Cmd-K)
+   ===================================================================== */
+.cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+  z-index: 100;
+  display: grid;
+  place-items: start center;
+  padding-top: 12vh;
+}
+.cmdk-shell {
+  background: var(--canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  width: min(640px, 92vw);
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.cmdk-input-row {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cmdk-input-row .cmdk-icon {
+  color: var(--text-muted);
+  font-size: var(--text-md);
+}
+.cmdk-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: var(--text-md);
+  font-family: inherit;
+  outline: none;
+  padding: 4px 0;
+}
+.cmdk-input::placeholder { color: var(--text-quiet); }
+.cmdk-hint {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10px; color: var(--text-quiet); padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+}
+.cmdk-results {
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px 0;
+}
+.cmdk-section-label {
+  padding: 8px 14px 4px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--text-quiet);
+}
+.cmdk-item {
+  display: flex; gap: var(--space-3); align-items: center;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: var(--text-2);
+}
+.cmdk-item:hover, .cmdk-item.cmdk-active {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+.cmdk-item .cmdk-item-icon {
+  width: 22px; height: 22px;
+  display: grid; place-items: center;
+  border-radius: 4px;
+  background: var(--surface-2);
+  color: var(--text-quiet);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.cmdk-item .cmdk-item-body { flex: 1; min-width: 0; }
+.cmdk-item .cmdk-item-title {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmdk-item .cmdk-item-sub {
+  color: var(--text-quiet);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmdk-item .cmdk-item-action {
+  font-size: 10px;
+  color: var(--text-quiet);
+  font-family: var(--font-mono);
+}
+.cmdk-empty {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-quiet);
+  font-size: var(--text-sm);
+}
+.cmdk-footer {
+  border-top: 1px solid var(--border);
+  padding: 8px 14px;
+  display: flex; gap: var(--space-3); align-items: center;
+  font-size: 11px; color: var(--text-quiet);
+}
+.cmdk-footer .cmdk-foot-key {
+  display: inline-flex; align-items: center; gap: 4px;
+  margin-right: 8px;
+}
+
+/* Cmd-K trigger pill in the header */
+.cmdk-trigger {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-quiet);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 80ms ease;
+}
+.cmdk-trigger:hover { border-color: var(--border-strong); color: var(--text-2); }
+.cmdk-trigger .cmdk-trigger-key {
+  font-family: var(--font-mono);
+  background: var(--surface-3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+
+/* =====================================================================
+   Charts: VRAM donut + line/sparkline chart container
+   ===================================================================== */
+.vram-donut {
+  display: flex; align-items: center; gap: var(--space-4);
+}
+.vram-donut svg { flex-shrink: 0; }
+.vram-donut .vram-legend {
+  display: flex; flex-direction: column; gap: 6px;
+  flex: 1;
+  font-size: var(--text-xs);
+}
+.vram-donut .vram-legend-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.vram-donut .vram-legend-swatch {
+  width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0;
+}
+.vram-donut .vram-legend-name { flex: 1; color: var(--text-2); }
+.vram-donut .vram-legend-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.line-chart {
+  width: 100%;
+  height: 120px;
+  display: block;
+}
+.line-chart .axis { stroke: var(--border); stroke-width: 0.5; }
+.line-chart .axis-label { fill: var(--text-quiet); font-size: 10px; font-family: var(--font-sans); }
+.line-chart .grid { stroke: var(--surface-3); stroke-width: 0.5; stroke-dasharray: 2,2; }
+.line-chart .data-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.line-chart .data-area { fill: var(--accent-soft); stroke: none; }
+.line-chart .data-dot  { fill: var(--accent); }
+
+.line-chart-large {
+  height: 280px;
+}
+
+/* =====================================================================
+   Training: rich job cards + drill-in
+   ===================================================================== */
+.training-cards { display: flex; flex-direction: column; gap: var(--space-3); }
+
+.training-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-4);
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-3);
+  cursor: pointer;
+  transition: border-color 80ms ease;
+}
+.training-card:hover { border-color: var(--border-strong); }
+.training-card.training-card-running { border-color: var(--info-bd); }
+.training-card-head {
+  display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap;
+}
+.training-card-head .training-card-name {
+  font-weight: 600; color: var(--text);
+}
+.training-card-head .training-card-type {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--surface-2); color: var(--text-quiet); border: 1px solid var(--border);
+  font-family: var(--font-mono);
+}
+.training-card-head .training-card-type.sft  { color: var(--info-fg); border-color: var(--info-bd); background: var(--info-bg); }
+.training-card-head .training-card-type.grpo { color: var(--warning-fg); border-color: var(--warning-bd); background: var(--warning-bg); }
+.training-card-progress {
+  display: grid;
+  grid-template-columns: 1fr 100px 100px;
+  gap: var(--space-3);
+  align-items: center;
+}
+.training-card-progress .progress-bar-wrap {
+  height: 8px; background: var(--surface-3); border-radius: 4px; overflow: hidden;
+}
+.training-card-progress .progress-bar-fill {
+  height: 100%; background: linear-gradient(90deg, var(--accent), var(--kiln-300));
+  transition: width 250ms ease;
+}
+.training-card-progress .training-stat {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+}
+.training-card-progress .training-stat-num {
+  font-variant-numeric: tabular-nums; font-size: var(--text-md); font-weight: 600; color: var(--text);
+}
+.training-card-progress .training-stat-label {
+  font-size: 10px; color: var(--text-quiet); text-transform: uppercase; letter-spacing: 0.06em;
+}
+
+.training-card-curve {
+  height: 64px;
+}
+
+/* =====================================================================
+   Adapter cards + drill-in
+   ===================================================================== */
+.adapter-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+.adapter-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  cursor: pointer;
+  transition: all 80ms ease;
+  position: relative;
+}
+.adapter-card:hover { border-color: var(--border-strong); transform: translateY(-1px); }
+.adapter-card.adapter-card-active {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, var(--accent-soft) 0%, var(--surface) 25%);
+}
+.adapter-card .adapter-card-active-pill {
+  position: absolute; top: 8px; right: 8px;
+  background: var(--accent); color: white;
+  font-size: 9px; font-weight: 700; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 999px; letter-spacing: 0.06em;
+}
+.adapter-card .adapter-card-name {
+  font-weight: 600; color: var(--text); font-size: var(--text-md);
+}
+.adapter-card .adapter-card-meta {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-quiet);
+}
+.adapter-card .adapter-card-meta .tabular-nums {
+  color: var(--text-2); font-weight: 500;
+}
+.adapter-card .adapter-card-actions {
+  display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap;
+}
+
+/* =====================================================================
+   Quick actions row (Overview)
+   ===================================================================== */
+.quick-actions {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-4);
+}
+.quick-action-btn {
+  flex: 1;
+  min-width: 180px;
+  padding: var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  display: flex; align-items: center; gap: var(--space-3);
+  cursor: pointer;
+  transition: all 80ms ease;
+  font-family: inherit;
+  text-align: left;
+  color: var(--text);
+}
+.quick-action-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  transform: translateY(-1px);
+}
+.quick-action-btn .quick-action-icon {
+  width: 36px; height: 36px;
+  display: grid; place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--kiln-300);
+  font-size: 18px;
+  flex-shrink: 0;
+}
+.quick-action-btn .quick-action-title { font-weight: 600; font-size: var(--text-sm); }
+.quick-action-btn .quick-action-sub { font-size: 11px; color: var(--text-quiet); margin-top: 2px; }
+
+/* =====================================================================
+   Playground compare mode
+   ===================================================================== */
+.compare-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.compare-side {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-3);
+  display: flex; flex-direction: column;
+  min-height: 200px;
+}
+.compare-side .compare-side-head {
+  font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--text-quiet);
+  margin-bottom: 6px;
+  display: flex; gap: 8px; align-items: center;
+}
+.compare-side .compare-side-body {
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+  flex: 1; max-height: 380px; overflow-y: auto;
+}
+
+@media (max-width: 900px) {
+  .compare-pair { grid-template-columns: 1fr; }
+  .training-card-progress { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -1426,6 +2434,11 @@ select {
   <div class="topbar-stats" id="header-stats" aria-live="polite">
     <span class="stat"><span class="status-dot offline" id="status-dot"></span><span class="stat-val" id="status-text">connecting…</span></span>
   </div>
+
+  <button class="cmdk-trigger" id="cmdk-trigger" type="button" aria-label="Open command palette" title="Open command palette (⌘K / Ctrl+K)">
+    <span>Search</span>
+    <span class="cmdk-trigger-key">⌘K</span>
+  </button>
 
   <nav class="header-help" aria-label="Help links">
     <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>
@@ -1454,6 +2467,10 @@ select {
     Training
     <span class="count" data-count="training" id="training-count">0</span>
   </button>
+  <button type="button" class="primary-tab" data-page="evals" role="tab" aria-selected="false" aria-controls="page-evals" id="primary-tab-evals">
+    Evals
+    <span class="count" data-count="evals" id="evals-count">0</span>
+  </button>
   <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground">
     Playground
   </button>
@@ -1465,6 +2482,38 @@ select {
        Overview page
        ================================================================= -->
   <section class="page active" id="page-overview" role="tabpanel" aria-labelledby="primary-tab-overview">
+
+    <!-- Quick actions row — four most common next-steps -->
+    <div class="quick-actions">
+      <button class="quick-action-btn" type="button" data-quick-action="new-eval">
+        <span class="quick-action-icon">📊</span>
+        <span>
+          <span class="quick-action-title">Run an eval</span>
+          <div class="quick-action-sub">Compare any adapter against a suite</div>
+        </span>
+      </button>
+      <button class="quick-action-btn" type="button" data-quick-action="train-sft">
+        <span class="quick-action-icon">🧪</span>
+        <span>
+          <span class="quick-action-title">Train an adapter</span>
+          <div class="quick-action-sub">Submit SFT or GRPO from a dataset</div>
+        </span>
+      </button>
+      <button class="quick-action-btn" type="button" data-quick-action="judge">
+        <span class="quick-action-icon">⚖️</span>
+        <span>
+          <span class="quick-action-title">Judge A/B pairs</span>
+          <div class="quick-action-sub">Build a local judge LoRA from your picks</div>
+        </span>
+      </button>
+      <button class="quick-action-btn" type="button" data-quick-action="playground">
+        <span class="quick-action-icon">💬</span>
+        <span>
+          <span class="quick-action-title">Open playground</span>
+          <div class="quick-action-sub">Try a prompt against the active adapter</div>
+        </span>
+      </button>
+    </div>
 
     <!-- Hero stats -->
     <div class="hero" id="hero-stats" aria-live="polite">
@@ -1491,7 +2540,7 @@ select {
     </div>
 
     <div class="row-2">
-      <!-- Server Status card -->
+      <!-- Server Status card with VRAM donut chart -->
       <div class="card">
         <div class="card-head">
           <h2>Server status</h2>
@@ -1502,7 +2551,7 @@ select {
         </div>
       </div>
 
-      <!-- Decode Performance card -->
+      <!-- Decode Performance card with live tok/s sparkline -->
       <div class="card">
         <div class="card-head">
           <h2>Decode performance</h2>
@@ -1533,9 +2582,9 @@ select {
     <div class="card">
       <div class="card-head">
         <h2>Saved adapters</h2>
-        <span class="eyebrow">LoRA adapters on disk</span>
+        <span class="eyebrow" id="adapters-card-eyebrow">LoRA adapters on disk</span>
       </div>
-      <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
+      <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true" style="padding: var(--space-4);">
         <div class="empty">Loading adapter list…</div>
       </div>
     </div>
@@ -1650,10 +2699,18 @@ select {
             </div>
           </div>
           <div class="form-group">
+            <label for="sft-dataset-pick">Pick from uploaded dataset <span class="hint">(optional)</span></label>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <select id="sft-dataset-pick" style="flex:1;"><option value="">— or paste examples below —</option></select>
+              <button type="button" class="btn btn-sm" id="sft-dataset-load">Load examples</button>
+            </div>
+            <div class="form-help">Pick any SFT dataset uploaded under Evals → Datasets. Loading replaces the textarea below.</div>
+          </div>
+          <div class="form-group">
             <label for="sft-examples">Training examples (JSON array)</label>
             <textarea id="sft-examples" name="examples" rows="6" aria-describedby="sft-examples-help sft-examples-state" placeholder='[{"messages":[{"role":"user","content":"Translate to French: Hello"},{"role":"assistant","content":"Bonjour"}]}]'></textarea>
             <div class="form-help" id="sft-examples-help">Expected: a JSON array of examples. Each example needs a <code>messages</code> array with at least one <code>user</code> message and one <code>assistant</code> message.</div>
-            <div id="sft-examples-state" data-sft-examples-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste examples JSON or use the sample payload to enable submit.</div>
+            <div id="sft-examples-state" data-sft-examples-state style="font-size: var(--text-xs); color: var(--text-muted);" aria-live="polite">Paste examples JSON, pick a dataset, or use the sample payload to enable submit.</div>
             <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
               <button type="button" class="btn btn-sm" id="use-sft-sample">Use sample SFT payload</button>
             </div>
@@ -1710,6 +2767,330 @@ select {
       </div>
     </div>
   </section>
+
+  <!-- =================================================================
+       Evals page — the full eval workflow: datasets, suites, jobs, judgments
+       ================================================================= -->
+  <section class="page" id="page-evals" role="tabpanel" aria-labelledby="primary-tab-evals" hidden inert>
+    <div id="evals-onboarding" hidden style="background: linear-gradient(135deg, var(--accent-soft), rgba(249,115,22,0.05)); border: 1px solid var(--accent); border-radius: var(--radius-md); padding: var(--space-4) var(--space-5); margin-bottom: var(--space-3); display: flex; gap: var(--space-3); align-items: center;">
+      <div style="font-size: 28px; opacity: 0.85;">🚀</div>
+      <div style="flex:1;">
+        <div style="font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px;">Welcome to Evals</div>
+        <div style="font-size: 12px; color: var(--text-2); line-height: 1.5;">
+          Three steps to your first eval result:
+          <strong style="color: var(--kiln-300);">①</strong> upload an SFT JSONL on the Datasets tab,
+          <strong style="color: var(--kiln-300);">②</strong> click "Synthesize" to turn it into an eval suite,
+          <strong style="color: var(--kiln-300);">③</strong> click "Run" — Kiln will evaluate against the active adapter and show you the per-example breakdown.
+          The Judgments tab adds a flywheel where your A/B picks train a local judge LoRA.
+        </div>
+      </div>
+      <button class="btn btn-sm" onclick="document.getElementById('evals-onboarding').hidden = true; localStorage.setItem('kiln-evals-onboarded', '1');" type="button">Got it</button>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <h2>Evaluations</h2>
+        <span class="eyebrow">Datasets → Suites → Jobs · Judgment flywheel</span>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Eval views" data-evals-tabs>
+        <button class="tab active" id="evals-tab-datasets"  data-tab="datasets"  type="button" role="tab" aria-selected="true"  aria-controls="tab-evals-datasets"  tabindex="0">Datasets</button>
+        <button class="tab"        id="evals-tab-suites"    data-tab="suites"    type="button" role="tab" aria-selected="false" aria-controls="tab-evals-suites"    tabindex="-1">Suites</button>
+        <button class="tab"        id="evals-tab-jobs"      data-tab="jobs"      type="button" role="tab" aria-selected="false" aria-controls="tab-evals-jobs"      tabindex="-1">Jobs</button>
+        <button class="tab"        id="evals-tab-judgments" data-tab="judgments" type="button" role="tab" aria-selected="false" aria-controls="tab-evals-judgments" tabindex="-1">Judgments</button>
+      </div>
+
+      <!-- Datasets sub-tab -->
+      <div class="tab-content active" id="tab-evals-datasets" role="tabpanel" aria-labelledby="evals-tab-datasets" data-panel-id="evals-datasets-panel">
+        <form id="dataset-upload-form" class="form-row" style="align-items:flex-end; gap:8px; flex-wrap:wrap; padding-bottom:12px; border-bottom:1px solid var(--border);">
+          <div class="form-group" style="min-width:200px;">
+            <label for="dataset-name">Dataset name</label>
+            <input id="dataset-name" type="text" placeholder="my-sft-dataset" required>
+          </div>
+          <div class="form-group">
+            <label for="dataset-format">Format</label>
+            <select id="dataset-format">
+              <option value="sft_chat">SFT chat (messages[])</option>
+              <option value="grpo_groups">GRPO groups</option>
+              <option value="raw">Raw JSONL</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex:1; min-width:250px;">
+            <label for="dataset-description">Description (optional)</label>
+            <input id="dataset-description" type="text" placeholder="What is this dataset for?">
+          </div>
+          <div class="form-group">
+            <label for="dataset-file">JSONL file</label>
+            <input id="dataset-file" type="file" accept=".jsonl,.json" required>
+          </div>
+          <button type="submit" class="btn primary">Upload</button>
+        </form>
+        <div id="datasets-list" class="empty" style="margin-top:12px;">Loading datasets…</div>
+
+        <!-- Synthesize panel — appears when a dataset is selected. -->
+        <div id="synthesize-panel" hidden style="margin-top:16px; padding:12px; border:1px solid var(--border); border-radius:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <h3 style="margin:0;">Synthesize eval suite from <code id="synth-dataset-name"></code></h3>
+            <button class="btn" id="synth-close" type="button">✕</button>
+          </div>
+          <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+            <div class="form-group" style="min-width:180px;">
+              <label for="synth-suite-name">Suite name</label>
+              <input id="synth-suite-name" type="text" placeholder="my-eval-suite" required>
+            </div>
+            <div class="form-group">
+              <label for="synth-strategy">Strategy</label>
+              <select id="synth-strategy">
+                <option value="final_assistant">Final assistant turn</option>
+                <option value="first_assistant_turn">First assistant turn</option>
+                <option value="every_assistant_turn">Every assistant turn</option>
+                <option value="tool_call_predict">Tool-call prediction only</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="synth-scorer">Scorer</label>
+              <select id="synth-scorer">
+                <option value="auto">Auto-detect (per example)</option>
+                <option value="exact_match">Exact match</option>
+                <option value="contains">Contains</option>
+                <option value="numeric">Numeric tolerance</option>
+                <option value="tool_call">Tool call</option>
+                <option value="code">Code (token similarity)</option>
+                <option value="judge">LLM judge (local adapter)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="synth-max-examples">Max examples</label>
+              <input id="synth-max-examples" type="number" value="100" min="1" max="10000">
+            </div>
+            <div class="form-group">
+              <label for="synth-seed">Seed (optional)</label>
+              <input id="synth-seed" type="number" placeholder="random">
+            </div>
+            <div class="form-group" style="align-self:flex-end;">
+              <label style="user-select:none;"><input id="synth-strip-system" type="checkbox"> Strip system prompt</label>
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button id="synth-preview-btn" class="btn" type="button">Preview 5 examples</button>
+            <button id="synth-save-btn" class="btn primary" type="button">Save suite</button>
+            <button id="synth-save-and-run-btn" class="btn primary" type="button" title="Save the suite and immediately run it against the active adapter">Save &amp; Run vs active</button>
+          </div>
+          <div id="synth-preview-output" style="margin-top:12px;"></div>
+        </div>
+      </div>
+
+      <!-- Suites sub-tab -->
+      <div class="tab-content" id="tab-evals-suites" role="tabpanel" aria-labelledby="evals-tab-suites" hidden inert data-panel-id="evals-suites-panel">
+        <div id="suites-list" class="empty">Loading suites…</div>
+      </div>
+
+      <!-- Jobs sub-tab -->
+      <div class="tab-content" id="tab-evals-jobs" role="tabpanel" aria-labelledby="evals-tab-jobs" hidden inert data-panel-id="evals-jobs-panel">
+        <div id="eval-jobs-list" class="empty">Loading eval jobs…</div>
+      </div>
+
+      <!-- Judgments sub-tab — the A/B flywheel -->
+      <div class="tab-content" id="tab-evals-judgments" role="tabpanel" aria-labelledby="evals-tab-judgments" hidden inert data-panel-id="evals-judgments-panel">
+        <div style="display:flex; gap:8px; align-items:flex-end; padding-bottom:12px; border-bottom:1px solid var(--border); flex-wrap:wrap;">
+          <div class="form-group" style="min-width:180px;">
+            <label for="judgment-create-name">New judgment dataset</label>
+            <input id="judgment-create-name" type="text" placeholder="my-judgments">
+          </div>
+          <button id="judgment-create-btn" type="button" class="btn primary">Create</button>
+        </div>
+        <div id="judgments-list" class="empty" style="margin-top:12px;">Loading judgment datasets…</div>
+
+        <!-- Active judging viewer — keyboard-first A/B/Tie/Skip with streaming -->
+        <div id="judgment-viewer" hidden style="margin-top:16px;">
+          <div style="display:flex; gap:8px; align-items:flex-end; padding:12px; border:1px solid var(--border); border-radius:8px; background:rgba(255,255,255,0.02); flex-wrap:wrap;">
+            <div class="form-group" style="min-width:240px; flex:1;">
+              <label for="judgment-prompt">User prompt</label>
+              <textarea id="judgment-prompt" rows="3" placeholder="What should the model answer?"></textarea>
+            </div>
+            <div class="form-group">
+              <label for="judgment-adapter-a">Adapter A</label>
+              <select id="judgment-adapter-a"><option value="">Base model</option></select>
+            </div>
+            <div class="form-group">
+              <label for="judgment-adapter-b">Adapter B</label>
+              <select id="judgment-adapter-b"><option value="">Base model</option></select>
+            </div>
+            <div class="form-group">
+              <label for="judgment-temp">Temperature</label>
+              <input id="judgment-temp" type="number" value="0.7" min="0" max="2" step="0.1" style="width:80px;">
+            </div>
+            <div class="form-group" style="display:flex; align-items:center; gap:6px; padding-bottom:6px;">
+              <label style="margin:0; user-select:none; display:inline-flex; align-items:center; gap:6px; cursor:pointer; font-size:12px;">
+                <input id="judgment-autoadvance" type="checkbox" checked> Auto-advance
+              </label>
+            </div>
+            <button id="judgment-generate-btn" type="button" class="btn primary">
+              Generate pair <span class="judge-kbd">G</span>
+            </button>
+          </div>
+
+          <div id="judgment-pair" hidden class="judgment-pair-grid">
+            <div class="judgment-reply judgment-reply-a" id="judgment-card-a">
+              <div class="judgment-tag">Reply A · <span id="judgment-a-adapter">base</span></div>
+              <div class="judgment-body" id="judgment-a-text"></div>
+            </div>
+            <div class="judgment-reply judgment-reply-b" id="judgment-card-b">
+              <div class="judgment-tag">Reply B · <span id="judgment-b-adapter">base</span></div>
+              <div class="judgment-body" id="judgment-b-text"></div>
+            </div>
+          </div>
+
+          <div id="judgment-actions" hidden class="judgment-actions">
+            <div class="judge-meta-fields">
+              <input id="judgment-note" type="text" placeholder="Why? (optional note)" style="flex:1; min-width:160px;">
+              <input id="judgment-tags" type="text" placeholder="tags" style="width:140px;">
+            </div>
+            <button class="judge-btn judge-a" id="judgment-pick-a" type="button" title="A wins">
+              ← A wins <span class="judge-kbd">A</span>
+            </button>
+            <button class="judge-btn judge-tie" id="judgment-pick-tie" type="button" title="Tie">
+              Tie <span class="judge-kbd">T</span>
+            </button>
+            <button class="judge-btn judge-b" id="judgment-pick-b" type="button" title="B wins">
+              B wins → <span class="judge-kbd">B</span>
+            </button>
+            <button class="judge-btn judge-skip" id="judgment-pick-skip" type="button" title="Skip this pair">
+              Skip <span class="judge-kbd">S</span>
+            </button>
+          </div>
+
+          <div id="judgment-rows-count" class="hint" style="margin-top:12px;"></div>
+        </div>
+
+        <!-- Compile to SFT + train + validate panel -->
+        <div id="judgment-compile" hidden style="margin-top:16px; padding:12px; border:1px solid var(--border); border-radius:8px;">
+          <h3 style="margin:0 0 8px 0;">Promote to a judge LoRA</h3>
+          <p class="hint" style="margin:0 0 8px 0;">Compile collected judgments into an SFT dataset, then train a judge LoRA on it. Validate against a held-out slice. All local — no frontier LLM required.</p>
+          <div class="form-row" style="gap:8px; flex-wrap:wrap;">
+            <div class="form-group">
+              <label for="compile-sft-name">Output SFT dataset</label>
+              <input id="compile-sft-name" type="text" placeholder="my-judge-sft">
+            </div>
+            <div class="form-group">
+              <label for="compile-holdout">Holdout size (for validation)</label>
+              <input id="compile-holdout" type="number" value="20" min="2" max="500">
+            </div>
+            <div class="form-group">
+              <label for="compile-judge-adapter">Validate adapter</label>
+              <select id="compile-judge-adapter"><option value="">Base model</option></select>
+            </div>
+            <button id="compile-btn" class="btn primary" type="button">Compile to SFT</button>
+            <button id="validate-btn" class="btn" type="button">Validate adapter</button>
+          </div>
+          <div id="compile-output" style="margin-top:8px;"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
+       Eval drill-in modal — opens when a job-card is clicked
+       ================================================================= -->
+  <div id="eval-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="drill-title">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="drill-title">Eval results</h2>
+        <span class="modal-meta" id="drill-meta"></span>
+        <button class="btn btn-sm" id="drill-rerun" type="button" title="Queue a new eval job that runs only the failing examples again">↻ Re-run failures</button>
+        <button class="modal-close" id="drill-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <aside class="modal-sidebar">
+          <div class="drill-headline" id="drill-headline">
+            <!-- accuracy ring + counts injected here -->
+          </div>
+          <div id="drill-compare" class="compare-matrix" hidden>
+            <!-- per-adapter stacked-bar matrix injected here for compare jobs -->
+          </div>
+          <div id="drill-tags" class="tag-bars" hidden>
+            <!-- per-tag pass-rate bars injected here -->
+          </div>
+          <div class="evals-toolbar">
+            <input class="search-input" id="drill-search" placeholder="Search prompts, completions, IDs…" type="search">
+            <button class="filter-pill active" data-drill-filter="all">All <span class="pill-count" id="drill-count-all">0</span></button>
+            <button class="filter-pill" data-drill-filter="pass">Pass <span class="pill-count" id="drill-count-pass">0</span></button>
+            <button class="filter-pill" data-drill-filter="fail">Fail <span class="pill-count" id="drill-count-fail">0</span></button>
+            <button class="filter-pill" data-drill-filter="invalid">Invalid <span class="pill-count" id="drill-count-invalid">0</span></button>
+            <button class="filter-pill" data-drill-filter="error">Error <span class="pill-count" id="drill-count-error">0</span></button>
+          </div>
+          <div id="drill-outcomes" class="outcomes-list">
+            <!-- outcome list rows injected here -->
+          </div>
+        </aside>
+        <main class="modal-content">
+          <div id="drill-detail" class="outcome-detail">
+            <div class="detail-empty">
+              <div style="font-size:32px; opacity:0.5; margin-bottom:12px;">←</div>
+              Select an example on the left to see the prompt, model output, and scorer detail.
+            </div>
+          </div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
+       Command palette (Cmd-K) — global search + actions
+       ================================================================= -->
+  <div id="cmdk-modal" class="cmdk-backdrop" hidden role="dialog" aria-modal="true" aria-label="Command palette">
+    <div class="cmdk-shell">
+      <div class="cmdk-input-row">
+        <span class="cmdk-icon">🔍</span>
+        <input class="cmdk-input" id="cmdk-input" placeholder="Search adapters, suites, jobs, datasets, judgments… or run an action" autocomplete="off" spellcheck="false">
+        <span class="cmdk-hint">esc</span>
+      </div>
+      <div class="cmdk-results" id="cmdk-results"></div>
+      <div class="cmdk-footer">
+        <span class="cmdk-foot-key">↑↓ navigate</span>
+        <span class="cmdk-foot-key">⏎ select</span>
+        <span class="cmdk-foot-key">esc close</span>
+        <span style="margin-left:auto;">Powered by your Kiln server</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
+       Training drill-in modal — opens when a training-card is clicked
+       ================================================================= -->
+  <div id="train-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="train-drill-title">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="train-drill-title">Training job</h2>
+        <span class="modal-meta" id="train-drill-meta"></span>
+        <button class="btn btn-sm" id="train-drill-stop" type="button" title="Cancel this training job (queued only)">⏹ Stop</button>
+        <button class="modal-close" id="train-drill-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="train-drill-content">
+          <div class="detail-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
+       Adapter drill-in modal
+       ================================================================= -->
+  <div id="adapter-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-drill-title">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="adapter-drill-title">Adapter</h2>
+        <span class="modal-meta" id="adapter-drill-meta"></span>
+        <button class="btn btn-sm primary" id="adapter-drill-load" type="button">Load</button>
+        <button class="btn btn-sm" id="adapter-drill-eval" type="button">Run eval…</button>
+        <button class="modal-close" id="adapter-drill-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="adapter-drill-content">
+          <div class="detail-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- =================================================================
        Playground page
@@ -1879,7 +3260,7 @@ document.querySelectorAll('.primary-tab').forEach(tab => {
   tab.addEventListener('click', () => selectPage(tab.dataset.page));
 });
 const initialHash = (location.hash || '#overview').slice(1);
-if (['overview', 'adapters', 'training', 'playground'].includes(initialHash)) {
+if (['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialHash)) {
   selectPage(initialHash);
 }
 
@@ -1988,6 +3369,7 @@ async function pollHealth() {
     renderHeader(h);
     renderServerStatus(h);
     renderHeroFromHealth(h);
+    if (typeof refreshVramDonut === 'function') refreshVramDonut();
   } catch (e) {
     document.getElementById('status-dot').className = 'status-dot offline';
     document.getElementById('status-text').textContent = 'offline';
@@ -2076,11 +3458,16 @@ function renderHeroFromHealth(h) {
 }
 
 // --- Decode Performance ---
+// Cached last response from `/v1/stats/decode`, populated by `pollDecodePerf`.
+// The Overview tab's tok/s sparkline reads from this so it never needs to
+// re-fetch what the original poll already produced.
+let lastDecode = null;
 async function pollDecodePerf() {
   const el = setPanelBusy('decode-perf-panel', true);
   if (!el) return;
   try {
     const data = await api('/v1/stats/decode');
+    lastDecode = data;
     const window = data.window_secs ? Math.round(data.window_secs) : 60;
     if (!data.sample_count || data.sample_count < 1) {
       el.innerHTML = `<div class="sched-stats">
@@ -2113,6 +3500,7 @@ async function pollDecodePerf() {
     setText('hero-tps-sub', `${data.sample_count} samples · ${window}s window`);
     document.getElementById('hero-itl').innerHTML = `${p50}<span class="unit">/ ${p99} ms</span>`;
     setText('hero-itl-sub', `mean ${mean} ms`);
+    if (typeof refreshDecodeSparkline === 'function') refreshDecodeSparkline();
   } catch (e) {
     el.innerHTML = apiFailureHtml('Decode performance', e, 'pollDecodePerf');
   } finally {
@@ -2134,9 +3522,11 @@ function fmtRelTime(unixMs) {
   return Math.floor(delta / 86400) + 'd ago';
 }
 
-function escapeHtml(s) {
-  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
+// `escapeHtml` is defined further down (the canonical version also
+// escapes single quotes); function-declaration hoisting makes the later
+// one win regardless of where this comment lives. Keeping a stub here
+// would be dead code that future readers might mistake for the source
+// of truth, so we just rely on the hoisted version.
 
 function safeClassToken(s) {
   return String(s == null ? '' : s).replace(/[^a-z0-9_-]/gi, '_');
@@ -2208,12 +3598,22 @@ function refreshRecentTimes() {
   if (liveMode) el.setAttribute('aria-live', liveMode);
 }
 
+// Content key from the most recent request fingerprints. Skipping the
+// re-render when unchanged preserves text-selection / hover / scroll
+// position on idle servers (`refreshRecentTimes` already updates the
+// relative timestamps in place every second).
+let lastRecentRequestsKey = null;
 async function pollRecentRequests() {
   const el = setPanelBusy('recent-requests-panel', true);
   if (!el) return;
   try {
     const data = await api('/v1/stats/recent-requests');
     recentRequestsCache = Array.isArray(data) ? data : [];
+    const key = recentRequestsCache
+      .map(r => `${r.timestamp_unix_ms || r.id || ''}:${r.completion_tokens || 0}`)
+      .join('|');
+    if (key === lastRecentRequestsKey) return;
+    lastRecentRequestsKey = key;
     renderRecentRequests(recentRequestsCache);
   } catch (e) {
     el.innerHTML = apiFailureHtml('Recent requests', e, 'pollRecentRequests');
@@ -2232,9 +3632,12 @@ async function pollAdapters() {
     const data = await api('/v1/adapters');
     lastAdapters = data;
     window.lastAdapters = data;
-    renderAdapters(data);
+    // The cards renderer owns `#adapters-panel`; these two helpers
+    // update orthogonal UI (chat-adapter dropdown, merge-sources panel)
+    // that the cards don't touch.
     updateAdapterSelect(data);
     renderMergeSources();
+    if (typeof refreshAdapterCards === 'function') refreshAdapterCards();
     const count = (data.available || []).length;
     setText('adapters-count', String(count));
   } catch (e) {
@@ -2243,60 +3646,6 @@ async function pollAdapters() {
     setPanelBusy('adapters-panel', false);
   }
 }
-
-function renderAdapters(data) {
-  const el = document.getElementById('adapters-panel');
-  if (!data.available || data.available.length === 0) {
-    el.innerHTML = `<div class="empty">
-      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No adapters found yet.</div>
-      <div>Use the base model now, submit an SFT job to create your first adapter, or upload a PEFT-compatible adapter below.</div>
-      <div style="margin-top:var(--space-2);">Training starts from the <strong>Submit SFT</strong> tab; feedback-based training starts from <strong>Submit GRPO</strong>.</div>
-      <div style="margin-top:var(--space-2);">New here? Walk through the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a> or check <a href="https://ericflo.github.io/kiln/troubleshooting.html" target="_blank" rel="noopener noreferrer">Troubleshooting</a>.</div>
-    </div>`;
-    return;
-  }
-  const items = data.available.map((a, adapterIndex) => {
-    const isActive = data.active === a.name;
-    const adapterName = escapeHtml(a.name);
-    return `
-      <li class="adapter-item ${isActive ? 'adapter-active' : ''}">
-        <div style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
-          <span class="adapter-name">${adapterName}</span>
-          ${isActive ? '<span class="badge badge-active">active</span>' : ''}
-        </div>
-        <span class="adapter-size">${fmtBytes(a.size_bytes)}</span>
-        <div class="adapter-actions">
-          ${isActive
-            ? `<button class="btn btn-sm" onclick="unloadAdapter()">Unload</button>`
-            : `<button class="btn btn-sm btn-primary" data-adapter-action="load" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Load</button>`}
-          <button class="btn btn-sm" data-adapter-action="download" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Download</button>
-          <button class="btn btn-sm btn-danger" data-adapter-action="delete" data-adapter-index="${adapterIndex}" onclick="adapterListAction(this)">Delete</button>
-        </div>
-      </li>
-    `;
-  }).join('');
-  el.innerHTML = `<ul class="adapter-list">${items}</ul>`;
-}
-
-window.adapterListAction = function(button) {
-  const adapterIndex = Number(button.dataset.adapterIndex);
-  const adapter = lastAdapters && lastAdapters.available && lastAdapters.available[adapterIndex];
-  if (!adapter || !adapter.name) { toast('Adapter is no longer available', 'err'); return; }
-
-  switch (button.dataset.adapterAction) {
-    case 'load':
-      loadAdapter(adapter.name);
-      break;
-    case 'download':
-      downloadAdapter(adapter.name);
-      break;
-    case 'delete':
-      deleteAdapter(adapter.name);
-      break;
-    default:
-      toast('Unknown adapter action', 'err');
-  }
-};
 
 function updateAdapterSelect(data) {
   const sel = document.getElementById('chat-adapter');
@@ -2697,13 +4046,26 @@ window.mergeAdapters = async function() {
 
 // --- Training Queue ---
 const cancellingTrainingJobIds = new Set();
+// Skip the wholesale `tab-queue` innerHTML rewrite when nothing changed
+// (running progress, queued list identity, recent finish-state). Mirrors
+// the `lastAdaptersKey` guard on the adapters tab.
+let lastTrainingKey = null;
 
 async function pollTraining() {
   const queuePanel = setPanelBusy('tab-queue', true);
   if (!queuePanel) return;
   try {
     const data = await api('/v1/train/queue');
-    renderTrainingQueue(data);
+    const r = data.running;
+    const key = [
+      r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
+      (data.queued || []).map(j => j.job_id).join(','),
+      (data.completed || []).slice(0, 5).map(j => `${j.job_id}:${j.state}`).join(','),
+    ].join('|');
+    if (key !== lastTrainingKey) {
+      lastTrainingKey = key;
+      renderTrainingQueue(data);
+    }
     const liveCount = (data.running ? 1 : 0) + (data.queued ? data.queued.length : 0);
     setText('training-count', String(liveCount));
     if (data.running) {
@@ -2733,80 +4095,108 @@ async function pollTraining() {
 
 function renderTrainingQueue(data) {
   const el = document.getElementById('tab-queue');
-  let html = '';
-
+  // Always render in the same flat container (training-cards) — separate
+  // queue/running/completed visually with section labels but a uniform
+  // card style so eye-tracking is constant across job states.
+  let html = '<div class="training-cards">';
   if (data.running) {
     html += `<div class="queue-section-label">Running</div>`;
-    html += renderJobCard(data.running, true);
+    html += renderTrainingCard(data.running, 'running');
   }
-
   if (data.queued && data.queued.length > 0) {
     html += `<div class="queue-section-label">Queued</div>`;
     data.queued.forEach(q => {
-      html += `<div class="job-card">
-        <div class="job-header">
-          <span class="job-id">${escapeHtml(shortId(q.job_id))}</span>
-          <span class="job-state Queued">Queued</span>
-        </div>
-        <div class="job-meta">
-          <span>Type: ${escapeHtml(q.job_type)}</span>
-          <span>Adapter: ${escapeHtml(q.adapter_name)}</span>
-          <span>Position: #${q.position}</span>
-        </div>
-        <div>${renderCancelJobButton(q.job_id)}</div>
-      </div>`;
+      html += renderTrainingCard(q, 'queued');
     });
   }
-
   if (data.completed && data.completed.length > 0) {
     html += `<div class="queue-section-label">Recent</div>`;
     data.completed.slice(0, 5).forEach(j => {
-      html += renderJobCard(j, false);
+      html += renderTrainingCard(j, 'completed');
     });
   }
+  html += '</div>';
 
-  if (!html) {
-    html = `<div class="empty">
-      <div style="font-weight:600;color:var(--text);margin-bottom:6px;">No training jobs yet.</div>
-      <div>Submit SFT examples to teach the model a correction, or use Submit GRPO for scored completions and reward-driven updates.</div>
-      <div style="margin-top:var(--space-2);">New here? Start with the <a href="https://ericflo.github.io/kiln/quickstart.html" target="_blank" rel="noopener noreferrer">Quickstart</a>, then read the <a href="https://ericflo.github.io/kiln/grpo.html" target="_blank" rel="noopener noreferrer">GRPO Guide</a>.</div>
+  if (!data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length)) {
+    html = `<div class="eval-empty">
+      <div class="eval-empty-icon">🧪</div>
+      <div class="eval-empty-title">No training jobs yet</div>
+      <div class="eval-empty-body">Submit SFT examples to teach a correction, or use GRPO for scored completions. Datasets uploaded under Evals can be picked directly in the SFT/GRPO submit forms.</div>
+      <button class="eval-empty-cta" type="button" onclick="document.getElementById('training-tab-sft').click();">Submit SFT</button>
     </div>`;
   }
-
   el.innerHTML = html;
+  // Wire card clicks for drill-in (queued/running/completed all open the modal).
+  el.querySelectorAll('[data-train-job-id]').forEach(card => {
+    card.addEventListener('click', ev => {
+      // Don't trigger drill if user clicked the cancel button.
+      if (ev.target.closest('[data-train-cancel]')) return;
+      openTrainDrillModal(card.dataset.trainJobId);
+    });
+  });
+  el.querySelectorAll('[data-train-cancel]').forEach(b => {
+    b.addEventListener('click', ev => {
+      ev.stopPropagation();
+      cancelJobFromButton(b);
+    });
+  });
 }
 
-function renderJobCard(j, isRunning) {
+/// Render a training job as a rich card with progress bar, loss curve
+/// (when history is available), and per-job stats. State drives layout:
+/// `queued` shows position; `running` shows live progress + curve;
+/// `completed` shows final loss + duration.
+function renderTrainingCard(j, state) {
   const pct = ((j.progress || 0) * 100).toFixed(0);
-  const state = String(j.state == null ? '' : j.state);
-  return `<div class="job-card">
-    <div class="job-header">
-      <span class="job-id">${escapeHtml(shortId(j.job_id))}</span>
-      <span class="job-state ${safeClassToken(state)}">${escapeHtml(state)}</span>
+  const adapterLabel = j.adapter_name ? escapeHtml(j.adapter_name) : `<span class="hint">(unnamed)</span>`;
+  const jobType = (j.job_type || '').toString().toLowerCase();
+  // Loss curve (only present when we've run job_detail at least once
+  // for this job — populated by openTrainDrillModal). We just leave a
+  // placeholder for now.
+  const isRunning = state === 'running';
+  const cardClass = isRunning ? 'training-card training-card-running' : 'training-card';
+  let stateBadge;
+  if (state === 'queued') {
+    stateBadge = `<span class="job-state-pill queued">queued${j.position ? ' · #'+j.position : ''}</span>`;
+  } else if (state === 'running') {
+    stateBadge = `<span class="job-state-pill running">running</span>`;
+  } else {
+    const stateNorm = (j.state || '').toString().toLowerCase();
+    stateBadge = `<span class="job-state-pill ${stateNorm}">${escapeHtml(stateNorm || 'completed')}</span>`;
+  }
+  const cancelBtn = (state === 'queued')
+    ? `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`
+    : '';
+  return `<div class="${cardClass}" data-train-job-id="${escapeHtml(j.job_id)}">
+    <div class="training-card-head">
+      ${stateBadge}
+      <span class="training-card-name">${adapterLabel}</span>
+      <span class="training-card-type ${escapeHtml(jobType)}">${escapeHtml(jobType)}</span>
+      <span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(shortId(j.job_id))}</span>
+      ${cancelBtn}
     </div>
-    <div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>
-    <div class="job-meta">
-      <span>Progress: ${pct}%</span>
-      ${j.current_loss != null ? `<span>Loss: <span class="tabular-nums" style="color:var(--text-2);">${j.current_loss.toFixed(4)}</span></span>` : ''}
-      ${j.adapter_name ? `<span>Adapter: <code>${escapeHtml(j.adapter_name)}</code></span>` : ''}
-      <span>Elapsed: ${fmtDuration(j.elapsed_secs)}</span>
+    <div class="training-card-progress">
+      <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%;"></div></div>
+      <div class="training-stat"><span class="training-stat-num">${pct}%</span><span class="training-stat-label">progress</span></div>
+      <div class="training-stat">
+        <span class="training-stat-num">${j.current_loss != null ? j.current_loss.toFixed(3) : '—'}</span>
+        <span class="training-stat-label">${j.current_loss != null ? 'loss' : 'not started'}</span>
+      </div>
     </div>
-    ${isRunning ? `<div>${renderCancelJobButton(j.job_id)}</div>` : ''}
+    <div class="training-card-curve" id="training-curve-${escapeHtml(j.job_id)}"></div>
   </div>`;
 }
 
-function renderCancelJobButton(jobId) {
-  const isCancelling = cancellingTrainingJobIds.has(jobId);
-  return `<button class="btn btn-sm btn-danger" data-job-id="${escapeHtml(jobId)}" onclick="cancelJobFromButton(this)" ${isCancelling ? 'disabled' : ''}>${isCancelling ? 'Cancelling…' : 'Cancel'}</button>`;
-}
-
-window.cancelJobFromButton = function(button) {
-  const jobId = button.dataset.jobId || '';
+// Cancel buttons receive the click via stopPropagation; this is a thin
+// indirection that resolves the job_id and forwards to the existing
+// cancellation flow.
+function cancelJobFromButton(btn) {
+  const jobId = btn.dataset.jobId || '';
   if (!jobId || cancellingTrainingJobIds.has(jobId)) return;
-  button.disabled = true;
-  button.textContent = 'Cancelling…';
-  cancelJob(jobId, button);
-};
+  btn.disabled = true;
+  btn.textContent = 'Cancelling…';
+  cancelJob(jobId, btn);
+}
 
 window.cancelJob = async function(jobId, button) {
   if (!jobId || cancellingTrainingJobIds.has(jobId)) return;
@@ -2874,6 +4264,44 @@ function fillGrpoSamplePayload() {
 
 document.getElementById('use-sft-sample').addEventListener('click', fillSftSamplePayload);
 document.getElementById('use-grpo-sample').addEventListener('click', fillGrpoSamplePayload);
+
+// Populate the dataset picker on the SFT submit form. Gated on the SFT
+// sub-tab being active so we don't issue a `/v1/eval/datasets` request
+// every 5s when the Training page isn't even open (the Evals tab already
+// polls the same endpoint).
+async function refreshSftDatasetPicker() {
+  const sel = document.getElementById('sft-dataset-pick');
+  if (!sel) return;
+  const sftTab = document.getElementById('tab-sft');
+  if (!sftTab || sftTab.hidden) return;
+  try {
+    const d = await api('/v1/eval/datasets');
+    const datasets = (d.datasets || []).filter(m => m.format === 'sft_chat');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— or paste examples below —</option>'
+      + datasets.map(m => `<option value="${escapeHtml(m.name)}">${escapeHtml(m.name)} · ${m.num_rows} rows</option>`).join('');
+    if (cur) sel.value = cur;
+  } catch (_) { /* best-effort */ }
+}
+// Refresh when the SFT tab becomes visible (cheap event-driven trigger)
+// and also on a slow interval so a newly-uploaded dataset shows up
+// without the user clicking around.
+document.getElementById('training-tab-sft')?.addEventListener('click', refreshSftDatasetPicker);
+refreshSftDatasetPicker();
+setInterval(refreshSftDatasetPicker, 10000);
+
+document.getElementById('sft-dataset-load')?.addEventListener('click', async () => {
+  const sel = document.getElementById('sft-dataset-pick');
+  const name = sel.value;
+  if (!name) { toast('Pick a dataset first', 'err'); return; }
+  try {
+    const rows = await api('/v1/eval/datasets/' + encodeURIComponent(name) + '/rows?limit=5000');
+    const ta = document.getElementById('sft-examples');
+    ta.value = JSON.stringify(rows, null, 2);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    toast(`Loaded ${rows.length} examples from ${name}`, 'ok');
+  } catch (e) { toast('Load failed: ' + e.message, 'err'); }
+});
 
 function parseJsonArrayField(value, label) {
   const text = value.trim();
@@ -3399,6 +4827,2276 @@ document.getElementById('merge-output-name').addEventListener('input', updateMer
 document.getElementById('merge-mode').addEventListener('change', updateMergeButtonState);
 document.getElementById('merge-density').addEventListener('input', updateMergeButtonState);
 updateMergeButtonState();
+/* =====================================================================
+   Evals page — datasets, suites, jobs, judgments (the flywheel)
+
+   This is intentionally one large module: every refresh is content-
+   addressed by the active sub-tab and shares one drill-in modal so
+   data flows across tabs (suite → run → drill, judgment → adapter
+   validate → drill) without losing context.
+   ===================================================================== */
+
+function selectEvalsTab(tab, focus = false) {
+  const panel = tab.closest('.card');
+  panel.querySelectorAll('[role="tab"]').forEach(item => {
+    const selected = item === tab;
+    item.classList.toggle('active', selected);
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+  });
+  panel.querySelectorAll('[role="tabpanel"]').forEach(tabPanel => {
+    const selected = tabPanel.id === tab.getAttribute('aria-controls');
+    tabPanel.classList.toggle('active', selected);
+    tabPanel.hidden = !selected;
+    if (selected) tabPanel.removeAttribute('inert'); else tabPanel.setAttribute('inert', '');
+  });
+  if (focus) tab.focus();
+  const which = tab.dataset.tab;
+  if (which === 'datasets') refreshDatasets();
+  else if (which === 'suites') refreshSuites();
+  else if (which === 'jobs') refreshEvalJobs();
+  else if (which === 'judgments') refreshJudgments();
+}
+document.querySelectorAll('[data-evals-tabs] [role="tab"]').forEach(tab => {
+  tab.addEventListener('click', () => selectEvalsTab(tab));
+  tab.addEventListener('keydown', event => {
+    const tabs = Array.from(tab.closest('[role="tablist"]').querySelectorAll('[role="tab"]'));
+    const index = tabs.indexOf(tab);
+    let nextTab = null;
+    if (event.key === 'ArrowRight') nextTab = tabs[(index + 1) % tabs.length];
+    if (event.key === 'ArrowLeft') nextTab = tabs[(index - 1 + tabs.length) % tabs.length];
+    if (event.key === 'Home') nextTab = tabs[0];
+    if (event.key === 'End') nextTab = tabs[tabs.length - 1];
+    if (nextTab) { event.preventDefault(); selectEvalsTab(nextTab, true); }
+  });
+});
+
+let evalAdaptersCache = [];
+let evalActiveAdapter = null;
+async function refreshAdapterDropdowns() {
+  try {
+    const d = await api('/v1/adapters');
+    evalAdaptersCache = (d.available || []).map(a => a.name);
+    evalActiveAdapter = d.active || '';
+    const targets = ['judgment-adapter-a', 'judgment-adapter-b', 'compile-judge-adapter'];
+    for (const id of targets) {
+      const sel = document.getElementById(id);
+      if (!sel) continue;
+      const cur = sel.value;
+      sel.innerHTML = ['<option value="">Base model</option>']
+        .concat(evalAdaptersCache.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`))
+        .join('');
+      if (cur && evalAdaptersCache.includes(cur)) sel.value = cur;
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function truncate(s, n) {
+  s = String(s || '');
+  if (s.length <= n) return s;
+  return s.slice(0, n) + '…';
+}
+function fmtPct(x, digits = 1) {
+  if (x == null || !isFinite(x)) return '—';
+  return (x * 100).toFixed(digits) + '%';
+}
+
+/* ---------- Accuracy ring (color graded by score) ---------- */
+function ringHtml(accuracy, size = '') {
+  const pct = (accuracy != null && isFinite(accuracy)) ? Math.max(0, Math.min(1, accuracy)) : 0;
+  // Color gradient: red → orange → green
+  let color;
+  if (pct >= 0.8) color = 'var(--success-fg)';
+  else if (pct >= 0.5) color = 'var(--warning-fg)';
+  else if (pct > 0) color = 'var(--danger-fg)';
+  else color = 'var(--text-quiet)';
+  const sizeClass = size ? ` ${size}` : '';
+  return `<span class="acc-ring${sizeClass}" style="--ring-pct:${(pct*100).toFixed(0)}; --ring-color:${color};"><span class="acc-ring-num">${(pct*100).toFixed(0)}</span></span>`;
+}
+
+/* ---------- Sparkline (suite history) ---------- */
+function sparkSvg(values, width = 64, height = 18) {
+  if (!values || values.length < 2) return '';
+  const pad = 1;
+  const w = width - 2 * pad;
+  const h = height - 2 * pad;
+  const xs = values.map((_, i) => pad + (i * w) / (values.length - 1));
+  const ys = values.map(v => pad + h - Math.max(0, Math.min(1, v)) * h);
+  const linePath = xs.map((x, i) => `${i === 0 ? 'M' : 'L'}${x.toFixed(1)} ${ys[i].toFixed(1)}`).join(' ');
+  const areaPath = `${linePath} L${xs[xs.length-1].toFixed(1)} ${(pad+h).toFixed(1)} L${xs[0].toFixed(1)} ${(pad+h).toFixed(1)} Z`;
+  return `<svg class="spark" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
+    <path class="spark-area" d="${areaPath}"/>
+    <path d="${linePath}"/>
+  </svg>`;
+}
+
+/* ---------- Datasets ---------- */
+
+let activeSynthDataset = null;
+async function refreshDatasets() {
+  try {
+    const d = await api('/v1/eval/datasets');
+    const datasets = d.datasets || [];
+    const el = document.getElementById('datasets-list');
+    if (!datasets.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `
+        <div class="eval-empty-icon">📂</div>
+        <div class="eval-empty-title">No datasets yet</div>
+        <div class="eval-empty-body">Upload an SFT JSONL above and Kiln will let you preview, sample, and synthesize an eval suite from it in seconds.</div>
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('dataset-name').focus()">Upload your first dataset</button>`;
+      return;
+    }
+    el.className = '';
+    el.innerHTML = datasets.map(m => {
+      const stats = m.stats || {};
+      const pattern = (stats.sample_role_patterns || []).slice(0, 1).join(' · ') || '';
+      const recommendation = recommendStrategy(stats);
+      return `<div class="eval-row eval-row-datasets">
+        <div>
+          <div class="row-title">${escapeHtml(m.name)}</div>
+          <div class="row-sub">${escapeHtml(m.format)} · ${escapeHtml(m.description || 'No description')}</div>
+        </div>
+        <div class="tabular-nums">${m.num_rows.toLocaleString()} rows · ${fmtBytes(m.size_bytes)}</div>
+        <div class="row-sub" title="Detected from the first ${stats.num_assistant_turns ? '1000' : 0} rows">
+          ${stats.num_assistant_turns ? stats.num_assistant_turns.toLocaleString() + ' assistant · ' + (stats.num_with_tool_calls || 0) + ' tool_calls' : '—'}
+          ${recommendation ? `<div style="margin-top:2px;"><span class="scorer-badge" title="Recommended synthesis strategy">${escapeHtml(recommendation)}</span></div>` : ''}
+        </div>
+        <div class="row-sub" style="font-family:var(--font-mono);">${escapeHtml(pattern)}</div>
+        <div class="row-actions">
+          <button class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
+          <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+        </div>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('button[data-action]').forEach(b => {
+      const name = b.dataset.name;
+      if (b.dataset.action === 'synth') {
+        b.addEventListener('click', () => openSynthPanel(name));
+      } else if (b.dataset.action === 'del') {
+        b.addEventListener('click', async () => {
+          if (!confirm(`Delete dataset "${name}"?`)) return;
+          try {
+            await api('/v1/eval/datasets/' + encodeURIComponent(name), { method: 'DELETE' });
+            toast('Dataset deleted', 'ok');
+            refreshDatasets();
+          } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
+        });
+      }
+    });
+  } catch (e) {
+    document.getElementById('datasets-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-title">Failed to load</div><div class="eval-empty-body">${escapeHtml(e.message)}</div></div>`;
+  }
+}
+
+function recommendStrategy(stats) {
+  if (!stats || !stats.num_assistant_turns) return null;
+  // Tool-call heavy → tool_call_predict
+  const toolFraction = stats.num_with_tool_calls / Math.max(1, stats.num_assistant_turns);
+  if (toolFraction > 0.3) return 'tool_call_predict ↘';
+  // Multi-turn → every_assistant_turn
+  if (stats.avg_messages_per_conv > 8) return 'every_assistant_turn';
+  // Otherwise → final_assistant
+  return 'final_assistant';
+}
+
+function openSynthPanel(name) {
+  activeSynthDataset = name;
+  document.getElementById('synth-dataset-name').textContent = name;
+  document.getElementById('synth-suite-name').value = name + '-eval';
+  document.getElementById('synth-preview-output').innerHTML = '';
+  document.getElementById('synthesize-panel').hidden = false;
+  document.getElementById('synthesize-panel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.getElementById('synth-close')?.addEventListener('click', () => {
+  document.getElementById('synthesize-panel').hidden = true;
+  activeSynthDataset = null;
+});
+
+function readSynthConfig() {
+  const suite_name = document.getElementById('synth-suite-name').value.trim();
+  if (!suite_name) { toast('Suite name is required', 'err'); return null; }
+  const strategy = document.getElementById('synth-strategy').value;
+  const scorerChoice = document.getElementById('synth-scorer').value;
+  let scorer;
+  if (scorerChoice === 'auto')       scorer = { kind: 'auto_detect' };
+  else if (scorerChoice === 'judge') scorer = { kind: 'judge', judge_adapter: null };
+  else if (scorerChoice === 'exact_match') scorer = { kind: 'fixed', scorer: { kind: 'exact_match', case_sensitive: false, strip_whitespace: true } };
+  else if (scorerChoice === 'contains')    scorer = { kind: 'fixed', scorer: { kind: 'contains', phrases: [], mode: 'any', case_sensitive: false } };
+  else if (scorerChoice === 'numeric')     scorer = { kind: 'fixed', scorer: { kind: 'numeric_tolerance', atol: 0, rtol: 0, integer_only: false } };
+  else if (scorerChoice === 'tool_call')   scorer = { kind: 'fixed', scorer: { kind: 'tool_call' } };
+  else if (scorerChoice === 'code')        scorer = { kind: 'fixed', scorer: { kind: 'code', style: { kind: 'token_similarity', min_jaccard: 0.6 } } };
+  const max_examples = parseInt(document.getElementById('synth-max-examples').value, 10);
+  const seedVal = document.getElementById('synth-seed').value;
+  const sampling = {
+    max_examples: isFinite(max_examples) && max_examples > 0 ? max_examples : null,
+    max_prompt_chars: 32768,
+    max_target_chars: 4096,
+    seed: seedVal ? parseInt(seedVal, 10) : null,
+    dedupe: true,
+  };
+  return {
+    suite_name,
+    strategy,
+    scorer,
+    generation: { temperature: 0.0, top_p: 1.0, top_k: 0, max_tokens: 256, n: 1, stop: [], seed: null },
+    sampling,
+    strip_system_prompt: document.getElementById('synth-strip-system').checked,
+  };
+}
+
+document.getElementById('synth-preview-btn')?.addEventListener('click', async () => {
+  if (!activeSynthDataset) return;
+  const config = readSynthConfig();
+  if (!config) return;
+  const out = document.getElementById('synth-preview-output');
+  out.innerHTML = '<div class="hint">Synthesizing preview…</div>';
+  try {
+    const res = await api('/v1/eval/datasets/' + encodeURIComponent(activeSynthDataset) + '/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...config, head_n: 5 }),
+    });
+    renderSynthPreview(out, res);
+  } catch (e) { out.innerHTML = '<div class="eval-empty"><div class="eval-empty-body">Preview failed: ' + escapeHtml(e.message) + '</div></div>'; }
+});
+
+function renderSynthPreview(container, preview) {
+  const s = preview.stats || {};
+  const examples = preview.examples || [];
+  const hist = s.auto_scorer_histogram || {};
+  const histStr = Object.entries(hist).map(([k, v]) => `<span class="scorer-badge">${escapeHtml(k)}×${v}</span>`).join(' ');
+  const exHtml = examples.slice(0, 5).map((ex, i) => {
+    const userMsg = (ex.messages || []).filter(m => m.role === 'user').slice(-1)[0];
+    const userText = userMsg ? userMsg.content : '';
+    const tags = (ex.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+    const scorerKind = ex.scorer ? ex.scorer.kind : '(suite default)';
+    return `<div style="border:1px solid var(--border); border-radius:6px; padding:10px; margin-top:6px; background:var(--surface);">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+        <div class="eyebrow">Example ${i+1}</div>
+        <span class="scorer-badge">${escapeHtml(scorerKind)}</span>
+      </div>
+      <div style="font-size:11px; color:var(--text-quiet); margin-bottom:2px;">prompt</div>
+      <div style="font-family:var(--font-mono); font-size:12px; max-height:60px; overflow:auto; margin-bottom:6px;">${escapeHtml(truncate(userText, 240))}</div>
+      <div style="font-size:11px; color:var(--text-quiet); margin-bottom:2px;">target</div>
+      <div style="font-family:var(--font-mono); font-size:12px; max-height:80px; overflow:auto;">${escapeHtml(truncate(ex.target || '', 320))}</div>
+      <div style="margin-top:6px;">${tags}</div>
+    </div>`;
+  }).join('');
+  container.innerHTML = `
+    <div style="margin-bottom:8px; padding:10px; background:var(--surface-2); border-radius:6px; display:flex; gap:16px; align-items:center; flex-wrap:wrap;">
+      <div>
+        <div class="hint" style="font-size:11px; color:var(--text-quiet);">examples generated</div>
+        <div style="font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;">${(s.examples_generated || 0).toLocaleString()}</div>
+      </div>
+      <div>
+        <div class="hint" style="font-size:11px; color:var(--text-quiet);">trajectories used</div>
+        <div style="font-size:18px; font-weight:700; font-variant-numeric:tabular-nums;">${(s.trajectories_used || 0).toLocaleString()}</div>
+      </div>
+      <div style="flex:1; min-width:200px;">
+        <div class="hint" style="font-size:11px; color:var(--text-quiet); margin-bottom:4px;">auto-detected scorers</div>
+        <div>${histStr || '<span class="hint">n/a</span>'}</div>
+      </div>
+    </div>
+    <div class="hint" style="margin-bottom:8px; font-size:11px;">Skipped: empty target=${s.skipped_no_target || 0} · prompt-too-long=${s.skipped_prompt_too_long || 0} · target-too-long=${s.skipped_target_too_long || 0} · duplicate=${s.skipped_duplicate || 0}</div>
+    ${exHtml || '<div class="eval-empty"><div class="eval-empty-body">No examples produced — try a different strategy or relax the sampling caps.</div></div>'}
+  `;
+}
+
+async function doSynthesize(runAgainst) {
+  if (!activeSynthDataset) return;
+  const config = readSynthConfig();
+  if (!config) return;
+  try {
+    const body = { ...config, force: false };
+    if (runAgainst && runAgainst.length) body.run_against = runAgainst;
+    const res = await api('/v1/eval/datasets/' + encodeURIComponent(activeSynthDataset) + '/synthesize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const queued = (res.queued_eval_job_ids || []).length;
+    toast(`Saved suite "${res.suite.name}" (${res.stats.examples_generated} examples)${queued ? ', queued ' + queued + ' eval job(s)' : ''}`, 'ok');
+    refreshSuites();
+    refreshEvalJobs();
+    if (queued > 0) {
+      // Hop to the Jobs tab so the user immediately sees the run.
+      document.getElementById('evals-tab-jobs')?.click();
+    }
+  } catch (e) { toast('Synthesize failed: ' + e.message, 'err'); }
+}
+
+document.getElementById('synth-save-btn')?.addEventListener('click', () => doSynthesize([]));
+document.getElementById('synth-save-and-run-btn')?.addEventListener('click', async () => {
+  await doSynthesize([evalActiveAdapter || '']);
+});
+
+document.getElementById('dataset-upload-form')?.addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const name = document.getElementById('dataset-name').value.trim();
+  const format = document.getElementById('dataset-format').value;
+  const description = document.getElementById('dataset-description').value.trim();
+  const file = document.getElementById('dataset-file').files[0];
+  if (!name || !file) { toast('Name and file are required', 'err'); return; }
+  const fd = new FormData();
+  fd.append('name', name);
+  fd.append('format', format);
+  if (description) fd.append('description', description);
+  fd.append('file', file);
+  try {
+    const res = await fetch('/v1/eval/datasets/upload', { method: 'POST', body: fd });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error?.message || `HTTP ${res.status}`);
+    }
+    const m = await res.json();
+    toast(`Uploaded "${m.name}" (${m.num_rows.toLocaleString()} rows)`, 'ok');
+    document.getElementById('dataset-upload-form').reset();
+    refreshDatasets();
+    // Auto-open the synthesize panel — the whole flow is "upload, synth, run".
+    openSynthPanel(m.name);
+  } catch (e) { toast('Upload failed: ' + e.message, 'err'); }
+});
+
+/* ---------- Suites ---------- */
+
+// Cache job results so we can compute per-suite sparkline trends.
+let evalJobsCache = [];
+
+async function refreshSuites() {
+  try {
+    const d = await api('/v1/eval/suites');
+    const suites = d.suites || [];
+    const el = document.getElementById('suites-list');
+    document.getElementById('evals-count').textContent = String(suites.length);
+    if (!suites.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `
+        <div class="eval-empty-icon">🎯</div>
+        <div class="eval-empty-title">No eval suites yet</div>
+        <div class="eval-empty-body">A suite is a named collection of (prompt, target, scorer) triplets. Synthesize one from a dataset, or POST an EvalSuite document to <code>/v1/eval/suites</code>.</div>
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-datasets').click()">Browse datasets</button>`;
+      return;
+    }
+    el.className = '';
+    // Build a per-suite history from the cached job list.
+    const suiteHistory = {};
+    for (const j of evalJobsCache) {
+      if (j.state !== 'completed') continue;
+      const acc = j.headline_accuracy;
+      if (acc == null) continue;
+      (suiteHistory[j.suite_name] = suiteHistory[j.suite_name] || []).push(acc);
+    }
+    el.innerHTML = suites.map(s => {
+      const hist = (suiteHistory[s.name] || []).slice(-10);
+      const recent = hist.length ? hist[hist.length - 1] : null;
+      const sparkline = hist.length >= 2 ? sparkSvg(hist) : '';
+      const recentBadge = recent != null
+        ? `<span class="job-state-pill completed" title="Latest run accuracy">${(recent*100).toFixed(0)}%</span>`
+        : '';
+      return `<div class="eval-row eval-row-suites">
+        <div>
+          <div class="row-title">${escapeHtml(s.name)}</div>
+          <div class="row-sub">${escapeHtml(truncate(s.description || 'No description', 120))}</div>
+        </div>
+        <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
+        <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
+        <div class="row-actions">
+          <button class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
+          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
+          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
+        </div>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('button[data-suite]').forEach(b => {
+      const suite = b.dataset.suite;
+      b.addEventListener('click', async () => {
+        const action = b.dataset.action;
+        try {
+          if (action === 'run') {
+            const res = await api('/v1/eval/run', {
+              method: 'POST', headers: {'Content-Type':'application/json'},
+              body: JSON.stringify({ suite, adapter: evalActiveAdapter || '' }),
+            });
+            toast('Queued eval ' + res.job_id.slice(0, 8), 'ok');
+            document.getElementById('evals-tab-jobs')?.click();
+            refreshEvalJobs();
+          } else if (action === 'compare') {
+            const res = await api('/v1/eval/compare', {
+              method: 'POST', headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ suite, adapters: ['', evalActiveAdapter || ''] }),
+            });
+            toast('Queued compare ' + res.job_id.slice(0, 8), 'ok');
+            document.getElementById('evals-tab-jobs')?.click();
+            refreshEvalJobs();
+          } else if (action === 'del') {
+            if (!confirm(`Delete suite "${suite}"?`)) return;
+            await api('/v1/eval/suites/' + encodeURIComponent(suite), { method: 'DELETE' });
+            toast('Suite deleted', 'ok');
+            refreshSuites();
+          }
+        } catch (e) { toast(action + ' failed: ' + e.message, 'err'); }
+      });
+    });
+  } catch (e) {
+    document.getElementById('suites-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+  }
+}
+
+/* ---------- Jobs ---------- */
+
+async function refreshEvalJobs() {
+  try {
+    const d = await api('/v1/eval/jobs');
+    const jobs = d.jobs || [];
+    evalJobsCache = jobs;
+    const el = document.getElementById('eval-jobs-list');
+    if (!jobs.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `
+        <div class="eval-empty-icon">📊</div>
+        <div class="eval-empty-title">No eval jobs yet</div>
+        <div class="eval-empty-body">Run a suite from the Suites tab. Jobs land here as they complete; click any job to drill into the per-example outcomes.</div>
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('evals-tab-suites').click()">Browse suites</button>`;
+      return;
+    }
+    el.className = '';
+    el.innerHTML = jobs.map(j => renderJobCard(j)).join('');
+    el.querySelectorAll('.job-card').forEach(card => {
+      card.addEventListener('click', () => openDrillModal(card.dataset.jobId));
+    });
+  } catch (e) {
+    document.getElementById('eval-jobs-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+  }
+  // Refreshing jobs also updates suite sparklines.
+  if (document.getElementById('evals-tab-suites')?.classList.contains('active')) {
+    refreshSuites();
+  }
+}
+
+function renderJobCard(j) {
+  const acc = j.headline_accuracy;
+  const adapters = (j.adapters || []).map(a => a == null ? '<span class="hint">base</span>' : escapeHtml(a)).join(' vs ');
+  const stateClass = (j.state || 'queued').toLowerCase();
+  const progress = j.progress || {};
+  const progFrac = progress.examples_total > 0 ? progress.examples_completed / progress.examples_total : 0;
+  const isRunning = stateClass === 'running' || stateClass === 'queued';
+
+  // Compact tag bars for the most-recent finished run (max 3)
+  let tagSummary = '';
+  if (j.finished_runs && j.finished_runs.length > 0) {
+    const lastRun = j.finished_runs[j.finished_runs.length - 1];
+    const rates = Object.entries(lastRun.metrics?.pass_rate_by_tag || {}).slice(0, 3);
+    if (rates.length) {
+      tagSummary = `<div style="display:flex; gap:8px; margin-top:6px; flex-wrap:wrap; font-size:11px;">`
+        + rates.map(([k, v]) => `<span class="tag-chip">${escapeHtml(k)} ${(v*100).toFixed(0)}%</span>`).join('') + `</div>`;
+    }
+  }
+
+  let progressOrCounts = '';
+  if (isRunning) {
+    progressOrCounts = `
+      <div class="job-card-progress">
+        <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${(progFrac*100).toFixed(1)}%;"></div></div>
+        <span class="tabular-nums hint" style="font-size:11px;">${progress.examples_completed || 0}/${progress.examples_total || 0}</span>
+      </div>`;
+    if ((progress.examples_completed || 0) > 0) {
+      progressOrCounts += `<div class="hint" style="font-size:11px; margin-top:4px;">running ${(progress.running_accuracy*100).toFixed(0)}% accuracy · mean ${(progress.running_mean_score).toFixed(2)}</div>`;
+    }
+  } else if (j.finished_runs && j.finished_runs.length > 0) {
+    // Per-run mini bars when compare-mode
+    const runsHtml = j.finished_runs.map(r => {
+      const a = r.adapter || 'base';
+      return `<span class="hint" style="font-size:11px; display:inline-flex; gap:4px; align-items:center; margin-right:10px;">
+        <strong>${escapeHtml(a)}</strong>: <span class="tabular-nums">${(r.metrics.accuracy*100).toFixed(0)}%</span>
+        <span class="hint" style="font-size:10px;">(${r.metrics.num_pass}/${r.metrics.num_examples})</span>
+      </span>`;
+    }).join('');
+    progressOrCounts = `<div style="margin-top:6px;">${runsHtml}</div>`;
+  } else if (j.error) {
+    progressOrCounts = `<div class="hint" style="color:var(--danger-fg); margin-top:4px;">${escapeHtml(j.error)}</div>`;
+  }
+
+  return `<div class="job-card" data-job-id="${escapeHtml(j.job_id)}">
+    ${ringHtml(acc, 'large')}
+    <div class="job-card-meta">
+      <div class="job-card-suite">${escapeHtml(j.suite_name)}</div>
+      <div class="job-card-sub">
+        <span class="job-state-pill ${stateClass}">${escapeHtml(j.state || '')}</span>
+        <span>${adapters}</span>
+        <span class="hint">${escapeHtml(j.submission_kind)}</span>
+        <span class="hint" style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0, 8))}</span>
+      </div>
+      ${progressOrCounts}
+      ${tagSummary}
+    </div>
+  </div>`;
+}
+
+/* ---------- Drill-in modal ---------- */
+
+let drillJob = null;
+let drillFilter = 'all';
+let drillSearch = '';
+let drillSelectedRun = 0;
+let drillSelectedOutcome = null;
+let drillPollHandle = null;
+// Map of example_id → { messages, target, scorer, weight, tags } for the
+// suite the current drill job ran. Lets the detail panel show the prompt
+// the model actually saw, not just the model's reply. Cached per-suite.
+let drillExamplesById = new Map();
+let drillSuiteCacheKey = null;
+
+async function openDrillModal(jobId) {
+  drillFilter = 'all';
+  drillSearch = '';
+  drillSelectedRun = 0;
+  drillSelectedOutcome = null;
+  document.getElementById('drill-search').value = '';
+  document.querySelectorAll('[data-drill-filter]').forEach(b => b.classList.toggle('active', b.dataset.drillFilter === 'all'));
+  document.getElementById('eval-drill-modal').hidden = false;
+  document.body.style.overflow = 'hidden';
+  await fetchDrillJob(jobId);
+  // If the job is still running, poll every second so the modal updates live.
+  drillPollHandle = setInterval(async () => {
+    if (!drillJob) return;
+    if (drillJob.state === 'running' || drillJob.state === 'queued') {
+      await fetchDrillJob(drillJob.job_id, /*preserveSelection*/ true);
+    }
+  }, 1500);
+}
+
+function closeDrillModal() {
+  document.getElementById('eval-drill-modal').hidden = true;
+  document.body.style.overflow = '';
+  drillJob = null;
+  drillSelectedOutcome = null;
+  drillSuiteCacheKey = null;
+  drillExamplesById = new Map();
+  if (drillPollHandle) { clearInterval(drillPollHandle); drillPollHandle = null; }
+}
+
+async function fetchDrillJob(jobId, preserveSelection = false) {
+  try {
+    const j = await api('/v1/eval/jobs/' + encodeURIComponent(jobId));
+    const jobMeta = evalJobsCache.find(item => item.job_id === jobId);
+    drillJob = {
+      ...j,
+      suite_name: jobMeta?.suite_name || j.runs?.[0]?.suite_name || 'eval',
+      adapters: jobMeta?.adapters || j.runs?.map(r => r.adapter ?? null) || [],
+      submission_kind: jobMeta?.submission_kind || 'on_demand',
+    };
+    // Lazily fetch the suite content the *first* time we draw a drill for
+    // it. The outcomes don't carry the example prompts (only the model's
+    // reply) — without this the user can't actually debug a failure.
+    const suiteName = drillJob.suite_name;
+    if (suiteName && drillSuiteCacheKey !== suiteName) {
+      drillSuiteCacheKey = suiteName;
+      drillExamplesById = new Map();
+      try {
+        const suite = await api('/v1/eval/suites/' + encodeURIComponent(suiteName));
+        // EvalExample.id is optional — when omitted the server uses a
+        // sha256 prefix derived from messages+target+aliases. We mirror
+        // the algorithm here so the outcome's example_id keys back to
+        // the right prompt. Hashing is async (crypto.subtle), so we
+        // resolve all of them in parallel.
+        const examples = suite.examples || [];
+        const ids = await Promise.all(examples.map(ex => ex.id ? Promise.resolve(ex.id) : hashExampleId(ex)));
+        for (let i = 0; i < examples.length; i++) {
+          drillExamplesById.set(ids[i], examples[i]);
+        }
+      } catch (_) {
+        // Inline-suite jobs aren't registered, so this 404s — we degrade
+        // to no-prompt mode silently.
+      }
+    }
+    renderDrillModal(preserveSelection);
+  } catch (e) {
+    toast('Failed to load job: ' + e.message, 'err');
+    closeDrillModal();
+  }
+}
+
+/// Recompute the same example ID the server uses when one is not provided.
+/// Mirrors `EvalExample::resolved_id` in kiln-eval/src/suite.rs (sha256
+/// over role|content|target|aliases, hex prefix of 8 bytes).
+async function hashExampleId(ex) {
+  const enc = new TextEncoder();
+  const parts = [];
+  for (const m of (ex.messages || [])) {
+    parts.push(enc.encode(m.role));
+    parts.push(new Uint8Array([0]));
+    parts.push(enc.encode(m.content));
+    parts.push(new Uint8Array([0]));
+  }
+  if (ex.target != null) {
+    parts.push(enc.encode('|t|'));
+    parts.push(enc.encode(ex.target));
+  }
+  for (const a of (ex.aliases || [])) {
+    parts.push(enc.encode('|a|'));
+    parts.push(enc.encode(a));
+  }
+  const total = parts.reduce((s, p) => s + p.length, 0);
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { buf.set(p, off); off += p.length; }
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest, 0, 8)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function renderDrillModal(preserveSelection) {
+  const j = drillJob;
+  if (!j) return;
+  document.getElementById('drill-title').textContent = j.suite_name || 'Eval results';
+  document.getElementById('drill-meta').innerHTML = `
+    <span class="job-state-pill ${j.state}">${escapeHtml(j.state)}</span>
+    <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
+
+  const runs = j.runs || [];
+  const isCompare = (j.adapters && j.adapters.length > 1) || runs.length > 1;
+  const headerEl = document.getElementById('drill-headline');
+  const compareEl = document.getElementById('drill-compare');
+  const tagsEl = document.getElementById('drill-tags');
+
+  if (runs.length === 0) {
+    headerEl.innerHTML = `
+      <div class="hint">${j.state === 'queued' ? 'Job is queued. Will start shortly.' : (j.state === 'running' ? 'Job is running. Live progress streaming…' : 'No completed runs yet.')}</div>
+      ${j.progress && j.progress.examples_total > 0 ? `<div style="flex:1;"><div class="progress-bar-wrap" style="height:8px;"><div class="progress-bar-fill" style="width:${(j.progress.examples_completed / j.progress.examples_total * 100).toFixed(1)}%;"></div></div><div class="hint" style="font-size:11px; margin-top:4px;">${j.progress.examples_completed}/${j.progress.examples_total} · running ${(j.progress.running_accuracy*100).toFixed(0)}%</div></div>` : ''}`;
+    compareEl.hidden = true;
+    tagsEl.hidden = true;
+    document.getElementById('drill-outcomes').innerHTML = '<div class="eval-empty"><div class="eval-empty-body">Outcomes will appear here as they complete.</div></div>';
+    document.getElementById('drill-detail').innerHTML = '<div class="detail-empty">Waiting on first results…</div>';
+    updateDrillFilterCounts([]);
+    return;
+  }
+
+  // Headline shows the *selected* run (default first).
+  const run = runs[Math.min(drillSelectedRun, runs.length - 1)];
+  const adapter = run.adapter || 'base';
+  const m = run.metrics || {};
+  headerEl.innerHTML = `
+    ${ringHtml(m.accuracy, 'large')}
+    <div style="flex:1; min-width:0;">
+      <div style="font-size:14px; font-weight:600; margin-bottom:6px;">Adapter: <span style="color:var(--text);">${escapeHtml(adapter)}</span></div>
+      <div class="drill-counts">
+        <div class="count-cell"><span class="count-num" style="color:var(--success-fg);">${m.num_pass || 0}</span><span class="count-label">pass</span></div>
+        <div class="count-cell"><span class="count-num" style="color:var(--danger-fg);">${m.num_fail || 0}</span><span class="count-label">fail</span></div>
+        <div class="count-cell"><span class="count-num" style="color:var(--warning-fg);">${m.num_invalid || 0}</span><span class="count-label">invalid</span></div>
+        <div class="count-cell"><span class="count-num" style="color:var(--text-muted);">${m.num_error || 0}</span><span class="count-label">error</span></div>
+        ${m.latency && m.latency.p50_ms > 0 ? `<div class="count-cell"><span class="count-num">${m.latency.p50_ms.toFixed(0)}ms</span><span class="count-label">p50</span></div>` : ''}
+        ${m.total_completion_tokens ? `<div class="count-cell"><span class="count-num">${(m.total_completion_tokens/1000).toFixed(1)}k</span><span class="count-label">tok out</span></div>` : ''}
+      </div>
+    </div>`;
+
+  // Compare matrix when multi-run
+  if (isCompare && runs.length >= 2) {
+    compareEl.hidden = false;
+    const total = (run.metrics?.num_examples || 1);
+    compareEl.innerHTML = '<div class="eval-section-head" style="background:transparent; border:none; padding:0 0 4px 0;">Adapter comparison</div>' +
+      runs.map((r, i) => {
+        const rm = r.metrics || {};
+        const tot = Math.max(1, rm.num_examples || total);
+        const pp = (rm.num_pass || 0) / tot * 100;
+        const fp = (rm.num_fail || 0) / tot * 100;
+        const ip = (rm.num_invalid || 0) / tot * 100;
+        const ep = (rm.num_error || 0) / tot * 100;
+        const a = r.adapter || 'base';
+        const isSel = i === drillSelectedRun;
+        return `<div class="compare-row" data-run-idx="${i}" style="cursor:pointer; ${isSel ? 'opacity:1;' : 'opacity:0.7;'}" title="Click to view this adapter's outcomes">
+          <span class="compare-name" ${isSel ? 'style="color:var(--accent);"' : ''}>${escapeHtml(a)}</span>
+          <div class="compare-bar">
+            <div class="seg-pass" style="width:${pp}%;" title="pass ${rm.num_pass}"></div>
+            <div class="seg-fail" style="width:${fp}%;" title="fail ${rm.num_fail}"></div>
+            <div class="seg-invalid" style="width:${ip}%;" title="invalid ${rm.num_invalid}"></div>
+            <div class="seg-error" style="width:${ep}%;" title="error ${rm.num_error}"></div>
+          </div>
+          <span class="compare-acc">${(rm.accuracy*100).toFixed(0)}%</span>
+        </div>`;
+      }).join('');
+    compareEl.querySelectorAll('.compare-row').forEach(row => {
+      row.addEventListener('click', () => {
+        drillSelectedRun = parseInt(row.dataset.runIdx, 10);
+        drillSelectedOutcome = null;
+        renderDrillModal(false);
+      });
+    });
+  } else {
+    compareEl.hidden = true;
+  }
+
+  // Tag pass-rate bars
+  const tagRates = m.pass_rate_by_tag || {};
+  const tagEntries = Object.entries(tagRates);
+  if (tagEntries.length) {
+    tagsEl.hidden = false;
+    tagsEl.innerHTML = '<div class="eval-section-head" style="background:transparent; border:none; padding:0 0 4px 0;">Pass rate by tag</div>' +
+      tagEntries.map(([k, v]) => `<div class="tag-bar">
+        <span class="tag-name">${escapeHtml(k)}</span>
+        <div class="tag-track"><div class="tag-fill" style="width:${(v*100).toFixed(1)}%;"></div></div>
+        <span class="tag-pct">${(v*100).toFixed(0)}%</span>
+      </div>`).join('');
+  } else {
+    tagsEl.hidden = true;
+  }
+
+  // Outcomes list, filtered + searched
+  renderDrillOutcomes();
+  if (!preserveSelection || drillSelectedOutcome === null) {
+    // Default: show first failure if any, else first outcome
+    const first = (run.outcomes || []).find(o => o.kind !== 'pass') || (run.outcomes || [])[0];
+    if (first) selectDrillOutcome(first);
+    else document.getElementById('drill-detail').innerHTML = '<div class="detail-empty">No outcomes for this run.</div>';
+  } else {
+    // Re-find the selected outcome by id (it may have changed kind on a re-poll)
+    const found = (run.outcomes || []).find(o => o.example_id === drillSelectedOutcome.example_id && o.completion_index === drillSelectedOutcome.completion_index);
+    if (found) selectDrillOutcome(found);
+  }
+}
+
+function renderDrillOutcomes() {
+  const j = drillJob;
+  if (!j || !j.runs) return;
+  const run = j.runs[Math.min(drillSelectedRun, j.runs.length - 1)];
+  const all = run.outcomes || [];
+  // Counts always reflect the whole run (so the filter pills are stable)
+  const counts = { all: all.length, pass: 0, fail: 0, invalid: 0, error: 0 };
+  for (const o of all) counts[o.kind] = (counts[o.kind] || 0) + 1;
+  updateDrillFilterCounts(counts);
+
+  const filtered = all.filter(o => {
+    if (drillFilter !== 'all' && o.kind !== drillFilter) return false;
+    if (drillSearch) {
+      const needle = drillSearch.toLowerCase();
+      const hay = (o.example_id + ' ' + (o.completion_text || '') + ' ' + (o.detail || '')).toLowerCase();
+      if (!hay.includes(needle)) return false;
+    }
+    return true;
+  });
+  const el = document.getElementById('drill-outcomes');
+  if (!filtered.length) {
+    el.innerHTML = '<div class="eval-empty" style="border:none; background:transparent;"><div class="eval-empty-body">No examples match the current filter.</div></div>';
+    return;
+  }
+  el.innerHTML = filtered.map(o => {
+    const tags = (o.tags || []).slice(0, 2).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+    const isSel = drillSelectedOutcome
+      && drillSelectedOutcome.example_id === o.example_id
+      && drillSelectedOutcome.completion_index === o.completion_index;
+    return `<div class="outcome-item ${isSel ? 'selected' : ''}" data-example-id="${escapeHtml(o.example_id)}" data-completion-index="${o.completion_index}">
+      <span class="outcome-badge ${o.kind}">${o.kind}</span>
+      <div class="outcome-preview" title="${escapeHtml(o.completion_text || '')}">${escapeHtml(truncate(o.completion_text || '(empty)', 110))}</div>
+      <div class="outcome-meta">
+        ${o.latency_ms != null ? `<span class="hint">${o.latency_ms.toFixed(0)}ms</span>` : ''}
+        ${tags}
+      </div>
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.outcome-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const id = item.dataset.exampleId;
+      const idx = parseInt(item.dataset.completionIndex, 10);
+      const found = all.find(o => o.example_id === id && o.completion_index === idx);
+      if (found) selectDrillOutcome(found);
+    });
+  });
+}
+
+function updateDrillFilterCounts(counts) {
+  for (const k of ['all', 'pass', 'fail', 'invalid', 'error']) {
+    const el = document.getElementById('drill-count-' + k);
+    if (el) el.textContent = (counts[k] || 0).toLocaleString();
+  }
+}
+
+function selectDrillOutcome(o) {
+  drillSelectedOutcome = { example_id: o.example_id, completion_index: o.completion_index };
+  // Highlight in list
+  document.querySelectorAll('.outcome-item').forEach(item => {
+    const match = item.dataset.exampleId === o.example_id && parseInt(item.dataset.completionIndex, 10) === o.completion_index;
+    item.classList.toggle('selected', match);
+  });
+  renderOutcomeDetail(o);
+}
+
+function renderOutcomeDetail(o) {
+  const tags = (o.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+  const detail = document.getElementById('drill-detail');
+  const example = drillExamplesById.get(o.example_id);
+  // Prompt section: the chat history the model actually saw. When we have
+  // it (suite was loadable + example_id matched), render each message as a
+  // role-coded bubble; otherwise show a hint that the suite isn't available.
+  const promptSection = example && example.messages && example.messages.length
+    ? `<div class="detail-section">
+        <h4>Prompt</h4>
+        <div class="messages-list">
+          ${example.messages.map(m => `<div class="chat-msg">
+            <div class="role ${escapeHtml(m.role)}">${escapeHtml(m.role)}</div>
+            <div class="body">${escapeHtml(m.content)}</div>
+          </div>`).join('')}
+        </div>
+      </div>`
+    : `<div class="detail-section">
+        <h4>Prompt</h4>
+        <div class="hint" style="font-size:11px;">Suite content not available locally — drill into a registered suite to see the prompt the model saw.</div>
+      </div>`;
+  // Side-by-side target vs got. Only render when we have a target; the
+  // "json_validity" / "any_block" scorers don't always set one.
+  const target = example && example.target;
+  const passClass = o.kind === 'pass' ? 'tg-pass' : (o.kind === 'fail' ? 'tg-fail' : '');
+  const tgSection = target != null
+    ? `<div class="detail-section">
+        <h4>Target ↔ Got</h4>
+        <div class="detail-tg">
+          <div class="tg-cell">
+            <div class="tg-label">Expected target</div>
+            <pre>${escapeHtml(target)}</pre>
+          </div>
+          <div class="tg-cell ${passClass}">
+            <div class="tg-label">Model output</div>
+            <pre>${escapeHtml(o.completion_text || '(empty)')}</pre>
+          </div>
+        </div>
+      </div>`
+    : `<div class="detail-section">
+        <h4>Model output</h4>
+        <pre class="${passClass}" style="margin:0; font-family:var(--font-mono); font-size:12px; line-height:1.55; white-space:pre-wrap; word-break:break-word; padding:10px; background:var(--surface); border:1px solid var(--border); border-radius:6px;">${escapeHtml(o.completion_text || '(empty)')}</pre>
+      </div>`;
+  // Scorer section: kind + per-example detail
+  const scorerKind = (example && example.scorer && example.scorer.kind) || drillJob?.runs?.[0]?.metrics?.by_scorer?.[0]?.scorer_kind || '';
+  const scorerSection = `<div class="detail-section">
+    <h4>Scorer</h4>
+    <div style="display:flex; gap:8px; align-items:center; margin-bottom:6px;">
+      ${scorerKind ? `<span class="scorer-badge">${escapeHtml(scorerKind)}</span>` : ''}
+      <span class="tabular-nums hint">score ${(o.score).toFixed(3)}</span>
+    </div>
+    ${o.detail ? `<div style="font-family:var(--font-mono); font-size:12px; padding:10px; background:var(--surface); border:1px solid var(--border); border-radius:6px;">${escapeHtml(o.detail)}</div>` : '<div class="hint" style="font-size:11px;">No scorer commentary.</div>'}
+  </div>`;
+  detail.innerHTML = `
+    <div class="detail-section">
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
+        <span class="outcome-badge ${o.kind}">${o.kind}</span>
+        <strong style="font-family:var(--font-mono); font-size:13px;">${escapeHtml(o.example_id)}</strong>
+        ${o.completion_index > 0 ? `<span class="hint">completion #${o.completion_index}</span>` : ''}
+        ${o.latency_ms != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.latency_ms.toFixed(0)}ms</span>` : ''}
+        ${o.prompt_tokens != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.prompt_tokens}→${o.completion_tokens || 0} tok</span>` : ''}
+      </div>
+      <div>${tags}</div>
+    </div>
+    ${promptSection}
+    ${tgSection}
+    ${scorerSection}
+  `;
+}
+
+document.getElementById('drill-close')?.addEventListener('click', closeDrillModal);
+document.getElementById('eval-drill-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'eval-drill-modal') closeDrillModal();
+});
+document.getElementById('drill-search')?.addEventListener('input', ev => {
+  drillSearch = ev.target.value;
+  renderDrillOutcomes();
+});
+document.querySelectorAll('[data-drill-filter]').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('[data-drill-filter]').forEach(other => other.classList.toggle('active', other === b));
+    drillFilter = b.dataset.drillFilter;
+    renderDrillOutcomes();
+  });
+});
+
+document.getElementById('drill-rerun')?.addEventListener('click', async () => {
+  if (!drillJob) return;
+  const failing = (drillJob.runs?.[Math.min(drillSelectedRun, (drillJob.runs?.length || 1) - 1)]?.outcomes || [])
+    .filter(o => o.kind !== 'pass').length;
+  if (!failing) {
+    toast('No non-passing examples to re-run', 'ok');
+    return;
+  }
+  if (!confirm(`Re-run ${failing} failing example(s)?`)) return;
+  try {
+    const res = await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id) + '/rerun', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    toast('Queued re-run as ' + res.job_id.slice(0, 8), 'ok');
+    closeDrillModal();
+    refreshEvalJobs();
+    setTimeout(() => openDrillModal(res.job_id), 200);
+  } catch (e) { toast('Re-run failed: ' + e.message, 'err'); }
+});
+
+// Modal-scoped keyboard shortcuts: Esc closes; / focuses search; J/K
+// scroll through outcomes (vim-style); R triggers re-run.
+document.addEventListener('keydown', ev => {
+  const modalOpen = !document.getElementById('eval-drill-modal').hidden;
+  if (!modalOpen) return;
+  const tag = (ev.target.tagName || '').toUpperCase();
+  if (ev.key === 'Escape') { closeDrillModal(); return; }
+  // When focused in an input, only Esc and Cmd/Ctrl shortcuts fire.
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (ev.key === '/') {
+    ev.preventDefault();
+    document.getElementById('drill-search').focus();
+  } else if (ev.key === 'r' || ev.key === 'R') {
+    ev.preventDefault();
+    document.getElementById('drill-rerun').click();
+  } else if (ev.key === 'j' || ev.key === 'ArrowDown') {
+    ev.preventDefault();
+    moveDrillSelection(1);
+  } else if (ev.key === 'k' || ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    moveDrillSelection(-1);
+  }
+});
+
+function moveDrillSelection(delta) {
+  const list = Array.from(document.querySelectorAll('.outcome-item'));
+  if (!list.length) return;
+  const cur = list.findIndex(el => el.classList.contains('selected'));
+  const next = Math.max(0, Math.min(list.length - 1, (cur < 0 ? 0 : cur + delta)));
+  list[next].click();
+  list[next].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+/* ---------- Judgments — keyboard-first A/B with streaming ---------- */
+
+let activeJudgmentDataset = null;
+let pendingJudgmentPair = null;
+let judgmentStreams = { a: null, b: null };  // AbortControllers
+let judgmentAutoAdvance = true;
+
+async function refreshJudgments() {
+  try {
+    const d = await api('/v1/judgments');
+    const items = d.judgments || [];
+    const el = document.getElementById('judgments-list');
+    if (!items.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `
+        <div class="eval-empty-icon">⚖️</div>
+        <div class="eval-empty-title">No judgment datasets yet</div>
+        <div class="eval-empty-body">Create a dataset, then judge model outputs A/B/Tie. After ~20 picks you can compile them into SFT data and train a local judge LoRA — no frontier LLM in the loop.</div>
+        <button class="eval-empty-cta" type="button" onclick="document.getElementById('judgment-create-name').focus()">Create your first dataset</button>`;
+    } else {
+      el.className = '';
+      el.innerHTML = items.map(m => {
+        const winners = m.winner_histogram || {};
+        const total = (winners.a || 0) + (winners.b || 0) + (winners.tie || 0);
+        const aPct = total ? ((winners.a || 0) / total * 100).toFixed(0) : 0;
+        const bPct = total ? ((winners.b || 0) / total * 100).toFixed(0) : 0;
+        const isActive = activeJudgmentDataset === m.name;
+        const winnerBar = total > 0 ? `<div style="display:flex; height:6px; border-radius:3px; overflow:hidden; background:var(--surface-3); width:120px;">
+          <div style="background:var(--info-fg); width:${aPct}%;" title="A: ${winners.a || 0}"></div>
+          <div style="background:var(--warning-fg); width:${total ? ((winners.tie || 0) / total * 100).toFixed(0) : 0}%;" title="Tie: ${winners.tie || 0}"></div>
+          <div style="background:var(--accent); width:${bPct}%;" title="B: ${winners.b || 0}"></div>
+        </div>` : '';
+        return `<div class="eval-row eval-row-judgments">
+          <div>
+            <div class="row-title">${escapeHtml(m.name)}${isActive ? ' <span class="hint">(active)</span>' : ''}</div>
+            <div class="row-sub">${escapeHtml(m.description || 'No description')}</div>
+          </div>
+          <div class="tabular-nums">${m.num_rows} judgments</div>
+          <div style="display:flex; gap:8px; align-items:center; font-size:11px;">${winnerBar}<span class="hint">A ${winners.a||0} · T ${winners.tie||0} · B ${winners.b||0}</span></div>
+          <div class="row-actions">
+            <button class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
+            <button class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
+            <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+          </div>
+        </div>`;
+      }).join('');
+      el.querySelectorAll('button[data-action]').forEach(b => {
+        const name = b.dataset.name;
+        if (b.dataset.action === 'judge') {
+          b.addEventListener('click', () => openJudgmentViewer(name));
+        } else if (b.dataset.action === 'promote') {
+          b.addEventListener('click', () => openJudgmentCompile(name));
+        } else if (b.dataset.action === 'del') {
+          b.addEventListener('click', async () => {
+            if (!confirm(`Delete judgment dataset "${name}"? Provenance is gone for good.`)) return;
+            try {
+              await api('/v1/judgments/' + encodeURIComponent(name), { method: 'DELETE' });
+              if (activeJudgmentDataset === name) {
+                activeJudgmentDataset = null;
+                document.getElementById('judgment-viewer').hidden = true;
+                document.getElementById('judgment-compile').hidden = true;
+              }
+              refreshJudgments();
+            } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
+          });
+        }
+      });
+    }
+  } catch (e) {
+    document.getElementById('judgments-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+  }
+  refreshAdapterDropdowns();
+}
+
+document.getElementById('judgment-create-btn')?.addEventListener('click', async () => {
+  const name = document.getElementById('judgment-create-name').value.trim();
+  if (!name) { toast('Name is required', 'err'); return; }
+  try {
+    await api('/v1/judgments', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+    toast('Created judgment dataset', 'ok');
+    document.getElementById('judgment-create-name').value = '';
+    refreshJudgments();
+    openJudgmentViewer(name);
+  } catch (e) { toast('Create failed: ' + e.message, 'err'); }
+});
+
+document.getElementById('judgment-autoadvance')?.addEventListener('change', ev => {
+  judgmentAutoAdvance = ev.target.checked;
+});
+
+function openJudgmentViewer(name) {
+  activeJudgmentDataset = name;
+  document.getElementById('judgment-viewer').hidden = false;
+  document.getElementById('judgment-pair').hidden = true;
+  document.getElementById('judgment-actions').hidden = true;
+  document.getElementById('judgment-rows-count').textContent = `Judging into "${name}". Press G to generate, A/B/T/S to vote.`;
+  document.getElementById('judgment-compile').hidden = true;
+  document.getElementById('judgment-prompt').focus();
+  document.getElementById('judgment-viewer').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function openJudgmentCompile(name) {
+  activeJudgmentDataset = name;
+  document.getElementById('judgment-compile').hidden = false;
+  document.getElementById('compile-sft-name').value = name + '-sft';
+  document.getElementById('compile-output').innerHTML = '';
+  document.getElementById('judgment-compile').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function abortPendingStreams() {
+  for (const k of ['a', 'b']) {
+    if (judgmentStreams[k]) {
+      try { judgmentStreams[k].abort(); } catch (_) {}
+      judgmentStreams[k] = null;
+    }
+  }
+}
+
+async function streamCompletion(slot, body) {
+  const ctrl = new AbortController();
+  judgmentStreams[slot] = ctrl;
+  const target = document.getElementById('judgment-' + slot + '-text');
+  target.textContent = '';
+  target.classList.add('token-cursor');
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify({ ...body, stream: true }),
+      signal: ctrl.signal,
+    });
+    if (!res.ok || !res.body) {
+      const errText = await res.text().catch(() => `HTTP ${res.status}`);
+      // The mock backend rejects streaming with a clear error code. Fall
+      // back to a plain non-streaming completion so the judgment flow
+      // still works without a real model loaded.
+      if (errText.includes('streaming_not_supported')) {
+        return await nonStreamingCompletion(slot, body, ctrl, target);
+      }
+      throw new Error(errText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let acc = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (payload === '[DONE]') return acc;
+        try {
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) {
+            acc += delta;
+            target.textContent = acc;
+          }
+        } catch (_) { /* tolerate non-JSON keepalives */ }
+      }
+    }
+    return acc;
+  } finally {
+    target.classList.remove('token-cursor');
+    if (judgmentStreams[slot] === ctrl) judgmentStreams[slot] = null;
+  }
+}
+
+async function nonStreamingCompletion(slot, body, ctrl, target) {
+  const res = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, stream: false }),
+    signal: ctrl.signal,
+  });
+  if (!res.ok) {
+    const errBody = await res.json().catch(() => ({}));
+    throw new Error(errBody.error?.message || `HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content || '';
+  target.textContent = text;
+  return text;
+}
+
+async function generateJudgmentPair() {
+  if (!activeJudgmentDataset) { toast('Pick a judgment dataset first', 'err'); return; }
+  const promptText = document.getElementById('judgment-prompt').value.trim();
+  if (!promptText) { toast('Enter a prompt to compare on', 'err'); return; }
+  abortPendingStreams();
+  const adapterA = document.getElementById('judgment-adapter-a').value;
+  const adapterB = document.getElementById('judgment-adapter-b').value;
+  const temperature = parseFloat(document.getElementById('judgment-temp').value || '0.7');
+  const baseBody = {
+    messages: [{ role: 'user', content: promptText }],
+    temperature, top_p: 1.0, max_tokens: 512,
+  };
+  const aBody = { ...baseBody }; if (adapterA) aBody.adapter = adapterA;
+  const bBody = { ...baseBody }; if (adapterB) bBody.adapter = adapterB;
+
+  document.getElementById('judgment-pair').hidden = false;
+  document.getElementById('judgment-actions').hidden = false;
+  document.getElementById('judgment-a-adapter').textContent = adapterA || 'base';
+  document.getElementById('judgment-b-adapter').textContent = adapterB || 'base';
+  // Stub the pair so vote actions know what to record. Final text is set
+  // after streams complete.
+  pendingJudgmentPair = {
+    prompt: [{ role: 'user', content: promptText }],
+    adapter_a: adapterA || null,
+    adapter_b: adapterB || null,
+    response_a: '',
+    response_b: '',
+  };
+
+  // Run both streams concurrently. Either one's failure shouldn't kill the other.
+  const [a, b] = await Promise.allSettled([
+    streamCompletion('a', aBody),
+    streamCompletion('b', bBody),
+  ]);
+  if (a.status === 'fulfilled') pendingJudgmentPair.response_a = a.value;
+  else document.getElementById('judgment-a-text').textContent = '⚠ ' + (a.reason?.message || 'failed');
+  if (b.status === 'fulfilled') pendingJudgmentPair.response_b = b.value;
+  else document.getElementById('judgment-b-text').textContent = '⚠ ' + (b.reason?.message || 'failed');
+}
+
+document.getElementById('judgment-generate-btn')?.addEventListener('click', () => generateJudgmentPair());
+
+async function recordJudgment(winner) {
+  if (!activeJudgmentDataset || !pendingJudgmentPair) return;
+  // If a stream is still going, capture whatever has been emitted so far so
+  // the user can vote mid-stream.
+  if (!pendingJudgmentPair.response_a) {
+    pendingJudgmentPair.response_a = document.getElementById('judgment-a-text').textContent;
+  }
+  if (!pendingJudgmentPair.response_b) {
+    pendingJudgmentPair.response_b = document.getElementById('judgment-b-text').textContent;
+  }
+  abortPendingStreams();
+  const note = document.getElementById('judgment-note').value.trim();
+  const tags = document.getElementById('judgment-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+  const body = {
+    ...pendingJudgmentPair,
+    winner,
+    note: note || null,
+    tags,
+  };
+  try {
+    const m = await api('/v1/judgments/' + encodeURIComponent(activeJudgmentDataset) + '/rows', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    document.getElementById('judgment-rows-count').textContent =
+      `${m.num_rows} judgments in "${activeJudgmentDataset}". Press G to generate the next pair (A/B/T/S to vote).`;
+    document.getElementById('judgment-note').value = '';
+    pendingJudgmentPair = null;
+    document.getElementById('judgment-actions').hidden = true;
+    document.getElementById('judgment-prompt').value = '';
+    document.getElementById('judgment-a-text').textContent = '';
+    document.getElementById('judgment-b-text').textContent = '';
+    document.getElementById('judgment-pair').hidden = true;
+    refreshJudgments();
+    if (judgmentAutoAdvance) {
+      // Re-focus the prompt for the next round.
+      setTimeout(() => document.getElementById('judgment-prompt').focus(), 50);
+    }
+  } catch (e) { toast('Save failed: ' + e.message, 'err'); }
+}
+
+document.getElementById('judgment-pick-a')?.addEventListener('click', () => recordJudgment('a'));
+document.getElementById('judgment-pick-b')?.addEventListener('click', () => recordJudgment('b'));
+document.getElementById('judgment-pick-tie')?.addEventListener('click', () => recordJudgment('tie'));
+document.getElementById('judgment-pick-skip')?.addEventListener('click', () => recordJudgment('skip'));
+
+// Click reply card itself to vote — visual and obvious.
+document.getElementById('judgment-card-a')?.addEventListener('click', () => {
+  if (pendingJudgmentPair && document.getElementById('judgment-actions') && !document.getElementById('judgment-actions').hidden) {
+    recordJudgment('a');
+  }
+});
+document.getElementById('judgment-card-b')?.addEventListener('click', () => {
+  if (pendingJudgmentPair && document.getElementById('judgment-actions') && !document.getElementById('judgment-actions').hidden) {
+    recordJudgment('b');
+  }
+});
+
+// Keyboard shortcuts for judgment voting.
+document.addEventListener('keydown', ev => {
+  // Only when judgment view is active and visible
+  const evalsActive = document.getElementById('page-evals')?.classList.contains('active');
+  const judgmentTabActive = document.getElementById('evals-tab-judgments')?.classList.contains('active');
+  if (!evalsActive || !judgmentTabActive) return;
+  // Don't intercept when typing in inputs
+  const tag = (ev.target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+    // Special case: in the prompt textarea, Cmd/Ctrl+Enter still triggers generate.
+    if ((ev.key === 'Enter') && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      generateJudgmentPair();
+    }
+    return;
+  }
+  if (document.getElementById('judgment-actions')?.hidden) {
+    // Pre-vote: G or Enter generates a pair.
+    if (ev.key === 'g' || ev.key === 'G' || ev.key === 'Enter') {
+      ev.preventDefault();
+      generateJudgmentPair();
+    }
+    return;
+  }
+  // Voting mode
+  if (ev.key === 'a' || ev.key === 'A' || ev.key === 'ArrowLeft') { ev.preventDefault(); recordJudgment('a'); }
+  else if (ev.key === 'b' || ev.key === 'B' || ev.key === 'ArrowRight') { ev.preventDefault(); recordJudgment('b'); }
+  else if (ev.key === 't' || ev.key === 'T' || ev.key === 'ArrowUp') { ev.preventDefault(); recordJudgment('tie'); }
+  else if (ev.key === 's' || ev.key === 'S' || ev.key === 'ArrowDown') { ev.preventDefault(); recordJudgment('skip'); }
+});
+
+document.getElementById('compile-btn')?.addEventListener('click', async () => {
+  if (!activeJudgmentDataset) { toast('No judgment dataset selected', 'err'); return; }
+  const output_dataset = document.getElementById('compile-sft-name').value.trim();
+  if (!output_dataset) { toast('Provide an output SFT dataset name', 'err'); return; }
+  try {
+    const res = await api('/v1/judgments/' + encodeURIComponent(activeJudgmentDataset) + '/compile', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ output_dataset, include_skips: false }),
+    });
+    document.getElementById('compile-output').innerHTML =
+      `<div style="padding:10px; background:var(--success-bg); border:1px solid var(--success-bd); border-radius:6px; color:var(--success-fg); font-size:12px;">
+        ✓ Compiled <strong>${res.rows}</strong> judgments into SFT dataset <code>${escapeHtml(res.dataset.name)}</code> (${res.dataset.num_rows} rows). Train a judge LoRA via the Training tab using this dataset.
+      </div>`;
+    toast('Compiled to SFT', 'ok');
+    refreshDatasets();
+  } catch (e) { toast('Compile failed: ' + e.message, 'err'); }
+});
+
+document.getElementById('validate-btn')?.addEventListener('click', async () => {
+  if (!activeJudgmentDataset) return;
+  const adapter = document.getElementById('compile-judge-adapter').value;
+  const holdout_n = parseInt(document.getElementById('compile-holdout').value, 10) || 20;
+  if (!adapter) { toast('Pick an adapter to validate', 'err'); return; }
+  try {
+    const res = await api('/v1/judgments/' + encodeURIComponent(activeJudgmentDataset) + '/validate', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ adapter, holdout_n }),
+    });
+    document.getElementById('compile-output').innerHTML =
+      `<div style="padding:10px; background:var(--info-bg); border:1px solid var(--info-bd); border-radius:6px; color:var(--info-fg); font-size:12px;">
+        Queued validation as eval job <code>${escapeHtml(res.eval_job_id)}</code>. Switching to the Jobs tab…
+      </div>`;
+    refreshEvalJobs();
+    setTimeout(() => {
+      document.getElementById('evals-tab-jobs')?.click();
+      openDrillModal(res.eval_job_id);
+    }, 400);
+  } catch (e) { toast('Validate failed: ' + e.message, 'err'); }
+});
+
+// Show the first-time onboarding banner unless the user has dismissed it.
+if (!localStorage.getItem('kiln-evals-onboarded')) {
+  document.getElementById('evals-onboarding').hidden = false;
+}
+
+// Initial population of adapter dropdowns + eval lists.
+refreshAdapterDropdowns();
+refreshDatasets();
+refreshSuites();
+refreshEvalJobs();
+refreshJudgments();
+
+// Periodic refresh — only updates the active sub-tab so we don't thrash.
+// Jobs tab refreshes every 1500ms (so a running job's progress feels alive),
+// other tabs every 4s.
+setInterval(() => {
+  const evalsPage = document.getElementById('page-evals');
+  if (!evalsPage || !evalsPage.classList.contains('active')) return;
+  const active = evalsPage.querySelector('.tab.active')?.dataset?.tab;
+  if (active === 'jobs')      refreshEvalJobs();
+  else if (active === 'datasets') refreshDatasets();
+  else if (active === 'suites')   refreshSuites();
+  else if (active === 'judgments') refreshJudgments();
+}, 1500);
+
+/* =====================================================================
+   Cmd-K command palette
+   ---------------------------------------------------------------------
+   Aggregates everything-actionable into one text-searchable list:
+   navigations (open page X), actions (run an eval, switch adapter),
+   and direct drill-ins (click a job/adapter/suite directly from search).
+   The palette stays cheap by reusing the data the dashboard already
+   polls — no separate index, no extra requests.
+   ===================================================================== */
+
+let cmdkOpen = false;
+let cmdkActiveIdx = 0;
+let cmdkResultsCache = [];
+
+function openCmdk() {
+  cmdkOpen = true;
+  cmdkActiveIdx = 0;
+  document.getElementById('cmdk-modal').hidden = false;
+  document.body.style.overflow = 'hidden';
+  const input = document.getElementById('cmdk-input');
+  input.value = '';
+  input.focus();
+  renderCmdkResults('');
+}
+function closeCmdk() {
+  cmdkOpen = false;
+  document.getElementById('cmdk-modal').hidden = true;
+  document.body.style.overflow = '';
+}
+
+// Build the searchable index from cached state. Cheap to recompute on
+// every keystroke — N is at most low hundreds.
+function buildCmdkIndex() {
+  const items = [];
+  // Navigation
+  items.push({ kind: 'nav', icon: '🏠', title: 'Overview',   sub: 'Live stats, recent requests, quick actions', action: () => selectPage('overview') });
+  items.push({ kind: 'nav', icon: '🧬', title: 'Adapters',   sub: 'Saved LoRAs, upload, merge', action: () => selectPage('adapters') });
+  items.push({ kind: 'nav', icon: '🧪', title: 'Training',   sub: 'SFT/GRPO queue + submit', action: () => selectPage('training') });
+  items.push({ kind: 'nav', icon: '📊', title: 'Evals',      sub: 'Datasets, suites, jobs, judgments', action: () => selectPage('evals') });
+  items.push({ kind: 'nav', icon: '💬', title: 'Playground', sub: 'Quick inference + A/B compare', action: () => selectPage('playground') });
+  // Actions
+  items.push({ kind: 'action', icon: '＋', title: 'Run a new eval',   sub: 'Submit a suite against an adapter', action: () => { selectPage('evals'); document.getElementById('evals-tab-suites')?.click(); } });
+  items.push({ kind: 'action', icon: '＋', title: 'Train a new SFT adapter', sub: 'Open the SFT submit form', action: () => { selectPage('training'); document.getElementById('training-tab-sft')?.click(); } });
+  items.push({ kind: 'action', icon: '＋', title: 'Train a new GRPO adapter', sub: 'Open the GRPO submit form', action: () => { selectPage('training'); document.getElementById('training-tab-grpo')?.click(); } });
+  items.push({ kind: 'action', icon: '＋', title: 'Upload a dataset', sub: 'Drop an SFT JSONL', action: () => { selectPage('evals'); document.getElementById('evals-tab-datasets')?.click(); document.getElementById('dataset-name')?.focus(); } });
+  items.push({ kind: 'action', icon: '＋', title: 'Create judgment dataset', sub: 'Start the A/B flywheel', action: () => { selectPage('evals'); document.getElementById('evals-tab-judgments')?.click(); document.getElementById('judgment-create-name')?.focus(); } });
+  // Adapters
+  for (const name of evalAdaptersCache) {
+    items.push({
+      kind: 'adapter', icon: '🧬',
+      title: name,
+      sub: name === evalActiveAdapter ? 'Adapter · ACTIVE' : 'Adapter',
+      action: async () => {
+        selectPage('adapters');
+        await openAdapterDrillModal(name);
+      },
+    });
+    items.push({
+      kind: 'adapter-load', icon: '↺',
+      title: 'Load adapter ' + name,
+      sub: 'Switch active LoRA',
+      action: async () => {
+        try {
+          await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+          toast(`Loaded ${name}`, 'ok');
+          refreshAdapterDropdowns();
+          pollAdapters && pollAdapters();
+        } catch (e) { toast('Load failed: ' + e.message, 'err'); }
+      },
+    });
+  }
+  // Suites (from the cached jobs list — list endpoint not always loaded yet)
+  const suiteNames = new Set();
+  for (const j of evalJobsCache) suiteNames.add(j.suite_name);
+  for (const name of suiteNames) {
+    items.push({
+      kind: 'suite', icon: '🎯',
+      title: name,
+      sub: 'Eval suite',
+      action: async () => {
+        selectPage('evals');
+        document.getElementById('evals-tab-suites')?.click();
+      },
+    });
+    items.push({
+      kind: 'suite-run', icon: '▶',
+      title: `Run "${name}" vs active adapter`,
+      sub: 'Queue an eval immediately',
+      action: async () => {
+        try {
+          const res = await api('/v1/eval/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ suite: name, adapter: evalActiveAdapter || '' }) });
+          toast('Queued eval ' + res.job_id.slice(0, 8), 'ok');
+          selectPage('evals');
+          document.getElementById('evals-tab-jobs')?.click();
+          refreshEvalJobs();
+        } catch (e) { toast('Run failed: ' + e.message, 'err'); }
+      },
+    });
+  }
+  // Jobs (recent — clickable to drill in)
+  for (const j of evalJobsCache.slice(0, 20)) {
+    items.push({
+      kind: 'job', icon: '📊',
+      title: `${j.suite_name}`,
+      sub: `Eval · ${j.state} · ${j.headline_accuracy != null ? (j.headline_accuracy*100).toFixed(0)+'%' : '—'} · ${j.job_id.slice(0, 8)}`,
+      action: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); openDrillModal(j.job_id); },
+    });
+  }
+  return items;
+}
+
+function renderCmdkResults(query) {
+  const items = buildCmdkIndex();
+  const q = query.trim().toLowerCase();
+  const filtered = !q ? items : items.filter(it => {
+    return it.title.toLowerCase().includes(q) || (it.sub && it.sub.toLowerCase().includes(q));
+  });
+  cmdkResultsCache = filtered;
+  cmdkActiveIdx = Math.max(0, Math.min(cmdkActiveIdx, filtered.length - 1));
+  const el = document.getElementById('cmdk-results');
+  if (!filtered.length) {
+    el.innerHTML = `<div class="cmdk-empty">No matches for <code>${escapeHtml(q || '(all)')}</code>.</div>`;
+    return;
+  }
+  // Group by kind label.
+  const groups = {
+    nav: 'Navigate', action: 'Actions',
+    adapter: 'Adapters', 'adapter-load': 'Adapter actions',
+    suite: 'Suites', 'suite-run': 'Suite actions',
+    job: 'Jobs',
+  };
+  let html = '';
+  let lastGroup = '';
+  filtered.forEach((it, i) => {
+    const groupLabel = groups[it.kind] || it.kind;
+    if (groupLabel !== lastGroup) {
+      html += `<div class="cmdk-section-label">${escapeHtml(groupLabel)}</div>`;
+      lastGroup = groupLabel;
+    }
+    html += `<div class="cmdk-item ${i === cmdkActiveIdx ? 'cmdk-active' : ''}" data-cmdk-idx="${i}">
+      <span class="cmdk-item-icon">${it.icon || '·'}</span>
+      <div class="cmdk-item-body">
+        <div class="cmdk-item-title">${escapeHtml(it.title)}</div>
+        <div class="cmdk-item-sub">${escapeHtml(it.sub || '')}</div>
+      </div>
+      <span class="cmdk-item-action">↵</span>
+    </div>`;
+  });
+  el.innerHTML = html;
+  el.querySelectorAll('.cmdk-item').forEach(item => {
+    item.addEventListener('mouseover', () => {
+      cmdkActiveIdx = parseInt(item.dataset.cmdkIdx, 10);
+      el.querySelectorAll('.cmdk-item').forEach((other, idx) => other.classList.toggle('cmdk-active', idx === cmdkActiveIdx));
+    });
+    item.addEventListener('click', () => runCmdkActive());
+  });
+  // Scroll the active row into view.
+  const active = el.querySelector('.cmdk-active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+function runCmdkActive() {
+  const item = cmdkResultsCache[cmdkActiveIdx];
+  if (!item) return;
+  closeCmdk();
+  // Defer to next tick so any open-modal action sees a clean state.
+  setTimeout(() => item.action(), 10);
+}
+
+document.getElementById('cmdk-trigger')?.addEventListener('click', openCmdk);
+document.getElementById('cmdk-input')?.addEventListener('input', ev => {
+  cmdkActiveIdx = 0;
+  renderCmdkResults(ev.target.value);
+});
+document.getElementById('cmdk-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'cmdk-modal') closeCmdk();
+});
+
+document.addEventListener('keydown', ev => {
+  // Open: ⌘K / Ctrl+K (anywhere except inside an input that already has its own handler)
+  if ((ev.key === 'k' || ev.key === 'K') && (ev.metaKey || ev.ctrlKey)) {
+    ev.preventDefault();
+    if (cmdkOpen) closeCmdk(); else openCmdk();
+    return;
+  }
+  // Open: just '/' when nothing else is focused (mirrors GitHub behaviour)
+  if (!cmdkOpen && ev.key === '/' && !['INPUT','TEXTAREA','SELECT'].includes((ev.target.tagName||'').toUpperCase())) {
+    ev.preventDefault();
+    openCmdk();
+    return;
+  }
+  if (!cmdkOpen) return;
+  if (ev.key === 'Escape') { ev.preventDefault(); closeCmdk(); }
+  else if (ev.key === 'ArrowDown') {
+    ev.preventDefault();
+    cmdkActiveIdx = Math.min(cmdkResultsCache.length - 1, cmdkActiveIdx + 1);
+    renderCmdkResults(document.getElementById('cmdk-input').value);
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    cmdkActiveIdx = Math.max(0, cmdkActiveIdx - 1);
+    renderCmdkResults(document.getElementById('cmdk-input').value);
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
+    runCmdkActive();
+  }
+});
+
+/* =====================================================================
+   Charts: line/sparkline/donut renderers
+   ===================================================================== */
+
+/// Render a multi-axis line chart of (x, y) pairs into the given container.
+/// `series` is an array of {points: [[x, y], ...], color, label}. Auto-scales
+/// X linearly between min/max; Y linearly between 0 and max(y) with a small
+/// headroom. Suitable for loss curves and tok/s timelines.
+function renderLineChart(container, series, opts = {}) {
+  const w = opts.width || 600;
+  const h = opts.height || 280;
+  const padL = 40, padR = 12, padT = 12, padB = 24;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+  // Single-pass min/max: avoids `Math.min/max(...xs)` which would spread
+  // every sample as a function arg. With training-loss curves capped at
+  // 1024 samples we're still within engine limits today, but the spread
+  // pattern crashes around ~125k args on Chrome — better to never use it.
+  let xMin = Infinity, xMax = -Infinity, yMaxRaw = 0, count = 0;
+  for (const s of series) {
+    for (const p of (s.points || [])) {
+      const x = p[0], y = p[1];
+      if (x < xMin) xMin = x;
+      if (x > xMax) xMax = x;
+      if (isFinite(y) && y > yMaxRaw) yMaxRaw = y;
+      count++;
+    }
+  }
+  if (count < 2) {
+    container.innerHTML = `<div class="hint" style="padding:12px; text-align:center;">Awaiting first samples…</div>`;
+    return;
+  }
+  const yMin = 0;
+  const yMax = yMaxRaw <= 0 ? 1 : yMaxRaw * 1.1;
+  const xRange = (xMax - xMin) || 1;
+  const yRange = (yMax - yMin) || 1;
+  const xx = x => padL + ((x - xMin) / xRange) * innerW;
+  const yy = y => padT + innerH - ((y - yMin) / yRange) * innerH;
+  // Y gridlines at 0/25/50/75/100% of range.
+  const grid = [];
+  for (let i = 0; i <= 4; i++) {
+    const yVal = yMin + (yRange * i / 4);
+    const yPx = yy(yVal);
+    grid.push(`<line class="grid" x1="${padL}" y1="${yPx.toFixed(1)}" x2="${(padL+innerW).toFixed(1)}" y2="${yPx.toFixed(1)}" />`);
+    grid.push(`<text class="axis-label" x="${padL - 4}" y="${(yPx + 3).toFixed(1)}" text-anchor="end">${yVal.toFixed(yVal < 1 ? 2 : (yVal < 10 ? 1 : 0))}</text>`);
+  }
+  // X axis
+  const xAxisLabels = [
+    `<text class="axis-label" x="${padL}" y="${(h - 6).toFixed(1)}" text-anchor="start">${xMin.toFixed(0)}s</text>`,
+    `<text class="axis-label" x="${(padL + innerW).toFixed(1)}" y="${(h - 6).toFixed(1)}" text-anchor="end">${xMax.toFixed(0)}s</text>`,
+  ];
+  // Series paths
+  const seriesHtml = series.map((s, idx) => {
+    const color = s.color || ['var(--accent)', 'var(--info-fg)', 'var(--success-fg)', 'var(--warning-fg)'][idx % 4];
+    const pts = s.points || [];
+    if (pts.length < 2) return '';
+    const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${xx(p[0]).toFixed(1)} ${yy(p[1]).toFixed(1)}`).join(' ');
+    const areaPath = `${linePath} L${xx(pts[pts.length-1][0]).toFixed(1)} ${(padT+innerH).toFixed(1)} L${xx(pts[0][0]).toFixed(1)} ${(padT+innerH).toFixed(1)} Z`;
+    return `<path class="data-area" d="${areaPath}" style="fill: ${color}; fill-opacity: 0.12;"/>
+            <path class="data-line" d="${linePath}" style="stroke: ${color};"/>`;
+  }).join('');
+  container.innerHTML = `<svg class="line-chart ${opts.large ? 'line-chart-large' : ''}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+    ${grid.join('')}
+    <line class="axis" x1="${padL}" y1="${padT}" x2="${padL}" y2="${(padT+innerH).toFixed(1)}" />
+    <line class="axis" x1="${padL}" y1="${(padT+innerH).toFixed(1)}" x2="${(padL+innerW).toFixed(1)}" y2="${(padT+innerH).toFixed(1)}" />
+    ${xAxisLabels.join('')}
+    ${seriesHtml}
+  </svg>`;
+}
+
+/// Render a donut chart representing memory or any partition into slices.
+/// `slices` is [{label, value, color}]. Returns SVG markup as a string.
+function donutChartSvg(slices, opts = {}) {
+  const size = opts.size || 110;
+  const stroke = opts.stroke || 18;
+  const r = (size - stroke) / 2;
+  const c = size / 2;
+  const total = slices.reduce((s, sl) => s + sl.value, 0);
+  if (total <= 0) {
+    return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}"><circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="var(--surface-3)" stroke-width="${stroke}"/></svg>`;
+  }
+  let offset = 0;
+  const C = 2 * Math.PI * r;
+  const segs = slices.map(sl => {
+    const portion = sl.value / total;
+    const dash = portion * C;
+    const seg = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${sl.color}" stroke-width="${stroke}"
+      stroke-dasharray="${dash.toFixed(2)} ${(C - dash).toFixed(2)}"
+      stroke-dashoffset="${(-offset).toFixed(2)}"
+      transform="rotate(-90 ${c} ${c})"/>`;
+    offset += dash;
+    return seg;
+  }).join('');
+  const center = opts.centerLabel
+    ? `<text x="${c}" y="${c - 2}" text-anchor="middle" style="fill:var(--text); font-weight:700; font-size:14px; font-variant-numeric:tabular-nums;">${escapeHtml(opts.centerLabel)}</text>
+       <text x="${c}" y="${c + 12}" text-anchor="middle" style="fill:var(--text-quiet); font-size:9px; text-transform:uppercase; letter-spacing:0.06em;">${escapeHtml(opts.centerSub || '')}</text>`
+    : '';
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="var(--surface-3)" stroke-width="${stroke}"/>
+    ${segs}
+    ${center}
+  </svg>`;
+}
+
+/* =====================================================================
+   Overview: VRAM donut + tok/s sparkline + quick actions
+   ===================================================================== */
+
+const tpsHistory = [];
+const TPS_HISTORY_CAP = 60;
+
+// Decode-perf sparkline. Driven from the end of `pollDecodePerf` so we
+// share the upstream fetch and never issue a second `/v1/stats/decode`
+// request. A change-detection guard skips the SVG repaint when tok/s is
+// unchanged (idle server), avoiding a layout reflow every 2s for nothing.
+let lastTpsRendered = null;
+function refreshDecodeSparkline() {
+  const data = lastDecode;
+  if (!data || typeof data.tok_per_sec !== 'number') return;
+  const tps = data.tok_per_sec;
+  // Always advance the sliding window so the visualised range stays
+  // anchored to "now"; only short-circuit the SVG repaint when the value
+  // hasn't changed and the buffer is full enough to look stable.
+  tpsHistory.push({ ts: Date.now(), tps });
+  while (tpsHistory.length > TPS_HISTORY_CAP) tpsHistory.shift();
+  if (tps === lastTpsRendered && tpsHistory.length >= TPS_HISTORY_CAP) return;
+  lastTpsRendered = tps;
+  const panel = document.getElementById('decode-perf-panel');
+  if (!panel) return;
+  let spark = panel.querySelector('.decode-spark-host');
+  if (!spark) {
+    spark = document.createElement('div');
+    spark.className = 'decode-spark-host';
+    spark.style.marginTop = '12px';
+    spark.style.paddingTop = '8px';
+    spark.style.borderTop = '1px solid var(--border)';
+    const header = document.createElement('div');
+    header.className = 'hint';
+    header.style.fontSize = '11px';
+    header.style.marginBottom = '4px';
+    spark.appendChild(header);
+    const body = document.createElement('div');
+    body.className = 'decode-spark-body';
+    spark.appendChild(body);
+    panel.appendChild(spark);
+  }
+  let peakTps = 0;
+  for (const s of tpsHistory) if (s.tps > peakTps) peakTps = s.tps;
+  spark.firstChild.innerHTML = `tok/s over the last ${tpsHistory.length}s · peak <span class="tabular-nums" style="color:var(--text-2);">${peakTps.toFixed(0)}</span> · now <span class="tabular-nums" style="color:var(--text-2);">${tps.toFixed(1)}</span>`;
+  const series = [{ points: tpsHistory.map((s, i) => [i, s.tps]), color: 'var(--accent)' }];
+  renderLineChart(spark.querySelector('.decode-spark-body'), series, { width: 520, height: 100 });
+}
+
+// VRAM donut. Same approach: read `lastHealth` cache, dedupe on a key
+// derived from the gpu_memory tuple so we don't re-paint the donut
+// unless the partition actually shifted.
+let lastVramKey = null;
+function refreshVramDonut() {
+  const h = lastHealth;
+  if (!h || !h.gpu_memory) return;
+  const g = h.gpu_memory;
+  const key = `${g.total_vram_gb}|${g.model_gb}|${g.kv_cache_gb}|${g.training_budget_gb}`;
+  if (key === lastVramKey) return;
+  lastVramKey = key;
+  const panel = document.getElementById('server-status');
+  if (!panel) return;
+  const remaining = Math.max(0, (g.total_vram_gb || 0) - (g.model_gb || 0) - (g.kv_cache_gb || 0) - (g.training_budget_gb || 0));
+  const slices = [
+    { label: 'Model',          value: g.model_gb || 0,         color: 'var(--accent)' },
+    { label: 'KV cache',       value: g.kv_cache_gb || 0,      color: 'var(--info-fg)' },
+    { label: 'Training reserve', value: g.training_budget_gb || 0, color: 'var(--success-fg)' },
+    { label: 'Free',           value: remaining,                color: 'var(--surface-3)' },
+  ].filter(s => s.value > 0);
+  const used = (g.model_gb || 0) + (g.kv_cache_gb || 0);
+  const totalLabel = (g.total_vram_gb || 0).toFixed(1) + 'G';
+  let host = panel.querySelector('.vram-donut-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'vram-donut-host vram-donut';
+    host.style.marginTop = '12px';
+    host.style.paddingTop = '12px';
+    host.style.borderTop = '1px solid var(--border)';
+    panel.appendChild(host);
+  }
+  const legend = slices.map(s => `<div class="vram-legend-row">
+    <span class="vram-legend-swatch" style="background:${s.color};"></span>
+    <span class="vram-legend-name">${escapeHtml(s.label)}</span>
+    <span class="vram-legend-value">${s.value.toFixed(1)}G</span>
+  </div>`).join('');
+  host.innerHTML = `${donutChartSvg(slices, { size: 120, stroke: 20, centerLabel: used.toFixed(1)+'G', centerSub: 'used / '+totalLabel })}
+    <div class="vram-legend">${legend}</div>`;
+}
+
+// Refreshers are driven event-style from the bottom of `pollDecodePerf`
+// and `pollHealth` (success path). No need for a standalone interval —
+// the polls are already on the right cadence.
+
+const QUICK_ACTIONS = {
+  'new-eval':   () => { selectPage('evals');    document.getElementById('evals-tab-suites')?.click(); },
+  'train-sft':  () => { selectPage('training'); document.getElementById('training-tab-sft')?.click(); },
+  'judge':      () => { selectPage('evals');    document.getElementById('evals-tab-judgments')?.click(); },
+  'playground': () => { selectPage('playground'); },
+};
+document.querySelectorAll('[data-quick-action]').forEach(btn => {
+  btn.addEventListener('click', () => QUICK_ACTIONS[btn.dataset.quickAction]?.());
+});
+
+/* =====================================================================
+   Adapter cards renderer + drill-in modal
+   ===================================================================== */
+
+function renderAdaptersAsCards(data) {
+  const panel = document.getElementById('adapters-panel');
+  if (!panel) return;
+  const adapters = data.available || [];
+  const active = data.active || '';
+  if (!adapters.length) {
+    panel.innerHTML = `<div class="eval-empty">
+      <div class="eval-empty-icon">🧬</div>
+      <div class="eval-empty-title">No saved adapters</div>
+      <div class="eval-empty-body">Train one via the Training tab, or upload a PEFT-compatible <code>.tar.gz</code> archive below.</div>
+      <button class="eval-empty-cta" type="button" data-focus-id="upload-name">Upload an adapter</button>
+    </div>`;
+    panel.querySelector('[data-focus-id]')?.addEventListener('click', ev => {
+      const id = ev.currentTarget.getAttribute('data-focus-id');
+      if (id) document.getElementById(id)?.focus();
+    });
+    return;
+  }
+  const cards = adapters.map(a => {
+    const isActive = a.name === active;
+    return `<div class="adapter-card ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
+      ${isActive ? '<span class="adapter-card-active-pill">active</span>' : ''}
+      <div class="adapter-card-name">${escapeHtml(a.name)}</div>
+      <div class="adapter-card-meta">
+        <span><span class="tabular-nums">${fmtBytes(a.size_bytes)}</span> on disk</span>
+        ${a.modified_at ? `<span title="${escapeHtml(a.modified_at)}">${escapeHtml(a.modified_at.split('T')[0])}</span>` : ''}
+        ${a.files ? `<span class="tabular-nums">${a.files.length} file${a.files.length === 1 ? '' : 's'}</span>` : ''}
+      </div>
+      <div class="adapter-card-actions">
+        ${isActive
+          ? `<button class="btn btn-sm" type="button" data-adapter-action="unload">Unload</button>`
+          : `<button class="btn btn-sm primary" type="button" data-adapter-action="load">Load</button>`}
+        <button class="btn btn-sm" type="button" data-adapter-action="eval">Run eval…</button>
+        <button class="btn btn-sm" type="button" data-adapter-action="download">Download</button>
+        <button class="btn btn-sm" type="button" data-adapter-action="delete" title="Delete this adapter from disk" style="margin-left:auto;">Delete</button>
+      </div>
+    </div>`;
+  }).join('');
+  panel.innerHTML = `<div class="adapter-cards">${cards}</div>`;
+  document.getElementById('adapters-card-eyebrow').textContent =
+    adapters.length + ' adapter' + (adapters.length === 1 ? '' : 's') + (active ? ' · active: ' + active : ' · base model active');
+  panel.querySelectorAll('.adapter-card').forEach(card => {
+    const name = card.dataset.adapterName;
+    card.addEventListener('click', ev => {
+      // Skip the open-drill behaviour when an action button was clicked.
+      if (ev.target.closest('[data-adapter-action]')) return;
+      openAdapterDrillModal(name);
+    });
+    card.querySelectorAll('[data-adapter-action]').forEach(b => {
+      b.addEventListener('click', async ev => {
+        ev.stopPropagation();
+        const action = b.dataset.adapterAction;
+        try {
+          if (action === 'load') {
+            await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+            toast('Loaded ' + name, 'ok');
+            pollAdapters && pollAdapters();
+          } else if (action === 'unload') {
+            await api('/v1/adapters/unload', { method: 'POST' });
+            toast('Unloaded — base model active', 'ok');
+            pollAdapters && pollAdapters();
+          } else if (action === 'download') {
+            window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
+          } else if (action === 'delete') {
+            if (!confirm(`Delete adapter "${name}"?`)) return;
+            await api('/v1/adapters/' + encodeURIComponent(name), { method: 'DELETE' });
+            toast('Deleted', 'ok');
+            pollAdapters && pollAdapters();
+          } else if (action === 'eval') {
+            // Open command palette pre-filtered for "Run X vs name"
+            selectPage('evals');
+            document.getElementById('evals-tab-suites')?.click();
+            toast('Pick a suite to run against ' + name, 'ok');
+          }
+        } catch (e) { toast(action + ' failed: ' + e.message, 'err'); }
+      });
+    });
+  });
+}
+
+// Adapter cards renderer. Driven off `lastAdapters` (populated by the
+// original `pollAdapters`) so we never issue a second `/v1/adapters`
+// request, and dedup'd on a content key so we don't re-paint the cards
+// when nothing changed (which would destroy hover/focus state).
+let lastAdaptersKey = null;
+function refreshAdapterCards() {
+  const d = lastAdapters;
+  if (!d) return;
+  const key = (d.active || '') + '|' + (d.available || [])
+    .map(a => `${a.name}:${a.size_bytes}:${a.modified_at || ''}`)
+    .join(',');
+  if (key === lastAdaptersKey) return;
+  lastAdaptersKey = key;
+  renderAdaptersAsCards(d);
+  const count = (d.available || []).length;
+  const heroAdapter = document.getElementById('hero-adapter');
+  const heroSub = document.getElementById('hero-adapter-sub');
+  if (heroAdapter) heroAdapter.textContent = d.active || 'base';
+  if (heroSub) heroSub.textContent = d.active ? `${count} adapter${count === 1 ? '' : 's'} on disk` : `${count} adapter${count === 1 ? '' : 's'} available · base model active`;
+}
+// Driven from `pollAdapters` end-of-success directly — no standalone
+// interval, no first-render kick needed.
+
+// Adapter drill-in modal state. `adapterDrillName` is the currently-
+// viewed adapter; `adapterDrillIsActive` mirrors the server's `is_active`
+// flag so the Load/Unload button doesn't read its own label as state.
+let adapterDrillName = null;
+let adapterDrillIsActive = false;
+
+async function openAdapterDrillModal(name) {
+  adapterDrillName = name;
+  adapterDrillIsActive = false;
+  document.getElementById('adapter-drill-modal').hidden = false;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('adapter-drill-title').textContent = name;
+  document.getElementById('adapter-drill-meta').textContent = 'Loading…';
+  document.getElementById('adapter-drill-content').innerHTML = '<div class="detail-empty">Loading…</div>';
+  try {
+    const d = await api('/v1/adapters/' + encodeURIComponent(name) + '/detail');
+    adapterDrillIsActive = !!d.is_active;
+    document.getElementById('adapter-drill-meta').innerHTML =
+      `<span class="hint">${d.is_active ? 'ACTIVE · ' : ''}${fmtBytes(d.size_bytes)} · ${d.files.length} file${d.files.length === 1 ? '' : 's'}</span>`;
+    const loadBtn = document.getElementById('adapter-drill-load');
+    loadBtn.textContent = d.is_active ? 'Unload' : 'Load';
+    loadBtn.classList.toggle('primary', !d.is_active);
+    const content = document.getElementById('adapter-drill-content');
+    content.innerHTML = renderAdapterDrillBody(d);
+    content.querySelectorAll('[data-eval-job]').forEach(row => {
+      row.addEventListener('click', () => openDrillModal(row.dataset.evalJob));
+    });
+    content.querySelectorAll('[data-train-job]').forEach(row => {
+      row.addEventListener('click', () => openTrainDrillModal(row.dataset.trainJob));
+    });
+  } catch (e) {
+    document.getElementById('adapter-drill-content').innerHTML = `<div class="detail-empty">Failed to load: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderAdapterDrillBody(d) {
+  const filesHtml = d.files.map(f => `<div style="display:grid; grid-template-columns:1fr auto; gap:8px; padding:6px 0; border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:12px;">
+    <span>${escapeHtml(f.name)}</span>
+    <span class="tabular-nums hint">${fmtBytes(f.size_bytes)}</span>
+  </div>`).join('') || '<div class="hint">No files.</div>';
+
+  const trainHtml = d.training_jobs.length
+    ? d.training_jobs.map(j => `<div class="eval-row" data-train-job="${escapeHtml(j.job_id)}" style="grid-template-columns:auto 1fr auto auto auto; cursor:pointer;">
+        <span class="job-state-pill ${(j.state||'').toString().toLowerCase()}">${escapeHtml((j.state||'').toString())}</span>
+        <span style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0,12))}</span>
+        <span class="hint">${escapeHtml(j.job_type.toString())}</span>
+        <span class="tabular-nums hint">${j.final_loss != null ? 'loss '+j.final_loss.toFixed(3) : '—'}</span>
+        <span class="tabular-nums hint">${fmtDuration(j.elapsed_secs)}</span>
+      </div>`).join('')
+    : '<div class="hint">No training jobs in tracking map (may have TTL\'d out).</div>';
+
+  const evalHtml = d.eval_jobs.length
+    ? d.eval_jobs.map(j => `<div class="eval-row" data-eval-job="${escapeHtml(j.job_id)}" style="grid-template-columns:auto 1fr auto auto; cursor:pointer;">
+        <span class="job-state-pill ${(j.state||'').toString()}">${escapeHtml((j.state||'').toString())}</span>
+        <span><strong>${escapeHtml(j.suite_name)}</strong></span>
+        <span class="tabular-nums" style="color:var(--text);">${j.accuracy != null ? (j.accuracy*100).toFixed(0)+'%' : '—'}</span>
+        <span class="hint" style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0,8))}</span>
+      </div>`).join('')
+    : '<div class="hint">No evals against this adapter yet. Click "Run eval…" above.</div>';
+
+  return `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
+    <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+      <div>
+        <div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Disk</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtBytes(d.size_bytes)}</div>
+      </div>
+      <div>
+        <div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Files</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${d.files.length}</div>
+      </div>
+      <div>
+        <div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Training</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${d.training_jobs.length}</div>
+      </div>
+      <div>
+        <div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Evals</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${d.eval_jobs.length}</div>
+      </div>
+    </div>
+  </div>
+  <div class="detail-section">
+    <h4>Eval history</h4>
+    ${evalHtml}
+  </div>
+  <div class="detail-section">
+    <h4>Training history</h4>
+    ${trainHtml}
+  </div>
+  <div class="detail-section">
+    <h4>Files on disk</h4>
+    ${filesHtml}
+  </div>`;
+}
+
+document.getElementById('adapter-drill-close')?.addEventListener('click', () => {
+  document.getElementById('adapter-drill-modal').hidden = true;
+  document.body.style.overflow = '';
+});
+document.getElementById('adapter-drill-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'adapter-drill-modal') {
+    document.getElementById('adapter-drill-modal').hidden = true;
+    document.body.style.overflow = '';
+  }
+});
+document.getElementById('adapter-drill-load')?.addEventListener('click', async () => {
+  if (!adapterDrillName) return;
+  const name = adapterDrillName;
+  const isUnload = adapterDrillIsActive;
+  try {
+    if (isUnload) {
+      await api('/v1/adapters/unload', { method: 'POST' });
+      toast('Unloaded — base model active', 'ok');
+    } else {
+      await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+      toast('Loaded ' + name, 'ok');
+    }
+    document.getElementById('adapter-drill-modal').hidden = true;
+    document.body.style.overflow = '';
+    pollAdapters && pollAdapters();
+  } catch (e) { toast(e.message, 'err'); }
+});
+document.getElementById('adapter-drill-eval')?.addEventListener('click', () => {
+  document.getElementById('adapter-drill-modal').hidden = true;
+  document.body.style.overflow = '';
+  selectPage('evals');
+  document.getElementById('evals-tab-suites')?.click();
+  toast('Pick a suite to run', 'ok');
+});
+
+/* =====================================================================
+   Training drill-in modal — full loss curve + linked evals + cancel
+   ===================================================================== */
+
+let trainDrillJobId = null;
+let trainDrillPollHandle = null;
+// Tracks the last (sample_count, state) tuple we rendered so we can skip
+// the SVG/DOM rebuild when nothing meaningful has changed. The drill
+// modal polls every 1.5s; for a finished job that's a 1024-sample
+// loss_history shipping every poll otherwise.
+let trainDrillLastKey = null;
+
+const TRAIN_TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
+
+async function openTrainDrillModal(jobId) {
+  trainDrillJobId = jobId;
+  trainDrillLastKey = null;
+  document.getElementById('train-drill-modal').hidden = false;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('train-drill-content').innerHTML = '<div class="detail-empty">Loading…</div>';
+  await fetchTrainDrill();
+  if (trainDrillPollHandle) clearInterval(trainDrillPollHandle);
+  trainDrillPollHandle = setInterval(() => {
+    if (!trainDrillJobId) return;
+    fetchTrainDrill();
+  }, 1500);
+}
+
+function closeTrainDrillModal() {
+  trainDrillJobId = null;
+  trainDrillLastKey = null;
+  document.getElementById('train-drill-modal').hidden = true;
+  document.body.style.overflow = '';
+  if (trainDrillPollHandle) { clearInterval(trainDrillPollHandle); trainDrillPollHandle = null; }
+}
+
+async function fetchTrainDrill() {
+  if (!trainDrillJobId) return;
+  try {
+    const j = await api('/v1/train/jobs/' + encodeURIComponent(trainDrillJobId));
+    const stateLow = (j.state || '').toString().toLowerCase();
+    const sampleCount = (j.loss_history || []).length;
+    const key = `${stateLow}|${sampleCount}|${j.progress.toFixed(4)}`;
+    if (key === trainDrillLastKey) {
+      // No new sample, no state change: skip the DOM/SVG rebuild. Also
+      // stop polling once the job has terminated — there's nothing more
+      // to learn from a completed/failed/cancelled job.
+      if (TRAIN_TERMINAL_STATES.has(stateLow) && trainDrillPollHandle) {
+        clearInterval(trainDrillPollHandle);
+        trainDrillPollHandle = null;
+      }
+      return;
+    }
+    trainDrillLastKey = key;
+
+    document.getElementById('train-drill-title').textContent = j.adapter_name || 'Training job';
+    document.getElementById('train-drill-meta').innerHTML =
+      `<span class="job-state-pill ${stateLow}">${escapeHtml(stateLow)}</span>
+       <span class="training-card-type ${(j.job_type||'').toString().toLowerCase()}" style="margin-left:8px;">${escapeHtml((j.job_type||'').toString())}</span>
+       <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
+
+    const stopBtn = document.getElementById('train-drill-stop');
+    if (stateLow === 'queued') { stopBtn.disabled = false; stopBtn.title = 'Cancel this queued job'; }
+    else if (stateLow === 'running') { stopBtn.disabled = true; stopBtn.title = 'Cancellation of running training jobs is not yet supported.'; }
+    else { stopBtn.disabled = true; stopBtn.title = 'Job already in terminal state'; }
+    stopBtn.dataset.jobId = j.job_id;
+
+    document.getElementById('train-drill-content').innerHTML = renderTrainDrillBody(j);
+    const curveEl = document.getElementById('train-drill-curve-host');
+    if (curveEl && j.loss_history && j.loss_history.length >= 2) {
+      const series = [{
+        points: j.loss_history.map(s => [s.elapsed_secs, s.loss]),
+        color: 'var(--accent)',
+      }];
+      renderLineChart(curveEl, series, { width: 800, height: 280, large: true });
+    } else if (curveEl) {
+      curveEl.innerHTML = `<div class="hint" style="padding:24px; text-align:center;">${stateLow === 'queued' ? 'Job hasn\'t started yet.' : (stateLow === 'running' ? 'Awaiting first loss sample…' : 'No loss history recorded.')}</div>`;
+    }
+    // Stop polling once the job is in a terminal state — `loss_history`
+    // and `state` are now frozen; the modal can sit on the last render.
+    if (TRAIN_TERMINAL_STATES.has(stateLow) && trainDrillPollHandle) {
+      clearInterval(trainDrillPollHandle);
+      trainDrillPollHandle = null;
+    }
+  } catch (e) {
+    document.getElementById('train-drill-content').innerHTML = `<div class="detail-empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderTrainDrillBody(j) {
+  const linkedIds = j.linked_eval_job_ids || [];
+  const linkedHtml = linkedIds.length
+    ? linkedIds.map(id => `<button class="btn btn-sm" type="button" data-linked-eval="${escapeHtml(id)}">↗ Eval ${escapeHtml(id.slice(0, 8))}</button>`).join(' ')
+    : '<span class="hint">None</span>';
+  const finalLoss = j.current_loss != null ? j.current_loss.toFixed(4) : '—';
+  const epoch = j.epoch != null ? j.epoch.toString() : '—';
+  const samples = (j.loss_history || []).length;
+  const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
+    <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Progress</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${(j.progress*100).toFixed(0)}%</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Current loss</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${finalLoss}</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Epoch</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${epoch}</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Elapsed</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtDuration(j.elapsed_secs)}</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Samples</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${samples}</div></div>
+    </div>
+  </div>
+  <div class="detail-section">
+    <h4>Loss curve</h4>
+    <div id="train-drill-curve-host"></div>
+  </div>
+  <div class="detail-section">
+    <h4>Adapter</h4>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <code style="background:var(--surface); padding:4px 8px; border-radius:4px; border:1px solid var(--border);">${escapeHtml(j.adapter_name || '—')}</code>
+      ${j.adapter_path ? `<span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(j.adapter_path)}</span>` : ''}
+      <span class="hint">${j.auto_load ? 'auto-load on completion' : ''}</span>
+    </div>
+  </div>
+  <div class="detail-section">
+    <h4>Linked evals</h4>
+    ${linkedHtml}
+  </div>`;
+  // Defer wiring to after innerHTML set
+  setTimeout(() => {
+    document.querySelectorAll('[data-linked-eval]').forEach(b => {
+      b.addEventListener('click', () => {
+        closeTrainDrillModal();
+        selectPage('evals');
+        document.getElementById('evals-tab-jobs')?.click();
+        openDrillModal(b.dataset.linkedEval);
+      });
+    });
+  }, 0);
+  return html;
+}
+
+document.getElementById('train-drill-close')?.addEventListener('click', closeTrainDrillModal);
+document.getElementById('train-drill-modal')?.addEventListener('click', ev => {
+  if (ev.target.id === 'train-drill-modal') closeTrainDrillModal();
+});
+document.getElementById('train-drill-stop')?.addEventListener('click', () => {
+  const jobId = document.getElementById('train-drill-stop').dataset.jobId;
+  if (!jobId) return;
+  if (!confirm('Cancel queued job?')) return;
+  // Reuse the in-flight set + toast + pollTraining refresh that
+  // window.cancelJob already implements; calling DELETE directly
+  // would let rapid clicks fire duplicate requests.
+  closeTrainDrillModal();
+  window.cancelJob(jobId);
+});
+
+/* =====================================================================
+   Playground: A/B compare mode + send-to-judgments
+   ===================================================================== */
+
+// We keep the simple chat mode entirely intact. Compare mode toggles a
+// second adapter dropdown + a second reply column, fans the same prompt
+// out to both, and offers a "Save A/B preference" button that ships the
+// pair into a chosen judgment dataset. Saves the inevitable copy-paste
+// dance into the Evals tab.
+
+const compareToolbar = document.createElement('div');
+compareToolbar.className = 'chat-controls';
+compareToolbar.style.borderTop = '1px solid var(--border)';
+compareToolbar.style.borderBottom = '1px solid var(--border)';
+compareToolbar.innerHTML = `
+  <label style="user-select:none; display:flex; align-items:center; gap:6px; cursor:pointer;">
+    <input type="checkbox" id="chat-compare-toggle"> Compare mode
+  </label>
+  <label for="chat-adapter-b" id="chat-adapter-b-label" style="display:none;">Adapter B</label>
+  <select id="chat-adapter-b" style="display:none;"><option value="">Base model</option></select>
+  <span style="flex:1;"></span>
+  <button class="btn btn-sm" id="chat-save-judgment" type="button" disabled title="Send this A/B pair into a judgment dataset">↗ Save A/B preference</button>`;
+
+const playgroundCard = document.querySelector('.playground-card');
+if (playgroundCard) {
+  const inputRow = playgroundCard.querySelector('.chat-input-row');
+  if (inputRow) inputRow.parentNode.insertBefore(compareToolbar, inputRow);
+  // The compare reply panel — appears under the existing chat-output.
+  const comparePair = document.createElement('div');
+  comparePair.id = 'chat-compare-pair';
+  comparePair.className = 'compare-pair';
+  comparePair.style.display = 'none';
+  comparePair.style.padding = '0 var(--space-5) var(--space-4)';
+  comparePair.innerHTML = `
+    <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body"></div></div>
+    <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body"></div></div>`;
+  const chatOutput = playgroundCard.querySelector('.chat-output-actions');
+  if (chatOutput) chatOutput.parentNode.insertBefore(comparePair, chatOutput);
+}
+
+let chatCompareMode = false;
+let chatComparePair = null;
+const chatCompareToggle = document.getElementById('chat-compare-toggle');
+chatCompareToggle?.addEventListener('change', ev => {
+  chatCompareMode = ev.target.checked;
+  document.getElementById('chat-adapter-b-label').style.display = chatCompareMode ? '' : 'none';
+  document.getElementById('chat-adapter-b').style.display = chatCompareMode ? '' : 'none';
+  document.getElementById('chat-compare-pair').style.display = chatCompareMode ? '' : 'none';
+  // Sync the B dropdown to the same options as A.
+  const a = document.getElementById('chat-adapter');
+  const b = document.getElementById('chat-adapter-b');
+  if (a && b) b.innerHTML = a.innerHTML;
+});
+
+// Hook send button: when compare mode is on, fan out to A and B in
+// parallel and render side-by-side. Otherwise let the existing handler
+// do its thing.
+const chatSendBtn = document.getElementById('chat-send');
+if (chatSendBtn) {
+  chatSendBtn.addEventListener('click', async () => {
+    if (!chatCompareMode) return;  // existing handler runs
+    const promptEl = document.getElementById('chat-input');
+    const prompt = (promptEl?.value || '').trim();
+    if (!prompt) return;
+    const adapterA = document.getElementById('chat-adapter').value;
+    const adapterB = document.getElementById('chat-adapter-b').value;
+    const temp = parseFloat(document.getElementById('chat-temp').value || '0');
+    document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
+    document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
+    const aBody = document.getElementById('chat-compare-a-body');
+    const bBody = document.getElementById('chat-compare-b-body');
+    aBody.textContent = 'Generating…';
+    bBody.textContent = 'Generating…';
+    const baseBody = { messages: [{role:'user', content: prompt}], temperature: temp, max_tokens: 512 };
+    const aReq = { ...baseBody }; if (adapterA) aReq.adapter = adapterA;
+    const bReq = { ...baseBody }; if (adapterB) bReq.adapter = adapterB;
+    try {
+      const [a, b] = await Promise.all([
+        api('/v1/chat/completions', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(aReq) }),
+        api('/v1/chat/completions', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(bReq) }),
+      ]);
+      const aText = a.choices?.[0]?.message?.content || '';
+      const bText = b.choices?.[0]?.message?.content || '';
+      aBody.textContent = aText;
+      bBody.textContent = bText;
+      chatComparePair = {
+        prompt: [{role:'user', content: prompt}],
+        adapter_a: adapterA || null,
+        adapter_b: adapterB || null,
+        response_a: aText,
+        response_b: bText,
+      };
+      document.getElementById('chat-save-judgment').disabled = false;
+    } catch (e) {
+      aBody.textContent = '⚠ ' + e.message;
+      bBody.textContent = '⚠ ' + e.message;
+    }
+  });
+}
+
+// Save the current A/B pair into a judgment dataset. Renders a small
+// inline form (replaces two consecutive `prompt()` dialogs which were
+// terrible UX and blocked the event loop).
+document.getElementById('chat-save-judgment')?.addEventListener('click', () => {
+  if (!chatComparePair) return;
+  const existing = document.getElementById('chat-save-judgment-form');
+  if (existing) { existing.remove(); return; }
+  const host = document.getElementById('chat-compare-pair');
+  if (!host) return;
+  const form = document.createElement('div');
+  form.id = 'chat-save-judgment-form';
+  form.style.cssText = 'display:flex; gap:8px; align-items:center; padding:10px; margin-top:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:6px; flex-wrap:wrap;';
+  form.innerHTML = `
+    <input id="chat-save-dataset" type="text" placeholder="dataset name" value="playground-pair" style="flex:1; min-width:140px; padding:6px 10px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text); font-family:inherit;">
+    <select id="chat-save-winner" style="padding:6px 10px; background:var(--surface); border:1px solid var(--border); border-radius:4px; color:var(--text); font-family:inherit;">
+      <option value="a">A wins</option>
+      <option value="b">B wins</option>
+      <option value="tie" selected>Tie</option>
+      <option value="skip">Skip</option>
+    </select>
+    <button class="btn btn-sm primary" id="chat-save-confirm" type="button">Save</button>
+    <button class="btn btn-sm" id="chat-save-cancel" type="button">Cancel</button>`;
+  host.parentNode.insertBefore(form, host.nextSibling);
+  document.getElementById('chat-save-cancel').addEventListener('click', () => form.remove());
+  document.getElementById('chat-save-confirm').addEventListener('click', async () => {
+    const datasetName = (document.getElementById('chat-save-dataset').value || '').trim();
+    if (!datasetName) { toast('Dataset name required', 'err'); return; }
+    const winner = document.getElementById('chat-save-winner').value;
+    try {
+      // 409 (already-exists) is fine — we just append a row below.
+      try { await api('/v1/judgments', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: datasetName }) }); } catch (_) { /* already exists is fine */ }
+      await api('/v1/judgments/' + encodeURIComponent(datasetName) + '/rows', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ ...chatComparePair, winner, note: 'from playground', tags: ['playground'] }),
+      });
+      toast('Saved into ' + datasetName, 'ok');
+      form.remove();
+    } catch (e) { toast('Save failed: ' + e.message, 'err'); }
+  });
+});
 
 // --- Init ---
 renderChat();

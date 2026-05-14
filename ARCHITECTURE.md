@@ -7,20 +7,22 @@ This document explains how Kiln works internally. It is aimed at contributors an
 - Use this architecture deep-dive when you want to understand Kiln's scheduler, model runner, LoRA hot-swap, training queue, and CUDA kernel layout.
 - Start with [Quickstart](QUICKSTART.md) when you want to install Kiln, run the server, or try the common API flows before reading internals.
 - Read [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) when you want the generate → score → train loop, reward-shaping examples, and GRPO request shapes.
+- Read [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) when you want the scorer reference, the `POST /v1/eval/*` API, the `kiln-eval` CLI, and post-training auto-eval hooks.
 - Skim [README.md](README.md) when you want the shorter overview, feature map, install command, and links to the rest of the docs.
 - If setup or API behavior is confusing, use the website [Troubleshooting guide](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## System Overview
 
-Kiln is a single Rust binary built as a Cargo workspace with twelve crates — seven portable crates plus five CUDA kernel crates that are only compiled when `--features cuda` is enabled:
+Kiln is a single Rust binary built as a Cargo workspace with thirteen crates — eight portable crates plus five CUDA kernel crates that are only compiled when `--features cuda` is enabled:
 
 ```
 kiln
 ├── kiln-core             Core types: block manager, prefix cache, KV cache config, request lifecycle
 ├── kiln-model            Model loading, forward pass, LoRA, sampling, KV cache, CUDA graphs
 ├── kiln-scheduler        Sarathi-style continuous batching scheduler with chunked prefill
-├── kiln-server           Axum HTTP server, CLI, training queue, metrics, configuration
+├── kiln-server           Axum HTTP server, CLI, training queue, eval queue, metrics, configuration
 ├── kiln-train            SFT and GRPO training loops with gradient checkpointing
+├── kiln-eval             Suite + scorer + result types for LoRA evaluation (see docs/EVAL_GUIDE.md)
 ├── kiln-nvtx             Thin NVTX range wrapper for nsys attribution (zero overhead when off)
 ├── kiln-flce-kernel      Fused Linear Cross-Entropy: chunked CE without materializing [T, V] logits
 └── (CUDA-only, --features cuda)
@@ -40,9 +42,11 @@ kiln-server
 │   └── kiln-flash-attn
 ├── kiln-scheduler
 │   └── kiln-core
-└── kiln-train
-    ├── kiln-core
-    └── kiln-model
+├── kiln-train
+│   ├── kiln-core
+│   ├── kiln-model
+│   └── kiln-eval         (post_eval hook on SftRequest / GrpoRequest)
+└── kiln-eval             (suite, scorers, results — pure CPU)
 ```
 
 Everything runs in a single OS process. Inference and training share the same GPU memory and model weights. There is no Python sidecar, no second model copy, no separate training service.
@@ -507,6 +511,119 @@ Phase 8 (PR #582) added an opt-in completion webhook so external schedulers, GRP
 
 The HTTP `POST` runs on a tokio task with a 5-second client timeout and is best-effort: 4xx, 5xx, and transport errors are logged at WARN but never propagate, so a successful training job stays "completed" even if the notifier 5xxs. There is no built-in retry — clients that need at-least-once semantics should re-poll `/v1/train/status/{id}` on the receiving end. See `fire_completion_webhook` and `TrainingCompletionEvent` in `crates/kiln-server/src/training_queue.rs`.
 
+## Evaluation Pipeline
+
+The eval pipeline lives in two places:
+
+- **`kiln-eval`** (pure CPU crate): suite/scorer/result types, the synthesis engine that turns SFT/GRPO datasets into eval suites, and the `PostEvalConfig` knob embedded in `SftRequest`/`GrpoRequest`.
+- **`kiln-server::eval`** module: the queue + worker + registry plumbing, the dataset and judgment stores, and the HTTP surface at `/v1/eval/*` and `/v1/judgments/*`.
+
+Full reference (request shapes, scorer reference, CLI usage): [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md).
+
+### Stores on disk
+
+Three on-disk registries persist the eval system, all rooted under `[eval] root` (defaults to `<state_dir>/eval`):
+
+| Path | Type | Purpose |
+|------|------|---------|
+| `<root>/suites/<name>.json` | `SuiteRegistry` | Versioned eval suites (examples + scorers + generation defaults) |
+| `<root>/datasets/<name>/` | `DatasetRegistry` | Uploaded SFT/GRPO JSONL with `manifest.json` + sampled stats |
+| `<root>/judgments/<name>/` | `JudgmentStore` | A/B/Tie/Skip rows + manifest for the human-judge flywheel |
+
+`SuiteRegistry::load` returns a deserialized `EvalSuite` from `kiln-eval`; `DatasetRegistry` keeps file size and row counts cheap by sampling the first N rows on upload, so the UI can render a preview without re-walking 100k-line files.
+
+### Scorers
+
+Scorers are variants of the serde-tagged `kiln_eval::scorers::Scorer` enum that compute a 0/1 outcome from `(generated_text, target, metadata)`. The on-disk `kind` field selects the variant; the kind labels (snake-cased) and use cases:
+
+| `kind` | Variant | Use case |
+|--------|---------|----------|
+| `exact_match` | `Scorer::ExactMatch` | Single-source-of-truth answers (math, classification labels) |
+| `contains` / `regex` | `Scorer::Contains` / `Scorer::Regex` | Free-text key-phrase or pattern matching |
+| `json_validity` / `multiple_choice` / `numeric_tolerance` | `Scorer::JsonValidity` / `MultipleChoice` / `NumericTolerance` | Structured outputs and graded numeric responses |
+| `tool_call` | `Scorer::ToolCall` | Trajectory/tool-arg matching (selected tool + arg shape + inner-content quality on string args) |
+| `code` | `Scorer::Code` | Code-output evals via `CodeStyle` (Jaccard, AST, output-match), with `bash` introspection for `python -c`/`node -e`/`uv run` inlined inside `bash` |
+| `llm_judge` | `Scorer::LlmJudge` | Local judge LoRA scoring with `judge_adapter`/`template`/`score_regex` |
+| `all` / `any` | `Scorer::All` / `Scorer::Any` | Composite — pass-all or pass-any over a list of sub-scorers |
+
+Adding a scorer means: append a `Scorer` variant, add the `kind_label()` arm, implement the scoring logic in `crates/kiln-eval/src/scorers/<name>.rs`, and dispatch it in `score_completion`. The wire format is then derived for free; synthesis and the UI pick it up via `kind_label`.
+
+### Synthesis: dataset → suite
+
+`POST /v1/eval/datasets/<name>/synthesize` (driven by `eval/synthesis_driver.rs`) decomposes an SFT or GRPO file into a graded suite. Strategies live in `kiln_eval::synthesis`:
+
+- **`final_assistant`** — last assistant turn becomes the target; everything before becomes the prompt.
+- **`first_assistant_turn`** — grade only the model's opening reply.
+- **`every_assistant_turn`** — emit one example per assistant turn (multi-turn rollouts).
+- **`tool_call_predict`** — for trajectories ending in a tool call: predict `{tool_name, args}` and score with `ToolCall` (with optional inner-content quality scorers on string args).
+
+Auto-detect chooses the scorer from the target shape (JSON → `JsonValidity` + structural checks, short literal → `ExactMatch`, code block → `Code`, free text → `Contains` / `LlmJudge`). A reservoir-sampled `max_examples` cap keeps suites runnable in seconds even when the source dataset has hundreds of thousands of rows.
+
+### Eval queue + worker
+
+The eval queue mirrors the training queue's design — a single FIFO worker, terminal-job GC, structured progress callbacks — but runs concurrently with training and inference because it consumes only the inference path (read lock on the GPU):
+
+```
+POST /v1/eval/run ──┐
+POST /v1/eval/compare ──► EvalQueue (FIFO) ──► spawn_eval_worker
+POST /v1/train/{sft,grpo}                            │   (read-locks GPU
+  with post_eval: {…} ──► enqueue_post_training_eval │    while generating)
+                                                     ▼
+                                  EvalJobInfo (Queued → Running → Completed/Failed)
+                                  ├── progress: EvalProgress { running_accuracy, … }
+                                  ├── finished_runs: Vec<SuiteResult>
+                                  └── headline_accuracy
+```
+
+`QueuedEvalJob` has three variants — `Registered { suite_name, adapter, … }`, `Inline { suite, adapter, … }`, and `Compare(spec)` (one suite × N adapters). The worker reads the next entry, resolves the suite from the registry (or uses the inline copy), instantiates a generator that drives the in-process inference path through `crate::eval::generator::generator_from_state`, and runs `run_suite_against_adapter` per adapter. Progress callbacks update `EvalJobInfo.progress` after every example so the UI's drill-in modal can stream a running accuracy.
+
+Cancellation flows through an `Arc<AtomicBool>` checked between examples; the API's cancel endpoint marks the job `Cancelled` and the worker either skips it (if still queued) or stops at the next example boundary (if running). Terminal jobs are evicted from `eval_jobs` once `tracked_job_ttl` elapses (`gc_eval_jobs`) so long-running servers don't grow the map unbounded.
+
+### Post-training auto-eval hook
+
+Every `SftRequest` and `GrpoRequest` accepts an optional `post_eval: { suite, include_baseline, generation }`. When the training job completes successfully, `enqueue_post_training_eval` (in `crates/kiln-server/src/training_queue.rs`) immediately pushes one or two eval jobs onto the eval queue:
+
+- The new adapter, against the named suite (always).
+- A baseline run with no adapter (when `include_baseline: true`), so the UI can render the delta side-by-side without a second request.
+
+The eval job IDs are recorded on `TrainingJobInfo.linked_eval_job_ids` at queue time — not at eval completion — so the training-detail panel can link to the in-flight eval the moment it appears, not after it finishes. The eval worker deliberately does not push back into the training job's link list, since the assignment already happened upstream and a second push would duplicate every ID.
+
+### Drill-in modal flow
+
+The UI uses three peer endpoints with a consistent shape so the drill-in modals can share a renderer:
+
+| Endpoint | Returns | Modal |
+|----------|---------|-------|
+| `GET /v1/eval/jobs/{id}` | `EvalJobInfo` (state + progress + per-example outcomes + headline) | Eval drill |
+| `GET /v1/train/jobs/{job_id}` | `TrainingJobDetail` (`serde(flatten)`-composed with linked eval IDs and downsampled loss history) | Training drill |
+| `GET /v1/adapters/{name}/detail` | `AdapterDetail` (file list + training history + eval history) | Adapter drill |
+
+Each modal polls only while the underlying job is non-terminal and uses a content-key change-detection guard (e.g. `evalDrillLastKey`) so the SVG charts and example tables only re-render when something actually changed. The training-job loss history is downsampled when it crosses 2× the cap, giving amortized O(1) `push_loss_sample` while still showing a smooth curve over thousands of steps.
+
+### Judgment flywheel
+
+The flywheel turns user A/B preferences into a local judge LoRA — no frontier LLM ever called:
+
+```
+A/B compare playground  ──► POST /v1/judgments/{name}/rows         (one row per pick)
+                                       │
+                                       ▼
+                            JudgmentStore on disk (manifest + JSONL)
+                                       │
+              POST /v1/judgments/{name}/compile
+                                       │
+                                       ▼
+                       SFT examples in chat-template form
+                                       │
+                                       ▼
+                  POST /v1/train/sft (judge-lora-name)
+                                       │
+                                       ▼
+                  Scorer::LlmJudge { judge_adapter: "judge-lora-name", template, score_regex }  ──► used by any future suite
+```
+
+`compile_judgments_to_sft` formats each `(prompt, response_a, response_b, winner)` row into a `format_judge_prompt` chat with a single-token verdict label. `build_validation_suite` produces a held-out slice so `POST /v1/judgments/{name}/validate` can score the freshly trained judge against the user's own preferences. Once the judge LoRA is trained, any suite can name it via `Scorer::LlmJudge { judge_adapter: … }` and the eval worker resolves it the same way the inference path resolves any other adapter — same hot-swap, same scheduler, same machine.
+
 ## Batch Generation API
 
 Phase 8 (PR #583) added `POST /v1/completions/batch`, a multi-prompt completion endpoint designed for the GRPO loop. GRPO normalizes advantages within a group of `n` completions per prompt, and issuing N separate HTTP requests per group adds non-trivial overhead per iteration. The batch endpoint takes the whole group in one round-trip and lets the iteration-level scheduler interleave the underlying prefill/decode steps:
@@ -704,6 +821,6 @@ See `crates/kiln-server/src/metrics.rs`.
 
 Returns uptime, model info, scheduler statistics, GPU memory breakdown, active adapter, and training queue state.
 
-## Phase status (2026-04-25)
+## Phase status (2026-05-13)
 
-Phase 6 (performance optimization) is closed. The post-#534 perf shortlist concluded with PRs #525 / #526 (SGLang RadixAttention), #210 / #206 (Marlin pack determinism + BF16 cleanup), #222 (FP8 KV opt-in), and #536 (native MTP self-spec, null at α=0.69). Active work is now Phase 7 (developer experience). For current decode numbers see `BENCHMARKS.md`; for the live profiling hotspot table see `PROFILING.md`.
+Phase 6 (performance optimization) is closed. The post-#534 perf shortlist concluded with PRs #525 / #526 (SGLang RadixAttention), #210 / #206 (Marlin pack determinism + BF16 cleanup), #222 (FP8 KV opt-in), and #536 (native MTP self-spec, null at α=0.69). Phase 11 (eval as a first-class surface — `kiln-eval` crate, `/v1/eval/*` API, dataset → suite synthesis, judgment flywheel, post-training auto-eval, drill-in UI) shipped as a single bundled commit. Active work is now Phase 7 (developer experience). For current decode numbers see `BENCHMARKS.md`; for the live profiling hotspot table see `PROFILING.md`.

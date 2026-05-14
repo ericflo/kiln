@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Your model gets better every time you use it.</strong><br>
-  A single-GPU inference server with live LoRA training. Pure Rust. Single binary.
+  A single-GPU inference server with live LoRA training and a first-class eval loop. Pure Rust. Single binary.
 </p>
 
 <p align="center">
@@ -15,6 +15,7 @@
   <a href="QUICKSTART.md">Quickstart</a> &middot;
   <a href="https://ericflo.github.io/kiln/cli.html">CLI Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/grpo.html">GRPO Guide</a> &middot;
+  <a href="docs/EVAL_GUIDE.md">Eval Guide</a> &middot;
   <a href="https://ericflo.github.io/kiln/api.html">API Reference</a> &middot;
   <a href="https://ericflo.github.io/kiln/troubleshooting.html">Troubleshooting</a> &middot;
   <a href="ARCHITECTURE.md">Architecture</a> &middot;
@@ -27,13 +28,13 @@
 
 ---
 
-Kiln serves a language model and trains it — in the same process, on the same GPU, at the same time. You submit corrections or scored completions over HTTP, and the model improves in seconds. No restarts, no separate training pipeline, no second copy of the weights.
+Kiln serves a language model, trains it, and evaluates it from one process on one GPU. You submit corrections or scored completions over HTTP and the model improves in seconds; you upload an SFT dataset and Kiln synthesizes an eval suite from it; you A/B-judge two adapters in the dashboard and your picks become a local judge LoRA. No restarts, no separate training pipeline, no second copy of the weights.
 
 It targets one model ([Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)) and optimizes everything for that model — the scheduler, the memory manager, the kernels. This isn't a general-purpose framework. It's a scalpel.
 
 ## Why
 
-Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, redeploy, hope. Kiln collapses that into one API call:
+Today, improving a deployed model looks like: collect failure examples, format them, upload to a training service, wait hours, download new weights, build a separate eval harness in Python, redeploy, hope. Kiln collapses that into one process — train, evaluate, A/B compare adapters, all over HTTP from the same binary that's serving traffic:
 
 ```bash
 # Submit a correction — the model learns it in seconds
@@ -52,15 +53,28 @@ curl http://localhost:8420/v1/train/sft \
 curl http://localhost:8420/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages": [{"role": "user", "content": "Summarize this contract clause..."}]}'
+
+# Did the new adapter actually get better? Run an eval suite against it
+curl http://localhost:8420/v1/eval/run \
+  -H "Content-Type: application/json" \
+  -d '{"suite": "contract-summaries", "adapter": "active"}'
+# → Returns a job_id; drill into per-example outcomes at /ui or via
+#   GET /v1/eval/jobs/{job_id}. Suites can be hand-authored, synthesized
+#   from an uploaded SFT dataset (POST /v1/eval/datasets/.../synthesize),
+#   or built up from your A/B picks in the Judgments tab.
 ```
 
-A 4B model continuously tuned to your specific workload will outperform a generic 70B model on the tasks you actually care about. And it runs on hardware you already own.
+A 4B model continuously tuned to your specific workload — and continuously *measured* against the prompts you actually care about — will outperform a generic 70B model on those tasks. And it runs on hardware you already own.
 
 ## Features
 
 - **OpenAI-compatible API** — drop in as a local replacement. SSE streaming, chat completions, tool use formatting.
 - **SFT training** over HTTP — submit examples, model updates in seconds via LoRA hot-swap.
 - **GRPO training** over HTTP — submit scored completions for reinforcement learning. You control the reward function.
+- **First-class evals** over HTTP — register suites, run them against any adapter, drill into per-example outcomes. Auto-detect picks the right scorer per example (`numeric_tolerance`, `multiple_choice`, `json_validity`, `regex`, `contains`, `tool_call`, `code`, `llm_judge`, `all`/`any` composites).
+- **Dataset → eval synthesis** — upload an SFT JSONL and Kiln decomposes it into an eval suite (final-assistant / first-turn / every-turn / tool-call-prediction strategies). No separate eval harness to write.
+- **Judgment flywheel** — A/B-judge two adapters in `/ui`, save your picks into a judgment dataset, compile to SFT, train a *local* judge LoRA, validate it on a held-out slice. The dashboard ships a streaming side-by-side viewer with `A`/`B`/`Tie`/`Skip` keyboard shortcuts.
+- **Post-training auto-eval** — attach `post_eval` to any SFT/GRPO request and the produced adapter is graded immediately, with results back-linked to the training job.
 - **LoRA hot-swap** — new adapter weights activate atomically at iteration boundaries. Zero downtime.
 - **Continuous batching** with chunked prefill — decode requests are never stalled by long prompts.
 - **128K+ context** on 24GB — Qwen3.5-4B's hybrid architecture (24 linear attention + 8 full attention layers) means KV cache is 4x smaller than a pure transformer.
@@ -68,9 +82,9 @@ A 4B model continuously tuned to your specific workload will outperform a generi
 - **FP8 KV cache** — optional quantization doubles effective context length.
 - **Prefix caching** — shared prompt prefixes reuse cached KV blocks.
 - **Gradient checkpointing** — training fits on consumer 24GB GPUs (RTX 3090/4090).
-- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters.
+- **Adapter management** — load, unload, upload (import), download (export), and version LoRA adapters; click any adapter in `/ui` for its provenance (training history + eval scores against it).
 - **Adapter composition** — stack multiple LoRAs per request with per-adapter scaling, or merge them server-side via weighted_average / TIES / concatenation.
-- **Embedded web dashboard** at `/ui` — live server status, VRAM breakdown, adapter management, training monitoring, and a chat playground. No extra service to run.
+- **Embedded web dashboard** at `/ui` — live server status, VRAM donut, adapter cards, training queue with live loss curves, full eval workflow (datasets / suites / jobs / judgments) with drill-in per-example modal, A/B compare playground, and a `⌘K` command palette across all of it. No extra service to run.
 - **Prometheus metrics** at `/metrics` — request latency, throughput, training progress, memory usage.
 - **Training webhooks** — POST a JSON event to a configured URL on training job completion or failure.
 - **Pure Rust** — single binary, single process. No Python. No sidecar. No second model in memory.
@@ -110,6 +124,36 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
 ```
 
 See [docs/GRPO_GUIDE.md](docs/GRPO_GUIDE.md) for worked verifiable-rewards examples (math, JSON, code).
+
+## The Eval Loop
+
+Training is half the story; the other half is knowing whether your last training run actually helped. Kiln's eval system runs in the same process, against the same model weights, and treats your evals as first-class artifacts — registered suites, drillable per-example outcomes, A/B comparisons across adapters, and a judgment flywheel that turns your A/B picks into a *local* judge LoRA you can re-use.
+
+```bash
+# 1. Upload an SFT JSONL — Kiln will use it as the source of truth for examples
+curl -F name=customer-support -F format=sft_chat -F file=@my-tickets.jsonl \
+  http://localhost:8420/v1/eval/datasets/upload
+
+# 2. Synthesize an eval suite from it (auto-detect picks the right scorer per example)
+curl -X POST http://localhost:8420/v1/eval/datasets/customer-support/synthesize \
+  -H 'content-type: application/json' \
+  -d '{"suite_name":"support-eval","strategy":"final_assistant",
+       "scorer":{"kind":"auto_detect"},
+       "sampling":{"max_examples":100,"max_prompt_chars":32768,"max_target_chars":4096,"dedupe":true},
+       "force":true,"run_against":["v1"]}'
+
+# 3. Compare two adapters head-to-head
+curl -X POST http://localhost:8420/v1/eval/compare \
+  -H 'content-type: application/json' \
+  -d '{"suite":"support-eval","adapters":["v1","v2"]}'
+
+# 4. Drill into per-example outcomes at /ui — pass/fail/invalid badges with prompt + target + got
+#    side-by-side, scorer detail, and a one-click "re-run failures" loop.
+```
+
+The judgment flywheel runs entirely on your machine — no frontier LLM, no API keys, no telemetry leaving the box. Click two replies in the playground, save them as an A/B preference, compile your picks into SFT data, train a small judge LoRA on them, then use that LoRA as the `judge_adapter` in any `LlmJudge` scorer. The judge gets better the more you use it; bad judgments are removable from the dataset and a retrain wipes their influence.
+
+See [docs/EVAL_GUIDE.md](docs/EVAL_GUIDE.md) for the full scorer reference, dataset synthesis strategies, and the judge-LoRA workflow.
 
 ## Quick Start
 
@@ -260,22 +304,43 @@ On Apple Silicon, model weights, KV cache, and training state all live in unifie
 |---|---|---|
 | POST | `/v1/chat/completions` | Chat completions (OpenAI-compatible) |
 | POST | `/v1/completions/batch` | Batch generation API for GRPO (up to 64 prompts per request) |
-| POST | `/v1/train/sft` | Submit SFT training examples |
-| POST | `/v1/train/grpo` | Submit GRPO scored completions |
+| POST | `/v1/train/sft` | Submit SFT training examples (optionally with a `post_eval` hook) |
+| POST | `/v1/train/grpo` | Submit GRPO scored completions (optionally with a `post_eval` hook) |
 | GET | `/v1/train/status` | Training queue and job status |
 | GET | `/v1/train/status/{job_id}` | Inspect one training job |
+| GET | `/v1/train/jobs/{job_id}` | Rich training job detail (loss curve + linked-eval back-references) |
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | GET | `/v1/adapters` | List saved/available LoRA adapters and identify the active adapter |
+| GET | `/v1/adapters/{name}/detail` | Files + training history + eval history for one adapter |
 | POST | `/v1/adapters/load` | Load adapter from disk |
 | POST | `/v1/adapters/unload` | Unload active adapter |
 | DELETE | `/v1/adapters/{name}` | Delete an adapter |
 | POST | `/v1/adapters/upload` | Multipart tar.gz import of an adapter |
 | GET  | `/v1/adapters/{name}/download` | Stream adapter as tar.gz (export) |
 | POST | `/v1/adapters/merge` | Merge adapters (weighted_average, TIES, or concatenation modes) |
+| GET / POST | `/v1/eval/suites` | List or register eval suites (body = `EvalSuite`) |
+| GET / DELETE | `/v1/eval/suites/{name}` | Fetch / delete one suite |
+| POST | `/v1/eval/run` | Submit an eval (registered suite or inline) |
+| POST | `/v1/eval/compare` | Run a suite across multiple adapters head-to-head |
+| GET | `/v1/eval/jobs` | List all eval jobs |
+| GET / DELETE | `/v1/eval/jobs/{job_id}` | Per-job status + outcomes / cancel |
+| POST | `/v1/eval/jobs/{job_id}/rerun` | Re-run only the failing examples from a completed job |
+| POST | `/v1/eval/datasets/upload` | Multipart upload of an SFT/GRPO JSONL dataset |
+| GET / DELETE | `/v1/eval/datasets/{name}` | Dataset manifest / delete |
+| GET | `/v1/eval/datasets/{name}/rows` | Stream first N rows (used by the SFT submit form's dataset picker) |
+| POST | `/v1/eval/datasets/{name}/preview` | Preview synthesized examples before committing |
+| POST | `/v1/eval/datasets/{name}/synthesize` | Decompose a dataset into an eval suite |
+| GET / POST | `/v1/judgments` | List or create judgment datasets |
+| DELETE | `/v1/judgments/{name}` | Delete a judgment dataset |
+| POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
+| DELETE | `/v1/judgments/{name}/rows/{id}` | Prune a bad row (then retrain to wipe its influence) |
+| POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for training a judge LoRA |
+| POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
+| POST | `/v1/judgments/render_prompt` | Render the canonical pairwise judging prompt (debug aid) |
 | GET | `/v1/models` | List available models |
 | GET | `/v1/config` | Current server configuration |
-| GET | `/ui` | Embedded web dashboard (status, adapters, training, chat) |
+| GET | `/ui` | Embedded web dashboard (Overview / Adapters / Training / Evals / Playground) |
 | GET | `/v1/stats/decode` | Live decode tokens/sec and inter-token latency stats used by the dashboard |
 | GET | `/v1/stats/recent-requests` | Bounded recent chat-completion history for the dashboard's request panel |
 | GET | `/health` | Server health and diagnostics |
@@ -294,12 +359,18 @@ Single Rust binary:
                   ├── 24× Gated DeltaNet layers (linear attention, O(1) state)
                   └──  8× GQA layers (full attention + KV cache)
                       │
-                  Training (background thread, shares GPU memory)
-                  ├── SFT (cross-entropy on LoRA parameters)
-                  └── GRPO (advantage-weighted policy gradient)
+                      ├── Training worker (background thread, shares GPU)
+                      │   ├── SFT (cross-entropy on LoRA parameters)
+                      │   └── GRPO (advantage-weighted policy gradient)
+                      │
+                      └── Eval worker (background thread, shares GPU)
+                          ├── Suite registry + dataset registry + judgment store on disk
+                          ├── Pluggable scorers (auto-detect, exact, regex, JSON,
+                          │   numeric, MCQ, contains, tool_call, code, llm_judge, all/any)
+                          └── Post-training auto-eval hook
 ```
 
-Everything runs in one process. Training happens on a background thread sharing the already-loaded model — no second copy in VRAM, no Python sidecar.
+Everything runs in one process. Training and evaluation share the already-loaded model — no second copy in VRAM, no Python sidecar, no frontier-LLM dependency for judging.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full deep-dive.
 
@@ -310,8 +381,9 @@ crates/
   kiln-core/             Core types: block manager, prefix cache, config, request lifecycle
   kiln-model/            Model loading, forward pass, LoRA, sampling
   kiln-scheduler/        Continuous batching scheduler with chunked prefill
-  kiln-server/           HTTP server, CLI, training queue, metrics, config
+  kiln-server/           HTTP server, CLI, training queue, eval queue, metrics, config
   kiln-train/            SFT and GRPO training loops with gradient checkpointing
+  kiln-eval/             Suites, scorers, results, dataset → eval synthesis (pure CPU, no GPU dep)
   kiln-nvtx/             Thin NVTX range wrapper for nsys attribution (no-op when off)
   kiln-flce-kernel/      Fused Linear Cross-Entropy (chunked CE without [T, V] logits)
   kiln-flash-attn/       Vendored Flash-Attention-2 CUDA kernels (C-ABI + Rust FFI) [CUDA only]
@@ -424,7 +496,7 @@ sudo systemctl enable --now kiln
 
 ## Status
 
-Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Active phase is Phase 11 — onboarding and polish for cold-reader developers. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
+Kiln v0.1.0 shipped on 2026-04-19 and the current release line follows the latest `kiln-v*` GitHub release. Phases 1–10 are shipped or chapter-closed: core inference, LoRA serving, SFT and GRPO training over HTTP, production hardening, the Phase 6 performance sprint (FP8 KV cache, CUDA graphs, GPTQ + Marlin W4A16 quantization, fused decode kernels, SGLang-style radix prefix cache), Phase 7 developer experience, Phase 8 advanced features (adapter upload/download, TIES + concatenation merge modes, per-request adapter composition, batch completions for GRPO, training webhooks), Phase 9 public-release prep (Sigstore-signed provenance, GHCR image, signed binaries for Linux/macOS/Windows), and Phase 10 Liger-style long-context training kernels (closed by [`docs/audits/PHASE10_CLOSURE.md`](docs/audits/PHASE10_CLOSURE.md)). Inference on macOS / Apple Silicon runs via the candle-metal backend, with a fused Metal kernel family landed in v0.2.0. Phase 11 — onboarding, the first-class eval system (suites, scorers, dataset → eval synthesis, judgment flywheel, post-training auto-eval), and the dashboard overhaul (drill-in modals, live loss curves, A/B compare, ⌘K command palette) — is the active line. See [`CHANGELOG.md`](CHANGELOG.md) for what landed in the most recent release and [`BENCHMARKS.md`](BENCHMARKS.md) for current decode numbers.
 
 Not yet production-hardened for multi-tenant use. Designed for single-user, single-GPU deployments — your home server, your dev box, your dedicated cloud instance.
 

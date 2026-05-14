@@ -7,6 +7,9 @@
 
 Qwen3.5-4B/
 
+# Default runtime state directory (adapter_dir + .eval/{suites,datasets,judgments})
+adapters/
+
 # Profiling artifact dumps (kept in git history only)
 c12-out/
 profile-out/

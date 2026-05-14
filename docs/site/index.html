@@ -60,6 +60,7 @@
       <nav class="nav site-nav" aria-label="Primary">
         <a href="quickstart.html">Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
@@ -81,9 +82,9 @@
           <span class="pill"><span class="pill-dot pill-dot--accent" aria-hidden="true"></span><a href="https://github.com/ericflo/kiln/releases/latest" style="color:inherit;text-decoration:none">latest release</a> · pre-1.0 preview</span>
           <h1 class="hero-title">Your model gets better<br><span class="txt-accent">every time you use it.</span></h1>
           <p class="hero-lede">
-            Kiln is a pure-Rust, single-GPU inference server with live LoRA training built in.
-            Drop-in OpenAI API. Hot-swap adapters. <strong>SFT and GRPO over HTTP</strong>.
-            Tuned for Qwen3.5-4B on a single NVIDIA RTX A6000.
+            Kiln is a pure-Rust, single-GPU inference server with live LoRA training <em>and</em> evals built in.
+            Drop-in OpenAI API. Hot-swap adapters. <strong>SFT, GRPO, and a local eval loop over HTTP</strong> —
+            no frontier-LLM judge required. Tuned for Qwen3.5-4B on a single NVIDIA RTX A6000.
           </p>
           <div class="hero-cta">
             <a class="btn btn-primary btn-lg" href="quickstart.html">Quickstart</a>
@@ -349,7 +350,15 @@ requests.post("http://localhost:8420/v1/train/grpo", json={
           </div>
           <div class="feature feature--compact">
             <h3>Pure Rust</h3>
-            <p>11-crate workspace. No Python at runtime. <code>cargo build --release --features cuda</code> and you have a server.</p>
+            <p>13-crate workspace. No Python at runtime. <code>cargo build --release --features cuda</code> and you have a server.</p>
+          </div>
+          <div class="feature feature--compact">
+            <h3>Evals as a peer of training</h3>
+            <p>Pluggable scorers (<code>exact_match</code>, <code>regex</code>, <code>tool_call</code>, <code>code</code>, <code>llm_judge</code>, …). Synthesize a suite from any SFT/GRPO dataset. Auto-eval every training run via <code>post_eval</code>. <a href="evals.html">See the eval loop →</a></p>
+          </div>
+          <div class="feature feature--compact">
+            <h3>The judgment flywheel</h3>
+            <p>A/B preferences from <code>/ui</code> compile into an SFT dataset and train a local judge LoRA, used as the <code>judge_adapter</code> in any future <code>llm_judge</code> scorer.</p>
           </div>
         </div>
       </div>
@@ -468,7 +477,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
       <div class="page">
         <header class="section-head">
           <span class="eyebrow">HTTP API</span>
-          <h2>Eight endpoints, one binary.</h2>
+          <h2>One binary, every endpoint you need.</h2>
         </header>
 
         <div class="endpoint-table" role="table" aria-label="Kiln HTTP endpoints">
@@ -501,6 +510,16 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
             <span class="endpoint-method" data-m="GET" role="cell">GET</span>
             <code class="endpoint-path" role="cell">/v1/adapters</code>
             <span class="endpoint-desc" role="cell">List, attach, detach LoRA adapters.</span>
+          </div>
+          <div class="endpoint" role="row">
+            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
+            <code class="endpoint-path" role="cell">/v1/eval/run</code>
+            <span class="endpoint-desc" role="cell">Run a graded eval suite against any adapter. Inline or registered. <a href="evals.html">Full eval API →</a></span>
+          </div>
+          <div class="endpoint" role="row">
+            <span class="endpoint-method" data-m="POST" role="cell">POST</span>
+            <code class="endpoint-path" role="cell">/v1/judgments</code>
+            <span class="endpoint-desc" role="cell">A/B/Tie/Skip preferences → SFT dataset → local judge LoRA. The flywheel.</span>
           </div>
           <div class="endpoint" role="row">
             <span class="endpoint-method" data-m="GET" role="cell">GET</span>
@@ -547,6 +566,7 @@ KILN_MODEL_PATH=./Qwen3.5-4B ./target/release/kiln serve</code></pre>
         <ul>
           <li><a href="quickstart.html">Quickstart</a></li>
           <li><a href="grpo.html">GRPO Guide</a></li>
+          <li><a href="evals.html">Evals</a></li>
           <li><a href="architecture.html">Architecture</a></li>
           <li><a href="troubleshooting.html">Troubleshooting</a></li>
         </ul>

@@ -445,7 +445,7 @@ fn parsed_json_argument_for_cache(value: Option<&serde_json::Value>) -> Option<s
     serde_json::from_str(value?.as_str()?).ok()
 }
 
-fn render_prompt_text(
+pub(crate) fn render_prompt_text(
     state: &AppState,
     messages: &[Message],
     tools: Option<&[serde_json::Value]>,
@@ -496,7 +496,7 @@ fn chat_template_options_from_kwargs(
     }
 }
 
-fn encode_prompt_tokens(state: &AppState, prompt_text: &str) -> Result<Vec<TokenId>, ApiError> {
+pub(crate) fn encode_prompt_tokens(state: &AppState, prompt_text: &str) -> Result<Vec<TokenId>, ApiError> {
     if let Some(tokens) = state.prompt_token_cache.lock().unwrap().get(prompt_text) {
         return Ok(tokens);
     }

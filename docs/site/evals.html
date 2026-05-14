@@ -1,0 +1,573 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kiln Evals &mdash; Score every adapter, locally</title>
+  <meta name="description" content="A site-local guide to the Kiln eval system: pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel.">
+  <link rel="canonical" href="https://ericflo.github.io/kiln/evals.html">
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="alternate icon" type="image/png" href="assets/logo.png">
+  <link rel="apple-touch-icon" href="assets/logo.png">
+
+  <meta property="og:title" content="Kiln Evals &mdash; Score every adapter, locally">
+  <meta property="og:description" content="Pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel &mdash; no frontier LLM called.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://ericflo.github.io/kiln/evals.html">
+  <meta property="og:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Kiln Evals &mdash; Score every adapter, locally">
+  <meta name="twitter:description" content="Pluggable scorers, dataset-to-suite synthesis, post-training auto-eval, and the local A/B judgment flywheel.">
+  <meta name="twitter:image" content="https://ericflo.github.io/kiln/assets/og-image.png">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d10;
+      --bg-soft: #11141a;
+      --bg-soft-2: #161a22;
+      --line: #1f2530;
+      --line-2: #2a3140;
+      --fg: #e6e9ef;
+      --fg-dim: #a4adbb;
+      --fg-mute: #6f7888;
+      --accent: #f97316;
+      --accent-soft: rgba(249, 115, 22, 0.12);
+    }
+    html { background: var(--bg); }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-feature-settings: "ss01", "cv02", "cv11";
+      -webkit-font-smoothing: antialiased;
+    }
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: 0;
+      transform: translateY(-120%);
+      z-index: 50;
+      background: var(--accent);
+      color: #1a0c00;
+      border-radius: 0 0 0.5rem 0.5rem;
+      padding: 0.65rem 0.9rem;
+      font-weight: 700;
+      text-decoration: none;
+      transition: transform 0.15s ease;
+    }
+    .skip-link:focus {
+      transform: translateY(0);
+      outline: 2px solid #fed7aa;
+      outline-offset: 2px;
+    }
+    code, pre, kbd, samp {
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+    pre { max-width: 100%; }
+    p code, li code, td code, h2 code, h3 code {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.4rem;
+      border-radius: 5px;
+      font-size: 0.875em;
+      color: #f3c891;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .hero-glow {
+      background:
+        radial-gradient(60% 50% at 50% 0%, rgba(249,115,22,0.10), transparent 70%),
+        radial-gradient(40% 35% at 80% 20%, rgba(56,189,248,0.06), transparent 70%);
+    }
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      min-width: 0;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #1a0c00;
+      font-weight: 600;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+    .btn-secondary {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--line-2);
+    }
+    .btn-secondary:hover { background: var(--bg-soft); }
+    .divider { border-top: 1px solid var(--line); }
+    .pill {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border: 1px solid rgba(249,115,22,0.35);
+    }
+    .label {
+      color: var(--accent);
+      font-size: 0.74rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .endpoint-list { display: grid; gap: 0.75rem; }
+    .endpoint {
+      background: var(--bg-soft-2);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      min-width: 0;
+    }
+    .endpoint code {
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .method {
+      display: inline-flex;
+      min-width: 3.8rem;
+      justify-content: center;
+      border-radius: 999px;
+      border: 1px solid rgba(249,115,22,0.35);
+      color: var(--accent);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 0.15rem 0.45rem;
+    }
+    a { color: #f3c891; }
+    a:hover { color: var(--accent); }
+    a.btn-primary, a.btn-primary:hover { color: #1a0c00; }
+    a.btn-secondary, a.btn-secondary:hover { color: var(--fg); }
+    .site-nav-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+    .site-nav {
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      color: var(--fg-dim);
+    }
+    .site-nav a[aria-current="page"] { color: var(--fg); }
+    @media (max-width: 640px) {
+      .site-nav-bar {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+      .site-nav {
+        flex-wrap: wrap;
+        gap: 0.35rem 1rem;
+        line-height: 1.35;
+        width: 100%;
+      }
+    }
+
+    .copy-code-shell {
+      position: relative;
+    }
+    .copy-code-shell pre {
+      padding-right: 4.75rem;
+    }
+    .copy-code-button {
+      position: absolute;
+      top: 0.65rem;
+      right: 0.65rem;
+      z-index: 1;
+      border: 1px solid var(--line-2);
+      border-radius: 999px;
+      background: rgba(11, 13, 16, 0.88);
+      color: var(--fg-dim);
+      cursor: pointer;
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1;
+      padding: 0.45rem 0.65rem;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    }
+    .copy-code-button:hover,
+    .copy-code-button:focus-visible {
+      background: var(--bg-soft-2);
+      border-color: rgba(249, 115, 22, 0.55);
+      color: var(--fg);
+      outline: none;
+    }
+    .copy-code-button.is-copied {
+      border-color: rgba(34, 197, 94, 0.55);
+      color: #86efac;
+    }
+  </style>
+</head>
+<body class="min-h-screen">
+  <a class="skip-link" href="#content">Skip to content</a>
+  <!-- nav -->
+  <header class="border-b" style="border-color: var(--line);">
+    <div class="site-nav-bar max-w-5xl mx-auto px-6 py-4">
+      <a href="./" class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="28" height="28" class="rounded">
+        <span class="text-lg font-semibold tracking-tight">Kiln</span>
+      </a>
+      <nav class="site-nav text-sm">
+        <a href="quickstart.html">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html" aria-current="page">Evals</a>
+        <a href="api.html">API Reference</a>
+        <a href="cli.html">CLI Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln" class="hidden sm:inline">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <!-- hero -->
+  <section class="hero-glow">
+    <div class="max-w-4xl mx-auto px-6 pt-16 pb-10">
+      <span class="pill inline-block text-xs px-2.5 py-1 rounded-full mb-6">Evals &middot; a peer of training</span>
+      <h1 class="text-4xl sm:text-5xl font-bold tracking-tight mb-5 leading-tight">
+        Score every adapter you ship &mdash; entirely on your own GPU.
+      </h1>
+      <p class="text-lg leading-relaxed max-w-3xl" style="color: var(--fg-dim);">
+        Kiln treats evals as a peer of training, not an afterthought. Pluggable scorers, dataset &rarr; suite synthesis, head-to-head adapter comparisons, and post-training auto-grading run on the same single-GPU binary that serves traffic.
+        The optional LLM judge is itself a local LoRA you train from A/B preferences &mdash; <strong>no frontier-model call is ever required</strong>.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-8">
+        <a href="api.html#evals" class="btn-primary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Eval API &rarr;
+        </a>
+        <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Full GitHub guide &rarr;
+        </a>
+        <a href="quickstart.html#sft-corrections" class="btn-secondary inline-flex items-center px-5 py-2.5 rounded-md text-sm">
+          Train first &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-8">
+      <div class="card p-5">
+        <div class="label mb-3">On this page</div>
+        <div class="flex flex-wrap gap-2 text-sm">
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#why-evals">Why evals</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#scorers">Scorers</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#synthesize">Dataset &rarr; suite</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#run-suite">Run a suite</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#compare">Compare adapters</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#post-eval">Post-training auto-eval</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#flywheel">Judgment flywheel</a>
+          <a class="btn-secondary inline-flex px-3 py-1.5 rounded-md" href="#where-to-go-next">Where to go next</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <main id="content" tabindex="-1" class="max-w-4xl mx-auto px-6 py-12">
+    <div class="grid gap-6">
+      <article class="card p-6">
+        <div class="label mb-3">Where things live</div>
+        <h2 id="why-evals" class="text-2xl font-semibold mb-4">Two crates, three on-disk stores</h2>
+        <p class="leading-relaxed" style="color: var(--fg-dim);">
+          The eval system splits into <code>kiln-eval</code> (pure-CPU types: suites, scorers, results, dataset synthesis) and <code>kiln-server::eval</code> (queue, worker, registries, HTTP surface). Suites, datasets, and judgments persist under <code>&lt;eval-root&gt;/{suites,datasets,judgments}/</code> (configurable via <code>[eval] root</code>). The eval worker rides the GPU read-lock so it runs concurrently with serving and training. The full type and request reference is in <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>; the queue/worker deep-dive is in <a href="architecture.html#eval-pipeline">Architecture &rsaquo; Eval pipeline</a>.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Scorers</div>
+        <h2 id="scorers" class="text-2xl font-semibold mb-4">Pluggable scorers, registered by <code>kind</code></h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Scorers are variants of the serde-tagged <code>kiln_eval::scorers::Scorer</code> enum — each variant computes a 0/1 outcome from <code>(generated, target, metadata)</code>, and the <code>kind</code> field on the wire selects which one runs. Built-ins cover the common shapes; adding one means appending a variant, dispatching it in <code>score_completion</code>, and adding a <code>kind_label</code> arm. Synthesis and the UI pick it up automatically.
+        </p>
+        <div class="endpoint-list">
+          <div class="endpoint"><code>exact_match</code> &mdash; single-source-of-truth answers (math, classification, structured labels).</div>
+          <div class="endpoint"><code>contains</code> &middot; <code>regex</code> &mdash; free-text key-phrase or pattern matching.</div>
+          <div class="endpoint"><code>json_validity</code> &middot; <code>multiple_choice</code> &middot; <code>numeric_tolerance</code> &mdash; structured outputs and graded numeric responses.</div>
+          <div class="endpoint"><code>tool_call</code> &mdash; selected tool + arg shape + per-arg inner-content quality (works for trajectories that end in a tool call).</div>
+          <div class="endpoint"><code>code</code> with <strong>bash introspection</strong> &mdash; code-output evals, including <code>python -c</code>/<code>node -e</code>/<code>uv run</code> inlined inside <code>bash</code>.</div>
+          <div class="endpoint"><code>llm_judge</code> &mdash; route grading through a local judge LoRA (see <a href="#flywheel">the flywheel</a>).</div>
+          <div class="endpoint"><strong>All</strong> &middot; <strong>Any</strong> composites &mdash; combine scorers per example for weighted-vote grading.</div>
+        </div>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Auto-detect picks a scorer from the target shape (JSON &rarr; <code>JsonValidity</code> + structural checks, short literal &rarr; <code>ExactMatch</code>, code block &rarr; <code>Code</code>, free text &rarr; <code>Contains</code>/<code>LlmJudge</code>).
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Dataset &rarr; suite</div>
+        <h2 id="synthesize" class="text-2xl font-semibold mb-4">Turn an SFT or GRPO file into a graded suite</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Upload your training data once, then synthesize a suite from it. The same JSONL that taught the model becomes the held-out grader. Reservoir-sampled <code>max_examples</code> caps keep suites runnable in seconds even on hundreds of thousands of rows.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">1. Upload a JSONL dataset</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/datasets/upload \
+  -F "file=@/tmp/sft-trajectories.jsonl" \
+  -F "name=trajectories-v1" \
+  -F "format=sft" \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">2. Synthesize a suite</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/datasets/trajectories-v1/synthesize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "suite_name": "trajectories-suite",
+    "strategy": "tool_call_predict",
+    "scorer": {"kind": "auto_detect"},
+    "sampling": {"max_examples": 256}
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <div class="grid sm:grid-cols-2 gap-4 mt-5">
+          <div class="endpoint">
+            <h3 class="font-semibold mb-2">Strategies</h3>
+            <ul class="space-y-2 text-sm" style="color: var(--fg-dim);">
+              <li><code>final_assistant</code> &mdash; grade the last assistant turn.</li>
+              <li><code>first_assistant_turn</code> &mdash; grade the model's opening reply.</li>
+              <li><code>every_assistant_turn</code> &mdash; one example per assistant turn (multi-turn rollouts).</li>
+              <li><code>tool_call_predict</code> &mdash; predict <code>{tool_name, args}</code> for trajectories ending in a tool call.</li>
+            </ul>
+          </div>
+          <div class="endpoint">
+            <h3 class="font-semibold mb-2">Inner-content quality</h3>
+            <p class="text-sm" style="color: var(--fg-dim);">
+              For <code>tool_call_predict</code>, string args carry sub-scorers: prose can be graded by <code>Contains</code>/<code>LlmJudge</code>; code by <code>Code</code>; <code>bash</code> calls are introspected to detect inlined <code>python -c</code>/<code>node -e</code>/<code>uv run</code> blocks and graded as code instead of strings.
+            </p>
+          </div>
+        </div>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Run a suite</div>
+        <h2 id="run-suite" class="text-2xl font-semibold mb-4">Grade an adapter against a registered or inline suite</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          <code>POST /v1/eval/run</code> queues the job and returns immediately with a <code>job_id</code>. The eval worker resolves the suite from disk (or uses an inline copy), drives the in-process inference path through the requested adapter, and writes per-example outcomes plus a headline accuracy as it goes. Drill into <code>/ui</code> &rsaquo; Evals to watch progress live.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Run a registered suite against an adapter</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "suite": "trajectories-suite",
+    "adapter": "my-coder-v3"
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <section class="endpoint mt-4">
+          <h3 class="font-semibold mb-2">Poll the job</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/jobs/$JOB_ID | python3 -m json.tool</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          Re-run only failures from a completed job with <code>POST /v1/eval/jobs/{id}/rerun</code> &mdash; useful for iterating on a scorer or prompt template without re-grading the whole suite.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Compare</div>
+        <h2 id="compare" class="text-2xl font-semibold mb-4">Head-to-head adapter comparison</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          <code>POST /v1/eval/compare</code> runs one suite across N adapters serially on the same prompts and seeds, so the per-example diffs in the drill-in modal are apples to apples. Pass an empty string for one of the entries to compare against the no-adapter baseline.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Compare three adapters + baseline</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/eval/compare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "suite": "trajectories-suite",
+    "adapters": ["", "my-coder-v2", "my-coder-v3", "my-coder-v4"],
+    "generation": { "temperature": 0.0, "max_tokens": 256, "seed": 42 }
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Post-training auto-eval</div>
+        <h2 id="post-eval" class="text-2xl font-semibold mb-4">Every training run grades itself</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          Any <code>SftRequest</code> or <code>GrpoRequest</code> can carry a <code>post_eval</code> block. When the training job completes, Kiln immediately queues one eval against the newly trained adapter, and (optionally) a second baseline eval with no adapter, so the UI can render the delta side-by-side without a second round-trip. Eval IDs are linked on the training-detail panel at queue time, not after completion, so the dashboard shows the in-flight grading the moment it appears.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">SFT request with auto-eval</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>curl -s http://localhost:8420/v1/train/sft \
+  -H "Content-Type: application/json" \
+  -d '{
+    "examples": [...],
+    "config": { "output_name": "my-coder-v4" },
+    "post_eval": {
+      "suite": "trajectories-suite",
+      "include_baseline": true,
+      "generation": { "temperature": 0.0, "max_tokens": 256, "seed": 42 }
+    }
+  }' \
+  | python3 -m json.tool</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          The same <code>post_eval</code> shape is supported on <code>/v1/train/grpo</code>. See <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a> for the full request schema.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">Judgment flywheel</div>
+        <h2 id="flywheel" class="text-2xl font-semibold mb-4">A/B preferences &rarr; SFT &rarr; judge LoRA</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          The flywheel turns human A/B/Tie/Skip preferences into a local judge LoRA you can drop into any future suite as an <code>llm_judge</code> scorer. The keyboard-driven A/B compare playground at <code>/ui</code> &rsaquo; Judgments writes every pick to a <code>JudgmentStore</code>; one curl compiles the picks into an SFT dataset and another trains the judge — all on the same GPU.
+        </p>
+        <div class="endpoint-list">
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments</code> &mdash; create a judgment dataset.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/rows</code> &mdash; append one A/B/Tie/Skip preference (the <code>/ui</code> playground does this on every pick).</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/compile</code> &mdash; compile preferences into an SFT JSONL ready for <code>/v1/train/sft</code>.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/validate</code> &mdash; score the trained judge LoRA against a held-out slice.</div>
+        </div>
+        <section class="endpoint mt-5">
+          <h3 class="font-semibold mb-2">Use the trained judge in a suite</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>{
+  "name": "code-quality-suite",
+  "examples": [...],
+  "default_scorer": {
+    "kind": "llm_judge",
+    "judge_adapter": "my-judge-v1",
+    "template": "Question: {question}\nAnswer: {answer}\nScore 1 if the answer correctly solves the question, else 0.\nScore:"
+  }
+}</code></pre>
+        </section>
+        <p class="text-sm mt-4" style="color: var(--fg-mute);">
+          The judge LoRA is hot-swapped exactly like any other adapter, so the eval worker resolves it through the same scheduler that serves your inference traffic.
+        </p>
+      </article>
+
+      <article class="card p-6">
+        <div class="label mb-3">CLI</div>
+        <h2 id="cli" class="text-2xl font-semibold mb-4"><code>kiln-eval</code> CLI</h2>
+        <p class="leading-relaxed mb-5" style="color: var(--fg-dim);">
+          The <code>kiln-eval</code> binary wraps the HTTP surface for scripted use: <code>list</code>, <code>register</code> a suite JSON, <code>run</code> a suite against an adapter (with <code>--watch</code>), <code>compare</code> multiple adapters head-to-head, and <code>probe</code> with a one-shot prompt+target+scorer. Synthesis stays HTTP-only — call <code>POST /v1/eval/datasets/&lt;name&gt;/synthesize</code>. See the <a href="cli.html">CLI Reference</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
+        </p>
+        <section class="endpoint">
+          <h3 class="font-semibold mb-2">Run a suite from the terminal</h3>
+          <pre class="overflow-x-auto text-sm leading-relaxed" style="color: var(--fg);"><code>kiln-eval run --suite trajectories-suite --adapter my-coder-v3</code></pre>
+        </section>
+      </article>
+    </div>
+  </main>
+
+  <section class="divider">
+    <div class="max-w-4xl mx-auto px-6 py-12">
+      <h2 id="where-to-go-next" class="text-2xl font-semibold tracking-tight mb-4">Where to go next</h2>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <a class="card p-5 block" href="api.html#evals">
+          <h3 class="font-semibold mb-2">Eval API</h3>
+          <p style="color: var(--fg-dim);">Every <code>/v1/eval/*</code> and <code>/v1/judgments/*</code> endpoint with request shapes.</p>
+        </a>
+        <a class="card p-5 block" href="architecture.html#eval-pipeline">
+          <h3 class="font-semibold mb-2">Eval pipeline</h3>
+          <p style="color: var(--fg-dim);">Suite registry, eval queue + worker, drill-in modal flow, post-training auto-eval hook.</p>
+        </a>
+        <a class="card p-5 block" href="grpo.html">
+          <h3 class="font-semibold mb-2">GRPO Guide</h3>
+          <p style="color: var(--fg-dim);">Generate &rarr; score &rarr; train. Pair with auto-eval to grade every adapter you ship.</p>
+        </a>
+        <a class="card p-5 block" href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">
+          <h3 class="font-semibold mb-2">EVAL_GUIDE.md</h3>
+          <p style="color: var(--fg-dim);">Full scorer reference, request schemas, judge-training walkthrough, and CLI subcommands.</p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- footer -->
+  <footer class="divider">
+    <div class="max-w-5xl mx-auto px-6 py-10 flex flex-wrap gap-x-6 gap-y-2 items-center justify-between text-sm" style="color: var(--fg-mute);">
+      <div class="flex items-center gap-2.5">
+        <img src="assets/logo.png" alt="" width="20" height="20" class="rounded">
+        <span>Kiln &middot; MIT licensed</span>
+      </div>
+      <nav class="flex flex-wrap gap-x-5 gap-y-1">
+        <a href="./">Home</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
+        <a href="quickstart.html">Quickstart</a>
+        <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
+        <a href="api.html">API Reference</a>
+        <a href="cli.html">CLI Reference</a>
+        <a href="demo/">Demo</a>
+        <a href="troubleshooting.html">Troubleshooting</a>
+        <a href="architecture.html">Architecture</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/BENCHMARKS.md">Benchmarks</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/CHANGELOG.md">Changelog</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/SECURITY.md">Security</a>
+        <a href="https://github.com/ericflo/kiln/blob/main/LICENSE">License</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const resetDelay = 1800;
+
+      function selectCode(code) {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      }
+
+      async function copyCode(code) {
+        const text = code.innerText.replace(/\n$/, "");
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+
+        selectCode(code);
+        const copied = document.execCommand && document.execCommand("copy");
+        if (!copied) {
+          console.info("Kiln docs: clipboard unavailable; selected the code block for manual copy.");
+        }
+        return copied;
+      }
+
+      document.querySelectorAll("pre > code").forEach((code) => {
+        const pre = code.parentElement;
+        if (!pre || pre.parentElement.classList.contains("copy-code-shell")) return;
+
+        const shell = document.createElement("div");
+        shell.className = "copy-code-shell";
+        pre.parentNode.insertBefore(shell, pre);
+        shell.appendChild(pre);
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "copy-code-button";
+        button.textContent = "Copy";
+        button.setAttribute("aria-label", "Copy code block");
+        shell.appendChild(button);
+
+        button.addEventListener("click", async () => {
+          try {
+            const copied = await copyCode(code);
+            button.textContent = copied ? "Copied" : "Selected";
+            button.classList.toggle("is-copied", copied);
+          } catch (error) {
+            selectCode(code);
+            console.info("Kiln docs: clipboard copy failed; selected the code block for manual copy.", error);
+            button.textContent = "Selected";
+            button.classList.remove("is-copied");
+          }
+
+          window.setTimeout(() => {
+            button.textContent = "Copy";
+            button.classList.remove("is-copied");
+          }, resetDelay);
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

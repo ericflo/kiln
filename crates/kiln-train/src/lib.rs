@@ -38,6 +38,11 @@ pub struct SftRequest {
     pub examples: Vec<SftExample>,
     #[serde(default)]
     pub config: SftConfig,
+    /// Optional auto-eval hook: when set, the training queue worker enqueues
+    /// an eval against the produced adapter once training completes. Lets
+    /// callers chain `train → eval` in a single API call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
 /// Optimizer selection for training.
@@ -185,6 +190,9 @@ pub struct GrpoRequest {
     pub dataset_path: Option<String>,
     #[serde(default)]
     pub config: GrpoConfig,
+    /// Optional auto-eval hook (see `SftRequest::post_eval`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

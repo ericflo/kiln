@@ -18,8 +18,13 @@ path = "src/main.rs"
 name = "kiln-bench"
 path = "src/bench.rs"
 
+[[bin]]
+name = "kiln-eval"
+path = "src/bin/kiln_eval_cli.rs"
+
 [dependencies]
 kiln-core = { workspace = true }
+kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
 kiln-scheduler = { workspace = true }
 kiln-train = { workspace = true }
@@ -39,7 +44,7 @@ futures = { workspace = true }
 tokio-stream = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.18"
 console = "0.16"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -51,6 +56,8 @@ flate2 = { workspace = true }
 # transitively by `tar`, but we depend on it directly to make the use
 # explicit.
 filetime = "0.2"
+sha2 = { workspace = true }
+regex = "1"
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-train/cuda"]

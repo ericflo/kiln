@@ -14,6 +14,7 @@ use kiln_core::env_flag::env_tristate;
 use kiln_train::{
     GrpoGroup, GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
 };
+use serde::Serialize;
 
 use std::sync::atomic::Ordering;
 
@@ -312,6 +313,8 @@ async fn submit_sft(
         submitted_at: std::time::Instant::now(),
         auto_load,
         finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
     };
     state
         .training_jobs
@@ -439,6 +442,8 @@ async fn submit_grpo(
         submitted_at: std::time::Instant::now(),
         auto_load,
         finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
     };
     state
         .training_jobs
@@ -627,6 +632,62 @@ const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// 64 MiB accommodates batches of scored completions.
 const GRPO_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
+/// Rich detail payload exposed at `GET /v1/train/jobs/:job_id`. Flattens
+/// `TrainingStatus` so the wire shape stays a superset (no field drift)
+/// and adds the curve + back-references the UI's drill-in panel needs.
+#[derive(Serialize)]
+struct TrainingJobDetail {
+    #[serde(flatten)]
+    status: TrainingStatus,
+    job_type: TrainingJobType,
+    epoch: Option<u32>,
+    adapter_path: Option<String>,
+    auto_load: bool,
+    /// Eval job IDs queued by `post_eval`. `None` when no post-eval was
+    /// requested; otherwise newest-first.
+    linked_eval_job_ids: Vec<String>,
+    /// Time-series of progress samples. Empty until the trainer emits
+    /// its first callback.
+    loss_history: Vec<crate::state::TrainingLossSample>,
+}
+
+async fn job_detail(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<TrainingJobDetail>, ApiError> {
+    // Build the response inside a tight read-lock scope and drop the
+    // guard before serializing. The drill-modal poll runs at 1.5s and
+    // clones up to 1024 loss samples here; the trainer's progress
+    // callback contends for the WRITE lock on every step. Building
+    // outside a `let _ = jobs;` would extend the borrow until end of
+    // function.
+    let detail = {
+        let jobs = state.training_jobs.read().unwrap();
+        let job = jobs
+            .get(&job_id)
+            .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
+        let elapsed_secs = job.submitted_at.elapsed().as_secs_f64();
+        TrainingJobDetail {
+            status: TrainingStatus {
+                job_id: job.job_id.clone(),
+                state: job.state,
+                progress: job.progress,
+                current_loss: job.loss,
+                adapter_name: Some(job.adapter_name.clone()),
+                started_at: format!("{}s ago", job.submitted_at.elapsed().as_secs()),
+                elapsed_secs,
+            },
+            job_type: job.job_type,
+            epoch: job.epoch,
+            adapter_path: job.adapter_path.clone(),
+            auto_load: job.auto_load,
+            linked_eval_job_ids: job.linked_eval_job_ids.clone(),
+            loss_history: job.loss_history.clone(),
+        }
+    };
+    Ok(Json(detail))
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -639,6 +700,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
+        .route("/v1/train/jobs/{job_id}", get(job_detail))
         .route("/v1/train/queue", get(list_queue))
         .route("/v1/train/queue/{job_id}", delete(cancel_queued_job))
 }
@@ -666,6 +728,7 @@ mod tests {
             groups,
             dataset_path: dataset_path.map(str::to_string),
             config: GrpoConfig::default(),
+            post_eval: None,
         }
     }
 

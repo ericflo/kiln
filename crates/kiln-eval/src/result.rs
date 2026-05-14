@@ -1,0 +1,374 @@
+//! Result types: per-example outcomes, suite-level aggregates, and the
+//! `EvalJobState` lifecycle exposed via the HTTP API.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+/// Lifecycle of an eval job (mirrors the training-job state machine so
+/// dashboards can render both with one code path).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalJobState {
+    Queued,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+/// What happened to a single example.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalOutcomeKind {
+    /// Scorer awarded a positive score (typically 1.0 for binary metrics).
+    Pass,
+    /// Scorer awarded zero or a below-threshold score.
+    Fail,
+    /// Scorer rejected the output (e.g. unparseable for numeric tolerance,
+    /// invalid JSON for json_validity). Counted distinctly so suites can
+    /// surface "what fraction of outputs even tried to follow the format".
+    Invalid,
+    /// Generation did not produce any output (timeout, cancellation, OOM,
+    /// rejected by sampler). Counted as a failure for headline accuracy but
+    /// surfaced separately for triage.
+    Error,
+}
+
+/// Per-example record returned in the `EvalResult`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExampleOutcome {
+    pub example_id: String,
+    pub completion_index: usize,
+    pub completion_text: String,
+    pub kind: EvalOutcomeKind,
+    /// Score in `[0.0, 1.0]`. Most scorers emit binary 0/1 outcomes; numeric
+    /// tolerance and LLM-judge can emit continuous values.
+    pub score: f32,
+    /// Scorer-specific commentary surfaced to the user (e.g. "expected 185,
+    /// got 186"). Free-form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Prompt tokens (resolved by tokenizer) attributable to this example,
+    /// useful for cost dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<usize>,
+    /// Wall-clock latency for the generation that produced this completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    /// Tags inherited from the example (echoed so consumers don't need to
+    /// re-join against the suite).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Latency stats expressed as p50/p90/p99 in milliseconds.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LatencyStats {
+    pub p50_ms: f64,
+    pub p90_ms: f64,
+    pub p99_ms: f64,
+    pub mean_ms: f64,
+    pub max_ms: f64,
+}
+
+impl LatencyStats {
+    /// Compute percentiles from a slice of samples. Empty input produces an
+    /// all-zeros stat block (callers can detect this via `samples.is_empty()`).
+    pub fn from_samples(samples: &[f64]) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+        let mut sorted: Vec<f64> = samples.iter().copied().filter(|x| x.is_finite()).collect();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sorted.len();
+        if n == 0 {
+            return Self::default();
+        }
+        let p = |q: f64| {
+            let idx = ((q * (n as f64 - 1.0)).round() as usize).min(n - 1);
+            sorted[idx]
+        };
+        let mean = sorted.iter().sum::<f64>() / (n as f64);
+        Self {
+            p50_ms: p(0.5),
+            p90_ms: p(0.9),
+            p99_ms: p(0.99),
+            mean_ms: mean,
+            max_ms: *sorted.last().unwrap_or(&0.0),
+        }
+    }
+}
+
+/// Per-scorer-kind breakdown — useful when a suite mixes scorers (e.g. an
+/// answer-correctness scorer plus a JSON-format scorer applied to the same
+/// outputs via per-example overrides).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScorerBreakdown {
+    pub scorer_kind: String,
+    pub num_examples: u32,
+    pub mean_score: f32,
+    pub pass_rate: f32,
+}
+
+/// Aggregate metrics over a single suite run against a single adapter.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AggregateMetrics {
+    pub num_examples: u32,
+    pub num_pass: u32,
+    pub num_fail: u32,
+    pub num_invalid: u32,
+    pub num_error: u32,
+    pub accuracy: f32,
+    pub mean_score: f32,
+    /// Weighted mean over `EvalExample::weight`.
+    pub weighted_mean_score: f32,
+    pub latency: LatencyStats,
+    pub total_prompt_tokens: u64,
+    pub total_completion_tokens: u64,
+    /// Total wall-clock seconds the run took (start → finish).
+    pub elapsed_secs: f64,
+    /// Pass rate sliced by example tag. Useful for "easy/medium/hard" splits.
+    pub pass_rate_by_tag: BTreeMap<String, f32>,
+    /// Per-scorer-kind breakdown when the suite mixes scorers.
+    pub by_scorer: Vec<ScorerBreakdown>,
+}
+
+impl AggregateMetrics {
+    /// Compute aggregate metrics from a vector of per-example outcomes and
+    /// the example weights they map to. Latency samples are read from
+    /// `ExampleOutcome::latency_ms` where present.
+    pub fn compute(
+        outcomes: &[ExampleOutcome],
+        weights: &BTreeMap<String, f32>,
+        tags_by_example: &BTreeMap<String, Vec<String>>,
+        scorer_kind_by_example: &BTreeMap<String, &'static str>,
+        elapsed_secs: f64,
+    ) -> Self {
+        let mut num_pass = 0u32;
+        let mut num_fail = 0u32;
+        let mut num_invalid = 0u32;
+        let mut num_error = 0u32;
+        let mut sum_score = 0.0f32;
+        let mut sum_weighted = 0.0f32;
+        let mut sum_weights = 0.0f32;
+        let mut latencies = Vec::with_capacity(outcomes.len());
+        let mut prompt_tokens: u64 = 0;
+        let mut completion_tokens: u64 = 0;
+
+        // pass-rate by tag
+        let mut tag_pass: BTreeMap<String, (u32, u32)> = BTreeMap::new();
+        // by scorer kind
+        let mut scorer_acc: BTreeMap<&'static str, (u32, f32, u32)> = BTreeMap::new();
+
+        for out in outcomes {
+            match out.kind {
+                EvalOutcomeKind::Pass => num_pass += 1,
+                EvalOutcomeKind::Fail => num_fail += 1,
+                EvalOutcomeKind::Invalid => num_invalid += 1,
+                EvalOutcomeKind::Error => num_error += 1,
+            }
+            sum_score += out.score;
+            let weight = weights.get(&out.example_id).copied().unwrap_or(1.0);
+            sum_weighted += out.score * weight;
+            sum_weights += weight;
+            if let Some(lat) = out.latency_ms {
+                latencies.push(lat);
+            }
+            if let Some(p) = out.prompt_tokens {
+                prompt_tokens = prompt_tokens.saturating_add(p as u64);
+            }
+            if let Some(c) = out.completion_tokens {
+                completion_tokens = completion_tokens.saturating_add(c as u64);
+            }
+            // tag pass-rate uses the FIRST completion per example to avoid
+            // double-counting under n>1. We mark the first occurrence by
+            // tracking example_id seen.
+            if out.completion_index == 0 {
+                if let Some(tags) = tags_by_example.get(&out.example_id) {
+                    for tag in tags {
+                        let entry = tag_pass.entry(tag.clone()).or_insert((0, 0));
+                        entry.0 += 1;
+                        if matches!(out.kind, EvalOutcomeKind::Pass) {
+                            entry.1 += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(kind) = scorer_kind_by_example.get(&out.example_id) {
+                let entry = scorer_acc.entry(*kind).or_insert((0, 0.0, 0));
+                entry.0 += 1;
+                entry.1 += out.score;
+                if matches!(out.kind, EvalOutcomeKind::Pass) {
+                    entry.2 += 1;
+                }
+            }
+        }
+
+        let num_examples = outcomes.len() as u32;
+        let accuracy = if num_examples > 0 {
+            num_pass as f32 / num_examples as f32
+        } else {
+            0.0
+        };
+        let mean_score = if num_examples > 0 {
+            sum_score / num_examples as f32
+        } else {
+            0.0
+        };
+        let weighted_mean_score = if sum_weights > 0.0 {
+            sum_weighted / sum_weights
+        } else {
+            0.0
+        };
+        let pass_rate_by_tag = tag_pass
+            .into_iter()
+            .map(|(tag, (n, p))| {
+                let rate = if n > 0 { p as f32 / n as f32 } else { 0.0 };
+                (tag, rate)
+            })
+            .collect();
+        let by_scorer = scorer_acc
+            .into_iter()
+            .map(|(kind, (n, sum, pass))| ScorerBreakdown {
+                scorer_kind: kind.to_string(),
+                num_examples: n,
+                mean_score: if n > 0 { sum / n as f32 } else { 0.0 },
+                pass_rate: if n > 0 { pass as f32 / n as f32 } else { 0.0 },
+            })
+            .collect();
+
+        Self {
+            num_examples,
+            num_pass,
+            num_fail,
+            num_invalid,
+            num_error,
+            accuracy,
+            mean_score,
+            weighted_mean_score,
+            latency: LatencyStats::from_samples(&latencies),
+            total_prompt_tokens: prompt_tokens,
+            total_completion_tokens: completion_tokens,
+            elapsed_secs,
+            pass_rate_by_tag,
+            by_scorer,
+        }
+    }
+}
+
+/// Progress snapshot used while a job is `Running`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvalProgress {
+    pub examples_completed: u32,
+    pub examples_total: u32,
+    pub running_accuracy: f32,
+    pub running_mean_score: f32,
+}
+
+/// Full result for a single (suite, adapter) run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuiteResult {
+    pub suite_name: String,
+    /// Adapter the model was running under. `None` means base model.
+    pub adapter: Option<String>,
+    pub metrics: AggregateMetrics,
+    pub outcomes: Vec<ExampleOutcome>,
+    /// ISO-8601 timestamps.
+    pub started_at: String,
+    pub finished_at: String,
+    /// Stable hash of the suite content (header + examples) for replay
+    /// auditing — different suite revisions produce different hashes.
+    pub suite_hash: String,
+}
+
+/// Top-level eval result that may contain multiple suite runs (one per
+/// adapter when compare-mode is used).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalResult {
+    pub job_id: String,
+    pub state: EvalJobState,
+    /// One entry per adapter requested. Single-adapter runs have len == 1.
+    pub runs: Vec<SuiteResult>,
+    /// Live progress for the currently-running adapter (cleared once the
+    /// job terminates). Useful for streaming dashboards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<EvalProgress>,
+    /// Free-form error message when `state == Failed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(id: &str, idx: usize, kind: EvalOutcomeKind, score: f32, lat: f64) -> ExampleOutcome {
+        ExampleOutcome {
+            example_id: id.into(),
+            completion_index: idx,
+            completion_text: format!("c-{id}-{idx}"),
+            kind,
+            score,
+            detail: None,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            latency_ms: Some(lat),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn latency_stats_basic() {
+        let lat = LatencyStats::from_samples(&[10.0, 20.0, 30.0, 40.0, 50.0]);
+        assert!((lat.p50_ms - 30.0).abs() < 0.1);
+        assert!(lat.p90_ms >= 40.0);
+        assert!((lat.mean_ms - 30.0).abs() < 0.001);
+        assert_eq!(lat.max_ms, 50.0);
+    }
+
+    #[test]
+    fn aggregate_basic_counts_pass_and_score() {
+        let outcomes = vec![
+            mk("a", 0, EvalOutcomeKind::Pass, 1.0, 10.0),
+            mk("b", 0, EvalOutcomeKind::Fail, 0.0, 20.0),
+            mk("c", 0, EvalOutcomeKind::Invalid, 0.0, 5.0),
+        ];
+        let mut weights = BTreeMap::new();
+        weights.insert("a".into(), 2.0);
+        weights.insert("b".into(), 1.0);
+        weights.insert("c".into(), 1.0);
+        let metrics =
+            AggregateMetrics::compute(&outcomes, &weights, &BTreeMap::new(), &BTreeMap::new(), 1.5);
+        assert_eq!(metrics.num_examples, 3);
+        assert_eq!(metrics.num_pass, 1);
+        assert_eq!(metrics.num_fail, 1);
+        assert_eq!(metrics.num_invalid, 1);
+        assert!((metrics.accuracy - 1.0 / 3.0).abs() < 1e-6);
+        // weighted: 2*1 + 1*0 + 1*0 / 4 = 0.5
+        assert!((metrics.weighted_mean_score - 0.5).abs() < 1e-6);
+        assert_eq!(metrics.total_completion_tokens, 60);
+    }
+
+    #[test]
+    fn aggregate_tag_passrates_use_first_completion() {
+        let outcomes = vec![
+            mk("a", 0, EvalOutcomeKind::Pass, 1.0, 1.0),
+            mk("a", 1, EvalOutcomeKind::Fail, 0.0, 1.0),
+            mk("b", 0, EvalOutcomeKind::Fail, 0.0, 1.0),
+        ];
+        let mut tags = BTreeMap::new();
+        tags.insert("a".to_string(), vec!["easy".to_string()]);
+        tags.insert("b".to_string(), vec!["easy".to_string()]);
+        let m = AggregateMetrics::compute(
+            &outcomes,
+            &BTreeMap::new(),
+            &tags,
+            &BTreeMap::new(),
+            1.0,
+        );
+        assert_eq!(m.pass_rate_by_tag.get("easy").copied(), Some(0.5));
+    }
+}

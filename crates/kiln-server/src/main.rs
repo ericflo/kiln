@@ -309,9 +309,55 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // Wire on-disk eval suite + dataset + judgment registries. The shared
+    // root is `<adapter_dir>/.eval/` by default; subdirs split the three
+    // collections so users can audit one without listing everything.
+    let eval_root = config
+        .eval
+        .as_ref()
+        .and_then(|e| e.eval_dir.clone())
+        .unwrap_or_else(|| state.adapter_dir.join(".eval"));
+    let suite_dir = eval_root.join("suites");
+    let dataset_dir = eval_root.join("datasets");
+    let judgment_dir = eval_root.join("judgments");
+    for (path, label) in &[
+        (&suite_dir, "suites"),
+        (&dataset_dir, "datasets"),
+        (&judgment_dir, "judgments"),
+    ] {
+        if let Err(e) = std::fs::create_dir_all(path) {
+            tracing::warn!(error = %e, path = %path.display(), kind = label, "failed to create eval subdir; that registry will be disabled");
+        }
+    }
+    if suite_dir.exists() {
+        state.suite_registry = Some(Arc::new(kiln_server::eval::SuiteRegistry::new(
+            suite_dir.clone(),
+        )));
+    }
+    if dataset_dir.exists() {
+        state.dataset_registry = Some(Arc::new(kiln_server::eval::DatasetRegistry::new(
+            dataset_dir.clone(),
+        )));
+    }
+    if judgment_dir.exists() {
+        state.judgment_store = Some(Arc::new(kiln_server::eval::JudgmentStore::new(
+            judgment_dir.clone(),
+        )));
+    }
+    tracing::debug!(
+        eval_root = %eval_root.display(),
+        "eval registries online (suites + datasets + judgments)"
+    );
+    if let Some(cfg) = config.eval.as_ref() {
+        state.max_queued_eval_jobs = cfg.max_queued_jobs;
+        state.max_tracked_eval_jobs = cfg.max_tracked_jobs;
+    }
+
     // Spawn the background training queue worker
     let shutdown_flag = state.shutdown.clone();
     kiln_server::training_queue::spawn_training_worker(state.clone(), shutdown_flag.clone());
+    // Spawn the background eval queue worker
+    kiln_server::eval::spawn_eval_worker(state.clone(), shutdown_flag.clone());
 
     let tokenizer_prewarm = state.tokenizer.clone();
     let prewarm_state = state.clone();

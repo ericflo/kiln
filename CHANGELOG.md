@@ -1,5 +1,54 @@
 # Kiln Server Changelog
 
+## Unreleased — Phase 11 evals as a first-class peer of training
+
+Adds an end-to-end eval system: pluggable scorers, dataset → suite synthesis, post-training auto-eval, head-to-head adapter comparison, and the local A/B judgment flywheel. The whole loop runs on the same single-GPU binary; no frontier-LLM call is ever required.
+
+### Added
+- `kiln-eval` crate (pure CPU): `EvalSuite`, `EvalExample`, `EvalGenerationParams`,
+  and a serde-tagged `Scorer` enum with kind labels `exact_match` / `contains` /
+  `regex` / `json_validity` / `multiple_choice` / `numeric_tolerance` /
+  `tool_call` / `code` (with `bash` introspection for inlined `python -c` /
+  `node -e` / `uv run`) / `llm_judge` / `all` / `any` composites, plus dataset →
+  suite synthesis (`final_assistant`, `first_assistant_turn`,
+  `every_assistant_turn`, `tool_call_predict`) with reservoir-sampled
+  `max_examples` and an `auto_detect` scorer choice that picks per example from
+  the target shape.
+- Server eval module (`crates/kiln-server/src/eval/`): `SuiteRegistry` on disk,
+  `DatasetRegistry` with manifest + sampled stats, `JudgmentStore` + judgment
+  compile + validate, `EvalQueue` + `spawn_eval_worker` (FIFO, terminal-job GC,
+  concurrent with training and serving), `generator_from_state`,
+  `synthesis_driver` (preview + commit), and re-run-only-failures.
+- HTTP surface: `GET/POST /v1/eval/suites`, `GET/DELETE /v1/eval/suites/{name}`,
+  `POST /v1/eval/run`, `POST /v1/eval/compare`, `GET /v1/eval/jobs`,
+  `GET /v1/eval/jobs/{id}`, `POST /v1/eval/jobs/{id}/rerun`,
+  `POST /v1/eval/datasets/upload`, `POST /v1/eval/datasets/{name}/synthesize`,
+  plus `GET/POST /v1/judgments`, `POST /v1/judgments/{name}/rows`,
+  `POST /v1/judgments/{name}/compile`, `POST /v1/judgments/{name}/validate`.
+- Post-training auto-eval: `SftRequest`/`GrpoRequest` accept
+  `post_eval: { suite, include_baseline, generation }`. `enqueue_post_training_eval`
+  pushes one (or two, with baseline) eval jobs the moment training succeeds;
+  IDs are linked on `TrainingJobInfo.linked_eval_job_ids` at queue time.
+- `kiln-eval` CLI binary (`crates/kiln-server/src/bin/kiln_eval_cli.rs`):
+  list/run/compare suites and trigger synthesis from the shell.
+- `/ui` overhaul (Phase 11): Cmd-K command palette, drill-in modals for eval /
+  training / adapter detail with live progress + content-key change-detection,
+  loss curves with downsampled history, A/B compare playground with keyboard
+  shortcuts that writes directly to `JudgmentStore`, VRAM donut, tok/s sparkline.
+- `[eval]` config section (`root`, `max_tracked_eval_jobs`, default
+  `generation` block).
+- Documentation: `docs/EVAL_GUIDE.md` (full scorer reference + request shapes),
+  `docs/site/evals.html`, README "The Eval Loop" section, QUICKSTART §10
+  walkthrough, ARCHITECTURE "Evaluation Pipeline" deep-dive.
+
+### Notes
+- Single bundled commit — this is the first shipping cut of the eval system,
+  not a series of incremental PRs.
+- The eval worker rides the GPU read-lock, so evals run concurrently with both
+  serving and training. The training queue keeps its exclusive write-lock model.
+- Suites, datasets, and judgments persist under `<eval-root>/{suites,datasets,judgments}/`
+  (defaults to `<state_dir>/eval`).
+
 ## Unreleased — Phase 2 Vulkan training hardening
 
 Active branch since v0.2.15. Targets the Strix Halo / unified-memory APU

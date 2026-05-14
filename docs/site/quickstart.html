@@ -239,6 +239,7 @@
       <nav class="site-nav text-sm">
         <a href="quickstart.html" aria-current=page>Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
@@ -473,7 +474,13 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
           See the <a href="grpo.html">GRPO Guide</a> for the generate &rarr; score &rarr; train loop and the <a href="cli.html">CLI Reference</a> for full command examples.
         </p>
       </div>
-      <div class="grid sm:grid-cols-2 lg:grid-cols-7 gap-4">
+      <div class="card p-5 mb-4" style="background: rgba(249, 115, 22, 0.08); border-color: rgba(249, 115, 22, 0.22);">
+        <h3 class="font-semibold mb-2">Prove the adapter is better &mdash; evals are a peer of training</h3>
+        <p style="color: var(--fg-dim);">
+          Upload an SFT or GRPO JSONL to <code>POST /v1/eval/datasets/upload</code> and synthesize a graded suite from it in one call &mdash; no separate eval-set authoring needed. Then <code>POST /v1/eval/run</code> grades any adapter, <code>/v1/eval/compare</code> runs the suite head-to-head against another adapter, and any training request can carry <code>post_eval: { suite, include_baseline: true }</code> to auto-grade itself the moment it finishes. The whole loop runs locally; the optional LLM judge is itself a LoRA you train from A/B preferences in <code>/ui</code>. See the <a href="evals.html">Evals guide</a> for the full walkthrough.
+        </p>
+      </div>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <a class="card p-5 block" href="api.html#training">
           <h3 id="sft-corrections" class="font-semibold mb-2">SFT corrections</h3>
           <p style="color: var(--fg-dim);">Post simple fixes to <code>/v1/train/sft</code> or use <code>kiln train sft</code> after first inference, then run <code>kiln train status</code> to confirm the job finished before the next chat request.</p>
@@ -482,9 +489,13 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
           <h3 class="font-semibold mb-2">GRPO Guide</h3>
           <p style="color: var(--fg-dim);">Run the generate &rarr; score &rarr; train loop against the same server.</p>
         </a>
+        <a class="card p-5 block" href="evals.html">
+          <h3 class="font-semibold mb-2">Evals Guide</h3>
+          <p style="color: var(--fg-dim);">Score adapters with built-in or LLM-judge scorers, synthesize suites from datasets, and run the local A/B judgment flywheel.</p>
+        </a>
         <a class="card p-5 block" href="api.html">
           <h3 class="font-semibold mb-2">API Reference</h3>
-          <p style="color: var(--fg-dim);">See inference, adapter, training, metrics, and configuration endpoints.</p>
+          <p style="color: var(--fg-dim);">See inference, adapter, training, eval, judgment, metrics, and configuration endpoints.</p>
         </a>
         <a class="card p-5 block" href="cli.html">
           <h3 class="font-semibold mb-2">CLI Reference</h3>
@@ -520,6 +531,7 @@ export KILN_MODEL_PATH=./Qwen3.5-4B</code></pre>
         <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
         <a href="quickstart.html">Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>

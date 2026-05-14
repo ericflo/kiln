@@ -6,8 +6,9 @@ use tracing::Span;
 use crate::state::AppState;
 
 mod adapters;
-mod completions;
+pub(crate) mod completions;
 mod config;
+mod eval;
 mod health;
 mod metrics;
 mod models;
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .merge(completions::routes())
         .merge(adapters::routes())
         .merge(training::routes())
+        .merge(eval::routes())
         .merge(config::routes())
         .merge(stats::routes())
         .merge(ui::routes())

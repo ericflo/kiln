@@ -11,7 +11,7 @@ This guide gets you from a fresh machine to your first Kiln inference. Stop afte
 | **Container** | You prefer the prebuilt GHCR image and already run NVIDIA GPU workloads with Docker. | Pull `ghcr.io/ericflo/kiln-server:latest`, mount your local `Qwen/Qwen3.5-4B` directory, then follow [Running with Docker](#running-with-docker). |
 | **Source / CLI** | You are contributing, scripting, or want to build the binary yourself. | Optionally build `kiln` from source, then download `Qwen/Qwen3.5-4B`, start `kiln serve`, and continue through steps 2-5. |
 
-After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
+After first inference, continue to [SFT training](#6-submit-sft-training), the [GRPO guide](docs/GRPO_GUIDE.md), [evaluating an adapter](#10-evaluate-your-adapter), [advanced API examples](#9-advanced-api-examples), or [Troubleshooting](https://ericflo.github.io/kiln/troubleshooting.html).
 
 ## Prerequisites
 
@@ -567,6 +567,76 @@ Payload (`Content-Type: application/json`):
 }
 ```
 
+## 10. Evaluate your adapter
+
+Once you've trained an adapter, you'll want to know whether it's actually any better than the base model on the prompts you care about. Kiln's eval system runs in the same process as inference and training, so the loop is `train → eval → drill into failures → fix → repeat` without leaving the server.
+
+The fastest path is to **synthesize an eval suite from an existing SFT dataset** — Kiln walks the conversations, extracts (prompt, target) pairs, picks an appropriate scorer per example (`numeric_tolerance`, `json_validity`, `multiple_choice`, `contains`, `tool_call`, `code`, `exact_match`, …), and registers a named suite you can re-run forever:
+
+```bash
+# 10.1. Upload an SFT JSONL (any file you'd POST to /v1/train/sft will work)
+curl -F name=customer-support \
+     -F format=sft_chat \
+     -F file=@my-tickets.jsonl \
+  http://localhost:8420/v1/eval/datasets/upload
+
+# 10.2. Synthesize a named suite from it
+curl -X POST http://localhost:8420/v1/eval/datasets/customer-support/synthesize \
+  -H 'content-type: application/json' \
+  -d '{
+    "suite_name": "support-eval",
+    "strategy": "final_assistant",
+    "scorer": {"kind": "auto_detect"},
+    "sampling": {"max_examples": 100, "max_prompt_chars": 32768, "max_target_chars": 4096, "dedupe": true},
+    "force": true,
+    "run_against": ["support-bot-v1"]
+  }'
+# → returns the synthesized suite + the queued eval job IDs
+```
+
+The `strategy` knob picks how each conversation is decomposed: `final_assistant` (default — prompt = everything up to the last user turn, target = final assistant reply), `first_assistant_turn`, `every_assistant_turn`, or `tool_call_predict` (only keeps assistant turns that emit tool calls; canonicalizes them and pairs with the `tool_call` scorer).
+
+**Run an existing suite against any adapter:**
+
+```bash
+curl -X POST http://localhost:8420/v1/eval/run \
+  -H 'content-type: application/json' \
+  -d '{"suite": "support-eval", "adapter": "support-bot-v2"}'
+# → {"job_id": "...", "state": "queued"}
+```
+
+**Compare two adapters head-to-head** (same suite, both adapters, side-by-side metrics):
+
+```bash
+curl -X POST http://localhost:8420/v1/eval/compare \
+  -H 'content-type: application/json' \
+  -d '{"suite": "support-eval", "adapters": ["support-bot-v1", "support-bot-v2"]}'
+```
+
+**Drill into per-example outcomes** by opening `/ui` → Evals → Jobs and clicking the job card; the modal shows pass/fail/invalid/error counts, per-tag pass rates, a filterable+searchable outcome list, and a Target ↔ Got side-by-side panel with the scorer's commentary.
+
+**Auto-eval after every training run** by attaching `post_eval` to your SFT/GRPO submission:
+
+```bash
+curl -X POST http://localhost:8420/v1/train/sft \
+  -H 'content-type: application/json' \
+  -d '{
+    "examples": [...],
+    "config": {"output_name": "support-bot-v3"},
+    "post_eval": {
+      "suite": "support-eval",
+      "include_baseline": true
+    }
+  }'
+# When training finishes, Kiln queues an eval against support-bot-v3 plus
+# a baseline run against the base model. Both jobs are back-linked from
+# the training job's status under `linked_eval_job_ids`.
+```
+
+**The judgment flywheel** turns your A/B picks into a *local* judge LoRA — no frontier-LLM dependency. Open `/ui` → Evals → Judgments, generate side-by-side replies for a prompt, click `A`/`B`/`Tie` (or `S` to skip). After ~20 judgments, click "Compile to SFT" to produce a training dataset, run `kiln train sft` on it to get a judge adapter, then point any future eval at it via `Scorer::LlmJudge { judge_adapter: "support-judge-v1" }`.
+
+See [`docs/EVAL_GUIDE.md`](docs/EVAL_GUIDE.md) for the full scorer reference, the `kiln-eval` CLI (`list`, `register`, `run`, `compare`, `probe`), and recipes for tool-call evals, code-writing evals, and JSON-shape gates.
+
 ## CLI Reference
 
 ```
@@ -634,6 +704,17 @@ Use `kiln -v serve` when first-run startup or model-load diagnostics are needed.
 | GET | `/v1/train/queue` | List queued training jobs |
 | DELETE | `/v1/train/queue/{job_id}` | Cancel a queued job |
 | (config) | `[training].webhook_url` | Fire-and-forget POST on training completion — set in `kiln.toml` or via `KILN_TRAINING_WEBHOOK_URL` (see [9.9](#99-training-completion-webhooks)). |
+| GET / POST | `/v1/eval/suites` | List or register eval suites (full reference: [`docs/EVAL_GUIDE.md`](docs/EVAL_GUIDE.md)) |
+| POST | `/v1/eval/run` | Submit an eval (registered suite or inline) — see [§10](#10-evaluate-your-adapter) |
+| POST | `/v1/eval/compare` | Run a suite across multiple adapters head-to-head |
+| GET | `/v1/eval/jobs` / `/v1/eval/jobs/{id}` | List eval jobs or fetch one with full per-example outcomes |
+| POST | `/v1/eval/jobs/{id}/rerun` | Re-run only failures from a completed job |
+| POST | `/v1/eval/datasets/upload` | Multipart SFT/GRPO JSONL upload, then synthesize a suite from it |
+| POST | `/v1/eval/datasets/{name}/synthesize` | Decompose a dataset into an eval suite |
+| GET / POST | `/v1/judgments` | List or create judgment datasets for the A/B flywheel |
+| POST | `/v1/judgments/{name}/rows` | Append one A/B/Tie/Skip preference |
+| POST | `/v1/judgments/{name}/compile` | Compile judgments into an SFT dataset for a judge LoRA |
+| POST | `/v1/judgments/{name}/validate` | Score a judge LoRA against a held-out judgment slice |
 | GET | `/v1/config` | Current server configuration |
 
 ## Configuration

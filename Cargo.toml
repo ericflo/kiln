@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/kiln-core",
     "crates/kiln-conv1d-kernel",
+    "crates/kiln-eval",
     "crates/kiln-flash-attn",
     "crates/kiln-flce-kernel",
     "crates/kiln-gdn-kernel",
@@ -25,6 +26,7 @@ members = [
 # feature activation on the real binary target.
 default-members = [
     "crates/kiln-core",
+    "crates/kiln-eval",
     "crates/kiln-flce-kernel",
     "crates/kiln-model",
     "crates/kiln-nvtx",
@@ -113,6 +115,7 @@ tempfile = "3"
 
 # Internal crates
 kiln-core = { path = "crates/kiln-core" }
+kiln-eval = { path = "crates/kiln-eval" }
 kiln-model = { path = "crates/kiln-model" }
 kiln-scheduler = { path = "crates/kiln-scheduler" }
 kiln-server = { path = "crates/kiln-server" }

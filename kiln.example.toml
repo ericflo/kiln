@@ -82,6 +82,27 @@ draft_layers = 8                      # First N layers used as draft model
                                       # Also settable via KILN_SPEC_ENABLED, KILN_SPEC_NUM_TOKENS,
                                       # KILN_SPEC_DRAFT_LAYERS env vars
 
+[eval]
+# Root directory for eval suites, datasets, and judgment stores.
+# Defaults to "<state_dir>/eval" when omitted. Subdirectories:
+#   <root>/suites/       — versioned EvalSuite JSON (SuiteRegistry)
+#   <root>/datasets/     — uploaded SFT/GRPO JSONL + manifest.json
+#   <root>/judgments/    — A/B preference rows + manifest (judge LoRA flywheel)
+# Override via KILN_EVAL_ROOT.
+# root = "/var/kiln/eval"
+
+# Cap on terminal eval jobs retained in memory. Older entries past
+# `tracked_job_ttl` (shared with training) are GC'd by the eval worker so
+# long-running servers don't grow `state.eval_jobs` unbounded.
+# max_tracked_eval_jobs = 256
+
+# Default generation parameters used when a suite or request does not override.
+# Identical knobs to the request-level `generation` block on /v1/eval/run.
+# [eval.generation]
+# temperature = 0.0
+# max_tokens = 512
+# seed = 42
+
 [adapters]
 max_disk_bytes = 107374182400         # 100 GiB cap on total finalized adapter_dir size.
                                       # Rejects POST /v1/adapters/upload with HTTP 507

@@ -106,6 +106,8 @@ fn fill_tracked(
                 submitted_at: std::time::Instant::now(),
                 auto_load: false,
                 finished_at,
+                linked_eval_job_ids: Vec::new(),
+                loss_history: Vec::new(),
             },
         );
     }
@@ -255,6 +257,8 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 submitted_at: std::time::Instant::now(),
                 auto_load: false,
                 finished_at: None,
+                linked_eval_job_ids: Vec::new(),
+                loss_history: Vec::new(),
             },
         );
         jobs.insert(
@@ -271,6 +275,8 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 submitted_at: std::time::Instant::now(),
                 auto_load: false,
                 finished_at: None,
+                linked_eval_job_ids: Vec::new(),
+                loss_history: Vec::new(),
             },
         );
     }

@@ -211,6 +211,60 @@ pub struct TrainingJobInfo {
     /// See `AppState::tracked_job_ttl`.
     #[serde(skip)]
     pub finished_at: Option<std::time::Instant>,
+    /// Eval job IDs that ran against this training run via the
+    /// `post_eval` auto-hook. Populated at *enqueue* time by
+    /// `enqueue_post_training_eval` (so the training-side dashboard can
+    /// link to the eval the moment it lands in the queue, not after it
+    /// finishes). Empty when no post-training eval was requested.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_eval_job_ids: Vec<String>,
+    /// Loss history for live charts. Each sample is
+    /// `{epoch, progress, loss, elapsed_secs}`. Capped at
+    /// `TRAINING_LOSS_HISTORY_CAP` to bound memory; once full, every
+    /// second sample is dropped (downsampled in-place) so the curve
+    /// retains shape without unbounded growth.
+    #[serde(default)]
+    pub loss_history: Vec<TrainingLossSample>,
+}
+
+/// Single point on the live loss curve. Lightweight on purpose — the
+/// callback fires on every step.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingLossSample {
+    pub epoch: u32,
+    pub progress: f32,
+    pub loss: f64,
+    pub elapsed_secs: f64,
+}
+
+/// Maximum points retained per job. Past this size the in-memory list is
+/// downsampled by 2× so a long run still shows a smooth curve.
+pub const TRAINING_LOSS_HISTORY_CAP: usize = 512;
+
+/// Append a loss sample to the job's history, downsampling in-place
+/// (every-other-sample, last preserved) when the series would exceed
+/// `2 * TRAINING_LOSS_HISTORY_CAP`. Downsampling at 2× the cap keeps the
+/// amortized cost O(1) per push — the trainer's progress callback runs
+/// at every step and previously triggered an O(n) rebuild every step
+/// past the cap.
+pub fn push_loss_sample(history: &mut Vec<TrainingLossSample>, sample: TrainingLossSample) {
+    history.push(sample);
+    if history.len() <= 2 * TRAINING_LOSS_HISTORY_CAP {
+        return;
+    }
+    let last = history.last().cloned();
+    let mut keep = Vec::with_capacity(TRAINING_LOSS_HISTORY_CAP + 1);
+    for (i, s) in history.iter().enumerate() {
+        if i % 2 == 0 {
+            keep.push(s.clone());
+        }
+    }
+    if let Some(last) = last {
+        if keep.last().map(|s| s.elapsed_secs) != Some(last.elapsed_secs) {
+            keep.push(last);
+        }
+    }
+    *history = keep;
 }
 
 /// Thread-safe map of tracked training jobs.
@@ -1213,9 +1267,64 @@ pub struct AppState {
     pub rendered_prompt_cache: Arc<std::sync::Mutex<RenderedPromptCache>>,
     /// Rendered-prompt token cache used before completion/prefix cache lookup.
     pub prompt_token_cache: Arc<std::sync::Mutex<PromptTokenCache>>,
+    /// FIFO queue of pending eval jobs. Drained by the background eval
+    /// worker (see `crate::eval::worker::spawn_eval_worker`).
+    pub eval_queue: crate::eval::SharedEvalQueue,
+    /// Tracked eval-job state (job_id → info). Mirrors `training_jobs`.
+    pub eval_jobs: crate::eval::EvalJobs,
+    /// On-disk registry of named eval suites. Set only when the server was
+    /// configured with an `eval_dir`; mock-mode and tests can leave it None
+    /// and use inline suites.
+    pub suite_registry: Option<Arc<crate::eval::SuiteRegistry>>,
+    /// On-disk dataset registry: SFT/GRPO JSONL files users upload to
+    /// power synthesis. Co-located with the suite registry.
+    pub dataset_registry: Option<Arc<crate::eval::DatasetRegistry>>,
+    /// On-disk judgment store: append-only A/B preference rows. The
+    /// flywheel that turns user picks into local judge LoRAs.
+    pub judgment_store: Option<Arc<crate::eval::JudgmentStore>>,
+    /// Maximum eval jobs allowed in `eval_queue` at once. Mirrors
+    /// `max_queued_training_jobs`; over-cap submissions are rejected with
+    /// 503 + Retry-After.
+    pub max_queued_eval_jobs: usize,
+    /// Maximum tracked eval entries in `eval_jobs`. Mirrors
+    /// `max_tracked_jobs`.
+    pub max_tracked_eval_jobs: usize,
 }
 
 impl AppState {
+    /// Register a new eval job: insert the `EvalJobInfo::queued` record
+    /// into `eval_jobs` and push the corresponding `EvalQueueEntry` onto
+    /// the worker queue. Returns the generated `job_id`. The two-write
+    /// pattern was previously open-coded at four submission sites; keeping
+    /// it here makes the cap checks easy to enforce and prevents the
+    /// tracking map and the queue from drifting out of sync.
+    pub fn enqueue_eval(
+        &self,
+        suite_name: String,
+        adapters: Vec<Option<String>>,
+        kind: crate::eval::queue::EvalSubmissionKind,
+        source_training_job_id: Option<String>,
+        job: crate::eval::queue::QueuedEvalJob,
+    ) -> String {
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let info = crate::eval::queue::EvalJobInfo::queued(
+            job_id.clone(),
+            suite_name,
+            adapters,
+            kind,
+            source_training_job_id,
+        );
+        self.eval_jobs.write().unwrap().insert(job_id.clone(), info);
+        self.eval_queue
+            .lock()
+            .unwrap()
+            .push(crate::eval::queue::EvalQueueEntry {
+                job_id: job_id.clone(),
+                job,
+            });
+        job_id
+    }
+
     /// Create an AppState with the mock engine backend.
     pub fn clear_real_prefix_cache(&self) {
         let ModelBackend::Real {
@@ -1297,6 +1406,13 @@ impl AppState {
             prompt_token_cache: Arc::new(std::sync::Mutex::new(PromptTokenCache::new(
                 PROMPT_TOKEN_CACHE_CAPACITY,
             ))),
+            eval_queue: crate::eval::new_shared_eval_queue(),
+            eval_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            suite_registry: None,
+            dataset_registry: None,
+            judgment_store: None,
+            max_queued_eval_jobs: 32,
+            max_tracked_eval_jobs: 1024,
         }
     }
 
@@ -1725,6 +1841,13 @@ impl AppState {
             prompt_token_cache: Arc::new(std::sync::Mutex::new(PromptTokenCache::new(
                 PROMPT_TOKEN_CACHE_CAPACITY,
             ))),
+            eval_queue: crate::eval::new_shared_eval_queue(),
+            eval_jobs: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            suite_registry: None,
+            dataset_registry: None,
+            judgment_store: None,
+            max_queued_eval_jobs: 32,
+            max_tracked_eval_jobs: 1024,
         }
     }
 }

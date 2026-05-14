@@ -224,6 +224,7 @@
       <nav class="site-nav text-sm">
         <a href="quickstart.html">Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
         <a href="api.html" aria-current=page>API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>
@@ -474,6 +475,34 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
         </p>
       </article>
 
+      <article class="card p-6">
+        <div class="label mb-3">Evals · datasets · judgments</div>
+        <h2 id="evals" class="text-2xl font-semibold mb-4">Run eval suites, synthesize datasets, train a local judge</h2>
+        <p class="leading-relaxed mb-4" style="color: var(--fg-dim);">
+          Evals are a first-class peer of training. Every adapter Kiln produces can be graded by a registered or inline suite, compared head-to-head against any other adapter, or auto-evaluated the moment a training job finishes. Full request shapes, scorer reference, and the <code>kiln-eval</code> CLI live in the <a href="evals.html">Evals guide</a> and <a href="https://github.com/ericflo/kiln/blob/main/docs/EVAL_GUIDE.md">EVAL_GUIDE.md</a>.
+        </p>
+        <div class="endpoint-list" style="color: var(--fg-dim);">
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/suites</code> &mdash; list registered eval suites.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/suites</code> &mdash; register or overwrite a suite (examples + scorers + generation defaults).</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/suites/{name}</code> &mdash; fetch one suite as JSON.</div>
+          <div class="endpoint"><span class="method">DELETE</span> <code>/v1/eval/suites/{name}</code> &mdash; delete a suite.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/run</code> &mdash; queue an eval (registered suite or inline) against any adapter.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/compare</code> &mdash; run one suite across multiple adapters head-to-head.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs</code> &mdash; list eval jobs and headline accuracies.</div>
+          <div class="endpoint"><span class="method">GET</span> <code>/v1/eval/jobs/{id}</code> &mdash; fetch one eval job with full per-example outcomes.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/jobs/{id}/rerun</code> &mdash; re-run only the failures from a completed job.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/upload</code> &mdash; multipart upload of an SFT or GRPO JSONL file.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/eval/datasets/{name}/synthesize</code> &mdash; decompose a dataset into a graded suite via <code>final_assistant</code>, <code>first_assistant_turn</code>, <code>every_assistant_turn</code>, or <code>tool_call_predict</code>.</div>
+          <div class="endpoint"><span class="method">GET / POST</span> <code>/v1/judgments</code> &mdash; list or create judgment datasets (the A/B flywheel).</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/rows</code> &mdash; append one A/B/Tie/Skip preference.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/compile</code> &mdash; compile judgments into an SFT dataset for a local judge LoRA.</div>
+          <div class="endpoint"><span class="method">POST</span> <code>/v1/judgments/{name}/validate</code> &mdash; score a judge LoRA against a held-out judgment slice.</div>
+        </div>
+        <p class="mt-3 text-sm" style="color: var(--fg-dim);">
+          Any <code>SftRequest</code> or <code>GrpoRequest</code> can include <code>post_eval: { suite, include_baseline: true, generation }</code> to auto-queue an eval the moment the training job finishes. See <a href="evals.html#post-eval">post-eval auto-grading</a>.
+        </p>
+      </article>
+
       <article class="card p-6" style="background: var(--bg-soft-2);">
         <div class="label mb-3">Security note</div>
         <h2 id="training-data-safety" class="text-2xl font-semibold mb-4">Training data changes the active adapter</h2>
@@ -535,6 +564,7 @@ curl -s -X DELETE http://localhost:8420/v1/train/queue/$JOB_ID | python3 -m json
         <a href="https://github.com/ericflo/kiln/blob/main/README.md">README</a>
         <a href="quickstart.html">Quickstart</a>
         <a href="grpo.html">GRPO Guide</a>
+        <a href="evals.html">Evals</a>
         <a href="api.html">API Reference</a>
         <a href="cli.html">CLI Reference</a>
         <a href="demo/">Demo</a>

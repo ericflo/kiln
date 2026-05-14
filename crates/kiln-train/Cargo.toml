@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 kiln-core = { workspace = true }
+kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
 kiln-model = { workspace = true }
 candle-core = { workspace = true }

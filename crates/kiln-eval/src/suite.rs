@@ -1,0 +1,492 @@
+//! Eval suite, example, and generation-config types.
+//!
+//! Suites can be authored two ways:
+//!
+//! 1. As a single JSON document mapping to `EvalSuite` (suite-level
+//!    `generation`, `default_scorer`, and an inline `examples: [...]` array).
+//! 2. As a JSONL file where each line is one `EvalExample`. This is the
+//!    convenient long-form for large suites; pair it with a `suite.json`
+//!    sidecar for the suite-level defaults.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::scorers::Scorer;
+
+/// Sampling / decode params used when running an eval example.
+///
+/// Mirrors the `ChatCompletionRequest` knobs we care about for eval. The
+/// defaults are tuned for verifiable-reward evaluation: greedy decoding
+/// (temperature=0) and a tight max-token cap so a misbehaving model can't
+/// stall the suite. Set `temperature > 0` and `n > 1` for pass@k metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EvalGenerationParams {
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_top_p")]
+    pub top_p: f32,
+    #[serde(default = "default_top_k")]
+    pub top_k: u32,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    /// Number of completions per example. Most metrics use n=1; pass@k tasks
+    /// use n>1 and aggregate via the suite-level `aggregate` choice.
+    #[serde(default = "default_n")]
+    pub n: usize,
+    #[serde(default)]
+    pub stop: Vec<String>,
+    /// Optional fixed seed for deterministic decoding. When `None` the server
+    /// picks one per request (and records it in the result for replayability).
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Optional per-eval chat-template variables (e.g. Qwen's
+    /// `enable_thinking=false`). Forwarded into the chat template context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+pub fn default_temperature() -> f32 {
+    0.0
+}
+fn default_top_p() -> f32 {
+    1.0
+}
+fn default_top_k() -> u32 {
+    0
+}
+pub fn default_max_tokens() -> usize {
+    256
+}
+fn default_n() -> usize {
+    1
+}
+
+impl Default for EvalGenerationParams {
+    fn default() -> Self {
+        Self {
+            temperature: default_temperature(),
+            top_p: default_top_p(),
+            top_k: default_top_k(),
+            max_tokens: default_max_tokens(),
+            n: default_n(),
+            stop: Vec::new(),
+            seed: None,
+            chat_template_kwargs: None,
+        }
+    }
+}
+
+/// A single chat message (mirrors the API `Message` shape, kept here to
+/// keep `kiln-eval` independent of the server crate).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EvalChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// One eval example: a prompt, an expected answer / scoring target, optional
+/// per-example overrides for generation params and scorer.
+///
+/// `id` is used to refer to the example in `EvalResult` and to make A/B
+/// comparison stable across adapters. When omitted, the loader auto-fills it
+/// from `sha256(messages || target)[..16]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalExample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub messages: Vec<EvalChatMessage>,
+    /// The expected answer. Interpreted by the scorer: a target like
+    /// `"42"` works for exact_match and numeric_tolerance; multiple-choice
+    /// uses single letters like `"A"`. JSON-validity ignores the target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Optional alternative correct answers — any match counts. Useful for
+    /// paraphrase-tolerant exact match and multiple-correct MCQ.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// Optional per-example tags (e.g. `["arithmetic", "easy"]`) for slicing
+    /// metrics in the aggregate report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Optional per-example metadata, surfaced back to the user in the
+    /// `EvalResult` so domain-specific dashboards can join in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    /// Override the suite-level scorer for this example only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scorer: Option<Scorer>,
+    /// Override the suite-level generation params for this example only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<EvalGenerationParams>,
+    /// Optional weight contributing to the aggregate. Defaults to 1.0.
+    #[serde(default = "default_weight")]
+    pub weight: f32,
+}
+
+fn default_weight() -> f32 {
+    1.0
+}
+
+impl EvalExample {
+    /// Returns the stable example ID, computing one from a hash when the
+    /// caller did not supply one. Idempotent.
+    pub fn resolved_id(&self) -> String {
+        if let Some(id) = self.id.as_ref()
+            && !id.is_empty()
+        {
+            return id.clone();
+        }
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for m in &self.messages {
+            hasher.update(m.role.as_bytes());
+            hasher.update([0u8]);
+            hasher.update(m.content.as_bytes());
+            hasher.update([0u8]);
+        }
+        if let Some(t) = self.target.as_ref() {
+            hasher.update(b"|t|");
+            hasher.update(t.as_bytes());
+        }
+        for a in &self.aliases {
+            hasher.update(b"|a|");
+            hasher.update(a.as_bytes());
+        }
+        let digest = hasher.finalize();
+        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        hex
+    }
+}
+
+/// A suite: header + examples.
+///
+/// JSON shape (suite-level defaults + inline examples):
+///
+/// ```json
+/// {
+///   "name": "math-200",
+///   "description": "200 grade-school arithmetic problems",
+///   "default_scorer": {"kind": "numeric_tolerance", "rtol": 0.0, "atol": 0.0},
+///   "generation": {"temperature": 0.0, "max_tokens": 64},
+///   "examples": [
+///     {"messages": [{"role":"user","content":"47 + 138 = ?"}], "target": "185"}
+///   ]
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalSuite {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Required: the scorer used for any example without a `scorer` override.
+    pub default_scorer: Scorer,
+    /// Suite-wide generation defaults. Per-example overrides win.
+    #[serde(default)]
+    pub generation: EvalGenerationParams,
+    /// Optional system message prepended to every example's messages, if the
+    /// example doesn't already start with one. Lets the suite author lock in
+    /// task framing without duplicating it per example.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+    /// Inline examples. May be empty when examples are streamed from a
+    /// sidecar JSONL file (see `EvalSuite::load_jsonl`).
+    #[serde(default)]
+    pub examples: Vec<EvalExample>,
+    /// Suite-author-chosen schema version. Defaults to v1 for backward
+    /// compatibility with the first generation of suite files.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+}
+
+fn default_schema_version() -> u32 {
+    1
+}
+
+impl EvalSuite {
+    /// Load a suite from a JSON file. The file is the full `EvalSuite`.
+    pub fn load_json(path: &Path) -> Result<Self, SuiteLoadError> {
+        let bytes = std::fs::read(path).map_err(|e| SuiteLoadError::Io(format!("{e}")))?;
+        let suite: EvalSuite =
+            serde_json::from_slice(&bytes).map_err(|e| SuiteLoadError::Parse(format!("{e}")))?;
+        suite.validate()?;
+        Ok(suite)
+    }
+
+    /// Load a suite split across `header.json` + `examples.jsonl`. The header
+    /// carries everything except `examples`; each non-empty line of the JSONL
+    /// is one `EvalExample`. Used for large suites that benefit from
+    /// line-oriented diffs and streaming reads.
+    pub fn load_jsonl(header_path: &Path, examples_path: &Path) -> Result<Self, SuiteLoadError> {
+        let bytes = std::fs::read(header_path).map_err(|e| SuiteLoadError::Io(format!("{e}")))?;
+        let mut suite: EvalSuite =
+            serde_json::from_slice(&bytes).map_err(|e| SuiteLoadError::Parse(format!("{e}")))?;
+        if !suite.examples.is_empty() {
+            return Err(SuiteLoadError::Parse(
+                "header file already contains examples; remove them when pairing with JSONL"
+                    .to_string(),
+            ));
+        }
+        let file =
+            std::fs::File::open(examples_path).map_err(|e| SuiteLoadError::Io(format!("{e}")))?;
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(file);
+        for (idx, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| {
+                SuiteLoadError::Io(format!("examples line {}: {e}", idx + 1))
+            })?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let ex: EvalExample = serde_json::from_str(trimmed).map_err(|e| {
+                SuiteLoadError::Parse(format!("invalid example at line {}: {e}", idx + 1))
+            })?;
+            suite.examples.push(ex);
+        }
+        suite.validate()?;
+        Ok(suite)
+    }
+
+    /// Stable per-suite summary surfaced in the listing API.
+    pub fn summary(&self) -> EvalSuiteSummary {
+        let mut tags: BTreeMap<String, u32> = BTreeMap::new();
+        for ex in &self.examples {
+            for t in &ex.tags {
+                *tags.entry(t.clone()).or_default() += 1;
+            }
+        }
+        EvalSuiteSummary {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            num_examples: self.examples.len(),
+            default_scorer_kind: self.default_scorer.kind_label(),
+            tags,
+        }
+    }
+
+    fn validate(&self) -> Result<(), SuiteLoadError> {
+        if self.name.trim().is_empty() {
+            return Err(SuiteLoadError::Parse(
+                "suite name must be non-empty".to_string(),
+            ));
+        }
+        if self.name.contains('/') || self.name.contains('\\') || self.name.contains("..") {
+            return Err(SuiteLoadError::Parse(format!(
+                "suite name '{}' must not contain path separators",
+                self.name
+            )));
+        }
+        if self.examples.is_empty() {
+            return Err(SuiteLoadError::Parse(
+                "suite must contain at least one example".to_string(),
+            ));
+        }
+        for (idx, ex) in self.examples.iter().enumerate() {
+            if ex.messages.is_empty() {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} has empty messages"
+                )));
+            }
+            if !ex.weight.is_finite() || ex.weight < 0.0 {
+                return Err(SuiteLoadError::Parse(format!(
+                    "example {idx} weight {} must be finite and non-negative",
+                    ex.weight
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Errors raised while loading a suite from disk.
+#[derive(Debug, thiserror::Error)]
+pub enum SuiteLoadError {
+    #[error("io: {0}")]
+    Io(String),
+    #[error("parse: {0}")]
+    Parse(String),
+}
+
+/// Lightweight projection used by the suite-listing API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalSuiteSummary {
+    pub name: String,
+    pub description: Option<String>,
+    pub num_examples: usize,
+    pub default_scorer_kind: &'static str,
+    /// Tag → count map (sorted).
+    pub tags: BTreeMap<String, u32>,
+}
+
+/// Compare-mode spec: same suite, multiple adapters. The server runs the
+/// suite once per adapter (sharing prompt tokenization where possible) and
+/// emits a head-to-head diff.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalCompareSpec {
+    pub suite: String,
+    /// Adapter names to compare. An empty string means the base model
+    /// (no adapter). Order is preserved in the result.
+    pub adapters: Vec<String>,
+    /// Optional generation override applied to every adapter run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<EvalGenerationParams>,
+}
+
+/// Auto-eval hook attached to an `SftRequest` or `GrpoRequest`. When set,
+/// the training queue worker enqueues an eval against the produced adapter
+/// once training finishes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostEvalConfig {
+    /// Name of the registered suite to run.
+    pub suite: String,
+    /// Optional generation override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<EvalGenerationParams>,
+    /// When set and the aggregate accuracy is strictly below this threshold,
+    /// the produced adapter is unloaded and renamed with a `.failed` suffix.
+    /// Use this as a "promote-only-if-good" gate after fine-tuning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_accuracy: Option<f32>,
+    /// If true and `min_accuracy` is set, runs the eval against the base
+    /// model as a baseline before scoring the trained adapter. Both results
+    /// land on the training job's `EvalRunRef`.
+    #[serde(default)]
+    pub include_baseline: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scorers::NumericTolerance;
+
+    fn ex(role: &str, content: &str, target: &str) -> EvalExample {
+        EvalExample {
+            id: None,
+            messages: vec![EvalChatMessage {
+                role: role.to_string(),
+                content: content.to_string(),
+            }],
+            target: Some(target.to_string()),
+            aliases: Vec::new(),
+            tags: Vec::new(),
+            metadata: None,
+            scorer: None,
+            generation: None,
+            weight: 1.0,
+        }
+    }
+
+    #[test]
+    fn resolved_id_is_stable_and_id_overrides_hash() {
+        let e = ex("user", "What is 1+1?", "2");
+        let id1 = e.resolved_id();
+        let id2 = e.resolved_id();
+        assert_eq!(id1, id2);
+        let mut e2 = e.clone();
+        e2.id = Some("custom-id".to_string());
+        assert_eq!(e2.resolved_id(), "custom-id");
+    }
+
+    #[test]
+    fn suite_validate_rejects_empty_name_and_examples() {
+        let suite = EvalSuite {
+            name: "".into(),
+            description: None,
+            default_scorer: Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![ex("user", "x", "y")],
+            schema_version: 1,
+        };
+        assert!(suite.validate().is_err());
+
+        let suite = EvalSuite {
+            name: "ok".into(),
+            description: None,
+            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![],
+            schema_version: 1,
+        };
+        assert!(suite.validate().is_err());
+    }
+
+    #[test]
+    fn suite_rejects_bad_name() {
+        let suite = EvalSuite {
+            name: "bad/name".into(),
+            description: None,
+            default_scorer: Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![ex("user", "x", "y")],
+            schema_version: 1,
+        };
+        assert!(suite.validate().is_err());
+    }
+
+    #[test]
+    fn summary_counts_tags() {
+        let mut e1 = ex("user", "a", "1");
+        e1.tags = vec!["math".into(), "easy".into()];
+        let mut e2 = ex("user", "b", "2");
+        e2.tags = vec!["math".into()];
+        let suite = EvalSuite {
+            name: "math".into(),
+            description: None,
+            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![e1, e2],
+            schema_version: 1,
+        };
+        let s = suite.summary();
+        assert_eq!(s.num_examples, 2);
+        assert_eq!(s.tags.get("math"), Some(&2));
+        assert_eq!(s.tags.get("easy"), Some(&1));
+    }
+
+    #[test]
+    fn load_json_and_jsonl_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let suite = EvalSuite {
+            name: "math".into(),
+            description: Some("toy".into()),
+            default_scorer: Scorer::NumericTolerance(NumericTolerance::default()),
+            generation: EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![ex("user", "1+1?", "2")],
+            schema_version: 1,
+        };
+        let json = serde_json::to_string(&suite).unwrap();
+        let p = dir.path().join("s.json");
+        std::fs::write(&p, &json).unwrap();
+        let loaded = EvalSuite::load_json(&p).unwrap();
+        assert_eq!(loaded.name, "math");
+        assert_eq!(loaded.examples.len(), 1);
+
+        // JSONL split
+        let mut header = suite.clone();
+        header.examples.clear();
+        let header_path = dir.path().join("h.json");
+        std::fs::write(&header_path, serde_json::to_string(&header).unwrap()).unwrap();
+        let ex_path = dir.path().join("e.jsonl");
+        let mut buf = String::new();
+        for e in &suite.examples {
+            buf.push_str(&serde_json::to_string(e).unwrap());
+            buf.push('\n');
+        }
+        std::fs::write(&ex_path, buf).unwrap();
+        let loaded = EvalSuite::load_jsonl(&header_path, &ex_path).unwrap();
+        assert_eq!(loaded.examples.len(), 1);
+    }
+}

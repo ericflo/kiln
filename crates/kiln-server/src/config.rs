@@ -29,6 +29,35 @@ pub struct KilnConfig {
     pub speculative: SpeculativeDecodingConfig,
     pub streaming_prefill: StreamingPrefillConfig,
     pub adapters: AdaptersConfig,
+    /// Eval subsystem configuration. `None` means "use defaults" — the
+    /// server still wires the eval API; only the on-disk suite registry
+    /// location is left at its default `<adapter_dir>/.eval/suites`.
+    #[serde(default)]
+    pub eval: Option<EvalConfig>,
+}
+
+/// Eval subsystem configuration.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EvalConfig {
+    /// Directory where named eval suites are persisted (each as
+    /// `<eval_dir>/<name>/suite.json`). `None` falls back to
+    /// `<adapter_dir>/.eval/suites`.
+    pub eval_dir: Option<std::path::PathBuf>,
+    /// Maximum eval jobs allowed in the queue at once.
+    pub max_queued_jobs: usize,
+    /// Maximum tracked eval-job entries (terminal entries TTL out).
+    pub max_tracked_jobs: usize,
+}
+
+impl Default for EvalConfig {
+    fn default() -> Self {
+        Self {
+            eval_dir: None,
+            max_queued_jobs: 32,
+            max_tracked_jobs: 1024,
+        }
+    }
 }
 
 /// HTTP server settings.
@@ -323,6 +352,7 @@ impl Default for KilnConfig {
             speculative: SpeculativeDecodingConfig::default(),
             streaming_prefill: StreamingPrefillConfig::default(),
             adapters: AdaptersConfig::default(),
+            eval: None,
         }
     }
 }

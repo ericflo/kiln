@@ -76,6 +76,7 @@ fn fill_queue(state: &AppState, n: usize) {
             job: QueuedJob::Sft(SftRequest {
                 examples: Vec::new(),
                 config: Default::default(),
+                post_eval: None,
             }),
         });
     }

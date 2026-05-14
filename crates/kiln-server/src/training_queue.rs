@@ -541,15 +541,28 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         TrainingJobType::Grpo => TrainingMetricType::Grpo,
     };
 
-    // Set up progress callback
+    // Set up progress callback. Records the latest scalar progress AND
+    // appends a sample to `loss_history` so the live UI chart has a
+    // bounded series to draw. Sampling is downsampled in-place at
+    // `TRAINING_LOSS_HISTORY_CAP` to bound memory on long runs.
     let training_jobs_cb = state.training_jobs.clone();
     let job_id_cb = job_id.clone();
+    let started_instant = std::time::Instant::now();
     let progress_cb = Box::new(move |progress: trainer::TrainingProgress| {
         let mut jobs = training_jobs_cb.write().unwrap();
         if let Some(job) = jobs.get_mut(&job_id_cb) {
             job.progress = progress.progress;
             job.loss = Some(progress.loss);
             job.epoch = Some(progress.epoch as u32);
+            crate::state::push_loss_sample(
+                &mut job.loss_history,
+                crate::state::TrainingLossSample {
+                    epoch: progress.epoch as u32,
+                    progress: progress.progress,
+                    loss: progress.loss,
+                    elapsed_secs: started_instant.elapsed().as_secs_f64(),
+                },
+            );
         }
     });
 
@@ -559,6 +572,13 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let base_model = trainer::default_base_model(&state.model_config);
 
     // Run the actual training under GPU write lock
+    // Capture the post-eval hook before the job request is consumed by the
+    // trainer.
+    let post_eval: Option<kiln_eval::PostEvalConfig> = match &entry.job {
+        QueuedJob::Sft(req) => req.post_eval.clone(),
+        QueuedJob::Grpo(req) => req.post_eval.clone(),
+    };
+
     let result: std::result::Result<PathBuf, String> = match entry.job {
         QueuedJob::Sft(mut req) => {
             if req.config.checkpoint_interval.is_none() {
@@ -672,6 +692,16 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                     tracing::info!(job_id = %job_id, "auto-loaded trained adapter");
                 }
             }
+
+            // Post-training auto-eval: enqueue an eval job against the
+            // produced adapter so dashboards land directly on the eval
+            // result. Failures here are warnings — we still consider the
+            // training itself successful.
+            if let Some(cfg) = post_eval.as_ref() {
+                if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, cfg) {
+                    tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
+                }
+            }
         }
         Err(e) => {
             tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
@@ -701,6 +731,57 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
         }
     }
+}
+
+/// Enqueue a post-training eval against `adapter_name`. When
+/// `cfg.include_baseline` is set, also enqueues a baseline run against the
+/// base model so a side-by-side delta is computable. Returns Err only when
+/// the eval queue is at capacity or no suite registry is configured;
+/// individual eval failures are reported via the eval-job tracking map.
+pub fn enqueue_post_training_eval(
+    state: &AppState,
+    training_job_id: &str,
+    adapter_name: &str,
+    cfg: &kiln_eval::PostEvalConfig,
+) -> Result<(), String> {
+    if state.suite_registry.is_none() {
+        return Err("server has no eval suite registry".to_string());
+    }
+    let qlen = state.eval_queue.lock().unwrap().len();
+    if qlen >= state.max_queued_eval_jobs {
+        return Err(format!(
+            "eval queue at capacity ({})",
+            state.max_queued_eval_jobs
+        ));
+    }
+    let push = |adapter: Option<String>| -> String {
+        state.enqueue_eval(
+            cfg.suite.clone(),
+            vec![adapter.clone()],
+            crate::eval::queue::EvalSubmissionKind::PostTraining,
+            Some(training_job_id.to_string()),
+            crate::eval::queue::QueuedEvalJob::Registered {
+                suite_name: cfg.suite.clone(),
+                adapter,
+                generation_override: cfg.generation.clone(),
+            },
+        )
+    };
+
+    let mut linked_ids: Vec<String> = Vec::new();
+    if cfg.include_baseline {
+        linked_ids.push(push(None));
+    }
+    linked_ids.push(push(Some(adapter_name.to_string())));
+    // Back-link the eval job IDs onto the training job so dashboards can
+    // find them quickly.
+    {
+        let mut jobs = state.training_jobs.write().unwrap();
+        if let Some(job) = jobs.get_mut(training_job_id) {
+            job.linked_eval_job_ids = linked_ids;
+        }
+    }
+    Ok(())
 }
 
 /// Load a LoRA adapter using the two-phase RwLock pattern.
@@ -801,6 +882,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
         q.push(QueueEntry {
@@ -808,6 +890,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
         q.push(QueueEntry {
@@ -815,6 +898,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
 
@@ -833,6 +917,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
         q.push(QueueEntry {
@@ -840,6 +925,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
         q.push(QueueEntry {
@@ -847,6 +933,7 @@ mod tests {
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
+                post_eval: None,
             }),
         });
 
@@ -866,6 +953,114 @@ mod tests {
         assert_eq!(q.len(), 0);
         assert!(q.pop().is_none());
         assert!(!q.remove("nonexistent"));
+    }
+
+    fn mk_post_eval_state() -> AppState {
+        let config = kiln_core::config::ModelConfig::qwen3_5_4b();
+        let sched_config = kiln_scheduler::SchedulerConfig {
+            max_batch_tokens: 8192,
+            max_batch_size: 64,
+            block_size: 16,
+            prefix_cache_enabled: false,
+            ..Default::default()
+        };
+        let scheduler = kiln_scheduler::Scheduler::new(sched_config, 256);
+        let engine = kiln_model::engine::MockEngine::new(config.clone());
+        let tokenizer = {
+            let json = br#"{
+                "version": "1.0",
+                "model": {
+                    "type": "BPE",
+                    "vocab": {"a": 0, "b": 1},
+                    "merges": []
+                }
+            }"#;
+            kiln_core::tokenizer::KilnTokenizer::from_bytes(json).unwrap()
+        };
+        let mut state = AppState::new_mock(
+            config,
+            scheduler,
+            Arc::new(engine),
+            tokenizer,
+            60,
+            "kiln-test".to_string(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        // Stash the registry on the state with a suite saved upfront so the
+        // post-eval enqueue succeeds.
+        let reg = crate::eval::SuiteRegistry::new(dir.path().to_path_buf());
+        let suite = kiln_eval::EvalSuite {
+            name: "smoke".into(),
+            description: None,
+            default_scorer: kiln_eval::scorers::Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            generation: kiln_eval::EvalGenerationParams::default(),
+            system_prompt: None,
+            examples: vec![kiln_eval::EvalExample {
+                id: Some("e1".into()),
+                messages: vec![kiln_eval::EvalChatMessage {
+                    role: "user".into(),
+                    content: "x".into(),
+                }],
+                target: Some("x".into()),
+                aliases: vec![],
+                tags: vec![],
+                metadata: None,
+                scorer: None,
+                generation: None,
+                weight: 1.0,
+            }],
+            schema_version: 1,
+        };
+        reg.save(&suite, false).unwrap();
+        state.suite_registry = Some(Arc::new(reg));
+        // The tempdir would otherwise drop and remove the suite — leak it.
+        std::mem::forget(dir);
+        state
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_adds_one_job_when_no_baseline() {
+        let state = mk_post_eval_state();
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: false,
+        };
+        enqueue_post_training_eval(&state, "train-job-1", "trained-adapter", &cfg).unwrap();
+        assert_eq!(state.eval_queue.lock().unwrap().len(), 1);
+        assert_eq!(state.eval_jobs.read().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_adds_two_jobs_with_baseline() {
+        let state = mk_post_eval_state();
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: true,
+        };
+        enqueue_post_training_eval(&state, "train-job-2", "trained-adapter", &cfg).unwrap();
+        assert_eq!(state.eval_queue.lock().unwrap().len(), 2);
+        assert_eq!(state.eval_jobs.read().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn enqueue_post_training_eval_errors_when_no_registry() {
+        let mut state = mk_post_eval_state();
+        state.suite_registry = None;
+        let cfg = kiln_eval::PostEvalConfig {
+            suite: "smoke".into(),
+            generation: None,
+            min_accuracy: None,
+            include_baseline: false,
+        };
+        let err = enqueue_post_training_eval(&state, "j", "a", &cfg).unwrap_err();
+        assert!(err.contains("no eval suite registry"));
     }
 
     #[test]

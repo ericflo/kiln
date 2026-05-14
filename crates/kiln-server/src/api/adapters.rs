@@ -1100,6 +1100,139 @@ fn rand_suffix() -> u128 {
     nanos ^ (pid << 64) ^ addr.rotate_left(33)
 }
 
+/// Provenance + audit summary for a single adapter, surfaced at
+/// `GET /v1/adapters/:name/detail`. Used by the adapter drill-in modal
+/// to show "what built this LoRA, what evals has it run against."
+#[derive(Serialize)]
+struct AdapterDetail {
+    name: String,
+    is_active: bool,
+    has_config: bool,
+    has_weights: bool,
+    size_bytes: u64,
+    files: Vec<AdapterFileEntry>,
+    /// Training jobs from the in-memory tracking map whose `adapter_name`
+    /// matches. May not include older jobs that have TTL'd out.
+    training_jobs: Vec<AdapterLinkedJob>,
+    /// Eval jobs whose `adapters` includes this adapter. Sorted newest first.
+    eval_jobs: Vec<AdapterLinkedEval>,
+}
+
+#[derive(Serialize)]
+struct AdapterFileEntry {
+    name: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct AdapterLinkedJob {
+    job_id: String,
+    job_type: crate::state::TrainingJobType,
+    state: kiln_train::TrainingState,
+    elapsed_secs: f64,
+    final_loss: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct AdapterLinkedEval {
+    job_id: String,
+    suite_name: String,
+    accuracy: Option<f32>,
+    state: kiln_eval::EvalJobState,
+}
+
+async fn adapter_detail(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<AdapterDetail>, ApiError> {
+    validate_adapter_name(&name)?;
+    let path = state.adapter_dir.join(&name);
+    let mut files: Vec<AdapterFileEntry> = Vec::new();
+    let mut size_bytes = 0u64;
+    let rd = match std::fs::read_dir(&path) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::adapter_not_found(&name));
+        }
+        Err(e) => return Err(ApiError::internal(format!("read_dir: {e}"))),
+    };
+    {
+        for entry in rd.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    let n = entry.file_name().to_string_lossy().to_string();
+                    files.push(AdapterFileEntry {
+                        name: n,
+                        size_bytes: meta.len(),
+                    });
+                    size_bytes += meta.len();
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let active = state.active_adapter_name.read().unwrap().clone();
+    let is_active = active.as_deref() == Some(name.as_str());
+
+    // Both lookups follow the same pattern: hold the read lock just long
+    // enough to collect a `(submitted_at, projection)` Vec, drop the
+    // lock, then sort outside it. Sorting under the lock would block the
+    // training/eval workers' writers for the duration on a busy server.
+    let mut training_pairs: Vec<(std::time::Instant, AdapterLinkedJob)> = {
+        let jobs = state.training_jobs.read().unwrap();
+        jobs.values()
+            .filter(|j| j.adapter_name == name)
+            .map(|j| {
+                (
+                    j.submitted_at,
+                    AdapterLinkedJob {
+                        job_id: j.job_id.clone(),
+                        job_type: j.job_type,
+                        state: j.state,
+                        elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
+                        final_loss: j.loss,
+                    },
+                )
+            })
+            .collect()
+    };
+    // Newest-first: more-recent submitted_at (larger Instant) first.
+    training_pairs.sort_by(|a, b| b.0.cmp(&a.0));
+    let training_jobs: Vec<AdapterLinkedJob> = training_pairs.into_iter().map(|(_, v)| v).collect();
+
+    let mut eval_pairs: Vec<(String, AdapterLinkedEval)> = {
+        let jobs = state.eval_jobs.read().unwrap();
+        jobs.values()
+            .filter(|j| j.adapters.iter().any(|a| a.as_deref() == Some(name.as_str())))
+            .map(|j| {
+                (
+                    j.submitted_at_iso.clone(),
+                    AdapterLinkedEval {
+                        job_id: j.job_id.clone(),
+                        suite_name: j.suite_name.clone(),
+                        accuracy: j.headline_accuracy,
+                        state: j.state,
+                    },
+                )
+            })
+            .collect()
+    };
+    eval_pairs.sort_by(|a, b| b.0.cmp(&a.0));
+    let eval_jobs: Vec<AdapterLinkedEval> = eval_pairs.into_iter().map(|(_, v)| v).collect();
+
+    Ok(Json(AdapterDetail {
+        name: name.clone(),
+        is_active,
+        has_config: path.join("adapter_config.json").exists(),
+        has_weights: path.join("adapter_model.safetensors").exists(),
+        size_bytes,
+        files,
+        training_jobs,
+        eval_jobs,
+    }))
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/adapters", get(list_adapters))
@@ -1111,5 +1244,6 @@ pub fn routes() -> Router<AppState> {
             post(upload_adapter).layer(DefaultBodyLimit::max(ADAPTER_UPLOAD_BODY_LIMIT)),
         )
         .route("/v1/adapters/{name}", delete(delete_adapter))
+        .route("/v1/adapters/{name}/detail", get(adapter_detail))
         .route("/v1/adapters/{name}/download", get(download_adapter))
 }

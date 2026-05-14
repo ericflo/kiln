@@ -7,6 +7,7 @@ pub mod config;
 pub mod decode_stats;
 pub mod device;
 pub mod error;
+pub mod eval;
 pub mod logging;
 pub mod metrics;
 pub mod recent_requests;

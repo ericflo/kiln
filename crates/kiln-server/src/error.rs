@@ -390,6 +390,158 @@ impl ApiError {
         }
     }
 
+    // ── Eval ────────────────────────────────────────────────────────
+
+    pub fn eval_invalid_request(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "eval_invalid_request",
+            message: format!("Invalid eval request: {detail}"),
+            hint: "Send either a registered suite name OR an inline suite document. See docs/EVAL_GUIDE.md for the schema.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn eval_suite_not_found(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "eval_suite_not_found",
+            message: format!("Eval suite '{name}' not found"),
+            hint: "List registered suites with GET /v1/eval/suites.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn eval_suite_exists(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "eval_suite_exists",
+            message: format!("Eval suite '{name}' already exists"),
+            hint: "Use ?force=true on POST /v1/eval/suites to overwrite.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn eval_job_not_found(job_id: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "eval_job_not_found",
+            message: format!("Eval job '{job_id}' not found"),
+            hint: "List jobs with GET /v1/eval/jobs.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn eval_queue_full(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "eval_queue_full",
+            message: format!("Eval queue is at capacity ({max} jobs queued)"),
+            hint: "Wait for in-flight evals to drain, or raise eval.max_queued_jobs in the config.",
+            retry_after_seconds: Some(15),
+        }
+    }
+
+    pub fn eval_tracked_full(max: usize) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "eval_tracked_full",
+            message: format!("Eval tracking map is at capacity ({max} tracked jobs)"),
+            hint: "Wait for terminal eval entries to TTL out, or raise eval.max_tracked_jobs.",
+            retry_after_seconds: Some(15),
+        }
+    }
+
+    pub fn eval_registry_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "eval_registry_unavailable",
+            message: "Server has no eval directory configured".to_string(),
+            hint: "Start the server with an eval_dir set in kiln.toml, or POST an inline suite instead of a registered name.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn dataset_not_found(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "dataset_not_found",
+            message: format!("Eval dataset '{name}' not found"),
+            hint: "List datasets with GET /v1/eval/datasets.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn dataset_exists(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "dataset_exists",
+            message: format!("Eval dataset '{name}' already exists"),
+            hint: "Delete or rename the existing dataset, or use a different name.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn dataset_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "dataset_invalid",
+            message: format!("Invalid eval dataset: {detail}"),
+            hint: "Each line must be a valid JSON object. SFT datasets must have a `messages` array.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn dataset_registry_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "dataset_registry_unavailable",
+            message: "Server has no dataset directory configured".to_string(),
+            hint: "Start the server with an eval_dir set or restart to let kiln create the default `<adapter_dir>/.eval/` location.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn judgment_store_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "judgment_store_unavailable",
+            message: "Server has no judgment store configured".to_string(),
+            hint: "Same setup as the dataset registry — the judgment store lives under `<adapter_dir>/.eval/judgments/`.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn judgment_not_found(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "judgment_not_found",
+            message: format!("Judgment dataset '{name}' not found"),
+            hint: "List judgments with GET /v1/judgments.",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn judgment_invalid(detail: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "judgment_invalid",
+            message: format!("Invalid judgment: {detail}"),
+            hint: "Required fields: prompt, response_a, response_b, winner (one of `a` | `b` | `tie` | `skip`).",
+            retry_after_seconds: None,
+        }
+    }
+
+    pub fn invalid_suite_name(name: impl std::fmt::Display) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_suite_name",
+            message: format!("Invalid suite name '{name}'"),
+            hint: "Suite names must be non-empty, not contain path separators or '..', and not be absolute paths.",
+            retry_after_seconds: None,
+        }
+    }
+
     // ── Batch completions ───────────────────────────────────────────
 
     pub fn batch_invalid_request(detail: impl std::fmt::Display) -> Self {
