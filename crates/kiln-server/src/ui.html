@@ -2750,9 +2750,20 @@ select {
   display: flex; gap: 8px; align-items: center;
 }
 .compare-side .compare-side-body {
-  font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
-  white-space: pre-wrap; word-break: break-word; color: var(--text);
-  flex: 1; max-height: 380px; overflow-y: auto;
+  font-size: 12px; line-height: 1.55;
+  word-break: break-word; color: var(--text);
+  flex: 1; max-height: 420px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.compare-side .compare-side-body .md-body {
+  font-size: 12px;
+  padding: 8px 10px;
+}
+.compare-side .compare-side-body .think-block.compare-think {
+  font-size: 11px;
+}
+.compare-side .compare-side-body .think-block.compare-think .think-body {
+  max-height: 160px;
 }
 
 @media (max-width: 900px) {
@@ -8089,51 +8100,203 @@ chatCompareToggle?.addEventListener('change', ev => {
   if (a && b) b.innerHTML = a.innerHTML;
 });
 
+/* ---------------------------------------------------------------------
+   Compare-mode streaming
+
+   Previously this fanned out two *non-streaming* completions and
+   awaited Promise.all, so:
+     - You stared at "Generating…" until both sides finished, with no
+       per-side progress.
+     - Reasoning-capable models discarded the entire `<think>` block
+       since non-streaming responses only return the post-`</think>`
+       content as `message.content`.
+   The streaming variant solves both: each side renders text as it
+   arrives, with a live "Thinking…" header populated from
+   `delta.reasoning_content`, and the existing Save A/B preference
+   flow keeps working off the final content.
+   --------------------------------------------------------------------- */
+
+function _renderCompareSide(side, m) {
+  const head = document.getElementById(`chat-compare-${side}-body`);
+  if (!head) return;
+  let html = '';
+  if (m.reasoning) {
+    const live = m.pending && !m.content;
+    const dur = (m.thinkStartMs && m.thinkEndMs)
+      ? formatChatDuration(m.thinkEndMs - m.thinkStartMs)
+      : (live && m.thinkStartMs ? formatChatDuration(performance.now() - m.thinkStartMs) : null);
+    const label = live ? 'Thinking' : 'Thought';
+    const meta  = dur ? `<span class="think-meta"> · ${live ? '' : 'for '}${escapeHtml(dur)}</span>` : '';
+    html += `<details class="think-block compare-think${live ? ' live' : ''}"${live ? ' open' : ''}>
+      <summary><span class="think-label">${label}</span>${meta}</summary>
+      <div class="think-body">${escapeHtml(m.reasoning)}</div>
+    </details>`;
+  }
+  if (m.error) {
+    html += `<div class="err-block">${escapeHtml(m.error)}</div>`;
+  } else if (m.content) {
+    html += m.pending
+      ? `<pre style="white-space:pre-wrap; margin:0;">${escapeHtml(m.content)}</pre>`
+      : `<div class="md-body">${renderMarkdown(m.content)}</div>`;
+  } else if (m.pending) {
+    html += `<div style="color:var(--text-quiet); font-style:italic; font-size:11px;">Generating…</div>`;
+  }
+  if (m.ttftMs != null || m.durationMs != null) {
+    const stats = [];
+    if (m.ttftMs != null)     stats.push(`<span class="stat"><strong>TTFT</strong> ${escapeHtml(formatChatDuration(m.ttftMs))}</span>`);
+    if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
+    const tps = chatTokensPerSec(m);
+    if (tps != null) stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
+    html += `<div class="turn-foot" style="margin-top:6px;">${stats.join('')}</div>`;
+  }
+  head.innerHTML = html;
+}
+
+async function streamCompareSide(side, adapterName, prompt, temp, signal) {
+  const m = {
+    role: 'assistant', content: '', reasoning: '',
+    pending: true,
+    startMs: performance.now(),
+    firstTokenMs: null, lastTokenMs: null,
+    thinkStartMs: null, thinkEndMs: null,
+    ttftMs: null, durationMs: null,
+    error: null, adapter: adapterName || null,
+  };
+  _renderCompareSide(side, m);
+  const tick = setInterval(() => {
+    if (!m.pending) return;
+    m.durationMs = performance.now() - m.startMs;
+    _renderCompareSide(side, m);
+  }, 250);
+  try {
+    const body = buildChatRequestBody({
+      messages: (() => {
+        const sys = getSystemPromptMessage();
+        const user = { role: 'user', content: prompt };
+        return sys ? [sys, user] : [user];
+      })(),
+      temperature: temp,
+    });
+    if (servedModelId) body.model = servedModelId;
+    if (adapterName) body.adapter = adapterName;
+
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    streamLoop:
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6);
+        if (payload === '[DONE]') break streamLoop;
+        try {
+          const chunk = JSON.parse(payload);
+          const delta = chunk.choices?.[0]?.delta;
+          if (!delta) continue;
+          const now = performance.now();
+          if (m.firstTokenMs == null) { m.firstTokenMs = now; m.ttftMs = now - m.startMs; }
+          if (delta.reasoning_content) {
+            if (m.thinkStartMs == null) m.thinkStartMs = now;
+            m.reasoning += delta.reasoning_content;
+          }
+          if (delta.content) {
+            if (m.thinkStartMs != null && m.thinkEndMs == null) m.thinkEndMs = now;
+            m.content += delta.content;
+          }
+          m.lastTokenMs = now;
+          m.durationMs = now - m.startMs;
+          _renderCompareSide(side, m);
+        } catch {}
+      }
+    }
+    m.pending = false;
+    m.durationMs = (m.lastTokenMs || performance.now()) - m.startMs;
+    if (m.thinkStartMs != null && m.thinkEndMs == null && m.content) {
+      m.thinkEndMs = m.lastTokenMs || performance.now();
+    }
+  } catch (e) {
+    m.pending = false;
+    if (e.name === 'AbortError') {
+      m.error = 'Aborted before completion.';
+    } else {
+      m.error = e?.message || String(e);
+    }
+  } finally {
+    clearInterval(tick);
+    _renderCompareSide(side, m);
+  }
+  return m;
+}
+
 // Hook send button: when compare mode is on, fan out to A and B in
-// parallel and render side-by-side. Otherwise let the existing handler
-// do its thing.
+// parallel and render side-by-side with live streaming. Otherwise
+// let the existing handler do its thing.
 const chatSendBtn = document.getElementById('chat-send');
+let chatCompareAbort = null;
 if (chatSendBtn) {
   chatSendBtn.addEventListener('click', async () => {
     if (!chatCompareMode) return;  // existing handler runs
+    if (chatCompareAbort) return;
     const promptEl = document.getElementById('chat-input');
     const prompt = (promptEl?.value || '').trim();
     if (!prompt) return;
+    let temp;
+    try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
+    catch (error) { toast(error.message, 'err'); return; }
+
     const adapterA = document.getElementById('chat-adapter').value;
     const adapterB = document.getElementById('chat-adapter-b').value;
-    const temp = parseFloat(document.getElementById('chat-temp').value || '0');
     document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
     document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
-    const aBody = document.getElementById('chat-compare-a-body');
-    const bBody = document.getElementById('chat-compare-b-body');
-    aBody.textContent = 'Generating…';
-    bBody.textContent = 'Generating…';
-    const baseBody = { messages: [{role:'user', content: prompt}], temperature: temp, max_tokens: 512 };
-    const aReq = { ...baseBody }; if (adapterA) aReq.adapter = adapterA;
-    const bReq = { ...baseBody }; if (adapterB) bReq.adapter = adapterB;
+    promptEl.value = '';
+    autoresizeChatInput();
+    updateChatSendState();
+    setChatGenerating(true);
+    document.getElementById('chat-save-judgment').disabled = true;
+
+    chatCompareAbort = new AbortController();
     try {
       const [a, b] = await Promise.all([
-        api('/v1/chat/completions', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(aReq) }),
-        api('/v1/chat/completions', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(bReq) }),
+        streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
+        streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
       ]);
-      const aText = a.choices?.[0]?.message?.content || '';
-      const bText = b.choices?.[0]?.message?.content || '';
-      aBody.textContent = aText;
-      bBody.textContent = bText;
-      chatComparePair = {
-        prompt: [{role:'user', content: prompt}],
-        adapter_a: adapterA || null,
-        adapter_b: adapterB || null,
-        response_a: aText,
-        response_b: bText,
-      };
-      document.getElementById('chat-save-judgment').disabled = false;
-    } catch (e) {
-      aBody.textContent = '⚠ ' + e.message;
-      bBody.textContent = '⚠ ' + e.message;
+      if (a.content || b.content) {
+        chatComparePair = {
+          prompt: [{ role: 'user', content: prompt }],
+          adapter_a: adapterA || null,
+          adapter_b: adapterB || null,
+          response_a: a.content || '',
+          response_b: b.content || '',
+        };
+        document.getElementById('chat-save-judgment').disabled = false;
+      }
+    } finally {
+      chatCompareAbort = null;
+      setChatGenerating(false);
     }
   });
 }
+
+// Wire the existing #chat-stop button so it aborts compare-mode
+// streams too (the simple-mode handler already aborts `chatAbort`).
+document.getElementById('chat-stop').addEventListener('click', () => {
+  if (chatCompareAbort) chatCompareAbort.abort();
+}, { capture: false });
 
 // Save the current A/B pair into a judgment dataset. Renders a small
 // inline form (replaces two consecutive `prompt()` dialogs which were
