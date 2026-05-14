@@ -3206,8 +3206,18 @@ fn keep_projection_originals_enabled() -> bool {
 }
 
 fn drop_projection_transposes_enabled() -> bool {
-    (crate::backend::vulkan_active() || env_enabled("KILN_VK_NATIVE_TRAINING"))
-        && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
+    // Only drop projection transposes when training is actually engaged
+    // (KILN_VK_NATIVE_TRAINING set explicitly). Earlier this was widened to
+    // every Vulkan-active process — but inference reads `in_proj_qkv_t` /
+    // `in_proj_z_t` / etc. directly via `backend.linear_prefill_apply`, and
+    // when those transposes are replaced with the shape-[1] BF16 stub at
+    // load time the GDN prefill matmul fails with "only 2d matrixes are
+    // supported [1, T, hidden] [1]" on every chat completion. Keeping the
+    // originals on vulkan_active stays in keep_projection_originals_enabled
+    // (it's cheap-ish and lets training start later); the transposes are
+    // only dropped when the trainer is genuinely going to be the only
+    // consumer.
+    env_enabled("KILN_VK_NATIVE_TRAINING") && !env_enabled("KILN_KEEP_PROJECTION_TRANSPOSES")
 }
 
 fn projection_original_drop_enabled_for_device(device: &Device) -> bool {
