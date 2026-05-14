@@ -364,6 +364,9 @@ async fn main() -> Result<()> {
 
     let tokenizer_prewarm = state.tokenizer.clone();
     let prewarm_state = state.clone();
+    // Cheap clones so the shutdown handler can reach the batching engine
+    // after `api::router` consumes the state.
+    let app_state_for_shutdown = state.clone();
     let app = api::router(state);
 
     let addr = format!("{host}:{port}");
@@ -377,22 +380,44 @@ async fn main() -> Result<()> {
     cli::print_ready_line(host, port);
     spawn_tokenizer_warmup(tokenizer_prewarm);
     spawn_backend_prewarm(prewarm_state);
-    // Graceful shutdown: listen for SIGTERM/SIGINT, drain in-flight requests,
-    // then force-exit after a timeout.
+    // Graceful shutdown: listen for SIGTERM/SIGINT, cancel in-flight
+    // inference via the batching engine (so SSE streams terminate
+    // immediately instead of holding the connection until the model
+    // naturally finishes generating), then bound the drain wait with a
+    // hard timeout so Ctrl+C is always responsive.
     let shutdown_timeout_secs = config.server.shutdown_timeout_secs;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_flag))
-        .await?;
+    // Snapshot the batching engine handle so the signal handler can
+    // proactively stop it. The handle is cheap to clone (just an mpsc
+    // sender + a snapshot atomic).
+    let engine_for_shutdown = match app_state_for_shutdown.backend.as_ref() {
+        ModelBackend::Real {
+            batching_engine, ..
+        } => batching_engine.clone(),
+        ModelBackend::Mock { .. } => None,
+    };
 
-    tracing::debug!(
-        timeout_secs = shutdown_timeout_secs,
-        "server stopped accepting connections — waiting for in-flight requests to drain"
-    );
+    let serve = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_flag, engine_for_shutdown));
 
-    // Give in-flight requests time to complete, then force exit
-    tokio::time::sleep(std::time::Duration::from_secs(shutdown_timeout_secs)).await;
-    tracing::warn!("shutdown timeout reached — exiting");
+    // Cap the total time we'll wait for in-flight requests to drain.
+    // Without this cap, axum's graceful drain can hang indefinitely on
+    // a streaming SSE connection that's mid-generation.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(shutdown_timeout_secs),
+        serve,
+    )
+    .await
+    {
+        Ok(Ok(())) => tracing::info!("server stopped cleanly"),
+        Ok(Err(e)) => tracing::error!(error = %e, "server stopped with error"),
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = shutdown_timeout_secs,
+                "graceful-shutdown drain hit timeout — forcing exit"
+            );
+        }
+    }
 
     Ok(())
 }
@@ -612,8 +637,13 @@ fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {
 #[cfg(not(feature = "vulkan"))]
 fn precompile_vulkan_custom_kernels(_device: &candle_core::Device) {}
 
-/// Wait for SIGTERM or SIGINT, then signal shutdown.
-async fn shutdown_signal(shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+/// Wait for SIGTERM or SIGINT, then signal shutdown. Receiving a *second*
+/// signal while still draining short-circuits straight to process exit so
+/// users hammering Ctrl+C never have to wait.
+async fn shutdown_signal(
+    shutdown_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    engine: Option<kiln_server::batching_engine::BatchingEngineHandle>,
+) {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
@@ -636,6 +666,30 @@ async fn shutdown_signal(shutdown_flag: std::sync::Arc<std::sync::atomic::Atomic
         _ = terminate => tracing::info!("received SIGTERM — initiating graceful shutdown"),
     }
 
-    // Signal the training worker to stop accepting new jobs
+    // Tell training/eval workers + every shutdown-aware code path to stop
+    // accepting work.
     shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // Proactively cancel every in-flight inference request. Without this
+    // step, axum's graceful_shutdown waits for the model to naturally
+    // finish generating on every open SSE stream — which can take a
+    // minute on long completions. `BatchingEngineHandle::stop` triggers
+    // `fail_all`, which calls `cancel.cancel()` + sends EngineEvent::Error
+    // to every waiting/active request so connection handlers return
+    // immediately and axum's drain completes promptly.
+    if let Some(engine) = engine {
+        match engine.stop().await {
+            Ok(()) => tracing::debug!("batching engine stopped — in-flight requests cancelled"),
+            Err(e) => tracing::warn!(error = %e, "batching engine stop failed (continuing)"),
+        }
+    }
+
+    // Watch for a second signal — if the user hammers Ctrl+C, exit
+    // immediately instead of waiting for the drain. Spawning a detached
+    // task here means we don't block the primary shutdown future.
+    tokio::spawn(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::warn!("second SIGINT received — exiting immediately");
+        std::process::exit(130);
+    });
 }

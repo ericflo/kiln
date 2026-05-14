@@ -363,7 +363,11 @@ impl Default for ServerConfig {
             host: "127.0.0.1".into(),
             port: 8420,
             request_timeout_secs: 600,
-            shutdown_timeout_secs: 30,
+            // Hard ceiling on graceful-shutdown drain. With proactive
+            // engine.stop() on signal, real draining typically completes
+            // in under a second, so anything beyond a few seconds is
+            // just a safety net before forcing exit.
+            shutdown_timeout_secs: 5,
         }
     }
 }
@@ -808,7 +812,7 @@ mod tests {
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8420);
         assert_eq!(config.server.request_timeout_secs, 600);
-        assert_eq!(config.server.shutdown_timeout_secs, 30);
+        assert_eq!(config.server.shutdown_timeout_secs, 5);
         assert_eq!(config.model.model_id, "Qwen/Qwen3.5-4B");
         assert!(config.model.path.is_none());
         assert!(config.model.tokenizer_path.is_none());

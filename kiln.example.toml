@@ -20,7 +20,7 @@
 host = "0.0.0.0"
 port = 8420
 request_timeout_secs = 600
-shutdown_timeout_secs = 30
+shutdown_timeout_secs = 5
 
 [model]
 # path = "/path/to/model"            # Required for real inference (omit for mock mode)
