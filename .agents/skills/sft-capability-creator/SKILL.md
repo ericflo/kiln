@@ -33,21 +33,31 @@ The eval is **blind**. You MUST treat the oracle as a black box that returns one
 
 You MUST NOT:
 
-- read `adapters/.eval/suites/**` or any registered suite JSON;
-- read `adapters/.eval/judgments/**` or any per-example judgment file;
-- pass `--json` to `kiln-eval` and parse `runs[].response` or per-example scores;
-- ask the user *"what does the eval check?"* with the intent of memorising its surface;
+- read any file under `adapters/.eval/suites/**` (the registered suite JSONs);
+- read any file under `adapters/.eval/judgments/**` (per-example judgment outputs);
+- read any file under `adapters/.eval/datasets/**` *for the dataset that backs the active oracle suite* — even though kiln puts dataset JSONLs there, those files are the source corpus the eval was synthesised from and are off-limits;
+- call `kiln-eval list` with intent to surface tags that reveal eval contents (tag *counts* leak rough composition);
+- call `kiln-eval --json run ...` and read fields other than `summary.accuracy`, `summary.mean_score`, `summary.num_examples`;
+- call `GET /v1/eval/jobs/{id}` and read `runs[]`, per-example responses, judgments, or any field outside `summary.*`;
+- call `GET /v1/eval/suites/{name}` for the active suite;
+- call `GET /v1/eval/datasets/{name}` or `GET /v1/eval/datasets/{name}/rows` for the dataset backing the active suite;
+- `cat` the oracle wrapper's intermediate JSON tempfile after a run;
+- copy the eval's prompt template into your training data;
 - design a dataset by trying to **invert** the oracle (probe → infer → train-to-match);
-- copy the eval's prompt template into your training data.
+- ask the user *"what does the eval check?"* with the intent of memorising its surface.
 
 You MAY:
 
 - ask the user once at intake for a **plain-English description** of the capability (1–3 sentences);
 - read the score the oracle returns;
-- read the n the oracle returns;
-- ask the user for **categorical hints** if they volunteer them ("the eval is multi-turn", "the eval has tool calls") — but do not press for surface details.
+- read `n` the oracle returns;
+- ask the user for **categorical hints** if they volunteer them ("the eval is multi-turn", "the eval scores short answers", "the eval has a tool-call check") — but do not press for surface details and **never** request the suite name, prompt text, or any example.
 
-If you catch yourself reading a suite file or looking at a per-example output, **stop, revert that step in your reasoning, and write `firewall_breach` in the next log entry's `notes`**. The user is trusting the skill to keep its hands clean; the experimental record loses meaning the moment you peek.
+If you catch yourself reading a suite file or looking at a per-example output, **stop, revert that step in your reasoning, and write `firewall_breach` in the next log entry's `notes`** with one sentence describing what leaked. The user is trusting the skill to keep its hands clean; the experimental record loses meaning the moment you peek. If a breach is severe (you saw the eval's prompts or rubric verbatim), **the session is dead** — start a new one with a slug-suffix `-postbreach` and acknowledge the contamination in the new `capability.md`.
+
+### Operational rule for the agent
+
+Before any `Read` / `Bash cat` / `Bash grep` / `Bash jq` call against a path under `adapters/.eval/`, pause and write a one-line note to yourself ("am I about to peek?"). Almost every legitimate operation you need only touches `sft-cap.<slug>/`, `Qwen3.5-4B/adapters/cap-*/lineage.json` (your own training records), and the oracle wrapper's stdout. If you don't need it for the loop, don't read it.
 
 ---
 
@@ -282,14 +292,15 @@ Pick the next hypothesis. Order of preference:
 
 ## 4. Hypothesis taxonomy (start here when stuck)
 
-Use these as seed families. Each is a sentence the agent can instantiate into a dataset.
+Use these as seed families. **Iteration 1 should always be a T-family ablation** — the asymmetry between verbal supervision and non-verbal evaluation is the *whole point* of the skill, and you cannot make later claims about transfer without first establishing whether prose alone moves the score.
 
-**T — Teach by words, test by deed (the asymmetry the skill is named for)**
-- *"Explain the algorithm in prose with no numeric worked example. The model learns the routing; the eval surfaces the routing as numeric accuracy."*
+**T — Teach by words, test by deed (the asymmetry the skill is named for) — DEFAULT FIRST ABLATION**
+- *"Explain the algorithm in prose with no numeric worked example in the assistant turn. The model learns the routing; the eval surfaces the routing as numeric accuracy."*
 - *"Describe the failure mode of the wrong answer, not the right answer. The model learns what to avoid."*
-- *"Use a different surface form than the eval (different language, different units, longer numbers, fewer numbers) so transfer is forced."*
+- *"Use a different surface form than the eval is likely to use (different language, different units, longer numbers, named entities instead of variables) so transfer is forced."*
+- *"Have the assistant turn answer a meta-question about the skill (\"how would you approach this kind of problem?\") rather than an instance of the skill (\"what is 27+45?\"). Meta-supervision often transfers."*
 
-**F — Framing diversity**
+**F — Framing diversity (run early, after one T)**
 - *"30 paraphrases of one rule beat 1 statement of 30 rules."* Vary *how* you say it, hold *what* fixed.
 - *"Same content, three voices (formal, conversational, terse). Voice diversity broadens the basin."*
 
@@ -310,10 +321,41 @@ Use these as seed families. Each is a sentence the agent can instantiate into a 
 **A — Abstraction ladder**
 - *"Start one ablation at maximum abstraction (a principle stated in 3 sentences), the next at minimum (a worked example). Bracket the right altitude."*
 
-**M — Modality crossover (the most powerful when it works)**
+**M — Modality crossover (most powerful when it works; pair with T)**
 - *"Teach math by talking. Teach prose by listing constraints. Teach tool use by describing why the tool is the right shape for the task."*
 
+**Late-stage families** (only after 5+ iterations and a clear winner):
+
+**H — Hyperparameter probes** (`<slug>-rank16`, `<slug>-3ep`) — keep dataset fixed, change one knob. Confirms the win wasn't an undertrained or overtrained accident.
+
+**B — Bigger-data probe** (`<slug>-256`) — once a small ablation wins, scale the dataset by 4× holding the recipe fixed. Diminishing returns above 256 examples are common at low rank; surprises here are publishable.
+
 Pull from this list when you have no hypothesis. Always specialise to the user's verbal description before generating data.
+
+### Generation prompt template (use to produce prose examples)
+
+When the agent itself is drafting the dataset (the common case), use this as a working scaffold. Adapt the bracketed parts to the capability:
+
+```
+For each of N=64 examples, produce one JSON line of the form
+  {"messages":[{"role":"user","content":"<USER>"},{"role":"assistant","content":"<ASSISTANT>"}]}
+where:
+- <USER> is a natural question that touches the capability but does
+  NOT match the eval's surface form (vary length, framing, vocabulary,
+  named entities, units). Do NOT include the verbatim eval prompt.
+- <ASSISTANT> teaches the algorithm/rule/frame in clear English. Avoid
+  the surface form the eval likely tests (e.g. if the eval asks
+  "What is 27+45?", the assistant should describe HOW to add two-digit
+  numbers with carrying, not produce numbers). Use varied vocabulary
+  across examples — do not echo a single canned phrasing.
+
+Quality bar: read the dataset back to yourself. If you could not learn
+the skill *from these examples alone*, the dataset is too thin; rewrite.
+If you could win the eval just by template-matching three examples,
+the dataset is too narrow; broaden.
+```
+
+This is the dataset's lift — a model that has read 64 sincere English explanations of an algorithm has been taught the algorithm. The eval then asks it to *apply* the algorithm. Apply ≠ recite. That gap is what we are paid to close.
 
 ---
 
@@ -426,7 +468,109 @@ Do **not** include trained adapter binaries in commits — kiln writes them unde
 
 ---
 
-## 11. Anti-patterns (read this list every session)
+## 11. Answer-form discipline (the hidden killer of transfer)
+
+A common failure mode: the prose dataset *does* teach the algorithm, but the evaluator scores short, terminal answers like `"62"` or `"Yes"` — and the SFT-tuned model now responds with a paragraph of prose. The capability is there; the surface form is wrong; the eval reads it as a regression.
+
+The defence is **mixed-form supervision**:
+
+1. The first 80–90 % of the dataset is your hypothesis (prose, abstract, etc.).
+2. The remaining 10–20 % is **anchor examples**: short user questions paired with very-short assistant answers that respect the *output form* you suspect the eval wants. Do **not** copy the eval's prompts — invent new ones in the same shape.
+
+Without knowing the eval's exact form, default to short-answer anchors: terminal `"42"`-style replies for math, `"Yes."`/`"No."`/`"I don't know."` for classification, single-sentence summaries for QA. The anchor is a stylistic preservation prior, not a teaching example — vary the surface but keep the answer terminal.
+
+If iter-1 (a T-family prose ablation) **drops** the score relative to baseline, the most likely cause is answer-form drift, not a failure of transfer. Iter-2 should be the same dataset with 20 % anchor examples added (slug `<slug>-anchored`).
+
+## 12. Regression watch (optional, recommended)
+
+The blind oracle scores one capability. Aggressive SFT can lift it while breaking unrelated things. Recommend the user register a second suite — call it the **anchor suite** — that covers general competence (something like kiln's `qwen3.5-agentic-core` works). Call it the same way as the primary oracle, log its score in the `notes` field of the JSONL entry.
+
+A `kept` ablation that loses >2× MAD on the anchor suite is a *Pyrrhic keep*. Mark it `kept` for the primary metric but explicitly note the regression and treat it as a partial dead end. The next ablation should attempt the same hypothesis at lower rank or with more diverse data, since extreme overfitting is the usual cause.
+
+The anchor suite is **also blind**. The skill is not allowed to read it. Same firewall, two oracles.
+
+## 13. Reproducibility
+
+- **Re-baseline at the start of every session.** Server drift, model swap, kernel re-build — any of these can move the baseline. The first iteration of every new session is `slug=baseline`, regardless of whether one exists in the log already; compare deltas only within a session unless you explicitly re-validate.
+- **Seed the SFT job.** kiln's request body accepts `seed`; the CLI doesn't expose it yet, but a future ablation that wants to test variance can issue the API call directly with a fixed seed and re-run. Pin a seed before declaring a 2× MAD result "real".
+- **Pin dataset order.** SFT is sensitive to example order at low rank. If you want a clean re-run, don't shuffle the JSONL between attempts; if you want a variance probe, shuffle and re-run with a distinct slug like `<slug>-shuffle1`.
+- **Record the kiln server version.** `curl -s "$SERVER/health" | jq -r '.version'` into `capability.config.json` at scaffold time. If a result is anomalous after a server restart, the version may have moved.
+
+## 14. Worked example (read once, follow the shape)
+
+Capability description (intake): *"two-digit subtraction with borrowing — model often messes up the borrow and produces off-by-ten errors."*
+
+```text
+# iter 0 — baseline (slug=baseline)
+./capability.oracle.sh ""
+# -> SCORE=0.36 N=25
+# log: status=kept (it's the baseline), score=0.36, delta=0, hypothesis="baseline".
+
+# iter 1 — T-family (slug=verbal-borrow-algorithm)
+# hypotheses/verbal-borrow-algorithm.md (BEFORE generation):
+#   Claim: 48 prose-only assistant turns describing the column-by-column
+#     subtract-with-borrow procedure will lift two-digit subtraction
+#     accuracy, because the model has the arithmetic primitives and just
+#     needs reliable routing into the borrow case.
+#   Mechanism: prose stabilises the chain "ones-column < ones-digit-of-
+#     subtrahend → borrow from tens column → subtract" without giving
+#     the model any numbers to overfit on.
+#   Held out: no two-digit subtraction problems in the dataset.
+#   Falsification: if Δ < MAD, the issue is form not routing; iter-2 adds
+#     anchor examples. If Δ < -MAD, the dataset clobbered style; iter-2
+#     reduces dataset to 24 examples + adds 8 short-answer anchors.
+
+# Generate 48 prose examples per the §4 template. Each user asks how
+# subtraction works in some specific framing ("If I have 73 apples and
+# eat 28, how do I work out what's left?"); each assistant explains the
+# borrow procedure in 3-6 sentences without writing the answer.
+# Validate: jq -c '.messages | length' shows all = 2. Roles = user/assistant.
+
+# Train + score
+bash <skill>/train_and_score.sh verbal-borrow-algorithm
+# -> ADAPTER=cap-verbal-borrow-algorithm LOSS=1.42 ELAPSED=37 SCORE=0.32 N=25
+
+# Δ = -0.04. Negative. Falsification plan said: form drift -> add anchors.
+
+# iter 2 — slug=verbal-borrow-anchored
+# hypotheses/verbal-borrow-anchored.md (BEFORE):
+#   Claim: same prose dataset + 8 short-answer anchor examples (single-
+#     digit subtraction asked with terminal-form answer like "5") will
+#     preserve the lift while restoring output form.
+# Dataset: 48 prose + 8 anchors (single-digit subtraction Q -> single-
+# digit numeric A). Surface-form-of-eval still held out (no two-digit
+# subtraction problems).
+
+bash <skill>/train_and_score.sh verbal-borrow-anchored
+# -> SCORE=0.44 N=25
+
+# Δ = +0.08 over baseline. With 3 logged ablations, MAD ≈ 0.04 → confidence ≈ 2×.
+# kept. Update capability.md "what's been tried" with one line.
+
+# iter 3 — triangulate. slug=numeric-drill-control
+# A *different* family (M crossover -> symbolic): 32 worked two-digit-
+# subtraction problems with numeric assistant answers. NOT a refinement
+# of the winner; a control that asks "could we have got here without the
+# prose route?".
+# Falsification: if numeric-drill-control matches or beats anchored,
+# the prose explanation isn't doing causal work — we're just doing SFT.
+
+bash <skill>/train_and_score.sh numeric-drill-control
+# -> SCORE=0.40 N=25
+
+# Δ = +0.04 over baseline, less than the prose+anchor combo.
+# Prose route is doing real work. Log: status=discard (below best),
+# notes="control: pure numeric drill underperforms prose+anchor".
+
+# iter 4 — refine the winner. slug=verbal-borrow-anchored-paraphrased
+# Same recipe but the 48 prose examples are deliberately *more diverse*
+# in framing (formal/casual/terse/poetic).
+# ...continue.
+```
+
+The pattern is: **T-prose → anchor-fix → triangulate with control → refine winner**. The first four iterations buy you a real causal claim. Everything after is gain-chasing within an understood mechanism.
+
+## 15. Anti-patterns (read this list every session)
 
 - **Peeking.** Reading suite files, judgment outputs, per-example transcripts. Hard veto. See §1.
 - **Eval-shaped training data.** Copying the eval's prompt template into your dataset. Even if you've never *read* the eval, if your data looks like the eval, transfer collapses into memorisation.
@@ -434,41 +578,66 @@ Do **not** include trained adapter binaries in commits — kiln writes them unde
 - **Rationalising results.** Discovering a mechanism *after* a positive score. Symptom: your hypothesis file is shorter than your `asi` block.
 - **Loss-chasing.** Picking the adapter with the lower final loss when its blind score is worse. Loss is a training-time signal; the score is ground truth.
 - **Big-data reflex.** Reaching for 1000-example datasets in iteration 2. Small ablations win; only scale a clearly-working hypothesis.
-- **Stylistic clobber.** Training data with a strong style overwrites the base model's defaults even for unrelated queries. Watch for it; the eval may not test style but humans will notice the model went weird.
+- **Stylistic clobber.** Training data with a strong style overwrites the base model's defaults even for unrelated queries. Watch for it; the eval may not test style but humans will notice the model went weird. Anchor examples (§11) and the anchor suite (§12) both defend against this.
 - **Eval contamination through the system prompt.** Adding `"You are an expert at <capability>"` to every system prompt. Usually a bug, not a feature; remove the system prompt unless the user asked for it.
+- **Drifting baseline.** Comparing iter 12 to a baseline from a previous session without re-baselining. The hardware/model/server has likely changed.
+- **Same-slug overwrite without thinking.** `kiln train sft --adapter cap-X` replaces the adapter binary if cap-X exists. Re-using a slug across honest re-runs is fine; re-using it for a *different* hypothesis is a logging crime.
 
 ---
 
-## 12. One-screen quickstart (the actual loop)
+## 16. One-screen quickstart (the actual loop)
 
 ```bash
-# 0. Intake — agent fills this in interactively with the user
-SLUG=capability-name        # short kebab; this names the whole session
-mkdir -p sft-cap.$SLUG/{datasets,hypotheses,adapters}
+# Skill ships at .agents/skills/sft-capability-creator/. Templates at
+# .agents/skills/sft-capability-creator/templates/. Reference them via
+# absolute path or symlink. We'll abbreviate $SKILL.
+
+SKILL=.agents/skills/sft-capability-creator
+
+# 0. Intake — agent fills this in interactively with the user.
+SLUG=capability-name        # short kebab; names the whole session
+$SKILL/templates/scaffold.sh $SLUG
 cd sft-cap.$SLUG
-# write capability.md, capability.config.json, capability.oracle.sh
-chmod +x capability.oracle.sh
+# edit capability.md (paste the user's verbatim description)
+# edit capability.config.json (set eval_suite, scorer_field, direction)
+# capability.oracle.sh is already the kiln-eval wrapper; if the user
+# wants paste-back mode, replace with $SKILL/templates/oracle-paste.sh.
 git add -A && git commit -m "cap[$SLUG]: intake"
 
-# baseline
-./capability.oracle.sh ""              # -> SCORE=0.35 N=25
-# append iter 0 line to capability.jsonl
+# Re-baseline (§13). Always.
+./capability.oracle.sh ""             # -> SCORE=0.36 N=25
+bash $SKILL/templates/log_iter.sh baseline kept 0.36 25 "" "" "" 0 0
 
-# loop — one iteration:
-ABL=verbal-add-algorithm
-# write hypotheses/$ABL.md (claim, mechanism, dataset shape, risk,
-# falsification plan) BEFORE touching data
-# write datasets/$ABL.jsonl (one {"messages":[...]} per line)
-jq -c '.messages | length' datasets/$ABL.jsonl | sort -u  # sanity
-kiln train sft --file datasets/$ABL.jsonl --adapter cap-$ABL \
-  --lr 1e-4 --epochs 1 --lora-rank 4
-echo cap-$ABL > adapters/$ABL.txt
-./capability.oracle.sh cap-$ABL        # -> SCORE=0.41 N=25
-# append iter line to capability.jsonl with score, delta, asi, status
-# update capability.md (what's been tried, hypothesis taxonomy)
-git add -A && git commit -m "cap[$ABL]: kept (+0.06)"
+# Loop — one iteration:
+ABL=verbal-borrow-algorithm
+cp $SKILL/templates/hypothesis.md.tmpl hypotheses/$ABL.md
+# Fill in hypotheses/$ABL.md (claim, mechanism, dataset shape, risk,
+# falsification plan). DO NOT touch data yet.
 
-# repeat until a stop condition fires (§9)
+# Generate datasets/$ABL.jsonl per §4's prompt template.
+jq -c '.messages | length' datasets/$ABL.jsonl | sort -u   # sanity
+
+# Train async (kiln SFT job) + blind-score in one call.
+RESULT=$(bash $SKILL/templates/train_and_score.sh $ABL)
+echo "$RESULT"
+SCORE=$(echo "$RESULT" | grep -oE 'SCORE=[-0-9.]+' | cut -d= -f2)
+N=$(echo "$RESULT" | grep -oE 'N=[0-9]+' | cut -d= -f2)
+LOSS=$(echo "$RESULT" | grep -oE 'LOSS=[-0-9.]+' | cut -d= -f2)
+ELAPSED=$(echo "$RESULT" | grep -oE 'ELAPSED=[0-9]+' | cut -d= -f2)
+
+# Apply falsification plan from hypotheses/$ABL.md. Decide kept|discard.
+STATUS=kept                            # or discard
+bash $SKILL/templates/log_iter.sh $ABL $STATUS $SCORE $N \
+  hypotheses/$ABL.md datasets/$ABL.jsonl cap-$ABL $LOSS $ELAPSED
+
+# Annotate the just-appended entry with `asi` (what was learned).
+# Easiest: edit the last line of capability.jsonl in place (with jq).
+# Update capability.md "what's been tried" with a one-liner.
+
+bash $SKILL/templates/confidence.sh   # advisory only
+git add -A && git commit -m "cap[$ABL]: $STATUS"
+
+# repeat until a stop condition fires (§9).
 ```
 
 That is the entire skill. Everything else above is discipline.

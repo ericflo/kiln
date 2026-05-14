@@ -52,10 +52,14 @@ if [ "$STATE" != "completed" ]; then
   exit 3
 fi
 
-SCORE=$(jq -r ".summary.$FIELD // empty" "$TMP")
-N=$(jq -r '.summary.num_examples // empty' "$TMP")
+# Single-adapter `kiln-eval run` puts metrics under `runs[0].metrics`.
+# Multi-adapter `compare` aggregates into `summary`. Try summary first
+# (forward-compatible), then fall back. We only read the named scorer
+# field and num_examples — never per-example contents.
+SCORE=$(jq -r ".summary.$FIELD // .runs[0].metrics.$FIELD // empty" "$TMP")
+N=$(jq -r '.summary.num_examples // .runs[0].metrics.num_examples // empty' "$TMP")
 if [ -z "$SCORE" ] || [ "$SCORE" = "null" ]; then
-  echo "ORACLE_ERROR: missing summary.$FIELD in eval result" >&2
+  echo "ORACLE_ERROR: missing $FIELD in eval result" >&2
   exit 2
 fi
 
