@@ -6646,18 +6646,18 @@ function renderAdaptersAsCards(data) {
         try {
           if (action === 'load') {
             await api('/v1/adapters/load', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
-            toast('Loaded ' + name, 'ok');
+            toast('Loaded adapter: ' + name, 'ok');
             pollAdapters && pollAdapters();
           } else if (action === 'unload') {
             await api('/v1/adapters/unload', { method: 'POST' });
-            toast('Unloaded — base model active', 'ok');
+            toast('Unloaded adapter', 'ok');
             pollAdapters && pollAdapters();
           } else if (action === 'download') {
             window.location.href = '/v1/adapters/' + encodeURIComponent(name) + '/download';
           } else if (action === 'delete') {
-            if (!confirm(`Delete adapter "${name}"?`)) return;
+            if (!confirm(`Delete adapter "${name}"? This cannot be undone.`)) return;
             await api('/v1/adapters/' + encodeURIComponent(name), { method: 'DELETE' });
-            toast('Deleted', 'ok');
+            toast('Deleted adapter: ' + name, 'ok');
             pollAdapters && pollAdapters();
           } else if (action === 'eval') {
             // Open command palette pre-filtered for "Run X vs name"
