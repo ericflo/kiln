@@ -1447,6 +1447,18 @@ select {
   background: var(--surface);
 }
 .chat-msg .turn-foot .turn-btn:active { background: var(--surface-2); }
+.chat-msg .turn-foot .badge-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
 
 .chat-msg .err-block {
   padding: 8px 12px;
@@ -1591,11 +1603,19 @@ select {
 }
 .chat-output-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: var(--space-2);
   padding: var(--space-2) var(--space-5);
   background: var(--ink-850);
   border-top: 1px solid var(--border);
 }
+.chat-output-actions .chat-turn-count {
+  font-size: var(--text-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-quiet);
+}
+.chat-output-actions .chat-turn-count[hidden] { display: none; }
 .chat-starter-prompts {
   display: flex;
   flex-wrap: wrap;
@@ -3496,7 +3516,10 @@ select {
       </div>
       <div class="chat-messages" id="chat-output"></div>
       <div class="chat-output-actions">
+        <span id="chat-turn-count" class="chat-turn-count"></span>
+        <span style="flex:1;"></span>
         <button type="button" class="btn btn-sm" id="copy-chat-response" data-copy-chat-response disabled>Copy response</button>
+        <button type="button" class="btn btn-sm" id="chat-export" title="Copy the whole conversation as markdown" disabled>⤓ Export</button>
       </div>
       <div class="chat-starter-prompts" aria-label="Starter prompts">
         <span>Try a starter</span>
@@ -5355,25 +5378,66 @@ function renderAssistantBubble(m) {
 
   // Per-turn footer with timing + actions. Hidden while we have nothing
   // useful to display yet (no first-token timing and no content).
-  const showFoot = !!(m.ttftMs || m.durationMs || (!m.pending && hasContent));
+  const showFoot = !!(m.ttftMs || m.durationMs || (!m.pending && (hasContent || m.error)));
   if (showFoot) {
     const stats = [];
+    const tag = (m.adapter || m.adapter === null) && m.temperature != null
+      ? `<span class="badge-tag" title="Adapter + sampling temperature for this turn">${escapeHtml(m.adapter || 'base')} · t=${escapeHtml(String(m.temperature))}</span>`
+      : '';
+    if (tag) stats.push(tag);
     if (m.ttftMs != null)     stats.push(`<span class="stat"><strong>TTFT</strong> ${escapeHtml(formatChatDuration(m.ttftMs))}</span>`);
     if (m.durationMs != null) stats.push(`<span class="stat"><strong>${m.pending ? 'Elapsed' : 'Total'}</strong> ${escapeHtml(formatChatDuration(m.durationMs))}</span>`);
     const tps = chatTokensPerSec(m);
     if (tps != null)          stats.push(`<span class="stat"><strong>~${tps.toFixed(tps >= 100 ? 0 : 1)}</strong> tok/s</span>`);
-    if (!m.pending && hasContent) {
-      stats.push(`<span class="spacer"></span>`);
+    stats.push(`<span class="spacer"></span>`);
+    if (!m.pending && m.error) {
+      stats.push(`<button class="turn-btn" type="button" data-chat-action="regenerate" data-chat-id="${escapeHtml(m._id)}" title="Retry this request">↻ retry</button>`);
+    } else if (!m.pending && hasContent) {
       stats.push(`<button class="turn-btn" type="button" data-chat-action="copy" data-chat-id="${escapeHtml(m._id)}" title="Copy assistant answer">⧉ copy</button>`);
       stats.push(`<button class="turn-btn" type="button" data-chat-action="regenerate" data-chat-id="${escapeHtml(m._id)}" title="Regenerate this response">↻ regenerate</button>`);
     } else if (m.pending) {
-      stats.push(`<span class="spacer"></span>`);
       stats.push(`<button class="turn-btn" type="button" data-chat-action="stop" title="Stop generation">■ stop</button>`);
     }
     parts.push(`<div class="turn-foot">${stats.join('')}</div>`);
   }
 
   return parts.join('');
+}
+
+/* ---------------------------------------------------------------------
+   Auto-scroll behavior
+
+   Snapping to the bottom on every chunk fights the user when they
+   scroll up to read an earlier turn. Track "is the viewport pinned to
+   the bottom?" right before each re-render and only snap if it was.
+   --------------------------------------------------------------------- */
+let chatStickToBottom = true;
+function captureScrollAffinity() {
+  const el = document.getElementById('chat-output');
+  if (!el) return;
+  // 12 px slack so the user doesn't have to be pixel-perfect.
+  chatStickToBottom = (el.scrollHeight - el.scrollTop - el.clientHeight) <= 12;
+}
+function restoreScrollAffinity() {
+  const el = document.getElementById('chat-output');
+  if (!el || !chatStickToBottom) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateChatTurnCount() {
+  const el = document.getElementById('chat-turn-count');
+  const exportBtn = document.getElementById('chat-export');
+  if (!el) return;
+  const userTurns = chatMessages.filter(m => m.role === 'user').length;
+  const finalAssistant = chatMessages.filter(m => m.role === 'assistant' && !m.pending && m.content).length;
+  if (userTurns === 0) {
+    el.hidden = true;
+    if (exportBtn) exportBtn.disabled = true;
+  } else {
+    el.hidden = false;
+    el.textContent = `${userTurns} turn${userTurns === 1 ? '' : 's'} · ${finalAssistant} reply${finalAssistant === 1 ? '' : 'ies'}`;
+    if (exportBtn) exportBtn.disabled = finalAssistant === 0;
+  }
 }
 
 function renderChat() {
@@ -5388,6 +5452,7 @@ function renderChat() {
     updateCopyChatResponseState();
     return;
   }
+  captureScrollAffinity();
   el.innerHTML = chatMessages.map(m => {
     if (m.role === 'assistant') {
       return `<div class="chat-msg assistant${m.pending ? ' pending' : ''}">
@@ -5426,8 +5491,9 @@ function renderChat() {
       <pre>${escapeHtml(m.content)}</pre>
     </div>`;
   }).join('');
-  el.scrollTop = el.scrollHeight;
+  restoreScrollAffinity();
   updateCopyChatResponseState();
+  updateChatTurnCount();
 }
 
 function getLatestAssistantResponseText() {
@@ -5865,6 +5931,63 @@ document.getElementById('chat-clear').addEventListener('click', () => {
 document.getElementById('chat-output').addEventListener('click', handleChatActionClick);
 document.getElementById('chat-output').addEventListener('toggle', handleThinkToggle, true);
 document.getElementById('copy-chat-response').addEventListener('click', copyLatestAssistantResponse);
+
+/* ---------------------------------------------------------------------
+   Conversation export
+
+   Renders the current `chatMessages` as a portable markdown document
+   so users can paste it into a PR/Slack/dataset without retyping. We
+   include the per-turn adapter+temperature badge so a recipient can
+   see what produced each answer.
+   --------------------------------------------------------------------- */
+function exportChatAsMarkdown() {
+  const sys = (document.getElementById('chat-system')?.value || '').trim();
+  const lines = [`# Kiln playground transcript`, '', `_Exported ${new Date().toISOString()}_`, ''];
+  if (sys) {
+    lines.push('## System prompt', '', '```', sys, '```', '');
+  }
+  for (const m of chatMessages) {
+    if (m.role === 'user') {
+      lines.push('## User', '', m.content || '_(empty)_', '');
+    } else if (m.role === 'assistant') {
+      const tag = (m.adapter || m.adapter === null) && m.temperature != null
+        ? ` — ${m.adapter || 'base'}, t=${m.temperature}`
+        : '';
+      lines.push(`## Assistant${tag}`, '');
+      if (m.reasoning) {
+        lines.push('<details><summary>Thinking</summary>', '', '```', m.reasoning, '```', '', '</details>', '');
+      }
+      if (m.error) {
+        lines.push(`> **Error:** ${m.error}`, '');
+      } else {
+        lines.push(m.content || '_(empty)_', '');
+      }
+    }
+  }
+  const text = lines.join('\n');
+  const writeText = navigator.clipboard?.writeText
+    ? navigator.clipboard.writeText.bind(navigator.clipboard)
+    : (t) => { fallbackCopyText(t); return Promise.resolve(); };
+  writeText(text).then(() => {
+    if (Object.prototype.hasOwnProperty.call(window, '__copiedText')) window.__copiedText = text;
+    toast('Conversation copied as markdown');
+  }).catch(() => {
+    try { fallbackCopyText(text); toast('Conversation copied as markdown'); }
+    catch { toast('Could not copy conversation.', 'err'); }
+  });
+}
+document.getElementById('chat-export')?.addEventListener('click', exportChatAsMarkdown);
+
+/* Escape inside the chat input stops an in-flight generation without
+   stealing focus or wiping the input. Falls through when nothing is
+   streaming so the user can still type literal escape sequences. */
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && (chatAbort || chatCompareAbort)) {
+    e.preventDefault();
+    if (chatAbort) chatAbort.abort();
+    if (chatCompareAbort) chatCompareAbort.abort();
+  }
+});
 
 /* ---------------------------------------------------------------------
    Wire up advanced-settings toggle + persistence
