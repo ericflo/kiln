@@ -450,6 +450,40 @@ fn print_human(result: &EvalResultPayload) {
                 println!("    {:<24}  {:>5.1}%", tag, rate * 100.0);
             }
         }
+        if !r.metrics.pass_rate_by_tool.is_empty() {
+            println!("  by tool:");
+            for (tool, br) in &r.metrics.pass_rate_by_tool {
+                println!(
+                    "    {:<24}  {:>5.1}%  ({}/{})",
+                    tool,
+                    br.pass_rate * 100.0,
+                    br.num_pass,
+                    br.num_examples
+                );
+            }
+        }
+        if r.metrics.reasoning_length.num_with_thinking > 0 {
+            println!(
+                "  reasoning: n={}  mean={:.0} chars  p50={}  p90={}  max={}",
+                r.metrics.reasoning_length.num_with_thinking,
+                r.metrics.reasoning_length.mean_chars,
+                r.metrics.reasoning_length.p50_chars,
+                r.metrics.reasoning_length.p90_chars,
+                r.metrics.reasoning_length.max_chars,
+            );
+        }
+        if r.metrics.num_unclosed_thinking > 0 {
+            println!(
+                "  ⚠ {} completion(s) emitted <think> without </think> (max_tokens?)",
+                r.metrics.num_unclosed_thinking
+            );
+        }
+        if r.metrics.num_non_xml_tool_calls > 0 {
+            println!(
+                "  ⚠ {} completion(s) used non-XML tool-call format (Qwen3.5 native is XML)",
+                r.metrics.num_non_xml_tool_calls
+            );
+        }
     }
 }
 

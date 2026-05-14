@@ -366,6 +366,7 @@ impl EvalSuite {
                 "suite must contain at least one example".to_string(),
             ));
         }
+        validate_tools_schema(self.tools.as_deref(), "suite-level tools")?;
         for (idx, ex) in self.examples.iter().enumerate() {
             if ex.messages.is_empty() {
                 return Err(SuiteLoadError::Parse(format!(
@@ -378,9 +379,53 @@ impl EvalSuite {
                     ex.weight
                 )));
             }
+            validate_tools_schema(ex.tools.as_deref(), &format!("example {idx} tools"))?;
         }
         Ok(())
     }
+}
+
+/// Shape-check the optional `tools` field. Tools must be an array of
+/// objects whose `function.name` is a non-empty string. We're tolerant of
+/// extra fields (different SDKs ship different metadata), but we draw the
+/// line at missing function names — those would silently break the chat
+/// template's `<tools>` rendering and produce useless evals.
+fn validate_tools_schema(
+    tools: Option<&[serde_json::Value]>,
+    context: &str,
+) -> Result<(), SuiteLoadError> {
+    let Some(tools) = tools else {
+        return Ok(());
+    };
+    if tools.is_empty() {
+        return Ok(());
+    }
+    for (idx, tool) in tools.iter().enumerate() {
+        let obj = tool.as_object().ok_or_else(|| {
+            SuiteLoadError::Parse(format!(
+                "{context}: entry {idx} must be a JSON object, got {tool:?}"
+            ))
+        })?;
+        // Accept both the OpenAI nested shape (`{type, function: {name, …}}`)
+        // and a flatter shape (`{name, parameters}`) some upstream datasets
+        // use. The chat template treats `tools[*]` as opaque JSON
+        // anyway — we just need a discoverable name.
+        let name = obj
+            .get("function")
+            .and_then(|f| f.as_object())
+            .and_then(|f| f.get("name"))
+            .or_else(|| obj.get("name"))
+            .and_then(|v| v.as_str());
+        match name {
+            Some(n) if !n.trim().is_empty() => {}
+            _ => {
+                return Err(SuiteLoadError::Parse(format!(
+                    "{context}: entry {idx} is missing a non-empty `function.name` (or top-level `name`)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Errors raised while loading a suite from disk.
@@ -498,6 +543,43 @@ mod tests {
             vec![],
         );
         assert!(suite.validate().is_err());
+    }
+
+    #[test]
+    fn suite_rejects_tools_without_names() {
+        let mut suite = mk_suite(
+            "ok",
+            Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            vec![ex("user", "x", "y")],
+        );
+        // Tool missing a name.
+        suite.tools = Some(vec![serde_json::json!({"type": "function"})]);
+        let err = suite.validate().unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("function.name"),
+            "expected name-validation error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn suite_accepts_well_formed_tools() {
+        let mut suite = mk_suite(
+            "ok",
+            Scorer::ExactMatch {
+                case_sensitive: false,
+                strip_whitespace: true,
+            },
+            vec![ex("user", "x", "y")],
+        );
+        suite.tools = Some(vec![serde_json::json!({
+            "type": "function",
+            "function": {"name": "search_web", "parameters": {"type": "object"}}
+        })]);
+        suite.validate().expect("well-formed tool entry should pass");
     }
 
     #[test]
