@@ -13663,6 +13663,63 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
+/// Batched paged decode forward + LM head with the stable graph inputs
+/// threaded through. Lives next to
+/// [`model_forward_paged_with_graph_inputs`] but specialized for
+/// `bs > 1`. The CUDA graph runner uses this under stream capture to
+/// build a captured batched decode graph; replay rewrites the contents
+/// of `graph_inputs.*` in place and re-launches.
+///
+/// Today this is a stub: it ignores `graph_inputs` and delegates to
+/// the existing eager batched forward. Step 6 of the multi-batch
+/// capture sequence (see top of `cuda_graph.rs`) replaces the body
+/// with a stable-pointer-aware variant of
+/// `model_forward_paged_batched_decode_hidden` that reads from
+/// `graph_inputs.token_ids` / `positions` / etc. and writes through
+/// pre-allocated per-layer scratch buffers.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub(crate) fn model_forward_paged_batched_with_graph_inputs(
+    backend: &dyn BackendRuntime,
+    input_tokens: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[BlockTable],
+    sequence_lengths: &[usize],
+    lora: Option<&LoraWeights>,
+    graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
+) -> Result<Tensor> {
+    // Stub: delegate to the existing eager batched forward, ignoring
+    // the pre-allocated per-step buffers. The captured graph this
+    // would feed is also not yet wired in. When the body is replaced
+    // with the stable-input variant, the entry point on
+    // `CudaGraphRunner` (and the caller in `generate.rs`) can flip
+    // over without further API churn here.
+    let _ = graph_inputs;
+    let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+        std::iter::once(&mut *graph_inputs.linear_state).collect();
+    // The single-row collect above is a placeholder — the real body
+    // will pass the persistent batched state directly. We still need
+    // a non-empty &mut [&mut LinearAttentionState] for the signature,
+    // and at the stub layer we know `linear_state` already has the
+    // right batch dim because the runner pre-allocated it via
+    // `CudaGraphRunner::persistent_batched_state(batch_size, …)`.
+    let _ = &mut linear_state_refs;
+    model_forward_paged_batched_decode(
+        backend,
+        input_tokens,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        sequence_lengths,
+        &mut [&mut *graph_inputs.linear_state],
+        lora,
+    )
+}
+
 /// Batched paged decode API for real continuous-batching work.
 ///
 /// Keeps the existing [`PagedKvCache`] API and its caller-held mutex: each
