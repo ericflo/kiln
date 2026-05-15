@@ -1097,6 +1097,37 @@ impl CudaGraphRunner {
         Tensor::new(&[position as f32], device).context("create CUDA graph position buffer")
     }
 
+    /// Allocate a `[batch] u32` token-id buffer with the row 0…batch-1
+    /// contents pre-filled from `token_ids`. The captured batched graph
+    /// reads its embedding-lookup indices from this device pointer; the
+    /// runner refreshes the contents in place via `update_cuda_scalar`
+    /// before each replay.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_token_buffer(device: &Device, token_ids: &[u32]) -> Result<Tensor> {
+        anyhow::ensure!(
+            !token_ids.is_empty(),
+            "new_batched_token_buffer requires a non-empty batch"
+        );
+        Tensor::new(token_ids, device).context("create CUDA graph batched token buffer")
+    }
+
+    /// Allocate a `[batch] f32` per-row decode-position buffer pre-filled
+    /// from `start_positions`. Used by the batched RoPE path under
+    /// capture — the captured kernels see the same device pointer and
+    /// read whatever the runner writes before each replay.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_position_buffer(device: &Device, start_positions: &[usize]) -> Result<Tensor> {
+        anyhow::ensure!(
+            !start_positions.is_empty(),
+            "new_batched_position_buffer requires a non-empty batch"
+        );
+        let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+        Tensor::new(positions_f32.as_slice(), device)
+            .context("create CUDA graph batched position buffer")
+    }
+
     #[cfg(feature = "cuda")]
     fn padded_block_table(
         block_table: &BlockTable,
