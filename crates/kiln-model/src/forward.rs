@@ -17422,6 +17422,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )?;
         device.synchronize()?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
