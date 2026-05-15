@@ -1,0 +1,13 @@
+[model]
+path = "./Qwen3.5-4B"
+
+[speculative]
+enabled = true
+num_speculative_tokens = 4
+
+[prefix_cache]
+enabled = true
+
+[logging]
+level = "info"
+format = "json"

@@ -1,0 +1,32 @@
+{"messages":[{"role":"user","content":"Compute 347 + 859."},{"role":"assistant","content":"347 + 859. Ones: 7+9=16, write 6 carry 1. Tens: 4+5+1=10, write 0 carry 1. Hundreds: 3+8+1=12. So 347 + 859 = 1206."}]}
+{"messages":[{"role":"user","content":"Compute 1024 - 287."},{"role":"assistant","content":"1024 - 287. Ones: 4-7, borrow: 14-7=7. Tens: 1-8, borrow: 11-8=3. Hundreds: 9-2=7. Thousands: 0. So 1024 - 287 = 737."}]}
+{"messages":[{"role":"user","content":"Compute 124 times 36."},{"role":"assistant","content":"124 x 36 = 124 x 30 + 124 x 6 = 3720 + 744 = 4464."}]}
+{"messages":[{"role":"user","content":"What is 1023 divided by 31?"},{"role":"assistant","content":"31 x 33 = 1023 exactly. So 1023 / 31 = 33 with remainder 0."}]}
+{"messages":[{"role":"user","content":"Compute 3.14 squared."},{"role":"assistant","content":"3.14^2 = 3.14 x 3.14 = 9.8596."}]}
+{"messages":[{"role":"user","content":"Solve x^2 + 5x + 6 = 0."},{"role":"assistant","content":"Factor: (x+2)(x+3) = 0. So x = -2 or x = -3."}]}
+{"messages":[{"role":"user","content":"Solve 2x^2 - 7x + 3 = 0."},{"role":"assistant","content":"Using the quadratic formula: x = (7 ± sqrt(49-24))/4 = (7 ± 5)/4. So x = 3 or x = 1/2."}]}
+{"messages":[{"role":"user","content":"Expand (x + 3)(x - 2)."},{"role":"assistant","content":"FOIL: x*x + x*(-2) + 3*x + 3*(-2) = x^2 - 2x + 3x - 6 = x^2 + x - 6."}]}
+{"messages":[{"role":"user","content":"Simplify (x^2 - 9) / (x - 3)."},{"role":"assistant","content":"Factor numerator: x^2 - 9 = (x-3)(x+3). Cancel (x-3): result is x + 3 (for x ≠ 3)."}]}
+{"messages":[{"role":"user","content":"Solve 1/x + 1/(x+1) = 1/2."},{"role":"assistant","content":"Combine left side: (x+1+x)/(x(x+1)) = (2x+1)/(x^2+x) = 1/2. Cross multiply: 2(2x+1) = x^2+x. So x^2 - 3x - 2 = 0. By quadratic formula: x = (3 ± sqrt(17))/2."}]}
+{"messages":[{"role":"user","content":"What is the volume of a sphere with radius 5?"},{"role":"assistant","content":"V = (4/3)pi r^3 = (4/3) x pi x 125 = 500pi/3 ≈ 523.6."}]}
+{"messages":[{"role":"user","content":"What is the surface area of a cylinder with radius 3 and height 10?"},{"role":"assistant","content":"Surface area = 2 pi r^2 + 2 pi r h = 2pi(9) + 2pi(3)(10) = 18pi + 60pi = 78pi ≈ 245.04."}]}
+{"messages":[{"role":"user","content":"What is the area of a regular hexagon with side 4?"},{"role":"assistant","content":"Area = (3 sqrt(3) / 2) s^2 = (3 sqrt(3) / 2) x 16 = 24 sqrt(3) ≈ 41.57."}]}
+{"messages":[{"role":"user","content":"What is the diagonal of a cube with edge 6?"},{"role":"assistant","content":"Cube space-diagonal = edge x sqrt(3) = 6 sqrt(3) ≈ 10.39."}]}
+{"messages":[{"role":"user","content":"What is the distance between points (1, 2) and (4, 6)?"},{"role":"assistant","content":"Distance = sqrt((4-1)^2 + (6-2)^2) = sqrt(9 + 16) = sqrt(25) = 5."}]}
+{"messages":[{"role":"user","content":"What is sin(120 degrees)?"},{"role":"assistant","content":"sin(120°) = sin(180° - 60°) = sin(60°) = sqrt(3)/2 ≈ 0.866."}]}
+{"messages":[{"role":"user","content":"What is cos(135 degrees)?"},{"role":"assistant","content":"cos(135°) = -cos(45°) = -sqrt(2)/2 ≈ -0.707."}]}
+{"messages":[{"role":"user","content":"Solve 2 sin(x) = 1 for x in [0°, 180°]."},{"role":"assistant","content":"sin(x) = 1/2, so x = 30° or x = 150°."}]}
+{"messages":[{"role":"user","content":"Convert 60 degrees to radians."},{"role":"assistant","content":"60° x (pi/180) = pi/3 ≈ 1.047 radians."}]}
+{"messages":[{"role":"user","content":"Solve the system: x + y + z = 6, x + y - z = 2, x - y + z = 0."},{"role":"assistant","content":"Add eqs 1 and 2: 2x + 2y = 8, so x + y = 4. Add eqs 1 and 3: 2x + 2z = 6, so x + z = 3. From eq 1: y = 6 - x - z = 6 - 3 = 3. Wait, better: from x+y=4 and x+z=3 and x+y+z=6, z=2, then x=1, y=3."}]}
+{"messages":[{"role":"user","content":"Solve the system: 3x + 2y = 8, 2x - y = 3."},{"role":"assistant","content":"From eq 2: y = 2x - 3. Substitute: 3x + 2(2x - 3) = 8, so 7x - 6 = 8, x = 2. Then y = 1."}]}
+{"messages":[{"role":"user","content":"Solve: x + y = 7, xy = 12."},{"role":"assistant","content":"x and y are roots of t^2 - 7t + 12 = 0, which factors as (t-3)(t-4)=0. So {x, y} = {3, 4}."}]}
+{"messages":[{"role":"user","content":"Solve: x^2 + y^2 = 25, x + y = 7."},{"role":"assistant","content":"(x+y)^2 = x^2 + 2xy + y^2 = 49. So 2xy = 49 - 25 = 24, xy = 12. Then x and y solve t^2 - 7t + 12 = 0: {x, y} = {3, 4}."}]}
+{"messages":[{"role":"user","content":"Find d/dx of (x^2 + 1)^3."},{"role":"assistant","content":"Chain rule: 3(x^2+1)^2 x d/dx(x^2+1) = 3(x^2+1)^2 x 2x = 6x(x^2+1)^2."}]}
+{"messages":[{"role":"user","content":"Find d/dx of x sin(x)."},{"role":"assistant","content":"Product rule: d/dx[x] sin(x) + x d/dx[sin(x)] = sin(x) + x cos(x)."}]}
+{"messages":[{"role":"user","content":"Find d/dx of ln(x^2 + 1)."},{"role":"assistant","content":"Chain rule: 1/(x^2+1) x d/dx(x^2+1) = 2x/(x^2+1)."}]}
+{"messages":[{"role":"user","content":"Compute the integral of x e^x dx."},{"role":"assistant","content":"Integration by parts: u=x, dv=e^x dx, so du=dx, v=e^x. Integral = x e^x - integral of e^x dx = x e^x - e^x + C = e^x(x - 1) + C."}]}
+{"messages":[{"role":"user","content":"Compute the integral of 1/(x^2 + 1) dx."},{"role":"assistant","content":"This is the derivative of arctan(x). So integral of 1/(x^2+1) dx = arctan(x) + C."}]}
+{"messages":[{"role":"user","content":"Solve dy/dx = 2y with y(0) = 3."},{"role":"assistant","content":"This is exponential growth. General solution: y = C e^(2x). Apply IC: y(0) = C = 3. So y = 3 e^(2x)."}]}
+{"messages":[{"role":"user","content":"Solve dy/dt = -k y with y(0) = N."},{"role":"assistant","content":"Exponential decay. General solution: y = C e^(-kt). Apply y(0) = C = N. So y = N e^(-kt)."}]}
+{"messages":[{"role":"user","content":"Solve dy/dx = y^2."},{"role":"assistant","content":"Separable: dy/y^2 = dx. Integrate: -1/y = x + C. So y = -1/(x + C), or equivalently y = 1/(C' - x)."}]}
+{"messages":[{"role":"user","content":"Solve dy/dt + y = 0 with y(0) = 5."},{"role":"assistant","content":"Rearrange: dy/dt = -y. Exponential decay solution: y = C e^(-t). Apply y(0) = C = 5. So y = 5 e^(-t)."}]}

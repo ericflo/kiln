@@ -1,0 +1,6 @@
+# Oracle internals — firewall. Built by an Opus sub-agent; main agent
+# must not read these. Never commit.
+.oracle-build/
+
+# Jupyter cache cruft
+.ipynb_checkpoints/

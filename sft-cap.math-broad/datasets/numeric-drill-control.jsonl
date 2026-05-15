@@ -1,0 +1,32 @@
+{"messages":[{"role":"user","content":"Compute 47 + 89."},{"role":"assistant","content":"47 + 89. The ones digits 7 and 9 sum to 16, write 6 and carry 1. The tens 4 and 8 plus the carry give 13. So 47 + 89 = 136."}]}
+{"messages":[{"role":"user","content":"What is 234 - 87?"},{"role":"assistant","content":"234 - 87. Borrowing: 4 needs 7, borrow from tens: 14 - 7 = 7. Tens column: now 2 - 8, borrow from hundreds: 12 - 8 = 4. Hundreds: 1. So 234 - 87 = 147."}]}
+{"messages":[{"role":"user","content":"Compute 16 times 14."},{"role":"assistant","content":"16 x 14 = 16 x (10 + 4) = 160 + 64 = 224."}]}
+{"messages":[{"role":"user","content":"What is 156 divided by 12?"},{"role":"assistant","content":"156 / 12. 12 goes into 15 once with remainder 3. Bring down 6 to make 36. 12 goes into 36 three times. So 156 / 12 = 13."}]}
+{"messages":[{"role":"user","content":"Compute 3.5 times 2.4."},{"role":"assistant","content":"3.5 x 2.4 = 35 x 24 / 100 = 840 / 100 = 8.4."}]}
+{"messages":[{"role":"user","content":"Solve for x: 3x + 7 = 22."},{"role":"assistant","content":"Subtract 7 from both sides: 3x = 15. Divide both sides by 3: x = 5."}]}
+{"messages":[{"role":"user","content":"Solve for y: 2y - 5 = 9."},{"role":"assistant","content":"Add 5 to both sides: 2y = 14. Divide by 2: y = 7."}]}
+{"messages":[{"role":"user","content":"If 4x + 3 = 27, what is x?"},{"role":"assistant","content":"Subtract 3: 4x = 24. Divide by 4: x = 6."}]}
+{"messages":[{"role":"user","content":"Factor x^2 + 5x + 6."},{"role":"assistant","content":"Find two numbers that multiply to 6 and sum to 5: 2 and 3. So x^2 + 5x + 6 = (x + 2)(x + 3)."}]}
+{"messages":[{"role":"user","content":"Simplify (2x + 4) - (x - 3)."},{"role":"assistant","content":"Distribute the minus: 2x + 4 - x + 3 = x + 7."}]}
+{"messages":[{"role":"user","content":"A rectangle has length 12 and width 8. What is its area?"},{"role":"assistant","content":"Area of a rectangle is length times width: 12 x 8 = 96."}]}
+{"messages":[{"role":"user","content":"A triangle has base 10 and height 6. What is its area?"},{"role":"assistant","content":"Area = (1/2) x base x height = (1/2) x 10 x 6 = 30."}]}
+{"messages":[{"role":"user","content":"A circle has radius 7. What is its area? (Use pi ≈ 3.14.)"},{"role":"assistant","content":"Area = pi x r^2 = 3.14 x 7^2 = 3.14 x 49 = 153.86."}]}
+{"messages":[{"role":"user","content":"A square has side 9. What is its perimeter?"},{"role":"assistant","content":"Perimeter = 4 x side = 4 x 9 = 36."}]}
+{"messages":[{"role":"user","content":"A cube has edge length 4. What is its volume?"},{"role":"assistant","content":"Volume of a cube = edge^3 = 4^3 = 64."}]}
+{"messages":[{"role":"user","content":"What is sin(30 degrees)?"},{"role":"assistant","content":"sin(30°) = 1/2 = 0.5."}]}
+{"messages":[{"role":"user","content":"What is cos(60 degrees)?"},{"role":"assistant","content":"cos(60°) = 1/2 = 0.5."}]}
+{"messages":[{"role":"user","content":"What is tan(45 degrees)?"},{"role":"assistant","content":"tan(45°) = sin(45°)/cos(45°). Since sin(45°) = cos(45°), tan(45°) = 1."}]}
+{"messages":[{"role":"user","content":"If a right triangle has legs 3 and 4, what is the hypotenuse?"},{"role":"assistant","content":"By the Pythagorean theorem: hypotenuse^2 = 3^2 + 4^2 = 9 + 16 = 25. So hypotenuse = 5."}]}
+{"messages":[{"role":"user","content":"Solve the system: x + y = 10, x - y = 4."},{"role":"assistant","content":"Add the two equations: 2x = 14, so x = 7. Substitute back: 7 + y = 10, so y = 3."}]}
+{"messages":[{"role":"user","content":"Solve the system: 2x + y = 8, x + y = 5."},{"role":"assistant","content":"Subtract the second equation from the first: x = 3. Substitute: 3 + y = 5, so y = 2."}]}
+{"messages":[{"role":"user","content":"Solve the system: 3x + 2y = 12, x + y = 5."},{"role":"assistant","content":"From the second, y = 5 - x. Substitute: 3x + 2(5 - x) = 12, so x + 10 = 12, x = 2. Then y = 3."}]}
+{"messages":[{"role":"user","content":"Solve the system: x + 2y = 7, 2x + y = 8."},{"role":"assistant","content":"From the first, x = 7 - 2y. Substitute: 2(7 - 2y) + y = 8, so 14 - 3y = 8, y = 2. Then x = 3."}]}
+{"messages":[{"role":"user","content":"Find the derivative of x^2."},{"role":"assistant","content":"Using the power rule: d/dx[x^2] = 2x."}]}
+{"messages":[{"role":"user","content":"Find the derivative of 3x^3 + 2x."},{"role":"assistant","content":"Power rule term-by-term: d/dx[3x^3] = 9x^2 and d/dx[2x] = 2. So the derivative is 9x^2 + 2."}]}
+{"messages":[{"role":"user","content":"Find the derivative of sin(x)."},{"role":"assistant","content":"d/dx[sin(x)] = cos(x)."}]}
+{"messages":[{"role":"user","content":"Find the integral of 2x dx."},{"role":"assistant","content":"Integral of 2x dx = x^2 + C."}]}
+{"messages":[{"role":"user","content":"Find the integral of cos(x) dx."},{"role":"assistant","content":"Integral of cos(x) dx = sin(x) + C."}]}
+{"messages":[{"role":"user","content":"Solve the differential equation dy/dx = y."},{"role":"assistant","content":"This is a first-order linear ODE with constant coefficient 1. The general solution is y = C e^x for any constant C."}]}
+{"messages":[{"role":"user","content":"A function y(t) = e^(kt) satisfies y(0) = 5. Write the explicit form."},{"role":"assistant","content":"y(0) = e^0 = 1 = 5 is inconsistent for the bare form, so the model must include a constant: y(t) = 5 e^(kt)."}]}
+{"messages":[{"role":"user","content":"A population doubles every 10 years. Starting at 100, what is the population after 30 years?"},{"role":"assistant","content":"30 years is 3 doubling periods. 100 x 2^3 = 100 x 8 = 800."}]}
+{"messages":[{"role":"user","content":"Money grows at 5% per year compounded annually. Starting at $1000, what is the value after 2 years?"},{"role":"assistant","content":"After 1 year: 1000 x 1.05 = 1050. After 2 years: 1050 x 1.05 = 1102.50. So $1102.50."}]}
