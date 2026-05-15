@@ -518,84 +518,167 @@ impl CudaGraphRunner {
             return Ok(None);
         }
 
-        // Phase 2: replay if we have a captured graph for this bucket
-        // with a matching adapter generation. Today the replay only
-        // refreshes the input buffers and launches the graph — the
-        // GDN state refresh (per-row → persistent slot scatter) is
-        // still pending, so the result is discarded and we fall back
-        // to eager for tokens. This isolates the graph-launch
-        // mechanism for shake-down before enabling result consumption.
+        // Phase 2: replay path on cache hit + adapter-gen match.
+        //
+        // (1) Adapter-gen check (cheap, scalar). Drop on mismatch.
+        // (2) Refresh GDN persistent state from per-row inputs
+        //     in place (no tensor replacement; device pointers stay
+        //     stable for the captured kernels).
+        // (3) Refresh every stable input buffer in place via the
+        //     batched updater family.
+        // (4) Launch the captured graph.
+        // (5) Argmax `output_logits` outside the captured region to
+        //     produce per-row tokens.
+        // (6) Scatter the post-step persistent state back into each
+        //     per-row `LinearAttentionState` so callers see the
+        //     updated GDN history.
+        //
+        // Borrow plumbing: capture-time grabs `&self.captured_batched`,
+        // while state refresh needs `&mut self.batched_state_pool`.
+        // We use disjoint field borrows by going through the
+        // HashMaps directly instead of via `self.persistent_batched_state(...)`.
+        let adapter_gen_now = self.adapter_generation;
+        let captured_exists_with_match = self
+            .captured_batched
+            .get(&key)
+            .map(|c| c.adapter_gen == adapter_gen_now)
+            .unwrap_or(false);
         if let Some(captured) = self.captured_batched.get(&key) {
-            if captured.adapter_gen == self.adapter_generation {
-                let device = weights.embed_tokens.device();
-                // Update every stable input buffer in place.
-                if let Err(e) =
-                    Self::update_batched_token_buffer(&captured.token_buffer, token_ids)
-                {
-                    tracing::warn!("batched graph replay: token refresh failed: {e:#}");
-                    return Ok(None);
-                }
-                if let Err(e) = Self::update_batched_position_buffer(
-                    &captured.position_buffer,
-                    sequence_lengths,
-                ) {
-                    tracing::warn!("batched graph replay: position refresh failed: {e:#}");
-                    return Ok(None);
-                }
-                if let Err(e) = Self::update_batched_rotary_buffers(
-                    &captured.rotary_cos_buffer,
-                    &captured.rotary_sin_buffer,
-                    config,
-                    sequence_lengths,
-                ) {
-                    tracing::warn!("batched graph replay: rotary refresh failed: {e:#}");
-                    return Ok(None);
-                }
-                if let Err(e) = Self::update_batched_paged_metadata_buffers(
-                    &captured.block_table_buffer,
-                    &captured.seqused_k_buffer,
-                    &captured.kv_slot_buffer,
-                    block_tables,
-                    paged_cache,
-                    sequence_lengths,
-                    captured.max_seqlen_k,
-                ) {
-                    tracing::warn!(
-                        "batched graph replay: paged metadata refresh failed: {e:#}"
-                    );
-                    return Ok(None);
-                }
-                let _ = device;
-                // GDN persistent-state refresh: PENDING — without
-                // this the captured graph reads stale recurrent /
-                // conv state. Until the in-place scatter primitive
-                // lands, do not return the replay's tokens; fall
-                // back to eager.
-                let _ = linear_states;
-                match captured.graph.launch() {
-                    Ok(()) => {
-                        tracing::debug!(
-                            batch_size,
-                            max_seqlen_k = key.max_seqlen_k,
-                            "batched CUDA graph: replay launched, falling back to eager pending GDN-state refresh"
-                        );
-                        return Ok(None);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            batch_size,
-                            max_seqlen_k = key.max_seqlen_k,
-                            error = %e,
-                            "batched CUDA graph replay launch failed, dropping cached graph"
-                        );
-                        self.captured_batched.remove(&key);
-                        return Ok(None);
-                    }
-                }
-            } else {
+            if captured.adapter_gen != adapter_gen_now {
                 // Adapter changed since capture; drop the cached graph.
                 self.captured_batched.remove(&key);
             }
+        }
+        if captured_exists_with_match {
+            // Step (2): refresh GDN persistent state via direct
+            // HashMap access. Either-or with the captured map borrow
+            // because both live on `self`; we touch the pool first
+            // and let the borrow end before re-grabbing captured.
+            let refresh_result = {
+                let persistent = self
+                    .batched_state_pool
+                    .get_mut(&batch_size)
+                    .context("missing persistent batched state slot at replay time")?;
+                let row_refs: Vec<&crate::forward::LinearAttentionState> =
+                    linear_states.iter().map(|s| &**s).collect();
+                persistent.refresh_batched_state_from_rows_in_place(&row_refs)
+            };
+            if let Err(e) = refresh_result {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched graph replay: GDN state refresh failed, falling back to eager"
+                );
+                return Ok(None);
+            }
+            // Re-borrow captured for buffer refresh + launch.
+            let captured = self
+                .captured_batched
+                .get(&key)
+                .context("captured graph vanished between adapter-gen check and replay")?;
+            // Step (3): refresh stable input buffers.
+            if let Err(e) = Self::update_batched_token_buffer(&captured.token_buffer, token_ids)
+                .and_then(|()| {
+                    Self::update_batched_position_buffer(
+                        &captured.position_buffer,
+                        sequence_lengths,
+                    )
+                })
+                .and_then(|()| {
+                    Self::update_batched_rotary_buffers(
+                        &captured.rotary_cos_buffer,
+                        &captured.rotary_sin_buffer,
+                        config,
+                        sequence_lengths,
+                    )
+                })
+                .and_then(|()| {
+                    Self::update_batched_paged_metadata_buffers(
+                        &captured.block_table_buffer,
+                        &captured.seqused_k_buffer,
+                        &captured.kv_slot_buffer,
+                        block_tables,
+                        paged_cache,
+                        sequence_lengths,
+                        captured.max_seqlen_k,
+                    )
+                })
+            {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched graph replay: buffer refresh failed, falling back to eager"
+                );
+                return Ok(None);
+            }
+            // Step (4): launch.
+            if let Err(e) = captured.graph.launch() {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched CUDA graph replay launch failed, dropping cached graph"
+                );
+                self.captured_batched.remove(&key);
+                return Ok(None);
+            }
+            // Step (5): argmax over `output_logits` → per-row tokens.
+            let output_logits = captured.output_logits.clone();
+            let tokens_result = (|| {
+                let normed = crate::forward::rms_norm(
+                    &output_logits,
+                    &weights.final_norm,
+                    config.rms_norm_eps,
+                )?;
+                let _ = normed;
+                // output_logits already holds final-norm + lm_head's
+                // contribution? NO — see the wrapper: it does rms_norm
+                // (final_norm) → lm_head → slice_set into output_logits.
+                // So the captured `output_logits` already IS the
+                // post-LM-head logits. Argmax over the vocab axis.
+                crate::sampling::greedy_sample_rows(&output_logits)
+            })();
+            let tokens = match tokens_result {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        batch_size,
+                        max_seqlen_k = key.max_seqlen_k,
+                        error = %e,
+                        "batched graph replay: argmax failed, falling back to eager"
+                    );
+                    return Ok(None);
+                }
+            };
+            // Step (6): scatter persistent → per-row so callers see
+            // the post-step GDN state.
+            let scatter_result = {
+                let persistent = self
+                    .batched_state_pool
+                    .get_mut(&batch_size)
+                    .context("missing persistent batched state slot at scatter time")?;
+                persistent.scatter_batch_rows_replace_with_backend(backend, linear_states)
+            };
+            if let Err(e) = scatter_result {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched graph replay: state scatter failed but tokens already produced"
+                );
+                // Tokens already consumed by caller above is fine —
+                // surface the scatter error so the next decode step
+                // sees an inconsistency rather than silent corruption.
+                return Err(e);
+            }
+            tracing::debug!(
+                batch_size,
+                max_seqlen_k = key.max_seqlen_k,
+                "batched CUDA graph replay produced tokens"
+            );
+            return Ok(Some(tokens));
         }
 
         // Phase 3 (capture): no graph cached → record one. The
