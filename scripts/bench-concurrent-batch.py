@@ -67,13 +67,16 @@ def bench_concurrent(host, num_concurrent, max_tokens, prompt_idx_seed=0):
     url = f"{host}/v1/chat/completions"
     results = [None] * num_concurrent
     errors = [None] * num_concurrent
+    # Per-bench-call nonce so each invocation has unique prompts even when
+    # batch size, seed, and PROMPT match a prior invocation. This bypasses
+    # the deterministic completion cache that would otherwise collapse
+    # repeated greedy decodes into a 0-tok response.
+    nonce = f"{int(time.time() * 1e6)}-{prompt_idx_seed}-{num_concurrent}-{max_tokens}"
 
     def worker(i):
-        # Same-length distinguishing suffix so positions_uniform=True but the
-        # deterministic cache does not collapse identical greedy requests.
         body = {
             "messages": [
-                {"role": "user", "content": PROMPT + f" Variant {i:03d}."}
+                {"role": "user", "content": f"{PROMPT} Variant {nonce}-{i:03d}."}
             ],
             "max_tokens": max_tokens,
             "temperature": 0.0,
