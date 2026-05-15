@@ -7942,10 +7942,22 @@ fn gated_deltanet_forward_decode_if(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
-            // Transpose to [B, channels, T] for conv
+            // Transpose to [B, channels, T] for conv. At seq_len == 1 the
+            // [B, 1, C] -> [B, C, 1] axis swap is a no-data-move shape
+            // reinterpretation: in row-major, element[b, 0, c] sits at the
+            // same offset as element[b, c, 0]. `reshape` on a contiguous
+            // input produces a view (no copy); the conv kernel's strict
+            // [B, C, 1] dims check accepts the view. Saves the
+            // transpose + `contiguous` copy that nsys flagged as ~3 ms /
+            // bench-bs=16 in `kiln/gdn/conv/layout`.
             let mixed_qkv_ct = {
                 kiln_nvtx::range!(c"kiln/gdn/conv/layout");
-                mixed_qkv.transpose(1, 2)?.contiguous()?
+                if seq_len == 1 && mixed_qkv.is_contiguous() {
+                    let (b, _t, c) = mixed_qkv.dims3()?;
+                    mixed_qkv.reshape((b, c, 1))?
+                } else {
+                    mixed_qkv.transpose(1, 2)?.contiguous()?
+                }
             };
             let post_silu = if seq_len == 1
                 && gdn_forward_only_fastpaths
