@@ -949,6 +949,7 @@ mod tests {
                 allocated_blocks: Vec::new(),
                 prefill_duration: Duration::ZERO,
                 decode_duration: Duration::ZERO,
+                id: 0,
             },
             hit_entry_id: None,
             adapter: None,

@@ -183,24 +183,27 @@ pub struct ModelRunner {
     decode_buffer_config: OnceLock<DecodeBufferConfig>,
     /// Cached batched `LinearAttentionState` carried across consecutive
     /// `decode_next_tokens_paged_contiguous_batch_greedy` invocations. When
-    /// the next call's per-row `LinearAttentionState` pointer set is
-    /// identical to what produced this cache, we skip the
-    /// `from_batch_rows` cat (24 GDN layers × 2 state-kinds = 48 cats per
-    /// step, ~1.6 ms total at bs=16) and reuse the cached batched state
-    /// directly. The cache is invalidated on adapter swap (same lifecycle
-    /// as `cuda_graph`) and on pointer-set mismatch.
+    /// the next call's per-row state-id set is identical to what produced
+    /// this cache, we skip the `from_batch_rows` cat (24 GDN layers × 2
+    /// state-kinds = 48 cats per step, ~1.6 ms total at bs=16) and reuse
+    /// the cached batched state directly. The cache is invalidated on
+    /// adapter swap (same lifecycle as `cuda_graph`) and on id-set
+    /// mismatch.
     batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
 }
 
 /// Persistent batched-state cache entry. The fingerprint is the set of
-/// per-row `LinearAttentionState` pointer addresses *in order*; this
-/// uniquely identifies a particular batch composition because the
-/// per-row states are never moved (the actor holds them inside a stable
-/// `Vec<ActiveRequest>` slot until a request finishes).
+/// per-row `PagedBatchedDecodeState::id` values *in order*. We use the
+/// stable atomic-counter id rather than a pointer fingerprint because
+/// the batching-engine actor's `Vec<ActiveRequest>` shifts surviving
+/// requests down in memory whenever a finished request is removed mid-
+/// batch via `Vec::remove`, which invalidates pointer-based keys even
+/// though the requests themselves are the same. The id survives the
+/// shift.
 pub(crate) struct CachedBatchedState {
     pub(crate) state: crate::forward::LinearAttentionState,
-    pub(crate) row_ptrs: Vec<usize>,
+    pub(crate) row_ids: Vec<u64>,
 }
 
 /// Output from a generation call.
@@ -261,6 +264,24 @@ pub struct PagedBatchedDecodeState {
     pub allocated_blocks: Vec<u32>,
     pub prefill_duration: std::time::Duration,
     pub decode_duration: std::time::Duration,
+    /// Stable per-request identity used for caching keys. Assigned at
+    /// construction from a process-global atomic counter so the value is
+    /// independent of where the `PagedBatchedDecodeState` happens to live
+    /// in memory — important because the batching-engine actor's
+    /// `Vec<ActiveRequest>` shifts elements down via `Vec::remove` when a
+    /// request finishes mid-batch, which moves the surrounding
+    /// `PagedBatchedDecodeState`s to new memory addresses. A pointer-based
+    /// cache key would lose its hits on every such shift; this stable id
+    /// survives them.
+    pub id: u64,
+}
+
+static PAGED_BATCHED_DECODE_STATE_NEXT_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_paged_batched_decode_state_id() -> u64 {
+    PAGED_BATCHED_DECODE_STATE_NEXT_ID
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn decode_buffer_max_batch() -> usize {
@@ -2253,6 +2274,7 @@ impl ModelRunner {
             allocated_blocks,
             prefill_duration,
             decode_duration: std::time::Duration::ZERO,
+            id: next_paged_batched_decode_state_id(),
         })
     }
 
@@ -2278,6 +2300,10 @@ impl ModelRunner {
             .map(|state| state.block_table.clone())
             .collect();
         let sequence_lengths: Vec<usize> = states.iter().map(|state| state.seq_len).collect();
+        // Collect stable batched-state-cache fingerprint *before* the
+        // `linear_states` mutable borrow below — otherwise the borrow
+        // checker rejects the immutable `states.iter()`.
+        let row_ids: Vec<u64> = states.iter().map(|state| state.id).collect();
         let mut linear_states: Vec<&mut LinearAttentionState> = states
             .iter_mut()
             .map(|state| &mut state.linear_state)
@@ -2319,21 +2345,23 @@ impl ModelRunner {
             let result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                self.decode_next_tokens_paged_contiguous_batch_greedy(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut linear_state_refs,
+                    Some(&row_ids),
                 )
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                self.decode_next_tokens_paged_contiguous_batch_greedy(
+                self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut no_linear_states,
+                    Some(&row_ids),
                 )
             };
             match result {
@@ -2628,6 +2656,27 @@ impl ModelRunner {
         seq_lens: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
     ) -> Result<Vec<TokenId>> {
+        // Stable-id-less call site (e.g. tests). Skip the batched-state
+        // cache.
+        self.decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+            input_tokens,
+            paged_cache,
+            block_tables,
+            seq_lens,
+            linear_states,
+            None,
+        )
+    }
+
+    pub fn decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+        &self,
+        input_tokens: &[TokenId],
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_states: &mut [&mut LinearAttentionState],
+        row_ids: Option<&[u64]>,
+    ) -> Result<Vec<TokenId>> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
         let batch = input_tokens.len();
         let profile_stages = profile_decode_batcher_stages_enabled();
@@ -2733,29 +2782,29 @@ impl ModelRunner {
                 .iter()
                 .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
         let mut batched_state_cache_hit = false;
-        let row_ptrs: Vec<usize> = linear_states
-            .iter()
-            .map(|s| (&**s as *const LinearAttentionState) as usize)
-            .collect();
         let mut batch_state = if has_linear_layers {
-            // Cache lookup: when the same set of per-row LinearAttentionState
-            // pointers came in last decode step, the cached batched state is
-            // already what `from_batch_rows` would re-produce (because we
-            // scatter to per-row after every forward — the batched state
-            // post-scatter and the per-row states post-scatter are
-            // byte-for-byte equivalent). Taking the cached state directly
-            // skips the per-step 24-GDN-layer × 2-state-kind `Tensor::cat`
-            // workload (~1.6 ms / step at bs=16).
+            // Cache lookup: when the same set of per-row state IDs came in
+            // last decode step, the cached batched state is already what
+            // `from_batch_rows` would re-produce (because we scatter to
+            // per-row after every forward — the batched state post-scatter
+            // and the per-row states post-scatter are byte-for-byte
+            // equivalent). Taking the cached state directly skips the
+            // per-step 24-GDN-layer × 2-state-kind `Tensor::cat` workload
+            // (~1.6 ms / step at bs=16). The cache is only consulted when
+            // the caller supplied a `row_ids` fingerprint that survives the
+            // batching-engine actor's `Vec::remove` shifts.
             let mut cache_guard = self
                 .batched_state_cache
                 .lock()
                 .map_err(|e| anyhow::anyhow!("failed to lock batched state cache: {e}"))?;
-            if let Some(CachedBatchedState { row_ptrs: cached_ptrs, .. }) = cache_guard.as_ref()
-                && cached_ptrs == &row_ptrs
-            {
+            let id_match = match (row_ids, cache_guard.as_ref()) {
+                (Some(ids), Some(CachedBatchedState { row_ids: cached, .. })) => cached == ids,
+                _ => false,
+            };
+            if id_match {
                 let cached = cache_guard
                     .take()
-                    .expect("cache_guard.as_ref() returned Some above");
+                    .expect("id_match implies cache_guard.is_some()");
                 batched_state_cache_hit = true;
                 drop(cache_guard);
                 Some(cached.state)
@@ -2813,16 +2862,19 @@ impl ModelRunner {
             }
         }
         // Park the (now updated) batched state back in the cache so the
-        // next decode step on the same per-row pointer set can skip the
+        // next decode step on the same id set can skip the
         // `from_batch_rows` cat. The per-row states are byte-for-byte
         // equivalent to this batched state right now (we just scattered),
         // so the next cache-hit reuses correct data; the next cache-miss
-        // (different pointer set) discards this entry and re-assembles.
-        if let Some(state) = batch_state.take() {
+        // (different id set, or caller without ids) discards this entry
+        // and re-assembles. We only cache when the caller supplied ids;
+        // otherwise the next call has no way to match and we'd just hold
+        // dead memory.
+        if let (Some(state), Some(ids)) = (batch_state.take(), row_ids) {
             if let Ok(mut cache_guard) = self.batched_state_cache.lock() {
                 *cache_guard = Some(CachedBatchedState {
                     state,
-                    row_ptrs,
+                    row_ids: ids.to_vec(),
                 });
             }
         }
