@@ -41,6 +41,13 @@ fn mlp_bf16_rows8_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
 }
 
+fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err()
+    })
+}
+
 fn mlp_chained_dispatch_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
@@ -264,6 +271,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("full_attn_qkv_decode_bf16w", 5usize, 20u32),
         ("full_attn_qkv_decode_batched", 5usize, 24u32),
         ("full_attn_qkv_decode_batched_bf16w", 5usize, 24u32),
+        ("full_attn_qkv_decode_batched_rows4_bf16w", 5usize, 24u32),
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
         ("gdn_in_proj_decode", 6, 24),
@@ -3901,11 +3909,19 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         .and_then(|n| n.checked_add(v_dim))
         .context("full_attn_qkv_decode_batched: total_out overflow")?;
     anyhow::ensure!(total_out > 0, "full_attn_qkv_decode_batched: total_out is zero");
+    let full_attn_qkv_rows4 = bf16_weights && batch >= 16 && full_attn_qkv_bf16w_rows4_enabled();
     let glsl_path = if bf16_weights {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
-        )
+        if full_attn_qkv_rows4 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/full_attn_qkv_decode_batched_rows4_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
+            )
+        }
     } else {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -3952,7 +3968,12 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         out_buf.handle(),
     ];
     let col_groups = total_out.div_ceil(16);
-    let total_groups = batch
+    let row_groups = if full_attn_qkv_rows4 {
+        batch.div_ceil(4)
+    } else {
+        batch
+    };
+    let total_groups = row_groups
         .checked_mul(col_groups)
         .context("full_attn_qkv_decode_batched: workgroup count overflow")?;
     run_compute_pipeline(

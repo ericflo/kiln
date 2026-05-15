@@ -1108,6 +1108,75 @@ fn full_attn_qkv_decode_batched_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn full_attn_qkv_decode_batched_bf16w_rows4_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    // Realistic Qwen3.5-4B-ish shapes with multiples of 16 along the
+    // total_out axis so the col-group tiling cuts on projection
+    // boundaries, then a handful of batch sizes that cover
+    //   * the unbatched-per-row code path (batch <  16) and
+    //   * the new rows4 path           (batch >= 16, including a
+    //                                   non-multiple-of-4 remainder).
+    let (hidden, q_dim, k_dim, v_dim) = (256usize, 128usize, 64usize, 64usize);
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let q_w = make_weight(q_dim, 0.019)?;
+    let k_w = make_weight(k_dim, -0.031)?;
+    let v_w = make_weight(v_dim, 0.023)?;
+    let q_w_f32 = q_w.to_dtype(DType::F32)?;
+    let k_w_f32 = k_w.to_dtype(DType::F32)?;
+    let v_w_f32 = v_w.to_dtype(DType::F32)?;
+    let q_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &q_w)?;
+    let k_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &k_w)?;
+    let v_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &v_w)?;
+
+    for batch in [4usize, 16usize, 17usize, 32usize, 33usize] {
+        let x = cpu_f32(
+            (0..(batch * hidden))
+                .map(|i| ((i as f32 % 11.0) - 5.0) * 0.09)
+                .collect(),
+            (batch, 1, hidden),
+        )?;
+        let (got_q, got_k, got_v) =
+            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+                &vk, &x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            )
+            .with_context(|| {
+                format!("dispatch_full_attn_qkv_decode_cached_batched_bf16_weights batch={batch}")
+            })?;
+
+        assert_close(
+            &format!("batched full attn bf16 q batch={batch}"),
+            &got_q,
+            &x.broadcast_matmul(&q_w_f32)?,
+            5e-4,
+        )?;
+        assert_close(
+            &format!("batched full attn bf16 k batch={batch}"),
+            &got_k,
+            &x.broadcast_matmul(&k_w_f32)?,
+            5e-4,
+        )?;
+        assert_close(
+            &format!("batched full attn bf16 v batch={batch}"),
+            &got_v,
+            &x.broadcast_matmul(&v_w_f32)?,
+            5e-4,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn full_attn_qkv_decode_batched_bf16w_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

@@ -1,0 +1,125 @@
+// Batched fused single-token full-attention Q/K/V projections with packed bf16
+// weights, four rows per workgroup. Each Q/K/V weight load is reused across
+// four input rows. Output layout matches the unbatched and rows1 batched
+// kernels: `(q | k | v)` per batch row, strided by batch.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint q_dim;
+    uint k_dim;
+    uint v_dim;
+    uint total_out;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer QWeightBuf { uint data_q_w[]; };
+layout(binding = 2) readonly buffer KWeightBuf { uint data_k_w[]; };
+layout(binding = 3) readonly buffer VWeightBuf { uint data_v_w[]; };
+layout(binding = 4) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial0[256];
+shared float partial1[256];
+shared float partial2[256];
+shared float partial3[256];
+
+float unpack_bf16(uint packed, uint idx) {
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (total_out + 15u) / 16u;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint out_idx = col_group * 16u + col_lane;
+    uint partial_idx = col_lane * 16u + red_lane;
+    uint row0 = row_group * 4u;
+
+    uint col = out_idx;
+    uint width = q_dim;
+    uint projection = 0u;
+    if (col >= q_dim) {
+        col -= q_dim;
+        width = k_dim;
+        projection = 1u;
+    }
+    if (projection == 1u && col >= k_dim) {
+        col -= k_dim;
+        width = v_dim;
+        projection = 2u;
+    }
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+    float sum2 = 0.0;
+    float sum3 = 0.0;
+    if (out_idx < total_out) {
+        bool valid0 = row0 < batch;
+        bool valid1 = (row0 + 1u) < batch;
+        bool valid2 = (row0 + 2u) < batch;
+        bool valid3 = (row0 + 3u) < batch;
+        uint x_base0 = row0 * hidden;
+        uint x_base1 = (row0 + 1u) * hidden;
+        uint x_base2 = (row0 + 2u) * hidden;
+        uint x_base3 = (row0 + 3u) * hidden;
+        for (uint h = red_lane; h < hidden; h += 16u) {
+            uint off = h * width + col;
+            float w = projection == 0u
+                ? unpack_bf16(data_q_w[off >> 1], off)
+                : (projection == 1u
+                    ? unpack_bf16(data_k_w[off >> 1], off)
+                    : unpack_bf16(data_v_w[off >> 1], off));
+            if (valid0) {
+                sum0 += data_x[x_base0 + h] * w;
+            }
+            if (valid1) {
+                sum1 += data_x[x_base1 + h] * w;
+            }
+            if (valid2) {
+                sum2 += data_x[x_base2 + h] * w;
+            }
+            if (valid3) {
+                sum3 += data_x[x_base3 + h] * w;
+            }
+        }
+    }
+
+    partial0[partial_idx] = sum0;
+    partial1[partial_idx] = sum1;
+    partial2[partial_idx] = sum2;
+    partial3[partial_idx] = sum3;
+    barrier();
+
+    if (red_lane == 0u && out_idx < total_out) {
+        float total0 = 0.0;
+        float total1 = 0.0;
+        float total2 = 0.0;
+        float total3 = 0.0;
+        for (uint lane = 0u; lane < 16u; lane++) {
+            uint idx = col_lane * 16u + lane;
+            total0 += partial0[idx];
+            total1 += partial1[idx];
+            total2 += partial2[idx];
+            total3 += partial3[idx];
+        }
+        if (row0 < batch) {
+            data_out[row0 * total_out + out_idx] = total0;
+        }
+        if ((row0 + 1u) < batch) {
+            data_out[(row0 + 1u) * total_out + out_idx] = total1;
+        }
+        if ((row0 + 2u) < batch) {
+            data_out[(row0 + 2u) * total_out + out_idx] = total2;
+        }
+        if ((row0 + 3u) < batch) {
+            data_out[(row0 + 3u) * total_out + out_idx] = total3;
+        }
+    }
+}
