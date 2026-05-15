@@ -300,6 +300,17 @@ pub struct CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     captured_batched: HashMap<CudaBatchedGraphKey, CapturedBatchedDecodeGraph>,
+    /// Persistent batched [`LinearAttentionState`] pool, one slot per
+    /// `batch_size` bucket. The captured-batched forward reads the GDN
+    /// recurrent / conv state from the slot's device pointers, which
+    /// must remain stable across replays. Callers refresh the slot's
+    /// contents in-place via the existing
+    /// `assemble_gdn_recurrent_resident_batch_rows` primitive (and the
+    /// conv-state equivalent landed alongside the forward wrapper)
+    /// before each replay.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    batched_state_pool: HashMap<usize, crate::forward::LinearAttentionState>,
     /// Adapter generation counter; incremented on LoRA swap.
     adapter_generation: u64,
     /// Whether warmup is complete.
@@ -324,6 +335,8 @@ impl CudaGraphRunner {
             captured: HashMap::new(),
             #[cfg(feature = "cuda")]
             captured_batched: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            batched_state_pool: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
             #[cfg(feature = "cuda")]
@@ -345,8 +358,59 @@ impl CudaGraphRunner {
             }
             self.captured.clear();
             self.captured_batched.clear();
+            // Persistent batched state survives LoRA swap — the GDN
+            // recurrent/conv tensors are weights-independent and the
+            // next replay refreshes their contents in-place. Drop only
+            // the captured graph that baked stale weight pointers.
             self.cache_full_warned = false;
         }
+    }
+
+    /// Get or lazily allocate the persistent batched [`LinearAttentionState`]
+    /// for `batch_size`. Allocation uses
+    /// [`LinearAttentionState::new_with_batch_for_inference_backend`] so
+    /// the recurrent/conv dtypes match the inference hot path.
+    ///
+    /// The returned reference is the canonical slot for that bucket —
+    /// callers (the batched capture/replay path) must NOT replace the
+    /// inner `recurrent_states[i]` / `conv_states[i]` tensors, only
+    /// refresh their contents in-place. Replacement breaks the
+    /// stable-device-pointer invariant the captured graph relies on.
+    ///
+    /// Returns `None` when the runner is disabled or the device is not
+    /// CUDA — the batched graph path is CUDA-only.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    pub(crate) fn persistent_batched_state(
+        &mut self,
+        batch_size: usize,
+        config: &ModelConfig,
+        device: &Device,
+    ) -> Result<Option<&mut crate::forward::LinearAttentionState>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+        if !matches!(device, Device::Cuda(_)) {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            batch_size > 0,
+            "persistent batched state requires batch_size > 0"
+        );
+        if !self.batched_state_pool.contains_key(&batch_size) {
+            let state =
+                crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
+                    config,
+                    batch_size,
+                    device,
+                    Some("cuda"),
+                )
+                .with_context(|| {
+                    format!("allocate persistent batched LinearAttentionState for bucket {batch_size}")
+                })?;
+            self.batched_state_pool.insert(batch_size, state);
+        }
+        Ok(self.batched_state_pool.get_mut(&batch_size))
     }
 
     /// Whether graphs are enabled.
