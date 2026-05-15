@@ -123,18 +123,50 @@ acceptance gate is verified and demonstrably correct.
 | (d) | Integration parity test framework in `crates/kiln-model/tests/vk_resident_decode_parity.rs`; gated on `KILN_RESIDENT_DECODE_PARITY_MODEL` | same |
 | (e) framework | `decode_microbench full_step_resident` mode chaining 5 resident dispatchers through pool slots. On RTX 6000 Ada at Qwen3.5-4B shapes, batch=1 lands at **604 µs for the full block** — ≈ 120 µs / kernel, well under the 200 µs / call target. Per-kernel legacy floor was 1.1–1.7 ms. | `crates/kiln-vulkan-kernel/examples/decode_microbench.rs` |
 
+### Building-block kernels also landed (for the wire-up)
+
+The full-attention block needs a few more resident dispatchers
+beyond the bf16w GEMMs in the gate (a) table:
+
+| Op | Dispatcher | Source |
+|----|------------|--------|
+| RoPE (Q/K rotation) | `dispatch_rotary_qk_resident` | `vk_rope_f32.comp` (existed for training; surfaced to decode) |
+| Residual add | `dispatch_add_resident` | `add.comp` |
+| Attention output gate | `dispatch_mul_sigmoid_gate_resident` | `vk_mul_sigmoid_gate_f32.comp` |
+| Per-head Q-norm / K-norm | reuse `dispatch_qwen_rmsnorm_forward_resident` with `rows = batch * num_heads, hidden = head_dim` | — |
+
+Parity tests for each compare against a CPU reference at ≤1e-6 abs
+(≤2 ulps for the multiply-sigmoid). With these landed, the
+**kernel-level surface is now complete** — every op the resident
+decode block needs has a `_resident` dispatcher.
+
 ### Remaining
 
-The largest remaining piece is the **per-layer wire-up** inside
-`model_forward_paged_inner`: each call site of the legacy
-`dispatch_*_cached_*` dispatchers needs to route through its
-`_resident` sibling, threading a pool slot between layers instead of
-materializing a Tensor. The entry point
-`model_forward_paged_last_token_resident` exists and gates on
-`supports_resident_decode()` + `decode_resident_pool_ready()`; it
-currently delegates to the legacy fn so behaviour is unchanged. Once
-each layer type (full-attn + GDN) is wired, gate (e)'s end-to-end
-tok/s numbers become measurable via `kiln-bench --features vulkan`.
+Two pieces:
+
+1. **Vulkan-resident paged KV pool.** Today `PagedKvCache::layers` is
+   `Vec<(Tensor, Tensor)>` and on Vulkan the candle device is
+   `Device::Cpu`. The decode-path KV write
+   (`write_token_major_native`) falls back to a candle `slice_set`
+   that goes through CPU storage. The resident path needs a Vulkan
+   `vk::Buffer`-backed pool so each layer's K/V write is a
+   `vkCmdCopyBuffer` from the QKV-projection output slot into the
+   pool at the block-table slot offset. This is architectural — it
+   touches both the cache abstraction and the paged-attention
+   reader.
+
+2. **Per-layer composition.** A new
+   `transformer_block_paged_decode_full_attn_resident` (and a GDN
+   sibling) that chains the dispatchers into a single decode block
+   using `DecodeResidentPool` slots for intermediates. Then
+   `model_forward_paged_last_token_resident` swaps its delegation
+   for a layer loop that calls those instead of
+   `transformer_block_paged_with_rope_tables` /
+   `gated_deltanet_forward_decode_if`.
+
+The first is the larger of the two — it changes the cache type and
+ripples through every backend's KV write path. The second is then
+the assembly job using the dispatchers already in place.
 
 ## Out of scope for this goal
 
