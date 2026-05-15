@@ -1361,6 +1361,7 @@ impl CudaGraphRunner {
                 rotary_sin: &rotary_sin_buffer,
                 attn_out: &paged_decode_outputs,
                 softmax_lse: &paged_decode_lse,
+                output_logits: &output_logits,
                 linear_state: persistent_state,
             };
 

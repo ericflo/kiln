@@ -10042,6 +10042,12 @@ pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
     /// Per-full-attention-layer paged decode LSE scratch, shape
     /// `[batch, n_heads, 1]`.
     pub softmax_lse: &'a [Tensor],
+    /// `[batch, 1, vocab]` stable output-logits buffer. The captured
+    /// forward writes the final logits into this storage via
+    /// `slice_set` so replay always reads from the same device
+    /// pointer; the runner argmax-reduces and DtoH-transfers tokens
+    /// outside the captured region.
+    pub output_logits: &'a Tensor,
     /// Persistent batched [`LinearAttentionState`] slot used by the
     /// captured forward. Lifetime is the graph runner's; the captured
     /// graph reads recurrent/conv state from these device pointers.
@@ -13772,12 +13778,32 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         Some(graph_inputs.positions),
         Some(graph_inputs.token_ids),
     )?;
-    let token_ids = {
+    // Compute logits and slice them into the caller-owned stable
+    // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
+    // records the matmul + slice_set, so on replay the runner can
+    // argmax-reduce the *same* device pointer without re-running any
+    // model kernels.
+    let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+    let logits = lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+        .context("graph-wrapper LM head forward")?;
+    graph_inputs
+        .output_logits
+        .slice_set(&logits, 0, 0)
+        .context("copy graph-wrapper logits into stable output_logits buffer")?;
+    // Argmax over vocab + DtoH to produce the per-row tokens this
+    // call returns. During capture the runner will discard these and
+    // re-argmax `output_logits` after every replay — but returning
+    // them here keeps the function's behavior consistent across
+    // capture and direct-call use.
+    let tokens = {
         kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode_graph");
-        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
+        lm_head_argmax_rows_backend_decode_if(
+            Some(backend),
+            &normed,
+            &weights.embed_tokens_t,
+        )?
     };
-    Ok(token_ids)
+    Ok(tokens)
 }
 
 /// Batched paged decode API for real continuous-batching work.
