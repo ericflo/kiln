@@ -144,12 +144,18 @@ deterministic completion cache collapses repeated greedy decodes onto a
 | Concurrency | Aggregate tok/s | Scale vs bs=1 |
 |---:|---:|---:|
 | 1 | 101 | 1.00× |
-| 2 | 168 | 1.66× |
-| 4 | 323 | 3.20× |
-| 8 | 569 | 5.63× |
-| 16 | 958 | 9.49× |
-| 32 | 1372 | 13.59× |
-| 64 | 1765 | 17.48× |
+| 2 | 170 | 1.69× |
+| 4 | 322 | 3.19× |
+| 8 | 575 | 5.69× |
+| 16 | 945 | 9.36× |
+| 32 | 1355 | 13.42× |
+| 64 | 1776 | 17.59× |
+
+Subsequent cleanup commits (`f6a1e85b` GDN conv layout reshape; `89220f6c`
+stable-id cache fingerprint) preserve these numbers without sacrificing
+robustness; pointer-fingerprint variant of the cache regressed in
+workloads with mixed `max_tokens` (mid-batch `Vec::remove` shifts) and
+the stable id closes that gap.
 
 Source: PRs landing the broadcast-matmul / row-loop-default / positions-
 uniform-gate / batched-state-cache fixes (commits `2e252f8a`,
