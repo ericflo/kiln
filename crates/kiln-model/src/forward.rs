@@ -2556,8 +2556,16 @@ impl LinearAttentionState {
             }
             let conv_refs: Vec<&Tensor> = conv_owned.iter().collect();
 
-            recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?.contiguous()?);
-            conv_states.push(Tensor::cat(&conv_refs, 0)?.contiguous()?);
+            // `Tensor::cat` already produces a contiguous output tensor, so
+            // the trailing `.contiguous()` was a no-op that nevertheless
+            // re-checked the layout on every cat — and on the hot decode
+            // path that meant one redundant CPU-side check per (layer, step,
+            // state-kind) tuple = 24 GDN layers × 2 states × steps. Removing
+            // it shaves a small amount of dispatch overhead off the
+            // `batch_state_assemble` stage. The runtime path is identical
+            // because cat is the only source feeding these tensors.
+            recurrent_states.push(Tensor::cat(&recurrent_refs, 0)?);
+            conv_states.push(Tensor::cat(&conv_refs, 0)?);
         }
 
         Ok(Self {
