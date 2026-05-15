@@ -12635,8 +12635,22 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
 
     let device = weights.embed_tokens.device();
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
-    let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
-    let positions = Tensor::from_slice(positions_f32.as_slice(), batch, device)?;
+    // When every row decodes at the same position (the common case — all
+    // requests admitted with same-length prompts or all admitted at the same
+    // decode step), pass a single-element positions tensor so the full-attn
+    // RoPE picks the fast scalar-broadcast path (`positions.elem_count() == 1`)
+    // and skips the 4-transpose+contig dance the per-row path needs to align
+    // cos/sin with the batch dim. nsys at bs=16 (post-broadcast-matmul fix)
+    // showed ~32 RoPE transpose+contig copies per decode step routing through
+    // copy2d_bf16; this elides them when positions happen to be uniform.
+    let first_pos = start_positions[0];
+    let positions_uniform = start_positions.iter().all(|&p| p == first_pos);
+    let positions = if positions_uniform {
+        Tensor::from_slice(&[first_pos as f32], 1usize, device)?
+    } else {
+        let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+        Tensor::from_slice(positions_f32.as_slice(), batch, device)?
+    };
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
     let profile_full_attn_stages = profile_full_attn_stages_enabled();
