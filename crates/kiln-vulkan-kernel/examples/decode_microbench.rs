@@ -188,6 +188,29 @@ fn run() -> Result<()> {
         println!();
     }
 
+    if want("gdn_gated_norm") {
+        println!("== gdn_gated_rms_norm_cached (hidden=2560) ==");
+        let weight_t = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;
+        let weight = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&device, &weight_t)?;
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            let z = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("gdn_gated_norm_cached", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached(
+                    &device,
+                    &x,
+                    &z,
+                    &weight,
+                    HIDDEN,
+                    1e-6,
+                    &[batch, 1, HIDDEN],
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
+    }
+
     if want("qwen_rmsnorm") {
         println!("== qwen_rmsnorm_forward (hidden=2560 per row) ==");
         let weight = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;
