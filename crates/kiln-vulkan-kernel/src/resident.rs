@@ -1073,6 +1073,72 @@ pub fn dispatch_causal_conv1d_update_resident(
     .context("causal_conv1d_update_resident: stage-2 state-advance kernel failed")
 }
 
+/// Resident-form element-wise vector add: `out[i] = a[i] + b[i]`.
+/// Used to materialise the residual connections inside the resident
+/// decode block without going through a candle `(x + y)?` (which
+/// allocates a fresh CPU Tensor every layer).
+pub fn dispatch_add_resident(
+    vk_device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    out: &VulkanBuffer,
+    n_elements: usize,
+) -> Result<()> {
+    let need = (n_elements * 4) as u64;
+    anyhow::ensure!(a.size() >= need, "add_resident: a buffer too small");
+    anyhow::ensure!(b.size() >= need, "add_resident: b buffer too small");
+    anyhow::ensure!(out.size() >= need, "add_resident: out buffer too small");
+    let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 1] = [n_elements as u32];
+    let handles: [vk::Buffer; 3] = [a.handle(), b.handle(), out.handle()];
+    let workgroups = n_elements.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("add_resident kernel failed")
+}
+
+/// Resident-form attention output gate: `out[i] = a[i] * sigmoid(gate[i])`.
+/// Used inside the full-attention layer when `attn_output_gate = true`
+/// (Qwen3.5-4B always does). Lifts the gate computation off the candle
+/// path which would otherwise materialise sigmoid + multiply Tensors.
+pub fn dispatch_mul_sigmoid_gate_resident(
+    vk_device: &VulkanDevice,
+    a: &VulkanBuffer,
+    gate: &VulkanBuffer,
+    out: &VulkanBuffer,
+    n_elements: usize,
+) -> Result<()> {
+    let need = (n_elements * 4) as u64;
+    anyhow::ensure!(
+        a.size() >= need && gate.size() >= need && out.size() >= need,
+        "mul_sigmoid_gate_resident: a/gate/out buffers must each be >= {need} bytes"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_mul_sigmoid_gate_f32.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 1] = [n_elements as u32];
+    let handles: [vk::Buffer; 3] = [a.handle(), gate.handle(), out.handle()];
+    let workgroups = n_elements.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("mul_sigmoid_gate_resident kernel failed")
+}
+
 /// Resident-form RoPE rotation for a single Q-or-K-style tensor of
 /// shape `[rows, num_heads, head_dim]`. The first `rotary_dim` dims
 /// per head are rotated; the remainder pass through unchanged. `cos`
@@ -1983,6 +2049,64 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
             assert_eq!(e.to_bits(), r.to_bits(), "idx {i}");
+        }
+    }
+
+    #[test]
+    fn add_resident_matches_cpu_reference() {
+        let Some(dev) = try_device() else { return };
+        let n = 1024usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.013 - 0.5).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.019 + 0.2).collect();
+        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
+        let b_t = Tensor::from_vec(b.clone(), n, &Device::Cpu).unwrap();
+        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
+        let b_buf = upload_tensor_f32_buffer(&dev, &b_t).unwrap();
+        let out_buf = alloc_out(&dev, (n * 4) as u64);
+        dispatch_add_resident(&dev, &a_buf, &b_buf, &out_buf, n).unwrap();
+        let got = read_back_f32(&dev, &out_buf);
+        for i in 0..n {
+            let expected = a[i] + b[i];
+            assert!(
+                (expected - got[i]).abs() <= 1e-6,
+                "idx {i}: {expected} vs {}",
+                got[i]
+            );
+        }
+    }
+
+    #[test]
+    fn mul_sigmoid_gate_resident_matches_cpu_reference() {
+        let Some(dev) = try_device() else { return };
+        let n = 1024usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.013 - 0.5).collect();
+        let g: Vec<f32> = (0..n).map(|i| (i as f32) * 0.011 - 5.0).collect();
+        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
+        let g_t = Tensor::from_vec(g.clone(), n, &Device::Cpu).unwrap();
+        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
+        let g_buf = upload_tensor_f32_buffer(&dev, &g_t).unwrap();
+        let out_buf = alloc_out(&dev, (n * 4) as u64);
+        dispatch_mul_sigmoid_gate_resident(&dev, &a_buf, &g_buf, &out_buf, n).unwrap();
+        let got = read_back_f32(&dev, &out_buf);
+        for i in 0..n {
+            let sigmoid = if g[i] >= 0.0 {
+                1.0 / (1.0 + (-g[i]).exp())
+            } else {
+                let e = g[i].exp();
+                e / (1.0 + e)
+            };
+            let expected = a[i] * sigmoid;
+            // Tolerance is ~ulp-of-magnitude * 2: sigmoid is computed
+            // with one of two stable branches and a single multiply,
+            // so we expect ≤2 ulps relative error.
+            let tol = expected.abs().max(1.0) * 1e-6;
+            assert!(
+                (expected - got[i]).abs() <= tol,
+                "idx {i}: {expected} vs {} (a={}, g={}, tol={tol:e})",
+                got[i],
+                a[i],
+                g[i]
+            );
         }
     }
 
