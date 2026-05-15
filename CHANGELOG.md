@@ -1,6 +1,6 @@
 # Kiln Server Changelog
 
-## Unreleased — Phase 11 evals as a first-class peer of training
+## kiln-v0.2.16 — 2026-05-15 — Phase 11 evals as a first-class peer of training
 
 Adds an end-to-end eval system: pluggable scorers, dataset → suite synthesis, post-training auto-eval, head-to-head adapter comparison, and the local A/B judgment flywheel. The whole loop runs on the same single-GPU binary; no frontier-LLM call is ever required.
 
@@ -49,7 +49,7 @@ Adds an end-to-end eval system: pluggable scorers, dataset → suite synthesis, 
 - Suites, datasets, and judgments persist under `<eval-root>/{suites,datasets,judgments}/`
   (defaults to `<state_dir>/eval`).
 
-## Unreleased — Phase 2 Vulkan training hardening
+## kiln-v0.2.16 — 2026-05-15 — Phase 2 Vulkan training hardening
 
 Active branch since v0.2.15. Targets the Strix Halo / unified-memory APU
 training path that previously OOM-killed `kiln serve` and (after the first

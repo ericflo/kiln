@@ -1,5 +1,49 @@
 # Kiln Desktop Changelog
 
+## desktop-v0.2.16 — 2026-05-15
+
+Aligned cut with kiln-v0.2.16 server. No desktop source changes since
+desktop-v0.2.15; this release re-pins the bundled server payload to the
+latest server cut so installers ship the new eval system, the Phase 2
+Vulkan training hardening, the full Qwen3.5 stochastic sampler, and the
+Playground overhaul.
+
+### Server payload
+This cut ships with the kiln-v0.2.16 server binary. Highlights:
+
+- **Phase 11 — Evals as a first-class peer of training:** end-to-end eval
+  system with pluggable scorers (`exact_match`, `contains`, `regex`,
+  `json_validity`, `multiple_choice`, `numeric_tolerance`, `tool_call`,
+  `code`, `llm_judge`, `all` / `any` composites), dataset → suite synthesis,
+  post-training auto-eval, head-to-head adapter compare, and an A/B
+  `JudgmentStore`. The embedded `/ui` gains a Cmd-K command palette, eval /
+  training / adapter detail modals with live progress, loss curves with
+  downsampled history, the A/B compare playground with keyboard shortcuts,
+  a VRAM donut, and a tok/s sparkline. New `/v1/eval/*` and `/v1/judgments/*`
+  HTTP surface, `kiln-eval` CLI binary, `[eval]` config section.
+- **Phase 2 — Vulkan training hardening (Strix Halo / unified-memory APUs):**
+  on-device AdamW (`adamw_step_{f32,bf16}.comp`, decoupled weight decay)
+  alongside the BF16 SGD path; lazy candle-CPU-storage sync removes the
+  per-step GPU→CPU readback; `VulkanLinearOp` (CustomOp1) with autograd
+  parity and in-op chunking via `KILN_VULKAN_LINEAR_MAX_GFLOP`;
+  `sdpa_prefill_f32.comp` replaces the old `flash_attn.comp` placeholder;
+  FLCE auto-engages at `active_count ≥ 16` and `KILN_USE_FLCE`,
+  `KILN_VULKAN_LINEAR`, and `KILN_VULKAN_SDPA` default ON; unified-memory
+  APU VRAM-budget correction; HTTP 413 rejection with actionable hints for
+  oversized training submissions.
+- **Sampling — full Qwen3.5 stochastic sampler:** fused on Vulkan, Metal,
+  and CUDA (zero vocab readback on Vulkan), new penalty fields, and
+  Qwen3.5 recommended defaults everywhere.
+- **Playground overhaul:** compare mode that streams both sides with
+  reasoning, markdown rendering, inline edit-and-resend on user turns,
+  per-turn badges + scroll lock + retry + transcript export, system-prompt
+  and advanced-sampling controls, live `<think>` drain.
+- **Reliability:** near-instant Ctrl+C shutdown; SSE parser hardened with a
+  first-token >5 s hint; uptime cap only applies after the drain signal;
+  default batching engine ON with `KILN_BATCHING_ENGINE=0` opt-out.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the full server changelog.
+
 ## desktop-v0.2.15 — 2026-05-10
 
 Aligned cut with kiln-v0.2.15 server. No desktop source changes since
