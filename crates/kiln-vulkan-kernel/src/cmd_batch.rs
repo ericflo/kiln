@@ -1,0 +1,394 @@
+//! Per-step Vulkan command-buffer batching for the resident decode
+//! path.
+//!
+//! Gate (e.1) of `docs/vk_resident_decode_plan.md`: the resident
+//! decode step's submit count needs to drop from
+//! `O(layers × kernels_per_layer)` to `O(1)`. Each
+//! `run_compute_pipeline` call currently begins, ends, submits, and
+//! waits its own command buffer — 11+ submits per layer × 32 layers
+//! ≈ 350 submits per decode token. At ~50 µs of queue overhead per
+//! submit on NVIDIA Vulkan, that's ~17 ms of pure submission
+//! overhead per token.
+//!
+//! `CommandBatch` collapses this to one submit: allocate one command
+//! buffer + one descriptor pool sized for the whole step, record
+//! every dispatch into it with a compute→compute memory barrier
+//! between, and submit once at the end. The compute-shader reads
+//! that the existing primitive emits at the end (a SHADER_WRITE →
+//! TRANSFER_READ barrier sized to a single dispatch) become
+//! SHADER_WRITE → SHADER_READ barriers between back-to-back
+//! dispatches; the final dispatch keeps the SHADER_WRITE →
+//! TRANSFER_READ barrier so the resident path's readback at the end
+//! of the step is well-defined.
+
+use crate::pipeline::ShaderPipeline;
+use crate::{VulkanBuffer, VulkanDevice};
+use anyhow::{Context, Result};
+use ash::vk;
+
+/// 1D or 3D workgroup count selector. `OneD(n)` dispatches `(n, 1, 1)`.
+#[derive(Debug, Clone, Copy)]
+pub enum Workgroups {
+    OneD(u32),
+    ThreeD(u32, u32, u32),
+}
+
+impl Workgroups {
+    pub fn as_3d(&self) -> (u32, u32, u32) {
+        match self {
+            Workgroups::OneD(x) => (*x, 1, 1),
+            Workgroups::ThreeD(x, y, z) => (*x, *y, *z),
+        }
+    }
+}
+
+/// One dispatch's full plan: SPIR-V bytes, buffer handles, push
+/// constants, workgroup count. Building a `KernelPlan` is free; you
+/// then either feed it into a single-submit
+/// `vk_device.submit_plan(plan)` (existing per-call path) or append
+/// it to a `CommandBatch` for batched submission.
+pub struct KernelPlan<'a> {
+    pub spirv: &'a [u8],
+    pub handles: &'a [vk::Buffer],
+    pub push_constants: &'a [u32],
+    pub workgroups: Workgroups,
+}
+
+/// Recording-state batch of compute dispatches. Built once at the
+/// start of a decode step; every layer's `record(...)` appends one
+/// dispatch (with the right compute→compute barrier separating it
+/// from the previous); `submit_and_wait()` flushes the whole step in
+/// one `vkQueueSubmit`.
+pub struct CommandBatch<'a> {
+    vk_device: &'a VulkanDevice,
+    cmd_pool: vk::CommandPool,
+    descriptor_pool: vk::DescriptorPool,
+    cmd: vk::CommandBuffer,
+    cmd_buffers_to_free: Vec<vk::CommandBuffer>,
+    dispatch_count: usize,
+    finished: bool,
+}
+
+const COMMAND_BATCH_MAX_DISPATCHES: u32 = 1024;
+const COMMAND_BATCH_MAX_BINDINGS: u32 = 64 * COMMAND_BATCH_MAX_DISPATCHES;
+
+impl<'a> CommandBatch<'a> {
+    /// Allocate a fresh command pool + descriptor pool sized for one
+    /// decode step (up to `COMMAND_BATCH_MAX_DISPATCHES` dispatches,
+    /// each with up to 64 storage-buffer bindings — comfortably
+    /// covering Qwen3.5-4B's 32 layers × ~11 kernels = 352 dispatches).
+    pub fn new(vk_device: &'a VulkanDevice) -> Result<Self> {
+        let device = vk_device.device();
+        let cmd_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::builder()
+                    .queue_family_index(vk_device.queue_family_index())
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    .build(),
+                None,
+            )
+        }
+        .context("CommandBatch: create transient command pool")?;
+        let descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .max_sets(COMMAND_BATCH_MAX_DISPATCHES)
+                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(COMMAND_BATCH_MAX_BINDINGS)
+                        .build()])
+                    .build(),
+                None,
+            )
+        }
+        .context("CommandBatch: create descriptor pool")?;
+        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(cmd_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1)
+            .build();
+        let cmd_buffers = unsafe { device.allocate_command_buffers(&alloc_info) }
+            .context("CommandBatch: allocate command buffer")?;
+        let cmd = cmd_buffers[0];
+        unsafe {
+            device
+                .begin_command_buffer(
+                    cmd,
+                    &vk::CommandBufferBeginInfo::builder()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
+                        .build(),
+                )
+                .context("CommandBatch: begin command buffer")?;
+        }
+        Ok(Self {
+            vk_device,
+            cmd_pool,
+            descriptor_pool,
+            cmd,
+            cmd_buffers_to_free: cmd_buffers,
+            dispatch_count: 0,
+            finished: false,
+        })
+    }
+
+    /// Append a single dispatch to the batch. Allocates a fresh
+    /// descriptor set out of the batch's pool, writes the handle bindings,
+    /// emits push constants + cmd_dispatch, and emits a
+    /// SHADER_WRITE → SHADER_READ memory barrier so the NEXT dispatch
+    /// (if any) sees the writes. The final-dispatch SHADER_WRITE →
+    /// TRANSFER_READ barrier is emitted once by `submit_and_wait`.
+    pub fn record(&mut self, plan: &KernelPlan<'_>) -> Result<()> {
+        anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
+        anyhow::ensure!(
+            (self.dispatch_count as u32) < COMMAND_BATCH_MAX_DISPATCHES,
+            "CommandBatch: exceeded {COMMAND_BATCH_MAX_DISPATCHES} dispatches per batch"
+        );
+        anyhow::ensure!(
+            plan.handles.len() <= 64,
+            "CommandBatch: dispatch {} has {} handles > 64 binding limit",
+            self.dispatch_count,
+            plan.handles.len(),
+        );
+        let device = self.vk_device.device();
+        let (set_layout, layout, pipeline) = self
+            .vk_device
+            .get_or_create_compute_pipeline(
+                plan.spirv,
+                plan.handles.len(),
+                (plan.push_constants.len() * 4) as u32,
+            )
+            .context("CommandBatch: get/create pipeline")?;
+        let set_layouts = [set_layout];
+        let descriptor_set = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(self.descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+        }
+        .context("CommandBatch: allocate descriptor set")?[0];
+
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = plan
+            .handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(descriptor_set)
+                    .dst_binding(i as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info))
+                    .build()
+            })
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+
+            // Inter-dispatch barrier — needed BEFORE this dispatch so it
+            // sees the previous dispatch's writes (skip on first call).
+            if self.dispatch_count > 0 {
+                let barrier = vk::MemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .build();
+                device.cmd_pipeline_barrier(
+                    self.cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[barrier],
+                    &[],
+                    &[],
+                );
+            }
+
+            device.cmd_bind_pipeline(self.cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+            device.cmd_bind_descriptor_sets(
+                self.cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                self.cmd,
+                layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::cast_slice(plan.push_constants),
+            );
+            let (wx, wy, wz) = plan.workgroups.as_3d();
+            device.cmd_dispatch(self.cmd, wx, wy, wz);
+        }
+        self.dispatch_count += 1;
+        Ok(())
+    }
+
+    /// Convenience: build a `KernelPlan` from a shader path and record it
+    /// in one step. Compiles `glsl_path` to SPIR-V via the shared cache;
+    /// the lifetime of the SPIR-V is bound to `self` to avoid feeding
+    /// the recorder a freed buffer.
+    pub fn record_shader(
+        &mut self,
+        glsl_path: &str,
+        handles: &[vk::Buffer],
+        push_constants: &[u32],
+        workgroups: Workgroups,
+    ) -> Result<()> {
+        let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+        let plan = KernelPlan {
+            spirv: &spirv,
+            handles,
+            push_constants,
+            workgroups,
+        };
+        self.record(&plan)
+    }
+
+    /// Number of dispatches currently in the batch (excluding the final
+    /// transfer barrier).
+    pub fn dispatch_count(&self) -> usize {
+        self.dispatch_count
+    }
+
+    /// Finalize, submit, wait for completion, free resources.
+    pub fn submit_and_wait(mut self, label: &str) -> Result<()> {
+        let device = self.vk_device.device();
+        unsafe {
+            // Final tail barrier: SHADER_WRITE → TRANSFER_READ + HOST_READ
+            // so the next readback / copy off the batch's last output
+            // buffer sees the writes.
+            if self.dispatch_count > 0 {
+                let barrier = vk::MemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ)
+                    .build();
+                device.cmd_pipeline_barrier(
+                    self.cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[barrier],
+                    &[],
+                    &[],
+                );
+            }
+            device
+                .end_command_buffer(self.cmd)
+                .with_context(|| format!("CommandBatch[{label}]: end command buffer"))?;
+        }
+        self.vk_device.submit_and_wait(self.cmd, label)?;
+        self.finished = true;
+        // Drop will free resources.
+        Ok(())
+    }
+
+    /// Tail buffer marker for callers that want to assert the chain
+    /// terminates at a particular slot. Not used by the recorder itself.
+    #[allow(dead_code)]
+    pub fn assert_last_handle(&self, expected: &VulkanBuffer) {
+        let _ = expected;
+    }
+}
+
+impl<'a> Drop for CommandBatch<'a> {
+    fn drop(&mut self) {
+        let device = self.vk_device.device();
+        unsafe {
+            if !self.cmd_buffers_to_free.is_empty() {
+                device.free_command_buffers(self.cmd_pool, &self.cmd_buffers_to_free);
+            }
+            device.destroy_descriptor_pool(self.descriptor_pool, None);
+            device.destroy_command_pool(self.cmd_pool, None);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernels::upload_tensor_f32_buffer;
+    use candle_core::{Device, Tensor};
+
+    #[test]
+    fn command_batch_chains_two_adds() {
+        let Ok(dev) = VulkanDevice::new() else {
+            return;
+        };
+        let n = 256usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.02).collect();
+        let c: Vec<f32> = (0..n).map(|i| (i as f32) * 0.03).collect();
+        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
+        let b_t = Tensor::from_vec(b.clone(), n, &Device::Cpu).unwrap();
+        let c_t = Tensor::from_vec(c.clone(), n, &Device::Cpu).unwrap();
+        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
+        let b_buf = upload_tensor_f32_buffer(&dev, &b_t).unwrap();
+        let c_buf = upload_tensor_f32_buffer(&dev, &c_t).unwrap();
+        let tmp = VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            (n * 4) as u64,
+        )
+        .unwrap();
+        let out = VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            (n * 4) as u64,
+        )
+        .unwrap();
+        let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
+        let push: [u32; 1] = [n as u32];
+        let wg = Workgroups::OneD(n.div_ceil(256) as u32);
+        {
+            let mut batch = CommandBatch::new(&dev).unwrap();
+            batch
+                .record_shader(
+                    glsl_path,
+                    &[a_buf.handle(), b_buf.handle(), tmp.handle()],
+                    &push,
+                    wg,
+                )
+                .unwrap();
+            batch
+                .record_shader(
+                    glsl_path,
+                    &[tmp.handle(), c_buf.handle(), out.handle()],
+                    &push,
+                    wg,
+                )
+                .unwrap();
+            assert_eq!(batch.dispatch_count(), 2);
+            batch.submit_and_wait("test_chain").unwrap();
+        }
+        let got_bytes = VulkanBuffer::read_back(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            dev.queue(),
+            dev.queue_family_index(),
+            &out,
+        )
+        .unwrap();
+        let got: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&got_bytes).to_vec();
+        for i in 0..n {
+            let expected = a[i] + b[i] + c[i];
+            assert!(
+                (expected - got[i]).abs() <= 1e-6,
+                "idx {i}: {expected} vs {}",
+                got[i]
+            );
+        }
+    }
+}

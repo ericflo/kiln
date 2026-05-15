@@ -13,6 +13,7 @@
 
 pub mod buffer;
 pub mod buffer_pool;
+pub mod cmd_batch;
 pub mod decode_resident_pool;
 pub mod device;
 pub mod kernels;
@@ -24,6 +25,7 @@ pub mod vk_raw;
 pub mod vk_tensor;
 
 pub use buffer::VulkanBuffer;
+pub use cmd_batch::{CommandBatch, KernelPlan, Workgroups};
 pub use decode_resident_pool::DecodeResidentPool;
 pub use device::VulkanDevice;
 pub use pipeline::ShaderPipeline;
