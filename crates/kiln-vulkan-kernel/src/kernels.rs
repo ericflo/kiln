@@ -4758,14 +4758,15 @@ fn dispatch_mlp_decode_cached_impl(
         && batch >= 32
         && !rows8_path
         && mlp_bf16_down_rows4_enabled();
-    // gate_up rows4 reuses weights across 4 rows. For the bf16/f32-down case
-    // it has always paid off at batch≥8 (existing behavior); for the
-    // all-bf16 case the win only materializes once linear-down also shifts
-    // off the per-batch-row kernel, so pair it with `down_bf16_rows4`.
+    // gate_up rows4 reuses weights across 4 rows. The intermediate dim is
+    // large (9216 for Qwen3.5-4B) so the 64-cols-per-workgroup tiling
+    // still leaves plenty of workgroups even at the rows4 4× reduction in
+    // row count — making gate_up_rows4 a near-unconditional win for any
+    // bf16-weight MLP at batch ≥ 8, independent of which linear-down
+    // path takes over. Decouple it from `down_bf16_rows4`.
     let gate_up_rows4 = gate_up_bf16_weights
         && batch >= 8
         && !rows8_path
-        && (down_bf16_rows4 || !down_bf16_weights)
         && mlp_bf16_gate_up_rows4_enabled();
     let down_rows4 =
         gate_up_bf16_weights && !down_bf16_weights && batch >= 8 && mlp_f32_down_rows4_enabled();
