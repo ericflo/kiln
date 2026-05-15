@@ -424,19 +424,19 @@ Kiln Desktop is a system-tray app that wraps the `kiln` server for people who do
 
 **Windows, Linux, and macOS (Apple Silicon).** Windows drives the CUDA build of `kiln`; Linux chooses CUDA on NVIDIA systems and Vulkan on AMD/Intel systems; macOS drives the candle-metal build on M-series hardware. Intel Macs are not supported.
 
-**Download — [Kiln Desktop v0.2.15](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.15):**
+**Download — [Kiln Desktop v0.2.16](https://github.com/ericflo/kiln/releases/tag/desktop-v0.2.16):**
 
-**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.15` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so the version split is intentional.
+**Release note:** Desktop and server binaries use separate GitHub release tags/version numbers. `desktop-v0.2.16` is the latest Desktop release; it downloads and verifies the matching server binary from the latest `kiln-v*` release line, so the version split is intentional.
 
 See **[desktop/CHANGELOG.md](desktop/CHANGELOG.md)** for the full version history.
 
 | Platform | Installer | Size |
 |---|---|---|
-| macOS (Apple Silicon) | [Kiln.Desktop_0.2.15_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.15/Kiln.Desktop_0.2.15_aarch64.dmg) | 8.5 MB |
-| Windows | [Kiln.Desktop_0.2.15_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.15/Kiln.Desktop_0.2.15_x64-setup.exe) (NSIS) | 4.5 MB |
-| Windows | [Kiln.Desktop_0.2.15_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.15/Kiln.Desktop_0.2.15_x64_en-US.msi) (MSI) | 6.8 MB |
-| Linux | [Kiln.Desktop_0.2.15_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.15/Kiln.Desktop_0.2.15_amd64.deb) | 8.8 MB |
-| Linux | [Kiln.Desktop_0.2.15_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.15/Kiln.Desktop_0.2.15_amd64.AppImage) | 85.7 MB |
+| macOS (Apple Silicon) | [Kiln.Desktop_0.2.16_aarch64.dmg](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_aarch64.dmg) | 8.5 MB |
+| Windows | [Kiln.Desktop_0.2.16_x64-setup.exe](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64-setup.exe) (NSIS) | 4.5 MB |
+| Windows | [Kiln.Desktop_0.2.16_x64_en-US.msi](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_x64_en-US.msi) (MSI) | 6.8 MB |
+| Linux | [Kiln.Desktop_0.2.16_amd64.deb](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.deb) | 8.8 MB |
+| Linux | [Kiln.Desktop_0.2.16_amd64.AppImage](https://github.com/ericflo/kiln/releases/download/desktop-v0.2.16/Kiln.Desktop_0.2.16_amd64.AppImage) | 85.7 MB |
 
 The installer bundles the desktop wrapper only. On first launch the app offers to auto-download the matching prebuilt `kiln` server binary for your platform (macOS aarch64 / Metal, Linux x86_64 / CUDA 12.4 or Vulkan, Windows x86_64 / CUDA 12.4) from the latest `kiln-v*` GitHub release and verify it against the published SHA-256. You can also point it at an existing `kiln` binary from Settings. Model weights still need to be downloaded separately — the Settings window has a HuggingFace downloader, or you can use the CLI path in [QUICKSTART.md](QUICKSTART.md).
 
