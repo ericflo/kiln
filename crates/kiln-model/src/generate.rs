@@ -181,7 +181,26 @@ pub struct ModelRunner {
     /// Mirrors the lazy registry pattern above so `ModelRunner::new` doesn't validate
     /// shapes that decode hasn't asked for yet.
     decode_buffer_config: OnceLock<DecodeBufferConfig>,
+    /// Cached batched `LinearAttentionState` carried across consecutive
+    /// `decode_next_tokens_paged_contiguous_batch_greedy` invocations. When
+    /// the next call's per-row `LinearAttentionState` pointer set is
+    /// identical to what produced this cache, we skip the
+    /// `from_batch_rows` cat (24 GDN layers × 2 state-kinds = 48 cats per
+    /// step, ~1.6 ms total at bs=16) and reuse the cached batched state
+    /// directly. The cache is invalidated on adapter swap (same lifecycle
+    /// as `cuda_graph`) and on pointer-set mismatch.
+    batched_state_cache: Mutex<Option<CachedBatchedState>>,
     backend: Arc<dyn BackendRuntime>,
+}
+
+/// Persistent batched-state cache entry. The fingerprint is the set of
+/// per-row `LinearAttentionState` pointer addresses *in order*; this
+/// uniquely identifies a particular batch composition because the
+/// per-row states are never moved (the actor holds them inside a stable
+/// `Vec<ActiveRequest>` slot until a request finishes).
+pub(crate) struct CachedBatchedState {
+    pub(crate) state: crate::forward::LinearAttentionState,
+    pub(crate) row_ptrs: Vec<usize>,
 }
 
 /// Output from a generation call.
@@ -1099,6 +1118,7 @@ impl ModelRunner {
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
             decode_buffer_config: OnceLock::new(),
+            batched_state_cache: Mutex::new(None),
             backend,
         }
     }
@@ -1150,6 +1170,14 @@ impl ModelRunner {
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
         }
+        // Adapter swap rewires the matmul weights; any cached batched
+        // LinearAttentionState is per-request data (independent of weights)
+        // but the cache lifecycle follows the same conservative
+        // invalidation rule as `cuda_graph` so we don't try to skip the
+        // assemble step across a weight-change boundary.
+        if let Ok(mut cache) = self.batched_state_cache.lock() {
+            *cache = None;
+        }
         Ok(())
     }
 
@@ -1162,6 +1190,9 @@ impl ModelRunner {
         }
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
+        }
+        if let Ok(mut cache) = self.batched_state_cache.lock() {
+            *cache = None;
         }
     }
 
@@ -1224,6 +1255,9 @@ impl ModelRunner {
         self.active_lora = lora;
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
+        }
+        if let Ok(mut cache) = self.batched_state_cache.lock() {
+            *cache = None;
         }
     }
 
@@ -2698,18 +2732,53 @@ impl ModelRunner {
             && linear_states
                 .iter()
                 .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
+        let mut batched_state_cache_hit = false;
+        let row_ptrs: Vec<usize> = linear_states
+            .iter()
+            .map(|s| (&**s as *const LinearAttentionState) as usize)
+            .collect();
         let mut batch_state = if has_linear_layers {
-            let state_refs: Vec<&LinearAttentionState> =
-                linear_states.iter().map(|state| &**state).collect();
-            let state = LinearAttentionState::from_batch_rows(&state_refs)?;
-            if all_rows_resident {
-                state.assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
+            // Cache lookup: when the same set of per-row LinearAttentionState
+            // pointers came in last decode step, the cached batched state is
+            // already what `from_batch_rows` would re-produce (because we
+            // scatter to per-row after every forward — the batched state
+            // post-scatter and the per-row states post-scatter are
+            // byte-for-byte equivalent). Taking the cached state directly
+            // skips the per-step 24-GDN-layer × 2-state-kind `Tensor::cat`
+            // workload (~1.6 ms / step at bs=16).
+            let mut cache_guard = self
+                .batched_state_cache
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock batched state cache: {e}"))?;
+            if let Some(CachedBatchedState { row_ptrs: cached_ptrs, .. }) = cache_guard.as_ref()
+                && cached_ptrs == &row_ptrs
+            {
+                let cached = cache_guard
+                    .take()
+                    .expect("cache_guard.as_ref() returned Some above");
+                batched_state_cache_hit = true;
+                drop(cache_guard);
+                Some(cached.state)
+            } else {
+                // Cache miss: discard any stale entry, assemble fresh.
+                *cache_guard = None;
+                drop(cache_guard);
+                let state_refs: Vec<&LinearAttentionState> =
+                    linear_states.iter().map(|state| &**state).collect();
+                let state = LinearAttentionState::from_batch_rows(&state_refs)?;
+                if all_rows_resident {
+                    state.assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
+                }
+                Some(state)
             }
-            Some(state)
         } else {
             None
         };
-        finish_decode_batcher_stage_profile("batch_state_assemble", batch, stage_start);
+        if batched_state_cache_hit {
+            finish_decode_batcher_stage_profile("batch_state_assemble_cache_hit", batch, stage_start);
+        } else {
+            finish_decode_batcher_stage_profile("batch_state_assemble", batch, stage_start);
+        }
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
@@ -2741,6 +2810,20 @@ impl ModelRunner {
             } else {
                 state.scatter_batch_rows(linear_states)?;
                 finish_decode_batcher_stage_profile("batch_state_scatter_copy", batch, stage_start);
+            }
+        }
+        // Park the (now updated) batched state back in the cache so the
+        // next decode step on the same per-row pointer set can skip the
+        // `from_batch_rows` cat. The per-row states are byte-for-byte
+        // equivalent to this batched state right now (we just scattered),
+        // so the next cache-hit reuses correct data; the next cache-miss
+        // (different pointer set) discards this entry and re-assembles.
+        if let Some(state) = batch_state.take() {
+            if let Ok(mut cache_guard) = self.batched_state_cache.lock() {
+                *cache_guard = Some(CachedBatchedState {
+                    state,
+                    row_ptrs,
+                });
             }
         }
         finish_decode_batcher_stage_profile("decode_total", batch, total_start);
