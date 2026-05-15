@@ -155,6 +155,21 @@ impl CudaGraphKey {
     }
 }
 
+/// Read the `KILN_CUDA_GRAPHS_BATCHED` env var.
+///
+/// Two-stage gating: `KILN_CUDA_GRAPHS=true` enables the (existing,
+/// stable) bs=1 capture/replay path; `KILN_CUDA_GRAPHS_BATCHED=1`
+/// additionally opts into the (in-development) bs>1 capture/replay
+/// path. Both must hold for batched graphs to engage; either being
+/// off sends the bs>1 caller down the eager batched path. Defaults
+/// to off until the batched implementation is fully validated.
+#[cfg(feature = "cuda")]
+fn batched_graph_enabled() -> bool {
+    std::env::var("KILN_CUDA_GRAPHS_BATCHED")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 /// Cache key for the (planned, not-yet-wired) batched (`bs > 1`) decode
 /// graph cache. Mirrors [`CudaGraphKey`] but with an explicit
 /// `batch_size` bucket. See the multi-batch design note at the top of
@@ -418,6 +433,24 @@ impl CudaGraphRunner {
         self.enabled
     }
 
+    /// Whether multi-batch CUDA graph capture/replay is enabled.
+    ///
+    /// Even when `is_enabled()` is true, the batched path is gated on
+    /// a separate opt-in (`KILN_CUDA_GRAPHS_BATCHED=1`) until the
+    /// implementation is fully validated. The graph runner's bs=1
+    /// path is the production default; the batched path lands
+    /// behind this flag so it can be benched in isolation and rolled
+    /// back without re-flipping `KILN_CUDA_GRAPHS`.
+    #[cfg(feature = "cuda")]
+    pub fn is_batched_enabled(&self) -> bool {
+        self.enabled && batched_graph_enabled()
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    pub fn is_batched_enabled(&self) -> bool {
+        false
+    }
+
     /// Run a batched paged decode step, attempting CUDA graph capture/replay
     /// for the `(batch_size, max_seqlen_k, …)` bucket. Today this always
     /// returns `Ok(None)`, signalling the caller to take the eager batched
@@ -447,10 +480,17 @@ impl CudaGraphRunner {
         _linear_states: &mut [&mut LinearAttentionState],
         _lora: Option<&LoraWeights>,
     ) -> Result<Option<Vec<u32>>> {
-        // Disabled stub: the body lands when steps 5-6 of the top-of-file
-        // sequencing plan complete. Returning `None` keeps the caller on
-        // the existing eager batched path, so wiring this in early
-        // is a no-op until the capture/replay glue exists.
+        // Two-stage gate: the batched-graph opt-in must be on, and the
+        // runner-wide graph enable must also hold. Either being off
+        // sends the caller down the eager batched path.
+        if !self.is_batched_enabled() {
+            return Ok(None);
+        }
+        // Disabled stub body: the capture/replay logic lands when
+        // steps 5-6 of the top-of-file sequencing plan complete.
+        // Returning `None` keeps the caller on the existing eager
+        // batched path even when `KILN_CUDA_GRAPHS_BATCHED=1` — so
+        // flipping the env var early is a safe no-op.
         Ok(None)
     }
 
