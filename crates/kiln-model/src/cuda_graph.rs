@@ -551,6 +551,19 @@ impl CudaGraphRunner {
             return Ok(None);
         }
 
+        // Diagnostic: when `KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1`,
+        // always evict the cached graph before checking — this
+        // forces every step to re-capture, never replay. If the
+        // bench succeeds under this mode but fails without it,
+        // the fault is isolated to the replay path; if it still
+        // fails, capture itself is broken.
+        if std::env::var("KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY")
+            .map(|v| matches!(v.as_str(), "1" | "true"))
+            .unwrap_or(false)
+        {
+            self.captured_batched.remove(&key);
+        }
+
         // Phase 2: replay path on cache hit + adapter-gen match.
         //
         // (1) Adapter-gen check (cheap, scalar). Drop on mismatch.

@@ -2340,15 +2340,47 @@ impl ModelRunner {
         let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
-        // Multi-batch CUDA graph: 7 wiring attempts hit CUDA_ERROR_ILLEGAL_ADDRESS.
-        // Compute-sanitizer trace: `is_u32_bf16+0x1a10` reading 60MB
-        // before allocation on `cuGraphLaunch`. Bypass attempts
-        // (stable token buffer off, NONE flag, per-bucket warmup,
-        // GDN thread-local install, post-capture argmax)
-        // didn't isolate. Needs cuda-gdb to localize the exact
-        // intra-capture allocation that gets pinned to a stale
-        // pointer. Memory: `feedback-batched-cuda-graph-debug`.
-        if try_contiguous_batched {
+        // Multi-batch CUDA graph fast path.
+        if try_contiguous_batched && has_linear_layers {
+            let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+            let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+                linear_states.iter_mut().map(|s| &mut **s).collect();
+            let graph_result = {
+                let mut graph_runner = self
+                    .cuda_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?;
+                if graph_runner.is_batched_enabled() {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    graph_runner.decode_step_paged_batched(
+                        &*self.backend,
+                        &input_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        &block_table_refs,
+                        &sequence_lengths,
+                        &mut linear_state_refs,
+                        self.active_lora.as_ref(),
+                    )
+                } else {
+                    Ok(None)
+                }
+            };
+            match graph_result {
+                Ok(Some(tokens)) => sampled = Some(tokens),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        batch = row_count,
+                        error = %err,
+                        "batched CUDA graph path errored; falling back to eager"
+                    );
+                }
+            }
+        }
+
+        if sampled.is_none() && try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
@@ -6053,6 +6085,7 @@ mod tests {
                         in_proj_b_t,
                         in_proj_ab_t: None,
                         out_proj_t,
+                        out_proj_marlin: None,
                     },
                 )
             };
