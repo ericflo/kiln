@@ -252,6 +252,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
     let shaders = [
         ("full_attn_qkv_decode", 5usize, 20u32),
         ("full_attn_qkv_decode_bf16w", 5usize, 20u32),
+        ("full_attn_qkv_decode_batched", 5usize, 24u32),
+        ("full_attn_qkv_decode_batched_bf16w", 5usize, 24u32),
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
         ("gdn_in_proj_decode", 6, 24),
@@ -3781,6 +3783,226 @@ fn create_full_attn_qkv_tensors_from_data(
     let q = take(q_dim, &[1, 1, q_dim])?;
     let k = take(k_dim, &[1, 1, k_dim])?;
     let v = take(v_dim, &[1, 1, v_dim])?;
+    Ok((q, k, v))
+}
+
+/// Batched variant of [`dispatch_full_attn_qkv_decode_cached`] — fused single-token
+/// Q/K/V projections across an arbitrary leading batch dim. `x` must be
+/// `[batch, 1, hidden]`; outputs are `[batch, 1, q_dim]`, `[batch, 1, k_dim]`,
+/// `[batch, 1, v_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_batched(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    dispatch_full_attn_qkv_decode_cached_batched_impl(
+        vk_device,
+        x,
+        q_weight_t,
+        k_weight_t,
+        v_weight_t,
+        batch,
+        hidden,
+        q_dim,
+        k_dim,
+        v_dim,
+        false,
+    )
+}
+
+/// BF16-weight batched variant of [`dispatch_full_attn_qkv_decode_cached_batched`].
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    dispatch_full_attn_qkv_decode_cached_batched_impl(
+        vk_device,
+        x,
+        q_weight_t,
+        k_weight_t,
+        v_weight_t,
+        batch,
+        hidden,
+        q_dim,
+        k_dim,
+        v_dim,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_full_attn_qkv_decode_cached_batched_impl(
+    vk_device: &VulkanDevice,
+    x: &Tensor,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    bf16_weights: bool,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    anyhow::ensure!(batch > 0, "full_attn_qkv_decode_batched: batch must be > 0");
+
+    let x_data = extract_tensor_bytes(x)?.0;
+    let expected_x_bytes = batch
+        .checked_mul(hidden)
+        .and_then(|n| n.checked_mul(4))
+        .context("full_attn_qkv_decode_batched: x byte count overflow")?;
+    anyhow::ensure!(
+        x_data.len() == expected_x_bytes,
+        "full_attn_qkv_decode_batched: x buffer has {} bytes, expected {} (batch={}, hidden={})",
+        x_data.len(),
+        expected_x_bytes,
+        batch,
+        hidden
+    );
+
+    let total_out = q_dim
+        .checked_add(k_dim)
+        .and_then(|n| n.checked_add(v_dim))
+        .context("full_attn_qkv_decode_batched: total_out overflow")?;
+    anyhow::ensure!(total_out > 0, "full_attn_qkv_decode_batched: total_out is zero");
+    let glsl_path = if bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode_batched.comp"
+        )
+    };
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 6] = [
+        hidden as u32,
+        q_dim as u32,
+        k_dim as u32,
+        v_dim as u32,
+        total_out as u32,
+        batch as u32,
+    ];
+
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create full_attn_qkv_decode_batched x buffer")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::upload_data_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &x_buf,
+            &x_data,
+        )
+        .context("failed to upload full_attn_qkv_decode_batched x buffer")?;
+    }
+
+    let out_bytes = batch
+        .checked_mul(total_out)
+        .and_then(|n| n.checked_mul(4))
+        .context("full_attn_qkv_decode_batched: output byte count overflow")?;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_bytes as u64)
+        .context("failed to create full_attn_qkv_decode_batched output buffer")?;
+
+    let all_handles = vec![
+        x_buf.handle(),
+        q_weight_t.handle(),
+        k_weight_t.handle(),
+        v_weight_t.handle(),
+        out_buf.handle(),
+    ];
+    let col_groups = total_out.div_ceil(16);
+    let total_groups = batch
+        .checked_mul(col_groups)
+        .context("full_attn_qkv_decode_batched: workgroup count overflow")?;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        total_groups as u32,
+    )
+    .context("full_attn_qkv_decode_batched kernel failed")?;
+
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("failed to read back full_attn_qkv_decode_batched output")?
+    };
+
+    split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
+}
+
+/// Split the contiguous batched `[batch, total_out]` readback buffer into
+/// three `[batch, 1, *_dim]` candle tensors. The shader writes rows in
+/// `(q | k | v)` order per batch element, so we copy row-by-row into three
+/// per-dim accumulators.
+fn split_batched_qkv_output(
+    out_data: &[u8],
+    batch: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    let total_out = q_dim + k_dim + v_dim;
+    let expected_bytes = batch
+        .checked_mul(total_out)
+        .and_then(|n| n.checked_mul(4))
+        .context("split_batched_qkv_output: byte count overflow")?;
+    anyhow::ensure!(
+        out_data.len() >= expected_bytes,
+        "split_batched_qkv_output: readback has {} bytes, expected {}",
+        out_data.len(),
+        expected_bytes
+    );
+    let out_f32: &[f32] = bytemuck::cast_slice(&out_data[..expected_bytes]);
+
+    let mut q_buf = Vec::with_capacity(batch * q_dim);
+    let mut k_buf = Vec::with_capacity(batch * k_dim);
+    let mut v_buf = Vec::with_capacity(batch * v_dim);
+    for row in 0..batch {
+        let base = row * total_out;
+        q_buf.extend_from_slice(&out_f32[base..base + q_dim]);
+        k_buf.extend_from_slice(&out_f32[base + q_dim..base + q_dim + k_dim]);
+        v_buf.extend_from_slice(&out_f32[base + q_dim + k_dim..base + total_out]);
+    }
+
+    let q = Tensor::from_vec(q_buf, batch * q_dim, &Device::Cpu)?.reshape((batch, 1, q_dim))?;
+    let k = Tensor::from_vec(k_buf, batch * k_dim, &Device::Cpu)?.reshape((batch, 1, k_dim))?;
+    let v = Tensor::from_vec(v_buf, batch * v_dim, &Device::Cpu)?.reshape((batch, 1, v_dim))?;
     Ok((q, k, v))
 }
 

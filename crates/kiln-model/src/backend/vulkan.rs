@@ -2487,7 +2487,12 @@ impl BackendRuntime for VulkanBackend {
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
-        if batch != 1 || seq_len != 1 {
+        // Multi-token (prefill-ish) shapes still go through the unfused
+        // path: this kernel family is the single-token decode projection.
+        // Batched single-token decode IS supported now via the `_batched`
+        // dispatch — collapsing seq_len==1 across an arbitrary batch dim
+        // into a single fused submit was the explicit scaling fix.
+        if seq_len != 1 || batch == 0 {
             return Ok(None);
         }
         let Ok((q_hidden, q_dim)) = q_weight_t.dims2() else {
@@ -2507,8 +2512,9 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let out =
-            if self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]) {
+        let bf16 = self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]);
+        let out = if batch == 1 {
+            if bf16 {
                 let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
                 let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
                 let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
@@ -2523,7 +2529,24 @@ impl BackendRuntime for VulkanBackend {
                     vk_device, x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
                 )
             }
-            .context("full_attn_qkv_decode kernel failed")?;
+            .context("full_attn_qkv_decode kernel failed")?
+        } else if bf16 {
+            let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
+            let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
+            let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+                vk_device, x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            )
+            .context("full_attn_qkv_decode_batched_bf16w kernel failed")?
+        } else {
+            let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
+            let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
+            let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched(
+                vk_device, x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            )
+            .context("full_attn_qkv_decode_batched kernel failed")?
+        };
         Ok(Some(out))
     }
 

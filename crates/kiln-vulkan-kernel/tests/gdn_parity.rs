@@ -1068,6 +1068,104 @@ fn full_attn_qkv_decode_bf16_packed_weights_match_cpu_reference() -> Result<()> 
 }
 
 #[test]
+fn full_attn_qkv_decode_batched_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, q_dim, k_dim, v_dim) = (3usize, 11usize, 7usize, 3usize, 4usize);
+    let x = cpu_f32(
+        (0..(batch * hidden))
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.09)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_f32(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let q_w = make_weight(q_dim, 0.019)?;
+    let k_w = make_weight(k_dim, -0.031)?;
+    let v_w = make_weight(v_dim, 0.023)?;
+    let q_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &q_w)?;
+    let k_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &k_w)?;
+    let v_buf = kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(&vk, &v_w)?;
+    let (got_q, got_k, got_v) =
+        kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched(
+            &vk, &x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+        )
+        .context("dispatch_full_attn_qkv_decode_cached_batched")?;
+
+    assert_close("batched full attn q", &got_q, &x.broadcast_matmul(&q_w)?, 1e-5)?;
+    assert_close("batched full attn k", &got_k, &x.broadcast_matmul(&k_w)?, 1e-5)?;
+    assert_close("batched full attn v", &got_v, &x.broadcast_matmul(&v_w)?, 1e-5)?;
+    Ok(())
+}
+
+#[test]
+fn full_attn_qkv_decode_batched_bf16w_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, hidden, q_dim, k_dim, v_dim) = (4usize, 9usize, 7usize, 3usize, 5usize);
+    let x = cpu_f32(
+        (0..(batch * hidden))
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.09)
+            .collect(),
+        (batch, 1, hidden),
+    )?;
+    let make_weight = |out_dim: usize, scale: f32| -> Result<Tensor> {
+        cpu_bf16(
+            (0..hidden * out_dim)
+                .map(|i| ((i as f32 % 13.0) - 6.0) * scale)
+                .collect(),
+            (hidden, out_dim),
+        )
+    };
+    let q_w = make_weight(q_dim, 0.019)?;
+    let k_w = make_weight(k_dim, -0.031)?;
+    let v_w = make_weight(v_dim, 0.023)?;
+    let q_w_f32 = q_w.to_dtype(DType::F32)?;
+    let k_w_f32 = k_w.to_dtype(DType::F32)?;
+    let v_w_f32 = v_w.to_dtype(DType::F32)?;
+    let q_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &q_w)?;
+    let k_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &k_w)?;
+    let v_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &v_w)?;
+    let (got_q, got_k, got_v) =
+        kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+            &vk, &x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+        )
+        .context("dispatch_full_attn_qkv_decode_cached_batched_bf16_weights")?;
+
+    assert_close(
+        "batched full attn bf16 q",
+        &got_q,
+        &x.broadcast_matmul(&q_w_f32)?,
+        1e-5,
+    )?;
+    assert_close(
+        "batched full attn bf16 k",
+        &got_k,
+        &x.broadcast_matmul(&k_w_f32)?,
+        1e-5,
+    )?;
+    assert_close(
+        "batched full attn bf16 v",
+        &got_v,
+        &x.broadcast_matmul(&v_w_f32)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
 fn paged_attn_decode_batch_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");
