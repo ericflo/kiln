@@ -10440,6 +10440,135 @@ fn try_flash_attn_paged_decode(
     Ok(Some(out))
 }
 
+/// Per-decode-step metadata that is identical across every full-attention
+/// layer (8× on Qwen3.5-4B). Building the `seqused_k` and padded
+/// `block_table` tensors costs one `cudaMemcpyHtoD` each per build, and was
+/// being repeated per layer — nsys at bs=16 attributed ~11% of GPU time to
+/// these `copy2d_bf16` launches. Hoisted to once-per-step via this struct.
+pub struct CachedPagedDecodeMeta {
+    /// Padded `[batch, max_blocks_per_seq]` u32 tensor indexing the paged
+    /// KV pool. Same for every full-attn layer within a step.
+    pub block_table_tensor: Tensor,
+    /// Per-row K/V length `[batch]` i32 tensor.
+    pub seqused_k_tensor: Tensor,
+    /// Max K/V length across rows in the batch (`max(start_pos) + 1`).
+    pub max_seqlen_k: usize,
+    /// Padded block-table width (in pages).
+    pub max_blocks_per_seq: usize,
+    /// Whether every row's `start_pos` is identical — when true, the strict
+    /// uniform-length path is preferred over `dyn_seqlen`.
+    pub uniform_start_pos: bool,
+    /// When the uniform-length path is reachable, the per-row contiguous
+    /// slot start positions (built via `paged_cache.contiguous_slot_run_starts`).
+    /// Cached here so the strict fallback skips its own build too.
+    pub strict_start_slots: Option<Vec<u32>>,
+}
+
+impl CachedPagedDecodeMeta {
+    /// Build the shared metadata once for the current decode step. Mirrors
+    /// the inline build inside `gqa_attention_paged_decode_contiguous_batch`,
+    /// but yields tensors the caller can pass into every full-attn layer.
+    pub fn build(
+        device: &Device,
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        start_positions: &[usize],
+    ) -> Result<Self> {
+        let batch = start_positions.len();
+        anyhow::ensure!(
+            batch > 0,
+            "CachedPagedDecodeMeta requires a non-empty batch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == batch,
+            "CachedPagedDecodeMeta metadata length mismatch ({} vs {batch})",
+            block_tables.len()
+        );
+
+        let max_start_pos = *start_positions
+            .iter()
+            .max()
+            .context("CachedPagedDecodeMeta requires non-empty start_positions")?;
+        let min_start_pos = *start_positions
+            .iter()
+            .min()
+            .context("CachedPagedDecodeMeta requires non-empty start_positions")?;
+        let uniform_start_pos = max_start_pos == min_start_pos;
+        let max_seqlen_k = max_start_pos + 1;
+
+        let page_block_size = paged_cache.block_size();
+        let max_blocks_per_seq =
+            ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+        let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
+        let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
+        for (row_idx, bt) in block_tables.iter().enumerate() {
+            let row_seqlen = start_positions[row_idx] + 1;
+            seqused_k_vec.push(
+                i32::try_from(row_seqlen)
+                    .context("CachedPagedDecodeMeta: seqused_k exceeds i32 range")?,
+            );
+            let row_blocks = bt.blocks.as_slice();
+            anyhow::ensure!(
+                row_blocks.len() * page_block_size >= row_seqlen,
+                "CachedPagedDecodeMeta row {row_idx}: block_table covers {} tokens but row needs {}",
+                row_blocks.len() * page_block_size,
+                row_seqlen,
+            );
+            let pad_block = *row_blocks.last().unwrap_or(&0);
+            for slot in 0..max_blocks_per_seq {
+                let phys = if slot < row_blocks.len() {
+                    row_blocks[slot]
+                } else {
+                    pad_block
+                };
+                block_table_vec.push(phys);
+            }
+        }
+
+        let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
+            let live_window_starts = vec![0usize; batch];
+            match paged_cache.contiguous_slot_run_starts(
+                block_tables,
+                &live_window_starts,
+                max_seqlen_k,
+            ) {
+                Some(slots) => {
+                    let v: Result<Vec<u32>> = slots
+                        .iter()
+                        .map(|&slot| {
+                            u32::try_from(slot).context(
+                                "CachedPagedDecodeMeta: start slot exceeds u32 range",
+                            )
+                        })
+                        .collect();
+                    Some(v?)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let block_table_tensor = Tensor::from_slice(
+            block_table_vec.as_slice(),
+            (batch, max_blocks_per_seq),
+            device,
+        )?
+        .contiguous()?;
+        let seqused_k_tensor =
+            Tensor::from_slice(seqused_k_vec.as_slice(), batch, device)?.contiguous()?;
+
+        Ok(Self {
+            block_table_tensor,
+            seqused_k_tensor,
+            max_seqlen_k,
+            max_blocks_per_seq,
+            uniform_start_pos,
+            strict_start_slots,
+        })
+    }
+}
+
 /// Batched full-attention decode for rows whose live paged-KV windows can be
 /// addressed through a block table. Uniform contiguous rows use the strict
 /// faster path when available; divergent row lengths use the backend's
@@ -10475,6 +10604,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
     profile_context: Option<(usize, usize)>,
+    cached_meta: Option<&CachedPagedDecodeMeta>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
     let profile_device = x.device();
@@ -10503,75 +10633,121 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // Phase 12-B-prime: drop the uniform-start_pos assertion stack. Per-row
     // K/V lengths are encoded via `seqused_k`, and per-row start positions
     // (used by RoPE + paged-KV slot indexing) are passed through as-is.
-    let max_start_pos = *start_positions
-        .iter()
-        .max()
-        .context("batched paged decode requires non-empty start_positions")?;
-    let min_start_pos = *start_positions
-        .iter()
-        .min()
-        .context("batched paged decode requires non-empty start_positions")?;
-    let uniform_start_pos = max_start_pos == min_start_pos;
-    let max_seqlen_k = max_start_pos + 1;
+    //
+    // When `cached_meta` is provided (set by the top-level batched decode
+    // entry point), we skip the per-layer rebuild of the seqused_k /
+    // block_table tensors. The cache is invariant across the 8 full-attn
+    // layers within a step, so building once saves 7 HtoD launches per
+    // step at bs > 1.
+    let (
+        max_seqlen_k,
+        uniform_start_pos,
+        max_blocks_per_seq,
+        own_block_table_tensor,
+        own_seqused_k_tensor,
+        own_strict_start_slots,
+    ): (usize, bool, usize, Option<Tensor>, Option<Tensor>, Option<Vec<u32>>) = match cached_meta
+    {
+        Some(meta) => (
+            meta.max_seqlen_k,
+            meta.uniform_start_pos,
+            meta.max_blocks_per_seq,
+            None,
+            None,
+            None,
+        ),
+        None => {
+            let max_start_pos = *start_positions
+                .iter()
+                .max()
+                .context("batched paged decode requires non-empty start_positions")?;
+            let min_start_pos = *start_positions
+                .iter()
+                .min()
+                .context("batched paged decode requires non-empty start_positions")?;
+            let uniform_start_pos = max_start_pos == min_start_pos;
+            let max_seqlen_k = max_start_pos + 1;
 
-    // Build varlen metadata: per-row seqused_k tensor and a padded
-    // [batch, max_blocks_per_seq] block_table tensor that indexes the
-    // paged KV pool. `flash_attn_paged_decode_dyn_seqlen` masks padding
-    // beyond each row's seqused_k.
-    let page_block_size = paged_cache.block_size();
-    let max_blocks_per_seq = ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
-    let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
-    let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
-    for (row_idx, bt) in block_tables.iter().enumerate() {
-        let row_seqlen = start_positions[row_idx] + 1;
-        seqused_k_vec.push(
-            i32::try_from(row_seqlen)
-                .context("batched contiguous paged attention seqused_k exceeds i32 range")?,
-        );
-        let row_blocks = bt.blocks.as_slice();
-        anyhow::ensure!(
-            row_blocks.len() * page_block_size >= row_seqlen,
-            "batched contiguous paged attention row {row_idx}: block_table covers {} tokens but row needs {}",
-            row_blocks.len() * page_block_size,
-            row_seqlen,
-        );
-        let pad_block = *row_blocks.last().unwrap_or(&0);
-        for slot in 0..max_blocks_per_seq {
-            let phys = if slot < row_blocks.len() {
-                row_blocks[slot]
-            } else {
-                pad_block
-            };
-            block_table_vec.push(phys);
-        }
-    }
-
-    // Strict-path slot_run vector kept as a fallback for when the dyn_seqlen
-    // backend declines (e.g. kill switch armed). Only valid when the live
-    // window is uniform across rows.
-    let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
-        let live_window_starts = vec![0usize; batch];
-        match paged_cache.contiguous_slot_run_starts(
-            block_tables,
-            &live_window_starts,
-            max_seqlen_k,
-        ) {
-            Some(slots) => {
-                let v: Result<Vec<u32>> = slots
-                    .iter()
-                    .map(|&slot| {
-                        u32::try_from(slot).context(
-                            "batched contiguous paged attention start slot exceeds u32 range",
-                        )
-                    })
-                    .collect();
-                Some(v?)
+            // Build varlen metadata: per-row seqused_k tensor and a padded
+            // [batch, max_blocks_per_seq] block_table tensor that indexes the
+            // paged KV pool. `flash_attn_paged_decode_dyn_seqlen` masks padding
+            // beyond each row's seqused_k.
+            let page_block_size = paged_cache.block_size();
+            let max_blocks_per_seq =
+                ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
+            let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
+            let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
+            for (row_idx, bt) in block_tables.iter().enumerate() {
+                let row_seqlen = start_positions[row_idx] + 1;
+                seqused_k_vec.push(
+                    i32::try_from(row_seqlen)
+                        .context("batched contiguous paged attention seqused_k exceeds i32 range")?,
+                );
+                let row_blocks = bt.blocks.as_slice();
+                anyhow::ensure!(
+                    row_blocks.len() * page_block_size >= row_seqlen,
+                    "batched contiguous paged attention row {row_idx}: block_table covers {} tokens but row needs {}",
+                    row_blocks.len() * page_block_size,
+                    row_seqlen,
+                );
+                let pad_block = *row_blocks.last().unwrap_or(&0);
+                for slot in 0..max_blocks_per_seq {
+                    let phys = if slot < row_blocks.len() {
+                        row_blocks[slot]
+                    } else {
+                        pad_block
+                    };
+                    block_table_vec.push(phys);
+                }
             }
-            None => None,
+
+            // Strict-path slot_run vector kept as a fallback for when the
+            // dyn_seqlen backend declines (e.g. kill switch armed). Only valid
+            // when the live window is uniform across rows.
+            let strict_start_slots: Option<Vec<u32>> = if uniform_start_pos {
+                let live_window_starts = vec![0usize; batch];
+                match paged_cache.contiguous_slot_run_starts(
+                    block_tables,
+                    &live_window_starts,
+                    max_seqlen_k,
+                ) {
+                    Some(slots) => {
+                        let v: Result<Vec<u32>> = slots
+                            .iter()
+                            .map(|&slot| {
+                                u32::try_from(slot).context(
+                                    "batched contiguous paged attention start slot exceeds u32 range",
+                                )
+                            })
+                            .collect();
+                        Some(v?)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            let block_table_tensor = Tensor::from_slice(
+                block_table_vec.as_slice(),
+                (batch, max_blocks_per_seq),
+                x.device(),
+            )?
+            .contiguous()?;
+            let seqused_k_tensor =
+                Tensor::from_slice(seqused_k_vec.as_slice(), batch, x.device())?.contiguous()?;
+
+            (
+                max_seqlen_k,
+                uniform_start_pos,
+                max_blocks_per_seq,
+                Some(block_table_tensor),
+                Some(seqused_k_tensor),
+                strict_start_slots,
+            )
         }
-    } else {
-        None
     };
+    let _ = max_blocks_per_seq; // shape already baked into the cached tensor
 
     let use_metal_decode_gemv = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
@@ -10696,14 +10872,24 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let (k_pool, v_pool) = paged_cache
         .pool_tensors(full_attn_layer_idx)
         .context("batched contiguous paged attention layer index out of range")?;
-    let block_table_tensor = Tensor::from_slice(
-        block_table_vec.as_slice(),
-        (batch, max_blocks_per_seq),
-        x.device(),
-    )?
-    .contiguous()?;
-    let seqused_k_tensor =
-        Tensor::from_slice(seqused_k_vec.as_slice(), batch, x.device())?.contiguous()?;
+    // Prefer the once-per-step cached tensors when the caller built them;
+    // otherwise use the per-layer ones we built above.
+    let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
+        (Some(meta), _) => &meta.block_table_tensor,
+        (None, Some(t)) => t,
+        (None, None) => unreachable!("cached_meta=None branch must build the block_table tensor"),
+    };
+    let seqused_k_tensor: &Tensor = match (cached_meta, own_seqused_k_tensor.as_ref()) {
+        (Some(meta), _) => &meta.seqused_k_tensor,
+        (None, Some(t)) => t,
+        (None, None) => unreachable!("cached_meta=None branch must build the seqused_k tensor"),
+    };
+    let strict_start_slots: Option<&[u32]> = match (cached_meta, own_strict_start_slots.as_ref()) {
+        (Some(meta), _) => meta.strict_start_slots.as_deref(),
+        (None, Some(v)) => Some(v.as_slice()),
+        (None, None) => None,
+    };
+    let page_block_size = paged_cache.block_size();
     let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -10736,11 +10922,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             // delivered PR #996's +10.76% c=8 throughput win. Requires
             // uniform start_pos + contiguous live KV. The strict kernel
             // expects head-major [batch, num_heads, 1, head_dim].
-            let strict_slots = strict_start_slots.as_ref().context(
+            let strict_slots = strict_start_slots.context(
                 "batched contiguous paged attention requires uniform start_pos for the strict path",
             )?;
             let start_slots =
-                Tensor::from_slice(strict_slots.as_slice(), batch, x.device())?.contiguous()?;
+                Tensor::from_slice(strict_slots, batch, x.device())?.contiguous()?;
             let q_strict = {
                 let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
@@ -10769,8 +10955,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 &q,
                 k_pool,
                 v_pool,
-                &block_table_tensor,
-                &seqused_k_tensor,
+                block_table_tensor,
+                seqused_k_tensor,
                 max_seqlen_k,
                 page_block_size,
                 softmax_scale,
@@ -12567,6 +12753,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     lora: Option<(&LoraLayerWeights, f32)>,
     full_attn_profile_context: Option<(usize, usize)>,
     mlp_profile_context: Option<(usize, usize)>,
+    cached_meta: Option<&CachedPagedDecodeMeta>,
 ) -> Result<Tensor> {
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(w) => w,
@@ -12612,6 +12799,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         config.attn_output_gate,
         lora,
         full_attn_profile_context,
+        cached_meta,
     )?;
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
@@ -12712,6 +12900,25 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     let profile_gdn_stages = profile_gdn_stages_enabled();
     let profile_mlp_stages = profile_mlp_stages_enabled();
 
+    // Build the per-step paged-decode metadata once when there are any
+    // full-attention layers in the model. Each gqa call within this step
+    // would otherwise rebuild the seqused_k + padded block_table tensors
+    // (one HtoD launch each) per layer (8× on Qwen3.5-4B); hoisting saves
+    // 14 launches per step. Skip the build entirely on linear-only models.
+    let has_full_attention_layer = weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Full(_)));
+    let cached_paged_meta: Option<CachedPagedDecodeMeta> = if has_full_attention_layer {
+        Some(
+            CachedPagedDecodeMeta::build(device, paged_cache, block_tables, start_positions)
+                .context("build cached paged decode metadata for batched step")?,
+        )
+    } else {
+        None
+    };
+    let cached_paged_meta_ref = cached_paged_meta.as_ref();
+
     let mut full_attn_idx = 0usize;
     let mut linear_attn_idx = 0usize;
     for (i, layer) in weights.layers.iter().enumerate() {
@@ -12734,6 +12941,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     layer_lora,
                     profile_full_attn_stages.then_some((full_attn_idx, max_start_pos)),
                     profile_mlp_stages.then_some((i, max_start_pos)),
+                    cached_paged_meta_ref,
                 )
                 .with_context(|| {
                     format!("batched transformer block {i} (full attention, paged)")
@@ -13665,6 +13873,7 @@ pub fn model_forward_paged_batched_decode_hidden(
                     &block_table_refs,
                     full_attn_idx,
                     layer_lora,
+                    None,
                     None,
                     None,
                 ) {
@@ -16822,6 +17031,7 @@ mod tests {
             &block_tables,
             0,
             false,
+            None,
             None,
             None,
         )?;
