@@ -294,13 +294,14 @@ struct CapturedBatchedDecodeGraph {
     _paged_decode_lse: Vec<Tensor>,
     /// Per-GDN-layer fused recurrent outputs, shape `[batch, ...]`.
     _gdn_decode_outputs: Vec<Tensor>,
-    /// Persistent batched [`LinearAttentionState`] slot used by the
-    /// captured forward. Replays scatter the per-row inputs into this
-    /// slot and read the same device pointers out the other side, so
-    /// the graph never sees a freed allocation.
-    _persistent_linear_state: Option<crate::forward::LinearAttentionState>,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
+    // NOTE: the captured graph reads GDN recurrent/conv state via the
+    // device pointers carried by the runner's `batched_state_pool` slot
+    // for this `batch_size`. The pool entry stays alive for the
+    // runner's lifetime, which always outlives the captured graph (we
+    // drop the captured map first on invalidate). No extra field
+    // needed here.
 }
 
 /// Manages CUDA graph lifecycle for decode forward passes.
@@ -1182,6 +1183,165 @@ impl CudaGraphRunner {
                 anyhow::bail!("end_capture failed: {e}");
             }
         }
+    }
+
+    /// Capture a batched (`bs > 1`) decode graph for the
+    /// `(batch_size, max_seqlen_k, …)` bucket and run it once, returning
+    /// the per-row next-token IDs. The captured graph is stored in
+    /// `self.captured_batched`; subsequent calls with a matching key
+    /// can replay it.
+    ///
+    /// This is the heart of step 6 in the multi-batch sequencing plan
+    /// at the top of this file. Buffer allocation uses the
+    /// `new_batched_*_buffer` helpers; the forward is invoked via
+    /// `model_forward_paged_batched_with_graph_inputs` which threads
+    /// the stable device pointers through the bs>1 hidden path.
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    fn try_capture_batched(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        sequence_lengths: &[usize],
+        lora: Option<&LoraWeights>,
+    ) -> Result<Vec<u32>> {
+        use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
+
+        let batch_size = token_ids.len();
+        anyhow::ensure!(
+            batch_size > 0,
+            "try_capture_batched requires a non-empty batch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == batch_size && sequence_lengths.len() == batch_size,
+            "try_capture_batched: row count mismatch"
+        );
+        let max_seq_len = *sequence_lengths.iter().max().expect("non-empty batch");
+        let key = CudaBatchedGraphKey::new(batch_size, max_seq_len, paged_cache);
+
+        let device = weights.embed_tokens.device();
+        let cuda_dev = match device {
+            Device::Cuda(d) => d,
+            _ => anyhow::bail!("CUDA graphs require a CUDA device"),
+        };
+        let stream = cuda_dev.cuda_stream();
+        let adapter_gen = self.adapter_generation;
+        let dtype = weights.embed_tokens.dtype();
+
+        // Pre-allocate every device buffer the captured graph will read
+        // from or write to. Each pointer is baked into the recorded
+        // kernel launches; the runner refreshes their contents in
+        // place before each replay.
+        let token_buffer = Self::new_batched_token_buffer(device, token_ids)?;
+        let position_buffer = Self::new_batched_position_buffer(device, sequence_lengths)?;
+        let rotary_cos_buffer = Self::new_batched_rotary_cos_buffer(config, device, batch_size)?;
+        let rotary_sin_buffer = Self::new_batched_rotary_sin_buffer(config, device, batch_size)?;
+        Self::update_batched_rotary_buffers(
+            &rotary_cos_buffer,
+            &rotary_sin_buffer,
+            config,
+            sequence_lengths,
+        )?;
+        let block_table_buffer = Self::new_batched_block_table_buffer(
+            block_tables,
+            paged_cache,
+            key.max_seqlen_k,
+            device,
+        )?;
+        let seqused_k_buffer = Self::new_batched_seqused_k_buffer(device, sequence_lengths)?;
+        let kv_slot_buffer =
+            Self::new_batched_kv_slot_buffer(block_tables, paged_cache, sequence_lengths, device)?;
+        let output_logits = Self::new_batched_output_logits(config, device, dtype, batch_size)?;
+        let (paged_decode_outputs, paged_decode_lse) =
+            Self::new_batched_paged_decode_outputs(config, device, dtype, batch_size)?;
+        let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, device, batch_size)?;
+
+        // Capture + forward inside a scope so the `&mut` borrow on
+        // `self.batched_state_pool` (taken by `persistent_batched_state`)
+        // ends before we mutate `self.captured_batched` below.
+        let (captured, tokens): (CapturedBatchedDecodeGraph, Vec<u32>) = {
+            let persistent_state = self
+                .persistent_batched_state(batch_size, config, device)?
+                .context("persistent batched state required for capture")?;
+            Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
+            let mut graph_inputs = crate::forward::BatchedPagedDecodeGraphInputs {
+                token_ids: &token_buffer,
+                positions: &position_buffer,
+                block_table: &block_table_buffer,
+                seqused_k: &seqused_k_buffer,
+                kv_slot: &kv_slot_buffer,
+                max_seqlen_k: key.max_seqlen_k,
+                rotary_cos: &rotary_cos_buffer,
+                rotary_sin: &rotary_sin_buffer,
+                attn_out: &paged_decode_outputs,
+                softmax_lse: &paged_decode_lse,
+                linear_state: persistent_state,
+            };
+
+            // Synchronize before capture — the capture window must not
+            // race with any in-flight launches from the prior step.
+            stream
+                .synchronize()
+                .map_err(|e| anyhow::anyhow!("sync before batched graph capture: {e}"))?;
+
+            stream
+                .begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)
+                .map_err(|e| anyhow::anyhow!("begin_capture (batched): {e}"))?;
+
+            let tokens_result = crate::forward::model_forward_paged_batched_with_graph_inputs(
+                backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                sequence_lengths,
+                lora,
+                &mut graph_inputs,
+            );
+
+            let graph_result = stream.end_capture(
+                candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+
+            let tokens = tokens_result.context("batched forward failed during graph capture")?;
+            let graph = match graph_result {
+                Ok(Some(g)) => g,
+                Ok(None) => anyhow::bail!("batched graph capture produced no operations"),
+                Err(e) => anyhow::bail!("batched end_capture failed: {e}"),
+            };
+
+            tracing::info!(
+                batch_size,
+                max_seqlen_k = key.max_seqlen_k,
+                "CUDA graph captured for batched decode"
+            );
+
+            let captured = CapturedBatchedDecodeGraph {
+                graph,
+                output_logits,
+                adapter_gen,
+                token_buffer,
+                position_buffer,
+                block_table_buffer,
+                seqused_k_buffer,
+                kv_slot_buffer,
+                rotary_cos_buffer,
+                rotary_sin_buffer,
+                _paged_decode_outputs: paged_decode_outputs,
+                _paged_decode_lse: paged_decode_lse,
+                _gdn_decode_outputs: gdn_decode_outputs,
+                max_seqlen_k: key.max_seqlen_k,
+            };
+            (captured, tokens)
+        };
+        self.captured_batched.insert(key, captured);
+        Ok(tokens)
     }
 
     /// Eager (non-graph) paged decode.
