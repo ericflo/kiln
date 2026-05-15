@@ -106,8 +106,35 @@ fn profile_decode_batcher_stages_enabled() -> bool {
 }
 
 fn cuda_gdn_batched_decode_row_loop_enabled() -> bool {
+    // Flipped to false-by-default after the matmul broadcast-copy fix made
+    // the true-batched contiguous-batch path strictly faster than the
+    // row-loop at every bs > 1. nsys profile (May 2026) showed candle's
+    // `broadcast_matmul` materializing a 168 MB BF16 weight copy across the
+    // batch dim before every GDN in-proj matmul, which made the batched
+    // path slower than just running N row-loop iterations sequentially.
+    // With that copy removed, bs=16 jumped from a flat ~100 tok/s ceiling
+    // to 790 tok/s (7.8×) on L40S + Qwen3.5-4B. Opt back into the row-loop
+    // with `KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP=1` (the old
+    // `KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP` env var is still
+    // honored for symmetry with prior docs / rollback runbooks — when set
+    // to anything other than "0"/"false"/"off" it keeps the row-loop off).
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP").is_err())
+    *ENABLED.get_or_init(|| {
+        // Legacy disable knob: when set to a truthy value, row-loop stays off
+        // (i.e. continues to use the new true-batched path).
+        if std::env::var("KILN_DISABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP").is_ok() {
+            return false;
+        }
+        // New opt-in knob to re-enable the row-loop fallback for debug /
+        // rollback. Recognizes the common truthy spellings.
+        match std::env::var("KILN_ENABLE_CUDA_GDN_BATCHED_DECODE_ROW_LOOP")
+            .ok()
+            .as_deref()
+        {
+            Some("1" | "true" | "TRUE" | "yes" | "on" | "ON") => true,
+            _ => false,
+        }
+    })
 }
 
 fn finish_decode_batcher_stage_profile(
