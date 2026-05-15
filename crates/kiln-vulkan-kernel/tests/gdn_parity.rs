@@ -3392,3 +3392,80 @@ fn sgd_step_f32_matches_cpu_reference() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn mlp_decode_bf16_packed_weights_match_decode_realistic_shapes() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    // Qwen3.5-4B-ish decode shapes, exercising the rows4 bf16w path at
+    // batch >= 8 (the regime where the new shader replaces the unbatched
+    // `linear_decode_batched_bf16w` for the down projection). Cuts the
+    // hidden / intermediate dims down so the test stays fast but still
+    // crosses the col_lane = 32 and red_lane = 4 tile boundaries.
+    let hidden = 256usize;
+    let intermediate = 384usize;
+    let out_dim = 192usize;
+    let batches = [8usize, 9usize, 16usize, 17usize];
+
+    let gate_w = cpu_bf16(
+        (0..hidden * intermediate)
+            .map(|i| ((i as f32 % 11.0) - 5.0) * 0.029)
+            .collect(),
+        (hidden, intermediate),
+    )?;
+    let up_w = cpu_bf16(
+        (0..hidden * intermediate)
+            .map(|i| ((i as f32 % 13.0) - 6.0) * -0.017)
+            .collect(),
+        (hidden, intermediate),
+    )?;
+    let down_w = cpu_bf16(
+        (0..intermediate * out_dim)
+            .map(|i| ((i as f32 % 17.0) - 8.0) * 0.011)
+            .collect(),
+        (intermediate, out_dim),
+    )?;
+    let gate_f32 = gate_w.to_dtype(DType::F32)?;
+    let up_f32 = up_w.to_dtype(DType::F32)?;
+    let down_f32 = down_w.to_dtype(DType::F32)?;
+    let gate_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &gate_w)?;
+    let up_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &up_w)?;
+    let down_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &down_w)?;
+
+    for batch in batches {
+        let x = cpu_f32(
+            (0..batch * hidden)
+                .map(|i| ((i as f32 % 17.0) - 8.0) * 0.047)
+                .collect(),
+            (batch, 1, hidden),
+        )?;
+
+        let got = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+            &vk,
+            &x,
+            &gate_buf,
+            &up_buf,
+            &down_buf,
+            hidden,
+            intermediate,
+            out_dim,
+        )
+        .with_context(|| format!("dispatch_mlp_decode_cached_bf16_weights batch={batch}"))?;
+
+        let gate = x.broadcast_matmul(&gate_f32)?;
+        let up = x.broadcast_matmul(&up_f32)?;
+        let sigmoid = (gate.neg()?.exp()? + 1.0)?.recip()?;
+        let hidden_t = ((gate * sigmoid)? * up)?;
+        let expected = hidden_t.broadcast_matmul(&down_f32)?;
+        assert_close(
+            &format!("mlp decode bf16w rows4 batch={batch}"),
+            &got,
+            &expected,
+            5e-4,
+        )?;
+    }
+    Ok(())
+}

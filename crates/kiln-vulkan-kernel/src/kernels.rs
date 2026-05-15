@@ -31,6 +31,11 @@ fn mlp_f32_down_rows4_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
 }
 
+fn mlp_bf16_down_rows4_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4").is_err())
+}
+
 fn mlp_chained_dispatch_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
@@ -276,6 +281,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_batched_bf16w", 3, 12),
         ("linear_decode_batched_rows2", 3, 12),
         ("linear_decode_batched_rows4", 3, 12),
+        ("linear_decode_batched_rows4_bf16w", 3, 12),
         ("linear_decode_argmax_blocks", 4, 12),
         ("linear_decode_argmax_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_reduce", 3, 4),
@@ -4549,9 +4555,16 @@ fn dispatch_mlp_decode_cached_impl(
     let batch = x_dims[0];
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
-    let gate_up_rows4 = gate_up_bf16_weights
-        && !down_bf16_weights
+    let down_bf16_rows4 = down_bf16_weights
+        && gate_up_bf16_weights
         && batch >= 8
+        && mlp_bf16_down_rows4_enabled();
+    // gate_up rows4 reuses weights across 4 rows; it is correctness-equivalent
+    // regardless of whether down is bf16 or f32 — wire it in for the all-bf16
+    // path too so we get the same scaling we already get for bf16/f32-down.
+    let gate_up_rows4 = gate_up_bf16_weights
+        && batch >= 8
+        && (down_bf16_rows4 || !down_bf16_weights)
         && mlp_bf16_gate_up_rows4_enabled();
     let down_rows4 =
         gate_up_bf16_weights && !down_bf16_weights && batch >= 8 && mlp_f32_down_rows4_enabled();
@@ -4726,6 +4739,11 @@ fn dispatch_mlp_decode_cached_impl(
                 env!("CARGO_MANIFEST_DIR"),
                 "/csrc/shaders/linear_decode_bf16w.comp"
             )
+        } else if down_bf16_rows4 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched_rows4_bf16w.comp"
+            )
         } else {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -4780,7 +4798,7 @@ fn dispatch_mlp_decode_cached_impl(
     ];
     let linear_workgroups = if batch == 1 {
         out_dim.div_ceil(16) as u32
-    } else if down_rows4 {
+    } else if down_rows4 || down_bf16_rows4 {
         (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
     } else if down_rows2 {
         (batch.div_ceil(2) * out_dim.div_ceil(32)) as u32
