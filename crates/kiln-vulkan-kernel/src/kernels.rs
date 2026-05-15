@@ -230,7 +230,7 @@ fn gdn_recurrent_parallel_reduce_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE").is_err())
 }
 
-fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
+pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
     dk >= 32 && dv > 0 && gdn_recurrent_parallel_reduce_enabled()
 }
 

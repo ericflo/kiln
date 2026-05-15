@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use ash::vk;
 
-use crate::kernels::run_compute_pipeline;
+use crate::kernels::{run_compute_pipeline, run_compute_pipeline_3d};
 use crate::pipeline::ShaderPipeline;
 use crate::{VulkanBuffer, VulkanDevice};
 
@@ -1073,6 +1073,94 @@ pub fn dispatch_causal_conv1d_update_resident(
     .context("causal_conv1d_update_resident: stage-2 state-advance kernel failed")
 }
 
+/// Resident-form GDN single-token recurrent step (fallback path used
+/// when the fully-fused `dispatch_gdn_decode_gates_recurrent_rmsnorm`
+/// is declined). Writes `out: [batch * heads * dv]` f32 and mutates
+/// `state` in place.
+///
+/// Push constants are `[batch, heads, 1, dk, dv, heads]` — matching
+/// the legacy dispatcher's `[batch, value_heads, seq_len, dk, dv,
+/// q_heads]` layout where `seq_len = 1` for the decode step and the
+/// q/v head counts are equal in the fallback path.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_recurrent_step_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k: &VulkanBuffer,
+    v: &VulkanBuffer,
+    beta: &VulkanBuffer,
+    g: &VulkanBuffer,
+    state: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    heads: usize,
+    dk: usize,
+    dv: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        out.size() >= (batch * heads * dv * 4) as u64,
+        "gdn_recurrent_step_resident: out buffer too small"
+    );
+    let parallel_reduce = crate::kernels::use_gdn_recurrent_parallel_reduce(dk, dv);
+    let glsl_path = if parallel_reduce {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_step_parallel.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_recurrent_prefill.comp"
+        )
+    };
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        heads as u32,
+        1,
+        dk as u32,
+        dv as u32,
+        heads as u32,
+    ];
+    let handles: [vk::Buffer; 7] = [
+        q.handle(),
+        k.handle(),
+        v.handle(),
+        beta.handle(),
+        g.handle(),
+        state.handle(),
+        out.handle(),
+    ];
+    if parallel_reduce {
+        // The `gdn_recurrent_step_parallel.comp` shader expects a 3D
+        // dispatch `(batch, heads, dv)` — see
+        // `dispatch_gdn_recurrent_step_single_submit` in kernels.rs.
+        // The 1D linear-count form would silently zero entire output
+        // rows.
+        run_compute_pipeline_3d(
+            vk_device,
+            &spirv,
+            &handles,
+            handles.len(),
+            &push_constants,
+            (batch as u32, heads as u32, dv as u32),
+        )
+        .context("gdn_recurrent_step_resident parallel-reduce kernel failed")
+    } else {
+        let total = batch * heads * dv;
+        let workgroup_count = total.div_ceil(256) as u32;
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &handles,
+            handles.len(),
+            &push_constants,
+            workgroup_count,
+        )
+        .context("gdn_recurrent_step_resident kernel failed")
+    }
+}
+
 /// Resident-form batched paged attention (compacted K/V variant).
 /// Writes `[batch, num_heads, head_dim]` f32 into `out`.
 #[allow(clippy::too_many_arguments)]
@@ -1793,6 +1881,73 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
             assert_eq!(e.to_bits(), r.to_bits(), "idx {i}");
+        }
+    }
+
+    #[test]
+    fn gdn_recurrent_step_resident_matches_nonresident() {
+        use crate::kernels::dispatch_gdn_recurrent_step;
+        let Some(dev) = try_device() else { return };
+        let batch = 2;
+        let heads = 4;
+        let dk = 32;
+        let dv = 16;
+        let q = Tensor::from_vec(
+            (0..batch * heads * dk).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
+            (batch, heads, dk),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let k = Tensor::from_vec(
+            (0..batch * heads * dk).map(|i| (i as f32 * 0.017) - 0.3).collect::<Vec<_>>(),
+            (batch, heads, dk),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let v = Tensor::from_vec(
+            (0..batch * heads * dv).map(|i| (i as f32 * 0.019) + 0.2).collect::<Vec<_>>(),
+            (batch, heads, dv),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let beta = Tensor::from_vec(
+            (0..batch * heads).map(|i| (i as f32 * 0.05) + 0.1).collect::<Vec<_>>(),
+            (batch, heads),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let g = Tensor::from_vec(
+            (0..batch * heads).map(|i| ((i as f32) * 0.03 - 0.1).tanh()).collect::<Vec<_>>(),
+            (batch, heads),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let state = Tensor::from_vec(
+            (0..batch * heads * dk * dv).map(|i| (i as f32 * 0.0017) - 0.05).collect::<Vec<_>>(),
+            (batch, heads, dk, dv),
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let (out_t, _new_state_t) =
+            dispatch_gdn_recurrent_step(&dev, &q, &k, &v, &beta, &g, &state).unwrap();
+        let expected = out_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
+        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
+        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
+        let beta_buf = upload_tensor_f32_buffer(&dev, &beta).unwrap();
+        let g_buf = upload_tensor_f32_buffer(&dev, &g).unwrap();
+        let state_buf = upload_tensor_f32_buffer(&dev, &state).unwrap();
+        let out_buf = alloc_out(&dev, (batch * heads * dv * 4) as u64);
+        dispatch_gdn_recurrent_step_resident(
+            &dev, &q_buf, &k_buf, &v_buf, &beta_buf, &g_buf, &state_buf, &out_buf, batch, heads, dk,
+            dv,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
         }
     }
 
