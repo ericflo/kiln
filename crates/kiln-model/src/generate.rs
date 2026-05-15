@@ -2266,10 +2266,18 @@ impl ModelRunner {
         let cuda_gdn_row_loop_candidate = self.backend.name() == "cuda"
             && has_linear_layers
             && cuda_gdn_batched_decode_row_loop_enabled();
-        let try_contiguous_batched = row_count > 1
-            && all_greedy
-            && !cache_is_fp8
-            && (positions_uniform || cuda_gdn_row_loop_candidate);
+        // `model_forward_paged_decode_contiguous_batch_hidden` already handles
+        // per-row positions via dyn-seqlen flash attention for full-attn
+        // layers, and the GDN layers operate on the batched
+        // `LinearAttentionState` regardless. The `positions_uniform` gate was
+        // a leftover from before the dyn-seqlen path landed — dropping it
+        // routes every bs > 1 greedy decode through the true-batched path
+        // (which also batches the LM-head argmax into a single kernel
+        // launch instead of `run_legacy_lm_head_sample_batch`'s per-row
+        // narrow + argmax loop).
+        let _ = positions_uniform;
+        let _ = cuda_gdn_row_loop_candidate;
+        let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
         if try_contiguous_batched {
