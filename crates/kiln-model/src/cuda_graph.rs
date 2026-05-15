@@ -847,6 +847,140 @@ impl CudaGraphRunner {
         Ok(())
     }
 
+    /// Rewrite the contents of the batched token buffer in place so the
+    /// captured graph picks up the new per-row input tokens on the next
+    /// replay.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn update_batched_token_buffer(
+        token_buffer: &Tensor,
+        token_ids: &[u32],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !token_ids.is_empty(),
+            "update_batched_token_buffer requires a non-empty batch"
+        );
+        Self::update_cuda_scalar(token_buffer, token_ids, "batched token buffer")
+    }
+
+    /// Rewrite the contents of the batched position buffer in place
+    /// from per-row `start_positions`.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn update_batched_position_buffer(
+        position_buffer: &Tensor,
+        start_positions: &[usize],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !start_positions.is_empty(),
+            "update_batched_position_buffer requires a non-empty batch"
+        );
+        let pos_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+        Self::update_cuda_scalar(
+            position_buffer,
+            pos_f32.as_slice(),
+            "batched position buffer",
+        )
+    }
+
+    /// Rewrite the three paged-metadata buffers for the batched graph
+    /// in place. Same contract as the bs=1
+    /// `update_paged_metadata_buffers` but every buffer is `[batch, …]`.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn update_batched_paged_metadata_buffers(
+        block_table_buffer: &Tensor,
+        seqused_k_buffer: &Tensor,
+        kv_slot_buffer: &Tensor,
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCache,
+        start_positions: &[usize],
+        max_seqlen_k: usize,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !block_tables.is_empty(),
+            "update_batched_paged_metadata_buffers requires a non-empty batch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == start_positions.len(),
+            "update_batched_paged_metadata_buffers: row count mismatch ({} vs {})",
+            block_tables.len(),
+            start_positions.len()
+        );
+        // Block table: stack each row's padded view, same width as
+        // capture time.
+        let mut block_flat: Vec<u32> = Vec::new();
+        for bt in block_tables {
+            let padded = Self::padded_block_table(bt, paged_cache, max_seqlen_k)?;
+            block_flat.extend_from_slice(&padded);
+        }
+        Self::update_cuda_scalar(
+            block_table_buffer,
+            block_flat.as_slice(),
+            "batched block table buffer",
+        )?;
+        // seqused_k: per-row (start_pos + 1) as i32.
+        let seqused: Vec<i32> = start_positions
+            .iter()
+            .map(|&p| {
+                i32::try_from(p + 1)
+                    .context("batched seqused_k buffer: value exceeds i32 range")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Self::update_cuda_scalar(
+            seqused_k_buffer,
+            seqused.as_slice(),
+            "batched seqused_k buffer",
+        )?;
+        // KV slots: per-row current write slot.
+        let mut slots: Vec<u32> = Vec::with_capacity(block_tables.len());
+        for (bt, &pos) in block_tables.iter().zip(start_positions.iter()) {
+            slots.push(
+                bt.slot_for(pos, paged_cache.block_size())
+                    .with_context(|| format!("no slot for decode position {pos}"))?
+                    as u32,
+            );
+        }
+        Self::update_cuda_scalar(kv_slot_buffer, slots.as_slice(), "batched KV slot buffer")?;
+        Ok(())
+    }
+
+    /// Rewrite the batched rotary cos/sin tables for the current batch
+    /// of per-row decode positions. Each row computes its own table,
+    /// then the rows are stacked into the `[batch, half]` buffer.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn update_batched_rotary_buffers(
+        rotary_cos_buffer: &Tensor,
+        rotary_sin_buffer: &Tensor,
+        config: &ModelConfig,
+        start_positions: &[usize],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !start_positions.is_empty(),
+            "update_batched_rotary_buffers requires a non-empty batch"
+        );
+        let half = config.rotary_dim() / 2;
+        let mut cos_flat: Vec<f32> = Vec::with_capacity(start_positions.len() * half);
+        let mut sin_flat: Vec<f32> = Vec::with_capacity(start_positions.len() * half);
+        for &pos in start_positions {
+            let (cos, sin) = Self::rotary_table_values(config, pos);
+            cos_flat.extend_from_slice(&cos);
+            sin_flat.extend_from_slice(&sin);
+        }
+        Self::update_cuda_scalar(
+            rotary_cos_buffer,
+            cos_flat.as_slice(),
+            "batched rotary cos buffer",
+        )?;
+        Self::update_cuda_scalar(
+            rotary_sin_buffer,
+            sin_flat.as_slice(),
+            "batched rotary sin buffer",
+        )?;
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
     fn update_cuda_scalar<T>(tensor: &Tensor, value: &[T], label: &str) -> Result<()>
     where
