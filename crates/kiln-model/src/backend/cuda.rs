@@ -726,7 +726,27 @@ impl BackendRuntime for CudaBackend {
             );
         });
 
-        let out = x.broadcast_matmul(weight_t)?;
+        // candle's `broadcast_matmul` for `[B, T, K] @ [K, N]` materializes
+        // the broadcasted RHS via `.broadcast_as(...).contiguous()`, which on
+        // CUDA copies the entire (B × K × N) weight tensor across the batch
+        // dim before every matmul. nsys showed that copy at 78 % of total
+        // GPU time on the bs > 1 GDN-decode path because GDN runs four
+        // in-proj matmuls per layer × 24 layers per step and each pays a
+        // ~168 MB BF16 copy at bs=4. Flatten leading dims, do a plain 2D
+        // matmul, and reshape — same compute, no implicit contiguous copy.
+        let l_dims = x.dims().to_vec();
+        let k = l_dims[l_dims.len() - 1];
+        let out_n = weight_t.dims()[1];
+        let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+        let out = if x.is_contiguous() {
+            let x2d = x.reshape((lead, k))?;
+            let out2d = x2d.matmul(weight_t)?;
+            let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
+            out_shape.push(out_n);
+            out2d.reshape(out_shape)?
+        } else {
+            x.broadcast_matmul(weight_t)?
+        };
         CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out))
     }

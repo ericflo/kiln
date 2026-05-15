@@ -3358,10 +3358,36 @@ fn broadcast_matmul_cpu_compatible(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor>
     if cpu_needs_f32_matmul(lhs, rhs) {
         let lhs_f32 = lhs.to_dtype(DType::F32)?;
         let rhs_f32 = rhs.to_dtype(DType::F32)?;
-        Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
-    } else {
-        Ok(lhs.broadcast_matmul(rhs)?)
+        return matmul_no_broadcast_copy(&lhs_f32, &rhs_f32);
     }
+    matmul_no_broadcast_copy(lhs, rhs)
+}
+
+/// `lhs.broadcast_matmul(rhs)` for the `[B, T, K] @ [K, N] -> [B, T, N]` case
+/// that drives every projection in the decoder, without paying for candle's
+/// `broadcast_matmul` of materializing the broadcasted RHS via
+/// `rhs.broadcast_as(...).contiguous()`. nsys (NVTX `kiln/gdn/in_proj` range)
+/// showed that contiguous copy as 78 % of total GPU time at bs=4 on the
+/// CUDA + GDN path — the 168 MB weight tensor was being copied across the
+/// batch dim before every matmul, dwarfing the matmul itself. Flattening
+/// `lhs` to 2D + `matmul(rhs)` + reshape uses the same compute path with no
+/// implicit copy.
+fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
+    let l_dims = lhs.dims();
+    let r_dims = rhs.dims();
+    if r_dims.len() == 2 && l_dims.len() >= 2 && lhs.is_contiguous() {
+        let k = l_dims[l_dims.len() - 1];
+        if r_dims[0] == k {
+            let out_n = r_dims[1];
+            let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+            let lhs2d = lhs.reshape((lead, k))?;
+            let out2d = lhs2d.matmul(rhs)?;
+            let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
+            out_shape.push(out_n);
+            return Ok(out2d.reshape(out_shape)?);
+        }
+    }
+    Ok(lhs.broadcast_matmul(rhs)?)
 }
 
 /// Vulkan-routed `[B, T, H] @ [H, D] -> [B, T, D]` matmul with autograd
