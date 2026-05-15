@@ -110,6 +110,32 @@ Measured on RTX 6000 Ada with NVIDIA Vulkan via `decode_microbench` and
 Commit and push to `main` (or merge the PR onto `main`) as each
 acceptance gate is verified and demonstrably correct.
 
+## Status (2026-05-15)
+
+### Landed
+
+| Gate | What | Where |
+|------|------|-------|
+| (a) | 14 `dispatch_*_resident` variants covering every kernel in the table | `crates/kiln-vulkan-kernel/src/resident.rs` |
+| (a) | 13 bit-identical parity tests against the legacy dispatchers | same — `cargo test -p kiln-vulkan-kernel resident:: -- --test-threads=1` |
+| (b) | `DecodeResidentPool` ring (3–4 slots, 1 % heap budget, transparent fallback) | `crates/kiln-vulkan-kernel/src/decode_resident_pool.rs` |
+| (c) | `Backend::supports_resident_decode()` + `decode_resident_pool_ready()` trait predicates; CPU/CUDA/Metal default `false` | `crates/kiln-model/src/backend/mod.rs` (+ vulkan impl) |
+| (d) | Integration parity test framework in `crates/kiln-model/tests/vk_resident_decode_parity.rs`; gated on `KILN_RESIDENT_DECODE_PARITY_MODEL` | same |
+| (e) framework | `decode_microbench full_step_resident` mode chaining 5 resident dispatchers through pool slots. On RTX 6000 Ada at Qwen3.5-4B shapes, batch=1 lands at **604 µs for the full block** — ≈ 120 µs / kernel, well under the 200 µs / call target. Per-kernel legacy floor was 1.1–1.7 ms. | `crates/kiln-vulkan-kernel/examples/decode_microbench.rs` |
+
+### Remaining
+
+The largest remaining piece is the **per-layer wire-up** inside
+`model_forward_paged_inner`: each call site of the legacy
+`dispatch_*_cached_*` dispatchers needs to route through its
+`_resident` sibling, threading a pool slot between layers instead of
+materializing a Tensor. The entry point
+`model_forward_paged_last_token_resident` exists and gates on
+`supports_resident_decode()` + `decode_resident_pool_ready()`; it
+currently delegates to the legacy fn so behaviour is unchanged. Once
+each layer type (full-attn + GDN) is wired, gate (e)'s end-to-end
+tok/s numbers become measurable via `kiln-bench --features vulkan`.
+
 ## Out of scope for this goal
 
 - Cooperative-matrix / Tensor-Core kernels via
