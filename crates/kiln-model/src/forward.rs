@@ -13663,20 +13663,26 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
-/// Batched paged decode forward + LM head with the stable graph inputs
-/// threaded through. Lives next to
-/// [`model_forward_paged_with_graph_inputs`] but specialized for
-/// `bs > 1`. The CUDA graph runner uses this under stream capture to
-/// build a captured batched decode graph; replay rewrites the contents
-/// of `graph_inputs.*` in place and re-launches.
+/// Batched paged decode forward + LM head argmax with the stable
+/// graph inputs threaded through. Lives next to
+/// [`model_forward_paged_with_graph_inputs`] but specialized for the
+/// `bs > 1` contiguous-batched hot path (the one
+/// `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
+/// drives).
 ///
-/// Today this is a stub: it ignores `graph_inputs` and delegates to
-/// the existing eager batched forward. Step 6 of the multi-batch
-/// capture sequence (see top of `cuda_graph.rs`) replaces the body
-/// with a stable-pointer-aware variant of
-/// `model_forward_paged_batched_decode_hidden` that reads from
-/// `graph_inputs.token_ids` / `positions` / etc. and writes through
-/// pre-allocated per-layer scratch buffers.
+/// Today this is a thin stub: it ignores `graph_inputs` and delegates
+/// to the eager `model_forward_paged_decode_contiguous_batch_greedy`,
+/// which is the same function the existing hot path calls. The
+/// captured-batched graph this would feed is not wired in yet. Step 6
+/// of the multi-batch capture sequence (see top of `cuda_graph.rs`)
+/// replaces the body with a stable-pointer-aware variant that reads
+/// from `graph_inputs.token_ids` / `.positions` / etc. and threads
+/// the persistent `graph_inputs.linear_state` slot through every
+/// GDN layer.
+///
+/// Returns the per-row next-token IDs (`[batch] u32`), matching the
+/// hot path's return shape so the runner's
+/// `decode_step_paged_batched` can return `Ok(Some(tokens))`.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
@@ -13686,28 +13692,17 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     paged_cache: &PagedKvCache,
-    block_tables: &[BlockTable],
+    block_tables: &[&BlockTable],
     sequence_lengths: &[usize],
     lora: Option<&LoraWeights>,
     graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
-) -> Result<Tensor> {
-    // Stub: delegate to the existing eager batched forward, ignoring
-    // the pre-allocated per-step buffers. The captured graph this
-    // would feed is also not yet wired in. When the body is replaced
-    // with the stable-input variant, the entry point on
-    // `CudaGraphRunner` (and the caller in `generate.rs`) can flip
-    // over without further API churn here.
+) -> Result<Vec<u32>> {
     let _ = graph_inputs;
-    let mut linear_state_refs: Vec<&mut LinearAttentionState> =
-        std::iter::once(&mut *graph_inputs.linear_state).collect();
-    // The single-row collect above is a placeholder — the real body
-    // will pass the persistent batched state directly. We still need
-    // a non-empty &mut [&mut LinearAttentionState] for the signature,
-    // and at the stub layer we know `linear_state` already has the
-    // right batch dim because the runner pre-allocated it via
-    // `CudaGraphRunner::persistent_batched_state(batch_size, …)`.
-    let _ = &mut linear_state_refs;
-    model_forward_paged_batched_decode(
+    // Delegate to the eager hot path. Uses `graph_inputs.linear_state`
+    // as the batched state slot — when the runner's `persistent_batched_state`
+    // allocator hands out the slot for this bucket, that's the
+    // persistent buffer the captured graph will read from.
+    model_forward_paged_decode_contiguous_batch_greedy(
         backend,
         input_tokens,
         weights,
@@ -13715,7 +13710,7 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         paged_cache,
         block_tables,
         sequence_lengths,
-        &mut [&mut *graph_inputs.linear_state],
+        Some(graph_inputs.linear_state),
         lora,
     )
 }
