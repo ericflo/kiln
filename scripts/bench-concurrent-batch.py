@@ -103,6 +103,7 @@ def bench_concurrent(host, num_concurrent, max_tokens, prompt_idx_seed=0):
     elapsed = time.perf_counter() - t0
     successes = [r for r in results if r is not None]
     total_completion_tokens = sum(r["completion_tokens"] for r in successes)
+    per_req_elapsed_s = sorted(r["elapsed_s"] for r in successes)
     return {
         "num_concurrent": num_concurrent,
         "elapsed_s": elapsed,
@@ -114,6 +115,7 @@ def bench_concurrent(host, num_concurrent, max_tokens, prompt_idx_seed=0):
             r["completion_tokens"] / r["elapsed_s"] if r["elapsed_s"] > 0 else 0
             for r in successes
         ],
+        "per_req_elapsed_s": per_req_elapsed_s,
     }
 
 
@@ -147,10 +149,20 @@ def main():
         if args.mode in ("concurrent", "both"):
             r = bench_concurrent(args.host, sz, args.max_tokens)
             r["mode"] = "concurrent"
+            # Per-request latency percentiles are the operator-visible signal
+            # for SLA-style benchmarks — p50 = median request wall-time, p99 =
+            # tail. The aggregate tok/s metric tracks compute-throughput well
+            # but masks request-level fairness / queue starvation.
+            per_req = r.get("per_req_elapsed_s") or []
+            p50 = per_req[len(per_req) // 2] if per_req else 0.0
+            p99 = per_req[max(0, int(len(per_req) * 0.99) - 1)] if per_req else 0.0
+            r["p50_req_latency_s"] = p50
+            r["p99_req_latency_s"] = p99
             print(
                 f"[concurrent] n={sz:>2} elapsed={r['elapsed_s']:.3f}s "
                 f"tokens={r['total_completion_tokens']:>5} "
                 f"tok/s={r['tokens_per_s']:.2f} "
+                f"p50={p50:.3f}s p99={p99:.3f}s "
                 f"successes={r['successes']}/{sz} "
                 f"errors={len(r['errors'])}",
                 flush=True,
