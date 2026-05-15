@@ -418,6 +418,42 @@ impl CudaGraphRunner {
         self.enabled
     }
 
+    /// Run a batched paged decode step, attempting CUDA graph capture/replay
+    /// for the `(batch_size, max_seqlen_k, …)` bucket. Today this always
+    /// returns `Ok(None)`, signalling the caller to take the eager batched
+    /// path — the capture/replay glue is still pending (see top-of-file
+    /// design note, sequencing step 5 onward).
+    ///
+    /// Callers (specifically `ModelRunner::paged_batched_decode_step`)
+    /// can wire this in eagerly: on `Ok(Some(tokens))`, the captured
+    /// graph just ran and produced the next per-row token ids; on
+    /// `Ok(None)`, fall back to the existing eager
+    /// `decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
+    /// path. The runner takes the args by reference because future
+    /// implementations will both read the per-row metadata and write
+    /// the next-step state back through these slices.
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub fn decode_step_paged_batched(
+        &mut self,
+        _backend: &dyn BackendRuntime,
+        _token_ids: &[u32],
+        _weights: &GpuWeights,
+        _config: &ModelConfig,
+        _paged_cache: &PagedKvCache,
+        _block_tables: &[&BlockTable],
+        _sequence_lengths: &[usize],
+        _linear_states: &mut [&mut LinearAttentionState],
+        _lora: Option<&LoraWeights>,
+    ) -> Result<Option<Vec<u32>>> {
+        // Disabled stub: the body lands when steps 5-6 of the top-of-file
+        // sequencing plan complete. Returning `None` keeps the caller on
+        // the existing eager batched path, so wiring this in early
+        // is a no-op until the capture/replay glue exists.
+        Ok(None)
+    }
+
     /// Run a paged decode step, using graph capture/replay when possible.
     ///
     /// The lifecycle is:
