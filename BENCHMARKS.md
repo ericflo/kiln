@@ -131,7 +131,7 @@ quantized + GDN-fused base path is already running close to its bs=1 ceiling
 on A6000, and the most obvious next-step lever (native MTP self-spec) does
 not yet pay back the verifier cost at current α.
 
-### Batched concurrent-decode throughput (L40S sm_89, post matmul-broadcast-copy fix)
+### Batched concurrent-decode throughput (L40S sm_89, post May 2026 batched-decode rework)
 
 Aggregate `/v1/chat/completions` greedy decode tokens/s across N
 concurrent HTTP streams, Qwen3.5-4B, `KILN_W4A16=1`,
@@ -144,26 +144,40 @@ deterministic completion cache collapses repeated greedy decodes onto a
 | Concurrency | Aggregate tok/s | Scale vs bs=1 |
 |---:|---:|---:|
 | 1 | 101 | 1.00× |
-| 2 | 164 | 1.63× |
-| 4 | 306 | 3.03× |
-| 8 | 525 | 5.20× |
-| 16 | 815 | 8.07× |
-| 32 | 1106 | 10.95× |
-| 48 | 1273 | 12.60× |
-| 64 | 1360 | 13.47× |
+| 2 | 168 | 1.66× |
+| 4 | 323 | 3.20× |
+| 8 | 569 | 5.63× |
+| 16 | 958 | 9.49× |
+| 32 | 1372 | 13.59× |
+| 64 | 1765 | 17.48× |
 
 Source: PRs landing the broadcast-matmul / row-loop-default / positions-
-uniform-gate fixes (commits `2e252f8a`, `feb316a1`, `ffe0feb7`,
-May 2026). Pre-fix aggregate was a **flat ~100 tok/s ceiling regardless
-of N** — candle's `Tensor::broadcast_matmul` was materializing a 168 MB
-BF16 weight copy across the batch dim before every GDN in-proj matmul,
-which was 78 % of GPU time. nsys after the fix shows `ucopy_bf16`
-falling out of the top kernels entirely and actual compute (cutlass /
-Marlin GEMM) dominating.
+uniform-gate / batched-state-cache fixes (commits `2e252f8a`,
+`feb316a1`, `ffe0feb7`, `c03e1da0`, `153dc932`, May 2026). Pre-fix
+aggregate was a **flat ~100 tok/s ceiling regardless of N**.
+
+Two compounding wins:
+
+1. **`broadcast_matmul` contiguous-copy fix** (`2e252f8a` /
+   `feb316a1`): candle's `Tensor::broadcast_matmul` for `[B, T, K] @
+   [K, N]` was materializing the RHS via
+   `broadcast_as(...).contiguous()` — a multi-hundred-MB BF16 weight
+   copy across the batch dim per GDN in-proj matmul. nsys showed
+   `ucopy_bf16` at 78 % of GPU time pre-fix; post-fix it falls out of
+   the top kernels and actual compute (cutlass / Marlin GEMM)
+   dominates.
+
+2. **Persistent batched-state cache** (`153dc932`):
+   `decode_next_tokens_paged_contiguous_batch_greedy` was re-running
+   `LinearAttentionState::from_batch_rows` (24 GDN layers × 2 state
+   kinds = 48 `Tensor::cat` ops) on every decode step. Caching the
+   batched state on the `ModelRunner` and keying on per-row pointer
+   identity skips this stage on consecutive same-composition batches.
+   Adds +10–32 % depending on batch size, biggest win at bs=64.
 
 The bs=1 number is unchanged because the bs=1 codepath is
-`graph_runner.decode_step_paged`, which never touched the
-broadcast-copy hot path; the fix is purely a bs > 1 win.
+`graph_runner.decode_step_paged`, which never touched either hot
+path; the fix is purely a bs > 1 win.
 
 ### kiln steady-state — refresh pending
 
