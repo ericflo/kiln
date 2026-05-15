@@ -320,14 +320,32 @@ fn run_full_step_resident(
 ) -> Result<()> {
     use kiln_vulkan_kernel::DecodeResidentPool;
     use kiln_vulkan_kernel::resident::{
-        dispatch_full_attn_qkv_decode_cached_batched_resident,
+        dispatch_add_resident, dispatch_full_attn_qkv_decode_cached_batched_resident,
         dispatch_full_attn_qkv_decode_cached_resident,
         dispatch_linear_decode_cached_bf16_weights_resident,
-        dispatch_mlp_decode_cached_bf16_weights_resident, dispatch_qwen_rmsnorm_forward_resident,
+        dispatch_mlp_decode_cached_bf16_weights_resident, dispatch_mul_sigmoid_gate_resident,
+        dispatch_paged_attn_decode_batch_f32_resident, dispatch_qwen_rmsnorm_forward_resident,
+        dispatch_rotary_qk_resident,
     };
     use std::sync::Arc;
 
-    println!("== full_step_resident (rmsnorm → QKV → out_proj → rmsnorm → MLP) ==");
+    println!(
+        "== full_step_resident (rmsnorm → QKV → QK-norm → RoPE → paged_attn → out_gate → out_proj → res → rmsnorm → MLP → res) =="
+    );
+    // Qwen3.5-4B full-attn shapes from ModelConfig::qwen3_5_4b():
+    //   num_attention_heads = 16, num_kv_heads = 4, head_dim = 256,
+    //   rotary_percentage of 0.25 → rotary_dim = 64.
+    // Q_DIM / K_DIM / V_DIM are the file-level constants 4096/1024/1024,
+    // which match num_heads * head_dim = 16 * 256 = 4096 and
+    // num_kv_heads * head_dim = 4 * 256 = 1024.
+    let num_heads = 16usize;
+    let num_kv_heads = 4usize;
+    let head_dim = 256usize;
+    let rotary_dim = 64usize;
+    let half_rot = rotary_dim / 2;
+    let max_seqlen = 256usize; // synthetic KV window
+    let softmax_scale = (head_dim as f32).sqrt().recip();
+
     let dev_arc = Arc::new(VulkanDevice::new()?);
     let pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
         .expect("RTX 6000 Ada has plenty of room for the resident pool");
@@ -335,24 +353,41 @@ fn run_full_step_resident(
         device,
         &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
     )?;
+    let weight_qknorm = upload_tensor_f32_buffer(
+        device,
+        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
+    )?;
     let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
 
+    // Synthetic RoPE cos/sin tables for 1 position (the new decode token).
+    let cos_t = Tensor::from_vec(
+        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
+        (1, half_rot),
+        &Device::Cpu,
+    )?;
+    let sin_t = Tensor::from_vec(
+        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
+        (1, half_rot),
+        &Device::Cpu,
+    )?;
+    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
+    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+
     for &batch in batches {
-        // Pre-allocate x once on device (in real decode this would be the
-        // embedded hidden state from the prior step).
-        let x_bytes = (batch * HIDDEN * 4) as u64;
+        // Pre-allocate the per-block intermediate buffers once. In a real
+        // decode loop these come from `DecodeResidentPool::acquire()` so
+        // they're shared across all 32 layers per step.
+        let hidden_bytes = (batch * HIDDEN * 4) as u64;
         let x_buf = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
-            x_bytes,
+            hidden_bytes,
         )?;
-        // Pre-allocate the final output (logits stand-in).
         let final_out = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
-            x_bytes,
+            hidden_bytes,
         )?;
-        // Scratch slot for mlp gate*up intermediate.
         let scratch = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
@@ -363,10 +398,89 @@ fn run_full_step_resident(
             device.device_local_mem_type(),
             (batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64,
         )?;
+        // Reshaped Q / K / V buffers (resident, written as separate slots).
+        let q_buf_dim = (batch * num_heads * head_dim * 4) as u64;
+        let kv_buf_dim = (batch * num_kv_heads * head_dim * 4) as u64;
+        let q_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            q_buf_dim,
+        )?;
+        let q_rot = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            q_buf_dim,
+        )?;
+        let k_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            kv_buf_dim,
+        )?;
+        let k_rot = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            kv_buf_dim,
+        )?;
+        let v_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            kv_buf_dim,
+        )?;
+        let gate_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            q_buf_dim,
+        )?;
+        // Synthetic K/V pool (max_seqlen tokens of zeros) — stands in for
+        // the paged KV cache. In a real implementation the resident path
+        // writes the new K/V into this pool at the per-row block-table
+        // slot offset; for the bench we just leave it zeroed.
+        let kv_pool_size = (batch * max_seqlen * num_kv_heads * head_dim * 4) as u64;
+        let k_pool = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            kv_pool_size,
+        )?;
+        let v_pool = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            kv_pool_size,
+        )?;
+        // Per-row sequence-length array (one entry per batch row).
+        let seq_lens_data: Vec<u32> = vec![max_seqlen as u32; batch];
+        let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data).to_vec();
+        let seq_lens_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            seq_lens_bytes.len() as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &seq_lens_buf,
+            &seq_lens_bytes,
+        )?;
+        let attn_pre_gate = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            q_buf_dim,
+        )?;
+        let attn_post_gate = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            q_buf_dim,
+        )?;
         let attn_out = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
-            (batch * Q_DIM * 4) as u64,
+            hidden_bytes,
+        )?;
+        let attn_residual = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            hidden_bytes,
         )?;
 
         time("full_step_resident", batch, || {
@@ -382,7 +496,7 @@ fn run_full_step_resident(
                 HIDDEN,
                 1e-6,
             )?;
-            // 2) Fused QKV
+            // 2) Fused QKV → combined buffer
             if batch == 1 {
                 dispatch_full_attn_qkv_decode_cached_resident(
                     device,
@@ -413,30 +527,99 @@ fn run_full_step_resident(
                     true,
                 )?;
             }
-            // 3) (paged_attn omitted: needs K/V cache plumbing — this
-            // microbench measures decode-block scaffolding only)
-            // 4) Attention out_proj: Q_DIM → HIDDEN
+            // For the bench we assume the QKV layout is already
+            // de-interleaved into q/k/v slot buffers; in the real wire-up
+            // a thin split-or-attention-input-step is added. Here we
+            // simulate that step by zero-cost reusing buffers — exact
+            // ordering only matters for parity testing (which lives in
+            // the parity test, not this latency bench).
+            // 3) Per-head QK-norm. rows = batch * heads, hidden = head_dim.
+            dispatch_qwen_rmsnorm_forward_resident(
+                device,
+                &q_buf,
+                &weight_qknorm,
+                &q_buf, // in-place is fine because the shader's writes don't depend on prior writes within a row
+                batch * num_heads,
+                head_dim,
+                1e-6,
+            )?;
+            dispatch_qwen_rmsnorm_forward_resident(
+                device,
+                &k_buf,
+                &weight_qknorm,
+                &k_buf,
+                batch * num_kv_heads,
+                head_dim,
+                1e-6,
+            )?;
+            // 4) RoPE on Q and K
+            dispatch_rotary_qk_resident(
+                device,
+                &q_buf,
+                &k_buf,
+                &cos_buf,
+                &sin_buf,
+                &q_rot,
+                &k_rot,
+                batch,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                rotary_dim,
+            )?;
+            // 5) Paged attention against the synthetic K/V pool.
+            dispatch_paged_attn_decode_batch_f32_resident(
+                device,
+                &q_rot,
+                &k_pool,
+                &v_pool,
+                &seq_lens_buf,
+                &attn_pre_gate,
+                batch,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+                max_seqlen,
+                softmax_scale,
+            )?;
+            // 6) Output gate: attn * sigmoid(gate)
+            dispatch_mul_sigmoid_gate_resident(
+                device,
+                &attn_pre_gate,
+                &gate_buf,
+                &attn_post_gate,
+                batch * num_heads * head_dim,
+            )?;
+            // 7) Attention out_proj: Q_DIM → HIDDEN
             dispatch_linear_decode_cached_bf16_weights_resident(
                 device,
-                &qkv_combined, // first Q_DIM elements per row are Q
+                &attn_post_gate,
                 &out_w,
                 &attn_out,
                 batch,
                 Q_DIM,
                 HIDDEN,
             )?;
-            // 5) Pre-MLP rmsnorm
+            // 8) Residual: x + attn_out
+            dispatch_add_resident(
+                device,
+                &x_buf,
+                &attn_out,
+                &attn_residual,
+                batch * HIDDEN,
+            )?;
+            // 9) Pre-MLP rmsnorm
             let normed2 = pool.acquire();
             dispatch_qwen_rmsnorm_forward_resident(
                 device,
-                &attn_out,
+                &attn_residual,
                 &weight_norm,
                 &normed2,
                 batch,
                 HIDDEN,
                 1e-6,
             )?;
-            // 6) MLP: SwiGLU
+            // 10) MLP: SwiGLU
             dispatch_mlp_decode_cached_bf16_weights_resident(
                 device,
                 &normed2,
@@ -449,6 +632,14 @@ fn run_full_step_resident(
                 HIDDEN,
                 INTERMEDIATE,
                 HIDDEN,
+            )?;
+            // 11) Final residual
+            dispatch_add_resident(
+                device,
+                &attn_residual,
+                &final_out,
+                &x_buf, // overwrite next-layer x
+                batch * HIDDEN,
             )?;
             Ok(())
         })?;
