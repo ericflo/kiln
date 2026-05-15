@@ -698,6 +698,496 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_resident(
     )
 }
 
+/// Resident-form fused GDN input projection. Writes the combined
+/// `[batch, qkv_dim + z_dim + a_dim + b_dim]` row-major output into
+/// `out`. Shader selection mirrors `dispatch_gdn_in_proj_decode_cached_impl`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_decode_cached_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    qkv_weight_t: &VulkanBuffer,
+    z_weight_t: &VulkanBuffer,
+    a_weight_t: &VulkanBuffer,
+    b_weight_t: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+    packed_bf16_weights: bool,
+) -> Result<()> {
+    let total_out = qkv_dim + z_dim + a_dim + b_dim;
+    let need_in = (batch * hidden * 4) as u64;
+    let need_out = (batch * total_out * 4) as u64;
+    anyhow::ensure!(
+        x.size() >= need_in,
+        "gdn_in_proj_resident: x buffer {} bytes < required {need_in}",
+        x.size()
+    );
+    anyhow::ensure!(
+        out.size() >= need_out,
+        "gdn_in_proj_resident: out buffer {} bytes < required {need_out}",
+        out.size()
+    );
+
+    let pair_qkv_z = batch > 1 && crate::kernels::gdn_in_proj_batch_pair_qkv_z_enabled();
+    let row_grouping = packed_bf16_weights
+        && pair_qkv_z
+        && batch >= 3
+        && crate::kernels::gdn_in_proj_batch_row_pair_enabled();
+    let row_group_size = if row_grouping
+        && batch >= 8
+        && crate::kernels::gdn_in_proj_batch_row_quad_enabled()
+    {
+        4usize
+    } else if row_grouping {
+        2usize
+    } else {
+        1usize
+    };
+    let dispatch_cols = if pair_qkv_z {
+        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
+    } else {
+        total_out
+    };
+
+    let glsl_path = if batch == 1 {
+        if packed_bf16_weights {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode.comp"
+            )
+        }
+    } else if packed_bf16_weights {
+        if row_group_size == 4 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w.comp"
+            )
+        } else if row_group_size == 2 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w.comp"
+            )
+        } else if pair_qkv_z {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_bf16w.comp"
+            )
+        }
+    } else if pair_qkv_z {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/gdn_in_proj_decode_batched.comp"
+        )
+    };
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let mut push_constants = vec![
+        hidden as u32,
+        qkv_dim as u32,
+        z_dim as u32,
+        a_dim as u32,
+        b_dim as u32,
+        total_out as u32,
+    ];
+    if batch > 1 {
+        push_constants.push(batch as u32);
+    }
+    let handles: [vk::Buffer; 6] = [
+        x.handle(),
+        qkv_weight_t.handle(),
+        z_weight_t.handle(),
+        a_weight_t.handle(),
+        b_weight_t.handle(),
+        out.handle(),
+    ];
+    let workgroups = if batch == 1 {
+        total_out.div_ceil(16) as u32
+    } else if row_group_size > 1 {
+        (batch.div_ceil(row_group_size) * dispatch_cols.div_ceil(80)) as u32
+    } else {
+        (batch * dispatch_cols.div_ceil(80)) as u32
+    };
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("gdn_in_proj_decode_resident kernel failed")
+}
+
+/// Resident-form fused GDN gates (β, g). Writes `[elem_count]` f32
+/// for each into `beta_out` and `g_out` respectively. `a` and `b`
+/// are f32 inputs already on device; `a_log` and `dt_bias` are
+/// long-lived weights.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_gates_cached_resident(
+    vk_device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    a_log: &VulkanBuffer,
+    dt_bias: &VulkanBuffer,
+    beta_out: &VulkanBuffer,
+    g_out: &VulkanBuffer,
+    elem_count: usize,
+    nv: usize,
+) -> Result<()> {
+    let need = (elem_count * 4) as u64;
+    anyhow::ensure!(
+        a.size() >= need && b.size() >= need,
+        "gdn_gates_resident: a/b buffers must each be >= {need} bytes"
+    );
+    anyhow::ensure!(
+        beta_out.size() >= need && g_out.size() >= need,
+        "gdn_gates_resident: out buffers must each be >= {need} bytes"
+    );
+    let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/gdn_gates.comp");
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 2] = [elem_count as u32, nv as u32];
+    let workgroup_count = elem_count.div_ceil(256) as u32;
+    let handles: [vk::Buffer; 6] = [
+        a.handle(),
+        b.handle(),
+        a_log.handle(),
+        dt_bias.handle(),
+        beta_out.handle(),
+        g_out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroup_count,
+    )
+    .context("gdn_gates_resident kernel failed")
+}
+
+/// Resident-form GDN gated RMS norm: `out = rms_norm(x, weight, eps) * silu(z)`.
+/// `rows = elem_count / hidden`. Writes `[elem_count]` f32 into `out`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_gated_rms_norm_cached_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    z: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    out: &VulkanBuffer,
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    let elem_count = rows * hidden;
+    let need = (elem_count * 4) as u64;
+    anyhow::ensure!(x.size() >= need, "gdn_gated_rms_norm_resident: x buffer too small");
+    anyhow::ensure!(z.size() >= need, "gdn_gated_rms_norm_resident: z buffer too small");
+    anyhow::ensure!(out.size() >= need, "gdn_gated_rms_norm_resident: out buffer too small");
+    anyhow::ensure!(
+        weight.size() >= (hidden * 4) as u64,
+        "gdn_gated_rms_norm_resident: weight buffer too small"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_gated_rms_norm.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
+    let handles: [vk::Buffer; 4] = [x.handle(), z.handle(), weight.handle(), out.handle()];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        rows as u32,
+    )
+    .context("gdn_gated_rms_norm_resident kernel failed")
+}
+
+/// Resident-form fused GDN single-token gates + recurrent + gated
+/// RMSNorm. Caller pre-uploads all 10 inputs (q/k/v/a/b/a_log/dt_bias/
+/// state/z/weight); the kernel mutates `state` in place and writes
+/// the gated-RMS-norm output of shape `[batch, 1, nv, dv]` into `out`.
+///
+/// Mirrors `dispatch_gdn_decode_gates_recurrent_rmsnorm`: same shader,
+/// same push constants, same workgroup count.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k: &VulkanBuffer,
+    v: &VulkanBuffer,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    a_log: &VulkanBuffer,
+    dt_bias: &VulkanBuffer,
+    state: &VulkanBuffer,
+    z: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    nv: usize,
+    dk: usize,
+    dv: usize,
+    eps: f32,
+) -> Result<()> {
+    anyhow::ensure!(
+        dv <= 256,
+        "gdn_decode fused resident: dv {dv} exceeds shader local capacity 256"
+    );
+    anyhow::ensure!(
+        out.size() >= (batch * nv * dv * 4) as u64,
+        "gdn_decode fused resident: out buffer too small"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_decode_gates_recurrent_rmsnorm.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        nv as u32,
+        dk as u32,
+        dv as u32,
+        eps.to_bits(),
+        batch as u32,
+    ];
+    let handles: [vk::Buffer; 11] = [
+        q.handle(),
+        k.handle(),
+        v.handle(),
+        a.handle(),
+        b.handle(),
+        a_log.handle(),
+        dt_bias.handle(),
+        state.handle(),
+        z.handle(),
+        weight.handle(),
+        out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        (batch * nv) as u32,
+    )
+    .context("gdn_decode_gates_recurrent_rmsnorm_resident kernel failed")
+}
+
+/// Resident-form fused causal conv1d single-step update.
+///
+/// Two-dispatch flow mirrors `dispatch_causal_conv1d_update`:
+///   stage 1 (`causal_conv1d.comp`)            computes `out`
+///   stage 2 (`causal_conv1d_state_advance.comp`) advances `state`
+///
+/// `state` is mutated in place — the next layer reads it from the
+/// same buffer. `kernel_size` must be 4 (matching the existing shader
+/// specialization).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_causal_conv1d_update_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    state: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    kernel_size: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        kernel_size == 4,
+        "causal_conv1d_resident: only kernel_size=4 supported"
+    );
+    let glsl_output = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d.comp"
+    );
+    let spirv_output = ShaderPipeline::compile_shader(glsl_output)?;
+    let output_handles: [vk::Buffer; 4] = [
+        x.handle(),
+        weight.handle(),
+        state.handle(),
+        out.handle(),
+    ];
+    let output_push: [u32; 4] = [
+        batch as u32,
+        channels as u32,
+        seq_len as u32,
+        kernel_size as u32,
+    ];
+    let total = batch * channels * seq_len;
+    let output_wg = total.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv_output,
+        &output_handles,
+        output_handles.len(),
+        &output_push,
+        output_wg,
+    )
+    .context("causal_conv1d_update_resident: stage-1 output kernel failed")?;
+
+    let glsl_state = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/causal_conv1d_state_advance.comp"
+    );
+    let spirv_state = ShaderPipeline::compile_shader(glsl_state)?;
+    let state_handles: [vk::Buffer; 2] = [x.handle(), state.handle()];
+    let state_push: [u32; 4] = [
+        batch as u32,
+        channels as u32,
+        seq_len as u32,
+        kernel_size as u32,
+    ];
+    let state_wg = (batch * channels) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv_state,
+        &state_handles,
+        state_handles.len(),
+        &state_push,
+        state_wg,
+    )
+    .context("causal_conv1d_update_resident: stage-2 state-advance kernel failed")
+}
+
+/// Resident-form batched paged attention (compacted K/V variant).
+/// Writes `[batch, num_heads, head_dim]` f32 into `out`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_f32_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k: &VulkanBuffer,
+    v: &VulkanBuffer,
+    seq_lens: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_seqlen: usize,
+    softmax_scale: f32,
+) -> Result<()> {
+    anyhow::ensure!(head_dim <= 256, "paged_attn_resident: head_dim {head_dim} > 256");
+    anyhow::ensure!(
+        num_heads % num_kv_heads == 0,
+        "paged_attn_resident: num_heads {num_heads} not divisible by num_kv_heads {num_kv_heads}"
+    );
+    anyhow::ensure!(
+        out.size() >= (batch * num_heads * head_dim * 4) as u64,
+        "paged_attn_resident: out buffer too small"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        max_seqlen as u32,
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+        softmax_scale.to_bits(),
+    ];
+    let handles: [vk::Buffer; 5] = [
+        q.handle(),
+        k.handle(),
+        v.handle(),
+        seq_lens.handle(),
+        out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        (batch * num_heads) as u32,
+    )
+    .context("paged_attn_decode_batch_f32_resident kernel failed")
+}
+
+/// Resident-form paged-pool batched attention.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    block_table: &VulkanBuffer,
+    seq_lens: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<()> {
+    anyhow::ensure!(head_dim <= 256, "paged_attn_paged_resident: head_dim {head_dim} > 256");
+    anyhow::ensure!(
+        num_heads % num_kv_heads == 0,
+        "paged_attn_paged_resident: num_heads not divisible by num_kv_heads"
+    );
+    anyhow::ensure!(
+        out.size() >= (batch * num_heads * head_dim * 4) as u64,
+        "paged_attn_paged_resident: out buffer too small"
+    );
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 6] = [
+        max_blocks_per_seq as u32,
+        page_block_size as u32,
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+        softmax_scale.to_bits(),
+    ];
+    let handles: [vk::Buffer; 6] = [
+        q.handle(),
+        k_pool.handle(),
+        v_pool.handle(),
+        block_table.handle(),
+        seq_lens.handle(),
+        out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        (batch * num_heads) as u32,
+    )
+    .context("paged_attn_decode_batch_paged_f32_resident kernel failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,6 +1549,250 @@ mod tests {
         let resident = read_back_f32(&dev, &qkv_out);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
             assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn gdn_in_proj_bf16w_resident_matches_nonresident_b1() {
+        use crate::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights;
+        let Some(dev) = try_device() else { return };
+        let hidden = 96;
+        let qkv_dim = 64;
+        let z_dim = 64;
+        let a_dim = 8;
+        let b_dim = 8;
+        let total_out = qkv_dim + z_dim + a_dim + b_dim;
+        let x = make_x_f32(1, hidden);
+        let qkv_w = make_bf16_weight(hidden, qkv_dim);
+        let z_w = make_bf16_weight(hidden, z_dim);
+        let a_w = make_bf16_weight(hidden, a_dim);
+        let b_w = make_bf16_weight(hidden, b_dim);
+        let qkv_buf = upload_tensor_bf16_packed_buffer(&dev, &qkv_w).unwrap();
+        let z_buf = upload_tensor_bf16_packed_buffer(&dev, &z_w).unwrap();
+        let a_buf = upload_tensor_bf16_packed_buffer(&dev, &a_w).unwrap();
+        let b_buf = upload_tensor_bf16_packed_buffer(&dev, &b_w).unwrap();
+
+        let (qkv_t, z_t, a_t, b_t) = dispatch_gdn_in_proj_decode_cached_bf16_weights(
+            &dev, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
+        )
+        .unwrap();
+        let mut expected: Vec<f32> = qkv_t.flatten_all().unwrap().to_vec1().unwrap();
+        expected.extend(z_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        expected.extend(a_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        expected.extend(b_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+
+        let x_buf = upload_x(&dev, &x);
+        let out_buf = alloc_out(&dev, (total_out * 4) as u64);
+        dispatch_gdn_in_proj_decode_cached_resident(
+            &dev, &x_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &out_buf, 1, hidden, qkv_dim, z_dim,
+            a_dim, b_dim, true,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn gdn_gates_resident_matches_nonresident() {
+        use crate::kernels::dispatch_gdn_gates_cached;
+        let Some(dev) = try_device() else { return };
+        let batch = 2;
+        let nv = 8;
+        let t = 1;
+        let elem_count = batch * t * nv;
+        let a = Tensor::from_vec(
+            (0..elem_count).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
+            (batch, t, nv),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let b = Tensor::from_vec(
+            (0..elem_count).map(|i| (i as f32 * 0.017) - 0.7).collect::<Vec<_>>(),
+            (batch, t, nv),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let a_log = Tensor::from_vec(
+            (0..nv).map(|i| (i as f32 + 1.0).ln() * -0.1).collect::<Vec<_>>(),
+            (nv,),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let dt_bias = Tensor::from_vec(
+            (0..nv).map(|i| (i as f32) * 0.011).collect::<Vec<_>>(),
+            (nv,),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let a_log_buf = upload_tensor_f32_buffer(&dev, &a_log).unwrap();
+        let dt_bias_buf = upload_tensor_f32_buffer(&dev, &dt_bias).unwrap();
+
+        let (beta_t, g_t) = dispatch_gdn_gates_cached(
+            &dev,
+            &a,
+            &b,
+            &a_log_buf,
+            &dt_bias_buf,
+            nv,
+            &[batch, t, nv],
+        )
+        .unwrap();
+        let beta_exp = beta_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let g_exp = g_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        let a_buf_d = upload_tensor_f32_buffer(&dev, &a).unwrap();
+        let b_buf_d = upload_tensor_f32_buffer(&dev, &b).unwrap();
+        let beta_buf = alloc_out(&dev, (elem_count * 4) as u64);
+        let g_buf = alloc_out(&dev, (elem_count * 4) as u64);
+        dispatch_gdn_gates_cached_resident(
+            &dev,
+            &a_buf_d,
+            &b_buf_d,
+            &a_log_buf,
+            &dt_bias_buf,
+            &beta_buf,
+            &g_buf,
+            elem_count,
+            nv,
+        )
+        .unwrap();
+        let beta_res = read_back_f32(&dev, &beta_buf);
+        let g_res = read_back_f32(&dev, &g_buf);
+        for (i, (e, r)) in beta_exp.iter().zip(beta_res.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "beta idx {i}");
+        }
+        for (i, (e, r)) in g_exp.iter().zip(g_res.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "g idx {i}");
+        }
+    }
+
+    #[test]
+    fn gdn_gated_rms_norm_resident_matches_nonresident() {
+        use crate::kernels::dispatch_gdn_gated_rms_norm_cached;
+        let Some(dev) = try_device() else { return };
+        let rows = 6;
+        let hidden = 64;
+        let eps = 1e-6f32;
+        let x = Tensor::from_vec(
+            (0..rows * hidden).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
+            (rows, hidden),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let z = Tensor::from_vec(
+            (0..rows * hidden).map(|i| (i as f32 * 0.017) - 0.3).collect::<Vec<_>>(),
+            (rows, hidden),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight = Tensor::from_vec(
+            (0..hidden).map(|i| (i as f32) * 0.02 + 1.0).collect::<Vec<_>>(),
+            (hidden,),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight_buf = upload_tensor_f32_buffer(&dev, &weight).unwrap();
+
+        let baseline = dispatch_gdn_gated_rms_norm_cached(
+            &dev,
+            &x,
+            &z,
+            &weight_buf,
+            hidden,
+            eps,
+            &[rows, hidden],
+        )
+        .unwrap();
+        let expected = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
+        let z_buf = upload_tensor_f32_buffer(&dev, &z).unwrap();
+        let out_buf = alloc_out(&dev, (rows * hidden * 4) as u64);
+        dispatch_gdn_gated_rms_norm_cached_resident(
+            &dev, &x_buf, &z_buf, &weight_buf, &out_buf, rows, hidden, eps,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}");
+        }
+    }
+
+    #[test]
+    fn paged_attn_decode_batch_resident_matches_nonresident() {
+        use crate::kernels::dispatch_paged_attn_decode_batch_f32;
+        let Some(dev) = try_device() else { return };
+        let batch = 2;
+        let num_heads = 4;
+        let num_kv_heads = 2;
+        let head_dim = 32;
+        let max_seqlen = 8;
+        let softmax_scale = (head_dim as f32).sqrt().recip();
+        let q = Tensor::from_vec(
+            (0..batch * 1 * num_heads * head_dim)
+                .map(|i| (i as f32 * 0.013) - 1.0)
+                .collect::<Vec<_>>(),
+            (batch, 1, num_heads, head_dim),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let k = Tensor::from_vec(
+            (0..batch * max_seqlen * num_kv_heads * head_dim)
+                .map(|i| (i as f32 * 0.011) - 0.5)
+                .collect::<Vec<_>>(),
+            (batch, max_seqlen, num_kv_heads, head_dim),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let v = Tensor::from_vec(
+            (0..batch * max_seqlen * num_kv_heads * head_dim)
+                .map(|i| (i as f32 * 0.007) + 0.1)
+                .collect::<Vec<_>>(),
+            (batch, max_seqlen, num_kv_heads, head_dim),
+            &Device::Cpu,
+        )
+        .unwrap();
+        let seq_lens: Vec<u32> = vec![max_seqlen as u32; batch];
+
+        let baseline = dispatch_paged_attn_decode_batch_f32(&dev, &q, &k, &v, &seq_lens, softmax_scale)
+            .unwrap();
+        let expected = baseline.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+
+        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
+        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
+        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
+        // seq_lens uploaded as raw u32 bytes
+        let seq_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens).to_vec();
+        let seq_buf = {
+            let buf = VulkanBuffer::create_device_local(
+                dev.device(),
+                dev.device_local_mem_type(),
+                seq_bytes.len() as u64,
+            )
+            .unwrap();
+            let pool = dev.transient_command_pool().unwrap();
+            VulkanBuffer::upload_data_with_command_pool(
+                dev.device(),
+                dev.host_visible_mem_type(),
+                dev.queue(),
+                *pool,
+                &buf,
+                &seq_bytes,
+            )
+            .unwrap();
+            buf
+        };
+        let out_buf = alloc_out(&dev, (batch * num_heads * head_dim * 4) as u64);
+        dispatch_paged_attn_decode_batch_f32_resident(
+            &dev, &q_buf, &k_buf, &v_buf, &seq_buf, &out_buf, batch, num_heads, num_kv_heads,
+            head_dim, max_seqlen, softmax_scale,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}");
         }
     }
 

@@ -257,19 +257,19 @@ fn gdn_in_proj_single_submit_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT").is_err())
 }
 
-fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z").is_err())
 }
 
-fn gdn_in_proj_batch_row_pair_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_row_pair_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
 }
 
-fn gdn_in_proj_batch_row_quad_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD").is_err())
