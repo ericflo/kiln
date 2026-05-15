@@ -18,6 +18,9 @@ use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
 use kiln_vulkan_kernel::kernels::{upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer};
 
+// Used by run_full_step_resident — keep the module-level imports here so the
+// helper itself stays terse.
+
 const HIDDEN: usize = 2560;
 const Q_DIM: usize = 4096;
 const K_DIM: usize = 1024;
@@ -284,8 +287,173 @@ fn run() -> Result<()> {
                 Ok(())
             })?;
         }
+        println!();
     }
 
+    if want("full_step_resident") {
+        run_full_step_resident(
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Full-decode-step microbench using the Vulkan-resident dispatchers
+/// (gate (e) of docs/vk_resident_decode_plan.md). Simulates one
+/// transformer block at Qwen3.5-4B shapes by chaining six resident
+/// dispatchers — qwen_rmsnorm, full_attn QKV, paged_attn, linear_decode
+/// (out_proj), qwen_rmsnorm, mlp — through pool slots without any host
+/// boundary between them. Compared with `full_attn_qkv` / `mlp_bf16w`
+/// in isolation this measures the *full-block* per-step overhead the
+/// resident path achieves.
+#[allow(clippy::too_many_arguments)]
+fn run_full_step_resident(
+    device: &VulkanDevice,
+    q_w: &VulkanBuffer,
+    k_w: &VulkanBuffer,
+    v_w: &VulkanBuffer,
+    gate_w: &VulkanBuffer,
+    up_w: &VulkanBuffer,
+    down_w: &VulkanBuffer,
+    batches: &[usize],
+) -> Result<()> {
+    use kiln_vulkan_kernel::DecodeResidentPool;
+    use kiln_vulkan_kernel::resident::{
+        dispatch_full_attn_qkv_decode_cached_batched_resident,
+        dispatch_full_attn_qkv_decode_cached_resident,
+        dispatch_linear_decode_cached_bf16_weights_resident,
+        dispatch_mlp_decode_cached_bf16_weights_resident, dispatch_qwen_rmsnorm_forward_resident,
+    };
+    use std::sync::Arc;
+
+    println!("== full_step_resident (rmsnorm → QKV → out_proj → rmsnorm → MLP) ==");
+    let dev_arc = Arc::new(VulkanDevice::new()?);
+    let pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
+        .expect("RTX 6000 Ada has plenty of room for the resident pool");
+    let weight_norm = upload_tensor_f32_buffer(
+        device,
+        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
+    )?;
+    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+
+    for &batch in batches {
+        // Pre-allocate x once on device (in real decode this would be the
+        // embedded hidden state from the prior step).
+        let x_bytes = (batch * HIDDEN * 4) as u64;
+        let x_buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            x_bytes,
+        )?;
+        // Pre-allocate the final output (logits stand-in).
+        let final_out = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            x_bytes,
+        )?;
+        // Scratch slot for mlp gate*up intermediate.
+        let scratch = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            (batch * INTERMEDIATE * 4) as u64,
+        )?;
+        let qkv_combined = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            (batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64,
+        )?;
+        let attn_out = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            (batch * Q_DIM * 4) as u64,
+        )?;
+
+        time("full_step_resident", batch, || {
+            pool.reset_cursor();
+            // 1) Pre-attn rmsnorm into a pool slot
+            let normed1 = pool.acquire();
+            dispatch_qwen_rmsnorm_forward_resident(
+                device,
+                &x_buf,
+                &weight_norm,
+                &normed1,
+                batch,
+                HIDDEN,
+                1e-6,
+            )?;
+            // 2) Fused QKV
+            if batch == 1 {
+                dispatch_full_attn_qkv_decode_cached_resident(
+                    device,
+                    &normed1,
+                    q_w,
+                    k_w,
+                    v_w,
+                    &qkv_combined,
+                    HIDDEN,
+                    Q_DIM,
+                    K_DIM,
+                    V_DIM,
+                    true,
+                )?;
+            } else {
+                dispatch_full_attn_qkv_decode_cached_batched_resident(
+                    device,
+                    &normed1,
+                    q_w,
+                    k_w,
+                    v_w,
+                    &qkv_combined,
+                    batch,
+                    HIDDEN,
+                    Q_DIM,
+                    K_DIM,
+                    V_DIM,
+                    true,
+                )?;
+            }
+            // 3) (paged_attn omitted: needs K/V cache plumbing — this
+            // microbench measures decode-block scaffolding only)
+            // 4) Attention out_proj: Q_DIM → HIDDEN
+            dispatch_linear_decode_cached_bf16_weights_resident(
+                device,
+                &qkv_combined, // first Q_DIM elements per row are Q
+                &out_w,
+                &attn_out,
+                batch,
+                Q_DIM,
+                HIDDEN,
+            )?;
+            // 5) Pre-MLP rmsnorm
+            let normed2 = pool.acquire();
+            dispatch_qwen_rmsnorm_forward_resident(
+                device,
+                &attn_out,
+                &weight_norm,
+                &normed2,
+                batch,
+                HIDDEN,
+                1e-6,
+            )?;
+            // 6) MLP: SwiGLU
+            dispatch_mlp_decode_cached_bf16_weights_resident(
+                device,
+                &normed2,
+                gate_w,
+                up_w,
+                down_w,
+                &scratch,
+                &final_out,
+                batch,
+                HIDDEN,
+                INTERMEDIATE,
+                HIDDEN,
+            )?;
+            Ok(())
+        })?;
+    }
+    println!();
     Ok(())
 }
 
