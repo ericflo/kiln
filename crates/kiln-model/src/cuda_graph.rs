@@ -1182,6 +1182,93 @@ impl CudaGraphRunner {
         Tensor::new(&[slot], device).context("create CUDA graph KV slot buffer")
     }
 
+    /// Allocate a `[batch, max_blocks_per_seq]` u32 padded block-table
+    /// buffer covering every row. Reuses the per-row `padded_block_table`
+    /// helper and stacks the rows. Used by the batched capture path so
+    /// flash-attention reads page metadata from a graph-stable pointer.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_block_table_buffer(
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCache,
+        max_seqlen_k: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(
+            !block_tables.is_empty(),
+            "new_batched_block_table_buffer requires a non-empty batch"
+        );
+        let mut flat: Vec<u32> = Vec::new();
+        let mut width: Option<usize> = None;
+        for bt in block_tables {
+            let padded = Self::padded_block_table(bt, paged_cache, max_seqlen_k)?;
+            if width.is_none() {
+                width = Some(padded.len());
+            } else if width != Some(padded.len()) {
+                anyhow::bail!(
+                    "new_batched_block_table_buffer: inconsistent padded widths ({} vs {})",
+                    width.unwrap(),
+                    padded.len()
+                );
+            }
+            flat.extend_from_slice(&padded);
+        }
+        let width = width.unwrap();
+        Tensor::new(flat.as_slice(), device)?
+            .reshape((block_tables.len(), width))
+            .context("create CUDA graph batched block table buffer")
+    }
+
+    /// Allocate a `[batch] i32` per-row seqused_k buffer pre-filled from
+    /// each row's `start_pos + 1`.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_seqused_k_buffer(
+        device: &Device,
+        start_positions: &[usize],
+    ) -> Result<Tensor> {
+        anyhow::ensure!(
+            !start_positions.is_empty(),
+            "new_batched_seqused_k_buffer requires a non-empty batch"
+        );
+        let seqused: Vec<i32> = start_positions
+            .iter()
+            .map(|&p| i32::try_from(p + 1).context("seqused_k exceeds i32 range"))
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::new(seqused.as_slice(), device)
+            .context("create CUDA graph batched seqused_k buffer")
+    }
+
+    /// Allocate a `[batch] u32` per-row KV-write-slot buffer for the
+    /// current decode step.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_kv_slot_buffer(
+        block_tables: &[&BlockTable],
+        paged_cache: &PagedKvCache,
+        start_positions: &[usize],
+        device: &Device,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(
+            !block_tables.is_empty(),
+            "new_batched_kv_slot_buffer requires a non-empty batch"
+        );
+        anyhow::ensure!(
+            block_tables.len() == start_positions.len(),
+            "new_batched_kv_slot_buffer: block_tables.len() != start_positions.len()"
+        );
+        let mut slots: Vec<u32> = Vec::with_capacity(block_tables.len());
+        for (bt, &pos) in block_tables.iter().zip(start_positions.iter()) {
+            let slot = bt
+                .slot_for(pos, paged_cache.block_size())
+                .with_context(|| format!("no slot for decode position {pos}"))?
+                as u32;
+            slots.push(slot);
+        }
+        Tensor::new(slots.as_slice(), device)
+            .context("create CUDA graph batched KV slot buffer")
+    }
+
     #[cfg(feature = "cuda")]
     fn new_rotary_cos_buffer(
         config: &ModelConfig,
