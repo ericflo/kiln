@@ -52,6 +52,12 @@ pub struct VulkanBackend {
     bf16_packed_mlp_decode_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
+    /// Cached `supports_resident_decode()` evaluation. The trait method
+    /// is called per-call on the hot path; reading env vars and checking
+    /// the device handle every time would be wasteful. Set at
+    /// construction from `KILN_VULKAN_RESIDENT_DECODE` (default on when
+    /// the device is up) and never changes.
+    resident_decode_enabled: bool,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -251,6 +257,15 @@ impl VulkanBackend {
         let recurrent_state_residency_enabled = gdn_enabled
             && std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok()
             && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_err();
+        // Default ON: every Vulkan build that brings up a logical device
+        // wants to route decode through the resident path. Pool feasibility
+        // is checked later at first use; if the device can't fit the ring
+        // (Strix Halo near memory limit) the call site falls back
+        // transparently to the per-call Tensor path and emits a one-time
+        // tracing::warn! — exactly the contract spelled out in gate (b)
+        // of docs/vk_resident_decode_plan.md.
+        let resident_decode_enabled =
+            kiln_core::env_flag::env_flag("KILN_VULKAN_RESIDENT_DECODE", true);
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
             Ok(dev) => {
@@ -305,6 +320,7 @@ impl VulkanBackend {
             bf16_packed_mlp_decode_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
+            resident_decode_enabled,
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -630,6 +646,15 @@ impl BackendRuntime for VulkanBackend {
             adamw_step: "Vulkan in-place registry update when operands are resident",
             native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
         }
+    }
+
+    fn supports_resident_decode(&self) -> bool {
+        // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
+        // applies whenever the logical device is up. The runtime pool
+        // feasibility check (the "fall back if the device can't fit even
+        // the minimum pool" rule in gate (b)) is enforced later, the
+        // first time a resident decode actually requests a buffer.
+        self.has_vulkan() && self.resident_decode_enabled
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {

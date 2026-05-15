@@ -127,6 +127,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         TrainingCapabilities::portable()
     }
 
+    /// Whether the backend can run a full decode step "device-resident":
+    /// pay one host→device upload (input token / hidden) and one device→host
+    /// readback (sampled token / last-row logits) per decode step, instead
+    /// of `N kernel calls × (extract + upload + readback)` per layer.
+    ///
+    /// CUDA and Metal already keep activations resident through candle and
+    /// MPS respectively, so for those backends the resident-decode plan is
+    /// a no-op and they keep returning false here. The Vulkan backend
+    /// returns true when feature-gated `KILN_VULKAN_RESIDENT_DECODE`
+    /// is on (default on when the kernel ring fits in the device's memory
+    /// budget) AND the device has actually been brought up.
+    ///
+    /// Callers in `model_forward_paged_last_token*` use this predicate to
+    /// route into the resident decode path. Returning false routes to
+    /// today's Tensor-shaped path unchanged.
+    fn supports_resident_decode(&self) -> bool {
+        false
+    }
+
     fn supports_flash_attn_prefill(&self) -> bool {
         false
     }
@@ -1122,6 +1141,53 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+    }
+
+    #[test]
+    fn portable_backend_declines_resident_decode_by_default() {
+        // The default trait implementation must return false so that
+        // every non-Vulkan backend continues to route through the
+        // unchanged `model_forward_paged_last_token*` path — the
+        // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
+        let cpu = cpu::CpuBackend::new(Device::Cpu);
+        assert!(
+            !cpu.supports_resident_decode(),
+            "CPU backend must decline resident decode so non-Vulkan call sites \
+             continue to use the existing per-call Tensor path"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_backend_declines_resident_decode() {
+        // CUDA already keeps activations resident through candle's CUDA
+        // device — the resident-decode plan does not apply.
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return, // No CUDA at test time — skip.
+        };
+        let cuda = cuda::CudaBackend::new(device);
+        assert!(
+            !cuda.supports_resident_decode(),
+            "CUDA backend must decline resident decode; gate (c) requires CUDA path unchanged"
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_backend_supports_resident_decode_when_device_up() {
+        // When the host has a working Vulkan device, the Vulkan backend
+        // must return true so call sites in `model_forward_paged_last_token*`
+        // route through the resident path.
+        if !vulkan::vulkan_is_available() {
+            return;
+        }
+        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        assert!(
+            backend.supports_resident_decode(),
+            "Vulkan backend must support resident decode by default when the \
+             logical device is up"
+        );
     }
 
     #[cfg(feature = "cuda")]
