@@ -316,6 +316,14 @@ pub struct CudaGraphRunner {
     #[cfg(feature = "cuda")]
     #[allow(dead_code)]
     captured_batched: HashMap<CudaBatchedGraphKey, CapturedBatchedDecodeGraph>,
+    /// Per-batch-size warmup tracker. Each new bucket needs one eager
+    /// call to prime the allocator before its first capture attempt;
+    /// without per-bucket warmup the global `warmup_done` flag set by
+    /// an earlier bs=1 capture caused new batched buckets to capture
+    /// against a cold allocator and hit `CUDA_ERROR_ILLEGAL_ADDRESS`.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    batched_bucket_warmup_done: std::collections::HashSet<usize>,
     /// Persistent batched [`LinearAttentionState`] pool, one slot per
     /// `batch_size` bucket. The captured-batched forward reads the GDN
     /// recurrent / conv state from the slot's device pointers, which
@@ -353,6 +361,8 @@ impl CudaGraphRunner {
             captured_batched: HashMap::new(),
             #[cfg(feature = "cuda")]
             batched_state_pool: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            batched_bucket_warmup_done: std::collections::HashSet::new(),
             adapter_generation: 0,
             warmup_done: false,
             #[cfg(feature = "cuda")]
@@ -378,6 +388,9 @@ impl CudaGraphRunner {
             // recurrent/conv tensors are weights-independent and the
             // next replay refreshes their contents in-place. Drop only
             // the captured graph that baked stale weight pointers.
+            // Per-bucket warmup also resets so the next capture for
+            // a bucket primes the allocator under the new weights.
+            self.batched_bucket_warmup_done.clear();
             self.cache_full_warned = false;
         }
     }
@@ -520,17 +533,20 @@ impl CudaGraphRunner {
             .context("decode_step_paged_batched requires a non-empty batch")?;
         let key = CudaBatchedGraphKey::new(batch_size, max_seq_len, paged_cache);
 
-        // Phase 1: warmup. The first batched call at each bucket runs
-        // eager so Candle / cudarc prime any lazy allocator state
-        // before we record the graph. Returning `Ok(None)` here sends
-        // the caller back to its eager path, which is exactly what we
-        // want: this iteration runs without capture overhead.
-        if !self.warmup_done {
-            self.warmup_done = true;
+        // Phase 1: per-bucket warmup. Each new `batch_size` bucket
+        // runs eager once so Candle / cudarc prime any lazy
+        // allocator state before we record the graph for that
+        // bucket. The global `warmup_done` flag covers the bs=1
+        // path; batched needs its own per-bucket tracker because a
+        // capture at a cold allocator state for bucket N can
+        // produce stale pointers even after bucket M's capture
+        // succeeded.
+        if !self.batched_bucket_warmup_done.contains(&batch_size) {
+            self.batched_bucket_warmup_done.insert(batch_size);
             tracing::debug!(
                 batch_size,
                 max_seqlen_k = key.max_seqlen_k,
-                "batched CUDA graph: warmup iteration (eager)"
+                "batched CUDA graph: per-bucket warmup iteration (eager)"
             );
             return Ok(None);
         }

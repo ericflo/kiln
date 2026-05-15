@@ -2340,13 +2340,14 @@ impl ModelRunner {
         let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
-        // Multi-batch CUDA graph wiring is held back — three integration
-        // attempts hit `CUDA_ERROR_ILLEGAL_ADDRESS` mid-batch. The
-        // capture/replay implementation on `CudaGraphRunner` is
-        // code-complete (commits 41f77a34..d564067c) but needs
-        // compute-sanitizer / cuda-gdb to isolate the fault.
-        // See `feedback-batched-cuda-graph-debug` memory for the
-        // next-session debug plan.
+        // Multi-batch CUDA graph implementation lives on
+        // `CudaGraphRunner::decode_step_paged_batched` (commits
+        // 41f77a34..f1a04c7d). Four integration attempts all hit
+        // `CUDA_ERROR_ILLEGAL_ADDRESS` at bs≥16, persisting through
+        // the DtoH-in-capture fix, GDN thread-local install at
+        // capture, and per-bucket warmup. Root cause needs
+        // compute-sanitizer / cuda-gdb to isolate. Memory:
+        // `feedback-batched-cuda-graph-debug`.
         if try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let result = if has_linear_layers {
