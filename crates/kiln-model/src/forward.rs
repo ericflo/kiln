@@ -2697,6 +2697,63 @@ impl LinearAttentionState {
         Ok(assembled_any)
     }
 
+    /// Refresh THIS batched state's recurrent + conv tensors *in place*
+    /// from the supplied per-row states, preserving device pointers.
+    /// Required by the multi-batch CUDA graph replay path: the captured
+    /// graph holds the persistent slot's device addresses, so refreshing
+    /// must not replace the tensors.
+    ///
+    /// Uses [`Tensor::slice_set`] per row + per layer, which writes the
+    /// source bytes into the destination's existing storage. After this
+    /// call, `self.recurrent_states[layer_idx][row]` byte-matches
+    /// `rows[row].recurrent_states[layer_idx]`, same for `conv_states`.
+    ///
+    /// The inverse direction (persistent → per-row, e.g. after a graph
+    /// replay) still uses [`Self::scatter_batch_rows_replace_with_backend`]
+    /// which is allowed to replace per-row tensors — only the batched
+    /// slot's pointers must stay pinned.
+    pub fn refresh_batched_state_from_rows_in_place(
+        &mut self,
+        rows: &[&Self],
+    ) -> Result<()> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            rows.len() == batch,
+            "refresh_batched_state_from_rows_in_place row count mismatch ({} vs {})",
+            rows.len(),
+            batch
+        );
+        anyhow::ensure!(
+            rows.iter()
+                .all(|r| r.recurrent_states.len() == self.recurrent_states.len()
+                    && r.conv_states.len() == self.conv_states.len()),
+            "refresh_batched_state_from_rows_in_place: per-row state layer-count mismatch"
+        );
+        for layer_idx in 0..self.recurrent_states.len() {
+            for (row_idx, src) in rows.iter().enumerate() {
+                self.recurrent_states[layer_idx]
+                    .slice_set(&src.recurrent_states[layer_idx], 0, row_idx)
+                    .with_context(|| {
+                        format!(
+                            "refresh recurrent state row {row_idx} into persistent batched slot at layer {layer_idx}"
+                        )
+                    })?;
+            }
+        }
+        for layer_idx in 0..self.conv_states.len() {
+            for (row_idx, src) in rows.iter().enumerate() {
+                self.conv_states[layer_idx]
+                    .slice_set(&src.conv_states[layer_idx], 0, row_idx)
+                    .with_context(|| {
+                        format!(
+                            "refresh conv state row {row_idx} into persistent batched slot at layer {layer_idx}"
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Replace one-row destination tensors, preserving backend-resident
     /// recurrent state when the backend owns a fresher batch buffer.
     pub fn scatter_batch_rows_replace_with_backend(
