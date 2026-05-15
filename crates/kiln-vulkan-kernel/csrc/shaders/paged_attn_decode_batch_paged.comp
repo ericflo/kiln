@@ -1,0 +1,113 @@
+// Batched paged decode attention with GPU-side block-table gather.
+//
+// Unlike `paged_attn_decode_batch.comp`, this kernel reads the K/V pool
+// directly and follows the per-row block table inline, so the host never
+// materializes a compacted `[batch, max_seqlen, num_kv_heads, head_dim]`
+// tensor (and never calls candle index_select on the pool).
+//
+// Q layout:           [batch, 1, num_heads, head_dim]
+// K/V pool layouts:   [total_slots, num_kv_heads, head_dim]
+// block_table layout: [batch, max_blocks_per_seq]
+// seq_lens:           [batch] active K/V length per row
+// Output layout:      [batch, 1, num_heads, head_dim]
+//
+// One workgroup per (batch row, query head) pair. Online softmax recurrence
+// over the per-row K/V window; each QK dot product computed once.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint max_blocks_per_seq;
+    uint page_block_size;
+    uint num_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    float softmax_scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KPoolBuf { float data_k_pool[]; };
+layout(binding = 2) readonly buffer VPoolBuf { float data_v_pool[]; };
+layout(binding = 3) readonly buffer BlockTableBuf { uint data_block_table[]; };
+layout(binding = 4) readonly buffer SeqLenBuf { uint data_seq_lens[]; };
+layout(binding = 5) writeonly buffer OutBuf { float data_out[]; };
+
+shared float partial[256];
+shared float shared_logit;
+shared uint shared_slot;
+
+uint resolve_slot(uint batch_idx, uint token_idx) {
+    uint block_idx = token_idx / page_block_size;
+    uint offset = token_idx - block_idx * page_block_size;
+    uint block = data_block_table[batch_idx * max_blocks_per_seq + block_idx];
+    return block * page_block_size + offset;
+}
+
+float dot_for_token(
+    uint kv_head,
+    uint slot,
+    uint lane,
+    float q_lane
+) {
+    float part = 0.0;
+    if (lane < head_dim) {
+        uint k_idx = (slot * num_kv_heads + kv_head) * head_dim + lane;
+        part = q_lane * data_k_pool[k_idx];
+    }
+    partial[lane] = part;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (lane < stride) {
+            partial[lane] += partial[lane + stride];
+        }
+        barrier();
+    }
+
+    if (lane == 0u) {
+        shared_logit = partial[0] * softmax_scale;
+    }
+    barrier();
+    return shared_logit;
+}
+
+void main() {
+    uint pair_idx = gl_WorkGroupID.x;
+    uint q_head = pair_idx % num_heads;
+    uint batch_idx = pair_idx / num_heads;
+    uint lane = gl_LocalInvocationID.x;
+    uint seq_len = data_seq_lens[batch_idx];
+    uint gqa_ratio = num_heads / num_kv_heads;
+    uint kv_head = q_head / gqa_ratio;
+
+    uint q_base = (batch_idx * num_heads + q_head) * head_dim;
+    float q_lane = lane < head_dim ? data_q[q_base + lane] : 0.0;
+
+    float row_max = -3.4028234663852886e38;
+    float row_sum = 0.0;
+    float acc = 0.0;
+    for (uint t = 0u; t < seq_len; t++) {
+        if (lane == 0u) {
+            shared_slot = resolve_slot(batch_idx, t);
+        }
+        barrier();
+        uint slot = shared_slot;
+        float logit = dot_for_token(kv_head, slot, lane, q_lane);
+        float new_max = max(row_max, logit);
+        float old_scale = exp(row_max - new_max);
+        float new_scale = exp(logit - new_max);
+        row_sum = row_sum * old_scale + new_scale;
+        if (lane < head_dim) {
+            uint v_idx = (slot * num_kv_heads + kv_head) * head_dim + lane;
+            acc = acc * old_scale + new_scale * data_v_pool[v_idx];
+        }
+        row_max = new_max;
+    }
+
+    if (lane < head_dim) {
+        uint out_idx = (batch_idx * num_heads + q_head) * head_dim + lane;
+        data_out[out_idx] = acc / row_sum;
+    }
+}

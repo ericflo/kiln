@@ -1229,6 +1229,88 @@ fn paged_attn_decode_batch_matches_cpu_reference() -> Result<()> {
 }
 
 #[test]
+fn paged_attn_decode_batch_paged_matches_compacted_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    // Pool with 3 blocks of size 4 = 12 total slots, two batch rows pointing
+    // at non-contiguous block sequences so the GPU gather has to actually
+    // follow `block_table` rather than read contiguous slots.
+    let (page_block_size, total_slots, num_heads, num_kv_heads, head_dim) =
+        (4usize, 12usize, 4usize, 2usize, 8usize);
+    let max_blocks_per_seq = 3usize;
+    let batch = 2usize;
+    // Row 0: uses blocks [2, 0], seq_len=5 → slots [8,9,10,11, 0]
+    // Row 1: uses blocks [1, 2], seq_len=6 → slots [4,5,6,7, 8,9]
+    let block_table_u32 = vec![2u32, 0, 0, 1, 2, 0];
+    let seq_lens = vec![5u32, 6u32];
+    let max_seqlen = seq_lens.iter().copied().max().unwrap() as usize;
+
+    let scale = 1.0f32 / (head_dim as f32).sqrt();
+    let pool_elem = total_slots * num_kv_heads * head_dim;
+    let k_pool_data: Vec<f32> = (0..pool_elem)
+        .map(|i| ((i as f32 % 19.0) - 9.0) * 0.05)
+        .collect();
+    let v_pool_data: Vec<f32> = (0..pool_elem)
+        .map(|i| ((i as f32 % 23.0) - 11.0) * 0.03)
+        .collect();
+    let q_data: Vec<f32> = (0..batch * num_heads * head_dim)
+        .map(|i| ((i as f32 % 17.0) - 8.0) * 0.07)
+        .collect();
+    let q = cpu_f32(q_data.clone(), (batch, 1, num_heads, head_dim))?;
+    let k_pool = cpu_f32(k_pool_data.clone(), (total_slots, num_kv_heads, head_dim))?;
+    let v_pool = cpu_f32(v_pool_data.clone(), (total_slots, num_kv_heads, head_dim))?;
+
+    let got = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32(
+        &vk,
+        &q,
+        &k_pool,
+        &v_pool,
+        &block_table_u32,
+        &seq_lens,
+        batch,
+        max_blocks_per_seq,
+        page_block_size,
+        scale,
+    )
+    .context("dispatch_paged_attn_decode_batch_paged_f32")?;
+
+    // Build the same compacted [batch, max_seqlen, num_kv_heads, head_dim]
+    // view by walking the block_table the way the host gather used to,
+    // and dispatch the original kernel for cross-validation.
+    let mut compact_k = vec![0f32; batch * max_seqlen * num_kv_heads * head_dim];
+    let mut compact_v = vec![0f32; batch * max_seqlen * num_kv_heads * head_dim];
+    let slot_elems = num_kv_heads * head_dim;
+    for b in 0..batch {
+        for t in 0..(seq_lens[b] as usize) {
+            let block_idx = t / page_block_size;
+            let offset = t % page_block_size;
+            let block = block_table_u32[b * max_blocks_per_seq + block_idx] as usize;
+            let slot = block * page_block_size + offset;
+            let dst = ((b * max_seqlen + t) * num_kv_heads) * head_dim;
+            let src = slot * slot_elems;
+            compact_k[dst..dst + slot_elems].copy_from_slice(&k_pool_data[src..src + slot_elems]);
+            compact_v[dst..dst + slot_elems].copy_from_slice(&v_pool_data[src..src + slot_elems]);
+        }
+    }
+    let k_compact = cpu_f32(compact_k, (batch, max_seqlen, num_kv_heads, head_dim))?;
+    let v_compact = cpu_f32(compact_v, (batch, max_seqlen, num_kv_heads, head_dim))?;
+    let expected = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
+        &vk,
+        &q,
+        &k_compact,
+        &v_compact,
+        &seq_lens,
+        scale,
+    )
+    .context("dispatch_paged_attn_decode_batch_f32 reference")?;
+    assert_close("paged attn decode batch paged", &got, &expected, 5e-5)?;
+    Ok(())
+}
+
+#[test]
 fn mlp_gate_up_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
         eprintln!("skipping: Vulkan device unavailable");

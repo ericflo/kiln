@@ -289,6 +289,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("mlp_gate_up_decode_batched_rows4_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
         ("paged_attn_decode_batch", 5, 20),
+        ("paged_attn_decode_batch_paged", 6, 24),
     ];
 
     for (shader_name, total_bindings, push_bytes) in shaders {
@@ -4152,6 +4153,175 @@ pub fn dispatch_paged_attn_decode_batch_f32(
             &out_buf,
         )
         .context("failed to read back paged_attn_decode_batch output")?
+    };
+    create_tensor_from_data(&out_data, &[batch, 1usize, num_heads, head_dim], DType::F32)
+}
+
+/// Paged-pool variant of [`dispatch_paged_attn_decode_batch_f32`].
+///
+/// Skips the host-side block_table → compacted K/V gather and uploads the
+/// raw K/V pool plus the block table; the shader walks the per-row block
+/// indices inline. Use when the compacted view would dwarf the pool itself
+/// (i.e., when `batch * max_seqlen > total_slots`), which is the typical
+/// shape for multi-batch decode at non-trivial context lengths.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_paged_f32(
+    vk_device: &VulkanDevice,
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table_u32: &[u32],
+    seq_lens: &[u32],
+    batch: usize,
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    anyhow::ensure!(
+        batch > 0 && max_blocks_per_seq > 0 && page_block_size > 0,
+        "paged_attn_decode_batch_paged: batch/max_blocks_per_seq/page_block_size must be > 0"
+    );
+    anyhow::ensure!(
+        seq_lens.len() == batch,
+        "paged_attn_decode_batch_paged: seq_lens length {} != batch {batch}",
+        seq_lens.len()
+    );
+    anyhow::ensure!(
+        block_table_u32.len() == batch * max_blocks_per_seq,
+        "paged_attn_decode_batch_paged: block_table length {} != batch*max_blocks_per_seq {}",
+        block_table_u32.len(),
+        batch * max_blocks_per_seq
+    );
+
+    let (q_batch, q_len, num_heads, head_dim) = q.dims4()?;
+    let (total_slots, num_kv_heads, k_head_dim) = k_pool.dims3()?;
+    let v_dims = v_pool.dims3()?;
+    anyhow::ensure!(
+        q_batch == batch && q_len == 1,
+        "paged_attn_decode_batch_paged: q shape {:?} mismatch (expected [{batch}, 1, *, *])",
+        q.dims()
+    );
+    anyhow::ensure!(
+        k_head_dim == head_dim && v_dims == (total_slots, num_kv_heads, head_dim),
+        "paged_attn_decode_batch_paged: K/V shape mismatch k={:?} v={:?}",
+        k_pool.dims(),
+        v_pool.dims()
+    );
+    anyhow::ensure!(
+        num_heads % num_kv_heads == 0,
+        "paged_attn_decode_batch_paged: requires integer GQA ratio"
+    );
+    for &len in seq_lens {
+        anyhow::ensure!(
+            len > 0,
+            "paged_attn_decode_batch_paged: zero-length seq_len not supported"
+        );
+    }
+
+    let q_data = extract_tensor_bytes(q)?.0;
+    let k_data = extract_tensor_bytes(k_pool)?.0;
+    let v_data = extract_tensor_bytes(v_pool)?.0;
+    let bt_bytes: Vec<u8> = bytemuck::cast_slice(block_table_u32).to_vec();
+    let seq_bytes: Vec<u8> = bytemuck::cast_slice(seq_lens).to_vec();
+
+    let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
+        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
+            .with_context(|| format!("failed to create paged_attn_decode_batch_paged {label} buffer"))
+    };
+    let q_buf = make_input(&q_data, "q")?;
+    let k_buf = make_input(&k_data, "k_pool")?;
+    let v_buf = make_input(&v_data, "v_pool")?;
+    let bt_buf = make_input(&bt_bytes, "block_table")?;
+    let seq_buf = make_input(&seq_bytes, "seq_lens")?;
+    {
+        let command_pool = vk_device.transient_command_pool()?;
+        if paged_attn_batched_uploads_enabled() {
+            upload_buffers_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &[
+                    (&q_buf, &q_data),
+                    (&k_buf, &k_data),
+                    (&v_buf, &v_data),
+                    (&bt_buf, &bt_bytes),
+                    (&seq_buf, &seq_bytes),
+                ],
+            )
+            .context("failed to upload paged_attn_decode_batch_paged inputs")?;
+        } else {
+            for (buf, data, label) in [
+                (&q_buf, &q_data, "q"),
+                (&k_buf, &k_data, "k_pool"),
+                (&v_buf, &v_data, "v_pool"),
+                (&bt_buf, &bt_bytes, "block_table"),
+                (&seq_buf, &seq_bytes, "seq_lens"),
+            ] {
+                VulkanBuffer::upload_data_with_command_pool(
+                    device,
+                    host_visible_mt,
+                    queue,
+                    *command_pool,
+                    buf,
+                    data,
+                )
+                .with_context(|| {
+                    format!("failed to upload paged_attn_decode_batch_paged {label} buffer")
+                })?;
+            }
+        }
+    }
+
+    let out_size = (batch * num_heads * head_dim * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create paged_attn_decode_batch_paged output buffer")?;
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged.comp"
+    );
+    let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants = [
+        max_blocks_per_seq as u32,
+        page_block_size as u32,
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+        softmax_scale.to_bits(),
+    ];
+    let all_handles = vec![
+        q_buf.handle(),
+        k_buf.handle(),
+        v_buf.handle(),
+        bt_buf.handle(),
+        seq_buf.handle(),
+        out_buf.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &all_handles,
+        all_handles.len(),
+        &push_constants,
+        (batch * num_heads) as u32,
+    )
+    .context("paged_attn_decode_batch_paged kernel failed")?;
+
+    let out_data = {
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("failed to read back paged_attn_decode_batch_paged output")?
     };
     create_tensor_from_data(&out_data, &[batch, 1usize, num_heads, head_dim], DType::F32)
 }

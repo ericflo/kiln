@@ -126,6 +126,18 @@ fn fused_gdn_resident_state_enabled() -> bool {
     })
 }
 
+/// When set, the multi-batch paged attention decode path walks the
+/// block_table inside the Vulkan shader instead of compacting K/V on the
+/// host with `Tensor::index_select`. Default: enabled. Disable via
+/// `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER=1` to fall back to the
+/// host-side gather path for parity comparisons.
+fn paged_decode_gpu_gather_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER").is_err()
+    })
+}
+
 /// Read `KILN_VULKAN_LINEAR` env var. When enabled, the autograd-safe
 /// `linear_prefill_apply` path wraps the existing Vulkan linear kernel in
 /// a `CustomOp1` so training projections produce a tracked tensor whose
@@ -1427,7 +1439,6 @@ impl BackendRuntime for VulkanBackend {
             .to_dtype(DType::I32)?
             .to_vec1::<i32>()?;
         let mut seq_lens = Vec::with_capacity(batch);
-        let mut gather_slots = Vec::with_capacity(batch * max_seqlen_k);
         for row in 0..batch {
             let row_len = usize::try_from(seq_i32[row])
                 .context("Vulkan paged decode seqused_k contains negative length")?;
@@ -1437,6 +1448,64 @@ impl BackendRuntime for VulkanBackend {
             seq_lens.push(
                 u32::try_from(row_len).context("Vulkan paged decode row length exceeds u32")?,
             );
+        }
+        // Bounds-check the block_table entries that the kernel will follow.
+        // We don't want the shader to OOB-read the K/V pool, so reject any
+        // out-of-range (block, offset) we can prove invalid from host state.
+        // Only the slots actually visited (`pos < row_len`) need to be valid.
+        for row in 0..batch {
+            let row_len = seq_lens[row] as usize;
+            let blocks_needed = row_len.div_ceil(page_block_size).max(1);
+            for block_idx in 0..blocks_needed {
+                let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
+                let last_pos_in_block = if block_idx == blocks_needed - 1 {
+                    row_len - block_idx * page_block_size - 1
+                } else {
+                    page_block_size - 1
+                };
+                let last_slot = block
+                    .checked_mul(page_block_size)
+                    .and_then(|base| base.checked_add(last_pos_in_block))
+                    .context("Vulkan paged decode slot index overflow")?;
+                if last_slot >= total_slots {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        // Skip the host-side gather + candle index_select entirely when the
+        // GPU-paged path is enabled (default on for batch > 1). The shader
+        // walks `block_table` inline against the resident pool, so the host
+        // never materializes a `batch * max_seqlen_k * num_kv_heads * head_dim`
+        // compacted tensor and never runs a CPU index_select over the pool.
+        if paged_decode_gpu_gather_enabled() && batch > 1 {
+            let out = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32(
+                vk_device,
+                q,
+                k_pool,
+                v_pool,
+                &block_data,
+                &seq_lens,
+                batch,
+                max_blocks_per_seq,
+                page_block_size,
+                softmax_scale,
+            )
+            .context("paged_attn_decode_batch_paged kernel failed")?;
+            return Ok(Some(out));
+        }
+
+        // Single-row fallback (batch == 1) keeps the original compacted path
+        // for now — the gather cost is negligible at batch=1 and the kernel
+        // is well-tuned for that shape. Build the gather indices and slice
+        // the pool.
+        let mut gather_slots = Vec::with_capacity(batch * max_seqlen_k);
+        for row in 0..batch {
+            let row_len = seq_lens[row] as usize;
             for pos in 0..max_seqlen_k {
                 if pos >= row_len {
                     gather_slots.push(0);
@@ -1445,19 +1514,13 @@ impl BackendRuntime for VulkanBackend {
                 let block_idx = pos / page_block_size;
                 let offset = pos % page_block_size;
                 let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
-                let slot = block
-                    .checked_mul(page_block_size)
-                    .and_then(|base| base.checked_add(offset))
-                    .context("Vulkan paged decode slot index overflow")?;
-                if slot >= total_slots {
-                    return Ok(None);
-                }
+                let slot = block * page_block_size + offset;
                 gather_slots
                     .push(u32::try_from(slot).context("Vulkan paged decode slot exceeds u32")?);
             }
         }
-
-        let gather = Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
+        let gather =
+            Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
         let k_compact = k_pool
             .index_select(&gather, 0)?
             .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
@@ -1467,10 +1530,6 @@ impl BackendRuntime for VulkanBackend {
             .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
             .contiguous()?;
 
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let out = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32(
             vk_device,
             q,
