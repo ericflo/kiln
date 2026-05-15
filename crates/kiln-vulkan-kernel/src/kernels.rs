@@ -3940,18 +3940,6 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create full_attn_qkv_decode_batched x buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )
-        .context("failed to upload full_attn_qkv_decode_batched x buffer")?;
-    }
 
     let out_bytes = batch
         .checked_mul(total_out)
@@ -3976,17 +3964,42 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
     let total_groups = row_groups
         .checked_mul(col_groups)
         .context("full_attn_qkv_decode_batched: workgroup count overflow")?;
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        total_groups as u32,
-    )
-    .context("full_attn_qkv_decode_batched kernel failed")?;
-
-    let out_data = {
+    let single_submit = full_attn_qkv_single_submit_enabled();
+    let out_data = if single_submit {
+        run_compute_pipeline_with_transfer_readback(
+            vk_device,
+            &x_buf,
+            &x_data,
+            &out_buf,
+            out_bytes as u64,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            total_groups as u32,
+        )
+        .context("full_attn_qkv_decode_batched single-submit kernel failed")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )
+            .context("failed to upload full_attn_qkv_decode_batched x buffer")?;
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            total_groups as u32,
+        )
+        .context("full_attn_qkv_decode_batched kernel failed")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
@@ -6665,6 +6678,173 @@ pub fn run_compute_pipeline_3d(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
     Ok(())
+}
+
+/// Single-submit upload + dispatch + readback. Sequences a host-to-device
+/// copy of `upload_data` into `upload_dst`, runs one compute kernel, then
+/// copies `readback_size` bytes from `readback_src` into a host-visible
+/// staging buffer — all in one command buffer and one queue submit. Saves
+/// the two extra `vkQueueSubmit` + fence-wait round trips the
+/// `extract → upload → dispatch → readback` decode kernels otherwise pay
+/// per call (≈ 600 µs on NVIDIA Vulkan).
+#[allow(clippy::too_many_arguments)]
+fn run_compute_pipeline_with_transfer_readback(
+    vk_device: &VulkanDevice,
+    upload_dst: &VulkanBuffer,
+    upload_data: &[u8],
+    readback_src: &VulkanBuffer,
+    readback_size: u64,
+    spirv: &[u8],
+    all_handles: &[vk::Buffer],
+    push_constants: &[u32],
+    workgroup_count: u32,
+) -> Result<Vec<u8>> {
+    let limit_x = vk_device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroup_count <= limit_x,
+        "run_compute_pipeline_with_transfer_readback: workgroup_count={workgroup_count} \
+         exceeds device per-axis limit {limit_x}"
+    );
+    let device = vk_device.device();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let upload_stage =
+        VulkanBuffer::create_host_visible(device, host_visible_mt, upload_data.len() as u64)
+            .context("failed to create transfer-readback upload staging buffer")?;
+    VulkanBuffer::write_host_visible(device, &upload_stage, upload_data)?;
+    let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
+        .context("failed to create transfer-readback readback staging buffer")?;
+
+    let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
+        spirv,
+        all_handles.len(),
+        (push_constants.len() * 4) as u32,
+    )?;
+    anyhow::ensure!(
+        all_handles.len() <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {}",
+        all_handles.len()
+    );
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let set_layouts = [set_layout];
+    let descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate transfer-readback descriptor set")?[0]
+    };
+
+    {
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| make_write_descriptor_set_buf(descriptor_set, i as u32, info))
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate transfer-readback command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin transfer-readback command buffer")?;
+        device.cmd_copy_buffer(
+            cmd,
+            upload_stage.handle(),
+            upload_dst.handle(),
+            &[vk::BufferCopy::builder()
+                .size(upload_data.len() as u64)
+                .build()],
+        );
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+            vk::AccessFlags::SHADER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            layout,
+            0,
+            &[descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(push_constants),
+        );
+        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
+
+        let readback_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::DependencyFlags::empty(),
+            &[readback_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            readback_src.handle(),
+            readback_stage.handle(),
+            &[vk::BufferCopy::builder().size(readback_size).build()],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end transfer-readback command buffer")?;
+    }
+
+    vk_device.submit_and_wait(cmd, "run_compute_pipeline_with_transfer_readback")?;
+    unsafe {
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transfer-readback descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    VulkanBuffer::read_host_visible(device, &readback_stage)
+        .context("failed to read transfer-readback output")
 }
 
 #[allow(clippy::too_many_arguments)]
