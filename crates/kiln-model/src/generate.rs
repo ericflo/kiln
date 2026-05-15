@@ -2340,16 +2340,17 @@ impl ModelRunner {
         let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
-        // NOTE: a multi-batch CUDA graph fast path exists on the
-        // graph runner (`decode_step_paged_batched`) gated on
-        // `KILN_CUDA_GRAPHS_BATCHED=1`. It is NOT wired here yet:
-        // first-pass integration hit `CUDA_ERROR_ILLEGAL_ADDRESS`
-        // at bs>=16 — see the batched-capture TODO at the top of
-        // `crates/kiln-model/src/cuda_graph.rs` for the remaining
-        // work (GDN state refresh ordering vs. graph capture is
-        // the most likely culprit). The runner method stays
-        // available and unit-testable; once the correctness bug
-        // is found the call site lands here.
+        // NOTE: multi-batch CUDA graph path (`decode_step_paged_batched`
+        // on `CudaGraphRunner`) exists and is gated on
+        // `KILN_CUDA_GRAPHS_BATCHED=1`. First-pass + second-pass
+        // integration attempts both hit `CUDA_ERROR_ILLEGAL_ADDRESS`
+        // mid-batch; the failure persists past the DtoH-in-capture
+        // fix (commit d564067c), suggesting capture-allocator or
+        // GDN kernel interaction issues that need debugging with
+        // CUDA tooling (compute-sanitizer, NVTX) beyond what
+        // stop-hook retries support. The runner method stays in
+        // place for future work — call-site wiring is held back
+        // until the fault is isolated.
         if try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let result = if has_linear_layers {
