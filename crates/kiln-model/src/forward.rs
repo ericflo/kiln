@@ -12888,6 +12888,41 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    model_forward_paged_decode_contiguous_batch_hidden_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state.as_deref_mut(),
+        lora,
+        None,
+        None,
+    )
+}
+
+/// Implementation backing `model_forward_paged_decode_contiguous_batch_hidden`
+/// plus the upcoming batched CUDA graph wrapper. When
+/// `stable_positions_gpu` / `stable_token_ids_gpu` are `Some`, the
+/// function skips the per-step host→device builds for those tensors
+/// and reads from the caller-owned device pointers instead — exactly
+/// the invariant CUDA graph capture/replay needs.
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_decode_contiguous_batch_hidden_inner(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    stable_positions_gpu: Option<&Tensor>,
+    stable_token_ids_gpu: Option<&Tensor>,
+) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
     anyhow::ensure!(
@@ -12915,7 +12950,15 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     }
 
     let device = weights.embed_tokens.device();
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?;
+    // Embedding lookup. When the caller supplies a stable `[batch] u32`
+    // token-id tensor on the device (CUDA graph capture path), use it
+    // via the index-based lookup — the device pointer stays valid
+    // across replays. Otherwise build fresh from the host slice.
+    let mut hidden = if let Some(token_ids_gpu) = stable_token_ids_gpu {
+        embedding_lookup_from_weights_with_index(token_ids_gpu, weights)?.unsqueeze(1)?
+    } else {
+        embedding_lookup_from_weights(token_ids, weights)?.unsqueeze(1)?
+    };
     // When every row decodes at the same position (the common case — all
     // requests admitted with same-length prompts or all admitted at the same
     // decode step), pass a single-element positions tensor so the full-attn
@@ -12924,14 +12967,27 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     // cos/sin with the batch dim. nsys at bs=16 (post-broadcast-matmul fix)
     // showed ~32 RoPE transpose+contig copies per decode step routing through
     // copy2d_bf16; this elides them when positions happen to be uniform.
+    //
+    // CUDA graph capture path: when `stable_positions_gpu` is `Some`,
+    // skip both branches above and use the caller-owned device buffer
+    // so the captured RoPE kernels read from a graph-stable pointer.
+    // The bench shows the per-step `Tensor::from_slice` here is a tiny
+    // HtoD launch (one per step), so the win comes from graph
+    // captureability, not from elimination of the copy itself.
     let first_pos = start_positions[0];
     let positions_uniform = start_positions.iter().all(|&p| p == first_pos);
-    let positions = if positions_uniform {
-        Tensor::from_slice(&[first_pos as f32], 1usize, device)?
+    let positions_owned: Option<Tensor> = if stable_positions_gpu.is_none() {
+        Some(if positions_uniform {
+            Tensor::from_slice(&[first_pos as f32], 1usize, device)?
+        } else {
+            let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+            Tensor::from_slice(positions_f32.as_slice(), batch, device)?
+        })
     } else {
-        let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
-        Tensor::from_slice(positions_f32.as_slice(), batch, device)?
+        None
     };
+    let positions: &Tensor = stable_positions_gpu
+        .unwrap_or_else(|| positions_owned.as_ref().expect("positions_owned built above when stable was None"));
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
     let profile_full_attn_stages = profile_full_attn_stages_enabled();
@@ -12970,7 +13026,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
                     &hidden,
                     layer,
                     config,
-                    &positions,
+                    positions,
                     start_positions,
                     &weights.rotary_inv_freq,
                     paged_cache,
