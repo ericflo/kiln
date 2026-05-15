@@ -466,6 +466,23 @@ impl CudaGraphRunner {
     /// path. The runner takes the args by reference because future
     /// implementations will both read the per-row metadata and write
     /// the next-step state back through these slices.
+    #[cfg(not(feature = "cuda"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged_batched(
+        &mut self,
+        _backend: &dyn BackendRuntime,
+        _token_ids: &[u32],
+        _weights: &GpuWeights,
+        _config: &ModelConfig,
+        _paged_cache: &PagedKvCache,
+        _block_tables: &[&BlockTable],
+        _sequence_lengths: &[usize],
+        _linear_states: &mut [&mut LinearAttentionState],
+        _lora: Option<&LoraWeights>,
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
+
     #[cfg(feature = "cuda")]
     #[allow(clippy::too_many_arguments)]
     pub fn decode_step_paged_batched(
@@ -1485,7 +1502,7 @@ impl CudaGraphRunner {
         // Capture + forward inside a scope so the `&mut` borrow on
         // `self.batched_state_pool` (taken by `persistent_batched_state`)
         // ends before we mutate `self.captured_batched` below.
-        let (captured, tokens): (CapturedBatchedDecodeGraph, Vec<u32>) = {
+        let captured: CapturedBatchedDecodeGraph = {
             let persistent_state = self
                 .persistent_batched_state(batch_size, config, device)?
                 .context("persistent batched state required for capture")?;
@@ -1515,7 +1532,7 @@ impl CudaGraphRunner {
                 .begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)
                 .map_err(|e| anyhow::anyhow!("begin_capture (batched): {e}"))?;
 
-            let tokens_result = crate::forward::model_forward_paged_batched_with_graph_inputs(
+            let forward_result = crate::forward::model_forward_paged_batched_with_graph_inputs(
                 backend,
                 token_ids,
                 weights,
@@ -1531,7 +1548,7 @@ impl CudaGraphRunner {
                 candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
             );
 
-            let tokens = tokens_result.context("batched forward failed during graph capture")?;
+            forward_result.context("batched forward failed during graph capture")?;
             let graph = match graph_result {
                 Ok(Some(g)) => g,
                 Ok(None) => anyhow::bail!("batched graph capture produced no operations"),
@@ -1560,8 +1577,12 @@ impl CudaGraphRunner {
                 _gdn_decode_outputs: gdn_decode_outputs,
                 max_seqlen_k: key.max_seqlen_k,
             };
-            (captured, tokens)
+            captured
         };
+        // Argmax + DtoH happens OUTSIDE the capture window — `output_logits`
+        // holds the captured forward's final-norm + LM-head result.
+        let tokens = crate::sampling::greedy_sample_rows(&captured.output_logits)
+            .context("argmax over captured output_logits failed")?;
         self.captured_batched.insert(key, captured);
         Ok(tokens)
     }

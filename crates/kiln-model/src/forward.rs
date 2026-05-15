@@ -13815,7 +13815,7 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     sequence_lengths: &[usize],
     lora: Option<&LoraWeights>,
     graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
-) -> Result<Vec<u32>> {
+) -> Result<()> {
     // Run the bs>1 hidden path with the persistent linear-state slot
     // and the graph-stable token-id / position device buffers. This is
     // the same code path `decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
@@ -13840,6 +13840,16 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     // records the matmul + slice_set, so on replay the runner can
     // argmax-reduce the *same* device pointer without re-running any
     // model kernels.
+    //
+    // CRITICAL: nothing in this function is allowed to do a device→host
+    // transfer (e.g. `to_vec1`, `to_scalar`, host-side argmax). Such
+    // calls would force a synchronous DtoH during CUDA stream
+    // capture, which the driver does not record cleanly — symptom
+    // observed in the first wiring attempt was `CUDA_ERROR_ILLEGAL_ADDRESS`
+    // on the second decode step. Argmax + DtoH is the caller's job
+    // (`CudaGraphRunner::try_capture_batched` /
+    // `decode_step_paged_batched`), which runs them *outside* the
+    // captured region.
     let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
     let logits = lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
         .context("graph-wrapper LM head forward")?;
@@ -13847,20 +13857,7 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         .output_logits
         .slice_set(&logits, 0, 0)
         .context("copy graph-wrapper logits into stable output_logits buffer")?;
-    // Argmax over vocab + DtoH to produce the per-row tokens this
-    // call returns. During capture the runner will discard these and
-    // re-argmax `output_logits` after every replay — but returning
-    // them here keeps the function's behavior consistent across
-    // capture and direct-call use.
-    let tokens = {
-        kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode_graph");
-        lm_head_argmax_rows_backend_decode_if(
-            Some(backend),
-            &normed,
-            &weights.embed_tokens_t,
-        )?
-    };
-    Ok(tokens)
+    Ok(())
 }
 
 /// Batched paged decode API for real continuous-batching work.
