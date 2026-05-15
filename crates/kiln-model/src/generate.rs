@@ -2340,16 +2340,14 @@ impl ModelRunner {
         let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
-        // Multi-batch CUDA graph implementation lives on
-        // `CudaGraphRunner::decode_step_paged_batched` (commits
-        // 41f77a34..30fd877e). Six integration attempts hit
-        // persistent `CUDA_ERROR_ILLEGAL_ADDRESS` faults at bs>=16.
-        // Compute-sanitizer trace pinpointed `is_u32_bf16` in
-        // cuGraphLaunch reading 60MB before allocation — consistent
-        // with `AUTO_FREE_ON_LAUNCH` freeing intra-capture
-        // allocations between replays. Bypass attempts (stable
-        // token buffer off, NONE flag) didn't isolate the fault.
-        // Memory: `feedback-batched-cuda-graph-debug`.
+        // Multi-batch CUDA graph: 7 wiring attempts hit CUDA_ERROR_ILLEGAL_ADDRESS.
+        // Compute-sanitizer trace: `is_u32_bf16+0x1a10` reading 60MB
+        // before allocation on `cuGraphLaunch`. Bypass attempts
+        // (stable token buffer off, NONE flag, per-bucket warmup,
+        // GDN thread-local install, post-capture argmax)
+        // didn't isolate. Needs cuda-gdb to localize the exact
+        // intra-capture allocation that gets pinned to a stale
+        // pointer. Memory: `feedback-batched-cuda-graph-debug`.
         if try_contiguous_batched {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let result = if has_linear_layers {
