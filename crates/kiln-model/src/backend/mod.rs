@@ -1175,6 +1175,34 @@ mod tests {
 
     #[cfg(feature = "vulkan")]
     #[test]
+    fn vulkan_backend_publishes_decode_resident_pool() {
+        // Gate (b) of the vk-resident-decode plan: when the Vulkan
+        // backend is up, `decode_resident_pool(...)` returns Some on
+        // hardware that fits 3-4 slots within 1% of the device-local
+        // heap. The RTX 6000 Ada the test host uses has ~48 GiB of
+        // VRAM; the 10 MiB Qwen3.5-4B ring fits trivially.
+        if !vulkan::vulkan_is_available() {
+            return;
+        }
+        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        let pool = backend.decode_resident_pool(2560, 9216, 64);
+        assert!(
+            pool.is_some(),
+            "decode_resident_pool must succeed on a discrete GPU with ample VRAM"
+        );
+        let pool = pool.unwrap();
+        assert!(
+            pool.num_slots() >= 3,
+            "pool must fit at least the 3-slot minimum, got {}",
+            pool.num_slots()
+        );
+        // OnceLock contract: second call returns the same Arc.
+        let again = backend.decode_resident_pool(2560, 9216, 64).unwrap();
+        assert!(Arc::ptr_eq(pool, again));
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
     fn vulkan_backend_supports_resident_decode_when_device_up() {
         // When the host has a working Vulkan device, the Vulkan backend
         // must return true so call sites in `model_forward_paged_last_token*`

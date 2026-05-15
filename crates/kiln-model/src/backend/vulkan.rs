@@ -58,6 +58,17 @@ pub struct VulkanBackend {
     /// construction from `KILN_VULKAN_RESIDENT_DECODE` (default on when
     /// the device is up) and never changes.
     resident_decode_enabled: bool,
+    /// Lazily constructed fixed ring of 3-4 reusable intermediate
+    /// `VulkanBuffer`s sized to `max(hidden, intermediate) × max_batch × 4`
+    /// bytes. The first resident-decode call ever made on this backend
+    /// publishes the ring; subsequent calls reuse the same slots.
+    ///
+    /// `OnceLock<Option<...>>` so a backend that fails the pool
+    /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
+    /// the `None` and routes every subsequent call to the per-call
+    /// Tensor path without re-checking.
+    decode_resident_pool:
+        OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -321,6 +332,7 @@ impl VulkanBackend {
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
             resident_decode_enabled,
+            decode_resident_pool: OnceLock::new(),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -329,6 +341,52 @@ impl VulkanBackend {
 
     fn has_vulkan(&self) -> bool {
         self.vulkan_device.is_some()
+    }
+
+    /// Direct accessor for the owned `VulkanDevice`. Returns `None`
+    /// when device initialization failed (CPU fallback path); callers
+    /// that need device-resident work must short-circuit on `None`.
+    pub fn vulkan_device(&self) -> Option<&Arc<kiln_vulkan_kernel::VulkanDevice>> {
+        self.vulkan_device.as_ref()
+    }
+
+    /// Lazily construct (and cache) the resident-decode buffer ring.
+    ///
+    /// Returns `Some(&pool)` when the ring fits within 1% of the
+    /// device-local heap and every slot allocation succeeds.
+    /// Returns `None` (after a one-time `tracing::warn!`) when the
+    /// device can't fit the minimum 3 slots — e.g. Strix Halo near
+    /// its 16 GiB UMA limit. The `None` outcome is cached so the
+    /// per-call Tensor fallback does not re-probe on every decode
+    /// step.
+    pub fn decode_resident_pool(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> Option<&Arc<kiln_vulkan_kernel::DecodeResidentPool>> {
+        let dev = self.vulkan_device.as_ref()?;
+        self.decode_resident_pool
+            .get_or_init(|| {
+                match kiln_vulkan_kernel::DecodeResidentPool::try_new(
+                    dev,
+                    max_hidden,
+                    max_intermediate,
+                    max_batch,
+                ) {
+                    Ok(Some(pool)) => Some(Arc::new(pool)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Vulkan-resident decode pool construction errored; \
+                             falling back to per-call Tensor path"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
     }
 
     fn cached_f32_weight_buffer(
