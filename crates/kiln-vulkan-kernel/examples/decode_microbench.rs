@@ -171,6 +171,23 @@ fn run() -> Result<()> {
         println!();
     }
 
+    if want("linear_decode") {
+        // Q-out / GDN-out shape: take Q dim → hidden. Exercises the
+        // standalone bf16w linear decode used for attention out_proj.
+        println!("== linear_decode_cached_bf16w (Q out, q_dim→hidden) ==");
+        let q_out_buf = upload_bf16_packed(&device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, Q_DIM), DType::F32, &Device::Cpu)?;
+            time("linear_decode_bf16w_qout", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+                    &device, &x, &q_out_buf, batch, Q_DIM, HIDDEN,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
+    }
+
     if want("gdn_in_proj") {
         println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
         for &batch in &batches {

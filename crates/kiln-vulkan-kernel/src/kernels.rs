@@ -41,6 +41,13 @@ fn mlp_bf16_rows8_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
 }
 
+fn linear_decode_bf16w_rows4_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
+    })
+}
+
 fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2309,11 +2316,19 @@ fn dispatch_linear_decode_cached_impl(
         )
         .context("linear_decode kernel failed")?;
     } else {
+        let rows4 = packed_bf16_weights && batch >= 32 && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/csrc/shaders/linear_decode_batched_bf16w.comp"
-            )
+            if rows4 {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/linear_decode_batched_rows4_bf16w.comp"
+                )
+            } else {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/linear_decode_batched_bf16w.comp"
+                )
+            }
         } else {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -2322,13 +2337,18 @@ fn dispatch_linear_decode_cached_impl(
         };
         let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
         let push_constants: [u32; 3] = [hidden as u32, out_dim as u32, batch as u32];
+        let workgroups = if rows4 {
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
+        } else {
+            (batch * out_dim.div_ceil(32)) as u32
+        };
         run_compute_pipeline(
             vk_device,
             &spirv,
             &all_handles,
             all_handles.len(),
             &push_constants,
-            (batch * out_dim.div_ceil(32)) as u32,
+            workgroups,
         )
         .context("linear_decode_batched kernel failed")?;
     }
@@ -2391,21 +2411,34 @@ fn dispatch_linear_decode_cached_single_submit(
             out_dim.div_ceil(16) as u32,
         )
     } else {
+        let rows4 = packed_bf16_weights && batch >= 32 && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
-            concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/csrc/shaders/linear_decode_batched_bf16w.comp"
-            )
+            if rows4 {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/linear_decode_batched_rows4_bf16w.comp"
+                )
+            } else {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/linear_decode_batched_bf16w.comp"
+                )
+            }
         } else {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/csrc/shaders/linear_decode_batched.comp"
             )
         };
+        let workgroups = if rows4 {
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
+        } else {
+            (batch * out_dim.div_ceil(32)) as u32
+        };
         (
             crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?,
             vec![hidden as u32, out_dim as u32, batch as u32],
-            (batch * out_dim.div_ceil(32)) as u32,
+            workgroups,
         )
     };
 

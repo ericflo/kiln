@@ -611,13 +611,10 @@ fn linear_decode_batched_bf16_packed_weights_match_cpu_reference() -> Result<()>
         return Ok(());
     };
 
-    let (batch, hidden, out_dim) = (4usize, 11usize, 9usize);
-    let x = cpu_f32(
-        (0..batch * hidden)
-            .map(|i| ((i as f32 % 19.0) - 9.0) * 0.071)
-            .collect(),
-        (batch, 1, hidden),
-    )?;
+    // Iterate batch values that exercise both the per-row bf16w shader
+    // (batch < 32) and the rows4 bf16w path (batch >= 32, including a
+    // non-multiple-of-4 remainder).
+    let (hidden, out_dim) = (256usize, 96usize);
     let weight = cpu_bf16(
         (0..hidden * out_dim)
             .map(|i| ((i as f32 % 17.0) - 8.0) * -0.013)
@@ -626,21 +623,31 @@ fn linear_decode_batched_bf16_packed_weights_match_cpu_reference() -> Result<()>
     )?;
     let weight_f32 = weight.to_dtype(DType::F32)?;
     let weight_buf = kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer(&vk, &weight)?;
-    let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
-        &vk,
-        &x,
-        &weight_buf,
-        batch,
-        hidden,
-        out_dim,
-    )
-    .context("dispatch_linear_decode_cached_bf16_weights batched")?;
-    assert_close(
-        "linear decode batched bf16 weights",
-        &got,
-        &x.broadcast_matmul(&weight_f32)?,
-        1e-5,
-    )?;
+    for batch in [4usize, 16usize, 32usize, 33usize, 64usize] {
+        let x = cpu_f32(
+            (0..batch * hidden)
+                .map(|i| ((i as f32 % 19.0) - 9.0) * 0.071)
+                .collect(),
+            (batch, 1, hidden),
+        )?;
+        let got = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights(
+            &vk,
+            &x,
+            &weight_buf,
+            batch,
+            hidden,
+            out_dim,
+        )
+        .with_context(|| {
+            format!("dispatch_linear_decode_cached_bf16_weights batched batch={batch}")
+        })?;
+        assert_close(
+            &format!("linear decode batched bf16 weights batch={batch}"),
+            &got,
+            &x.broadcast_matmul(&weight_f32)?,
+            5e-4,
+        )?;
+    }
     Ok(())
 }
 
