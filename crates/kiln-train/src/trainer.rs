@@ -7524,6 +7524,7 @@ mod tests {
                     in_proj_b_t,
                     in_proj_ab_t: None,
                     out_proj_t,
+                    out_proj_marlin: None,
                 })
             };
 

@@ -2278,6 +2278,17 @@ pub struct GpuLinearAttentionWeights {
     /// prefill/decode A/B projections into one matmul on backend fast paths.
     pub in_proj_ab_t: Option<Tensor>,
     pub out_proj_t: Tensor,
+    /// Optional Marlin W4A16-packed GDN out_proj. Populated at load time
+    /// when `KILN_W4A16_GDN_OUT_PROJ=1` is set on a CUDA build whose
+    /// out_proj shape fits Marlin's tile constraints (`k%128 && n%256`).
+    /// When present, the GDN forward path uses Marlin for the projection
+    /// instead of `broadcast_matmul` via `out_proj_t`. This is gated
+    /// behind a separate opt-in from the existing `KILN_W4A16` because the
+    /// GDN out_proj is the last linear layer in the GDN block before the
+    /// residual add — int4 quantization there is more sensitive to
+    /// quality drift than the in-projections or the MLP, so deployments
+    /// opt in only after their own quality A/B passes.
+    pub out_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
 }
 
 pub struct GpuFfnWeights {
@@ -3599,6 +3610,7 @@ enum MarlinPackKind {
     GateProj,
     UpProj,
     DownProj,
+    GdnOutProj,
 }
 
 #[derive(Debug)]
@@ -3642,6 +3654,14 @@ fn install_marlin_packed(
             layer.mlp.down_proj_marlin = Some(packed);
             if !drop_disabled {
                 layer.mlp.down_proj_t = dropped_bf16_stub(device)?;
+            }
+        }
+        MarlinPackKind::GdnOutProj => {
+            if let GpuAttentionWeights::Linear(ref mut lin) = layer.attention {
+                lin.out_proj_marlin = Some(packed);
+                if !drop_disabled {
+                    lin.out_proj_t = dropped_bf16_stub(device)?;
+                }
             }
         }
     }
@@ -3867,6 +3887,18 @@ impl GpuWeights {
                         attn_proj.next().context(ctx("in_proj_z missing"))?;
                     let (out_proj, out_proj_t) =
                         attn_proj.next().context(ctx("out_proj missing"))?;
+                    // KILN_W4A16=1 + KILN_W4A16_GDN_OUT_PROJ=1 opt-in: queue
+                    // the GDN out_proj for Marlin batch pack. Gated separately
+                    // from the rest because it's the last linear in the GDN
+                    // block before the residual add, so int4 here is more
+                    // quality-sensitive than the in-projections or the MLP.
+                    if w4a16_enabled && crate::marlin_proj::gdn_out_proj_enabled() {
+                        marlin_pack_inputs.push((out_proj_t.clone(), 128));
+                        marlin_pack_meta.push(MarlinPackEntry {
+                            layer_idx: i,
+                            kind: MarlinPackKind::GdnOutProj,
+                        });
+                    }
                     let (in_proj_a, in_proj_a_t) =
                         attn_proj.next().context(ctx("in_proj_a missing"))?;
                     let (in_proj_b, in_proj_b_t) =
@@ -3921,6 +3953,7 @@ impl GpuWeights {
                             in_proj_b_t,
                             in_proj_ab_t,
                             out_proj_t,
+                            out_proj_marlin: None,
                         }),
                     )
                 }
@@ -7165,11 +7198,12 @@ pub fn gdn_out_proj_from_gated_norm(
         Some((layer, scale)) => (Some(layer), scale),
         None => (None, 0.0),
     };
-    linear_with_lora_t_backend_decode_if(
+    mlp_proj_forward_decode_if(
         Some(backend),
         false,
         normed,
         &weights.out_proj_t,
+        weights.out_proj_marlin.as_ref(),
         lora_layer.and_then(|layer| layer.gdn_out_proj.as_ref()),
         lora_scale,
     )
@@ -8855,11 +8889,12 @@ fn gated_deltanet_forward_decode_if(
     let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/gdn/out_proj");
-        linear_with_lora_t_backend_decode_if(
+        mlp_proj_forward_decode_if(
             Some(backend),
             use_metal_decode_gemv,
             &attn_out,
             &weights.out_proj_t,
+            weights.out_proj_marlin.as_ref(),
             gdn_out_lora,
             lora_scale,
         )?
@@ -16658,6 +16693,7 @@ mod tests {
                     a_log: Tensor::zeros(nv, DType::F32, device)?,
                     a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
+                    out_proj_marlin: None,
                 })
             };
 
@@ -17813,6 +17849,7 @@ mod tests {
                 in_proj_b_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 in_proj_ab_t: None,
                 out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
+                out_proj_marlin: None,
             }),
             mlp: GpuFfnWeights {
                 gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
@@ -18509,6 +18546,7 @@ mod tests {
                     in_proj_b_t,
                     in_proj_ab_t: None,
                     out_proj_t,
+                    out_proj_marlin: None,
                 })
             };
 

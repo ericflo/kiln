@@ -331,6 +331,16 @@ pub fn env_enabled() -> bool {
     kiln_core::env_flag::env_flag("KILN_W4A16", false)
 }
 
+/// Check the `KILN_W4A16_GDN_OUT_PROJ` env var.
+///
+/// Gates the experimental Marlin W4A16 path for the GDN out-projection. This
+/// is split from the main `KILN_W4A16` flag because the GDN out_proj is the
+/// last linear before the residual add and is the most quality-sensitive
+/// projection inside the GDN block. Requires `KILN_W4A16=1` to do anything.
+pub fn gdn_out_proj_enabled() -> bool {
+    kiln_core::env_flag::env_flag("KILN_W4A16_GDN_OUT_PROJ", false)
+}
+
 /// Check the `KILN_DISABLE_PARALLEL_PACK` env var.
 ///
 /// `KILN_DISABLE_PARALLEL_PACK=1` (or `true`/`yes`, case-insensitive) forces
