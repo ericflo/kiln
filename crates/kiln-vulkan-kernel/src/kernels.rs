@@ -90,7 +90,7 @@ fn causal_conv1d_single_submit_enabled() -> bool {
     })
 }
 
-fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
+pub(crate) fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err()

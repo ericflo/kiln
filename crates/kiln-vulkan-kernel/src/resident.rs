@@ -507,6 +507,164 @@ pub fn dispatch_mlp_decode_cached_bf16_weights_resident(
     )
 }
 
+/// Resident-form fused full-attention single-token Q/K/V projection
+/// (`batch == 1`). Writes the contiguous `[1, q_dim + k_dim + v_dim]`
+/// combined output into `qkv_out`. The caller indexes Q at offset 0,
+/// K at offset `q_dim * 4`, V at offset `(q_dim + k_dim) * 4` — the
+/// same layout the non-resident dispatcher reads back and then
+/// splits into three Tensors before returning.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    qkv_out: &VulkanBuffer,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    bf16_weights: bool,
+) -> Result<()> {
+    let total_out = q_dim + k_dim + v_dim;
+    let need_in = (hidden * 4) as u64;
+    let need_out = (total_out * 4) as u64;
+    anyhow::ensure!(
+        x.size() >= need_in,
+        "full_attn_qkv_resident: x buffer {} bytes < required {need_in}",
+        x.size()
+    );
+    anyhow::ensure!(
+        qkv_out.size() >= need_out,
+        "full_attn_qkv_resident: qkv_out buffer {} bytes < required {need_out}",
+        qkv_out.size()
+    );
+
+    let glsl_path = if bf16_weights {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode_bf16w.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode.comp"
+        )
+    };
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        hidden as u32,
+        q_dim as u32,
+        k_dim as u32,
+        v_dim as u32,
+        total_out as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        x.handle(),
+        q_weight_t.handle(),
+        k_weight_t.handle(),
+        v_weight_t.handle(),
+        qkv_out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        total_out.div_ceil(16) as u32,
+    )
+    .context("full_attn_qkv_decode_resident kernel failed")
+}
+
+/// Resident-form batched full-attention QKV projection. Writes the
+/// row-major `[batch, q_dim + k_dim + v_dim]` combined output (each
+/// batch row stores `q | k | v`).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_full_attn_qkv_decode_cached_batched_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    q_weight_t: &VulkanBuffer,
+    k_weight_t: &VulkanBuffer,
+    v_weight_t: &VulkanBuffer,
+    qkv_out: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    q_dim: usize,
+    k_dim: usize,
+    v_dim: usize,
+    bf16_weights: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "full_attn_qkv_batched_resident: batch must be > 0"
+    );
+    let total_out = q_dim + k_dim + v_dim;
+    let need_in = (batch * hidden * 4) as u64;
+    let need_out = (batch * total_out * 4) as u64;
+    anyhow::ensure!(
+        x.size() >= need_in,
+        "full_attn_qkv_batched_resident: x buffer {} bytes < required {need_in}",
+        x.size()
+    );
+    anyhow::ensure!(
+        qkv_out.size() >= need_out,
+        "full_attn_qkv_batched_resident: qkv_out buffer {} bytes < required {need_out}",
+        qkv_out.size()
+    );
+
+    let rows4 = bf16_weights
+        && batch >= 16
+        && crate::kernels::full_attn_qkv_bf16w_rows4_enabled();
+    let glsl_path = if bf16_weights {
+        if rows4 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/full_attn_qkv_decode_batched_rows4_bf16w.comp"
+            )
+        } else {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
+            )
+        }
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/full_attn_qkv_decode_batched.comp"
+        )
+    };
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 6] = [
+        hidden as u32,
+        q_dim as u32,
+        k_dim as u32,
+        v_dim as u32,
+        total_out as u32,
+        batch as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        x.handle(),
+        q_weight_t.handle(),
+        k_weight_t.handle(),
+        v_weight_t.handle(),
+        qkv_out.handle(),
+    ];
+    let col_groups = total_out.div_ceil(16);
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let total_groups = row_groups * col_groups;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        total_groups as u32,
+    )
+    .context("full_attn_qkv_decode_batched_resident kernel failed")
+}
+
 /// Convenience wrapper for the bf16 gate/up + f32 down MLP. Mirrors
 /// `dispatch_mlp_decode_cached_bf16_gate_up_f32_down`.
 #[allow(clippy::too_many_arguments)]
@@ -820,6 +978,87 @@ mod tests {
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
             assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn full_attn_qkv_bf16w_resident_matches_nonresident_b1() {
+        use crate::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights;
+        let Some(dev) = try_device() else { return };
+        let hidden = 96;
+        let q_dim = 64;
+        let k_dim = 32;
+        let v_dim = 32;
+        let x = make_x_f32(1, hidden);
+        let q_w = make_bf16_weight(hidden, q_dim);
+        let k_w = make_bf16_weight(hidden, k_dim);
+        let v_w = make_bf16_weight(hidden, v_dim);
+        let q_buf = upload_tensor_bf16_packed_buffer(&dev, &q_w).unwrap();
+        let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
+        let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
+
+        let (q_t, k_t, v_t) = dispatch_full_attn_qkv_decode_cached_bf16_weights(
+            &dev, &x, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
+        )
+        .unwrap();
+        let mut expected: Vec<f32> = q_t.flatten_all().unwrap().to_vec1().unwrap();
+        expected.extend(k_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+        expected.extend(v_t.flatten_all().unwrap().to_vec1::<f32>().unwrap());
+
+        let x_buf = upload_x(&dev, &x);
+        let qkv_out = alloc_out(&dev, ((q_dim + k_dim + v_dim) * 4) as u64);
+        dispatch_full_attn_qkv_decode_cached_resident(
+            &dev, &x_buf, &q_buf, &k_buf, &v_buf, &qkv_out, hidden, q_dim, k_dim, v_dim, true,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &qkv_out);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn full_attn_qkv_bf16w_batched_resident_matches_nonresident() {
+        use crate::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights;
+        let Some(dev) = try_device() else { return };
+        let batch = 4;
+        let hidden = 96;
+        let q_dim = 64;
+        let k_dim = 32;
+        let v_dim = 32;
+        let x = make_x_f32(batch, hidden);
+        let q_w = make_bf16_weight(hidden, q_dim);
+        let k_w = make_bf16_weight(hidden, k_dim);
+        let v_w = make_bf16_weight(hidden, v_dim);
+        let q_buf = upload_tensor_bf16_packed_buffer(&dev, &q_w).unwrap();
+        let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
+        let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
+
+        let (q_t, k_t, v_t) = dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+            &dev, &x, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+        )
+        .unwrap();
+        let q_v = q_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let k_v = k_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let v_v = v_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        let total_out = q_dim + k_dim + v_dim;
+        let mut expected: Vec<f32> = Vec::with_capacity(batch * total_out);
+        for r in 0..batch {
+            expected.extend_from_slice(&q_v[r * q_dim..(r + 1) * q_dim]);
+            expected.extend_from_slice(&k_v[r * k_dim..(r + 1) * k_dim]);
+            expected.extend_from_slice(&v_v[r * v_dim..(r + 1) * v_dim]);
+        }
+
+        let x_buf = upload_x(&dev, &x);
+        let qkv_out = alloc_out(&dev, (batch * total_out * 4) as u64);
+        dispatch_full_attn_qkv_decode_cached_batched_resident(
+            &dev, &x_buf, &q_buf, &k_buf, &v_buf, &qkv_out, batch, hidden, q_dim, k_dim, v_dim,
+            true,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &qkv_out);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
         }
     }
 
