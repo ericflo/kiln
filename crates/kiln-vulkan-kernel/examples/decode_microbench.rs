@@ -188,6 +188,28 @@ fn run() -> Result<()> {
         println!();
     }
 
+    if want("causal_conv1d_update") {
+        println!("== causal_conv1d_update (B,C=2048,T=1) ==");
+        let channels = 2048usize;
+        let kernel_size = 4usize;
+        let weight = Tensor::zeros((channels, kernel_size), DType::F32, &Device::Cpu)?;
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, channels, 1usize), DType::F32, &Device::Cpu)?;
+            let state = Tensor::zeros(
+                (batch, channels, kernel_size - 1),
+                DType::F32,
+                &Device::Cpu,
+            )?;
+            time("causal_conv1d_update", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update(
+                    &device, &x, &weight, &state, kernel_size,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
+    }
+
     if want("gdn_gated_norm") {
         println!("== gdn_gated_rms_norm_cached (hidden=2560) ==");
         let weight_t = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;

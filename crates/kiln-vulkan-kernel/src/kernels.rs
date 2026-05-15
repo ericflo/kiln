@@ -83,6 +83,13 @@ fn mlp_gate_up_single_submit_enabled() -> bool {
     })
 }
 
+fn causal_conv1d_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_CAUSAL_CONV1D_SINGLE_SUBMIT").is_err()
+    })
+}
+
 fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -6210,52 +6217,23 @@ pub fn dispatch_causal_conv1d_update(
     let dims = x.dims();
     let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
 
-    // Create input buffers + upload
+    // Create input buffers (uploads scheduled inside single-submit helper)
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
     let weight_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, weight_data.len() as u64)?;
     let state_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, state_data.len() as u64)?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &weight_buf,
-            &weight_data,
-        )?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &state_buf,
-            &state_data,
-        )?;
-    }
 
     // Create output buffer (f32)
     let out_size = (batch * channels * seq_len * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)?;
 
-    // ---- Dispatch 1: causal_conv1d.comp (output only, no state writes) ----
+    // ---- Stage 1: causal_conv1d.comp (output only, no state writes) ----
     let glsl_output = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/causal_conv1d.comp"
     );
     let spirv_output = crate::pipeline::ShaderPipeline::compile_shader(glsl_output)?;
-
-    // Bindings for output shader: x=0, weight=1, conv_state=2, out=3
     let output_handles: Vec<vk::Buffer> = vec![
         x_buf.handle(),
         weight_buf.handle(),
@@ -6269,26 +6247,14 @@ pub fn dispatch_causal_conv1d_update(
         kernel_size as u32,
     ];
     let total = batch * channels * seq_len;
-    let output_wg = ((total + 255) / 256) as u32;
+    let output_wg = total.div_ceil(256) as u32;
 
-    run_compute_pipeline(
-        vk_device,
-        &spirv_output,
-        &output_handles,
-        output_handles.len(),
-        &output_push,
-        output_wg,
-    )?;
-
-    // ---- Dispatch 2: causal_conv1d_state_advance.comp (state update only) ----
-    // Each workgroup handles one (b, c) pair: batch * channels workgroups
+    // ---- Stage 2: causal_conv1d_state_advance.comp ----
     let glsl_state = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/causal_conv1d_state_advance.comp"
     );
     let spirv_state = crate::pipeline::ShaderPipeline::compile_shader(glsl_state)?;
-
-    // Bindings for state shader: x=0, conv_state=1
     let state_handles: Vec<vk::Buffer> = vec![x_buf.handle(), state_buf.handle()];
     let state_push: [u32; 4] = [
         batch as u32,
@@ -6298,17 +6264,75 @@ pub fn dispatch_causal_conv1d_update(
     ];
     let state_wg = (batch * channels) as u32;
 
-    run_compute_pipeline(
-        vk_device,
-        &spirv_state,
-        &state_handles,
-        2,
-        &state_push,
-        state_wg,
-    )?;
-
-    // Read back both output and updated state
-    let (out_data, state_data) = {
+    let (out_data, state_data) = if causal_conv1d_single_submit_enabled() {
+        let readbacks = run_two_stage_compute_pipeline_with_transfers(
+            vk_device,
+            &[
+                (&x_buf, &x_data),
+                (&weight_buf, &weight_data),
+                (&state_buf, &state_data),
+            ],
+            &[&out_buf, &state_buf],
+            &spirv_output,
+            &output_handles,
+            &output_push,
+            output_wg,
+            &spirv_state,
+            &state_handles,
+            &state_push,
+            state_wg,
+        )
+        .context("causal_conv1d_update single-submit failed")?;
+        anyhow::ensure!(
+            readbacks.len() == 2,
+            "causal_conv1d_update single-submit returned wrong readback count"
+        );
+        let mut iter = readbacks.into_iter();
+        (iter.next().unwrap(), iter.next().unwrap())
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &weight_buf,
+                &weight_data,
+            )?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &state_buf,
+                &state_data,
+            )?;
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv_output,
+            &output_handles,
+            output_handles.len(),
+            &output_push,
+            output_wg,
+        )?;
+        run_compute_pipeline(
+            vk_device,
+            &spirv_state,
+            &state_handles,
+            2,
+            &state_push,
+            state_wg,
+        )?;
         let command_pool = vk_device.transient_command_pool()?;
         let out_data = VulkanBuffer::read_back_with_command_pool(
             device,
@@ -6317,14 +6341,14 @@ pub fn dispatch_causal_conv1d_update(
             *command_pool,
             &out_buf,
         )?;
-        let state_data = VulkanBuffer::read_back_with_command_pool(
+        let state_data_read = VulkanBuffer::read_back_with_command_pool(
             device,
             host_visible_mt,
             queue,
             *command_pool,
             &state_buf,
         )?;
-        (out_data, state_data)
+        (out_data, state_data_read)
     };
 
     // Cleanup
