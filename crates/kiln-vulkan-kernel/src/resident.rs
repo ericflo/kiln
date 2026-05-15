@@ -1073,6 +1073,108 @@ pub fn dispatch_causal_conv1d_update_resident(
     .context("causal_conv1d_update_resident: stage-2 state-advance kernel failed")
 }
 
+/// Resident-form RoPE rotation for a single Q-or-K-style tensor of
+/// shape `[rows, num_heads, head_dim]`. The first `rotary_dim` dims
+/// per head are rotated; the remainder pass through unchanged. `cos`
+/// and `sin` are `[rows, rotary_dim/2]` precomputed tables.
+///
+/// Uses the existing `vk_rope_f32.comp` shader landed for the
+/// training-side autograd stack — same shader, same push constants,
+/// so the rotation arithmetic stays bit-identical with that path.
+/// Wraps it for decode hot path use without going through the
+/// candle-based `apply_rope` (which materialises ~6 intermediate
+/// Tensors per RoPE call and is currently the only Vulkan-decode RoPE
+/// path — this lifts that cost off the CPU).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_rotary_one_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    cos: &VulkanBuffer,
+    sin: &VulkanBuffer,
+    out: &VulkanBuffer,
+    rows: usize,
+    num_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        "rotary_one_resident: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
+    );
+    let need = (rows * num_heads * head_dim * 4) as u64;
+    anyhow::ensure!(x.size() >= need, "rotary_one_resident: x buffer too small");
+    anyhow::ensure!(
+        out.size() >= need,
+        "rotary_one_resident: out buffer too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_f32.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 4] = [
+        rows as u32,
+        num_heads as u32,
+        head_dim as u32,
+        rotary_dim as u32,
+    ];
+    let handles: [vk::Buffer; 4] = [x.handle(), cos.handle(), sin.handle(), out.handle()];
+    let total = rows * num_heads * head_dim;
+    let workgroups = total.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("rotary_one_resident kernel failed")
+}
+
+/// Convenience: rotates Q and K with one dispatch per side. Q and K
+/// often have different head counts (num_attention_heads vs
+/// num_kv_heads under GQA). Both share the same `cos` / `sin` table.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_rotary_qk_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k: &VulkanBuffer,
+    cos: &VulkanBuffer,
+    sin: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    k_out: &VulkanBuffer,
+    rows: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Result<()> {
+    dispatch_rotary_one_resident(
+        vk_device,
+        q,
+        cos,
+        sin,
+        q_out,
+        rows,
+        num_q_heads,
+        head_dim,
+        rotary_dim,
+    )?;
+    dispatch_rotary_one_resident(
+        vk_device,
+        k,
+        cos,
+        sin,
+        k_out,
+        rows,
+        num_kv_heads,
+        head_dim,
+        rotary_dim,
+    )
+}
+
 /// Resident-form GDN single-token recurrent step (fallback path used
 /// when the fully-fused `dispatch_gdn_decode_gates_recurrent_rmsnorm`
 /// is declined). Writes `out: [batch * heads * dv]` f32 and mutates
@@ -1881,6 +1983,72 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
             assert_eq!(e.to_bits(), r.to_bits(), "idx {i}");
+        }
+    }
+
+    #[test]
+    fn rotary_one_resident_matches_cpu_reference() {
+        let Some(dev) = try_device() else { return };
+        let rows = 3usize;
+        let num_heads = 4usize;
+        let head_dim = 16usize;
+        let rotary_dim = 8usize;
+        let half = rotary_dim / 2;
+        let n = rows * num_heads * head_dim;
+        let x_data: Vec<f32> = (0..n).map(|i| ((i % 23) as f32 - 11.0) * 0.05).collect();
+        let cos_data: Vec<f32> = (0..rows * half)
+            .map(|i| ((i as f32) * 0.13).cos())
+            .collect();
+        let sin_data: Vec<f32> = (0..rows * half)
+            .map(|i| ((i as f32) * 0.13).sin())
+            .collect();
+        let x = Tensor::from_vec(x_data.clone(), (rows, num_heads, head_dim), &Device::Cpu).unwrap();
+        let cos_t =
+            Tensor::from_vec(cos_data.clone(), (rows, half), &Device::Cpu).unwrap();
+        let sin_t =
+            Tensor::from_vec(sin_data.clone(), (rows, half), &Device::Cpu).unwrap();
+
+        let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
+        let cos_buf = upload_tensor_f32_buffer(&dev, &cos_t).unwrap();
+        let sin_buf = upload_tensor_f32_buffer(&dev, &sin_t).unwrap();
+        let out_buf = alloc_out(&dev, (n * 4) as u64);
+        dispatch_rotary_one_resident(
+            &dev, &x_buf, &cos_buf, &sin_buf, &out_buf, rows, num_heads, head_dim, rotary_dim,
+        )
+        .unwrap();
+        let got = read_back_f32(&dev, &out_buf);
+
+        // CPU reference: same rotation the shader implements.
+        let mut expected = vec![0f32; n];
+        for r in 0..rows {
+            for h in 0..num_heads {
+                let base = (r * num_heads + h) * head_dim;
+                for d in 0..head_dim {
+                    let idx = base + d;
+                    if d >= rotary_dim {
+                        expected[idx] = x_data[idx];
+                        continue;
+                    }
+                    let half_r = rotary_dim / 2;
+                    let (pair, is_low) = if d < half_r {
+                        (d, true)
+                    } else {
+                        (d - half_r, false)
+                    };
+                    let low = x_data[base + pair];
+                    let high = x_data[base + pair + half_r];
+                    let c = cos_data[r * half_r + pair];
+                    let s = sin_data[r * half_r + pair];
+                    expected[idx] = if is_low { low * c - high * s } else { low * s + high * c };
+                }
+            }
+        }
+        for (i, (e, g)) in expected.iter().zip(got.iter()).enumerate() {
+            assert!(
+                (e - g).abs() <= 1e-5,
+                "idx {i}: cpu {e} vs gpu {g} (delta {})",
+                (e - g).abs()
+            );
         }
     }
 
