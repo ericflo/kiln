@@ -228,6 +228,39 @@ otherwise inflates kiln numbers. p50/p99 per-request latencies follow
 the aggregate-throughput ordering (vLLM's bs=64 p99 = 2.13 s, kiln's
 bs=64 p99 = 3.46 s).
 
+### Batched CUDA-graph capture mode (KILN_CUDA_GRAPHS_BATCHED=1 +
+###  KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1)
+
+Same setup as above, with both env flags on. The runner records a
+batched CUDA graph for the per-step shape, launches it once, then
+evicts the cache so each subsequent step re-captures. The full replay
+path on cache-hit is disabled pending a CUDA-side correctness fix
+(see `feedback-batched-cuda-graph-debug` memory). Even so, the
+capture-and-launch (no replay) path is meaningfully faster than the
+eager batched fallback:
+
+| bs | kiln eager (main) | kiln batched-capture | kiln / kiln-eager | kiln / vLLM |
+|---:|---:|---:|---:|---:|
+| 1  | 100.6 |  97.8  | 0.97× | **1.25× kiln** |
+| 2  | 163.5 | 254.3  | **1.55×** | **1.81× kiln** |
+| 4  | 307.5 | 407.5  | **1.32×** | **1.77× kiln** |
+| 8  | 513.5 | 621.3  | **1.21×** | **1.20× kiln** |
+| 16 | 793.2 | 960.5  | **1.21×** | **1.19× kiln** |
+| 32 | 998.4 | 1282.1 | **1.28×** | 0.86×          |
+| 64 | 1181.4| 1401.2 | **1.19×** | 0.73×          |
+
+`kiln batched-capture` column is what `KILN_CUDA_GRAPHS_BATCHED=1
+KILN_CUDA_GRAPHS_BATCHED_NO_REPLAY=1` delivers — every batched
+decode step captures + launches a fresh graph, no replay. At
+bs ≤ 16 kiln now leads vLLM by 19-81 %. At bs=32 the gap to vLLM
+narrows from 33 % to 14 %; at bs=64 from 38 % to 27 %.
+
+The remaining bs ≥ 32 gap is the missing replay path: capture has a
+fixed instantiation cost (~1 ms) that gets paid once per step
+without replay, but would be amortized across many steps with replay
+working. When the replay correctness bug is fixed (separately
+tracked) we expect bs ≥ 32 to close the rest of the gap.
+
 ### kiln steady-state — refresh pending
 
 The previous version of this doc included a 1 / 4 / 8 / 16 sequential-runs
