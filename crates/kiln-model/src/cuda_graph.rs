@@ -518,62 +518,119 @@ impl CudaGraphRunner {
             return Ok(None);
         }
 
-        // Phase 2 (replay) — landing in the next commit. For now, if
-        // we have a captured graph for this key + matching adapter
-        // generation, fall back to eager (Ok(None)) until the replay
-        // glue is in place. We still attempt capture below so the
-        // first non-warmup call records the graph.
+        // Phase 2: replay if we have a captured graph for this bucket
+        // with a matching adapter generation. Today the replay only
+        // refreshes the input buffers and launches the graph — the
+        // GDN state refresh (per-row → persistent slot scatter) is
+        // still pending, so the result is discarded and we fall back
+        // to eager for tokens. This isolates the graph-launch
+        // mechanism for shake-down before enabling result consumption.
+        if let Some(captured) = self.captured_batched.get(&key) {
+            if captured.adapter_gen == self.adapter_generation {
+                let device = weights.embed_tokens.device();
+                // Update every stable input buffer in place.
+                if let Err(e) =
+                    Self::update_batched_token_buffer(&captured.token_buffer, token_ids)
+                {
+                    tracing::warn!("batched graph replay: token refresh failed: {e:#}");
+                    return Ok(None);
+                }
+                if let Err(e) = Self::update_batched_position_buffer(
+                    &captured.position_buffer,
+                    sequence_lengths,
+                ) {
+                    tracing::warn!("batched graph replay: position refresh failed: {e:#}");
+                    return Ok(None);
+                }
+                if let Err(e) = Self::update_batched_rotary_buffers(
+                    &captured.rotary_cos_buffer,
+                    &captured.rotary_sin_buffer,
+                    config,
+                    sequence_lengths,
+                ) {
+                    tracing::warn!("batched graph replay: rotary refresh failed: {e:#}");
+                    return Ok(None);
+                }
+                if let Err(e) = Self::update_batched_paged_metadata_buffers(
+                    &captured.block_table_buffer,
+                    &captured.seqused_k_buffer,
+                    &captured.kv_slot_buffer,
+                    block_tables,
+                    paged_cache,
+                    sequence_lengths,
+                    captured.max_seqlen_k,
+                ) {
+                    tracing::warn!(
+                        "batched graph replay: paged metadata refresh failed: {e:#}"
+                    );
+                    return Ok(None);
+                }
+                let _ = device;
+                // GDN persistent-state refresh: PENDING — without
+                // this the captured graph reads stale recurrent /
+                // conv state. Until the in-place scatter primitive
+                // lands, do not return the replay's tokens; fall
+                // back to eager.
+                let _ = linear_states;
+                match captured.graph.launch() {
+                    Ok(()) => {
+                        tracing::debug!(
+                            batch_size,
+                            max_seqlen_k = key.max_seqlen_k,
+                            "batched CUDA graph: replay launched, falling back to eager pending GDN-state refresh"
+                        );
+                        return Ok(None);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            batch_size,
+                            max_seqlen_k = key.max_seqlen_k,
+                            error = %e,
+                            "batched CUDA graph replay launch failed, dropping cached graph"
+                        );
+                        self.captured_batched.remove(&key);
+                        return Ok(None);
+                    }
+                }
+            } else {
+                // Adapter changed since capture; drop the cached graph.
+                self.captured_batched.remove(&key);
+            }
+        }
 
         // Phase 3 (capture): no graph cached → record one. The
         // attempt runs the forward pass once and returns its tokens;
         // a captured graph is then stored under `key` for the future
         // replay path to consume.
-        if !self.captured_batched.contains_key(&key) {
-            // Before capture we must refresh the persistent batched
-            // state's contents from the per-row inputs so the
-            // captured-graph reads see the correct GDN history. The
-            // existing `assemble_gdn_recurrent_resident_batch_rows`
-            // primitive writes per-row recurrent state into the
-            // pool's slot in place.
-            //
-            // Build it via a fresh `from_batch_rows` on the per-row
-            // states for now: cheap one-time setup for the first
-            // capture at this bucket.
-            let _ = linear_states; // refresh path lands with replay
-            match self.try_capture_batched(
-                backend,
-                token_ids,
-                weights,
-                config,
-                paged_cache,
-                block_tables,
-                sequence_lengths,
-                lora,
-            ) {
-                Ok(tokens) => {
-                    tracing::debug!(
-                        batch_size,
-                        max_seqlen_k = key.max_seqlen_k,
-                        "batched CUDA graph: capture succeeded, returning captured tokens"
-                    );
-                    return Ok(Some(tokens));
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        batch_size,
-                        max_seqlen_k = key.max_seqlen_k,
-                        error = %e,
-                        "batched CUDA graph capture failed, falling back to eager"
-                    );
-                    return Ok(None);
-                }
+        let _ = linear_states; // refresh path lands with replay
+        match self.try_capture_batched(
+            backend,
+            token_ids,
+            weights,
+            config,
+            paged_cache,
+            block_tables,
+            sequence_lengths,
+            lora,
+        ) {
+            Ok(tokens) => {
+                tracing::debug!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    "batched CUDA graph: capture succeeded, returning captured tokens"
+                );
+                Ok(Some(tokens))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched CUDA graph capture failed, falling back to eager"
+                );
+                Ok(None)
             }
         }
-        // Phase 2 placeholder — when replay lands here, return
-        // `Ok(Some(replayed_tokens))`. Until then, fall back to eager
-        // even on cache hit so we don't run a stale captured graph
-        // without input refresh.
-        Ok(None)
     }
 
     /// Run a paged decode step, using graph capture/replay when possible.
