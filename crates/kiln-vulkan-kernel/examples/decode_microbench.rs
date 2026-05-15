@@ -188,6 +188,46 @@ fn run() -> Result<()> {
         println!();
     }
 
+    if want("qwen_rmsnorm") {
+        println!("== qwen_rmsnorm_forward (hidden=2560 per row) ==");
+        let weight = Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?;
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("qwen_rmsnorm_forward", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward(
+                    &device, &x, &weight, 1e-6,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
+    }
+
+    if want("gdn_gates") {
+        println!("== gdn_gates_cached (a/b + a_log/dt_bias) ==");
+        // Match Qwen3.5 GDN gates: a/b shape [batch, 1, nv]. nv = linear_num_value_heads = 32.
+        let nv = 32usize;
+        let a_log = upload_bf16_packed(&device, &make_bf16_weight(1, nv)?)?;
+        let dt_bias = upload_bf16_packed(&device, &make_bf16_weight(1, nv)?)?;
+        for &batch in &batches {
+            let a = Tensor::zeros((batch, 1, nv), DType::F32, &Device::Cpu)?;
+            let b = Tensor::zeros((batch, 1, nv), DType::F32, &Device::Cpu)?;
+            time("gdn_gates_cached", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached(
+                    &device,
+                    &a,
+                    &b,
+                    &a_log,
+                    &dt_bias,
+                    nv,
+                    &[batch, 1, nv],
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
+    }
+
     if want("gdn_in_proj") {
         println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
         for &batch in &batches {
