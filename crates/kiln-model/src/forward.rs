@@ -13753,12 +13753,13 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     lora: Option<&LoraWeights>,
     graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
 ) -> Result<Vec<u32>> {
-    let _ = graph_inputs;
-    // Delegate to the eager hot path. Uses `graph_inputs.linear_state`
-    // as the batched state slot — when the runner's `persistent_batched_state`
-    // allocator hands out the slot for this bucket, that's the
-    // persistent buffer the captured graph will read from.
-    model_forward_paged_decode_contiguous_batch_greedy(
+    // Run the bs>1 hidden path with the persistent linear-state slot
+    // and the graph-stable token-id / position device buffers. This is
+    // the same code path `decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
+    // drives, just with the per-step host→device builds skipped — the
+    // captured graph reads from `graph_inputs.token_ids` / `.positions`
+    // device pointers that the runner re-fills before each replay.
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden_inner(
         backend,
         input_tokens,
         weights,
@@ -13768,7 +13769,15 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         sequence_lengths,
         Some(graph_inputs.linear_state),
         lora,
-    )
+        Some(graph_inputs.positions),
+        Some(graph_inputs.token_ids),
+    )?;
+    let token_ids = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode_graph");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
+    };
+    Ok(token_ids)
 }
 
 /// Batched paged decode API for real continuous-batching work.
