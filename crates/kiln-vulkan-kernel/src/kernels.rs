@@ -21,27 +21,27 @@ fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
 }
 
-fn mlp_bf16_gate_up_rows4_enabled() -> bool {
+pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4").is_err())
 }
 
-fn mlp_f32_down_rows4_enabled() -> bool {
+pub(crate) fn mlp_f32_down_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
 }
 
-fn mlp_bf16_down_rows4_enabled() -> bool {
+pub(crate) fn mlp_bf16_down_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4").is_err())
 }
 
-fn mlp_bf16_rows8_enabled() -> bool {
+pub(crate) fn mlp_bf16_rows8_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
 }
 
-fn linear_decode_bf16w_rows4_enabled() -> bool {
+pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
@@ -305,7 +305,7 @@ fn prefill_row_pair_matmul_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
 }
 
-fn use_prefill_row_pair_matmul(batch: usize) -> bool {
+pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
     batch >= 8 && prefill_row_pair_matmul_enabled()
 }
 

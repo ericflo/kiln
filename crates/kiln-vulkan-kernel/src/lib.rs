@@ -17,6 +17,7 @@ pub mod decode_resident_pool;
 pub mod device;
 pub mod kernels;
 pub mod pipeline;
+pub mod resident;
 pub mod vk_autograd;
 pub mod vk_ops;
 pub mod vk_raw;
