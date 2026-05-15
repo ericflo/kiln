@@ -48,6 +48,13 @@ fn linear_decode_bf16w_rows4_enabled() -> bool {
     })
 }
 
+fn paged_attn_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_PAGED_ATTN_SINGLE_SUBMIT").is_err()
+    })
+}
+
 fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4153,43 +4160,6 @@ pub fn dispatch_paged_attn_decode_batch_f32(
     let k_buf = make_input(&k_data, "k")?;
     let v_buf = make_input(&v_data, "v")?;
     let seq_buf = make_input(&seq_data, "seq_lens")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        if paged_attn_batched_uploads_enabled() {
-            upload_buffers_with_command_pool(
-                device,
-                host_visible_mt,
-                queue,
-                *command_pool,
-                &[
-                    (&q_buf, &q_data),
-                    (&k_buf, &k_data),
-                    (&v_buf, &v_data),
-                    (&seq_buf, &seq_data),
-                ],
-            )
-            .context("failed to upload paged_attn_decode_batch inputs")?;
-        } else {
-            for (buf, data, label) in [
-                (&q_buf, &q_data, "q"),
-                (&k_buf, &k_data, "k"),
-                (&v_buf, &v_data, "v"),
-                (&seq_buf, &seq_data, "seq_lens"),
-            ] {
-                VulkanBuffer::upload_data_with_command_pool(
-                    device,
-                    host_visible_mt,
-                    queue,
-                    *command_pool,
-                    buf,
-                    data,
-                )
-                .with_context(|| {
-                    format!("failed to upload paged_attn_decode_batch {label} buffer")
-                })?;
-            }
-        }
-    }
 
     let out_size = (batch * num_heads * head_dim * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
@@ -4213,17 +4183,70 @@ pub fn dispatch_paged_attn_decode_batch_f32(
         seq_buf.handle(),
         out_buf.handle(),
     ];
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        (batch * num_heads) as u32,
-    )
-    .context("paged_attn_decode_batch kernel failed")?;
-
-    let out_data = {
+    let out_data = if paged_attn_single_submit_enabled() {
+        run_compute_pipeline_with_transfers_readback(
+            vk_device,
+            &[
+                (&q_buf, &q_data),
+                (&k_buf, &k_data),
+                (&v_buf, &v_data),
+                (&seq_buf, &seq_data),
+            ],
+            &out_buf,
+            out_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            (batch * num_heads) as u32,
+        )
+        .context("paged_attn_decode_batch single-submit kernel failed")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            if paged_attn_batched_uploads_enabled() {
+                upload_buffers_with_command_pool(
+                    device,
+                    host_visible_mt,
+                    queue,
+                    *command_pool,
+                    &[
+                        (&q_buf, &q_data),
+                        (&k_buf, &k_data),
+                        (&v_buf, &v_data),
+                        (&seq_buf, &seq_data),
+                    ],
+                )
+                .context("failed to upload paged_attn_decode_batch inputs")?;
+            } else {
+                for (buf, data, label) in [
+                    (&q_buf, &q_data, "q"),
+                    (&k_buf, &k_data, "k"),
+                    (&v_buf, &v_data, "v"),
+                    (&seq_buf, &seq_data, "seq_lens"),
+                ] {
+                    VulkanBuffer::upload_data_with_command_pool(
+                        device,
+                        host_visible_mt,
+                        queue,
+                        *command_pool,
+                        buf,
+                        data,
+                    )
+                    .with_context(|| {
+                        format!("failed to upload paged_attn_decode_batch {label} buffer")
+                    })?;
+                }
+            }
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            (batch * num_heads) as u32,
+        )
+        .context("paged_attn_decode_batch kernel failed")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
@@ -4318,45 +4341,6 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
     let v_buf = make_input(&v_data, "v_pool")?;
     let bt_buf = make_input(&bt_bytes, "block_table")?;
     let seq_buf = make_input(&seq_bytes, "seq_lens")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        if paged_attn_batched_uploads_enabled() {
-            upload_buffers_with_command_pool(
-                device,
-                host_visible_mt,
-                queue,
-                *command_pool,
-                &[
-                    (&q_buf, &q_data),
-                    (&k_buf, &k_data),
-                    (&v_buf, &v_data),
-                    (&bt_buf, &bt_bytes),
-                    (&seq_buf, &seq_bytes),
-                ],
-            )
-            .context("failed to upload paged_attn_decode_batch_paged inputs")?;
-        } else {
-            for (buf, data, label) in [
-                (&q_buf, &q_data, "q"),
-                (&k_buf, &k_data, "k_pool"),
-                (&v_buf, &v_data, "v_pool"),
-                (&bt_buf, &bt_bytes, "block_table"),
-                (&seq_buf, &seq_bytes, "seq_lens"),
-            ] {
-                VulkanBuffer::upload_data_with_command_pool(
-                    device,
-                    host_visible_mt,
-                    queue,
-                    *command_pool,
-                    buf,
-                    data,
-                )
-                .with_context(|| {
-                    format!("failed to upload paged_attn_decode_batch_paged {label} buffer")
-                })?;
-            }
-        }
-    }
 
     let out_size = (batch * num_heads * head_dim * 4) as u64;
     let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
@@ -4382,17 +4366,73 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32(
         seq_buf.handle(),
         out_buf.handle(),
     ];
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        (batch * num_heads) as u32,
-    )
-    .context("paged_attn_decode_batch_paged kernel failed")?;
-
-    let out_data = {
+    let out_data = if paged_attn_single_submit_enabled() {
+        run_compute_pipeline_with_transfers_readback(
+            vk_device,
+            &[
+                (&q_buf, &q_data),
+                (&k_buf, &k_data),
+                (&v_buf, &v_data),
+                (&bt_buf, &bt_bytes),
+                (&seq_buf, &seq_bytes),
+            ],
+            &out_buf,
+            out_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            (batch * num_heads) as u32,
+        )
+        .context("paged_attn_decode_batch_paged single-submit kernel failed")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            if paged_attn_batched_uploads_enabled() {
+                upload_buffers_with_command_pool(
+                    device,
+                    host_visible_mt,
+                    queue,
+                    *command_pool,
+                    &[
+                        (&q_buf, &q_data),
+                        (&k_buf, &k_data),
+                        (&v_buf, &v_data),
+                        (&bt_buf, &bt_bytes),
+                        (&seq_buf, &seq_bytes),
+                    ],
+                )
+                .context("failed to upload paged_attn_decode_batch_paged inputs")?;
+            } else {
+                for (buf, data, label) in [
+                    (&q_buf, &q_data, "q"),
+                    (&k_buf, &k_data, "k_pool"),
+                    (&v_buf, &v_data, "v_pool"),
+                    (&bt_buf, &bt_bytes, "block_table"),
+                    (&seq_buf, &seq_bytes, "seq_lens"),
+                ] {
+                    VulkanBuffer::upload_data_with_command_pool(
+                        device,
+                        host_visible_mt,
+                        queue,
+                        *command_pool,
+                        buf,
+                        data,
+                    )
+                    .with_context(|| {
+                        format!("failed to upload paged_attn_decode_batch_paged {label} buffer")
+                    })?;
+                }
+            }
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            (batch * num_heads) as u32,
+        )
+        .context("paged_attn_decode_batch_paged kernel failed")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
@@ -6878,6 +6918,173 @@ fn run_compute_pipeline_with_transfer_readback(
 
     VulkanBuffer::read_host_visible(device, &readback_stage)
         .context("failed to read transfer-readback output")
+}
+
+/// Single-submit multi-upload + dispatch + readback. Variant of
+/// `run_compute_pipeline_with_transfer_readback` for kernels that take
+/// several disjoint input buffers (e.g. paged_attn_decode_batch's
+/// Q/K/V/seq_lens uploads). Schedules all host→device copies, the compute
+/// dispatch, and a single device→host readback into one command buffer.
+#[allow(clippy::too_many_arguments)]
+fn run_compute_pipeline_with_transfers_readback(
+    vk_device: &VulkanDevice,
+    uploads: &[(&VulkanBuffer, &[u8])],
+    readback_src: &VulkanBuffer,
+    readback_size: u64,
+    spirv: &[u8],
+    all_handles: &[vk::Buffer],
+    push_constants: &[u32],
+    workgroup_count: u32,
+) -> Result<Vec<u8>> {
+    let limit_x = vk_device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        workgroup_count <= limit_x,
+        "run_compute_pipeline_with_transfers_readback: workgroup_count={workgroup_count} \
+         exceeds device per-axis limit {limit_x}"
+    );
+    let device = vk_device.device();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    let mut upload_stages = Vec::with_capacity(uploads.len());
+    for (_, data) in uploads {
+        let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)
+            .context("failed to create transfers-readback upload staging buffer")?;
+        VulkanBuffer::write_host_visible(device, &stage, data)?;
+        upload_stages.push(stage);
+    }
+    let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
+        .context("failed to create transfers-readback readback staging buffer")?;
+
+    let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
+        spirv,
+        all_handles.len(),
+        (push_constants.len() * 4) as u32,
+    )?;
+    anyhow::ensure!(
+        all_handles.len() <= 64,
+        "Vulkan transient descriptor pool only supports up to 64 bindings, got {}",
+        all_handles.len()
+    );
+
+    let descriptor_pool = vk_device.transient_descriptor_pool()?;
+    let set_layouts = [set_layout];
+    let descriptor_set = unsafe {
+        device
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(*descriptor_pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+            .context("failed to allocate transfers-readback descriptor set")?[0]
+    };
+
+    {
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| make_write_descriptor_set_buf(descriptor_set, i as u32, info))
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+    }
+
+    let cmd_pool = vk_device.transient_command_pool()?;
+    let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
+    let command_buffers =
+        crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
+            .context("failed to allocate transfers-readback command buffer")?;
+    let cmd = command_buffers[0];
+
+    unsafe {
+        device
+            .begin_command_buffer(cmd, &make_cmd_begin_info())
+            .context("failed to begin transfers-readback command buffer")?;
+        for ((dst, data), stage) in uploads.iter().zip(upload_stages.iter()) {
+            device.cmd_copy_buffer(
+                cmd,
+                stage.handle(),
+                dst.handle(),
+                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+            );
+        }
+        let upload_barrier = make_memory_barrier(
+            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+            vk::AccessFlags::SHADER_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::DependencyFlags::empty(),
+            &[upload_barrier],
+            &[],
+            &[],
+        );
+
+        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+        device.cmd_bind_descriptor_sets(
+            cmd,
+            vk::PipelineBindPoint::COMPUTE,
+            layout,
+            0,
+            &[descriptor_set],
+            &[],
+        );
+        device.cmd_push_constants(
+            cmd,
+            layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            bytemuck::cast_slice(push_constants),
+        );
+        device.cmd_dispatch(cmd, workgroup_count, 1, 1);
+
+        let readback_barrier = make_memory_barrier(
+            vk::AccessFlags::SHADER_WRITE,
+            vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ,
+        );
+        device.cmd_pipeline_barrier(
+            cmd,
+            vk::PipelineStageFlags::COMPUTE_SHADER,
+            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+            vk::DependencyFlags::empty(),
+            &[readback_barrier],
+            &[],
+            &[],
+        );
+        device.cmd_copy_buffer(
+            cmd,
+            readback_src.handle(),
+            readback_stage.handle(),
+            &[vk::BufferCopy::builder().size(readback_size).build()],
+        );
+        device
+            .end_command_buffer(cmd)
+            .context("failed to end transfers-readback command buffer")?;
+    }
+
+    vk_device.submit_and_wait(cmd, "run_compute_pipeline_with_transfers_readback")?;
+    unsafe {
+        device
+            .reset_descriptor_pool(*descriptor_pool, vk::DescriptorPoolResetFlags::empty())
+            .context("failed to reset transfers-readback descriptor pool")?;
+        device.free_command_buffers(*cmd_pool, &command_buffers);
+    }
+
+    VulkanBuffer::read_host_visible(device, &readback_stage)
+        .context("failed to read transfers-readback output")
 }
 
 #[allow(clippy::too_many_arguments)]
