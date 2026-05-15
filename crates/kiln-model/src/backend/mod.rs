@@ -127,6 +127,25 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         TrainingCapabilities::portable()
     }
 
+    /// First-use feasibility check for the Vulkan-resident decode pool:
+    /// returns true when a 3-4 slot ring sized to `max(hidden, intermediate)
+    /// × max_batch × 4` bytes can be allocated within 1 % of the device-local
+    /// heap. CPU / CUDA / Metal return false by default; the Vulkan backend
+    /// constructs (and caches) the pool here.
+    ///
+    /// Gate (b) of docs/vk_resident_decode_plan.md. The cached `None`
+    /// outcome means subsequent decode steps see the same `false` answer
+    /// without re-probing the device.
+    #[allow(unused_variables)]
+    fn decode_resident_pool_ready(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> bool {
+        false
+    }
+
     /// Whether the backend can run a full decode step "device-resident":
     /// pay one host→device upload (input token / hidden) and one device→host
     /// readback (sampled token / last-row logits) per decode step, instead

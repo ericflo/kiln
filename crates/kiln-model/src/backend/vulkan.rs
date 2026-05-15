@@ -706,6 +706,19 @@ impl BackendRuntime for VulkanBackend {
         }
     }
 
+    fn decode_resident_pool_ready(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> bool {
+        if !self.has_vulkan() || !self.resident_decode_enabled {
+            return false;
+        }
+        self.decode_resident_pool(max_hidden, max_intermediate, max_batch)
+            .is_some()
+    }
+
     fn supports_resident_decode(&self) -> bool {
         // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
         // applies whenever the logical device is up. The runtime pool

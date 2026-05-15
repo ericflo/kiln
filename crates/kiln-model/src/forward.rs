@@ -13680,6 +13680,80 @@ pub fn model_forward_paged_last_token(
     Ok(logits.expect("LmHeadMode::LastRowOnly always produces logits"))
 }
 
+/// Vulkan-resident decode entry-point. Same signature as
+/// [`model_forward_paged_last_token`]; routes through the Vulkan-resident
+/// dispatchers when the backend supports it AND the per-step buffer pool
+/// is feasible, else falls back transparently to the per-call Tensor path.
+///
+/// Gate (a)/(c) of `docs/vk_resident_decode_plan.md`. The runtime predicate
+/// `Backend::supports_resident_decode()` returns `false` on CPU / CUDA /
+/// Metal so those backends keep using the existing `model_forward_paged_last_token`
+/// path. On Vulkan the predicate returns `true` when the logical device is
+/// up; pool feasibility is checked the first time this fn is called and
+/// cached on the backend.
+///
+/// This entry point is a strict superset of `model_forward_paged_last_token`:
+/// the resident path is a fast-path overlay, and any code path it can't
+/// service yet delegates to the legacy function. Callers can switch to this
+/// entry point without behavioural change while the layer-by-layer
+/// resident wiring fills in (gate (e) measurable wins arrive progressively
+/// as more layer types route through the resident dispatchers).
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_last_token_resident(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    positions_gpu: Option<&Tensor>,
+) -> Result<Tensor> {
+    // Resident path requires backend support AND the buffer pool to fit.
+    // On any decline path we fall back transparently to the existing
+    // per-call Tensor dispatchers — preserves bit-identical behavior
+    // until each layer routes through resident dispatchers.
+    let _route_resident = backend.supports_resident_decode()
+        && resident_decode_pool_ready(backend, config);
+
+    // TODO(vk_resident_decode_plan.md gate(a)/(e)): the per-layer resident
+    // wiring lands here. Until each layer type is wired, we delegate to the
+    // legacy path so behavior is unchanged. The dispatchers, pool, and
+    // backend predicate land first (gates a/b/c); the layer wiring is the
+    // subsequent slice of work measured by gate (e).
+    model_forward_paged_last_token(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        positions_gpu,
+    )
+}
+
+/// First-use feasibility check for the Vulkan-resident decode pool.
+///
+/// Returns true when the backend's `decode_resident_pool_ready` predicate
+/// confirms the buffer-pool ring fits in the device-local memory budget.
+/// On CPU / CUDA / Metal the trait default returns false; only Vulkan
+/// constructs (and caches) the pool here.
+fn resident_decode_pool_ready(
+    backend: &dyn BackendRuntime,
+    config: &kiln_core::config::ModelConfig,
+) -> bool {
+    // The pool is sized off (hidden, intermediate, max_batch). Max
+    // batch defaults to 64 per docs/vk_resident_decode_plan.md gate
+    // (b). At runtime, an iGPU near its UMA limit lands `None` and
+    // routes to the per-call Tensor path.
+    backend.decode_resident_pool_ready(config.hidden_size, config.intermediate_size, 64)
+}
+
 /// Paged-KV forward pass for greedy generation prefill.
 ///
 /// This runs the same prefill work as [`model_forward_paged_last_token`] but
