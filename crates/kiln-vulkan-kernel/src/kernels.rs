@@ -69,6 +69,20 @@ fn gdn_gates_single_submit_enabled() -> bool {
     })
 }
 
+fn gdn_gated_norm_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_GDN_GATED_NORM_SINGLE_SUBMIT").is_err()
+    })
+}
+
+fn mlp_gate_up_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_MLP_GATE_UP_SINGLE_SUBMIT").is_err()
+    })
+}
+
 fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4519,25 +4533,9 @@ pub fn dispatch_mlp_gate_up_decode_cached(
     );
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create mlp_gate_up_decode x buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )
-        .context("failed to upload mlp_gate_up_decode x buffer")?;
-    }
-
-    let out_buf = VulkanBuffer::create_device_local(
-        device,
-        device_local_mt,
-        (batch * intermediate * 4) as u64,
-    )
-    .context("failed to create mlp_gate_up_decode output buffer")?;
+    let out_size = (batch * intermediate * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create mlp_gate_up_decode output buffer")?;
 
     let use_rows2 = use_prefill_row_pair_matmul(batch);
     let glsl_path = if batch == 1 {
@@ -4567,23 +4565,49 @@ pub fn dispatch_mlp_gate_up_decode_cached(
         up_weight_t.handle(),
         out_buf.handle(),
     ];
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        if batch == 1 {
-            intermediate.div_ceil(64) as u32
-        } else if use_rows2 {
-            (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
-        } else {
-            (batch * intermediate.div_ceil(128)) as u32
-        },
-    )
-    .context("mlp_gate_up_decode kernel failed")?;
+    let workgroups = if batch == 1 {
+        intermediate.div_ceil(64) as u32
+    } else if use_rows2 {
+        (batch.div_ceil(2) * intermediate.div_ceil(64)) as u32
+    } else {
+        (batch * intermediate.div_ceil(128)) as u32
+    };
 
-    let out_data = {
+    let out_data = if mlp_gate_up_single_submit_enabled() {
+        run_compute_pipeline_with_transfer_readback(
+            vk_device,
+            &x_buf,
+            &x_data,
+            &out_buf,
+            out_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            workgroups,
+        )
+        .context("mlp_gate_up_decode single-submit kernel failed")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )
+            .context("failed to upload mlp_gate_up_decode x buffer")?;
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            workgroups,
+        )
+        .context("mlp_gate_up_decode kernel failed")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
@@ -6057,37 +6081,9 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
 
-    // Create input buffers + upload
+    // Create input buffers
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)?;
     let z_buf = VulkanBuffer::create_device_local(device, device_local_mt, z_data.len() as u64)?;
-    if gdn_gated_norm_batched_uploads_enabled() {
-        let command_pool = vk_device.transient_command_pool()?;
-        upload_buffers_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &[(&x_buf, &x_data), (&z_buf, &z_data)],
-        )?;
-    } else {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &z_buf,
-            &z_data,
-        )?;
-    }
 
     // Create output buffer
     let elem_count: usize = out_shape.iter().product();
@@ -6110,17 +6106,57 @@ pub fn dispatch_gdn_gated_rms_norm_cached(
     ];
     let total_bindings = all_handles.len();
 
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        total_bindings,
-        &push_constants,
-        workgroup_count,
-    )?;
+    let output_data = if gdn_gated_norm_single_submit_enabled() {
+        run_compute_pipeline_with_transfers_readback(
+            vk_device,
+            &[(&x_buf, &x_data), (&z_buf, &z_data)],
+            &out_buf,
+            output_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            workgroup_count,
+        )
+        .context("gdn_gated_rms_norm single-submit dispatch")?
+    } else {
+        if gdn_gated_norm_batched_uploads_enabled() {
+            let command_pool = vk_device.transient_command_pool()?;
+            upload_buffers_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &[(&x_buf, &x_data), (&z_buf, &z_data)],
+            )?;
+        } else {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &z_buf,
+                &z_data,
+            )?;
+        }
 
-    // Read back output
-    let output_data = {
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            total_bindings,
+            &push_constants,
+            workgroup_count,
+        )?;
+
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
