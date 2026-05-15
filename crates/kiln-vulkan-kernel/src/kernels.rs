@@ -36,6 +36,11 @@ fn mlp_bf16_down_rows4_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4").is_err())
 }
 
+fn mlp_bf16_rows8_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
+}
+
 fn mlp_chained_dispatch_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_CHAINED_DISPATCH").is_err())
@@ -282,6 +287,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_batched_rows2", 3, 12),
         ("linear_decode_batched_rows4", 3, 12),
         ("linear_decode_batched_rows4_bf16w", 3, 12),
+        ("linear_decode_batched_rows8_bf16w", 3, 12),
         ("linear_decode_argmax_blocks", 4, 12),
         ("linear_decode_argmax_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_reduce", 3, 4),
@@ -293,6 +299,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("mlp_gate_up_decode_batched", 4, 12),
         ("mlp_gate_up_decode_batched_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows4_bf16w", 4, 12),
+        ("mlp_gate_up_decode_batched_rows8_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
         ("paged_attn_decode_batch", 5, 20),
         ("paged_attn_decode_batch_paged", 6, 24),
@@ -4555,15 +4562,31 @@ fn dispatch_mlp_decode_cached_impl(
     let batch = x_dims[0];
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
+    // For the all-bf16 MLP, the rows4 / rows8 amortization only beats the
+    // per-batch-row bf16w kernel once we have enough rows to keep the SMs
+    // full: rows4 cuts workgroup count by 4×, rows8 by 8×. On NVIDIA RTX
+    // 6000 Ada the empirical crossover is batch ≈ 32 (rows4) and batch ≈ 64
+    // (rows8) — at smaller batches the unbatched bf16w kernel wins because
+    // it puts batch×col_groups workgroups on the GPU. The f32-down rows4
+    // path keeps its older batch≥8 threshold because reading 4 B/weight
+    // makes weight-read reuse pay off sooner. See decode_microbench output
+    // in PR description for the empirical curve.
+    let rows8_path = gate_up_bf16_weights
+        && down_bf16_weights
+        && batch >= 64
+        && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
-        && batch >= 8
+        && batch >= 32
+        && !rows8_path
         && mlp_bf16_down_rows4_enabled();
-    // gate_up rows4 reuses weights across 4 rows; it is correctness-equivalent
-    // regardless of whether down is bf16 or f32 — wire it in for the all-bf16
-    // path too so we get the same scaling we already get for bf16/f32-down.
+    // gate_up rows4 reuses weights across 4 rows. For the bf16/f32-down case
+    // it has always paid off at batch≥8 (existing behavior); for the
+    // all-bf16 case the win only materializes once linear-down also shifts
+    // off the per-batch-row kernel, so pair it with `down_bf16_rows4`.
     let gate_up_rows4 = gate_up_bf16_weights
         && batch >= 8
+        && !rows8_path
         && (down_bf16_rows4 || !down_bf16_weights)
         && mlp_bf16_gate_up_rows4_enabled();
     let down_rows4 =
@@ -4670,6 +4693,11 @@ fn dispatch_mlp_decode_cached_impl(
                 env!("CARGO_MANIFEST_DIR"),
                 "/csrc/shaders/mlp_gate_up_decode_bf16w.comp"
             )
+        } else if rows8_path {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/mlp_gate_up_decode_batched_rows8_bf16w.comp"
+            )
         } else if gate_up_rows4 {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -4725,6 +4753,8 @@ fn dispatch_mlp_decode_cached_impl(
     ];
     let gate_up_workgroups = if batch == 1 {
         intermediate.div_ceil(64) as u32
+    } else if rows8_path {
+        (batch.div_ceil(8) * intermediate.div_ceil(64)) as u32
     } else if gate_up_rows4 {
         (batch.div_ceil(4) * intermediate.div_ceil(64)) as u32
     } else if gate_up_rows2 {
@@ -4738,6 +4768,11 @@ fn dispatch_mlp_decode_cached_impl(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/csrc/shaders/linear_decode_bf16w.comp"
+            )
+        } else if rows8_path {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/linear_decode_batched_rows8_bf16w.comp"
             )
         } else if down_bf16_rows4 {
             concat!(
@@ -4798,6 +4833,8 @@ fn dispatch_mlp_decode_cached_impl(
     ];
     let linear_workgroups = if batch == 1 {
         out_dim.div_ceil(16) as u32
+    } else if rows8_path {
+        (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32
     } else if down_rows4 || down_bf16_rows4 {
         (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
     } else if down_rows2 {

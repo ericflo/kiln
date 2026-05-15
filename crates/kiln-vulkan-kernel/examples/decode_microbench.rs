@@ -30,8 +30,9 @@ const Z_DIM: usize = 4096;
 const A_DIM: usize = 32;
 const B_DIM: usize = 32;
 
-const WARMUP_ITERS: usize = 5;
+const WARMUP_ITERS: usize = 10;
 const TIMED_ITERS: usize = 30;
+const REPEATS: usize = 5;
 
 fn make_bf16_weight(rows: usize, cols: usize) -> Result<Tensor> {
     let n = rows * cols;
@@ -49,13 +50,22 @@ fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result
     for _ in 0..WARMUP_ITERS {
         f()?;
     }
-    let start = Instant::now();
-    for _ in 0..TIMED_ITERS {
-        f()?;
+    // Take the minimum per-iter time across REPEATS independent timed blocks.
+    // The fastest block is the cleanest signal of steady-state kernel cost;
+    // mean is dragged around by background load and GPU thermal swings.
+    let mut best_ns = u128::MAX;
+    for _ in 0..REPEATS {
+        let start = Instant::now();
+        for _ in 0..TIMED_ITERS {
+            f()?;
+        }
+        let elapsed = start.elapsed().as_nanos();
+        if elapsed < best_ns {
+            best_ns = elapsed;
+        }
     }
-    let elapsed = start.elapsed();
-    let per_iter_us = elapsed.as_micros() as f64 / TIMED_ITERS as f64;
-    let rows_per_sec = (batch as f64 * TIMED_ITERS as f64) / elapsed.as_secs_f64();
+    let per_iter_us = (best_ns as f64 / TIMED_ITERS as f64) / 1_000.0;
+    let rows_per_sec = (batch as f64 * TIMED_ITERS as f64) / (best_ns as f64 / 1e9);
     println!(
         "{label:<32} batch={batch:>3}  per_iter={per_iter_us:>8.1} us  rows/s={rows_per_sec:>10.0}"
     );
@@ -70,6 +80,12 @@ fn run() -> Result<()> {
         device.vendor_string()
     );
     println!();
+
+    // Allow caller to run a single kernel ("mlp_bf16w", "mlp_bf16_gu_f32_d",
+    // "full_attn_qkv", "gdn_in_proj") so they can iterate fast without
+    // perturbation from sibling tests heating the GPU.
+    let only = std::env::args().nth(1);
+    let want = |name: &str| only.as_deref().is_none_or(|s| s == name);
 
     // Pre-upload weights once.
     let q_w = make_bf16_weight(HIDDEN, Q_DIM)?;
@@ -99,65 +115,73 @@ fn run() -> Result<()> {
 
     let batches: [usize; 6] = [1, 4, 8, 16, 32, 64];
 
-    println!("== full_attn QKV (fused, bf16w) ==");
-    for &batch in &batches {
-        let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
-        time("full_attn_qkv_decode", batch, || {
-            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
-                &device, &x, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_DIM, K_DIM, V_DIM,
-            )?;
-            Ok(())
-        })?;
+    if want("full_attn_qkv") {
+        println!("== full_attn QKV (fused, bf16w) ==");
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("full_attn_qkv_decode", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights(
+                    &device, &x, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_DIM, K_DIM, V_DIM,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
     }
-    println!();
 
-    println!("== MLP gate_up + down (bf16 g/u, f32 down) ==");
-    for &batch in &batches {
-        let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
-        time("mlp_decode_bf16_gu_f32_d", batch, || {
-            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
-                &device,
-                &x,
-                &gate_buf,
-                &up_buf,
-                &down_f32_buf,
-                HIDDEN,
-                INTERMEDIATE,
-                HIDDEN,
-            )?;
-            Ok(())
-        })?;
+    if want("mlp_bf16_gu_f32_d") {
+        println!("== MLP gate_up + down (bf16 g/u, f32 down) ==");
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("mlp_decode_bf16_gu_f32_d", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down(
+                    &device,
+                    &x,
+                    &gate_buf,
+                    &up_buf,
+                    &down_f32_buf,
+                    HIDDEN,
+                    INTERMEDIATE,
+                    HIDDEN,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
     }
-    println!();
 
-    println!("== MLP gate_up + down (full bf16) ==");
-    for &batch in &batches {
-        let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
-        time("mlp_decode_bf16w", batch, || {
-            kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
-                &device,
-                &x,
-                &gate_buf,
-                &up_buf,
-                &down_buf,
-                HIDDEN,
-                INTERMEDIATE,
-                HIDDEN,
-            )?;
-            Ok(())
-        })?;
+    if want("mlp_bf16w") {
+        println!("== MLP gate_up + down (full bf16) ==");
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("mlp_decode_bf16w", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights(
+                    &device,
+                    &x,
+                    &gate_buf,
+                    &up_buf,
+                    &down_buf,
+                    HIDDEN,
+                    INTERMEDIATE,
+                    HIDDEN,
+                )?;
+                Ok(())
+            })?;
+        }
+        println!();
     }
-    println!();
 
-    println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
-    for &batch in &batches {
-        let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
-        time("gdn_in_proj_decode", batch, || {
-            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
-                &device, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM, Z_DIM, A_DIM, B_DIM,
-            )?;
-            Ok(())
-        })?;
+    if want("gdn_in_proj") {
+        println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
+        for &batch in &batches {
+            let x = Tensor::zeros((batch, 1, HIDDEN), DType::F32, &Device::Cpu)?;
+            time("gdn_in_proj_decode", batch, || {
+                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights(
+                    &device, &x, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM, Z_DIM, A_DIM, B_DIM,
+                )?;
+                Ok(())
+            })?;
+        }
     }
 
     Ok(())

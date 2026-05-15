@@ -3400,15 +3400,16 @@ fn mlp_decode_bf16_packed_weights_match_decode_realistic_shapes() -> Result<()> 
         return Ok(());
     };
 
-    // Qwen3.5-4B-ish decode shapes, exercising the rows4 bf16w path at
-    // batch >= 8 (the regime where the new shader replaces the unbatched
-    // `linear_decode_batched_bf16w` for the down projection). Cuts the
-    // hidden / intermediate dims down so the test stays fast but still
-    // crosses the col_lane = 32 and red_lane = 4 tile boundaries.
+    // Qwen3.5-4B-ish decode shapes. Covers each bf16-down dispatch
+    // path: per-row workgroup (batch<32), rows4-bf16w (batch>=32 with
+    // KILN_DISABLE_VULKAN_MLP_BF16_ROWS8 set, exercised here via the
+    // boundary cases), and rows8-bf16w (default at batch>=32). Cuts
+    // hidden/intermediate down so the test stays fast but still crosses
+    // the col_lane=32 and red_lane=4 tile boundaries.
     let hidden = 256usize;
     let intermediate = 384usize;
     let out_dim = 192usize;
-    let batches = [8usize, 9usize, 16usize, 17usize];
+    let batches = [8usize, 17usize, 32usize, 33usize, 40usize, 64usize, 72usize];
 
     let gate_w = cpu_bf16(
         (0..hidden * intermediate)

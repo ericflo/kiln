@@ -1,0 +1,94 @@
+// Batched SwiGLU gate/up projection with packed bf16 weights, eight rows
+// per workgroup. Each gate AND up weight load is reused across eight input
+// rows — doubling the amortization of the existing `_rows4_bf16w` variant.
+// Targets larger decode batches where the cost of weight reads dominates.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 2, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint intermediate;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer GateWeightBuf { uint data_gate_w[]; };
+layout(binding = 2) readonly buffer UpWeightBuf { uint data_up_w[]; };
+layout(binding = 3) writeonly buffer OutBuf { float data_out[]; };
+
+shared float gate_partial[8][128];
+shared float up_partial[8][128];
+
+float load_bf16(uint packed_word, uint idx) {
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed_word & 0xffffu) : (packed_word >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (intermediate + 63) / 64;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint row0 = row_group * 8;
+    uint col = col_group * 64 + col_lane;
+    uint partial_idx = col_lane * 2 + red_lane;
+
+    float gate_sum[8];
+    float up_sum[8];
+    [[unroll]] for (uint r = 0; r < 8; r++) {
+        gate_sum[r] = 0.0;
+        up_sum[r] = 0.0;
+    }
+    if (col < intermediate) {
+        bool valid[8];
+        uint x_base[8];
+        [[unroll]] for (uint r = 0; r < 8; r++) {
+            valid[r] = (row0 + r) < batch;
+            x_base[r] = (row0 + r) * hidden;
+        }
+        for (uint h = red_lane; h < hidden; h += 2) {
+            uint off = h * intermediate + col;
+            float gate_w = load_bf16(data_gate_w[off >> 1], off);
+            float up_w = load_bf16(data_up_w[off >> 1], off);
+            [[unroll]] for (uint r = 0; r < 8; r++) {
+                if (valid[r]) {
+                    float xv = data_x[x_base[r] + h];
+                    gate_sum[r] += xv * gate_w;
+                    up_sum[r] += xv * up_w;
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0; r < 8; r++) {
+        gate_partial[r][partial_idx] = gate_sum[r];
+        up_partial[r][partial_idx] = up_sum[r];
+    }
+    barrier();
+
+    if (red_lane == 0 && col < intermediate) {
+        float gate[8];
+        float up[8];
+        [[unroll]] for (uint r = 0; r < 8; r++) {
+            gate[r] = gate_partial[r][col_lane * 2] + gate_partial[r][col_lane * 2 + 1];
+            up[r] = up_partial[r][col_lane * 2] + up_partial[r][col_lane * 2 + 1];
+        }
+        [[unroll]] for (uint r = 0; r < 8; r++) {
+            uint row = row0 + r;
+            if (row < batch) {
+                data_out[row * intermediate + col] = gate[r] * stable_sigmoid(gate[r]) * up[r];
+            }
+        }
+    }
+}
