@@ -155,6 +155,52 @@ impl CudaGraphKey {
     }
 }
 
+/// Cache key for the (planned, not-yet-wired) batched (`bs > 1`) decode
+/// graph cache. Mirrors [`CudaGraphKey`] but with an explicit
+/// `batch_size` bucket. See the multi-batch design note at the top of
+/// this file for the surrounding plan.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[allow(dead_code)]
+struct CudaBatchedGraphKey {
+    /// Same stable-paged-metadata cliff as `CudaGraphKey`.
+    stable_metadata: bool,
+    /// Number of rows the captured graph was specialized for.
+    batch_size: usize,
+    /// When `stable_metadata=false`, encodes the per-row seq_len so a
+    /// changed K/V length triggers a re-capture; zero otherwise.
+    max_seqlen_k: usize,
+    /// Padded block-table width, in physical pages.
+    max_blocks_per_seq: usize,
+}
+
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+impl CudaBatchedGraphKey {
+    /// Build a batched key from the same primitives used by
+    /// [`CudaGraphKey::new`], applied to the largest seq_len in the
+    /// batch (rounded up to the 128 K/V chunk). Bucketing all rows to
+    /// the same `max_seqlen_k` lets one captured graph serve every
+    /// row at that decode step.
+    fn new(
+        batch_size: usize,
+        max_seq_len: usize,
+        paged_cache: &PagedKvCache,
+    ) -> Self {
+        let stable_metadata = CudaGraphKey::stable_paged_metadata_enabled();
+        let attention_len = max_seq_len + 1;
+        let max_seqlen_k = attention_len.div_ceil(128) * 128;
+        let pages_per_chunk = 128 / paged_cache.block_size();
+        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        Self {
+            stable_metadata,
+            batch_size,
+            max_seqlen_k,
+            max_blocks_per_seq,
+        }
+    }
+}
+
 #[cfg(feature = "cuda")]
 struct CapturedDecodeGraph {
     /// The instantiated CUDA graph.
@@ -199,6 +245,49 @@ struct CapturedDecodeGraph {
     _gdn_decode_outputs: Vec<Tensor>,
 }
 
+/// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
+/// Reserved for the multi-batch capture path documented at the top of
+/// this file; not yet populated. The fields mirror
+/// [`CapturedDecodeGraph`] but every per-row tensor is shaped for
+/// `[batch, ...]` so one graph replay services the whole batch.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+struct CapturedBatchedDecodeGraph {
+    /// The instantiated CUDA graph.
+    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    /// `[batch, 1, vocab]` logits — replay writes into this storage.
+    output_logits: candle_core::Tensor,
+    /// Adapter generation when captured (invalidate on mismatch).
+    adapter_gen: u64,
+    /// `[batch]` u32 token-id buffer; updated before replay.
+    token_buffer: Tensor,
+    /// `[batch]` f32 per-row decode position; updated before replay.
+    position_buffer: Tensor,
+    /// `[batch, max_blocks_per_seq]` u32 padded block table.
+    block_table_buffer: Tensor,
+    /// `[batch]` i32 per-row K/V length.
+    seqused_k_buffer: Tensor,
+    /// `[batch]` u32 per-row current KV-write slot.
+    kv_slot_buffer: Tensor,
+    /// `[batch, rotary_dim / 2]` RoPE cos table; updated before replay.
+    rotary_cos_buffer: Tensor,
+    /// `[batch, rotary_dim / 2]` RoPE sin table; updated before replay.
+    rotary_sin_buffer: Tensor,
+    /// Per-full-attn-layer paged decode outputs, shape `[batch, 1, n_heads, head_dim]`.
+    _paged_decode_outputs: Vec<Tensor>,
+    /// Per-full-attn-layer LSE scratch, shape `[batch, n_heads, 1]`.
+    _paged_decode_lse: Vec<Tensor>,
+    /// Per-GDN-layer fused recurrent outputs, shape `[batch, ...]`.
+    _gdn_decode_outputs: Vec<Tensor>,
+    /// Persistent batched [`LinearAttentionState`] slot used by the
+    /// captured forward. Replays scatter the per-row inputs into this
+    /// slot and read the same device pointers out the other side, so
+    /// the graph never sees a freed allocation.
+    _persistent_linear_state: Option<crate::forward::LinearAttentionState>,
+    /// Max K/V length baked into the captured kernel launch shape.
+    max_seqlen_k: usize,
+}
+
 /// Manages CUDA graph lifecycle for decode forward passes.
 pub struct CudaGraphRunner {
     /// Whether CUDA graphs are enabled.
@@ -206,6 +295,11 @@ pub struct CudaGraphRunner {
     /// Captured graphs keyed by graph-unsafe paged metadata.
     #[cfg(feature = "cuda")]
     captured: HashMap<CudaGraphKey, CapturedDecodeGraph>,
+    /// Captured batched graphs keyed on `(batch_size, max_seqlen_k, …)`.
+    /// Empty today; populated by the planned multi-batch capture path.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    captured_batched: HashMap<CudaBatchedGraphKey, CapturedBatchedDecodeGraph>,
     /// Adapter generation counter; incremented on LoRA swap.
     adapter_generation: u64,
     /// Whether warmup is complete.
@@ -228,6 +322,8 @@ impl CudaGraphRunner {
             enabled: actually_enabled,
             #[cfg(feature = "cuda")]
             captured: HashMap::new(),
+            #[cfg(feature = "cuda")]
+            captured_batched: HashMap::new(),
             adapter_generation: 0,
             warmup_done: false,
             #[cfg(feature = "cuda")]
@@ -241,13 +337,14 @@ impl CudaGraphRunner {
         self.warmup_done = false;
         #[cfg(feature = "cuda")]
         {
-            if !self.captured.is_empty() {
+            if !self.captured.is_empty() || !self.captured_batched.is_empty() {
                 tracing::debug!(
                     "CUDA graph invalidated (adapter gen={})",
                     self.adapter_generation
                 );
             }
             self.captured.clear();
+            self.captured_batched.clear();
             self.cache_full_warned = false;
         }
     }
