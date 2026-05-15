@@ -10010,6 +10010,44 @@ pub(crate) struct PagedDecodeGraphInputs<'a> {
     pub softmax_lse: &'a [Tensor],
 }
 
+/// Stable per-step inputs threaded through the batched CUDA graph
+/// capture/replay path. Mirrors [`PagedDecodeGraphInputs`] but every
+/// tensor is shaped for `[batch, …]`. The CUDA graph runner pre-allocates
+/// these on the device once per `batch_size` bucket; per-step updates
+/// rewrite their contents in place via `cudaMemcpyHtoDAsync` so the
+/// captured kernels read from the same device pointers on every replay.
+/// Not consumed yet — kept for the upcoming batched forward wrapper.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
+    /// `[batch]` u32 token-id buffer.
+    pub token_ids: &'a Tensor,
+    /// `[batch]` f32 per-row decode position.
+    pub positions: &'a Tensor,
+    /// `[batch, max_blocks_per_seq]` u32 padded block table.
+    pub block_table: &'a Tensor,
+    /// `[batch]` i32 per-row K/V length.
+    pub seqused_k: &'a Tensor,
+    /// `[batch]` u32 per-row current KV-write slot.
+    pub kv_slot: &'a Tensor,
+    /// Max K/V length baked into the captured kernel launch shape.
+    pub max_seqlen_k: usize,
+    /// `[batch, rotary_dim/2]` rotary cosine table.
+    pub rotary_cos: &'a Tensor,
+    /// `[batch, rotary_dim/2]` rotary sine table.
+    pub rotary_sin: &'a Tensor,
+    /// Per-full-attention-layer paged decode output buffers, shape
+    /// `[batch, 1, n_heads, head_dim]`.
+    pub attn_out: &'a [Tensor],
+    /// Per-full-attention-layer paged decode LSE scratch, shape
+    /// `[batch, n_heads, 1]`.
+    pub softmax_lse: &'a [Tensor],
+    /// Persistent batched [`LinearAttentionState`] slot used by the
+    /// captured forward. Lifetime is the graph runner's; the captured
+    /// graph reads recurrent/conv state from these device pointers.
+    pub linear_state: &'a mut LinearAttentionState,
+}
+
 /// Try the fused paged-decode flash-attention kernel.
 ///
 /// Returns `Ok(Some(output))` on success and `Ok(None)` when the kernel
