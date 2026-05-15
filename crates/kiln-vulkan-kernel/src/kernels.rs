@@ -1848,22 +1848,9 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
 
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create linear_decode_offset x buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )
-        .context("failed to upload linear_decode_offset x buffer")?;
-    }
-
-    let out_buf =
-        VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
-            .context("failed to create linear_decode_offset output buffer")?;
+    let out_size = (batch * out_dim * 4) as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create linear_decode_offset output buffer")?;
 
     let all_handles = vec![x_buf.handle(), weight_buffer.handle(), out_buf.handle()];
     let glsl_path = concat!(
@@ -1878,17 +1865,43 @@ pub fn dispatch_linear_decode_cached_bf16_weights_offset(
         weight_offset as u32,
         full_out_dim as u32,
     ];
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        (batch * out_dim.div_ceil(32)) as u32,
-    )
-    .context("linear_decode_batched_offset_bf16w kernel failed")?;
+    let workgroups = (batch * out_dim.div_ceil(32)) as u32;
 
-    let out_data = {
+    let out_data = if linear_decode_single_submit_enabled() {
+        run_compute_pipeline_with_transfer_readback(
+            vk_device,
+            &x_buf,
+            &x_data,
+            &out_buf,
+            out_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            workgroups,
+        )
+        .context("linear_decode_batched_offset_bf16w single-submit kernel failed")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )
+            .context("failed to upload linear_decode_offset x buffer")?;
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            workgroups,
+        )
+        .context("linear_decode_batched_offset_bf16w kernel failed")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
