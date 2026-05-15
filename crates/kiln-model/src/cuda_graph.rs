@@ -29,6 +29,71 @@
 //! - Requires `cuMemAllocAsync` support (Ampere+ / compute capability ≥ 8.0).
 //! - Graph is invalidated on LoRA adapter swap (different weight pointers).
 //! - Falls back gracefully to eager execution if capture fails.
+//!
+//! ## Multi-batch (`bs > 1`) capture — not yet implemented
+//!
+//! Today the runner only captures the `bs = 1` decode shape. The
+//! `paged_batched_decode_step` path for `row_count > 1` runs eager, which is
+//! the single biggest remaining throughput gap vs. vLLM at high concurrency
+//! on Qwen3.5-4B / L40S (kiln 1181 tok/s @ bs=64 vs. vLLM 1907 tok/s — see
+//! `BENCHMARKS.md` "Direct head-to-head" section, commit `5fddb497`).
+//!
+//! ### Proposed structure
+//!
+//! - **`CudaBatchedGraphKey { batch_size, max_seqlen_k, max_blocks_per_seq,
+//!   stable_metadata }`** — same `stable_metadata` cliff as today; batch-size
+//!   bucketed cache.
+//! - **`CapturedBatchedDecodeGraph`** — same fields as `CapturedDecodeGraph`
+//!   but every per-row tensor (`token_buffer`, `position_buffer`,
+//!   `block_table_buffer`, `seqused_k_buffer`, `kv_slot_buffer`,
+//!   `output_logits`, per-full-attn-layer outputs/LSE) sized for `[batch,
+//!   ...]` instead of `[1, ...]`. GDN decode outputs gain a `batch` dim too.
+//! - **Persistent batched `LinearAttentionState` slot per bucket** — the
+//!   current per-row `recurrent_states[layer_idx]` / `conv_states[layer_idx]`
+//!   tensors have new pointers on every `from_batch_rows` call. Capture
+//!   needs stable device addresses, so the runner should own one batched
+//!   state pool keyed on `batch_size` and copy-in the per-row contents
+//!   (via the existing scatter primitives) before each replay.
+//! - **Per-bucket cap** — vLLM captures 51 sizes (1, 2, 4, …, 512); for
+//!   kiln a bounded set like `[1, 2, 4, 8, 16, 32, 64]` covers the
+//!   `KILN_MAX_DECODE_BATCH` default range. Bucket the request batch to
+//!   the next-larger captured size (or fall back to eager).
+//! - **Entry point** — `CudaGraphRunner::decode_step_paged_batched(...)`
+//!   mirroring `decode_step_paged` but taking `&[u32]` / `&[&BlockTable]`
+//!   / `&[usize]` / `&mut [&mut LinearAttentionState]`. Wire into
+//!   `ModelRunner::paged_batched_decode_step` in `generate.rs` at the
+//!   `try_contiguous_batched` branch — before invoking
+//!   `model_forward_paged_batched_decode_hidden`, route through the
+//!   batched graph runner when the bucket is captured.
+//! - **Forward wrapper** — `model_forward_paged_batched_with_graph_inputs`
+//!   in `forward.rs` mirroring the existing single-row
+//!   `model_forward_paged_with_graph_inputs`, consuming
+//!   `BatchedPagedDecodeGraphInputs` for the stable per-row tensors.
+//!
+//! ### Sequencing
+//!
+//! 1. Land the key + struct + runner fields behind `#[allow(dead_code)]`
+//!    to verify the type design compiles cleanly.
+//! 2. Add the persistent batched-state pool (separate commit) — reuses
+//!    `LinearAttentionState::from_batch_rows` shape but with in-place
+//!    storage via the existing `assemble_gdn_recurrent_resident_batch_rows`
+//!    backend primitive.
+//! 3. Add the batched forward wrapper consuming stable inputs.
+//! 4. Add capture + replay logic.
+//! 5. Wire into `paged_batched_decode_step`.
+//! 6. Bench: target ≥ 1.5× kiln throughput at bs=32-64 to close most of
+//!    the vLLM gap.
+//!
+//! ### Why this hasn't landed yet
+//!
+//! The graph capture has to pin **every** device pointer touched in
+//! the forward, including the GDN recurrent state, the conv state,
+//! per-layer attention scratch, paged-KV pool slots, RoPE tables, and
+//! the LM head output. Any allocation Candle frees between capture and
+//! replay turns the graph into a use-after-free. The bs=1 path
+//! enumerates and pre-allocates these carefully; extending the same
+//! discipline to a batched shape is several commits worth of work and
+//! is currently the top-priority entry on this file's TODO list.
 
 use anyhow::{Context, Result};
 use candle_core::Device;
