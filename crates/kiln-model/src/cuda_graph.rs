@@ -1368,6 +1368,123 @@ impl CudaGraphRunner {
         Ok(outputs)
     }
 
+    /// `[batch, rotary_dim/2]` rotary cosine buffer initialized at
+    /// `position 0`. The runner refreshes the per-row contents before
+    /// each replay so the captured RoPE kernels see updated angles
+    /// while reading from a graph-stable pointer.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_rotary_cos_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        batch: usize,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(batch > 0, "rotary cos buffer requires batch > 0");
+        let half = config.rotary_dim() / 2;
+        Tensor::zeros((batch, half), candle_core::DType::F32, device)
+            .context("create CUDA graph batched rotary cos buffer")
+    }
+
+    /// `[batch, rotary_dim/2]` rotary sine buffer initialized at
+    /// `position 0`. See `new_batched_rotary_cos_buffer` for the
+    /// replay-time refresh semantics.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_rotary_sin_buffer(
+        config: &ModelConfig,
+        device: &Device,
+        batch: usize,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(batch > 0, "rotary sin buffer requires batch > 0");
+        let half = config.rotary_dim() / 2;
+        Tensor::zeros((batch, half), candle_core::DType::F32, device)
+            .context("create CUDA graph batched rotary sin buffer")
+    }
+
+    /// `[batch, 1, vocab]` output-logits buffer for batched capture.
+    /// (The batched argmax then reduces this to per-row tokens — the
+    /// caller of the captured graph either reads the tokens out via
+    /// the same in-place mechanism the bs=1 path uses, or runs the LM
+    /// head as the post-capture stage on every replay.)
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_output_logits(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+        batch: usize,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(batch > 0, "batched output logits require batch > 0");
+        Tensor::zeros((batch, 1, config.vocab_size), dtype, device)
+            .context("create CUDA graph batched output logits")
+    }
+
+    /// Per-full-attention-layer paged decode outputs and LSE scratch,
+    /// shaped for `[batch, 1, n_heads, head_dim]` and `[batch, n_heads, 1]`.
+    /// One element per full-attention layer in the model.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_paged_decode_outputs(
+        config: &ModelConfig,
+        device: &Device,
+        dtype: candle_core::DType,
+        batch: usize,
+    ) -> Result<(Vec<Tensor>, Vec<Tensor>)> {
+        anyhow::ensure!(batch > 0, "batched paged decode outputs require batch > 0");
+        let mut outputs = Vec::with_capacity(config.num_full_attention_layers);
+        let mut lse = Vec::with_capacity(config.num_full_attention_layers);
+        for _ in 0..config.num_full_attention_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (batch, 1, config.num_attention_heads, config.head_dim),
+                    dtype,
+                    device,
+                )
+                .context("create CUDA graph batched paged decode output")?,
+            );
+            lse.push(
+                Tensor::zeros(
+                    (batch, config.num_attention_heads, 1),
+                    candle_core::DType::F32,
+                    device,
+                )
+                .context("create CUDA graph batched paged decode LSE")?,
+            );
+        }
+        Ok((outputs, lse))
+    }
+
+    /// Per-linear-attention-layer fused GDN decode outputs, shaped for
+    /// `[batch, 1, linear_num_value_heads, linear_value_head_dim]`.
+    /// One element per linear-attention (GDN) layer in the model.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_gdn_decode_outputs(
+        config: &ModelConfig,
+        device: &Device,
+        batch: usize,
+    ) -> Result<Vec<Tensor>> {
+        anyhow::ensure!(batch > 0, "batched GDN decode outputs require batch > 0");
+        let num_linear_layers = config.num_layers - config.num_full_attention_layers;
+        let mut outputs = Vec::with_capacity(num_linear_layers);
+        for _ in 0..num_linear_layers {
+            outputs.push(
+                Tensor::zeros(
+                    (
+                        batch,
+                        1,
+                        config.linear_num_value_heads,
+                        config.linear_value_head_dim,
+                    ),
+                    candle_core::DType::BF16,
+                    device,
+                )
+                .context("create CUDA graph batched GDN decode output")?,
+            );
+        }
+        Ok(outputs)
+    }
+
     /// Eager decode that uses the same pre-allocated position tensor path as
     /// graph capture. This primes kernels/modules that the plain eager path
     /// skips, keeping unsupported lazy work out of the later capture window.
