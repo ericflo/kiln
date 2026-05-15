@@ -55,6 +55,13 @@ fn paged_attn_single_submit_enabled() -> bool {
     })
 }
 
+fn qwen_rmsnorm_single_submit_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_QWEN_RMSNORM_SINGLE_SUBMIT").is_err()
+    })
+}
+
 fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1977,30 +1984,9 @@ pub fn dispatch_qwen_rmsnorm_forward(
     let weight_buf =
         VulkanBuffer::create_device_local(device, device_local_mt, weight_data.len() as u64)
             .context("qwen_rmsnorm_forward: create weight buffer")?;
-    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+    let out_size = x_data.len() as u64;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
         .context("qwen_rmsnorm_forward: create out buffer")?;
-
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )
-        .context("qwen_rmsnorm_forward: upload x")?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &weight_buf,
-            &weight_data,
-        )
-        .context("qwen_rmsnorm_forward: upload weight")?;
-    }
 
     let all_handles = vec![x_buf.handle(), weight_buf.handle(), out_buf.handle()];
     let glsl_path = concat!(
@@ -2010,17 +1996,51 @@ pub fn dispatch_qwen_rmsnorm_forward(
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
     // Push constants: rows, hidden, eps. eps is f32 transmuted to u32 bits.
     let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
-    run_compute_pipeline(
-        vk_device,
-        &spirv,
-        &all_handles,
-        all_handles.len(),
-        &push_constants,
-        rows as u32,
-    )
-    .context("qwen_rmsnorm_forward: kernel dispatch")?;
+    let workgroups = rows as u32;
 
-    let out_data = {
+    let out_data = if qwen_rmsnorm_single_submit_enabled() {
+        run_compute_pipeline_with_transfers_readback(
+            vk_device,
+            &[(&x_buf, &x_data), (&weight_buf, &weight_data)],
+            &out_buf,
+            out_size,
+            &spirv,
+            &all_handles,
+            &push_constants,
+            workgroups,
+        )
+        .context("qwen_rmsnorm_forward: single-submit dispatch")?
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &x_buf,
+                &x_data,
+            )
+            .context("qwen_rmsnorm_forward: upload x")?;
+            VulkanBuffer::upload_data_with_command_pool(
+                device,
+                host_visible_mt,
+                queue,
+                *command_pool,
+                &weight_buf,
+                &weight_data,
+            )
+            .context("qwen_rmsnorm_forward: upload weight")?;
+        }
+        run_compute_pipeline(
+            vk_device,
+            &spirv,
+            &all_handles,
+            all_handles.len(),
+            &push_constants,
+            workgroups,
+        )
+        .context("qwen_rmsnorm_forward: kernel dispatch")?;
         let command_pool = vk_device.transient_command_pool()?;
         VulkanBuffer::read_back_with_command_pool(
             device,
