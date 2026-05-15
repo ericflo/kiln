@@ -131,6 +131,40 @@ quantized + GDN-fused base path is already running close to its bs=1 ceiling
 on A6000, and the most obvious next-step lever (native MTP self-spec) does
 not yet pay back the verifier cost at current α.
 
+### Batched concurrent-decode throughput (L40S sm_89, post matmul-broadcast-copy fix)
+
+Aggregate `/v1/chat/completions` greedy decode tokens/s across N
+concurrent HTTP streams, Qwen3.5-4B, `KILN_W4A16=1`,
+`KILN_CUDA_GRAPHS=true`, `KILN_MAX_DECODE_BATCH=64`, 128 generated
+tokens per stream, per-call-nonce prompts (see
+`scripts/bench-concurrent-batch.py` — without the nonce, the
+deterministic completion cache collapses repeated greedy decodes onto a
+0-tok response and over-reports throughput by 2 ×+):
+
+| Concurrency | Aggregate tok/s | Scale vs bs=1 |
+|---:|---:|---:|
+| 1 | 101 | 1.00× |
+| 2 | 164 | 1.63× |
+| 4 | 306 | 3.03× |
+| 8 | 525 | 5.20× |
+| 16 | 815 | 8.07× |
+| 32 | 1106 | 10.95× |
+| 48 | 1273 | 12.60× |
+| 64 | 1360 | 13.47× |
+
+Source: PRs landing the broadcast-matmul / row-loop-default / positions-
+uniform-gate fixes (commits `2e252f8a`, `feb316a1`, `ffe0feb7`,
+May 2026). Pre-fix aggregate was a **flat ~100 tok/s ceiling regardless
+of N** — candle's `Tensor::broadcast_matmul` was materializing a 168 MB
+BF16 weight copy across the batch dim before every GDN in-proj matmul,
+which was 78 % of GPU time. nsys after the fix shows `ucopy_bf16`
+falling out of the top kernels entirely and actual compute (cutlass /
+Marlin GEMM) dominating.
+
+The bs=1 number is unchanged because the bs=1 codepath is
+`graph_runner.decode_step_paged`, which never touched the
+broadcast-copy hot path; the fix is purely a bs > 1 win.
+
 ### kiln steady-state — refresh pending
 
 The previous version of this doc included a 1 / 4 / 8 / 16 sequential-runs
