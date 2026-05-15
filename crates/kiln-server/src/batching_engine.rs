@@ -28,6 +28,20 @@ const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 
+/// Resolve the actor's `max_decode_batch` from the environment, falling back
+/// to [`DEFAULT_MAX_DECODE_BATCH`] when `KILN_MAX_DECODE_BATCH` is unset or
+/// cannot be parsed as a positive integer. The actor caps `active.len()` at
+/// this value, so it is the effective concurrent-decode width — bumping it
+/// without a corresponding scheduler-side improvement is a no-op past the
+/// natural single-stream-row-loop ceiling.
+fn env_max_decode_batch() -> usize {
+    std::env::var("KILN_MAX_DECODE_BATCH")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_DECODE_BATCH)
+}
+
 #[derive(Debug, Clone)]
 pub struct EngineRequest {
     pub request_id: Uuid,
@@ -415,7 +429,7 @@ pub struct BatchingEngineHandle {
 
 impl BatchingEngineHandle {
     pub fn start(forward: Arc<dyn DecodeForward>) -> Self {
-        Self::start_with_options(forward, DEFAULT_MAX_DECODE_BATCH)
+        Self::start_with_options(forward, env_max_decode_batch())
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {

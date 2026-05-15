@@ -218,11 +218,24 @@ pub struct PagedBatchedDecodeState {
 }
 
 fn decode_buffer_max_batch() -> usize {
-    std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
+    let explicit = std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0);
+    if let Some(value) = explicit {
+        return value;
+    }
+    // When the batching-engine actor is configured for a wider decode batch
+    // via `KILN_MAX_DECODE_BATCH`, scale the per-step decode buffer up to
+    // match so the actor doesn't immediately error with `decode batch N
+    // exceeds buffer max_batch 8`. The 8-row default stays in place for the
+    // unconfigured case.
+    let actor_max = std::env::var("KILN_MAX_DECODE_BATCH")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
-        .unwrap_or(8)
+        .unwrap_or(0);
+    actor_max.max(8)
 }
 
 enum PrefillSampleSource {
