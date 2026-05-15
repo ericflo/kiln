@@ -185,6 +185,49 @@ The bs=1 number is unchanged because the bs=1 codepath is
 `graph_runner.decode_step_paged`, which never touched either hot
 path; the fix is purely a bs > 1 win.
 
+### Direct head-to-head: kiln vs vLLM 0.21.0 (L40S sm_89, May 2026)
+
+Same Qwen3.5-4B weights, same L40S, same bench harness
+(`scripts/bench-concurrent-batch.py`), greedy decode,
+`max_tokens=64`, per-call-nonce prompts. vLLM serves via
+`vllm serve … --gpu-memory-utilization 0.85 --max-model-len 2048
+--max-num-seqs 256`, default torch.compile + full CUDA-graph capture
+across batch sizes [1..512]. kiln runs `target/release/kiln serve`
+with `KILN_W4A16=1`, `KILN_CUDA_GRAPHS=true`,
+`KILN_MAX_DECODE_BATCH=64`.
+
+Aggregate tokens/s (single warmup pass before each sweep):
+
+| Concurrency | kiln main `f3a5f95e` tok/s | vLLM 0.21.0 tok/s | kiln / vLLM |
+|---:|---:|---:|---:|
+| 1  | 100.6 | 78.4   | **1.28× kiln** |
+| 2  | 163.5 | 140.3  | **1.16× kiln** |
+| 4  | 307.5 | 229.9  | **1.34× kiln** |
+| 8  | 513.5 | 518.9  | 0.99× (tie)    |
+| 16 | 793.2 | 808.4  | 0.98× (tie)    |
+| 32 | 998.4 | 1485.5 | 0.67×          |
+| 64 | 1181.4| 1906.8 | 0.62×          |
+
+**Picture as of `f3a5f95e`** (today's two commits: GDN `out_proj`
+W4A16 opt-in + hoisted per-step paged-decode metadata; both built and
+benched here on L40S):
+
+- **bs ≤ 4**: kiln wins by 16–34 %. vLLM pays a steep async-scheduler
+  / Python overhead at low concurrency; kiln's batching-engine actor
+  + CUDA-graph-captured bs=1 step is cheaper.
+- **bs = 8–16**: parity (kiln within 2 % of vLLM either way).
+- **bs ≥ 32**: vLLM pulls ahead 1.49× at bs=32 and 1.62× at bs=64,
+  driven by their full multi-batch CUDA-graph capture + torch.compile
+  inductor fusions. kiln currently only graph-captures bs=1, so per
+  bs=64 step every kernel pays full dispatch overhead. Closing this
+  is the next major perf lever — see TODO note in `cuda_graph.rs`.
+
+The gap is reproducible across multiple sweeps and the `bench-concurrent-batch.py`
+nonce already neutralizes the deterministic completion cache that
+otherwise inflates kiln numbers. p50/p99 per-request latencies follow
+the aggregate-throughput ordering (vLLM's bs=64 p99 = 2.13 s, kiln's
+bs=64 p99 = 3.46 s).
+
 ### kiln steady-state — refresh pending
 
 The previous version of this doc included a 1 / 4 / 8 / 16 sequential-runs
