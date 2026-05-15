@@ -642,22 +642,10 @@ impl CudaGraphRunner {
                 return Ok(None);
             }
             // Step (5): argmax over `output_logits` → per-row tokens.
-            let output_logits = captured.output_logits.clone();
-            let tokens_result = (|| {
-                let normed = crate::forward::rms_norm(
-                    &output_logits,
-                    &weights.final_norm,
-                    config.rms_norm_eps,
-                )?;
-                let _ = normed;
-                // output_logits already holds final-norm + lm_head's
-                // contribution? NO — see the wrapper: it does rms_norm
-                // (final_norm) → lm_head → slice_set into output_logits.
-                // So the captured `output_logits` already IS the
-                // post-LM-head logits. Argmax over the vocab axis.
-                crate::sampling::greedy_sample_rows(&output_logits)
-            })();
-            let tokens = match tokens_result {
+            // `output_logits` is already the post-LM-head tensor
+            // (`[batch, 1, vocab]`) — the wrapper does final_norm +
+            // lm_head + slice_set inside the captured region.
+            let tokens = match crate::sampling::greedy_sample_rows(&captured.output_logits) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
@@ -1532,16 +1520,31 @@ impl CudaGraphRunner {
                 .begin_capture(CU_STREAM_CAPTURE_MODE_RELAXED)
                 .map_err(|e| anyhow::anyhow!("begin_capture (batched): {e}"))?;
 
-            let forward_result = crate::forward::model_forward_paged_batched_with_graph_inputs(
-                backend,
-                token_ids,
-                weights,
-                config,
-                paged_cache,
-                block_tables,
-                sequence_lengths,
-                lora,
-                &mut graph_inputs,
+            // Install pre-allocated GDN recurrent outputs into the
+            // GDN kernel's thread-local for the duration of the
+            // captured forward. Without this, the GDN decode kernel
+            // would `Tensor::zeros(...)` its outputs INSIDE the
+            // capture window — those allocations get freed by
+            // `AUTO_FREE_ON_LAUNCH` and the graph's recorded
+            // pointers go stale on replay. The bs=1 path uses the
+            // same mechanism; missing it was the root cause of the
+            // observed `CUDA_ERROR_ILLEGAL_ADDRESS` faults at bs>=16
+            // in the first wiring attempts.
+            let forward_result = kiln_gdn_kernel::with_decode_gates_recurrent_outputs(
+                gdn_decode_outputs.clone(),
+                || {
+                    crate::forward::model_forward_paged_batched_with_graph_inputs(
+                        backend,
+                        token_ids,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_tables,
+                        sequence_lengths,
+                        lora,
+                        &mut graph_inputs,
+                    )
+                },
             );
 
             let graph_result = stream.end_capture(
