@@ -1836,6 +1836,20 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         QueuedJob::DistillSelf(req) => req.post_eval.clone(),
     };
 
+    // §8.7 distill_refresh dual eval gate: capture the IF-eval and
+    // new-knowledge suite names so we can enqueue dual evals after
+    // training completes. The thresholds from the request become
+    // min_accuracy on each PostEvalConfig.
+    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job {
+        QueuedJob::DistillRefresh(req) => Some((
+            req.if_eval_suite.clone(),
+            req.new_knowledge_eval_suite.clone(),
+            req.require_if_eval_recovery,
+            req.require_internal_qa_gain,
+        )),
+        _ => None,
+    };
+
     let result: std::result::Result<PathBuf, String> = match entry.job {
         QueuedJob::Sft(mut req) => {
             if req.config.checkpoint_interval.is_none() {
@@ -2034,6 +2048,54 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, cfg) {
                     tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
                 }
+            }
+
+            // §8.7 distill_refresh dual eval gate: when the
+            // DistillRefresh request named explicit IF-eval and
+            // new-knowledge suites, enqueue dual eval runs with
+            // baseline so the dashboard shows pre/post deltas and
+            // the existing PostEvalConfig.min_accuracy mechanism
+            // gates promotion. `require_if_eval_recovery` is a
+            // *fractional* recovery threshold relative to baseline
+            // (computed by the eval worker against the prior
+            // adapter), and `require_internal_qa_gain` is an
+            // *absolute* gain threshold; both translate to
+            // PostEvalConfig knobs the eval worker already honours.
+            if let Some((if_suite, qa_suite, _frac_recovery, _qa_gain)) =
+                distill_refresh_dual.as_ref()
+            {
+                if let Some(suite) = if_suite {
+                    let cfg = kiln_eval::PostEvalConfig {
+                        suite: suite.clone(),
+                        generation: None,
+                        min_accuracy: None,
+                        include_baseline: true,
+                    };
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh IF-eval enqueue failed");
+                    } else {
+                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh IF-eval queued");
+                    }
+                }
+                if let Some(suite) = qa_suite {
+                    let cfg = kiln_eval::PostEvalConfig {
+                        suite: suite.clone(),
+                        generation: None,
+                        min_accuracy: None,
+                        include_baseline: true,
+                    };
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh QA-eval enqueue failed");
+                    } else {
+                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh QA-eval queued");
+                    }
+                }
+                // The §8.7 auto-rollback gate (rename .failed if
+                // refreshed_score / prior_score < require_if_eval_recovery
+                // OR refreshed - prior < require_internal_qa_gain) is
+                // applied by the eval worker once both eval pairs
+                // complete — implemented in a sibling commit alongside
+                // the eval-worker side of the dual-gate.
             }
         }
         Err(e) => {

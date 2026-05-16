@@ -463,6 +463,8 @@ fn step_to_queued_job(
                     require_internal_qa_gain: 0.05,
                     config: c,
                     post_eval: None,
+                    if_eval_suite: None,
+                    new_knowledge_eval_suite: None,
                 }),
             ))
         }

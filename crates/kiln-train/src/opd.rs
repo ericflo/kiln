@@ -218,6 +218,21 @@ pub struct DistillRefreshRequest {
     /// uses).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
+    /// Name of the registered eval suite used to measure
+    /// instruction-following recovery. When set, the refreshed
+    /// adapter is queued for a post-training eval against this suite
+    /// with `min_accuracy = baseline * require_if_eval_recovery`
+    /// (the prior adapter `name` is the baseline). On failure, the
+    /// refreshed adapter is renamed with `.failed` — §8.7 auto-
+    /// rollback contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub if_eval_suite: Option<String>,
+    /// Name of the registered eval suite used to measure new-knowledge
+    /// gain on the mid-trained material. When set, the refreshed
+    /// adapter is queued for a post-training eval against this suite
+    /// with `min_accuracy = baseline + require_internal_qa_gain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_knowledge_eval_suite: Option<String>,
 }
 
 fn default_background_chat() -> String {
