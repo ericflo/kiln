@@ -46,6 +46,8 @@ pub mod shaders {
     pub const QWEN_RMSNORM_FORWARD: &str = shader_path!("qwen_rmsnorm_forward");
     pub const QWEN_RMSNORM_QK_COMBINED: &str = shader_path!("qwen_rmsnorm_qk_combined");
     pub const FULL_ATTN_QKV_DECODE_BF16W: &str = shader_path!("full_attn_qkv_decode_bf16w");
+    pub const FULL_ATTN_QKV_DECODE_BF16W_WIDE: &str =
+        shader_path!("full_attn_qkv_decode_bf16w_wide");
     pub const QKV_GATE_SPLIT: &str = shader_path!("qkv_gate_split");
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
     pub const PAGED_KV_WRITE_SLOT: &str = shader_path!("paged_kv_write_slot");
