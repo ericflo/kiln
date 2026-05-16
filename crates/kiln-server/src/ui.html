@@ -3875,6 +3875,7 @@ function selectTrainingTab(tab, focus = false) {
     tabPanel.inert = !selected;
   });
   if (focus) tab.focus();
+  try { localStorage.setItem('kiln.trainingSubTab', tab.dataset.tab); } catch {}
 }
 
 document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
@@ -3893,6 +3894,16 @@ document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
     }
   });
 });
+
+// Restore last visited training sub-tab so users return to Submit SFT
+// (or GRPO) instead of always-Queue after a refresh.
+try {
+  const lastTrainingSubTab = localStorage.getItem('kiln.trainingSubTab');
+  if (lastTrainingSubTab && lastTrainingSubTab !== 'queue') {
+    const target = document.getElementById(`training-tab-${lastTrainingSubTab}`);
+    if (target) selectTrainingTab(target);
+  }
+} catch {}
 
 // --- Formatting ---
 function fmtBytes(b) {
@@ -6648,6 +6659,7 @@ function selectEvalsTab(tab, focus = false) {
   });
   if (focus) tab.focus();
   const which = tab.dataset.tab;
+  try { localStorage.setItem('kiln.evalsSubTab', which); } catch {}
   if (which === 'datasets') refreshDatasets();
   else if (which === 'suites') refreshSuites();
   else if (which === 'jobs') refreshEvalJobs();
@@ -6666,6 +6678,16 @@ document.querySelectorAll('[data-evals-tabs] [role="tab"]').forEach(tab => {
     if (nextTab) { event.preventDefault(); selectEvalsTab(nextTab, true); }
   });
 });
+
+// Restore the last visited eval sub-tab so users return to Jobs (or
+// Suites / Judgments) instead of always-Datasets after a refresh.
+try {
+  const lastEvalsSubTab = localStorage.getItem('kiln.evalsSubTab');
+  if (lastEvalsSubTab && lastEvalsSubTab !== 'datasets') {
+    const target = document.getElementById(`evals-tab-${lastEvalsSubTab}`);
+    if (target) selectEvalsTab(target);
+  }
+} catch {}
 
 let evalAdaptersCache = [];
 let evalActiveAdapter = null;
