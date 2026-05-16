@@ -1539,21 +1539,19 @@ pub fn record_full_attn_block_into(
         &[hidden as u32, intermediate as u32],
         Workgroups::OneD(intermediate.div_ceil(64) as u32),
     )?;
+    // MLP down fused with the final residual ADD: writes
+    // `x_out_buf[c] = sum_k mlp_scratch[k] * down_w[k,c] + attn_residual[c]`.
+    // Saves one dispatch + one compute->compute barrier per block.
     batch.record_shader(
-        shaders::LINEAR_DECODE_BF16W,
-        &[mlp_scratch.handle(), down_w.handle(), mlp_out.handle()],
-        &[intermediate as u32, hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(16) as u32),
-    )?;
-    batch.record_shader(
-        shaders::ADD,
+        shaders::LINEAR_DECODE_BF16W_ADD_RESIDUAL,
         &[
+            mlp_scratch.handle(),
+            down_w.handle(),
             attn_residual.handle(),
-            mlp_out.handle(),
             x_out_buf.handle(),
         ],
-        &[hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(256) as u32),
+        &[intermediate as u32, hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
     Ok(true)
 }
@@ -1783,21 +1781,19 @@ pub fn record_gdn_block_into(
         &[hidden as u32, intermediate as u32],
         Workgroups::OneD(intermediate.div_ceil(64) as u32),
     )?;
+    // MLP down fused with the final residual ADD: writes
+    // `x_out_buf[c] = sum_k mlp_scratch[k] * down_w[k,c] + attn_residual[c]`.
+    // Saves one dispatch + one compute->compute barrier per block.
     batch.record_shader(
-        shaders::LINEAR_DECODE_BF16W,
-        &[mlp_scratch.handle(), down_w.handle(), mlp_out.handle()],
-        &[intermediate as u32, hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(16) as u32),
-    )?;
-    batch.record_shader(
-        shaders::ADD,
+        shaders::LINEAR_DECODE_BF16W_ADD_RESIDUAL,
         &[
+            mlp_scratch.handle(),
+            down_w.handle(),
             attn_residual.handle(),
-            mlp_out.handle(),
             x_out_buf.handle(),
         ],
-        &[hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(256) as u32),
+        &[intermediate as u32, hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
     Ok(true)
 }
