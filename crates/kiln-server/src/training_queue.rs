@@ -587,6 +587,24 @@ fn run_opd(
     )
     .map_err(|e| format!("failed to write OPD stub marker: {e}"))?;
 
+    // §8.11 reproducibility receipt — every adapter ships with one.
+    // Even the milestone-4 stub gets a receipt so the verify tooling
+    // and dashboard receipt-display path work end-to-end now.
+    let seed = req.config.seed.unwrap_or(0);
+    let hyperparameters = serde_json::to_value(&req.config)
+        .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize OpdConfig"}));
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: req.teacher.clone(),
+            model_id: req.teacher.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(hyperparameters);
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write OPD receipt: {e}");
+    }
+
     // Emit progress callbacks so the dashboard / progress bar sees the
     // job as "completed" rather than "stuck at 0%".
     progress_cb(trainer::TrainingProgress {

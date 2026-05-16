@@ -9,10 +9,16 @@ pub mod cuda_train;
 pub mod diagnostics;
 pub mod logit_source;
 pub mod opd;
+pub mod receipt;
 pub mod replay;
 pub mod trainer;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
+
+pub use receipt::{
+    AdapterReceipt, DiagnosticSummary, PromptSourceDescriptor, RECEIPT_SCHEMA_VERSION,
+    TeacherDescriptor,
+};
 
 pub use diagnostics::{
     GuardrailDecision, GuardrailTrigger, LengthInflationGuardrail, OpdDiagnosticSnapshot,
