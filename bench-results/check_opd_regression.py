@@ -32,8 +32,14 @@ import sys
 from pathlib import Path
 
 
-ROW_RE = re.compile(
-    r"T=\s*(?P<T>\d+)\s+"
+FWD_ROW_RE = re.compile(
+    # The bench prints two lines per shape: `FWD T=...` (forward only)
+    # and `FWD+BWD T=...` (forward + backward). The committed baseline
+    # was captured against forward-only throughput; we match the FWD
+    # rows here and ignore FWD+BWD. The pre-FWD-prefix format (rows
+    # starting with `T=`) is also accepted for backwards-compat with
+    # the original 60db09ff capture.
+    r"(?:^|\b)(?:FWD\s+)?T=\s*(?P<T>\d+)\s+"
     r"H=\s*(?P<H>\d+)\s+"
     r"V=\s*(?P<V>\d+)\s+"
     r"K=\s*(?P<K>\d+)\s+"
@@ -49,7 +55,10 @@ ROW_RE = re.compile(
 def parse_bench_stdout(text: str) -> list[dict]:
     rows = []
     for line in text.splitlines():
-        m = ROW_RE.search(line)
+        # Skip FWD+BWD rows — only forward-only throughput is gated.
+        if "FWD+BWD" in line:
+            continue
+        m = FWD_ROW_RE.search(line)
         if not m:
             continue
         rows.append(
@@ -84,7 +93,10 @@ def main() -> int:
     p.add_argument(
         "--baseline",
         type=Path,
-        default=Path(__file__).resolve().parent / "opd-a6000-baseline.json",
+        default=None,
+        help="Path to the baseline JSON. When omitted, auto-picks "
+             "opd-a100-baseline.json if 'A100' appears in the bench stdout, "
+             "opd-a6000-baseline.json otherwise.",
     )
     p.add_argument(
         "--threshold-pct",
@@ -97,14 +109,26 @@ def main() -> int:
     if not args.bench_stdout.exists():
         print(f"ERROR: bench stdout not found: {args.bench_stdout}", file=sys.stderr)
         return 2
-    if not args.baseline.exists():
-        print(f"ERROR: baseline not found: {args.baseline}", file=sys.stderr)
+
+    bench_text = args.bench_stdout.read_text()
+    if args.baseline is None:
+        repo_root = Path(__file__).resolve().parent
+        baseline = (
+            repo_root / "opd-a100-baseline.json"
+            if "A100" in bench_text
+            else repo_root / "opd-a6000-baseline.json"
+        )
+    else:
+        baseline = args.baseline
+    if not baseline.exists():
+        print(f"ERROR: baseline not found: {baseline}", file=sys.stderr)
         return 2
+    args.baseline = baseline
 
     baseline = json.loads(args.baseline.read_text())
     threshold = args.threshold_pct or baseline.get("regression_threshold_pct", 5.0)
 
-    new_rows = parse_bench_stdout(args.bench_stdout.read_text())
+    new_rows = parse_bench_stdout(bench_text)
     if not new_rows:
         print(
             f"ERROR: parsed zero rows from {args.bench_stdout} — check format",

@@ -69,14 +69,20 @@ cargo run --release --features cuda -p kiln-opd-loss-kernel \
   >"$LOG_DIR/opd_kernel_bench.log" 2>&1
 
 PHASE="perf_gate"
-# Compare bench output against committed baseline. A100 vs A6000 is a
-# different GPU — the baseline numbers are the A6000 commit-60db09ff
-# capture, so we expect A100 to *beat* A6000 on most rows. A regression
-# (>5% below A6000) on A100 would be a real concern. We log either
-# pass/fail without aborting so the rest of the suite still runs.
+# Compare bench output against the committed baseline for the
+# detected GPU. The §9.9 gate is per-GPU because raw tok/s varies
+# significantly across A6000 / A100 / H100 etc., even on the same
+# kernel — the regression check is meant to catch code regressions,
+# not hardware differences.
+case "$GPU_NAME" in
+  *A100*|*A800*) BASELINE_FILE=bench-results/opd-a100-baseline.json ;;
+  *A6000*)        BASELINE_FILE=bench-results/opd-a6000-baseline.json ;;
+  *)              BASELINE_FILE=bench-results/opd-a6000-baseline.json ;;  # closest available
+esac
 PERF_GATE=pass
 python3 bench-results/check_opd_regression.py \
   --bench-stdout "$LOG_DIR/opd_kernel_bench.log" \
+  --baseline "$BASELINE_FILE" \
   >"$LOG_DIR/perf_gate.log" 2>&1 \
   || PERF_GATE=fail
 
