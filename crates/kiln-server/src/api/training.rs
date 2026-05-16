@@ -311,8 +311,10 @@ async fn submit_sft(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -440,8 +442,10 @@ async fn submit_grpo(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -478,21 +482,31 @@ async fn submit_grpo(
     }))
 }
 
+fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatus {
+    TrainingStatus {
+        job_id: j.job_id.clone(),
+        state: j.state,
+        progress: j.progress,
+        current_loss: j.loss,
+        adapter_name: Some(j.adapter_name.clone()),
+        started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
+        elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
+        submitted_unix_ms: Some(j.submitted_unix_ms),
+        finished_unix_ms: j.finished_unix_ms,
+        job_type: Some(
+            match j.job_type {
+                TrainingJobType::Sft => "sft",
+                TrainingJobType::Grpo => "grpo",
+            }
+            .into(),
+        ),
+    }
+}
+
 /// GET /v1/train/status — overall training status (list all tracked jobs).
 async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>> {
     let jobs = state.training_jobs.read().unwrap();
-    let statuses: Vec<TrainingStatus> = jobs
-        .values()
-        .map(|j| TrainingStatus {
-            job_id: j.job_id.clone(),
-            state: j.state,
-            progress: j.progress,
-            current_loss: j.loss,
-            adapter_name: Some(j.adapter_name.clone()),
-            started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
-            elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
-        })
-        .collect();
+    let statuses: Vec<TrainingStatus> = jobs.values().map(training_status_from_info).collect();
     Json(statuses)
 }
 
@@ -506,15 +520,7 @@ async fn job_status(
         .get(&job_id)
         .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
 
-    Ok(Json(TrainingStatus {
-        job_id: job.job_id.clone(),
-        state: job.state,
-        progress: job.progress,
-        current_loss: job.loss,
-        adapter_name: Some(job.adapter_name.clone()),
-        started_at: format!("{}s ago", job.submitted_at.elapsed().as_secs()),
-        elapsed_secs: job.submitted_at.elapsed().as_secs_f64(),
-    }))
+    Ok(Json(training_status_from_info(job)))
 }
 
 /// GET /v1/train/queue — list queue contents organized by state.
@@ -526,15 +532,7 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
     let mut completed = Vec::new();
 
     for j in jobs.values() {
-        let status = TrainingStatus {
-            job_id: j.job_id.clone(),
-            state: j.state,
-            progress: j.progress,
-            current_loss: j.loss,
-            adapter_name: Some(j.adapter_name.clone()),
-            started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
-            elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
-        };
+        let status = training_status_from_info(j);
         match j.state {
             TrainingState::Running => running = Some(status),
             TrainingState::Completed | TrainingState::Failed => completed.push(status),
@@ -561,8 +559,14 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
         })
         .collect();
 
-    // Sort completed by most recent first
-    completed.sort_by(|a, b| a.elapsed_secs.partial_cmp(&b.elapsed_secs).unwrap());
+    // Sort completed by most-recently-finished first (falls back to submit
+    // time when the terminal-transition timestamp is missing — e.g., an
+    // archived entry that pre-dates the `finished_unix_ms` field).
+    completed.sort_by(|a, b| {
+        let a_t = a.finished_unix_ms.unwrap_or_else(|| a.submitted_unix_ms.unwrap_or(0));
+        let b_t = b.finished_unix_ms.unwrap_or_else(|| b.submitted_unix_ms.unwrap_or(0));
+        b_t.cmp(&a_t)
+    });
 
     Json(QueueResponse {
         running,
@@ -666,17 +670,8 @@ async fn job_detail(
         let job = jobs
             .get(&job_id)
             .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
-        let elapsed_secs = job.submitted_at.elapsed().as_secs_f64();
         TrainingJobDetail {
-            status: TrainingStatus {
-                job_id: job.job_id.clone(),
-                state: job.state,
-                progress: job.progress,
-                current_loss: job.loss,
-                adapter_name: Some(job.adapter_name.clone()),
-                started_at: format!("{}s ago", job.submitted_at.elapsed().as_secs()),
-                elapsed_secs,
-            },
+            status: training_status_from_info(job),
             job_type: job.job_type,
             epoch: job.epoch,
             adapter_path: job.adapter_path.clone(),

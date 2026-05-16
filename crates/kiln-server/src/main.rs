@@ -280,6 +280,23 @@ async fn main() -> Result<()> {
         ttl_secs = config.training.tracked_job_ttl_secs,
         "training tracked-jobs cap and TTL configured"
     );
+
+    // Restore terminal training jobs persisted from previous runs so the
+    // /ui training queue still shows last week's history after a restart.
+    {
+        use kiln_server::training_history;
+        let archived = training_history::load_all(&state.adapter_dir);
+        if !archived.is_empty() {
+            let mut jobs = state.training_jobs.write().unwrap();
+            for job in archived.iter() {
+                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+            }
+            tracing::info!(
+                count = archived.len(),
+                "restored archived training jobs from disk"
+            );
+        }
+    }
     match state.adapter_max_disk_bytes {
         Some(cap) => tracing::debug!(
             cap_bytes = cap,

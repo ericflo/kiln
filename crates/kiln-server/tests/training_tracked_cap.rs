@@ -104,8 +104,10 @@ fn fill_tracked(
                 epoch: None,
                 adapter_path: None,
                 submitted_at: std::time::Instant::now(),
+                submitted_unix_ms: 0,
                 auto_load: false,
                 finished_at,
+                finished_unix_ms: None,
                 linked_eval_job_ids: Vec::new(),
                 loss_history: Vec::new(),
             },
@@ -228,11 +230,15 @@ async fn submit_sft_below_cap_does_not_emit_tracked_full() {
     );
 }
 
-/// `gc_tracked_jobs` evicts terminal entries past TTL.
+/// `gc_tracked_jobs` evicts terminal entries past TTL **once the cap is
+/// exceeded**. With cap=2 and 4 entries (2 stale terminal + 1 queued +
+/// 1 running), both stale terminal entries are eligible and get evicted
+/// to bring the map back under cap.
 #[test]
 fn gc_evicts_terminal_entries_past_ttl() {
     // Tiny TTL so we can drive eviction without sleeping for real time.
-    let state = make_state(64, std::time::Duration::from_millis(10));
+    // Tight cap so cap-based eviction fires.
+    let state = make_state(2, std::time::Duration::from_millis(10));
 
     // Two completed entries with a stale `finished_at` (well past the
     // 10ms TTL by the time we call gc), one queued without a timestamp,
@@ -255,8 +261,10 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 epoch: None,
                 adapter_path: None,
                 submitted_at: std::time::Instant::now(),
+                submitted_unix_ms: 0,
                 auto_load: false,
                 finished_at: None,
+                finished_unix_ms: None,
                 linked_eval_job_ids: Vec::new(),
                 loss_history: Vec::new(),
             },
@@ -273,8 +281,10 @@ fn gc_evicts_terminal_entries_past_ttl() {
                 epoch: None,
                 adapter_path: None,
                 submitted_at: std::time::Instant::now(),
+                submitted_unix_ms: 0,
                 auto_load: false,
                 finished_at: None,
+                finished_unix_ms: None,
                 linked_eval_job_ids: Vec::new(),
                 loss_history: Vec::new(),
             },
