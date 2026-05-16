@@ -56,6 +56,7 @@ pub mod shaders {
     pub const VK_MUL_SIGMOID_GATE_F32: &str = shader_path!("vk_mul_sigmoid_gate_f32");
     pub const LINEAR_DECODE_BF16W: &str = shader_path!("linear_decode_bf16w");
     pub const ADD: &str = shader_path!("add");
+    pub const ADD_QWEN_RMSNORM: &str = shader_path!("add_qwen_rmsnorm");
     pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");

@@ -1,0 +1,82 @@
+// Fused element-wise ADD + qwen-style RMSNorm in one dispatch.
+//
+// Computes:
+//   sum[i]    = a[i] + b[i]
+//   out[i]    = (1 + weight[i]) * sum[i] / sqrt(mean(sum^2) + eps)
+//
+// Both `sum` and `out` are written — the unnormalized residual `sum`
+// is consumed later by the next residual ADD, so we materialise it as
+// well as the post-norm output.
+//
+// Matches `qwen_rmsnorm_forward.comp` for normalization semantics
+// (HF Qwen3.5: weight stored centered around 0, applied as `(1+w)`),
+// so this fused kernel is bit-identical with a sequenced ADD →
+// qwen_rmsnorm pair.
+//
+// Saves 1 dispatch + 1 compute→compute barrier per fused use, and
+// reads `a`/`b` only once (the unfused form reads them once for the
+// ADD and reads `sum` again for the norm — same total bytes here
+// because `sum` is on the same buffer chain, but the kernel runtime
+// drops by the per-dispatch overhead).
+//
+// Inputs:
+//   - a, b:   f32, length = hidden (single-row decode token)
+//   - weight: f32, length = hidden
+//   - eps:    f32 push constant
+//
+// Outputs:
+//   - sum:  f32, length = hidden (unnormalized residual)
+//   - out:  f32, length = hidden (post-RMSNorm)
+//
+// One workgroup per dispatch (single-row decode token); 256 threads
+// strided over the hidden dim, shared-mem reduction.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0) readonly  buffer ABuf      { float data_a[];      };
+layout(binding = 1) readonly  buffer BBuf      { float data_b[];      };
+layout(binding = 2) readonly  buffer WeightBuf { float data_weight[]; };
+layout(binding = 3)           buffer SumBuf    { float data_sum[];    };
+layout(binding = 4) writeonly buffer OutBuf    { float data_out[];    };
+
+shared float sum_sh[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+
+    // Pass 1: each thread accumulates partial sum-of-squares over its
+    // strided slice. We also write the residual `sum` to its output
+    // buffer in the same pass, so the next residual ADD can read it.
+    float sq_sum = 0.0;
+    for (uint col = tid; col < hidden; col += 256) {
+        float v = data_a[col] + data_b[col];
+        data_sum[col] = v;
+        sq_sum += v * v;
+    }
+    sum_sh[tid] = sq_sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) {
+            sum_sh[tid] += sum_sh[tid + s];
+        }
+        barrier();
+    }
+    float mean_sq = sum_sh[0] / float(hidden);
+    float rms_inv = inversesqrt(mean_sq + eps);
+
+    // Pass 2: stride over hidden again, reading the just-written sum
+    // and the per-element weight to produce the normalized output.
+    for (uint col = tid; col < hidden; col += 256) {
+        float w = data_weight[col];
+        float v = data_sum[col];
+        data_out[col] = (1.0 + w) * v * rms_inv;
+    }
+}

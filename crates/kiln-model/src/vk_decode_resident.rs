@@ -817,23 +817,18 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     )?;
     // 10) Residual: attn_residual = x + gdn_out
     batch.record_shader(
-        shaders::ADD,
-        &[x_buf.handle(), gdn_out.handle(), attn_residual.handle()],
-        &[hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(256) as u32),
-    )?;
-    // 11) Pre-MLP norm: attn_residual → normed_post
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
+        shaders::ADD_QWEN_RMSNORM,
         &[
-            attn_residual.handle(),
+            x_buf.handle(),
+            gdn_out.handle(),
             post_norm.handle(),
+            attn_residual.handle(),
             normed_post.handle(),
         ],
-        &[1u32, hidden as u32, eps.to_bits()],
+        &[hidden as u32, eps.to_bits()],
         Workgroups::OneD(1),
     )?;
-    // 12) MLP gate_up
+    // 12) MLP gate_up (the ADD + pre-MLP norm were fused above)
     batch.record_shader(
         shaders::MLP_GATE_UP_DECODE_BF16W,
         &[
@@ -1517,23 +1512,15 @@ pub fn record_full_attn_block_into(
         Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
     batch.record_shader(
-        shaders::ADD,
+        shaders::ADD_QWEN_RMSNORM,
         &[
             x_in_buf.handle(),
             attn_out.handle(),
-            attn_residual.handle(),
-        ],
-        &[hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(256) as u32),
-    )?;
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[
-            attn_residual.handle(),
             post_norm.handle(),
+            attn_residual.handle(),
             normed_post.handle(),
         ],
-        &[1u32, hidden as u32, eps.to_bits()],
+        &[hidden as u32, eps.to_bits()],
         Workgroups::OneD(1),
     )?;
     batch.record_shader(
