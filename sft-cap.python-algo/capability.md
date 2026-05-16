@@ -298,3 +298,30 @@ The sub-agent's pilot reported scoring in [0.67, 0.88], so 0.88 IS achievable �
   from the *algorithmic depth* dimension, or are they coupled?
 - The math-broad winner used 32+32 examples. Does the same scale
   work for the more structurally-constrained Python output?
+
+## Session 2 (iters 136-145): cross-domain attempts after user hint about HF datasets / word games / decomposition
+
+User hint: try totally different training data like math-broad's prose/numeric mix that won 1.000. User cited specific HF datasets (ericflo/{logic,filtro,inducto,dyna}-50M) and ideas like decomposition, word games, business situations, multi-turn.
+
+| iter | slug | n | score | Δ vs baseline 0.8068 | status | notes |
+|---:|---|---:|---:|---:|:---|---|
+| 136 | primitives-mix (HF) | 75 | 0.6877 | -0.119 | discard | 16 each from ericflo/{dyna,inducto,logic,filtro}-50M (raw symbolic→target). Symbolic outputs steered model away from code form. |
+| 137 | decomp-prose-anchors | 75 | 0.6533 | -0.154 | discard | 32 algorithm-decomposition prose (100-200 words) + 32 short Python anchors. Long prose taught verbosity. |
+| 138 | multi-turn-debug | 75 | 0.7845 | -0.022 | discard | 32 multi-turn debug dialogues ending in clean Python. Multi-turn structure conflicts with single-turn eval. |
+| 139 | cross-domain-py | 75 | 0.6973 | -0.110 | discard | 63 weird-domain → Python with print() style. Print form clashed with eval's def-return form. |
+| 140 | cross-domain-defs | 75 | 0.7219 | -0.085 | discard | Same 64 weird domains but in def-return form. Still hurt — content variation alone regresses. |
+| 141 | cross-defs-think | 75 | 0.6378 | -0.169 | discard | Cross-domain-defs with thinking comments injected in def body. Even worse. |
+| 142 | winning-plus-cross | 75 | 0.5859 | -0.221 | discard | 50/50 mix of proven code-with-thinking-comments + cross-defs-think. Catastrophic. |
+| 143 | word-games-canon | 75 | 0.6547 | -0.152 | discard | 32 word-game problems in EXACT winning shape (def + #Problem/#Approach comments). Still regressed. |
+| 144 | wg-r1 | 75 | 0.7007 | -0.106 | discard | Same word-games at rank-1 (less damage). Better than rank-4 but still below baseline. |
+| 145 | merge-think-predict | 75 | 0.7558 | -0.051 | discard | Weighted-avg merge of cap-think-sgd + cap-predict-sgd. Averaging dilutes. |
+
+**Key finding from session 2**: Every single cross-domain attempt regressed *below baseline* (0.80). Even narrow content shifts (word games in winning shape) hurt. The eval is sufficiently sensitive to output distribution that any content shift damages it.
+
+The user's intuition that worked for math-broad ("teach a totally different skill that transfers") does NOT transfer to this python-algo eval. Possible reasons:
+- The math eval may have accepted prose answers or had a more forgiving format
+- Qwen3.5-4B's coding distribution is already finely tuned; SFT shifts it off-optimal
+- The 0.87 stable / 0.88 lucky ceiling appears to be a structural capability limit, not a training-data deficiency
+
+**Best stable remains iter 102 = 0.8694 (SGD optimizer at lr 5e-5 on thinking-comments).**
+**Best observed remains iter 35 = 0.8866 (lucky tail, not reproducible).**
