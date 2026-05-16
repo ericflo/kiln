@@ -92,6 +92,13 @@ pub struct VulkanBackend {
         Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Set of state TensorIds that have been seeded.
     seeded_linear_attn_layers: Mutex<HashSet<TensorId>>,
+    /// Scratch activation buffers reused across resident decode calls,
+    /// keyed by a stable role string. Each entry persists for the
+    /// backend's lifetime (single-sequence decode reuses the same
+    /// buffers across layers and across tokens). Avoids the
+    /// `create_device_local` + `Drop` pair that ran on every call
+    /// (≈ 200 µs × 12 buffers × N layers per token).
+    resident_scratch: Mutex<HashMap<&'static str, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -361,6 +368,7 @@ impl VulkanBackend {
             linear_attn_recurrent_state: Mutex::new(HashMap::new()),
             linear_attn_conv_state: Mutex::new(HashMap::new()),
             seeded_linear_attn_layers: Mutex::new(HashSet::new()),
+            resident_scratch: Mutex::new(HashMap::new()),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -574,6 +582,43 @@ impl VulkanBackend {
         if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
             g.clear();
         }
+    }
+
+    /// Acquire (or lazily create) a persistent scratch
+    /// [`VulkanBuffer`] under the given role key, sized to at least
+    /// `min_bytes`. The same buffer is returned on every subsequent
+    /// call with the same role, so the resident decode block helpers
+    /// pay zero allocation cost on the steady-state hot path.
+    ///
+    /// If a previously-cached buffer for the role is too small for
+    /// the new `min_bytes` it is replaced.
+    pub fn acquire_resident_scratch(
+        &self,
+        role: &'static str,
+        min_bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .resident_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
+        if let Some(buf) = g.get(role) {
+            if buf.size() >= min_bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            min_bytes.max(4),
+        )
+        .with_context(|| format!("alloc resident scratch '{role}'"))?;
+        let arc = Arc::new(buf);
+        g.insert(role, Arc::clone(&arc));
+        Ok(arc)
     }
 
     pub fn cached_f32_weight_buffer(

@@ -126,31 +126,34 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let rope_cos_buf = upload_tensor_f32(vk_device, rope_cos)?;
     let rope_sin_buf = upload_tensor_f32(vk_device, rope_sin)?;
 
-    // --- activation buffer allocation --------------------------------
-    let mk = |bytes: u64| -> Result<VulkanBuffer> {
-        VulkanBuffer::create_device_local(
-            vk_device.device(),
-            vk_device.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc activation buffer")
-    };
-    let x_buf = mk((hidden * 4) as u64)?;
-    let normed_buf = mk((hidden * 4) as u64)?;
-    let qkv_combined = mk(((q_dim + k_dim + v_dim) * 4) as u64)?;
-    let q_buf = mk((num_heads * head_dim * 4) as u64)?;
-    let q_rot_buf = mk((num_heads * head_dim * 4) as u64)?;
-    let gate_buf = mk((num_heads * head_dim * 4) as u64)?;
-    let k_buf = mk((kv_elems * 4) as u64)?;
-    let k_rot_buf = mk((kv_elems * 4) as u64)?;
-    let v_buf = mk((kv_elems * 4) as u64)?;
-    let attn_pre_gate = mk((num_heads * head_dim * 4) as u64)?;
-    let attn_post_gate = mk((num_heads * head_dim * 4) as u64)?;
-    let attn_out_buf = mk((hidden * 4) as u64)?;
-    let attn_residual = mk((hidden * 4) as u64)?;
-    let mlp_scratch = mk((intermediate * 4) as u64)?;
-    let mlp_out_buf = mk((hidden * 4) as u64)?;
-    let final_out = mk((hidden * 4) as u64)?;
+    // --- activation buffer acquisition (pooled, persistent across
+    //     resident decode calls on the same backend) -----------------
+    let x_buf = backend.acquire_resident_scratch("fa_x", (hidden * 4) as u64)?;
+    let normed_buf = backend.acquire_resident_scratch("fa_normed", (hidden * 4) as u64)?;
+    let qkv_combined = backend.acquire_resident_scratch(
+        "fa_qkv_combined",
+        ((q_dim + k_dim + v_dim) * 4) as u64,
+    )?;
+    let q_buf = backend.acquire_resident_scratch("fa_q", (num_heads * head_dim * 4) as u64)?;
+    let q_rot_buf =
+        backend.acquire_resident_scratch("fa_q_rot", (num_heads * head_dim * 4) as u64)?;
+    let gate_buf = backend.acquire_resident_scratch("fa_gate", (num_heads * head_dim * 4) as u64)?;
+    let k_buf = backend.acquire_resident_scratch("fa_k", (kv_elems * 4) as u64)?;
+    let k_rot_buf = backend.acquire_resident_scratch("fa_k_rot", (kv_elems * 4) as u64)?;
+    let v_buf = backend.acquire_resident_scratch("fa_v", (kv_elems * 4) as u64)?;
+    let attn_pre_gate = backend.acquire_resident_scratch(
+        "fa_attn_pre_gate",
+        (num_heads * head_dim * 4) as u64,
+    )?;
+    let attn_post_gate = backend.acquire_resident_scratch(
+        "fa_attn_post_gate",
+        (num_heads * head_dim * 4) as u64,
+    )?;
+    let attn_out_buf = backend.acquire_resident_scratch("fa_attn_out", (hidden * 4) as u64)?;
+    let attn_residual = backend.acquire_resident_scratch("fa_attn_residual", (hidden * 4) as u64)?;
+    let mlp_scratch = backend.acquire_resident_scratch("fa_mlp_scratch", (intermediate * 4) as u64)?;
+    let mlp_out_buf = backend.acquire_resident_scratch("fa_mlp_out", (hidden * 4) as u64)?;
+    let final_out = backend.acquire_resident_scratch("fa_final_out", (hidden * 4) as u64)?;
 
     // block_table + seq_lens for paged-attn read
     let blocks: Vec<u32> = block_table.blocks.clone();
@@ -523,27 +526,20 @@ pub fn gated_deltanet_forward_decode_resident_b1(
         backend.mark_linear_attn_layer_seeded(state_key);
     }
 
-    // --- allocate intermediate buffers ---------------------------
-    let mk = |bytes: u64| -> Result<VulkanBuffer> {
-        VulkanBuffer::create_device_local(
-            vk_device.device(),
-            vk_device.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc GDN activation buffer")
-    };
-    let x_buf = mk((hidden * 4) as u64)?;
-    let in_proj_out = mk((in_proj_total * 4) as u64)?;
-    let mixed_qkv = mk((qkv_dim * 4) as u64)?;
-    let conv_qkv = mk((qkv_dim * 4) as u64)?;
-    let z_buf = mk((z_dim * 4) as u64)?;
-    let a_buf = mk((a_dim * 4) as u64)?;
-    let b_buf = mk((b_dim * 4) as u64)?;
-    let q_buf = mk((qk_dim * 4) as u64)?;
-    let k_buf = mk((qk_dim * 4) as u64)?;
-    let v_buf = mk((v_dim * 4) as u64)?;
-    let gated_norm = mk((v_dim * 4) as u64)?;
-    let out_buf = mk((hidden * 4) as u64)?;
+    // --- acquire pooled intermediate buffers ---------------------
+    let x_buf = backend.acquire_resident_scratch("gdn_x", (hidden * 4) as u64)?;
+    let in_proj_out =
+        backend.acquire_resident_scratch("gdn_in_proj_out", (in_proj_total * 4) as u64)?;
+    let mixed_qkv = backend.acquire_resident_scratch("gdn_mixed_qkv", (qkv_dim * 4) as u64)?;
+    let conv_qkv = backend.acquire_resident_scratch("gdn_conv_qkv", (qkv_dim * 4) as u64)?;
+    let z_buf = backend.acquire_resident_scratch("gdn_z", (z_dim * 4) as u64)?;
+    let a_buf = backend.acquire_resident_scratch("gdn_a", (a_dim * 4) as u64)?;
+    let b_buf = backend.acquire_resident_scratch("gdn_b", (b_dim * 4) as u64)?;
+    let q_buf = backend.acquire_resident_scratch("gdn_q", (qk_dim * 4) as u64)?;
+    let k_buf = backend.acquire_resident_scratch("gdn_k", (qk_dim * 4) as u64)?;
+    let v_buf = backend.acquire_resident_scratch("gdn_v", (v_dim * 4) as u64)?;
+    let gated_norm = backend.acquire_resident_scratch("gdn_gated_norm", (v_dim * 4) as u64)?;
+    let out_buf = backend.acquire_resident_scratch("gdn_out", (hidden * 4) as u64)?;
 
     // --- upload x -----------------------------------------------
     let x_f32 = if x_normed.dtype() == DType::F32 {
