@@ -3837,16 +3837,38 @@ selectPage(initialPage);
 // --- Toast Notifications ---
 function toast(msg, type) {
   const c = document.getElementById('toasts');
+  // Dedupe: a poll that errors every 2s shouldn't stack 30 identical
+  // toasts. If the most-recent live toast matches the message + type,
+  // bump a small (xN) counter on it and reset its dismiss timer
+  // instead of stacking a new one.
+  const last = c.lastElementChild;
+  if (last && last.dataset.toastKey === `${type || 'ok'}|${msg}`) {
+    const cnt = (Number(last.dataset.toastCount) || 1) + 1;
+    last.dataset.toastCount = String(cnt);
+    last.querySelector('.toast-count')?.remove();
+    const counter = document.createElement('span');
+    counter.className = 'toast-count';
+    counter.style.cssText = 'margin-left:8px; opacity:0.7; font-variant-numeric: tabular-nums;';
+    counter.textContent = `×${cnt}`;
+    last.appendChild(counter);
+    clearTimeout(Number(last.dataset.toastTimer));
+    last.dataset.toastTimer = String(setTimeout(() => last.remove(), 4000));
+    return;
+  }
   const el = document.createElement('div');
   el.className = 'toast ' + (type || 'ok');
+  el.dataset.toastKey = `${type || 'ok'}|${msg}`;
   if (type === 'err') {
     el.setAttribute('role', 'alert');
     el.setAttribute('aria-live', 'assertive');
     el.setAttribute('aria-atomic', 'true');
   }
   el.textContent = msg;
+  el.title = 'Click to dismiss';
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', () => el.remove());
   c.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  el.dataset.toastTimer = String(setTimeout(() => el.remove(), 4000));
 }
 
 // --- API Helpers ---
