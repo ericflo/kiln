@@ -74,6 +74,15 @@ pub struct VulkanDevice {
     /// each × 32 layers = 160 ms wasted per token).
     batch_command_pool: Mutex<vk::CommandPool>,
     batch_descriptor_pool: Mutex<vk::DescriptorPool>,
+    /// Persistent descriptor-set cache for `CommandBatch::record_shader`.
+    /// Keyed by `(set_layout, [buffer handles])` — once a unique
+    /// combination is seen we keep the descriptor set allocated forever
+    /// (the `batch_descriptor_pool` is no longer reset on `CommandBatch`
+    /// drop, so the sets remain valid). After the first decode token
+    /// this cache is fully warm and `record_with_pipeline` is just a
+    /// hashmap lookup plus the cmd_* binds.
+    descriptor_set_cache:
+        Mutex<HashMap<(vk::DescriptorSetLayout, Vec<vk::Buffer>), vk::DescriptorSet>>,
     /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
     /// Once true, subsequent dispatches short-circuit with a clear error
     /// instead of returning cryptic submit failures forever — the underlying
@@ -384,6 +393,7 @@ impl VulkanDevice {
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
             batch_command_pool: Mutex::new(batch_command_pool),
             batch_descriptor_pool: Mutex::new(batch_descriptor_pool),
+            descriptor_set_cache: Mutex::new(HashMap::new()),
             terminally_lost: AtomicBool::new(false),
         })
     }
@@ -712,6 +722,72 @@ impl VulkanDevice {
         self.batch_descriptor_pool
             .lock()
             .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))
+    }
+
+    /// Fast-path descriptor-set lookup keyed by `(set_layout, handles)`.
+    /// On first call per unique combination, allocates a descriptor set
+    /// from `pool`, writes the storage-buffer bindings, and caches it.
+    /// Subsequent calls return the cached set without any Vulkan API
+    /// call — the descriptor pool is never reset, so cached sets stay
+    /// valid for the lifetime of the device.
+    pub(crate) fn get_or_alloc_descriptor_set(
+        &self,
+        set_layout: vk::DescriptorSetLayout,
+        pool: vk::DescriptorPool,
+        handles: &[vk::Buffer],
+    ) -> Result<vk::DescriptorSet> {
+        let key = (set_layout, handles.to_vec());
+        {
+            let cache = self
+                .descriptor_set_cache
+                .lock()
+                .map_err(|_| anyhow!("Vulkan descriptor set cache mutex poisoned"))?;
+            if let Some(s) = cache.get(&key) {
+                return Ok(*s);
+            }
+        }
+        let device = &self.device;
+        let set_layouts = [set_layout];
+        let descriptor_set = unsafe {
+            device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(pool)
+                    .set_layouts(&set_layouts)
+                    .build(),
+            )
+        }
+        .context("get_or_alloc_descriptor_set: allocate")?[0];
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::builder()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
+        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                vk::WriteDescriptorSet::builder()
+                    .dst_set(descriptor_set)
+                    .dst_binding(i as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info))
+                    .build()
+            })
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+        let mut cache = self
+            .descriptor_set_cache
+            .lock()
+            .map_err(|_| anyhow!("Vulkan descriptor set cache mutex poisoned"))?;
+        cache.insert(key, descriptor_set);
+        Ok(descriptor_set)
     }
 
     /// True once any submit/wait has observed `VK_ERROR_DEVICE_LOST`.

@@ -183,41 +183,16 @@ impl<'a> CommandBatch<'a> {
             handles.len(),
         );
         let device = self.vk_device.device();
-        let set_layouts = [set_layout];
-        let descriptor_set = unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
-                    .descriptor_pool(*self.descriptor_pool_guard)
-                    .set_layouts(&set_layouts)
-                    .build(),
-            )
-        }
-        .context("CommandBatch: allocate descriptor set")?[0];
-
-        let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
-            .iter()
-            .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
-                    .buffer(h)
-                    .offset(0)
-                    .range(vk::WHOLE_SIZE)
-                    .build()
-            })
-            .collect();
-        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
-            .iter()
-            .enumerate()
-            .map(|(i, info)| {
-                vk::WriteDescriptorSet::builder()
-                    .dst_set(descriptor_set)
-                    .dst_binding(i as u32)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(std::slice::from_ref(info))
-                    .build()
-            })
-            .collect();
+        // Descriptor-set cache fast-path: keyed by `(layout, &handles)`,
+        // looked up on the device. After first call per shape the set
+        // is just a lookup; no `allocate_descriptor_sets` /
+        // `update_descriptor_sets` round-trip per dispatch.
+        let descriptor_set = self.vk_device.get_or_alloc_descriptor_set(
+            set_layout,
+            *self.descriptor_pool_guard,
+            handles,
+        )?;
         unsafe {
-            device.update_descriptor_sets(&writes, &[]);
 
             // Inter-dispatch barrier — needed BEFORE this dispatch so it
             // sees the previous dispatch's writes (skip on first call).
@@ -387,16 +362,17 @@ impl<'a> Drop for CommandBatch<'a> {
     fn drop(&mut self) {
         let device = self.vk_device.device();
         unsafe {
-            // Pools persist on `VulkanDevice` — we only free/reset what
-            // this batch borrowed from them, then release the locks
-            // (the guards drop after this scope).
+            // Pools persist on `VulkanDevice`. Free this batch's
+            // command buffer back to the (transient) command pool, but
+            // do NOT reset the descriptor pool — the descriptor-set
+            // cache in `VulkanDevice` holds long-lived references to
+            // every `(layout, handles)` combination this batch
+            // allocated. After the first decode token the cache is
+            // warm and subsequent batches reuse the same descriptor
+            // sets without any allocate/update Vulkan API calls.
             if !self.cmd_buffers_to_free.is_empty() {
                 device.free_command_buffers(*self.cmd_pool_guard, &self.cmd_buffers_to_free);
             }
-            let _ = device.reset_descriptor_pool(
-                *self.descriptor_pool_guard,
-                vk::DescriptorPoolResetFlags::empty(),
-            );
         }
     }
 }
