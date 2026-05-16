@@ -494,14 +494,45 @@ Final per-token phase budget (steady-state, KILN_VK_NATIVE_PHASE_TIMING):
 Bench at 494-token prompt, 128 output tokens, 5 runs:
 **~35 tok/s mean / 25.2 ms p50 (~40 tok/s p50)**.
 
+#### First shader-level win: split-K paged attention (`66c4208b`)
+
+After the host side was wrung dry, the next biggest cost was the
+paged-attention kernel — which dispatched **one workgroup per
+(batch, q_head) pair**, i.e. 16 workgroups on the 144-SM RTX 6000
+Ada (~11% SM utilization). Each workgroup looped serially over the
+full per-row K/V window (~494 positions at the bench prompt).
+
+`paged_attn_decode_batch_paged_splitk.comp` plus
+`paged_attn_decode_batch_paged_splitk_reduce.comp` split that scan
+into `num_chunks` workgroups per pair. Each chunk emits a partial
+`(chunk_max, chunk_sum, chunk_acc[head_dim])` triple; the reduce
+pass combines them via the standard stable-softmax recurrence:
+
+  combined_max = max(chunk_max[c])
+  scale[c]     = exp(chunk_max[c] - combined_max)
+  combined_sum = sum(chunk_sum[c] * scale[c])
+  combined_acc = sum(chunk_acc[c] * scale[c])  // element-wise
+  out          = combined_acc / combined_sum
+
+Default chunks=8 → 16 heads × 8 = 128 workgroups (≈90% SM
+utilization); tunable via `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`.
+Empty chunks (when num_chunks > seq_len) write neutral identities
+the reduce ignores.
+
+Measured on Qwen3.5-4B / RTX 6000 Ada at 494-token prompt:
+  before: ~35 tok/s mean / ~25.2 ms p50 (~40 tok/s p50)
+  after:  **~40 tok/s mean / ~21.2 ms p50 (~47 tok/s p50)**
+
+Parity bit-identical against the non-split-K legacy path.
+
 #### Remaining gap
 
-Current ~35 tok/s mean (warmed) / ~40 tok/s p50 vs. the gate (e.2)
-target of 55 tok/s leaves a ~1.4× p50 / ~1.6× mean factor. The
-submit phase is now ~82% of ITL — the host side has been wrung
-dry, and what's left is the **actual GPU kernel time** for the
-32 transformer blocks plus final norm + LM head. Per-layer kernel
-breakdown:
+Current ~40 tok/s mean (warmed, 128-token output) / ~47 tok/s p50
+vs. the gate (e.2) target of 55 tok/s leaves a ~1.17× p50 / ~1.4×
+mean factor. The submit phase is still ~80% of ITL — what's left is
+the **actual GPU kernel time** for the 32 transformer blocks plus
+final norm + LM head, primarily the bf16-weight matrix-vector
+GEMMs. Per-layer kernel breakdown:
 
 - Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
   (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
