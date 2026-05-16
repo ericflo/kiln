@@ -13696,6 +13696,43 @@ pub fn model_forward_paged(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
+    // Native single-submit Vulkan-resident decode fast-path. For
+    // `seq_len == 1` (decode hot path) the LastRowOnly logits returned
+    // by the native path are shape-equivalent to LmHeadMode::Full's
+    // single-row output, so callers see identical behaviour.
+    #[cfg(feature = "vulkan")]
+    {
+        if token_ids.len() == 1
+            && start_pos > 0
+            && lora.is_none()
+            && !crate::mtp_debug::is_subop_capture_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && config.attn_output_gate
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && backend.supports_resident_decode()
+            && resident_decode_pool_ready(backend, config)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                    vk_backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    start_pos,
+                    linear_state.as_deref(),
+                )? {
+                    return Ok(logits);
+                }
+            }
+        }
+    }
+
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -13734,6 +13771,42 @@ pub fn model_forward_paged_last_token(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
+    // Native single-submit Vulkan-resident decode fast-path. Records
+    // all 32 layers into one `CommandBatch` and submits once. Falls
+    // back transparently when not feasible.
+    #[cfg(feature = "vulkan")]
+    {
+        if token_ids.len() == 1
+            && start_pos > 0
+            && lora.is_none()
+            && !crate::mtp_debug::is_subop_capture_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && config.attn_output_gate
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && backend.supports_resident_decode()
+            && resident_decode_pool_ready(backend, config)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                    vk_backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    start_pos,
+                    linear_state.as_deref(),
+                )? {
+                    return Ok(logits);
+                }
+            }
+        }
+    }
+
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
         token_ids,
@@ -13785,17 +13858,48 @@ pub fn model_forward_paged_last_token_resident(
     positions_gpu: Option<&Tensor>,
 ) -> Result<Tensor> {
     // Resident path requires backend support AND the buffer pool to fit.
-    // On any decline path we fall back transparently to the existing
-    // per-call Tensor dispatchers — preserves bit-identical behavior
-    // until each layer routes through resident dispatchers.
-    let _route_resident = backend.supports_resident_decode()
+    let route_resident = backend.supports_resident_decode()
         && resident_decode_pool_ready(backend, config);
 
-    // TODO(vk_resident_decode_plan.md gate(a)/(e)): the per-layer resident
-    // wiring lands here. Until each layer type is wired, we delegate to the
-    // legacy path so behavior is unchanged. The dispatchers, pool, and
-    // backend predicate land first (gates a/b/c); the layer wiring is the
-    // subsequent slice of work measured by gate (e).
+    // Native single-submit orchestrator: chains all 32 layers' dispatches
+    // into one `CommandBatch`, eliminating per-layer Tensor bridging and
+    // submit overhead. Gated on KILN_VK_RESIDENT_DECODE_NATIVE (default
+    // on); falls back transparently to the per-layer fast-path embedded
+    // in `model_forward_paged_inner` on any decline.
+    #[cfg(feature = "vulkan")]
+    {
+        if route_resident
+            && token_ids.len() == 1
+            && start_pos > 0
+            && lora.is_none()
+            && !crate::mtp_debug::is_subop_capture_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && config.attn_output_gate
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(logits) =
+                    model_forward_paged_last_token_resident_native_vk(
+                        vk_backend,
+                        token_ids,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        start_pos,
+                        linear_state.as_deref(),
+                    )?
+                {
+                    return Ok(logits);
+                }
+            }
+        }
+    }
+
     model_forward_paged_last_token(
         backend,
         token_ids,
@@ -13808,6 +13912,238 @@ pub fn model_forward_paged_last_token_resident(
         lora,
         positions_gpu,
     )
+}
+
+/// Native single-submit Vulkan-resident decode forward.
+///
+/// Records all 32 layer blocks' dispatches into one `CommandBatch`,
+/// alternating between two pool buffers for layer-to-layer x; pre-seeds
+/// any first-use KV-pool / GDN-state layers, pre-uploads RoPE/block_table/
+/// seq_lens, submits once, reads back the final hidden state, and runs
+/// the final RMSNorm + LM head through the legacy path (cheap one-shot).
+///
+/// Returns `Ok(None)` on any unsupported configuration so the caller
+/// falls back to `model_forward_paged_inner` bit-identically.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn model_forward_paged_last_token_resident_native_vk(
+    vk_backend: &crate::backend::vulkan::VulkanBackend,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&LinearAttentionState>,
+) -> Result<Option<Tensor>> {
+    use kiln_vulkan_kernel::{CommandBatch, VulkanBuffer};
+    let Some(vk_device) = vk_backend.vulkan_device() else {
+        return Ok(None);
+    };
+    let Some(state) = linear_state else {
+        return Ok(None);
+    };
+    let hidden_size = config.hidden_size;
+    let device = weights.embed_tokens.device();
+
+    // 1. Embedding lookup (CPU/candle): produces [1, 1, hidden] f32.
+    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    hidden = hidden.unsqueeze(0)?;
+
+    // 2. Position tensor + RoPE tables for this single decode position.
+    let positions = candle_core::Tensor::new(
+        &[start_pos as f32][..],
+        device,
+    )?;
+    let (rope_cos_t, rope_sin_t) =
+        rotary_tables_from_tensor(&positions, &weights.rotary_inv_freq)?;
+
+    // 3. Acquire the two persistent IO buffers (alternating across layers).
+    let io_a =
+        vk_backend.acquire_resident_scratch("native_io_a", (hidden_size * 4) as u64)?;
+    let io_b =
+        vk_backend.acquire_resident_scratch("native_io_b", (hidden_size * 4) as u64)?;
+
+    // 4. Upload the embedding output into io_a.
+    let hidden_flat = if hidden.dtype() == candle_core::DType::F32 {
+        hidden.flatten_all()?
+    } else {
+        hidden.to_dtype(candle_core::DType::F32)?.flatten_all()?
+    };
+    let hidden_data: Vec<f32> = hidden_flat.to_vec1()?;
+    let mut hidden_bytes: Vec<u8> = Vec::with_capacity(hidden_data.len() * 4);
+    for &x in &hidden_data {
+        hidden_bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &io_a,
+        &hidden_bytes,
+    )
+    .context("native: upload embedding output to io_a")?;
+
+    // 5. Pre-upload RoPE cos/sin, block_table, seq_lens.
+    let rope_cos_buf =
+        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, &rope_cos_t)?;
+    let rope_sin_buf =
+        kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer(vk_device, &rope_sin_t)?;
+    let blocks: Vec<u32> = block_table.blocks.clone();
+    let block_table_buf = upload_u32_slice_native(vk_device, &blocks)?;
+    let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
+    let seq_lens_buf = upload_u32_slice_native(vk_device, &seq_lens)?;
+
+    // 6. VkPagedKvCache (size matches paged cache).
+    let num_full_attn_layers = weights
+        .layers
+        .iter()
+        .filter(|l| matches!(l.attention, GpuAttentionWeights::Full(_)))
+        .count();
+    let vk_kv_cache_arc = match vk_backend.vk_paged_kv_cache(
+        config.num_full_attention_layers,
+        paged_cache.num_blocks(),
+        paged_cache.block_size(),
+        config.num_kv_heads,
+        config.head_dim,
+    ) {
+        Some(c) => c.clone(),
+        None => return Ok(None),
+    };
+    let vk_kv_cache: &kiln_vulkan_kernel::VkPagedKvCache = &vk_kv_cache_arc;
+
+    // 7. Pre-seed any first-use full-attn layers from the legacy paged cache.
+    let mut full_attn_idx: usize = 0;
+    for layer in weights.layers.iter() {
+        if let GpuAttentionWeights::Full(_) = &layer.attention {
+            if !vk_backend.full_attn_layer_seeded(full_attn_idx) {
+                crate::vk_decode_resident::seed_vk_kv_cache_layer_from_legacy(
+                    vk_device,
+                    vk_kv_cache,
+                    paged_cache,
+                    full_attn_idx,
+                )?;
+                vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
+            }
+            full_attn_idx += 1;
+        }
+    }
+
+    // 8. Build ONE CommandBatch with all 32 layer blocks recorded.
+    let mut batch = CommandBatch::new(vk_device)?;
+    let mut full_attn_layer_idx: usize = 0;
+    let mut linear_attn_idx: usize = 0;
+    let mut from_buf: &std::sync::Arc<VulkanBuffer> = &io_a;
+    let mut to_buf: &std::sync::Arc<VulkanBuffer> = &io_b;
+    for layer in weights.layers.iter() {
+        match &layer.attention {
+            GpuAttentionWeights::Full(_) => {
+                let ok = crate::vk_decode_resident::record_full_attn_block_into(
+                    vk_backend,
+                    &mut batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    start_pos,
+                    block_table,
+                    full_attn_layer_idx,
+                    paged_cache,
+                    vk_kv_cache,
+                    &rope_cos_buf,
+                    &rope_sin_buf,
+                    &block_table_buf,
+                    &seq_lens_buf,
+                )?;
+                if !ok {
+                    return Ok(None);
+                }
+                full_attn_layer_idx += 1;
+            }
+            GpuAttentionWeights::Linear(_) => {
+                let recurrent_t = &state.recurrent_states[linear_attn_idx];
+                let conv_t = &state.conv_states[linear_attn_idx];
+                let ok = crate::vk_decode_resident::record_gdn_block_into(
+                    vk_backend,
+                    &mut batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    recurrent_t,
+                    conv_t,
+                )?;
+                if !ok {
+                    return Ok(None);
+                }
+                linear_attn_idx += 1;
+            }
+        }
+        std::mem::swap(&mut from_buf, &mut to_buf);
+    }
+
+    // 9. Submit + wait — one queue submission for the whole token.
+    batch
+        .submit_and_wait("vk-resident native full-token forward")
+        .context("native: submit full-token CommandBatch")?;
+
+    // 10. Read back final hidden from `from_buf` (post-swap on last layer).
+    let out_bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        from_buf,
+    )
+    .context("native: read back final hidden")?;
+    let n = out_bytes.len() / 4;
+    let mut out_f32: Vec<f32> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&out_bytes[i * 4..i * 4 + 4]);
+        out_f32.push(f32::from_le_bytes(b));
+    }
+    let hidden_final =
+        candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden_size), device)?
+            .to_dtype(hidden.dtype())?;
+
+    // 11. Final RMSNorm + LM head via legacy (one-shot, small ops).
+    let last = hidden_final.narrow(1, 0, 1)?;
+    let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
+    let logits = lm_head_forward_backend_decode_if(
+        Some(vk_backend as &dyn BackendRuntime),
+        &normed,
+        &weights.embed_tokens_t,
+    )?;
+    Ok(Some(logits))
+}
+
+/// Local helper used only by the native orchestrator.
+#[cfg(feature = "vulkan")]
+fn upload_u32_slice_native(
+    vk_device: &kiln_vulkan_kernel::VulkanDevice,
+    data: &[u32],
+) -> Result<kiln_vulkan_kernel::VulkanBuffer> {
+    use kiln_vulkan_kernel::VulkanBuffer;
+    let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 4);
+    for &x in data {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    let buf = VulkanBuffer::create_device_local(
+        vk_device.device(),
+        vk_device.device_local_mem_type(),
+        bytes.len().max(4) as u64,
+    )?;
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &buf,
+        &bytes,
+    )?;
+    Ok(buf)
 }
 
 /// Try the Vulkan-resident full-attention decode block. Returns
@@ -13922,6 +14258,56 @@ pub fn model_forward_paged_last_token_greedy(
     lora: Option<&LoraWeights>,
     positions_gpu: Option<&Tensor>,
 ) -> Result<u32> {
+    // Native single-submit Vulkan-resident decode fast-path. For the
+    // hot decode loop the bench drives through this entry (since Vulkan
+    // exposes `supports_linear_decode_argmax = true`), so the native
+    // path has to land here too — wiring it only into
+    // `model_forward_paged` / `_last_token` misses the production
+    // generation loop entirely.
+    #[cfg(feature = "vulkan")]
+    {
+        if token_ids.len() == 1
+            && start_pos > 0
+            && lora.is_none()
+            && !crate::mtp_debug::is_subop_capture_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && config.attn_output_gate
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+            && backend.supports_resident_decode()
+            && resident_decode_pool_ready(backend, config)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(logits) = model_forward_paged_last_token_resident_native_vk(
+                    vk_backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    start_pos,
+                    linear_state.as_deref(),
+                )? {
+                    // Materialize argmax on the returned logits.
+                    let logits_flat = logits.flatten_all()?;
+                    let logits_vec: Vec<f32> = logits_flat.to_vec1()?;
+                    let mut best_idx = 0u32;
+                    let mut best_val = f32::NEG_INFINITY;
+                    for (i, &v) in logits_vec.iter().enumerate() {
+                        if v > best_val {
+                            best_val = v;
+                            best_idx = i as u32;
+                        }
+                    }
+                    return Ok(best_idx);
+                }
+            }
+        }
+    }
+
     let (_logits, _hidden, token) = model_forward_paged_inner(
         backend,
         token_ids,
