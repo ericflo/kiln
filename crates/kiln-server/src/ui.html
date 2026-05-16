@@ -3343,6 +3343,13 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
 
       <!-- Jobs sub-tab -->
       <div class="tab-content" id="tab-evals-jobs" role="tabpanel" aria-labelledby="evals-tab-jobs" hidden inert data-panel-id="evals-jobs-panel">
+        <div class="evals-toolbar" style="padding:0; margin-bottom:var(--space-3);">
+          <input class="search-input" id="eval-jobs-filter" type="search" placeholder="Filter by suite name, adapter, job id…" aria-label="Filter eval jobs">
+          <button type="button" class="filter-pill active" data-eval-jobs-filter="all">All</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="running">Running / queued</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="completed">Completed</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="failed">Failed / cancelled</button>
+        </div>
         <div id="eval-jobs-list" class="empty">Loading eval jobs…</div>
       </div>
 
@@ -4399,7 +4406,25 @@ document.addEventListener('input', (ev) => {
     // applies immediately even when the upstream cache is unchanged.
     lastRecentRequestsKey = null;
     renderRecentRequests(recentRequestsCache);
+  } else if (ev.target && ev.target.id === 'eval-jobs-filter') {
+    evalJobsFilter.query = ev.target.value || '';
+    if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
   }
+});
+
+// State-pill clicks for the eval-jobs filter. Delegated so a re-render
+// of the pill DOM doesn't tear off the handler.
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-eval-jobs-filter]');
+  if (!t) return;
+  // Don't double-handle the "Clear filter" button rendered inside the
+  // empty state — it already re-runs refresh on its own listener.
+  if (!t.classList.contains('filter-pill')) return;
+  evalJobsFilter.state = t.dataset.evalJobsFilter;
+  document.querySelectorAll('.filter-pill[data-eval-jobs-filter]').forEach(p => {
+    p.classList.toggle('active', p.dataset.evalJobsFilter === evalJobsFilter.state);
+  });
+  if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
 });
 
 // Content key from the most recent request fingerprints. Skipping the
@@ -7113,6 +7138,23 @@ async function refreshSuites() {
 
 /* ---------- Jobs ---------- */
 
+let evalJobsFilter = { query: '', state: 'all' };
+function matchesEvalJobsFilter(j) {
+  const q = (evalJobsFilter.query || '').trim().toLowerCase();
+  if (q) {
+    const hay = [
+      j.suite_name || '',
+      j.job_id || '',
+      ...(j.adapters || []).map(a => a || 'base'),
+    ].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  const st = (j.state || '').toString().toLowerCase();
+  if (evalJobsFilter.state === 'running') return st === 'queued' || st === 'running';
+  if (evalJobsFilter.state === 'completed') return st === 'completed';
+  if (evalJobsFilter.state === 'failed') return st === 'failed' || st === 'cancelled';
+  return true;
+}
 async function refreshEvalJobs() {
   try {
     const d = await api('/v1/eval/jobs');
@@ -7127,6 +7169,22 @@ async function refreshEvalJobs() {
     }).length;
     setText('evals-count', String(liveCount));
     const el = document.getElementById('eval-jobs-list');
+    const filtered = jobs.filter(matchesEvalJobsFilter);
+    if (jobs.length && !filtered.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `<div class="eval-empty-body">No eval jobs match the current filter. <button class="btn btn-sm" type="button" data-eval-jobs-filter="all">Clear filter</button></div>`;
+      el.querySelectorAll('[data-eval-jobs-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-eval-jobs-filter]').forEach(b => b.classList.toggle('active', b.dataset.evalJobsFilter === 'all'));
+          evalJobsFilter.state = 'all';
+          const inp = document.getElementById('eval-jobs-filter');
+          if (inp) inp.value = '';
+          evalJobsFilter.query = '';
+          refreshEvalJobs();
+        });
+      });
+      return;
+    }
     if (!jobs.length) {
       el.className = 'eval-empty';
       el.innerHTML = `
@@ -7137,7 +7195,7 @@ async function refreshEvalJobs() {
       return;
     }
     el.className = '';
-    el.innerHTML = jobs.map(j => renderJobCard(j)).join('');
+    el.innerHTML = filtered.map(j => renderJobCard(j)).join('');
     el.querySelectorAll('.job-card').forEach(card => {
       card.addEventListener('click', () => openDrillModal(card.dataset.jobId));
     });
