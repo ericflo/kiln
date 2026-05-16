@@ -6,10 +6,46 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
+pub mod diagnostics;
+pub mod logit_cache;
+pub mod logit_source;
+pub mod opd;
+pub mod receipt;
+pub mod remote_teacher;
 pub mod replay;
 pub mod trainer;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
+
+pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
+pub use remote_teacher::{CostTally, RemoteProvider, RemoteTeacher, RemoteTeacherConfig};
+pub use receipt::{
+    AdapterReceipt, DiagnosticSummary, PromptSourceDescriptor, RECEIPT_SCHEMA_VERSION,
+    TeacherDescriptor,
+};
+
+pub use diagnostics::{
+    DIVERSITY_COLLAPSE_THRESHOLD, DIVERSITY_COLLAPSE_WINDOW, GuardrailDecision, GuardrailTrigger,
+    LengthInflationGuardrail, OpdDiagnosticSnapshot, REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary,
+    SELF_PLAY_SATURATION_THRESHOLD, SELF_PLAY_SATURATION_WINDOW, build_snapshot, repetition_rate,
+    rollout_diversity, truncation_rate,
+};
+pub use logit_source::{
+    DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
+    TopKLogprobs,
+};
+pub use opd::{
+    AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
+    COLD_START_OVERLAP_THRESHOLD, ColdStartDecision, DistillMergeRequest, DistillMergeSource,
+    DistillPumpMode, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
+    NewKnowledgeSource, OpdConfig, OpdLossGranularity, OpdPrompt, OpdRequest, SelfDistillMode,
+    StableOpdCoefficients, StableOpdLossInputs, StableOpdLossOutputs, TipTokenClass,
+    cold_start_probe, cold_start_probe_default, compute_agentic_loss_weights,
+    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl,
+    default_lambda_sft, default_lambda_verifier, default_opd_samples_per_prompt,
+    default_opd_top_k, default_score_decay_steps, default_score_earliest_weight,
+    default_tip_tool_call_weight, default_tip_tool_name_weight,
+};
 
 pub use replay::{
     BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,

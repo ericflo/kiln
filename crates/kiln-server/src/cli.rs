@@ -343,7 +343,94 @@ pub enum Commands {
         #[arg(long, short)]
         file: Option<String>,
     },
+
+    /// §10.14: write `~/.pi/agent/models.json` pointing pi at the
+    /// local kiln server.
+    ///
+    /// The canonical pi + kiln pipeline (§10.14 in the grand plan):
+    ///
+    ///   brew install kiln pi
+    ///   kiln serve &
+    ///   kiln pi-setup       # one-time
+    ///   kiln judge distill  # one-time, §10.6.1
+    ///   pi                  # use normally; sessions captured
+    ///   kiln self-improve   # auto-runs Saturday
+    #[command(name = "pi-setup", long_about = PI_SETUP_OVERVIEW)]
+    PiSetup {
+        /// Override the URL kiln writes into models.json.
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+        /// Output path for the models.json file. Default
+        /// `$HOME/.pi/agent/models.json`.
+        #[arg(long)]
+        out: Option<String>,
+    },
+
+    /// §10.6 self-distillation engine — the "centerpiece" of the
+    /// grand plan's agentic deployment.
+    #[command(subcommand, name = "judge", long_about = JUDGE_OVERVIEW)]
+    Judge(JudgeCommands),
+
+    /// §10.6.2 + §10.14 — kick the weekly self-improve loop.
+    #[command(name = "self-improve", long_about = SELF_IMPROVE_OVERVIEW)]
+    SelfImprove {
+        /// Server URL.
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+        /// Agent adapter to improve.
+        #[arg(long, default_value = "pi-coder-current")]
+        agent: String,
+        /// Judge LoRA alias.
+        #[arg(long, default_value = "judge-pi-v1")]
+        judge: String,
+        /// Disable the §10.6.4 CRISP terseness pass.
+        #[arg(long, default_value_t = false)]
+        no_crisp: bool,
+    },
 }
+
+/// §10.6 subcommands.
+#[derive(Subcommand)]
+pub enum JudgeCommands {
+    /// §10.6.1 — distil a turn-judge LoRA from the configured 27B
+    /// teacher's multi-axis scoring of (turn, context) pairs.
+    Distill {
+        /// Server URL.
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+        /// Output adapter name.
+        #[arg(long, default_value = "judge-pi-v1")]
+        name: String,
+        /// Teacher alias.
+        #[arg(long, default_value = "qwen3.6-27b@local")]
+        teacher: String,
+    },
+    /// §10.6.3 drift check — periodically re-score with the 27B
+    /// teacher and refresh the judge if agreement < 80%.
+    DriftCheck {
+        /// Server URL.
+        #[arg(long, default_value = "http://localhost:8420")]
+        url: String,
+        /// Judge LoRA alias.
+        #[arg(long, default_value = "judge-pi-v1")]
+        judge: String,
+        /// 27B teacher alias.
+        #[arg(long, default_value = "qwen3.6-27b@local")]
+        teacher: String,
+    },
+}
+
+const PI_SETUP_OVERVIEW: &str = "Write ~/.pi/agent/models.json pointing pi at this kiln server.\n\
+Part of the §10.14 canonical pi + kiln pipeline.";
+
+const JUDGE_OVERVIEW: &str = "§10.6 self-distillation engine.\n\
+Distill a turn-judge LoRA once (judge distill), then run the perpetual\n\
+self-improve loop forever (kiln self-improve). Drift-check periodically.";
+
+const SELF_IMPROVE_OVERVIEW: &str = "§10.6.2 + §10.14 — kick the weekly self-improve loop.\n\
+Scores the week's rollouts with the local judge LoRA, runs GRPO with\n\
+judge-derived advantages, optionally engages the §10.6.4 CRISP\n\
+terseness pass on successful trajectories.";
 
 #[derive(Subcommand)]
 pub enum TrainCommands {
@@ -1453,6 +1540,136 @@ fn print_job_line(job: &serde_json::Value) {
         progress_pct,
         elapsed
     );
+}
+
+// ===========================================================================
+// §10.14 pi + kiln canonical pipeline runners
+// ===========================================================================
+
+/// §10.14 `kiln pi-setup` — write `~/.pi/agent/models.json` pointing
+/// pi at the local kiln server.
+pub async fn run_pi_setup(url: &str, out: Option<&str>) -> anyhow::Result<()> {
+    let default_out: std::path::PathBuf = match std::env::var("HOME") {
+        Ok(h) => std::path::PathBuf::from(h)
+            .join(".pi")
+            .join("agent")
+            .join("models.json"),
+        Err(_) => std::path::PathBuf::from("/tmp/pi-agent-models.json"),
+    };
+    let path = match out {
+        Some(p) => std::path::PathBuf::from(p),
+        None => default_out,
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // The kiln server speaks the OpenAI-compatible /v1/chat/completions
+    // surface; pi's `~/.pi/agent/models.json` just needs base_url +
+    // model id.
+    let body = serde_json::json!({
+        "providers": [{
+            "name": "kiln-local",
+            "base_url": url,
+            "api_key": "kiln",
+            "models": [
+                {"id": "qwen3.5-4b", "name": "Qwen3.5-4B via kiln"}
+            ]
+        }],
+        "default_model": "qwen3.5-4b"
+    });
+    let bytes = serde_json::to_vec_pretty(&body)?;
+    std::fs::write(&path, bytes)?;
+    println!(
+        "{} Wrote pi models.json → {}",
+        style("✓").green().bold(),
+        path.display()
+    );
+    println!("  pi now talks to {}.", url);
+    println!(
+        "  Next: {} once, then use pi normally; {} on Saturdays.",
+        style("kiln judge distill").cyan(),
+        style("kiln self-improve").cyan(),
+    );
+    Ok(())
+}
+
+/// §10.6 `kiln judge ...` dispatcher.
+pub async fn run_judge(cmd: &JudgeCommands) -> anyhow::Result<()> {
+    match cmd {
+        JudgeCommands::Distill { url, name, teacher } => {
+            let body = serde_json::json!({
+                "name": name,
+                "teacher": teacher
+            });
+            let resp = reqwest::Client::new()
+                .post(format!("{url}/v1/agent/judge_distill"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| handle_request_error(url, e))?;
+            print_simple_json_response("judge distill", resp).await
+        }
+        JudgeCommands::DriftCheck {
+            url,
+            judge,
+            teacher,
+        } => {
+            let body = serde_json::json!({
+                "judge": judge,
+                "teacher": teacher
+            });
+            let resp = reqwest::Client::new()
+                .post(format!("{url}/v1/agent/judge_drift_check"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| handle_request_error(url, e))?;
+            print_simple_json_response("judge drift-check", resp).await
+        }
+    }
+}
+
+/// §10.6.2 / §10.14 `kiln self-improve` — POST the weekly self-
+/// improvement loop request.
+pub async fn run_self_improve(
+    url: &str,
+    agent: &str,
+    judge: &str,
+    crisp: bool,
+) -> anyhow::Result<()> {
+    let body = serde_json::json!({
+        "agent": agent,
+        "judge": judge,
+        "crisp": crisp
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/v1/agent/self_improve"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| handle_request_error(url, e))?;
+    print_simple_json_response("self-improve", resp).await
+}
+
+async fn print_simple_json_response(
+    label: &str,
+    resp: reqwest::Response,
+) -> anyhow::Result<()> {
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await?;
+    if status.is_success() {
+        println!("{} {label}", style("✓").green().bold());
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        Ok(())
+    } else {
+        eprintln!(
+            "{} {label} failed ({})",
+            style("✗").red().bold(),
+            status
+        );
+        eprintln!("{}", serde_json::to_string_pretty(&body)?);
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

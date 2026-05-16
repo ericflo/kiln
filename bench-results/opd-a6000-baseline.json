@@ -1,0 +1,20 @@
+{
+  "comment": "Canonical kiln-opd-loss-kernel throughput baseline. Captured on an RTX A6000 (CUDA 12.4, driver 570.195.03) at kiln commit 60db09ff via `crates/kiln-opd-loss-kernel/examples/bench_opd_topk_kl.rs`. §9.9 of the grand plan: the bench gate fails any PR that regresses any kernel_tok_s entry by more than 5%.",
+  "device": "Cuda(CudaDevice(DeviceId(1)))",
+  "device_label": "RTX A6000",
+  "kiln_commit": "60db09ff",
+  "regression_threshold_pct": 5.0,
+  "shape": {
+    "hidden_size": 2560,
+    "vocab_size": 32000
+  },
+  "rows": [
+    {"T": 256,  "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 455014, "kernel_ms":  0.563, "candle_ms":  1.334, "speedup_x": 2.37},
+    {"T": 512,  "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 587770, "kernel_ms":  0.871, "candle_ms":  2.789, "speedup_x": 3.20},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 583043, "kernel_ms":  1.756, "candle_ms":  7.656, "speedup_x": 4.36},
+    {"T": 4096, "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 241297, "kernel_ms": 16.975, "candle_ms": 29.860, "speedup_x": 1.76},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 16, "dtype": "F32",  "kernel_tok_s": 242727, "kernel_ms":  4.219, "candle_ms":  4.880, "speedup_x": 1.16},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 32, "dtype": "BF16", "kernel_tok_s": 652428, "kernel_ms":  1.570, "candle_ms": 10.372, "speedup_x": 6.61},
+    {"T": 4096, "H": 2560, "V": 32000, "K": 32, "dtype": "BF16", "kernel_tok_s": 802808, "kernel_ms":  5.102, "candle_ms": 31.690, "speedup_x": 6.21}
+  ]
+}

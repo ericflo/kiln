@@ -1,0 +1,33 @@
+name: coding-assistant-from-repo
+description: |
+  §3.7 day-one recipe: build a Qwen3.5-4B coding assistant specialised
+  to a single repository. Used by the §10.8 agentic recipe set as the
+  scaffold workflow.
+
+  Two phases:
+  1. Cold-start SFT on repo-derived synthesis prompts (per §3.1 +
+     §8.10 auto-cold-start mandate).
+  2. OPD against the chosen teacher on the same prompt distribution.
+
+  When run via the recipe surface today, both steps are queued
+  independently — full step chaining (cold-start → OPD on the
+  produced adapter) lands with the §3.1 trainer body refactor.
+
+steps:
+  - kind: sft
+    name: repo-cold-start
+    examples_from:
+      dataset: repo-synthesis-prompts
+    config:
+      epochs: 2
+      lora_rank: 16
+
+  - kind: opd
+    name: repo-assistant
+    teacher: qwen3.6-27b@local
+    prompts_from:
+      dataset: repo-synthesis-prompts
+    config:
+      base_adapter: repo-cold-start
+      top_k: 32
+      samples_per_prompt: 4

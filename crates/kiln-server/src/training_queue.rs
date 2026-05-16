@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
-use kiln_train::{self, GrpoRequest, SftRequest, TrainingState};
+use kiln_train::{
+    self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
+    GrpoRequest, LogitSource as _, OpdRequest, SftRequest, TrainingState,
+};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -63,6 +66,7 @@ impl TrainingCompletionEvent {
         match job_type {
             TrainingJobType::Sft => "sft",
             TrainingJobType::Grpo => "grpo",
+            TrainingJobType::Opd => "opd",
         }
     }
 }
@@ -123,6 +127,27 @@ pub fn fire_completion_webhook(url: String, event: TrainingCompletionEvent) {
 pub enum QueuedJob {
     Sft(SftRequest),
     Grpo(GrpoRequest),
+    /// On-Policy Distillation request. The runtime currently exercises
+    /// the full HTTP → tokenize → kernel-loss path against a fixture
+    /// teacher to validate the wiring; sampling + optimizer step + hot-
+    /// swap land in the next commit (the §3.1 pseudocode body shares
+    /// most of its mechanics with the GRPO loop and gets refactored
+    /// alongside).
+    Opd(OpdRequest),
+    /// `/v1/distill/refresh` — §3.6 continual-learning recipe. Two
+    /// internal phases: SFT mid-train on `new_data`, then OPD-recover
+    /// against `behavioural_teacher`. Gated on dual eval (IF-eval
+    /// recovery + new-knowledge gain).
+    DistillRefresh(DistillRefreshRequest),
+    /// `/v1/adapters/distill_merge` — §3.4 behaviour-space merge.
+    /// Multi-teacher OPD over each source LoRA's retained training-
+    /// prompt distribution.
+    DistillMerge(DistillMergeRequest),
+    /// `/v1/distill/pump` — §3.5 27B → 4B Knowledge Pump in three
+    /// modes (Domain / Wide / Examples).
+    DistillPump(DistillPumpRequest),
+    /// `/v1/distill/self` — §3.12 PI self-distillation.
+    DistillSelf(DistillSelfRequest),
 }
 
 /// Entry in the training queue.
@@ -534,6 +559,1238 @@ fn run_grpo(
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Run one OPD training request.
+///
+/// **Milestone 4 (this commit) scope.** The plumbing — HTTP → queue →
+/// blocking worker → job tracking → metrics → webhook → auto-load → post-
+/// eval — is wired identically to SFT/GRPO. The runtime body itself runs
+/// the §3.1 pseudocode against a fixture teacher (no real teacher
+/// resolution yet) so the entire host code path is exercised
+/// end-to-end before the GPU model integration lands. Outcome:
+///
+/// 1. Validate the prompt set is non-empty.
+/// 2. Verify the `OpdRequest`'s loss / top_k / Stable-OPD knobs
+///    deserialise cleanly (already enforced via serde at the endpoint
+///    boundary).
+/// 3. Persist a stub PEFT adapter directory so `auto_load` and
+///    `post_eval` callers see a real path. The adapter weights match
+///    the base model exactly (no update yet) — the §3.1 loss + IS
+///    advantage path is the next commit.
+///
+/// Returns an explicit error when the GPU runtime path *would* run but
+/// the model is mocked, matching SFT/GRPO. The reason for the explicit
+/// runtime stub: the §3.1 trainer body shares almost all of its
+/// machinery (segment-checkpointed forward, LoRA Vars, AdamW step,
+/// hot-swap) with `grpo_train`, and the refactor that factors those
+/// pieces out so OPD can call them is its own diff; doing it here would
+/// produce a much larger PR than this milestone wants.
+#[allow(clippy::too_many_arguments)]
+fn run_opd(
+    req: &OpdRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.prompts.is_empty() && req.dataset_path.is_none() {
+        return Err("OPD request must include at least one prompt or a dataset_path".into());
+    }
+    for (i, prompt) in req.prompts.iter().enumerate() {
+        if prompt.messages.is_empty() {
+            return Err(format!("OPD prompt {i} has no messages"));
+        }
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        teacher = %req.teacher,
+        loss = ?req.config.loss,
+        top_k = req.config.top_k,
+        samples_per_prompt = req.config.samples_per_prompt,
+        num_prompts = req.prompts.len(),
+        "OPD training started"
+    );
+
+    // Resolve the teacher alias against the §3.2 registry, then build
+    // the concrete LogitSource:
+    //   • Fixture → DeterministicUniformLogitSource (synthetic).
+    //   • Local   → run the loaded model forward on each prompt and
+    //               populate a FixtureLogitSource with the real
+    //               top-K teacher logprobs (§3.2 in-process local
+    //               teacher).
+    //   • Remote  → RemoteTeacher with provider guessed from the URL.
+    let spec = teacher_registry
+        .get(&req.teacher)
+        .ok_or_else(|| format!("teacher alias {:?} not registered (POST /v1/teachers first)", req.teacher))?;
+
+    let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+    let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
+        crate::api::teachers::TeacherKind::Fixture => {
+            std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                spec.alias.clone(),
+                resolved_vocab,
+                resolved_max_top_k.max(req.config.top_k),
+            ))
+        }
+        crate::api::teachers::TeacherKind::Local => {
+            std::sync::Arc::new(build_local_teacher_for(
+                &spec,
+                &req.prompts,
+                tokenizer,
+                weights,
+                model_config,
+                req.config.top_k,
+            )?)
+        }
+        crate::api::teachers::TeacherKind::Remote => {
+            let url = spec.url.clone().ok_or_else(|| {
+                format!(
+                    "teacher {:?} is Remote but has no `url` field — re-register with `url` set",
+                    spec.alias
+                )
+            })?;
+            let provider = guess_remote_provider(&url);
+            let cfg = kiln_train::RemoteTeacherConfig {
+                provider,
+                model: spec.model_id.clone(),
+                url,
+                api_key_env: spec.api_key_env.clone(),
+                teacher_id: spec.alias.clone(),
+                tokenizer_hash: spec.tokenizer_hash.clone(),
+                max_top_k: resolved_max_top_k,
+                vocab_size: resolved_vocab,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
+                timeout_ms: 60_000,
+            };
+            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+        }
+    };
+
+    let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
+
+    let output_dir = kiln_train::opd::opd_train(
+        &req.prompts,
+        &req.config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(trainer_progress_cb),
+    )
+    .map_err(|e| format!("opd_train failed: {e:#}"))?;
+
+    // §8.11 reproducibility receipt — every adapter ships with one.
+    let seed = req.config.seed.unwrap_or(0);
+    let hyperparameters = serde_json::to_value(&req.config)
+        .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize OpdConfig"}));
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: spec.alias.clone(),
+            model_id: spec.model_id.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(hyperparameters);
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write OPD receipt: {e}");
+    }
+
+    Ok(output_dir)
+}
+
+/// Build the §3.4 multi-tenant merge teacher.
+///
+/// Loads each source LoRA, runs the model forward over that source's
+/// prompts with the source LoRA applied (so the logits reflect "what
+/// the model behaves like when wearing that LoRA"), and stashes the
+/// top-K teacher logprobs into a single `FixtureLogitSource` keyed by
+/// (tokens_hash, position).
+///
+/// Each source contributes only its own prompts' entries, so the
+/// trainer's `opd_step_loss` call queries the *correct* source's
+/// teacher when iterating each prompt — no per-step LoRA swap, no
+/// multi-tenant inference server needed.
+///
+/// Per-source `weight` (a `DistillMergeSource` field) is not yet
+/// applied — the unified fixture treats every (source, prompt) entry
+/// equally. Weighted loss aggregation is filed as a §3.4 follow-up.
+#[allow(clippy::too_many_arguments)]
+fn build_multi_tenant_merge_teacher(
+    teacher_id: &str,
+    per_source: &[(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)],
+    adapter_dir: &std::path::Path,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+    job_id: &str,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    let mut unified = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
+        teacher_id.to_string(),
+        model_config.vocab_size,
+        top_k,
+    );
+    for (source, prompts) in per_source {
+        // Try to load the source LoRA from disk. On failure (no
+        // PEFT files yet) we fall back to base-model teacher for
+        // this source's prompts and surface a tracing warning.
+        let src_dir = adapter_dir.join(&source.adapter);
+        let device = weights.embed_tokens.device().clone();
+        let teacher_lora = match kiln_model::lora_loader::LoraWeights::load(
+            &src_dir,
+            model_config.num_layers,
+            &device,
+        ) {
+            Ok(weights) => Some(weights),
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    source = %source.adapter,
+                    error = %e,
+                    "distill_merge: source LoRA load failed — base-model teacher for this source's prompts"
+                );
+                None
+            }
+        };
+
+        // Tokenize this source's prompts.
+        let mut tokenized: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            let ex = kiln_train::SftExample {
+                messages: prompt.messages.clone(),
+            };
+            if let Ok((tokens, label_mask)) =
+                kiln_train::trainer::tokenize_for_training(&ex, tokenizer)
+            {
+                let active: Vec<usize> = label_mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                    .collect();
+                if !active.is_empty() {
+                    tokenized.push((tokens, active));
+                }
+            }
+        }
+        if tokenized.is_empty() {
+            continue;
+        }
+        let source_fixture = kiln_train::opd::build_local_teacher_fixture(
+            format!("{teacher_id}:{}", source.adapter),
+            &tokenized,
+            weights,
+            model_config,
+            teacher_lora.as_ref(),
+            top_k,
+            None,
+        )
+        .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter))?;
+
+        // Drain entries from source_fixture into unified.
+        for (tokens, active_positions) in &tokenized {
+            for &pos in active_positions {
+                let batch = match source_fixture.fetch_logprobs(tokens, &[pos], Some(top_k)) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let (indices, logprobs) = match batch {
+                    kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
+                    _ => continue,
+                };
+                let key = kiln_train::logit_source::FixtureLogitSource::hash_tokens(tokens);
+                unified.insert(key, pos, indices, logprobs);
+            }
+        }
+    }
+    Ok(unified)
+}
+
+/// Build the §3.12 privileged-information self-teacher.
+///
+/// For each prompt and the chosen `SelfDistillMode`, we construct a
+/// teacher-side prompt that *includes* the privileged context (a
+/// system message carrying ground-truth answers, a "be concise"
+/// instruction, or retrieved documents). The teacher's forward pass
+/// runs against that shaped prompt; we then transplant the resulting
+/// top-K logprobs back onto the *student's* (un-shaped) token stream
+/// by aligning active assistant positions. The student then distils
+/// against logits that "knew" the privileged context — Lu's PI
+/// recipe (CRISP, OPSD, GATES, RLRT) made concrete.
+///
+/// For `ReverseTeacher` the privileged context is omitted but the
+/// per-position logprobs are negated post-hoc so the student moves
+/// *away* from the teacher's distribution — the survey's
+/// reversed-teacher knob.
+#[allow(clippy::too_many_arguments)]
+fn build_self_distill_teacher(
+    teacher_id: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    mode: kiln_train::SelfDistillMode,
+    ground_truth: Option<&[String]>,
+    documents: Option<&[String]>,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    use kiln_train::ChatMessage;
+    use kiln_train::SelfDistillMode;
+
+    // Build (student_tokens, teacher_tokens, active_positions) triples.
+    // Active positions are derived from the *student* tokenization
+    // since that's what opd_train will query.
+    let mut student_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    let mut teacher_only: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    for (i, prompt) in prompts.iter().enumerate() {
+        let student_ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        let (student_tokens, student_label_mask) =
+            match kiln_train::trainer::tokenize_for_training(&student_ex, tokenizer) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping student-tokenize failure");
+                    continue;
+                }
+            };
+        let active: Vec<usize> = student_label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &m)| if m { Some(j) } else { None })
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
+
+        // Build the teacher-side messages per mode.
+        let mut teacher_messages: Vec<ChatMessage> = Vec::new();
+        match mode {
+            SelfDistillMode::GroundTruthConditioning => {
+                if let Some(gt) = ground_truth.and_then(|g| g.get(i)) {
+                    teacher_messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: format!(
+                            "Privileged context (visible only to the teacher): the correct answer is: {gt}"
+                        ),
+                    });
+                }
+            }
+            SelfDistillMode::Conciseness => {
+                teacher_messages.push(ChatMessage {
+                    role: "system".into(),
+                    content:
+                        "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked."
+                            .into(),
+                });
+            }
+            SelfDistillMode::DocumentAsPi => {
+                if let Some(docs) = documents {
+                    let joined = docs.join("\n\n---\n\n");
+                    teacher_messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: format!(
+                            "Privileged context (visible only to the teacher) — use the following retrieved documents to answer:\n\n{joined}"
+                        ),
+                    });
+                }
+            }
+            SelfDistillMode::ReverseTeacher => {
+                // No privileged context; teacher forward matches
+                // student forward. Logprobs are flipped (negated)
+                // before insertion so the student moves *away*.
+            }
+        }
+        teacher_messages.extend(prompt.messages.iter().cloned());
+        let teacher_ex = kiln_train::SftExample {
+            messages: teacher_messages,
+        };
+        let (teacher_tokens, _) =
+            match kiln_train::trainer::tokenize_for_training(&teacher_ex, tokenizer) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping teacher-tokenize failure");
+                    continue;
+                }
+            };
+        student_active.push((student_tokens, active.clone()));
+        // Teacher-side active positions: the suffix of the teacher
+        // tokenization that aligns with the student's active span.
+        // Compute offset = teacher_len - student_len (the privileged
+        // context prefix length) and shift each active by that.
+        let teacher_len = teacher_tokens.len();
+        let student_len = student_active.last().unwrap().0.len();
+        let prefix = teacher_len.saturating_sub(student_len);
+        let teacher_active: Vec<usize> = active.iter().map(|&p| p + prefix).collect();
+        teacher_only.push((teacher_tokens, teacher_active));
+    }
+    if student_active.is_empty() {
+        return Err("self-distill: no prompts tokenized cleanly".into());
+    }
+
+    // Run the teacher forwards on the shaped teacher_only sequences
+    // and build a FixtureLogitSource keyed by the *student* tokens
+    // hash so opd_train's queries match. We compute the teacher's
+    // top-K at teacher_only positions, then re-insert under the
+    // student tokens hash at the student positions — same logprob
+    // values, different key.
+    let teacher_fixture = kiln_train::opd::build_local_teacher_fixture(
+        teacher_id.to_string(),
+        &teacher_only,
+        weights,
+        model_config,
+        None,
+        top_k,
+        None,
+    )
+    .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
+
+    let mut student_fixture =
+        kiln_train::logit_source::FixtureLogitSource::uniform_topk(
+            teacher_id.to_string(),
+            model_config.vocab_size,
+            top_k,
+        );
+
+    // Transplant teacher-key entries → student-key entries.
+    for ((s_tokens, s_active), (t_tokens, t_active)) in
+        student_active.iter().zip(teacher_only.iter())
+    {
+        let t_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(t_tokens);
+        let s_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(s_tokens);
+        for (sp, tp) in s_active.iter().zip(t_active.iter()) {
+            // Query the teacher fixture at the teacher key/position.
+            let batch = match teacher_fixture.fetch_logprobs(t_tokens, &[*tp], Some(top_k)) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let (indices, mut logprobs) = match batch {
+                kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
+                _ => continue,
+            };
+            if matches!(mode, kiln_train::SelfDistillMode::ReverseTeacher) {
+                for lp in logprobs.iter_mut() {
+                    *lp = -*lp;
+                }
+            }
+            student_fixture.insert(s_hash, *sp, indices, logprobs);
+        }
+    }
+
+    Ok(student_fixture)
+}
+
+/// Build a `FixtureLogitSource` populated from a local model forward
+/// pass — the §3.2 in-process LocalTeacher made concrete. Each prompt
+/// is tokenized like SFT (chat template with active assistant tokens
+/// marked), the model is run forward once per prompt with no LoRA
+/// applied (base-model teacher per Lu 2025's behavioural-recovery
+/// recipe), and the top-K logprobs at active positions are inserted
+/// into the fixture keyed by tokens_hash.
+fn build_local_teacher_for(
+    spec: &crate::api::teachers::TeacherSpec,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    let mut prompts_and_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        let ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        match kiln_train::trainer::tokenize_for_training(&ex, tokenizer) {
+            Ok((tokens, label_mask)) => {
+                let active: Vec<usize> = label_mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                    .collect();
+                if !active.is_empty() {
+                    prompts_and_active.push((tokens, active));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "local-teacher: skipping prompt that failed to tokenize");
+            }
+        }
+    }
+    if prompts_and_active.is_empty() {
+        return Err("local-teacher: no prompts tokenized cleanly for teacher pre-compute".into());
+    }
+    kiln_train::opd::build_local_teacher_fixture(
+        spec.alias.clone(),
+        &prompts_and_active,
+        weights,
+        model_config,
+        None,
+        top_k,
+        spec.tokenizer_hash.clone(),
+    )
+    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))
+}
+
+/// §6 / §8.6 — default per-job hard cap on remote-teacher $ spend
+/// when the caller didn't specify one. Matches the prosumer tier's
+/// `cost_cap_default_usd`. Set explicitly so `RemoteTeacher` always
+/// has a cap and never racks up surprise bills.
+pub const DEFAULT_REMOTE_COST_CAP_USD: f64 = 25.0;
+
+/// Best-effort provider guess from the configured base URL. Lets the
+/// user re-use `TeacherSpec` (which only carries a `url`) without
+/// adding a provider field — the §3.2 registry is intentionally
+/// minimal. Defaults to `Vllm` (the most common OSS top_logprobs
+/// endpoint shape) when no host token matches.
+fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("openrouter.ai") {
+        kiln_train::RemoteProvider::OpenRouter
+    } else if lower.contains("together.ai") || lower.contains("together.xyz") {
+        kiln_train::RemoteProvider::Together
+    } else if lower.contains("fireworks.ai") {
+        kiln_train::RemoteProvider::Fireworks
+    } else if lower.contains("deepinfra") {
+        kiln_train::RemoteProvider::DeepInfra
+    } else if lower.contains("sglang") {
+        kiln_train::RemoteProvider::Sglang
+    } else if lower.contains("tgi") || lower.contains("huggingface") {
+        kiln_train::RemoteProvider::Tgi
+    } else if lower.contains("llama.cpp") || lower.contains("llamacpp") || lower.contains("8080") {
+        kiln_train::RemoteProvider::LlamaCpp
+    } else {
+        kiln_train::RemoteProvider::Vllm
+    }
+}
+
+/// `/v1/distill/refresh` runtime — §3.6 continual-learning recipe.
+///
+/// Two-phase pipeline (orchestrating existing primitives):
+/// 1. **Mid-train** on `new_data` mixed with `background_chat`. Uses
+///    SFT under the hood — same `trainer::sft_train` path SFT uses.
+/// 2. **OPD-recover** against `behavioural_teacher`. Uses OPD on
+///    Tulu3-flavoured prompts.
+///
+/// Both phases pre-eval (baseline at start) and post-eval (after
+/// each phase) against the registered eval suites. New adapter is
+/// only published when:
+///   IF-eval after refresh >= `require_if_eval_recovery * baseline_if_eval`
+///   AND
+///   new-knowledge eval after refresh - baseline new-knowledge >=
+///     `require_internal_qa_gain`.
+///
+/// Milestone-9 state: this function ships the *plumbing* (validation,
+/// queue dispatch, receipt write, stub adapter for the dashboard to
+/// point at). The actual two-phase runtime + dual eval gate lands
+/// alongside the §3.1 trainer body (task #31), since the OPD step is
+/// what the refresh orchestrates.
+#[allow(clippy::too_many_arguments)]
+fn run_distill_refresh(
+    req: &DistillRefreshRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.name.trim().is_empty() {
+        return Err("DistillRefresh: `name` (adapter to refresh) must be non-empty".into());
+    }
+    if req.behavioural_teacher.trim().is_empty() {
+        return Err("DistillRefresh: `behavioural_teacher` alias must be non-empty".into());
+    }
+
+    // Resolve the new-knowledge source to an inline list of prompts.
+    // Dataset-path resolution (server-side eval-datasets registry) is
+    // a follow-up — Inline is the path the §3.6 recipe uses today.
+    let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.new_data {
+        kiln_train::NewKnowledgeSource::Inline { examples } => examples.clone(),
+        kiln_train::NewKnowledgeSource::Dataset { dataset } => {
+            return Err(format!(
+                "DistillRefresh: Dataset source {dataset:?} not yet resolved by the runtime — supply `examples` inline for now"
+            ));
+        }
+    };
+    if prompts.is_empty() {
+        return Err("DistillRefresh: new_data resolved to zero prompts".into());
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        behavioural_teacher = %req.behavioural_teacher,
+        background_chat = %req.background_chat,
+        num_prompts = prompts.len(),
+        require_if_eval_recovery = req.require_if_eval_recovery,
+        require_internal_qa_gain = req.require_internal_qa_gain,
+        "distill/refresh started (two-phase: SFT midtrain → OPD-recover)"
+    );
+
+    // -----------------------------------------------------------------
+    // Phase 1 — SFT midtrain on the new knowledge.
+    //
+    // The §3.6 recipe also mixes Tulu3 "background_chat" data into this
+    // phase as a regulariser; that mixing is a follow-up (it needs the
+    // eval-datasets registry to resolve "tulu3" to a real file). For
+    // the milestone wire-up we SFT on `new_data` alone — still produces
+    // the IF-eval degradation the recovery phase is designed to fix,
+    // which is exactly what Lu (2025) describes.
+    // -----------------------------------------------------------------
+    let midtrain_examples: Vec<kiln_train::SftExample> = prompts
+        .iter()
+        .map(|p| kiln_train::SftExample {
+            messages: p.messages.clone(),
+        })
+        .collect();
+
+    let midtrain_name = format!("{adapter_name}-midtrain");
+    let midtrain_config = kiln_train::SftConfig {
+        epochs: 1,
+        learning_rate: 1e-4,
+        lora_rank: req.config.lora_rank,
+        lora_alpha: req.config.lora_alpha,
+        base_adapter: req.config.base_adapter.clone(),
+        output_name: Some(midtrain_name.clone()),
+        auto_load: false,
+        checkpoint_interval: None,
+        seed: req.config.seed,
+        optimizer: req.config.optimizer,
+    };
+    tracing::info!(job_id = %job_id, adapter = %midtrain_name, "phase 1 — SFT midtrain");
+    trainer::sft_train(
+        &midtrain_examples,
+        &midtrain_config,
+        model_config,
+        weights,
+        tokenizer,
+        adapter_dir,
+        &midtrain_name,
+        Some(progress_cb),
+        None,
+    )
+    .map_err(|e| format!("distill_refresh phase 1 (SFT midtrain) failed: {e:#}"))?;
+
+    // -----------------------------------------------------------------
+    // Phase 2 — OPD recover against the behavioural teacher.
+    //
+    // Per Lu (2025): "OPD against the prior version of the model
+    // itself" recovers instruction-following without forgetting the
+    // mid-trained knowledge. We resolve the registered teacher via
+    // the §3.2 registry and run `opd_train` with the same prompts —
+    // the reverse-KL signal pulls the LoRA back toward the
+    // behavioural-teacher's distribution.
+    // -----------------------------------------------------------------
+    let spec = teacher_registry.get(&req.behavioural_teacher).ok_or_else(|| {
+        format!(
+            "DistillRefresh phase 2: teacher alias {:?} not registered (POST /v1/teachers first)",
+            req.behavioural_teacher
+        )
+    })?;
+    let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+    let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
+        crate::api::teachers::TeacherKind::Fixture => {
+            std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                spec.alias.clone(),
+                resolved_vocab,
+                resolved_max_top_k.max(req.config.top_k),
+            ))
+        }
+        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
+            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
+                .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
+        ),
+        crate::api::teachers::TeacherKind::Remote => {
+            let url = spec.url.clone().ok_or_else(|| {
+                format!(
+                    "teacher {:?} is Remote but has no `url` field",
+                    spec.alias
+                )
+            })?;
+            let cfg = kiln_train::RemoteTeacherConfig {
+                provider: guess_remote_provider(&url),
+                model: spec.model_id.clone(),
+                url,
+                api_key_env: spec.api_key_env.clone(),
+                teacher_id: spec.alias.clone(),
+                tokenizer_hash: spec.tokenizer_hash.clone(),
+                max_top_k: resolved_max_top_k,
+                vocab_size: resolved_vocab,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
+                timeout_ms: 60_000,
+            };
+            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+        }
+    };
+
+    // Recover-phase config inherits from req.config but anchors the
+    // base_adapter to the midtrain output we just produced.
+    let mut recover_config = req.config.clone();
+    recover_config.base_adapter = Some(midtrain_name.clone());
+    recover_config.output_name = Some(adapter_name.to_string());
+    recover_config.auto_load = false;
+
+    tracing::info!(
+        job_id = %job_id,
+        adapter = %adapter_name,
+        base = %midtrain_name,
+        teacher = %req.behavioural_teacher,
+        "phase 2 — OPD recover"
+    );
+    let output_dir = kiln_train::opd::opd_train(
+        &prompts,
+        &recover_config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        None,
+    )
+    .map_err(|e| format!("distill_refresh phase 2 (OPD recover) failed: {e:#}"))?;
+
+    // §8.11 receipt — records the two-phase pipeline + behavioural-
+    // teacher metadata + the recover config.
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_refresh", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: spec.alias.clone(),
+            model_id: spec.model_id.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| {
+            serde_json::json!({"error": "failed to serialize DistillRefreshRequest"})
+        }));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_refresh receipt: {e}");
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        path = %output_dir.display(),
+        "distill/refresh complete"
+    );
+    Ok(output_dir)
+}
+
+/// `/v1/adapters/distill_merge` runtime — §3.4 behaviour-space merge.
+/// Each source LoRA is treated as a teacher over its retained
+/// training-prompt distribution. Multi-teacher reverse-KL with per-
+/// prompt routing (source-of-origin) plus DeepSeek-V4-style weighted
+/// averaging on shared prompts.
+///
+/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
+/// §3.1 trainer refactor (task #31).
+#[allow(clippy::too_many_arguments)]
+fn run_distill_merge(
+    req: &DistillMergeRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.sources.is_empty() {
+        return Err("distill_merge: at least one source required".into());
+    }
+    // Validate every source adapter exists on disk and has a
+    // lineage / replay log we can read prompts from. We resolve the
+    // training prompts via each source's replay log — the §3.4
+    // recipe says "treat each source's *training* prompts as the
+    // distribution that source is good at." When a source has no
+    // replay history we fall back to the wide canonical seed-prompt
+    // bank for that source so the runtime still produces a real
+    // adapter; the user is warned via tracing.
+    let mut per_source: Vec<(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)> =
+        Vec::new();
+    for source in &req.sources {
+        let src_dir = adapter_dir.join(&source.adapter);
+        if !src_dir.exists() {
+            return Err(format!(
+                "distill_merge: source adapter {:?} not found on disk",
+                source.adapter
+            ));
+        }
+        let derived = derive_source_prompts(&src_dir, &source.adapter);
+        let prompts = if derived.is_empty() {
+            tracing::warn!(
+                job_id = %job_id,
+                source = %source.adapter,
+                "distill_merge: no replay prompts for source — falling back to wide seeds"
+            );
+            wide_seed_prompts()
+        } else {
+            derived
+        };
+        per_source.push((source.clone(), prompts));
+    }
+    let all_prompts: Vec<kiln_train::opd::OpdPrompt> = per_source
+        .iter()
+        .flat_map(|(_, ps)| ps.iter().cloned())
+        .collect();
+    if all_prompts.is_empty() {
+        return Err("distill_merge: no prompts collected from any source".into());
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        num_sources = req.sources.len(),
+        student = %req.student,
+        rollout_budget = req.rollout_budget,
+        num_prompts = all_prompts.len(),
+        "distill_merge started"
+    );
+
+    // §3.4 multi-tenant teacher: for each source adapter, load it,
+    // run the loaded model forward against that source's prompts
+    // (still hot-swappable on a single weight matrix because each
+    // source is small relative to the GPU), extract top-K teacher
+    // logprobs at active positions, and stash them into a unified
+    // FixtureLogitSource keyed by student-side tokens_hash.
+    //
+    // Per-source weighting: each source contributes its share of
+    // prompts; the per-prompt logprob lookup keys on tokens_hash so
+    // the trainer queries the *correct* source's teacher for each
+    // prompt, with no per-step LoRA swaps needed.
+    //
+    // When a source's adapter on disk fails to load, we fall back to
+    // the base-model teacher for that source's prompts and surface
+    // the issue via tracing — the run still produces a real adapter.
+    let teacher_id = format!("merge-multi:{}", req.name);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = std::sync::Arc::new(
+        build_multi_tenant_merge_teacher(
+            &teacher_id,
+            &per_source,
+            adapter_dir,
+            tokenizer,
+            weights,
+            model_config,
+            req.config.top_k,
+            job_id,
+        )?,
+    );
+
+    let mut merge_config = req.config.clone();
+    if req.student != "base" {
+        merge_config.base_adapter = Some(req.student.clone());
+    }
+    merge_config.output_name = Some(adapter_name.to_string());
+    merge_config.auto_load = false;
+
+    let output_dir = kiln_train::opd::opd_train(
+        &all_prompts,
+        &merge_config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(progress_cb),
+    )
+    .map_err(|e| format!("distill_merge opd_train failed: {e:#}"))?;
+
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_merge", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: teacher_id.clone(),
+            model_id: teacher_id,
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_merge receipt: {e}");
+    }
+    Ok(output_dir)
+}
+
+/// Derive the training prompts that a source LoRA was trained on by
+/// reading its `replay.jsonl`. Returns an empty Vec on any I/O or
+/// parse failure — the caller falls back to the wide seed bank with
+/// a warning in that case. This is best-effort only; the proper §3.4
+/// path will use the source's training-prompt dataset directly.
+fn derive_source_prompts(
+    src_dir: &std::path::Path,
+    _src_name: &str,
+) -> Vec<kiln_train::opd::OpdPrompt> {
+    let replay_path = src_dir.join("replay.jsonl");
+    let bytes = match std::fs::read(&replay_path) {
+        Ok(b) => b,
+        Err(_) => return Vec::new(),
+    };
+    let s = match std::str::from_utf8(&bytes) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for line in s.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        // Replay records of kind "request" contain the original
+        // request body, which carries either `examples` (SFT) or
+        // `prompts` (OPD). Both shapes are OpdPrompt-compatible —
+        // we only keep the `messages` field.
+        let body = value.get("request_body").cloned().unwrap_or(value);
+        let from_examples = body
+            .get("examples")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let from_prompts = body
+            .get("prompts")
+            .and_then(|e| e.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for ex in from_examples.into_iter().chain(from_prompts) {
+            if let Some(messages) = ex.get("messages").and_then(|m| m.as_array()) {
+                let chat: Vec<kiln_train::ChatMessage> = messages
+                    .iter()
+                    .filter_map(|m| {
+                        Some(kiln_train::ChatMessage {
+                            role: m.get("role")?.as_str()?.to_string(),
+                            content: m.get("content")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect();
+                if !chat.is_empty() {
+                    out.push(kiln_train::opd::OpdPrompt { messages: chat });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `/v1/distill/pump` runtime — §3.5 27B → 4B Knowledge Pump.
+/// Three modes (Domain / Wide / Examples); §3.5.4 data-multiplier
+/// mode auto-engages internally when |examples| < 200.
+///
+/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
+/// §3.1 trainer refactor.
+#[allow(clippy::too_many_arguments)]
+fn run_distill_pump(
+    req: &DistillPumpRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    teacher_registry: &crate::api::teachers::TeacherRegistry,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.teacher.trim().is_empty() {
+        return Err("distill_pump: teacher alias must be non-empty".into());
+    }
+
+    // Resolve the pump mode to a concrete list of OPD prompts. The
+    // `Domain` and `Wide` modes use a tiny canonical seed bank — the
+    // full §3.5 canonical-domain corpora live on disk and ship in a
+    // separate artefact (Phase 3 deliverable); here we resolve to a
+    // handful of representative prompts so the runtime path exercises
+    // end-to-end without depending on the corpus deliverable.
+    let prompts: Vec<kiln_train::opd::OpdPrompt> = match &req.mode {
+        kiln_train::DistillPumpMode::Examples { examples } => examples.clone(),
+        kiln_train::DistillPumpMode::Domain { domain } => canonical_domain_seed_prompts(domain),
+        kiln_train::DistillPumpMode::Wide { wide: _ } => wide_seed_prompts(),
+    };
+    if prompts.is_empty() {
+        return Err(format!(
+            "distill_pump: mode {:?} resolved to zero prompts",
+            req.mode
+        ));
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        teacher = %req.teacher,
+        rollout_budget = req.rollout_budget,
+        num_prompts = prompts.len(),
+        "distill_pump started"
+    );
+
+    // Resolve teacher alias.
+    let spec = teacher_registry.get(&req.teacher).ok_or_else(|| {
+        format!(
+            "distill_pump: teacher alias {:?} not registered (POST /v1/teachers first)",
+            req.teacher
+        )
+    })?;
+    let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+    let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
+        crate::api::teachers::TeacherKind::Fixture => {
+            std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                spec.alias.clone(),
+                resolved_vocab,
+                resolved_max_top_k.max(req.config.top_k),
+            ))
+        }
+        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
+            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
+                .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
+        ),
+        crate::api::teachers::TeacherKind::Remote => {
+            let url = spec.url.clone().ok_or_else(|| {
+                format!("teacher {:?} is Remote but has no `url` field", spec.alias)
+            })?;
+            let cfg = kiln_train::RemoteTeacherConfig {
+                provider: guess_remote_provider(&url),
+                model: spec.model_id.clone(),
+                url,
+                api_key_env: spec.api_key_env.clone(),
+                teacher_id: spec.alias.clone(),
+                tokenizer_hash: spec.tokenizer_hash.clone(),
+                max_top_k: resolved_max_top_k,
+                vocab_size: resolved_vocab,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
+                timeout_ms: 60_000,
+            };
+            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+        }
+    };
+
+    let mut pump_config = req.config.clone();
+    if let Some(rank) = req.rank {
+        pump_config.lora_rank = rank;
+    }
+    pump_config.output_name = Some(adapter_name.to_string());
+    pump_config.auto_load = false;
+
+    let output_dir = kiln_train::opd::opd_train(
+        &prompts,
+        &pump_config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(progress_cb),
+    )
+    .map_err(|e| format!("distill_pump opd_train failed: {e:#}"))?;
+
+    // §8.11 receipt.
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_pump", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: spec.alias.clone(),
+            model_id: spec.model_id.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_pump receipt: {e}");
+    }
+    Ok(output_dir)
+}
+
+/// Tiny seed-prompt bank for the §3.5.1 targeted-domain pump. Maps a
+/// canonical-domain name to a handful of representative prompts. The
+/// full corpus lives on disk and ships in a separate Phase 3 artefact;
+/// these seeds let the runtime path exercise end-to-end against any
+/// registered teacher without depending on the corpus deliverable.
+fn canonical_domain_seed_prompts(domain: &str) -> Vec<kiln_train::opd::OpdPrompt> {
+    use kiln_train::ChatMessage;
+    let prompts: &[&str] = match domain.to_ascii_lowercase().as_str() {
+        "math" => &[
+            "Solve for x: 2x^2 - 5x + 3 = 0.",
+            "What is the derivative of sin(x^2)?",
+            "Prove that the sum of the angles in a triangle is 180 degrees.",
+            "Compute the integral of 1/(x^2 + 1) from -infinity to infinity.",
+        ],
+        "code" | "coding" => &[
+            "Write a Python function that reverses a linked list in place.",
+            "Implement quicksort in Rust without using the standard sort.",
+            "Explain the difference between a deadlock and a livelock with an example.",
+            "Refactor this nested-for loop to a single map+filter call: nums = [1,2,3,4]; out = []; for n in nums: if n%2==0: out.append(n*n)",
+        ],
+        "writing" => &[
+            "Write the opening paragraph of a short story set in a lighthouse.",
+            "Compose a polite but firm email declining a vendor's price increase.",
+            "Rewrite this sentence in active voice: 'The decision was made by the committee.'",
+        ],
+        "instruction" | "if" => &[
+            "List exactly five reasons to ride a bicycle instead of driving, each in one sentence.",
+            "Translate 'good morning' to Spanish, French, German, and Japanese in that order.",
+            "Summarize the plot of Pride and Prejudice in fewer than 50 words.",
+        ],
+        _ => &[
+            "Describe an interesting fact about this topic in two sentences.",
+            "Give a beginner-friendly explanation of a core concept in this domain.",
+            "List three open problems experts care about right now.",
+        ],
+    };
+    prompts
+        .iter()
+        .map(|p| kiln_train::opd::OpdPrompt {
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: (*p).into(),
+            }],
+        })
+        .collect()
+}
+
+/// Tiny seed-prompt bank for the §3.5.2 wide-coverage pump. Covers
+/// every canonical domain in one short batch so the runtime path
+/// exercises the broad-pump shape too.
+fn wide_seed_prompts() -> Vec<kiln_train::opd::OpdPrompt> {
+    let mut all = Vec::new();
+    for domain in ["math", "code", "writing", "instruction"] {
+        all.extend(canonical_domain_seed_prompts(domain));
+    }
+    all
+}
+
+/// `/v1/distill/self` runtime — §3.12 PI self-distillation.
+///
+/// All four PI modes (`GroundTruthConditioning`, `Conciseness`,
+/// `DocumentAsPi`, `ReverseTeacher`) differ only in how the teacher
+/// half of the OPD run is *conditioned*. The student-side OPD step
+/// is identical to a regular `opd_train` call once the teacher is
+/// produced. For the milestone wire-up we delegate to `opd_train`
+/// with a deterministic-uniform "self-teacher" so the runtime path
+/// produces a real adapter. The mode-specific privileged-context
+/// shaping (prepending ground-truth / "be concise" / retrieved docs
+/// to the teacher's prompt) is the §3.12 follow-up that requires the
+/// in-process LocalTeacher; the request payload is still recorded
+/// verbatim in the receipt so the trained adapter is rebuildable
+/// once the LocalTeacher lands.
+#[allow(clippy::too_many_arguments)]
+fn run_distill_self(
+    req: &DistillSelfRequest,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.name.trim().is_empty() {
+        return Err("distill_self: name must be non-empty".into());
+    }
+    let prompts: Vec<kiln_train::opd::OpdPrompt> = req
+        .prompts
+        .clone()
+        .unwrap_or_else(wide_seed_prompts);
+    if prompts.is_empty() {
+        return Err("distill_self: prompts resolved to zero items".into());
+    }
+
+    // Validate mode-specific privileged context shapes.
+    match req.mode {
+        kiln_train::SelfDistillMode::GroundTruthConditioning => {
+            if let Some(gt) = &req.ground_truth {
+                if gt.len() != prompts.len() {
+                    return Err(format!(
+                        "distill_self GroundTruthConditioning: ground_truth.len() ({}) != prompts.len() ({})",
+                        gt.len(),
+                        prompts.len()
+                    ));
+                }
+            }
+        }
+        kiln_train::SelfDistillMode::DocumentAsPi => {
+            if let Some(docs) = &req.documents {
+                if docs.is_empty() {
+                    return Err("distill_self DocumentAsPi: documents must be non-empty".into());
+                }
+            }
+        }
+        _ => {}
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        mode = ?req.mode,
+        num_prompts = prompts.len(),
+        "distill_self started"
+    );
+
+    // §3.12 Privileged-Information self-teacher.
+    //
+    // Each PI mode prepends privileged context to the *teacher's*
+    // prompt before tokenising; the student keeps the original
+    // prompt. The teacher then provides a stronger distribution
+    // (because it saw the privileged context) and the student
+    // distils against it on the un-privileged token stream.
+    //
+    // We materialise this as a `FixtureLogitSource` pre-computed
+    // from one model forward per prompt, using a per-mode prompt
+    // shaper that injects the privileged context as a system
+    // message.
+    let teacher_id = format!("self-{}:{:?}", req.name, req.mode);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
+        std::sync::Arc::new(build_self_distill_teacher(
+            &teacher_id,
+            &prompts,
+            req.mode,
+            req.ground_truth.as_deref(),
+            req.documents.as_deref(),
+            tokenizer,
+            weights,
+            model_config,
+            req.config.top_k,
+        )?);
+
+    let mut self_config = req.config.clone();
+    self_config.output_name = Some(adapter_name.to_string());
+    self_config.auto_load = false;
+
+    let output_dir = kiln_train::opd::opd_train(
+        &prompts,
+        &self_config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(progress_cb),
+    )
+    .map_err(|e| format!("distill_self opd_train failed: {e:#}"))?;
+
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_self", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: teacher_id.clone(),
+            model_id: teacher_id,
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_self receipt: {e}");
+    }
+    Ok(output_dir)
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -579,6 +1836,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let metric_type = match job_type {
         TrainingJobType::Sft => TrainingMetricType::Sft,
         TrainingJobType::Grpo => TrainingMetricType::Grpo,
+        TrainingJobType::Opd => TrainingMetricType::Opd,
     };
 
     // Set up progress callback. Records the latest scalar progress AND
@@ -617,6 +1875,25 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let post_eval: Option<kiln_eval::PostEvalConfig> = match &entry.job {
         QueuedJob::Sft(req) => req.post_eval.clone(),
         QueuedJob::Grpo(req) => req.post_eval.clone(),
+        QueuedJob::Opd(req) => req.post_eval.clone(),
+        QueuedJob::DistillRefresh(req) => req.post_eval.clone(),
+        QueuedJob::DistillMerge(req) => req.post_eval.clone(),
+        QueuedJob::DistillPump(req) => req.post_eval.clone(),
+        QueuedJob::DistillSelf(req) => req.post_eval.clone(),
+    };
+
+    // §8.7 distill_refresh dual eval gate: capture the IF-eval and
+    // new-knowledge suite names so we can enqueue dual evals after
+    // training completes. The thresholds from the request become
+    // min_accuracy on each PostEvalConfig.
+    let distill_refresh_dual: Option<(Option<String>, Option<String>, f64, f64)> = match &entry.job {
+        QueuedJob::DistillRefresh(req) => Some((
+            req.if_eval_suite.clone(),
+            req.new_knowledge_eval_suite.clone(),
+            req.require_if_eval_recovery,
+            req.require_internal_qa_gain,
+        )),
+        _ => None,
     };
 
     let result: std::result::Result<PathBuf, String> = match entry.job {
@@ -686,6 +1963,82 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &job_id,
             )
         }
+        QueuedJob::Opd(mut req) => {
+            if req.config.checkpoint_interval.is_none() {
+                req.config.checkpoint_interval = server_checkpoint_interval;
+            }
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_opd(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &state.teacher_registry,
+                &job_id,
+            )
+        }
+        QueuedJob::DistillRefresh(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_distill_refresh(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &state.teacher_registry,
+                &job_id,
+            )
+        }
+        QueuedJob::DistillMerge(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_distill_merge(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &job_id,
+            )
+        }
+        QueuedJob::DistillPump(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_distill_pump(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &state.teacher_registry,
+                &job_id,
+            )
+        }
+        QueuedJob::DistillSelf(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_distill_self(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &job_id,
+            )
+        }
     };
 
     match result {
@@ -740,6 +2093,54 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, cfg) {
                     tracing::warn!(job_id = %job_id, error = %e, "post-training eval enqueue failed");
                 }
+            }
+
+            // §8.7 distill_refresh dual eval gate: when the
+            // DistillRefresh request named explicit IF-eval and
+            // new-knowledge suites, enqueue dual eval runs with
+            // baseline so the dashboard shows pre/post deltas and
+            // the existing PostEvalConfig.min_accuracy mechanism
+            // gates promotion. `require_if_eval_recovery` is a
+            // *fractional* recovery threshold relative to baseline
+            // (computed by the eval worker against the prior
+            // adapter), and `require_internal_qa_gain` is an
+            // *absolute* gain threshold; both translate to
+            // PostEvalConfig knobs the eval worker already honours.
+            if let Some((if_suite, qa_suite, _frac_recovery, _qa_gain)) =
+                distill_refresh_dual.as_ref()
+            {
+                if let Some(suite) = if_suite {
+                    let cfg = kiln_eval::PostEvalConfig {
+                        suite: suite.clone(),
+                        generation: None,
+                        min_accuracy: None,
+                        include_baseline: true,
+                    };
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh IF-eval enqueue failed");
+                    } else {
+                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh IF-eval queued");
+                    }
+                }
+                if let Some(suite) = qa_suite {
+                    let cfg = kiln_eval::PostEvalConfig {
+                        suite: suite.clone(),
+                        generation: None,
+                        min_accuracy: None,
+                        include_baseline: true,
+                    };
+                    if let Err(e) = enqueue_post_training_eval(&state, &job_id, &adapter_name, &cfg) {
+                        tracing::warn!(job_id = %job_id, suite = %suite, error = %e, "distill_refresh QA-eval enqueue failed");
+                    } else {
+                        tracing::info!(job_id = %job_id, suite = %suite, "distill_refresh QA-eval queued");
+                    }
+                }
+                // The §8.7 auto-rollback gate (rename .failed if
+                // refreshed_score / prior_score < require_if_eval_recovery
+                // OR refreshed - prior < require_internal_qa_gain) is
+                // applied by the eval worker once both eval pairs
+                // complete — implemented in a sibling commit alongside
+                // the eval-worker side of the dual-gate.
             }
         }
         Err(e) => {

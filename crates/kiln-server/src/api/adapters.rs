@@ -1249,6 +1249,27 @@ async fn adapter_detail(
     }))
 }
 
+/// `GET /v1/adapters/{name}/receipt` — return the §8.11 reproducibility
+/// receipt for the adapter, or 404 when no receipt is on disk.
+async fn adapter_receipt(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<kiln_train::AdapterReceipt>, ApiError> {
+    let adapter_dir = state.adapter_dir.join(&name);
+    if !adapter_dir.exists() {
+        return Err(ApiError::adapter_not_found(&name));
+    }
+    match kiln_train::AdapterReceipt::read_from_adapter_dir(&adapter_dir) {
+        Ok(Some(r)) => Ok(Json(r)),
+        Ok(None) => Err(ApiError::adapter_not_found(&format!(
+            "{name}/receipt.json"
+        ))),
+        Err(e) => Err(ApiError::internal(format!(
+            "failed to read adapter receipt for {name}: {e:#}"
+        ))),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/v1/adapters", get(list_adapters))
@@ -1262,4 +1283,5 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/adapters/{name}", delete(delete_adapter))
         .route("/v1/adapters/{name}/detail", get(adapter_detail))
         .route("/v1/adapters/{name}/download", get(download_adapter))
+        .route("/v1/adapters/{name}/receipt", get(adapter_receipt))
 }

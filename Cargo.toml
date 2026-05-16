@@ -10,6 +10,7 @@ members = [
     "crates/kiln-marlin-gemm",
     "crates/kiln-model",
     "crates/kiln-nvtx",
+    "crates/kiln-opd-loss-kernel",
     "crates/kiln-rmsnorm-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
@@ -30,6 +31,7 @@ default-members = [
     "crates/kiln-flce-kernel",
     "crates/kiln-model",
     "crates/kiln-nvtx",
+    "crates/kiln-opd-loss-kernel",
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-train",
@@ -99,6 +101,7 @@ kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
+kiln-opd-loss-kernel = { path = "crates/kiln-opd-loss-kernel" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
 kiln-vulkan-kernel = { path = "crates/kiln-vulkan-kernel" }
 # Random number generation

@@ -12,7 +12,8 @@ use axum::{
 
 use kiln_core::env_flag::env_tristate;
 use kiln_train::{
-    GrpoGroup, GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
+    DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest, GrpoGroup,
+    GrpoRequest, OpdRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
 };
 use serde::Serialize;
 
@@ -482,6 +483,391 @@ async fn submit_grpo(
     }))
 }
 
+/// `POST /v1/train/opd` — submit an On-Policy Distillation training run.
+///
+/// Mirror of `submit_grpo` adapted to the §3.1 OPD recipe. The request
+/// shape is `OpdRequest` (defined in `kiln-train::opd`): a list of
+/// prompts, a teacher alias, and an `OpdConfig` whose §6 paper-cited
+/// defaults match the grand plan exactly (top_k=32, temperature=1.0,
+/// top_p=0.9, max_tokens=7K, γ=0, Stable-OPD auto, etc.).
+///
+/// Same queue / hot-swap / auto-load / post-eval semantics as SFT/GRPO.
+/// Job tracking via `/v1/train/status`, `/v1/train/queue`, etc.
+async fn submit_opd(
+    State(state): State<AppState>,
+    Json(mut req): Json<OpdRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    // Reject during shutdown.
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+
+    // Queue / tracking caps — mirror SFT/GRPO.
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+
+    // Trim a blank dataset_path the same way GRPO does.
+    if let Some(path) = req.dataset_path.take() {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            req.dataset_path = Some(path);
+        }
+    }
+
+    if req.prompts.is_empty() && req.dataset_path.is_none() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must include at least one prompt or a dataset_path".to_string(),
+        ));
+    }
+    if req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must specify a teacher alias (e.g. \"qwen3.6-27b@local\")".to_string(),
+        ));
+    }
+    if req.config.top_k == 0 {
+        return Err(ApiError::training_invalid_request(
+            "OPD top_k must be > 0".to_string(),
+        ));
+    }
+    if req.config.samples_per_prompt == 0 {
+        return Err(ApiError::training_invalid_request(
+            "OPD samples_per_prompt must be > 0".to_string(),
+        ));
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req
+        .config
+        .output_name
+        .clone()
+        .unwrap_or_else(|| format!("opd-{}", &job_id[..8]));
+    let auto_load = req.config.auto_load;
+
+    tracing::info!(
+        num_prompts = req.prompts.len(),
+        teacher = %req.teacher,
+        loss = ?req.config.loss,
+        top_k = req.config.top_k,
+        samples_per_prompt = req.config.samples_per_prompt,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        "OPD training request queued"
+    );
+
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+
+    // Register the job and enqueue. OPD now runs through the real
+    // trainer body (kiln_train::opd::opd_train) — same GPU lock /
+    // replay / hot-swap / receipt semantics as SFT and GRPO. Wiring
+    // OPD into the SFT/GRPO working-set preflight (so the §8.5
+    // capacity calc applies) is a follow-up.
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
+        auto_load,
+        finished_at: None,
+        finished_unix_ms: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+
+    let queue_position = {
+        let mut q = state.training_queue.lock().unwrap();
+        q.push(QueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedJob::Opd(req),
+        });
+        q.len()
+    };
+
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: format!(
+            "Queued OPD training (position {queue_position} in queue)."
+        ),
+    }))
+}
+
+/// `POST /v1/distill/refresh` — §3.6 continual-learning recipe
+/// (Lu 2025 instruction-following recovery experiment).
+///
+/// Body: [`DistillRefreshRequest`]. The runtime mid-trains on
+/// `new_data` then OPD-recovers against the prior-self
+/// `behavioural_teacher`, gated on dual eval (IF-eval recovery +
+/// new-knowledge gain). Same queue / receipt / auto-load semantics
+/// as `/v1/train/opd`.
+async fn submit_distill_refresh(
+    State(state): State<AppState>,
+    Json(req): Json<DistillRefreshRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "DistillRefresh: `name` must be non-empty".to_string(),
+        ));
+    }
+    if req.behavioural_teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&req.require_if_eval_recovery) {
+        return Err(ApiError::training_invalid_request(
+            "require_if_eval_recovery must be in [0.0, 1.0]".to_string(),
+        ));
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = format!("{}@refresh-{}", req.name, &job_id[..8]);
+    let auto_load = req.config.auto_load;
+
+    tracing::info!(
+        name = %req.name,
+        behavioural_teacher = %req.behavioural_teacher,
+        background_chat = %req.background_chat,
+        require_if_eval_recovery = req.require_if_eval_recovery,
+        require_internal_qa_gain = req.require_internal_qa_gain,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        "distill/refresh request queued"
+    );
+
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        // Reuse the Opd job type — refresh is structurally an OPD run
+        // with extra orchestration. Dashboards group both as OPD-class.
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
+        auto_load,
+        finished_at: None,
+        finished_unix_ms: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+
+    let queue_position = {
+        let mut q = state.training_queue.lock().unwrap();
+        q.push(QueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedJob::DistillRefresh(req),
+        });
+        q.len()
+    };
+
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: format!(
+            "Queued distill/refresh (position {queue_position} in queue)."
+        ),
+    }))
+}
+
+/// `POST /v1/adapters/distill_merge` — §3.4 behaviour-space merge.
+async fn submit_distill_merge(
+    State(state): State<AppState>,
+    Json(req): Json<DistillMergeRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.sources.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: `sources` must be non-empty".to_string(),
+        ));
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: `name` must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillMerge(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill_merge.".to_string(),
+    }))
+}
+
+/// `POST /v1/distill/pump` — §3.5 Knowledge Pump.
+async fn submit_distill_pump(
+    State(state): State<AppState>,
+    Json(req): Json<DistillPumpRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/pump: `teacher` alias must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillPump(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill/pump.".to_string(),
+    }))
+}
+
+/// `POST /v1/distill/self` — §3.12 PI self-distillation.
+async fn submit_distill_self(
+    State(state): State<AppState>,
+    Json(req): Json<DistillSelfRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/self: `name` must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillSelf(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill/self.".to_string(),
+    }))
+}
+
+/// Shared queue-cap enforcement used by all distill_* endpoints.
+fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
+    let max_queued = state.max_queued_training_jobs;
+    if state.training_queue.lock().unwrap().len() >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    if state.training_jobs.read().unwrap().len() >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+    Ok(())
+}
+
+/// Shared registration+enqueue for distill_* endpoints. Same shape as
+/// `submit_distill_refresh`/`submit_opd` but inlined for the simpler
+/// distill variants.
+fn register_and_enqueue_distill(
+    state: &AppState,
+    job_id: &str,
+    adapter_name: &str,
+    auto_load: bool,
+    job: QueuedJob,
+) {
+    let info = TrainingJobInfo {
+        job_id: job_id.to_string(),
+        adapter_name: adapter_name.to_string(),
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
+        auto_load,
+        finished_at: None,
+        finished_unix_ms: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.to_string(), info);
+    let mut q = state.training_queue.lock().unwrap();
+    q.push(QueueEntry {
+        job_id: job_id.to_string(),
+        job,
+    });
+}
+
 fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatus {
     TrainingStatus {
         job_id: j.job_id.clone(),
@@ -497,6 +883,7 @@ fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatu
             match j.job_type {
                 TrainingJobType::Sft => "sft",
                 TrainingJobType::Grpo => "grpo",
+                TrainingJobType::Opd => "opd",
             }
             .into(),
         ),
@@ -615,6 +1002,7 @@ async fn cancel_queued_job(
             let mt = match jt {
                 TrainingJobType::Sft => TrainingMetricType::Sft,
                 TrainingJobType::Grpo => TrainingMetricType::Grpo,
+                TrainingJobType::Opd => TrainingMetricType::Opd,
             };
             state
                 .metrics
@@ -691,6 +1079,9 @@ const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Body-size cap for GRPO training submissions (audit LOW §1).
 /// 64 MiB accommodates batches of scored completions.
 const GRPO_BODY_LIMIT: usize = 64 * 1024 * 1024;
+/// Body-size cap for OPD training submissions. Matches GRPO since the
+/// payload shape — prompts + config — is structurally similar.
+const OPD_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Rich detail payload exposed at `GET /v1/train/jobs/:job_id`. Flattens
 /// `TrainingStatus` so the wire shape stays a superset (no field drift)
@@ -749,6 +1140,26 @@ pub fn routes() -> Router<AppState> {
             "/v1/train/grpo",
             post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
         )
+        .route(
+            "/v1/train/opd",
+            post(submit_opd).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/distill/refresh",
+            post(submit_distill_refresh).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/adapters/distill_merge",
+            post(submit_distill_merge).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/distill/pump",
+            post(submit_distill_pump).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/distill/self",
+            post(submit_distill_self).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
         .route(
@@ -762,7 +1173,8 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_train::{ChatMessage, GrpoConfig, ScoredCompletion};
+    use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
+    use kiln_train::opd::{OpdConfig, OpdPrompt};
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
@@ -818,5 +1230,71 @@ mod tests {
         assert_eq!(stats.num_groups, None);
         assert_eq!(stats.total_completions, None);
         assert!(stats.max_seq_len > 0);
+    }
+
+    fn opd_request_payload() -> OpdRequest {
+        OpdRequest {
+            prompts: vec![OpdPrompt {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Solve 5x + 7 = 22".into(),
+                }],
+            }],
+            dataset_path: None,
+            teacher: "qwen3.6-27b@local".into(),
+            config: OpdConfig::default(),
+            post_eval: None,
+        }
+    }
+
+    #[test]
+    fn opd_request_serde_round_trip_carries_grand_plan_defaults() {
+        let req = opd_request_payload();
+        let json = serde_json::to_string(&req).expect("serialize");
+        let parsed: OpdRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.teacher, "qwen3.6-27b@local");
+        assert_eq!(parsed.config.top_k, 32);
+        assert_eq!(parsed.config.samples_per_prompt, 4);
+        assert!((parsed.config.top_p - 0.9).abs() < 1e-9);
+        assert!(matches!(parsed.config.loss, OpdLossGranularity::TeacherTopK));
+        assert_eq!(parsed.config.max_tokens, 7168);
+    }
+
+    #[test]
+    fn opd_request_accepts_dataset_path_in_place_of_prompts() {
+        // A streaming-dataset payload — no inline prompts but a
+        // `dataset_path` set. The `submit_opd` handler treats this as
+        // valid; tested at the wire level.
+        let json = r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@openrouter"}"#;
+        let req: OpdRequest = serde_json::from_str(json).unwrap();
+        assert!(req.prompts.is_empty());
+        assert_eq!(req.dataset_path.as_deref(), Some("/tmp/opd.jsonl"));
+        assert_eq!(req.teacher, "qwen3.6-27b@openrouter");
+    }
+
+    #[test]
+    fn opd_request_rejects_unknown_loss_granularity() {
+        let json = r#"{"prompts":[],"teacher":"x","config":{"loss":"sampled_lobotomy"}}"#;
+        let parsed: Result<OpdRequest, _> = serde_json::from_str(json);
+        assert!(
+            parsed.is_err(),
+            "unknown loss value should fail to deserialize"
+        );
+    }
+
+    #[test]
+    fn distill_refresh_request_minimal_json_parses() {
+        let json = r#"{
+            "name": "company-assistant",
+            "new_data": {"dataset": "q4-2026"},
+            "behavioural_teacher": "company-assistant@v17"
+        }"#;
+        let req: DistillRefreshRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "company-assistant");
+        assert_eq!(req.behavioural_teacher, "company-assistant@v17");
+        // Defaults populate.
+        assert_eq!(req.background_chat, "tulu3");
+        assert!((req.require_if_eval_recovery - 0.95).abs() < 1e-9);
+        assert!((req.require_internal_qa_gain - 0.05).abs() < 1e-9);
     }
 }

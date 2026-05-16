@@ -1,0 +1,19 @@
+name: learn-from-my-pi-history
+description: |
+  §10.8 day-one agentic recipe: continual learning from the user's
+  own pi sessions.
+
+  Reads agent_traces from the §10.3 layer (discovered via the
+  `agent_traces:user-pi` synthetic dataset reference), runs OPD on
+  successful trajectories, and lands a refreshed agent adapter on
+  the §3.9 dual-eval gate.
+
+steps:
+  - kind: opd
+    name: pi-coder-refresh
+    teacher: qwen3.6-27b@local
+    prompts_from:
+      dataset: agent_traces:user-pi
+    config:
+      top_k: 32
+      samples_per_prompt: 4

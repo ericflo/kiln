@@ -83,6 +83,9 @@ pub struct Metrics {
     pub training_grpo_completed: AtomicU64,
     pub training_grpo_failed: AtomicU64,
     pub training_grpo_cancelled: AtomicU64,
+    pub training_opd_completed: AtomicU64,
+    pub training_opd_failed: AtomicU64,
+    pub training_opd_cancelled: AtomicU64,
 }
 
 impl Metrics {
@@ -111,6 +114,9 @@ impl Metrics {
             training_grpo_completed: AtomicU64::new(0),
             training_grpo_failed: AtomicU64::new(0),
             training_grpo_cancelled: AtomicU64::new(0),
+            training_opd_completed: AtomicU64::new(0),
+            training_opd_failed: AtomicU64::new(0),
+            training_opd_cancelled: AtomicU64::new(0),
         }
     }
 
@@ -190,6 +196,15 @@ impl Metrics {
             }
             (TrainingMetricType::Grpo, TrainingMetricStatus::Cancelled) => {
                 self.training_grpo_cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Opd, TrainingMetricStatus::Completed) => {
+                self.training_opd_completed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Opd, TrainingMetricStatus::Failed) => {
+                self.training_opd_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            (TrainingMetricType::Opd, TrainingMetricStatus::Cancelled) => {
+                self.training_opd_cancelled.fetch_add(1, Ordering::Relaxed);
             }
         };
     }
@@ -721,6 +736,33 @@ impl Metrics {
             "cancelled",
             self.training_grpo_cancelled.load(Ordering::Relaxed),
         );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "opd",
+            "status",
+            "completed",
+            self.training_opd_completed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "opd",
+            "status",
+            "failed",
+            self.training_opd_failed.load(Ordering::Relaxed),
+        );
+        prom_counter2(
+            &mut out,
+            "kiln_training_jobs_total",
+            "type",
+            "opd",
+            "status",
+            "cancelled",
+            self.training_opd_cancelled.load(Ordering::Relaxed),
+        );
 
         out.push_str("# HELP kiln_training_active Currently running training job.\n");
         out.push_str("# TYPE kiln_training_active gauge\n");
@@ -782,6 +824,7 @@ pub enum RequestStatus {
 pub enum TrainingMetricType {
     Sft,
     Grpo,
+    Opd,
 }
 
 #[derive(Clone, Copy)]

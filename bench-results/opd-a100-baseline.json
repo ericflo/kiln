@@ -1,0 +1,20 @@
+{
+  "comment": "kiln-opd-loss-kernel forward-throughput baseline captured on an NVIDIA A100 80GB PCIe (CUDA 12.4, driver 565.57.01) at kiln commit c40ecf89 via `crates/kiln-opd-loss-kernel/examples/bench_opd_topk_kl.rs` (forward-only `FWD T=...` rows). §9.9 of the grand plan: the bench gate fails any PR that regresses any kernel_tok_s entry by more than 5% versus the baseline matching the runner's GPU. Captured by scripts/opd_phase0_pod_validation.sh; logs in /workspace/opd-phase0-validation.json on lease pod-63eb259201cc8a3ae830ce1a.",
+  "device": "Cuda(CudaDevice(DeviceId(0)))",
+  "device_label": "NVIDIA A100 80GB PCIe",
+  "kiln_commit": "c40ecf8960f163717018780ab452cb6c2942c123",
+  "regression_threshold_pct": 5.0,
+  "shape": {
+    "hidden_size": 2560,
+    "vocab_size": 32000
+  },
+  "rows": [
+    {"T": 256,  "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 461537, "kernel_ms":  0.555, "candle_ms":  0.965, "speedup_x": 1.74},
+    {"T": 512,  "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 580171, "kernel_ms":  0.882, "candle_ms":  2.299, "speedup_x": 2.61},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 707025, "kernel_ms":  1.448, "candle_ms":  6.064, "speedup_x": 4.19},
+    {"T": 4096, "H": 2560, "V": 32000, "K": 32, "dtype": "F32",  "kernel_tok_s": 630896, "kernel_ms":  6.492, "candle_ms": 29.761, "speedup_x": 4.58},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 16, "dtype": "F32",  "kernel_tok_s": 1088214,"kernel_ms":  0.941, "candle_ms":  3.166, "speedup_x": 3.36},
+    {"T": 1024, "H": 2560, "V": 32000, "K": 32, "dtype": "BF16", "kernel_tok_s": 912908, "kernel_ms":  1.122, "candle_ms":  7.959, "speedup_x": 7.10},
+    {"T": 4096, "H": 2560, "V": 32000, "K": 32, "dtype": "BF16", "kernel_tok_s": 735164, "kernel_ms":  5.572, "candle_ms": 26.087, "speedup_x": 4.68}
+  ]
+}

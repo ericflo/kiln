@@ -2927,6 +2927,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
     Evals
     <span class="count" data-count="evals" id="evals-count">0</span>
   </button>
+  <button type="button" class="primary-tab" data-page="distill" role="tab" aria-selected="false" aria-controls="page-distill" id="primary-tab-distill">
+    Distill
+  </button>
   <button type="button" class="primary-tab" data-page="playground" role="tab" aria-selected="false" aria-controls="page-playground" id="primary-tab-playground">
     Playground
   </button>
@@ -3583,6 +3586,473 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   </div>
 
   <!-- =================================================================
+       Distill page — §3 + §10.6 on-policy distillation workflows
+       =================================================================
+       Surfaces the OPD primitives the grand plan describes:
+         • Submit OPD (POST /v1/train/opd) — the §3.1 trainer body
+         • Teachers (/v1/teachers) — the §3.2 LogitSource registry
+         • Recipes (/v1/recipes + /v1/recipes/run) — §3.7 one-click cookbook
+         • Refresh / Pump / Merge / Self — §3.6 / §3.5 / §3.4 / §3.12
+         • Cache (/v1/cache/stats) — §3.3 logit cache
+         • Library (/v1/library) — §3.10 adapter library
+         • Agent traces (/v1/agent/traces) — §10.3 pi-session ingestion
+         • Preflight (/v1/preflight/*) — §8.4 / §8.5 / §8.13 pit-of-success surfaces
+  -->
+  <section class="page" id="page-distill" role="tabpanel" aria-labelledby="primary-tab-distill" hidden inert>
+    <div class="card">
+      <div class="card-head">
+        <h2>On-Policy Distillation</h2>
+        <span class="eyebrow">Grand plan §3 + §10.6 — frontier brilliance, distilled</span>
+      </div>
+      <div class="tabs" role="tablist" aria-label="Distill views" data-distill-tabs>
+        <button class="tab active" id="distill-tab-opd" data-tab="opd" type="button" role="tab" aria-selected="true" aria-controls="distill-tab-opd-pane" tabindex="0">Submit OPD</button>
+        <button class="tab" id="distill-tab-teachers" data-tab="teachers" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-teachers-pane" tabindex="-1">Teachers</button>
+        <button class="tab" id="distill-tab-recipes" data-tab="recipes" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-recipes-pane" tabindex="-1">Recipes</button>
+        <button class="tab" id="distill-tab-refresh" data-tab="refresh" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-refresh-pane" tabindex="-1">Refresh</button>
+        <button class="tab" id="distill-tab-pump" data-tab="pump" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-pump-pane" tabindex="-1">Pump</button>
+        <button class="tab" id="distill-tab-merge" data-tab="merge" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-merge-pane" tabindex="-1">Merge</button>
+        <button class="tab" id="distill-tab-self" data-tab="self" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-self-pane" tabindex="-1">Self</button>
+        <button class="tab" id="distill-tab-cache" data-tab="cache" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-cache-pane" tabindex="-1">Cache</button>
+        <button class="tab" id="distill-tab-library" data-tab="library" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-library-pane" tabindex="-1">Library</button>
+        <button class="tab" id="distill-tab-traces" data-tab="traces" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-traces-pane" tabindex="-1">Agent traces</button>
+        <button class="tab" id="distill-tab-preflight" data-tab="preflight" type="button" role="tab" aria-selected="false" aria-controls="distill-tab-preflight-pane" tabindex="-1">Preflight</button>
+      </div>
+
+      <!-- =================================================================
+           Submit OPD — POST /v1/train/opd
+           ================================================================= -->
+      <div class="tab-content active" id="distill-tab-opd-pane" role="tabpanel" aria-labelledby="distill-tab-opd">
+        <form id="opd-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="opd-output-name">Adapter name</label>
+              <input type="text" id="opd-output-name" name="output_name" value="opd-adapter" required>
+              <div class="form-help">Saved adapter name. Path-safe; the §8.11 receipt is keyed by this.</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-teacher">Teacher</label>
+              <select id="opd-teacher" name="teacher" required>
+                <option value="">— pick a registered teacher —</option>
+              </select>
+              <div class="form-help">From the <a href="#" data-distill-tab-link="teachers">Teachers</a> registry. Register one first.</div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="opd-loss">Loss granularity</label>
+              <select id="opd-loss" name="loss">
+                <option value="teacher_top_k" selected>teacher_top_k (§6 default; Fu et al. 2026)</option>
+                <option value="sampled_token">sampled_token (Lu 2025 baseline)</option>
+                <option value="full_vocab">full_vocab (corporate tier; DeepSeek-V4)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="opd-top-k">Top-K</label>
+              <input type="number" id="opd-top-k" name="top_k" value="32" min="1" max="1024">
+              <div class="form-help">§6 default 32 (Fu et al. ablation table 3).</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-samples">Samples / prompt</label>
+              <input type="number" id="opd-samples" name="samples_per_prompt" value="4" min="1" max="64">
+              <div class="form-help">Auto-scales 4 / 16 / 64 by dataset size when left at default.</div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="opd-lr">Learning rate</label>
+              <input type="text" id="opd-lr" name="learning_rate" value="1e-5">
+              <div class="form-help">§6: 10× the FullFT optimum.</div>
+            </div>
+            <div class="form-group">
+              <label for="opd-rank">LoRA rank</label>
+              <input type="number" id="opd-rank" name="lora_rank" value="32" min="1" max="256">
+            </div>
+            <div class="form-group">
+              <label for="opd-max-tokens">Max tokens</label>
+              <input type="number" id="opd-max-tokens" name="max_tokens" value="7168" min="64" max="32768">
+              <div class="form-help">§6 default 7K (Li et al. 2026 reward-decay curve).</div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="opd-temperature">Temperature</label>
+              <input type="text" id="opd-temperature" name="temperature" value="1.0">
+            </div>
+            <div class="form-group">
+              <label for="opd-top-p">Top-p</label>
+              <input type="text" id="opd-top-p" name="top_p" value="0.9">
+            </div>
+            <div class="form-group">
+              <label for="opd-max-cost">Cost cap (USD)</label>
+              <input type="text" id="opd-max-cost" name="max_cost_usd" value="25" placeholder="25">
+              <div class="form-help">§8.6 hard cap. Default 25.</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="opd-prompts">Prompts (JSON array)</label>
+            <textarea id="opd-prompts" name="prompts" rows="8" placeholder='[{"messages":[{"role":"user","content":"Solve: 2x^2 - 5x + 3 = 0"},{"role":"assistant","content":"Use the quadratic formula..."}]}]'></textarea>
+            <div class="form-help">Each prompt is one <code>{messages:[...]}</code> object. The trainer rolls out <code>samples_per_prompt</code> times per prompt.</div>
+            <div style="display: flex; justify-content: flex-end; margin-top: var(--space-2);">
+              <button type="button" class="btn btn-sm" id="opd-use-sample">Use sample OPD payload</button>
+            </div>
+          </div>
+          <div style="display: flex; gap: var(--space-3); align-items: center; padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <label style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400;">
+              <input type="checkbox" id="opd-auto-load" name="auto_load" checked> Auto-load adapter after training
+            </label>
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit OPD job</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Teachers — GET / POST / DELETE /v1/teachers
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-teachers-pane" role="tabpanel" aria-labelledby="distill-tab-teachers" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Registered teachers</h3>
+          <span class="eyebrow">§3.2 LogitSource registry</span>
+        </div>
+        <div id="teachers-list">
+          <div class="empty">Loading…</div>
+        </div>
+
+        <div class="card-head" style="border:none; padding: var(--space-4) 0 var(--space-2); margin-top: var(--space-4); border-top: 1px solid var(--border);">
+          <h3 style="font-size: var(--text-lg);">Register a teacher</h3>
+        </div>
+        <form id="teacher-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="teacher-alias">Alias</label>
+              <input type="text" id="teacher-alias" name="alias" required placeholder="qwen3.6-27b@openrouter">
+              <div class="form-help">Stable id used in <code>teacher</code> fields. Conventional shape: <code>model@source</code>.</div>
+            </div>
+            <div class="form-group">
+              <label for="teacher-kind">Kind</label>
+              <select id="teacher-kind" name="kind" required>
+                <option value="fixture">Fixture (deterministic; synthetic)</option>
+                <option value="local">Local (same process, in-RAM)</option>
+                <option value="remote" selected>Remote (HTTP top_logprobs)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="teacher-model-id">Model id</label>
+              <input type="text" id="teacher-model-id" name="model_id" placeholder="qwen/qwen-3.6-27b">
+            </div>
+            <div class="form-group">
+              <label for="teacher-url">URL <span class="hint">(Remote)</span></label>
+              <input type="text" id="teacher-url" name="url" placeholder="https://openrouter.ai/api/v1">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="teacher-api-key-env">API-key env var <span class="hint">(Remote)</span></label>
+              <input type="text" id="teacher-api-key-env" name="api_key_env" placeholder="OPENROUTER_API_KEY">
+              <div class="form-help">§8.6 cost-lock: kiln never stores the key, only the env-var name to read.</div>
+            </div>
+            <div class="form-group">
+              <label for="teacher-max-top-k">Max top-K</label>
+              <input type="number" id="teacher-max-top-k" name="max_top_k" value="32" min="1" max="1024">
+            </div>
+            <div class="form-group">
+              <label for="teacher-vocab-size">Vocab size</label>
+              <input type="number" id="teacher-vocab-size" name="vocab_size" value="152064" min="1">
+            </div>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Register teacher</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Recipes — §3.7 one-click cookbook
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-recipes-pane" role="tabpanel" aria-labelledby="distill-tab-recipes" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Bundled recipes</h3>
+          <span class="eyebrow">§3.7 one-click — kiln picks all hyperparameters</span>
+        </div>
+        <div id="recipes-list">
+          <div class="empty">Loading…</div>
+        </div>
+      </div>
+
+      <!-- =================================================================
+           Refresh — §3.6 continual-learning recovery
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-refresh-pane" role="tabpanel" aria-labelledby="distill-tab-refresh" hidden inert>
+        <form id="distill-refresh-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="refresh-name">Existing adapter to refresh</label>
+              <input type="text" id="refresh-name" name="name" required placeholder="company-assistant">
+            </div>
+            <div class="form-group">
+              <label for="refresh-teacher">Behavioural teacher</label>
+              <select id="refresh-teacher" name="behavioural_teacher" required data-distill-teacher-select>
+                <option value="">— pick a teacher —</option>
+              </select>
+              <div class="form-help">Per Lu (2025): the prior version of the model itself.</div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="refresh-background-chat">Background chat distribution</label>
+              <input type="text" id="refresh-background-chat" name="background_chat" value="tulu3">
+            </div>
+            <div class="form-group">
+              <label for="refresh-require-if-eval">Require IF-eval recovery (frac of baseline)</label>
+              <input type="text" id="refresh-require-if-eval" name="require_if_eval_recovery" value="0.95">
+            </div>
+            <div class="form-group">
+              <label for="refresh-require-qa-gain">Require new-knowledge gain (absolute)</label>
+              <input type="text" id="refresh-require-qa-gain" name="require_internal_qa_gain" value="0.05">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="refresh-if-suite">IF-eval suite <span class="hint">(optional)</span></label>
+              <input type="text" id="refresh-if-suite" name="if_eval_suite" placeholder="ifeval">
+            </div>
+            <div class="form-group">
+              <label for="refresh-qa-suite">New-knowledge eval suite <span class="hint">(optional)</span></label>
+              <input type="text" id="refresh-qa-suite" name="new_knowledge_eval_suite" placeholder="q4-internal-qa">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="refresh-new-data">New data (JSON array of prompts)</label>
+            <textarea id="refresh-new-data" name="new_data" rows="6" placeholder='[{"messages":[{"role":"user","content":"What is Project Aurora?"},{"role":"assistant","content":"..."}]}]'></textarea>
+            <div class="form-help">Inline OpdPrompts. Each is <code>{messages:[...]}</code>.</div>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/refresh</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Pump — §3.5 27B → 4B knowledge pump
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-pump-pane" role="tabpanel" aria-labelledby="distill-tab-pump" hidden inert>
+        <form id="distill-pump-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="pump-name">Adapter name</label>
+              <input type="text" id="pump-name" name="name" required placeholder="math-frontier">
+            </div>
+            <div class="form-group">
+              <label for="pump-teacher">Teacher</label>
+              <select id="pump-teacher" name="teacher" required data-distill-teacher-select>
+                <option value="">— pick a teacher —</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="pump-mode">Mode</label>
+              <select id="pump-mode" name="mode">
+                <option value="domain">Targeted domain</option>
+                <option value="wide">Wide (all canonical domains)</option>
+                <option value="examples">Inline examples</option>
+              </select>
+            </div>
+            <div class="form-group" data-pump-mode-field="domain">
+              <label for="pump-domain">Domain</label>
+              <input type="text" id="pump-domain" name="domain" value="math" placeholder="math / code / writing / instruction">
+            </div>
+            <div class="form-group">
+              <label for="pump-rank">LoRA rank</label>
+              <input type="number" id="pump-rank" name="rank" value="64" min="1" max="256">
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="pump-budget">Rollout budget</label>
+              <input type="number" id="pump-budget" name="rollout_budget" value="50000" min="100" max="10000000">
+            </div>
+            <div class="form-group">
+              <label style="font-size: var(--text-xs); display: flex; align-items: center; gap: var(--space-2); color: var(--text-muted); text-transform: none; letter-spacing: 0; font-weight: 400; margin-top: 26px;">
+                <input type="checkbox" id="pump-use-cache" name="use_cache" checked> Honor logit cache (§3.3)
+              </label>
+            </div>
+          </div>
+          <div class="form-group" data-pump-mode-field="examples" hidden>
+            <label for="pump-examples">Inline prompts (JSON array)</label>
+            <textarea id="pump-examples" name="examples" rows="6" placeholder='[{"messages":[{"role":"user","content":"..."}]}]'></textarea>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/pump</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Merge — §3.4 behaviour-space LoRA merge
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-merge-pane" role="tabpanel" aria-labelledby="distill-tab-merge" hidden inert>
+        <form id="distill-merge-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="merge-name">Merged adapter name</label>
+              <input type="text" id="merge-name" name="name" required placeholder="unified-assistant">
+            </div>
+            <div class="form-group">
+              <label for="merge-student">Warm-start from</label>
+              <input type="text" id="merge-student" name="student" value="base">
+              <div class="form-help">Existing adapter to warm-start, or "base".</div>
+            </div>
+            <div class="form-group">
+              <label for="merge-budget">Rollout budget</label>
+              <input type="number" id="merge-budget" name="rollout_budget" value="5000" min="100" max="1000000">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="merge-sources">Source adapters (JSON array)</label>
+            <textarea id="merge-sources" name="sources" rows="6" placeholder='[{"adapter":"rust-helper","weight":1.0},{"adapter":"python-helper","weight":1.0}]'></textarea>
+            <div class="form-help">Each <code>{adapter, weight}</code> — the multi-tenant merge loads each source LoRA and uses it as the per-prompt teacher.</div>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill_merge</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Self — §3.12 PI self-distillation
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-self-pane" role="tabpanel" aria-labelledby="distill-tab-self" hidden inert>
+        <form id="distill-self-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="self-name">Adapter name</label>
+              <input type="text" id="self-name" name="name" required placeholder="concise-style">
+            </div>
+            <div class="form-group">
+              <label for="self-mode">PI mode</label>
+              <select id="self-mode" name="mode">
+                <option value="ground_truth_conditioning">GroundTruthConditioning (OPSD)</option>
+                <option value="conciseness" selected>Conciseness (CRISP — Lu et al.)</option>
+                <option value="document_as_pi">DocumentAsPi (GATES)</option>
+                <option value="reverse_teacher">ReverseTeacher (RLRT)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="self-prompts">Prompts (JSON array, optional)</label>
+            <textarea id="self-prompts" name="prompts" rows="5" placeholder='[{"messages":[{"role":"user","content":"..."}]}]'></textarea>
+            <div class="form-help">Optional — when blank, kiln uses the §3.5.2 wide canonical seeds.</div>
+          </div>
+          <div class="form-group" data-self-mode-field="ground_truth_conditioning" hidden>
+            <label for="self-ground-truth">Ground-truth answers (JSON array of strings)</label>
+            <textarea id="self-ground-truth" name="ground_truth" rows="3" placeholder='["The answer is 42.", "Bonjour"]'></textarea>
+          </div>
+          <div class="form-group" data-self-mode-field="document_as_pi" hidden>
+            <label for="self-documents">Retrieved documents (JSON array of strings)</label>
+            <textarea id="self-documents" name="documents" rows="3" placeholder='["Document text 1...", "Document text 2..."]'></textarea>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Submit distill/self</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Cache — §3.3 logit cache stats + import/export
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-cache-pane" role="tabpanel" aria-labelledby="distill-tab-cache" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Logit cache</h3>
+          <span class="eyebrow">§3.3 — prefix-keyed, RocksDB-backed</span>
+        </div>
+        <div id="cache-stats">
+          <div class="empty">Loading…</div>
+        </div>
+        <div style="display: flex; gap: var(--space-3); padding-top: var(--space-4); border-top: 1px solid var(--border); margin-top: var(--space-4);">
+          <button type="button" class="btn" id="cache-export-btn">Export cache (.tar)</button>
+          <input type="file" id="cache-import-file" accept=".tar" style="display:none;">
+          <button type="button" class="btn" id="cache-import-btn">Import cache tarball</button>
+        </div>
+      </div>
+
+      <!-- =================================================================
+           Library — §3.10 adapter library
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-library-pane" role="tabpanel" aria-labelledby="distill-tab-library" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Adapter library</h3>
+          <span class="eyebrow">§3.10 — browse, install, publish with reproducibility receipt</span>
+        </div>
+        <div id="library-list">
+          <div class="empty">Loading…</div>
+        </div>
+        <div class="card-head" style="border:none; padding: var(--space-4) 0 var(--space-2); margin-top: var(--space-4); border-top: 1px solid var(--border);">
+          <h3 style="font-size: var(--text-lg);">Publish a local adapter</h3>
+        </div>
+        <form id="library-publish-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="library-publish-name">Adapter name</label>
+              <input type="text" id="library-publish-name" name="adapter_name" required placeholder="my-domain-pump">
+              <div class="form-help">Local adapter must have a §8.11 reproducibility receipt; library refuses to publish without one.</div>
+            </div>
+            <div class="form-group">
+              <label for="library-publish-description">Description <span class="hint">(optional)</span></label>
+              <input type="text" id="library-publish-description" name="description" placeholder="A domain LoRA for X">
+            </div>
+            <div class="form-group">
+              <label for="library-publish-uploader">Uploader <span class="hint">(optional)</span></label>
+              <input type="text" id="library-publish-uploader" name="uploader" placeholder="anonymous">
+            </div>
+          </div>
+          <div style="display: flex; gap: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border);">
+            <button type="submit" class="btn btn-primary" style="margin-left: auto;">Publish to library</button>
+          </div>
+        </form>
+      </div>
+
+      <!-- =================================================================
+           Agent traces — §10.3 pi session ingestion
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-traces-pane" role="tabpanel" aria-labelledby="distill-tab-traces" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">pi session traces</h3>
+          <span class="eyebrow">§10.3 — ~/.pi/agent/sessions/ JSONL ingestion</span>
+        </div>
+        <div style="display: flex; gap: var(--space-3); margin-bottom: var(--space-3);">
+          <button type="button" class="btn btn-sm" id="agent-traces-refresh">Rescan ~/.pi/agent/sessions/</button>
+        </div>
+        <div id="agent-traces-list">
+          <div class="empty">Click rescan to discover pi sessions.</div>
+        </div>
+      </div>
+
+      <!-- =================================================================
+           Preflight — §8.4 / §8.5 / §8.13 pit-of-success surfaces
+           ================================================================= -->
+      <div class="tab-content" id="distill-tab-preflight-pane" role="tabpanel" aria-labelledby="distill-tab-preflight" hidden inert>
+        <div class="card-head" style="border:none; padding:0; margin-bottom: var(--space-3);">
+          <h3 style="font-size: var(--text-lg);">Compatibility table</h3>
+          <span class="eyebrow">§8.4 — 30+ validated (teacher × student × domain) rows</span>
+        </div>
+        <div id="preflight-compat-list">
+          <div class="empty">Loading…</div>
+        </div>
+
+        <div class="card-head" style="border:none; padding: var(--space-4) 0 var(--space-2); margin-top: var(--space-4); border-top: 1px solid var(--border);">
+          <h3 style="font-size: var(--text-lg);">Tier-aware defaults</h3>
+          <span class="eyebrow">§8.13 — laptop / prosumer / corporate</span>
+        </div>
+        <div id="preflight-tier-defaults">
+          <div class="empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================================================================
        Playground page
        ================================================================= -->
   <section class="page page-playground" id="page-playground" role="tabpanel" aria-labelledby="primary-tab-playground" hidden inert>
@@ -3816,6 +4286,7 @@ function selectPage(name) {
   // visit the Evals page — and catches the case of someone landing on
   // #evals via deep link without having to mirror the polling guard.
   if (name === 'evals') refreshActiveEvalSubTab();
+  if (name === 'distill') refreshActiveDistillSubTab();
 }
 
 // Trigger the refresh function matching the currently-active Evals sub-tab.
@@ -3840,7 +4311,7 @@ let initialPage = (location.hash || '').slice(1);
 if (!initialPage) {
   try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
-if (!['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialPage)) {
+if (!['overview', 'adapters', 'training', 'evals', 'distill', 'playground'].includes(initialPage)) {
   initialPage = 'overview';
 }
 selectPage(initialPage);
@@ -9608,6 +10079,556 @@ setInterval(() => {
   const evalsActive = document.querySelector('[data-page="evals"]')?.classList.contains('active');
   if (!evalsActive) refreshEvalJobs();
 }, 5000);
+
+/* =====================================================================
+   Distill page — §3 + §10.6 on-policy distillation workflows
+   ===================================================================== */
+
+// Sub-tab activation for the Distill page mirrors the evals/training
+// pattern: clicking a `.tab[data-tab="X"]` inside `[data-distill-tabs]`
+// hides every `.tab-content` and shows the one with id
+// `distill-tab-X-pane`.
+(function wireDistillTabs() {
+  const root = document.querySelector('[data-distill-tabs]');
+  if (!root) return;
+  root.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button.tab[data-tab]');
+    if (!btn) return;
+    const wanted = btn.dataset.tab;
+    root.querySelectorAll('.tab').forEach(t => {
+      const active = t.dataset.tab === wanted;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-selected', String(active));
+      t.tabIndex = active ? 0 : -1;
+    });
+    document.querySelectorAll('#page-distill .tab-content').forEach(p => {
+      const active = p.id === `distill-tab-${wanted}-pane`;
+      p.classList.toggle('active', active);
+      p.hidden = !active;
+      if (active) p.removeAttribute('inert'); else p.setAttribute('inert', '');
+    });
+    refreshActiveDistillSubTab();
+    try { localStorage.setItem('kiln.distill.lastTab', wanted); } catch {}
+  });
+  // Restore the last-used sub-tab.
+  try {
+    const last = localStorage.getItem('kiln.distill.lastTab');
+    if (last) {
+      const btn = root.querySelector(`button.tab[data-tab="${last}"]`);
+      if (btn) btn.click();
+    }
+  } catch {}
+})();
+
+// Click-handler for inline distill-tab cross-links in form help text
+// (e.g. "register one first" → Teachers tab).
+document.addEventListener('click', (ev) => {
+  const link = ev.target.closest('[data-distill-tab-link]');
+  if (!link) return;
+  ev.preventDefault();
+  const tab = link.getAttribute('data-distill-tab-link');
+  const btn = document.querySelector(`[data-distill-tabs] button.tab[data-tab="${tab}"]`);
+  if (btn) btn.click();
+});
+
+function refreshActiveDistillSubTab() {
+  const root = document.querySelector('[data-distill-tabs]');
+  if (!root) return;
+  const active = root.querySelector('.tab.active')?.dataset?.tab || 'opd';
+  if (active === 'opd' || active === 'refresh' || active === 'pump') {
+    refreshTeacherDropdowns();
+  } else if (active === 'teachers') {
+    refreshTeachersList();
+  } else if (active === 'recipes') {
+    refreshRecipesList();
+  } else if (active === 'cache') {
+    refreshCacheStats();
+  } else if (active === 'library') {
+    refreshLibraryList();
+  } else if (active === 'traces') {
+    /* user-triggered via rescan button */
+  } else if (active === 'preflight') {
+    refreshPreflightSurfaces();
+  }
+}
+
+// --- Teachers (/v1/teachers) ----------------------------------------
+async function refreshTeachersList() {
+  const node = document.getElementById('teachers-list');
+  if (!node) return;
+  try {
+    const res = await api('/v1/teachers');
+    const teachers = res.teachers || [];
+    if (teachers.length === 0) {
+      node.innerHTML = '<div class="empty">No teachers registered. Add one below.</div>';
+    } else {
+      const rows = teachers.map(t => {
+        const caps = t.capabilities ? `<span class="hint">${t.capabilities.max_top_k || '?'} top-K · ${t.capabilities.vocab_size || '?'} vocab</span>` : '';
+        return `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3);">
+          <div style="flex:1; min-width:0;">
+            <div style="font-weight:600;">${escapeHtml(t.spec?.alias || '?')}</div>
+            <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(t.spec?.kind || '?')} · ${escapeHtml(t.spec?.model_id || '?')}</div>
+          </div>
+          ${caps}
+          <button class="btn btn-sm" data-teacher-delete="${escapeHtml(t.spec?.alias || '')}">Delete</button>
+        </div>`;
+      }).join('');
+      node.innerHTML = rows;
+    }
+    refreshTeacherDropdowns(teachers);
+  } catch (e) {
+    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function refreshTeacherDropdowns(prefetched) {
+  let teachers;
+  try {
+    if (prefetched) teachers = prefetched;
+    else teachers = (await api('/v1/teachers'))?.teachers || [];
+  } catch { return; }
+  const selectors = ['#opd-teacher', '[data-distill-teacher-select]'];
+  for (const sel of selectors) {
+    document.querySelectorAll(sel).forEach(node => {
+      const prev = node.value;
+      const opts = ['<option value="">— pick a registered teacher —</option>'];
+      for (const t of teachers) {
+        const alias = t.spec?.alias || '';
+        if (!alias) continue;
+        opts.push(`<option value="${escapeHtml(alias)}">${escapeHtml(alias)}</option>`);
+      }
+      node.innerHTML = opts.join('');
+      if (prev && teachers.some(t => t.spec?.alias === prev)) node.value = prev;
+    });
+  }
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-teacher-delete]');
+  if (!btn) return;
+  const alias = btn.getAttribute('data-teacher-delete');
+  if (!alias || !confirm(`Delete teacher "${alias}"?`)) return;
+  try {
+    await api('/v1/teachers/' + encodeURIComponent(alias), { method: 'DELETE' });
+    toast(`Deleted teacher ${alias}`);
+    refreshTeachersList();
+  } catch (e) { toast('Delete failed: ' + e.message, 'err'); }
+});
+
+document.getElementById('teacher-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const body = {
+      alias: form.alias.value.trim(),
+      kind: form.kind.value,
+      model_id: form.model_id.value.trim(),
+    };
+    if (form.url.value.trim()) body.url = form.url.value.trim();
+    if (form.api_key_env.value.trim()) body.api_key_env = form.api_key_env.value.trim();
+    if (form.max_top_k.value) body.max_top_k = parseInt(form.max_top_k.value, 10);
+    if (form.vocab_size.value) body.vocab_size = parseInt(form.vocab_size.value, 10);
+    await api('/v1/teachers', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(`Registered teacher ${body.alias}`);
+    form.reset();
+    refreshTeachersList();
+  } catch (err) { toast('Register failed: ' + err.message, 'err'); }
+});
+
+// --- Recipes (/v1/recipes + /v1/recipes/run) ------------------------
+async function refreshRecipesList() {
+  const node = document.getElementById('recipes-list');
+  if (!node) return;
+  try {
+    const res = await api('/v1/recipes');
+    const recipes = res.recipes || [];
+    if (recipes.length === 0) {
+      node.innerHTML = '<div class="empty">No bundled recipes.</div>';
+      return;
+    }
+    node.innerHTML = recipes.map(r => `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3); margin-bottom:var(--space-2);">
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:600;">${escapeHtml(r.name)}</div>
+        <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(r.description || '')}</div>
+        <div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">${r.num_steps || 0} step${(r.num_steps || 0) === 1 ? '' : 's'}</div>
+      </div>
+      <button class="btn btn-sm" data-recipe-run="${escapeHtml(r.name)}">Run</button>
+    </div>`).join('');
+  } catch (e) {
+    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-recipe-run]');
+  if (!btn) return;
+  const name = btn.getAttribute('data-recipe-run');
+  if (!name) return;
+  try {
+    btn.disabled = true; btn.textContent = 'Queuing…';
+    const res = await api('/v1/recipes/run', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ recipe: name }) });
+    toast(res.message || `Queued recipe ${name}`);
+  } catch (e) { toast('Run failed: ' + e.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = 'Run'; }
+});
+
+// --- Submit OPD (/v1/train/opd) -------------------------------------
+document.getElementById('opd-use-sample')?.addEventListener('click', () => {
+  document.getElementById('opd-prompts').value = JSON.stringify([
+    { messages: [{ role: 'user', content: 'Solve for x: 2x^2 - 5x + 3 = 0.' }, { role: 'assistant', content: 'Use the quadratic formula: x = (5 ± √(25 - 24)) / 4 = (5 ± 1)/4, so x = 3/2 or x = 1.' }] },
+    { messages: [{ role: 'user', content: 'What is the derivative of sin(x^2)?' }, { role: 'assistant', content: 'Chain rule: d/dx sin(x²) = cos(x²) · 2x.' }] },
+  ], null, 2);
+});
+
+document.getElementById('opd-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const promptsText = document.getElementById('opd-prompts').value.trim();
+    const prompts = promptsText ? JSON.parse(promptsText) : [];
+    if (!Array.isArray(prompts) || prompts.length === 0) {
+      throw new Error('Prompts must be a non-empty JSON array');
+    }
+    const teacher = document.getElementById('opd-teacher').value;
+    if (!teacher) throw new Error('Pick a teacher first (Teachers tab)');
+    const body = {
+      prompts,
+      teacher,
+      config: {
+        output_name: document.getElementById('opd-output-name').value.trim(),
+        loss: document.getElementById('opd-loss').value,
+        top_k: parseInt(document.getElementById('opd-top-k').value, 10),
+        samples_per_prompt: parseInt(document.getElementById('opd-samples').value, 10),
+        learning_rate: parseFloat(document.getElementById('opd-lr').value),
+        lora_rank: parseInt(document.getElementById('opd-rank').value, 10),
+        max_tokens: parseInt(document.getElementById('opd-max-tokens').value, 10),
+        temperature: parseFloat(document.getElementById('opd-temperature').value),
+        top_p: parseFloat(document.getElementById('opd-top-p').value),
+        auto_load: document.getElementById('opd-auto-load').checked,
+      },
+    };
+    const maxCost = document.getElementById('opd-max-cost').value;
+    if (maxCost.trim()) body.config.max_cost_usd = parseFloat(maxCost);
+    const res = await api('/v1/train/opd', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'OPD job submitted');
+    selectPage('training');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// --- Distill / Refresh (/v1/distill/refresh) ------------------------
+document.getElementById('distill-refresh-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const examplesText = document.getElementById('refresh-new-data').value.trim();
+    const examples = examplesText ? JSON.parse(examplesText) : [];
+    if (!Array.isArray(examples) || examples.length === 0) {
+      throw new Error('new_data must be a non-empty JSON array');
+    }
+    const body = {
+      name: form.name.value.trim(),
+      new_data: { examples },
+      behavioural_teacher: form.behavioural_teacher.value,
+      background_chat: form.background_chat.value.trim() || 'tulu3',
+      require_if_eval_recovery: parseFloat(form.require_if_eval_recovery.value),
+      require_internal_qa_gain: parseFloat(form.require_internal_qa_gain.value),
+    };
+    if (form.if_eval_suite.value.trim()) body.if_eval_suite = form.if_eval_suite.value.trim();
+    if (form.new_knowledge_eval_suite.value.trim()) body.new_knowledge_eval_suite = form.new_knowledge_eval_suite.value.trim();
+    const res = await api('/v1/distill/refresh', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'distill/refresh queued');
+    selectPage('training');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// --- Distill / Pump (/v1/distill/pump) ------------------------------
+document.querySelectorAll('#distill-pump-form select[name="mode"]').forEach(sel => {
+  const sync = () => {
+    const wanted = sel.value;
+    document.querySelectorAll('#distill-pump-form [data-pump-mode-field]').forEach(node => {
+      node.hidden = node.getAttribute('data-pump-mode-field') !== wanted;
+    });
+  };
+  sel.addEventListener('change', sync);
+  sync();
+});
+
+document.getElementById('distill-pump-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const mode = form.mode.value;
+    let modeBody;
+    if (mode === 'domain') modeBody = { domain: form.domain.value.trim() };
+    else if (mode === 'wide') modeBody = { wide: true };
+    else if (mode === 'examples') {
+      const text = document.getElementById('pump-examples').value.trim();
+      const examples = text ? JSON.parse(text) : [];
+      if (!Array.isArray(examples) || examples.length === 0) throw new Error('Inline examples must be a non-empty JSON array');
+      modeBody = { examples };
+    }
+    const body = {
+      name: form.name.value.trim(),
+      teacher: form.teacher.value,
+      mode: modeBody,
+      rank: parseInt(form.rank.value, 10),
+      rollout_budget: parseInt(form.rollout_budget.value, 10),
+      use_cache: form.use_cache.checked,
+    };
+    const res = await api('/v1/distill/pump', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'distill/pump queued');
+    selectPage('training');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// --- Distill / Merge (/v1/adapters/distill_merge) -------------------
+document.getElementById('distill-merge-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const sources = JSON.parse(form.sources.value);
+    if (!Array.isArray(sources) || sources.length === 0) throw new Error('sources must be a non-empty JSON array');
+    const body = {
+      name: form.name.value.trim(),
+      sources,
+      student: form.student.value.trim() || 'base',
+      rollout_budget: parseInt(form.rollout_budget.value, 10),
+    };
+    const res = await api('/v1/adapters/distill_merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'distill_merge queued');
+    selectPage('training');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// --- Distill / Self (/v1/distill/self) ------------------------------
+document.querySelectorAll('#distill-self-form select[name="mode"]').forEach(sel => {
+  const sync = () => {
+    document.querySelectorAll('#distill-self-form [data-self-mode-field]').forEach(node => {
+      node.hidden = node.getAttribute('data-self-mode-field') !== sel.value;
+    });
+  };
+  sel.addEventListener('change', sync);
+  sync();
+});
+
+document.getElementById('distill-self-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const body = {
+      name: form.name.value.trim(),
+      mode: form.mode.value,
+    };
+    if (form.prompts.value.trim()) body.prompts = JSON.parse(form.prompts.value);
+    const gt = document.getElementById('self-ground-truth')?.value?.trim();
+    if (gt) body.ground_truth = JSON.parse(gt);
+    const docs = document.getElementById('self-documents')?.value?.trim();
+    if (docs) body.documents = JSON.parse(docs);
+    const res = await api('/v1/distill/self', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    toast(res.message || 'distill/self queued');
+    selectPage('training');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// --- Cache (/v1/cache/{stats,import,export}) ------------------------
+async function refreshCacheStats() {
+  const node = document.getElementById('cache-stats');
+  if (!node) return;
+  try {
+    const res = await api('/v1/cache/stats');
+    const stats = res.stats || {};
+    const teachers = Object.entries(stats.per_teacher || {});
+    const perTeacherHtml = teachers.length
+      ? `<div style="margin-top: var(--space-3);"><div class="form-help" style="margin-bottom: var(--space-2);">Per-teacher entries</div>
+          ${teachers.map(([k, n]) => `<div style="display:flex; justify-content:space-between; font-size:var(--text-xs); padding: var(--space-1) 0;"><span>${escapeHtml(k)}</span><span style="font-variant-numeric: tabular-nums;">${n.toLocaleString()}</span></div>`).join('')}
+        </div>`
+      : '';
+    node.innerHTML = `<div class="stat-grid" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-3);">
+        <div class="stat-card" style="padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);"><div class="stat-label" style="font-size: var(--text-xs); color: var(--text-muted);">Total entries</div><div class="stat-val" style="font-size: var(--text-2xl); font-weight: 600;">${(stats.total_entries ?? 0).toLocaleString()}</div></div>
+        <div class="stat-card" style="padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);"><div class="stat-label" style="font-size: var(--text-xs); color: var(--text-muted);">Size on disk</div><div class="stat-val" style="font-size: var(--text-2xl); font-weight: 600;">${formatBytes(stats.total_bytes || 0)}</div></div>
+        <div class="stat-card" style="padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md);"><div class="stat-label" style="font-size: var(--text-xs); color: var(--text-muted);">Teachers</div><div class="stat-val" style="font-size: var(--text-2xl); font-weight: 600;">${teachers.length}</div></div>
+      </div>
+      <div class="form-help" style="margin-top: var(--space-3);">Cache root: <code>${escapeHtml(res.root || '')}</code></div>
+      ${perTeacherHtml}`;
+  } catch (e) {
+    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+document.getElementById('cache-export-btn')?.addEventListener('click', () => {
+  window.location.href = '/v1/cache/export';
+});
+
+document.getElementById('cache-import-btn')?.addEventListener('click', () => {
+  document.getElementById('cache-import-file').click();
+});
+
+document.getElementById('cache-import-file')?.addEventListener('change', async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  try {
+    const res = await fetch('/v1/cache/import', { method: 'POST', body: file, headers: { 'Content-Type': 'application/x-tar' } });
+    if (!res.ok) throw new Error(await res.text());
+    toast('Imported cache tarball');
+    refreshCacheStats();
+  } catch (err) { toast('Import failed: ' + err.message, 'err'); }
+});
+
+// --- Library (/v1/library) ------------------------------------------
+async function refreshLibraryList() {
+  const node = document.getElementById('library-list');
+  if (!node) return;
+  try {
+    const res = await api('/v1/library');
+    const adapters = res.adapters || [];
+    if (adapters.length === 0) {
+      node.innerHTML = '<div class="empty">No published adapters yet.</div>';
+      return;
+    }
+    node.innerHTML = adapters.map(a => `<div class="adapter-card" style="display:flex; align-items:center; gap:var(--space-3); margin-bottom:var(--space-2);">
+      <div style="flex:1; min-width:0;">
+        <div style="font-weight:600;">${escapeHtml(a.name || a.id || '?')}</div>
+        <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(a.source_kind || '')}${a.description ? ' · ' + escapeHtml(a.description) : ''}</div>
+      </div>
+      <button class="btn btn-sm" data-library-install="${escapeHtml(a.id || a.name || '')}">Install</button>
+    </div>`).join('');
+    const note = res.note;
+    if (note) {
+      const noteEl = document.createElement('div');
+      noteEl.className = 'empty';
+      noteEl.style.cssText = 'margin-top: var(--space-3); font-size: var(--text-xs);';
+      noteEl.textContent = note;
+      node.appendChild(noteEl);
+    }
+  } catch (e) {
+    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-library-install]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-library-install');
+  if (!id) return;
+  try {
+    btn.disabled = true; btn.textContent = 'Installing…';
+    await api('/v1/library/install/' + encodeURIComponent(id), { method: 'POST' });
+    toast(`Installed ${id}`);
+    pollAdapters();
+  } catch (err) { toast('Install failed: ' + err.message, 'err'); }
+  finally { btn.disabled = false; btn.textContent = 'Install'; }
+});
+
+document.getElementById('library-publish-form')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  try {
+    const name = form.adapter_name.value.trim();
+    if (!name) throw new Error('Adapter name required');
+    const body = {};
+    if (form.description.value.trim()) body.description = form.description.value.trim();
+    if (form.uploader.value.trim()) body.uploader = form.uploader.value.trim();
+    const res = await api('/v1/library/publish/' + encodeURIComponent(name), {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    toast(res.status === 'ready_to_publish' ? `Publish prepared for ${name} (${res.intended_id})` : `Published ${name}`);
+    refreshLibraryList();
+  } catch (err) { toast('Publish failed: ' + err.message, 'err'); }
+});
+
+// --- Agent traces (/v1/agent/traces) --------------------------------
+document.getElementById('agent-traces-refresh')?.addEventListener('click', async () => {
+  const node = document.getElementById('agent-traces-list');
+  node.innerHTML = '<div class="empty">Scanning…</div>';
+  try {
+    // First POST /v1/agent/traces/discover to rescan ~/.pi/agent/sessions/
+    // and write the index; then GET /v1/agent/traces to list it.
+    const discover = await api('/v1/agent/traces/discover', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    const list = await api('/v1/agent/traces');
+    const traces = list.traces || [];
+    if (traces.length === 0) {
+      node.innerHTML = `<div class="empty">No pi sessions found under <code>${escapeHtml(discover.path || '~/.pi/agent/sessions/')}</code>.</div>`;
+      return;
+    }
+    node.innerHTML = `<div class="form-help" style="margin-bottom: var(--space-3);">Indexed ${discover.indexed} pi session${discover.indexed === 1 ? '' : 's'} from <code>${escapeHtml(discover.path)}</code>.</div>` +
+      traces.map(t => {
+        const outcomeBits = [];
+        if (t.outcome?.ended_with_exit_0 === true) outcomeBits.push('exit 0');
+        if (t.outcome?.ended_with_exit_0 === false) outcomeBits.push('exit ≠ 0');
+        if (t.outcome?.user_edited_agent_files?.length) outcomeBits.push(`${t.outcome.user_edited_agent_files.length} user-edited`);
+        if (t.outcome?.has_followup_attempt === true) outcomeBits.push('has follow-up');
+        if (t.forked) outcomeBits.push('forked');
+        return `<div class="adapter-card" style="margin-bottom:var(--space-2);">
+          <div style="font-weight:600; font-family:var(--font-mono); font-size:var(--text-xs);">${escapeHtml(t.id || '?')}</div>
+          <div style="font-size:var(--text-xs); color:var(--text-muted);">${t.num_turns || 0} turns · ${t.num_tool_calls || 0} tool calls · ${escapeHtml(t.working_dir || '')}</div>
+          ${outcomeBits.length ? `<div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">${outcomeBits.map(b => escapeHtml(b)).join(' · ')}</div>` : ''}
+        </div>`;
+      }).join('');
+  } catch (e) {
+    node.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+});
+
+// --- Preflight (/v1/preflight/*) ------------------------------------
+async function refreshPreflightSurfaces() {
+  const compatNode = document.getElementById('preflight-compat-list');
+  const tierNode = document.getElementById('preflight-tier-defaults');
+  try {
+    const compat = await api('/v1/preflight/compatibility');
+    const rows = compat.matches || [];
+    compatNode.innerHTML = rows.length === 0
+      ? `<div class="empty">${escapeHtml(compat.note || 'No rows.')}</div>`
+      : `<div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; font-size:var(--text-xs);">
+          <thead><tr style="text-align:left; color:var(--text-muted);">
+            <th style="padding:var(--space-2);">Teacher</th><th style="padding:var(--space-2);">Student</th><th style="padding:var(--space-2);">Domain</th><th style="padding:var(--space-2);">Init overlap</th><th style="padding:var(--space-2);">Rank</th><th style="padding:var(--space-2);">GPU-hr</th><th style="padding:var(--space-2);">$</th><th style="padding:var(--space-2);">Eval</th>
+          </tr></thead>
+          <tbody>${rows.map(r => `<tr style="border-top:1px solid var(--border);">
+            <td style="padding:var(--space-2);">${escapeHtml(r.teacher)}</td>
+            <td style="padding:var(--space-2);">${escapeHtml(r.student)}</td>
+            <td style="padding:var(--space-2);">${escapeHtml(r.domain)}</td>
+            <td style="padding:var(--space-2);">${(r.predicted_initial_overlap || 0).toFixed(2)}</td>
+            <td style="padding:var(--space-2);">${r.recommended_rank}</td>
+            <td style="padding:var(--space-2);">${(r.expected_gpu_hours || 0).toFixed(1)}</td>
+            <td style="padding:var(--space-2);">${r.expected_cost_usd != null ? '$' + r.expected_cost_usd.toFixed(2) : '—'}</td>
+            <td style="padding:var(--space-2);">${escapeHtml(r.validation_eval || '')}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>`;
+  } catch (e) {
+    compatNode.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+  try {
+    const res = await api('/v1/preflight/tiers');
+    const tiers = res.tiers || [];
+    tierNode.innerHTML = tiers.length === 0
+      ? '<div class="empty">No tiers configured.</div>'
+      : tiers.map(t => `<div class="adapter-card" style="margin-bottom:var(--space-2);">
+          <div style="display:flex; justify-content:space-between; align-items:baseline;">
+            <div style="font-weight:600; text-transform:capitalize;">${escapeHtml(t.tier)}</div>
+            <div style="font-size:var(--text-xs); color:var(--text-muted);">${escapeHtml(t.default_logit_source || '')}</div>
+          </div>
+          <div style="font-size:var(--text-xs); color:var(--text-muted); margin-top:var(--space-1);">rank ${t.lora_rank} · top-K ${t.default_top_k} · loss ${escapeHtml(t.default_loss || '')} · batch ${t.batch_size}</div>
+          <div style="font-size:var(--text-xs); color:var(--text-muted);">cost cap ${t.cost_cap_default_usd == null ? '—' : '$' + t.cost_cap_default_usd.toFixed(0)} · max rollout ${(t.max_rollout_tokens || 0).toLocaleString()} tok · checkpoint every ${t.auto_checkpoint_cadence_steps} steps</div>
+          <div style="font-size:var(--text-2xs); color:var(--text-quiet); margin-top:var(--space-1);">samples/prompt: ${t.samples_per_prompt_default} (data-multiplier: ${t.samples_per_prompt_data_multiplier}) · cold-start ≥ ${t.cold_start_overlap_threshold} · goldens ${(t.mixture_distillation_golden_fraction * 100).toFixed(0)}%</div>
+        </div>`).join('');
+  } catch (e) {
+    tierNode.innerHTML = `<div class="empty">Failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// Helper used by cache stats (small + dep-free; no risk of name clash).
+function formatBytes(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
 
 })();
 </script>

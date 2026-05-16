@@ -1,0 +1,35 @@
+[package]
+name = "kiln-opd-loss-kernel"
+description = "Fused top-K reverse-KL loss for On-Policy Distillation (OPD) — gathers student logits at teacher's top-K support indices, renormalises both sides, computes per-token reverse KL + gradient w.r.t. student hidden states without materialising the full [T, V] logits tensor."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+candle-core = { workspace = true }
+anyhow = { workspace = true }
+half = "2"
+# `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and
+# already pulled in by every consumer of kiln-train.
+tracing = { workspace = true }
+
+[features]
+# Activates the raw-CUDA forward/backward path in `cuda_fwd`/`bwd`. Without
+# this feature the CUDA path routes through the candle reference path on
+# CUDA storage (correct but slower). kiln-train re-exports this feature via
+# its own `cuda` feature so `cargo build --features cuda` activates it.
+#
+# Milestone 1 (this commit): the `cuda` feature only enables the candle-on-CUDA
+# reference path; a raw-CUDA C-ABI kernel + `build.rs` lands in the next
+# milestone (see `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
+# §9.2). The CPU reference path is the parity oracle.
+cuda = ["candle-core/cuda"]
+
+[dev-dependencies]
+candle-nn = { workspace = true }

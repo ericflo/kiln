@@ -11,6 +11,7 @@ kiln-core = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
 kiln-model = { workspace = true }
+kiln-opd-loss-kernel = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 safetensors = { workspace = true }
@@ -26,9 +27,11 @@ console = "0.16"
 sha2 = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
+tar = "0.4"
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda"]
+cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda"]
 metal = ["kiln-model/metal"]
 vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel"]
 

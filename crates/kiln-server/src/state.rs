@@ -188,6 +188,10 @@ pub type GpuCoordinationLock = Arc<std::sync::RwLock<()>>;
 pub enum TrainingJobType {
     Sft,
     Grpo,
+    /// On-Policy Distillation (§3.1 of the grand plan). Sampling +
+    /// teacher reverse-KL + importance-sampling loss. Same hot-swap
+    /// semantics as SFT/GRPO.
+    Opd,
 }
 
 fn now_instant_default() -> std::time::Instant {
@@ -1209,6 +1213,11 @@ pub struct AppState {
     /// FIFO training queue — jobs are enqueued here and executed sequentially
     /// by a background worker.
     pub training_queue: SharedTrainingQueue,
+    /// §3.2 / §4 teacher registry — alias → `TeacherSpec`. Persists
+    /// to `adapter_dir/teachers.json` so registrations survive restart.
+    /// Consulted by every OPD / distill_* handler that takes a
+    /// `teacher: alias` request field.
+    pub teacher_registry: crate::api::teachers::SharedTeacherRegistry,
     /// Detected VRAM info for config/debug reporting.
     pub vram_info: kiln_core::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
@@ -1381,6 +1390,7 @@ impl AppState {
             memory_budget: Arc::new(GpuMemoryBudget::compute(0, 0, 0, 0, 0, 1.0, None)),
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
+            teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
             vram_info: kiln_core::vram::GpuVramInfo {
                 total_bytes: 0,
                 source: kiln_core::vram::VramSource::None,
@@ -1452,6 +1462,15 @@ impl AppState {
         prefix_cache_cfg: &crate::config::PrefixCacheConfig,
     ) -> Self {
         let block_size = DEFAULT_BLOCK_SIZE;
+        // §3.2 teacher registry — loaded from `adapter_dir/teachers.json`
+        // if present. Clone-able Arc so the AppState field below can
+        // own its handle.
+        let teacher_registry_for_real = {
+            let teachers_path = adapter_dir.join("teachers.json");
+            std::sync::Arc::new(crate::api::teachers::TeacherRegistry::load_from_path(
+                &teachers_path,
+            ))
+        };
 
         // KV cache dtype must match the model's activation dtype, otherwise
         // `paged_cache.write` hits a slice-set dtype mismatch on the first
@@ -1824,6 +1843,7 @@ impl AppState {
             memory_budget: Arc::new(memory_budget),
             gpu_lock,
             training_queue: crate::training_queue::new_shared_queue(),
+            teacher_registry: teacher_registry_for_real.clone(),
             vram_info,
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
