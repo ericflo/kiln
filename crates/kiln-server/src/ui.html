@@ -4409,6 +4409,11 @@ document.addEventListener('input', (ev) => {
   } else if (ev.target && ev.target.id === 'eval-jobs-filter') {
     evalJobsFilter.query = ev.target.value || '';
     if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
+  } else if (ev.target && ev.target.id === 'training-queue-filter') {
+    trainingQueueFilter = ev.target.value || '';
+    // Bypass the change-detection guard for an immediate re-render.
+    lastTrainingKey = null;
+    if (trainingJobsCache) renderTrainingQueue(trainingJobsCache);
   }
 });
 
@@ -4946,30 +4951,74 @@ async function pollTraining() {
   }
 }
 
+let trainingQueueFilter = '';
+function matchTraining(j) {
+  const q = trainingQueueFilter.trim().toLowerCase();
+  if (!q) return true;
+  return [
+    j.job_id || '',
+    j.adapter_name || '',
+    (j.job_type || '').toString(),
+    (j.state || '').toString(),
+  ].join(' ').toLowerCase().includes(q);
+}
 function renderTrainingQueue(data) {
   const el = document.getElementById('tab-queue');
+  // Snapshot filter focus/selection BEFORE rewriting innerHTML so a
+  // background poll that fires while the user is typing doesn't yank
+  // focus away mid-keystroke.
+  let restoreFocus = false;
+  let restoreSelStart = 0;
+  let restoreSelEnd = 0;
+  const prevFilter = document.getElementById('training-queue-filter');
+  if (prevFilter && document.activeElement === prevFilter) {
+    restoreFocus = true;
+    restoreSelStart = prevFilter.selectionStart || 0;
+    restoreSelEnd = prevFilter.selectionEnd || 0;
+  }
+  const totalAll = (data.running ? 1 : 0)
+    + (data.queued ? data.queued.length : 0)
+    + (data.completed ? data.completed.length : 0);
+  // Filter input is always present (even when 0 results) so the user can
+  // clear / change the filter without re-navigating.
+  const filterBar = totalAll > 0
+    ? `<div class="evals-toolbar" style="padding:0 0 var(--space-3) 0;">
+        <input class="search-input" id="training-queue-filter" type="search" placeholder="Filter by adapter, type, state, job id…" aria-label="Filter training jobs" value="${escapeHtml(trainingQueueFilter)}">
+      </div>`
+    : '';
+
+  const runningMatch = data.running && matchTraining(data.running);
+  const queuedMatch = (data.queued || []).filter(matchTraining);
+  const completedMatch = (data.completed || []).filter(matchTraining);
+
   // Always render in the same flat container (training-cards) — separate
   // queue/running/completed visually with section labels but a uniform
   // card style so eye-tracking is constant across job states.
-  let html = '<div class="training-cards">';
-  if (data.running) {
+  let html = filterBar + '<div class="training-cards">';
+  if (runningMatch) {
     html += `<div class="queue-section-label">Running</div>`;
     html += renderTrainingCard(data.running, 'running');
   }
-  if (data.queued && data.queued.length > 0) {
+  if (queuedMatch.length > 0) {
     html += `<div class="queue-section-label">Queued</div>`;
-    data.queued.forEach(q => {
+    queuedMatch.forEach(q => {
       html += renderTrainingCard(q, 'queued');
     });
   }
-  if (data.completed && data.completed.length > 0) {
-    const total = data.completed.length;
-    html += `<div class="queue-section-label">Recent <span class="hint" style="font-weight:400;">· ${total} job${total === 1 ? '' : 's'}</span></div>`;
-    data.completed.forEach(j => {
+  if (completedMatch.length > 0) {
+    const total = completedMatch.length;
+    const totalLabel = totalAll && total !== (data.completed?.length || 0)
+      ? `${total} of ${data.completed?.length || 0}`
+      : `${total}`;
+    html += `<div class="queue-section-label">Recent <span class="hint" style="font-weight:400;">· ${totalLabel} job${total === 1 ? '' : 's'}</span></div>`;
+    completedMatch.forEach(j => {
       html += renderTrainingCard(j, 'completed');
     });
   }
   html += '</div>';
+  if (totalAll > 0 && !runningMatch && !queuedMatch.length && !completedMatch.length) {
+    html += `<div class="eval-empty" style="margin-top:var(--space-3);"><div class="eval-empty-body">No training jobs match <code>${escapeHtml(trainingQueueFilter)}</code>.</div></div>`;
+  }
 
   if (!data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length)) {
     html = `<div class="eval-empty empty">
@@ -4994,6 +5043,13 @@ function renderTrainingQueue(data) {
       cancelJobFromButton(b);
     });
   });
+  if (restoreFocus) {
+    const f = document.getElementById('training-queue-filter');
+    if (f) {
+      f.focus();
+      try { f.setSelectionRange(restoreSelStart, restoreSelEnd); } catch {}
+    }
+  }
 }
 
 /// Render a training job as a rich card with progress bar, loss curve
