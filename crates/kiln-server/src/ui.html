@@ -6500,6 +6500,22 @@ document.getElementById('chat-stop').addEventListener('click', () => {
   if (chatAbort) chatAbort.abort();
   updateChatSendState();
 });
+// Esc aborts the active streaming generation when no other modal owns
+// the key. Standard chat-app keyboard shortcut — saves a mouse trip to
+// the Stop button mid-stream. Modal handlers run on their own listeners
+// and stop propagation, so this only fires when nothing else is open.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  // Only intervene when chat is actually streaming.
+  if (!chatAbort && !chatCompareAbort) return;
+  // Don't fight any open modal — the modal's own Esc handler ran first.
+  const openModal = ['eval-drill-modal', 'train-drill-modal', 'adapter-drill-modal', 'request-drill-modal', 'cmdk-modal']
+    .some(id => { const el = document.getElementById(id); return el && !el.hidden; });
+  if (openModal) return;
+  if (chatAbort) { chatAbort.abort(); }
+  if (chatCompareAbort) { chatCompareAbort.abort(); }
+  ev.preventDefault();
+});
 document.getElementById('chat-clear').addEventListener('click', () => {
   if (chatAbort) { chatAbort.abort(); chatAbort = null; }
   chatMessages.length = 0;
