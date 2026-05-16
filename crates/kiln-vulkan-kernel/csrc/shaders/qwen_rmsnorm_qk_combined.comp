@@ -1,0 +1,87 @@
+// Fused Q-norm + K-norm in one dispatch, mirroring two consecutive
+// `qwen_rmsnorm_forward` calls on the (Q, q_weight) and (K, k_weight)
+// pairs that every transformer block does between QKV-split and RoPE.
+//
+// One workgroup per row across BOTH inputs:
+//   workgroup_id in [0, q_rows):                 process row of Q
+//   workgroup_id in [q_rows, q_rows + k_rows):   process row of K
+//
+// Total workgroup count = q_rows + k_rows.
+//
+// Push-constant layout:
+//   q_rows, k_rows, hidden, eps_bits
+//
+// Bindings:
+//   0: Q buffer (read/write, in-place)
+//   1: q_weight (read-only)
+//   2: K buffer (read/write, in-place)
+//   3: k_weight (read-only)
+//
+// Behaviour bit-identical with running `qwen_rmsnorm_forward` twice
+// because each row's computation is independent of the other and
+// each branch performs the same `(1 + weight) * x * rms_inv`
+// arithmetic.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint q_rows;
+    uint k_rows;
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0)           buffer QBuf  { float data_q[];  };
+layout(binding = 1) readonly  buffer QWBuf { float data_qw[]; };
+layout(binding = 2)           buffer KBuf  { float data_k[];  };
+layout(binding = 3) readonly  buffer KWBuf { float data_kw[]; };
+
+shared float sum_sh[256];
+
+void main() {
+    uint wg = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+
+    bool is_q = wg < q_rows;
+    uint row = is_q ? wg : wg - q_rows;
+    uint base = row * hidden;
+
+    float sq_sum = 0.0;
+    if (is_q) {
+        for (uint col = tid; col < hidden; col += 256) {
+            float v = data_q[base + col];
+            sq_sum += v * v;
+        }
+    } else {
+        for (uint col = tid; col < hidden; col += 256) {
+            float v = data_k[base + col];
+            sq_sum += v * v;
+        }
+    }
+    sum_sh[tid] = sq_sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) {
+            sum_sh[tid] += sum_sh[tid + s];
+        }
+        barrier();
+    }
+    float rms_inv = inversesqrt(sum_sh[0] / float(hidden) + eps);
+
+    if (is_q) {
+        for (uint col = tid; col < hidden; col += 256) {
+            float w = data_qw[col];
+            float v = data_q[base + col];
+            data_q[base + col] = (1.0 + w) * v * rms_inv;
+        }
+    } else {
+        for (uint col = tid; col < hidden; col += 256) {
+            float w = data_kw[col];
+            float v = data_k[base + col];
+            data_k[base + col] = (1.0 + w) * v * rms_inv;
+        }
+    }
+}

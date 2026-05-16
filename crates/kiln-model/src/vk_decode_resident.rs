@@ -1073,19 +1073,19 @@ pub fn gated_deltanet_forward_decode_resident_b1(
         &[qk_dim as u32, v_dim as u32],
         Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
     )?;
-    // 5) Q-norm: push = [rows, hidden, eps_bits], workgroups = rows.
+    // 5+6) Fused Q-norm + K-norm: one dispatch, 2*nk workgroups.
+    // GDN shares the same `q_norm` weight buffer for both Q and K
+    // (matches the legacy dispatcher), so we pass it twice.
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[q_buf.handle(), q_norm.handle(), q_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
-    )?;
-    // 6) K-norm (rows = nk to match legacy dispatcher).
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[k_buf.handle(), q_norm.handle(), k_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
+        shaders::QWEN_RMSNORM_QK_COMBINED,
+        &[
+            q_buf.handle(),
+            q_norm.handle(),
+            k_buf.handle(),
+            q_norm.handle(),
+        ],
+        &[nk as u32, nk as u32, dk as u32, eps.to_bits()],
+        Workgroups::OneD((nk + nk) as u32),
     )?;
     // 7) Fused gates+recurrent+rmsnorm. push = [nv, dk, dv, eps_bits, batch],
     //    workgroups = batch*nv.
@@ -1400,17 +1400,22 @@ pub fn record_full_attn_block_into(
         &[num_heads as u32, num_kv_heads as u32, head_dim as u32],
         Workgroups::OneD(total_split.div_ceil(64) as u32),
     )?;
+    // Fused Q-norm + K-norm: one dispatch, q_rows + k_rows workgroups.
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[q_buf.handle(), q_norm.handle(), q_buf.handle()],
-        &[num_heads as u32, head_dim as u32, eps.to_bits()],
-        Workgroups::OneD(num_heads as u32),
-    )?;
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[k_buf.handle(), k_norm.handle(), k_buf.handle()],
-        &[num_kv_heads as u32, head_dim as u32, eps.to_bits()],
-        Workgroups::OneD(num_kv_heads as u32),
+        shaders::QWEN_RMSNORM_QK_COMBINED,
+        &[
+            q_buf.handle(),
+            q_norm.handle(),
+            k_buf.handle(),
+            k_norm.handle(),
+        ],
+        &[
+            num_heads as u32,
+            num_kv_heads as u32,
+            head_dim as u32,
+            eps.to_bits(),
+        ],
+        Workgroups::OneD((num_heads + num_kv_heads) as u32),
     )?;
     batch.record_shader(
         shaders::VK_ROPE_F32,
