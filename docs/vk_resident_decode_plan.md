@@ -445,11 +445,63 @@ p50 once first-token costs amortize over enough output tokens —
 token's pipeline-compilation + cold-cache costs dominate the
 average.
 
+#### Three more host-side wins (commits `fa513e5f`, `b213ea84`, `28efa815`, `c0faf4d9`)
+
+Phase timing after the in-batch readback still showed ~9 ms / token
+of cumulative host-side work. Four targeted optimizations closed
+most of it:
+
+1. **Persistent descriptor-set cache (`fa513e5f`)** — `record_with_pipeline`
+   was calling `allocate_descriptor_sets` + `update_descriptor_sets`
+   on every dispatch (~450 dispatches / token). The
+   `(set_layout, &handles)` combinations are identical token to
+   token because the scratch pool + cached weight buffers have
+   stable handles, so we now allocate once per shape and cache the
+   resulting `vk::DescriptorSet` on `VulkanDevice` forever. The
+   batch descriptor pool is no longer reset on `CommandBatch::Drop`
+   (would invalidate the cached sets). First-token cost drops
+   visibly: P99 ITL went from 600+ ms to 38-130 ms.
+2. **Host-visible small inputs (`b213ea84`)** — RoPE cos/sin,
+   block_table, and seq_lens are each read once by the GPU per
+   token within the main batch. Moved them to persistent
+   host-visible memory via `acquire_resident_scratch_host_visible`
+   and a new `VulkanBuffer::write_mapped(&[u8])` (just
+   `map → memcpy → unmap`, no command submission). Eliminates 4 of
+   5 staging-buffer creates per token.
+3. **Host-visible io_a (`28efa815`)** — Same treatment for the
+   layer-0 input buffer: the embedding output is now just a host
+   `memcpy` into a persistent host-visible buffer, no upload
+   submission at all. The GPU pulls it into L2 on the first read.
+   Upload phase drops from 3.4 ms → 0.02 ms / token.
+4. **Hash-key descriptor cache (`c0faf4d9`)** — On every cache hit,
+   `(layout, Vec<vk::Buffer>)` allocated a fresh `Vec<u64>` from
+   the handles slice. Switched the key to
+   `(layout, fnv64-hash-of-handles)` — no allocation on lookup.
+
+Final per-token phase budget (steady-state, KILN_VK_NATIVE_PHASE_TIMING):
+
+| Phase | Wall time |
+|-------|-----------|
+| embed | 0.16 ms |
+| rope | 0.01 ms |
+| upload | 0.02 ms |
+| record | 2.5 ms |
+| submit | 19.2 ms |
+| readback | 1.4 ms |
+| lmhead | 0.0 ms |
+| **total** | **~23 ms / token** |
+
+Bench at 494-token prompt, 128 output tokens, 5 runs:
+**~35 tok/s mean / 25.2 ms p50 (~40 tok/s p50)**.
+
 #### Remaining gap
 
-Current ~30 tok/s mean (steady) / ~35 tok/s p50 vs. the gate (e.2)
-target of 55 tok/s leaves a ~1.5× p50 / ~1.8× mean factor. Per-layer
-kernel breakdown:
+Current ~35 tok/s mean (warmed) / ~40 tok/s p50 vs. the gate (e.2)
+target of 55 tok/s leaves a ~1.4× p50 / ~1.6× mean factor. The
+submit phase is now ~82% of ITL — the host side has been wrung
+dry, and what's left is the **actual GPU kernel time** for the
+32 transformer blocks plus final norm + LM head. Per-layer kernel
+breakdown:
 
 - Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
   (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
