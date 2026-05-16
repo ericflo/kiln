@@ -14,7 +14,7 @@
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::{HeaderValue, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use kiln_train::{CacheStats, LogitCache};

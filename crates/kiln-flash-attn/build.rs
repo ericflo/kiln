@@ -48,6 +48,8 @@ fn main() {
     // Suppress noisy warnings from CUTLASS templates
     build.flag("-diag-suppress=177"); // variable declared but never referenced
     build.flag("-diag-suppress=174"); // expression has no effect
+    // Host compiler emits these on vendored CUTLASS headers; nothing we can fix upstream.
+    build.flag("-Xcompiler").flag("-Wno-unused-parameter");
 
     // Architecture flags — only sm80+ (flash-attn requirement)
     for arch in cuda_archs.split(';') {

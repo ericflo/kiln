@@ -962,7 +962,6 @@ fn build_self_distill_teacher(
     for ((s_tokens, s_active), (t_tokens, t_active)) in
         student_active.iter().zip(teacher_only.iter())
     {
-        let t_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(t_tokens);
         let s_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(s_tokens);
         for (sp, tp) in s_active.iter().zip(t_active.iter()) {
             // Query the teacher fixture at the teacher key/position.

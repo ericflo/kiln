@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs};
+use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch};
 
 /// Provider variations on the OpenAI `top_logprobs` schema. Most
 /// fields are URL/header conventions; the protocol body is the

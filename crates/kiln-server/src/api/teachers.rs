@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path as AxumPath, State};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get};
 use serde::{Deserialize, Serialize};
 
 use kiln_train::{LogitSourceCaps, LogitSourceError};
@@ -263,6 +263,7 @@ fn resolve_caps_for(spec: &TeacherSpec) -> Option<LogitSourceCaps> {
 /// inside `run_opd` (and future `/v1/distill/*` handlers) to look up
 /// the registry entry. Returns a `LogitSourceError::Invalid` when
 /// the alias is unknown.
+#[allow(dead_code)]
 pub fn resolve_teacher(registry: &TeacherRegistry, alias: &str) -> Result<TeacherSpec, LogitSourceError> {
     registry.get(alias).ok_or_else(|| LogitSourceError::Invalid {
         teacher_id: alias.to_string(),

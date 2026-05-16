@@ -1751,6 +1751,10 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    // Per-gate kernels exist in csrc/ for future use (e.g. split-path
+    // recompute in backward); the fused variant above is the only entry
+    // point currently called from Candle ops.
+    #[allow(dead_code)]
     fn kiln_gdn_gate_beta_bf16(
         b: *const core::ffi::c_void,
         beta_out: *mut core::ffi::c_void,
@@ -1759,6 +1763,7 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    #[allow(dead_code)]
     fn kiln_gdn_gate_g_bf16(
         a: *const core::ffi::c_void,
         A_log: *const core::ffi::c_void,
@@ -1791,6 +1796,7 @@ unsafe extern "C" {
 ///   - `A_log`, `dt_bias` of shape `[nv]`, bf16 or f32, CUDA
 ///   - `nv <= 256`
 
+#[allow(dead_code)]
 struct GdnGateBetaOp;
 
 impl CustomOp1 for GdnGateBetaOp {
@@ -1845,6 +1851,7 @@ impl CustomOp1 for GdnGateBetaOp {
     }
 }
 
+#[allow(dead_code)]
 struct GdnGateGOp;
 
 impl CustomOp3 for GdnGateGOp {

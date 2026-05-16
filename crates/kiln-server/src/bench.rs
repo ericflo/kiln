@@ -2245,7 +2245,7 @@ fn bench_training(
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(false);
     #[cfg(not(feature = "cuda"))]
-    let cuda_native = false;
+    let _cuda_native = false;
 
     #[cfg(feature = "cuda")]
     let result = if cuda_native {
