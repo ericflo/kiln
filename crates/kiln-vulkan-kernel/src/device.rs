@@ -59,6 +59,11 @@ pub struct VulkanDevice {
     /// vkCmdDispatch fail opaquely.
     max_compute_work_group_count: [u32; 3],
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
+    /// Fast-path cache for `CommandBatch::record_shader` callers.
+    /// Keyed by `(shader_path, total_bindings, push_constant_size)` —
+    /// avoids re-hashing the SPIR-V bytes on every record. Returns
+    /// the same `CachedComputePipeline` slots as `pipeline_cache`.
+    path_pipeline_cache: Mutex<HashMap<(&'static str, u32, u32), CachedComputePipeline>>,
     transient_command_pool: Mutex<vk::CommandPool>,
     transient_descriptor_pool: Mutex<vk::DescriptorPool>,
     /// Long-lived pools dedicated to `CommandBatch`. Sized to hold a full
@@ -374,6 +379,7 @@ impl VulkanDevice {
             max_compute_shared_memory_size,
             max_compute_work_group_count,
             pipeline_cache: Mutex::new(HashMap::new()),
+            path_pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
             batch_command_pool: Mutex::new(batch_command_pool),
@@ -628,6 +634,47 @@ impl VulkanDevice {
             self.device.destroy_shader_module(shader_module, None);
         }
 
+        cache.insert(
+            key,
+            CachedComputePipeline {
+                set_layout,
+                layout,
+                pipeline,
+            },
+        );
+        Ok((set_layout, layout, pipeline))
+    }
+
+    /// Path-keyed variant of `get_or_create_compute_pipeline`. Avoids
+    /// re-hashing the SPIR-V bytes on every call from the hot decode
+    /// path (`CommandBatch::record_shader` runs this ~450× per token).
+    /// First-call falls through to `get_or_create_compute_pipeline`
+    /// and caches the result by `(path, total_bindings, push_size)`.
+    pub(crate) fn get_compute_pipeline_by_path(
+        &self,
+        path: &'static str,
+        total_bindings: usize,
+        push_constant_size: u32,
+    ) -> Result<(vk::DescriptorSetLayout, vk::PipelineLayout, vk::Pipeline)> {
+        let key = (path, total_bindings as u32, push_constant_size);
+        {
+            let cache = self
+                .path_pipeline_cache
+                .lock()
+                .map_err(|_| anyhow!("Vulkan path pipeline cache mutex poisoned"))?;
+            if let Some(c) = cache.get(&key) {
+                return Ok((c.set_layout, c.layout, c.pipeline));
+            }
+        }
+        // First-call: compile (or load embedded SPIR-V) and create the
+        // pipeline through the normal cache, then memoize by path.
+        let spirv = crate::pipeline::ShaderPipeline::compile_shader(path)?;
+        let (set_layout, layout, pipeline) =
+            self.get_or_create_compute_pipeline(&spirv, total_bindings, push_constant_size)?;
+        let mut cache = self
+            .path_pipeline_cache
+            .lock()
+            .map_err(|_| anyhow!("Vulkan path pipeline cache mutex poisoned"))?;
         cache.insert(
             key,
             CachedComputePipeline {

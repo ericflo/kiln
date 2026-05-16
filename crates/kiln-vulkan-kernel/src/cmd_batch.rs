@@ -139,7 +139,6 @@ impl<'a> CommandBatch<'a> {
             self.dispatch_count,
             plan.handles.len(),
         );
-        let device = self.vk_device.device();
         let (set_layout, layout, pipeline) = self
             .vk_device
             .get_or_create_compute_pipeline(
@@ -148,6 +147,42 @@ impl<'a> CommandBatch<'a> {
                 (plan.push_constants.len() * 4) as u32,
             )
             .context("CommandBatch: get/create pipeline")?;
+        self.record_with_pipeline(
+            set_layout,
+            layout,
+            pipeline,
+            plan.handles,
+            plan.push_constants,
+            plan.workgroups,
+        )
+    }
+
+    /// Inner recording path that takes the cached pipeline objects
+    /// directly. Used by `record_shader` (path-keyed cache) and
+    /// `record` (SPIR-V-keyed cache). Allocates a descriptor set,
+    /// writes the buffer bindings, emits the compute→compute barrier
+    /// (skipped on first dispatch), and dispatches.
+    fn record_with_pipeline(
+        &mut self,
+        set_layout: vk::DescriptorSetLayout,
+        layout: vk::PipelineLayout,
+        pipeline: vk::Pipeline,
+        handles: &[vk::Buffer],
+        push_constants: &[u32],
+        workgroups: Workgroups,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
+        anyhow::ensure!(
+            (self.dispatch_count as u32) < COMMAND_BATCH_MAX_DISPATCHES,
+            "CommandBatch: exceeded {COMMAND_BATCH_MAX_DISPATCHES} dispatches per batch"
+        );
+        anyhow::ensure!(
+            handles.len() <= 64,
+            "CommandBatch: dispatch {} has {} handles > 64 binding limit",
+            self.dispatch_count,
+            handles.len(),
+        );
+        let device = self.vk_device.device();
         let set_layouts = [set_layout];
         let descriptor_set = unsafe {
             device.allocate_descriptor_sets(
@@ -159,8 +194,7 @@ impl<'a> CommandBatch<'a> {
         }
         .context("CommandBatch: allocate descriptor set")?[0];
 
-        let buf_infos: Vec<vk::DescriptorBufferInfo> = plan
-            .handles
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
             .iter()
             .map(|&h| {
                 vk::DescriptorBufferInfo::builder()
@@ -217,9 +251,9 @@ impl<'a> CommandBatch<'a> {
                 layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                bytemuck::cast_slice(plan.push_constants),
+                bytemuck::cast_slice(push_constants),
             );
-            let (wx, wy, wz) = plan.workgroups.as_3d();
+            let (wx, wy, wz) = workgroups.as_3d();
             device.cmd_dispatch(self.cmd, wx, wy, wz);
         }
         self.dispatch_count += 1;
@@ -232,19 +266,19 @@ impl<'a> CommandBatch<'a> {
     /// the recorder a freed buffer.
     pub fn record_shader(
         &mut self,
-        glsl_path: &str,
+        glsl_path: &'static str,
         handles: &[vk::Buffer],
         push_constants: &[u32],
         workgroups: Workgroups,
     ) -> Result<()> {
-        let spirv = ShaderPipeline::compile_shader(glsl_path)?;
-        let plan = KernelPlan {
-            spirv: &spirv,
-            handles,
-            push_constants,
-            workgroups,
-        };
-        self.record(&plan)
+        // Path-keyed pipeline cache fast-path: avoids re-hashing the
+        // SPIR-V on every call (~450 calls per decode token).
+        let (set_layout, layout, pipeline) = self.vk_device.get_compute_pipeline_by_path(
+            glsl_path,
+            handles.len(),
+            (push_constants.len() * 4) as u32,
+        )?;
+        self.record_with_pipeline(set_layout, layout, pipeline, handles, push_constants, workgroups)
     }
 
     /// Number of dispatches currently in the batch (excluding the final
