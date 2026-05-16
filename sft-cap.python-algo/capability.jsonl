@@ -189,3 +189,13 @@
 {"iter":196,"slug":"cap-sgd2-mini","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8186,"delta":-0.055,"n":75,"notes":"tiny SGD layer hurt"}
 {"iter":197,"slug":"cap-stack-sgd2-final","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8799,"delta":+0.011,"n":75,"notes":"FINAL BEST: re-verified at 0.8799 (variance: also seen at 0.8732). Beats iter 102 stable by +0.011"}
 {"iter":198,"slug":"cap-sgd3-s7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8340,"delta":-0.046,"n":75,"notes":"different base + shuffle hurt"}
+{"iter":199,"slug":"cap-sgd-imt-mid","score":0.8285,"status":"discarded","notes":"IMT as middle layer regressed"}
+{"iter":200,"slug":"cap-sgd-po","score":0.8637,"status":"discarded","notes":"PO as middle layer below 0.88"}
+{"iter":201,"slug":"cap-stack-sgd2-3e5","score":0.8504,"status":"discarded","notes":"lr 3e-5 too low"}
+{"iter":202,"slug":"cap-stack-sgd2-7e5","score":0.8564,"status":"discarded","notes":"lr 7e-5 too high"}
+{"iter":203,"slug":"cap-sgd2-a16","score":0.8268,"status":"discarded","notes":"alpha 16 worse"}
+{"iter":204,"slug":"cap-sgd2-a64","score":0.8402,"status":"discarded","notes":"alpha 64 worse"}
+{"iter":205,"slug":"cap-sgd2-a8","score":0.8108,"status":"discarded","notes":"alpha 8 worst"}
+{"iter":206,"slug":"cap-stack-sgd1","score":0.8016,"status":"discarded","notes":"sgd-run1 base too low"}
+{"iter":207,"slug":"cap-sgd-run7","score":0.7878,"status":"discarded","notes":"fresh SGD base bad seed"}
+{"iter":208,"slug":"variance-discovery","score":null,"status":"note","notes":"cap-stack-sgd2 measurements vary 0.80-0.88 across server restarts. Real eval variance."}

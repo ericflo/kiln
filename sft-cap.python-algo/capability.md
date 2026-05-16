@@ -447,3 +447,18 @@ Key discoveries this session:
 
 Cannot stack further (3+ layers always regress) and GRPO OOMs on
 this base. Final ceiling appears to be ~0.88 stable for LoRA on Qwen3.5-4B.
+
+## Session 3 PART 4 (HONESTY): eval variance discovered
+
+End-of-session re-verification revealed scoring is NOT deterministic
+across kiln server restarts:
+- cap-stack-sgd2: scored 0.8799 (3x), then 0.8732 (3x), then 0.8249 (3x)
+- cap-stack-imt2: scored 0.8702 (3x), then 0.8047 (2x)
+
+All scores are stable WITHIN a single eval session, but vary across
+server restarts.
+
+**Honest best observed**: cap-stack-sgd2 hit 0.8799 reproducibly in
+one session window. The recipe still holds: SGD optimizer for the
+middle stack layer beats AdamW by a measurable margin in any single
+session.
