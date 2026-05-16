@@ -73,18 +73,17 @@ pub struct VulkanDevice {
     /// per layer (which dominated decode ITL on NVIDIA drivers, ~5 ms
     /// each × 32 layers = 160 ms wasted per token).
     batch_command_pool: Mutex<vk::CommandPool>,
-    batch_descriptor_pool: Mutex<vk::DescriptorPool>,
-    /// Persistent descriptor-set cache for `CommandBatch::record_shader`.
-    /// Keyed by `(set_layout, fnv64-hash-of-handles)` — once a unique
-    /// combination is seen we keep the descriptor set allocated forever
-    /// (the `batch_descriptor_pool` is no longer reset on `CommandBatch`
-    /// drop, so the sets remain valid). The hash key avoids cloning
-    /// the handle slice on every lookup; collisions are vanishingly
-    /// rare in the ~450-entry working set, and a buffer-handle
-    /// collision causing a stale descriptor would surface as a
-    /// validation-layer error (not a silent miscompute) before
-    /// reaching parity tests.
-    descriptor_set_cache: Mutex<HashMap<(vk::DescriptorSetLayout, u64), vk::DescriptorSet>>,
+    /// Ring of long-lived descriptor pools dedicated to `CommandBatch`.
+    /// Grows on demand: when the most recent pool hits
+    /// `ERROR_OUT_OF_POOL_MEMORY`, a new pool is appended and the
+    /// allocation retries against it. Sets allocated from older pools
+    /// stay valid (the pools are never reset for the lifetime of the
+    /// device), which is what keeps the long-lived
+    /// `descriptor_set_cache` entries usable. Without this growth the
+    /// single pool exhausted after ~1024 unique buffer combos — fine
+    /// for bench but fatal under real serving where every request
+    /// brings fresh KV-cache slot and intermediate-buffer handles.
+    batch_descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
     /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
     /// Once true, subsequent dispatches short-circuit with a clear error
     /// instead of returning cryptic submit failures forever — the underlying
@@ -363,19 +362,9 @@ impl VulkanDevice {
             )
         }
         .context("failed to create Vulkan batch command pool")?;
-        let batch_descriptor_pool = unsafe {
-            device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(1024)
-                    .pool_sizes(&[vk::DescriptorPoolSize::default()
-                        .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(64 * 1024)
-                        ])
-                    ,
-                None,
-            )
-        }
-        .context("failed to create Vulkan batch descriptor pool")?;
+        let batch_descriptor_pool =
+            Self::create_batch_descriptor_pool(&device)
+                .context("failed to create Vulkan batch descriptor pool")?;
 
         Ok(Self {
             entry,
@@ -396,8 +385,7 @@ impl VulkanDevice {
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
             batch_command_pool: Mutex::new(batch_command_pool),
-            batch_descriptor_pool: Mutex::new(batch_descriptor_pool),
-            descriptor_set_cache: Mutex::new(HashMap::new()),
+            batch_descriptor_pools: Mutex::new(vec![batch_descriptor_pool]),
             terminally_lost: AtomicBool::new(false),
         })
     }
@@ -721,58 +709,68 @@ impl VulkanDevice {
             .map_err(|_| anyhow!("Vulkan batch command pool mutex poisoned"))
     }
 
-    pub(crate) fn batch_descriptor_pool(&self) -> Result<MutexGuard<'_, vk::DescriptorPool>> {
-        self.check_alive()?;
-        self.batch_descriptor_pool
-            .lock()
-            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))
-    }
-
-    /// Fast-path descriptor-set lookup keyed by `(set_layout, handles)`.
-    /// On first call per unique combination, allocates a descriptor set
-    /// from `pool`, writes the storage-buffer bindings, and caches it.
-    /// Subsequent calls return the cached set without any Vulkan API
-    /// call — the descriptor pool is never reset, so cached sets stay
-    /// valid for the lifetime of the device.
-    pub(crate) fn get_or_alloc_descriptor_set(
-        &self,
-        set_layout: vk::DescriptorSetLayout,
-        pool: vk::DescriptorPool,
-        handles: &[vk::Buffer],
-    ) -> Result<vk::DescriptorSet> {
-        // Cheap FNV-1a-style hash over the handles slice — avoids
-        // the heap allocation that `handles.to_vec()` would do on
-        // every lookup (~450 lookups per decode token).
-        let h_hash: u64 = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for handle in handles {
-                let bits: u64 = unsafe { std::mem::transmute::<vk::Buffer, u64>(*handle) };
-                h ^= bits;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h
-        };
-        let key = (set_layout, h_hash);
-        {
-            let cache = self
-                .descriptor_set_cache
-                .lock()
-                .map_err(|_| anyhow!("Vulkan descriptor set cache mutex poisoned"))?;
-            if let Some(s) = cache.get(&key) {
-                return Ok(*s);
-            }
-        }
-        let device = &self.device;
-        let set_layouts = [set_layout];
-        let descriptor_set = unsafe {
-            device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::default()
-                    .descriptor_pool(pool)
-                    .set_layouts(&set_layouts)
-                    ,
+    fn create_batch_descriptor_pool(device: &ash::Device) -> Result<vk::DescriptorPool> {
+        unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1024)
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(64 * 1024)]),
+                None,
             )
         }
-        .context("get_or_alloc_descriptor_set: allocate")?[0];
+        .context("failed to create Vulkan batch descriptor pool")
+    }
+
+    /// Allocate a fresh descriptor set from the latest batch pool and
+    /// write the storage-buffer bindings. Always allocates — no cross-
+    /// batch caching, because Vulkan recycles `vk::Buffer` handle values
+    /// after destruction (e.g. session-scoped KV caches, transient
+    /// per-request staging buffers), so a hash-of-handles cache key can
+    /// collide between a destroyed buffer and a freshly allocated one
+    /// and silently return a descriptor set bound to freed memory.
+    /// `CommandBatch::new` resets the pools, so allocations within a
+    /// single batch reuse pool slots cleanly across batches.
+    ///
+    /// When the latest pool returns `ERROR_OUT_OF_POOL_MEMORY` (a single
+    /// batch records >1024 dispatches), grows the ring with a fresh
+    /// pool and retries.
+    pub(crate) fn alloc_descriptor_set(
+        &self,
+        set_layout: vk::DescriptorSetLayout,
+        handles: &[vk::Buffer],
+    ) -> Result<vk::DescriptorSet> {
+        let device = &self.device;
+        let set_layouts = [set_layout];
+        let mut pools = self
+            .batch_descriptor_pools
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))?;
+        let alloc_from = |pool: vk::DescriptorPool| -> ash::prelude::VkResult<Vec<vk::DescriptorSet>> {
+            unsafe {
+                device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(pool)
+                        .set_layouts(&set_layouts),
+                )
+            }
+        };
+        let current = *pools.last().expect("at least one batch descriptor pool");
+        let descriptor_set = match alloc_from(current) {
+            Ok(sets) => sets[0],
+            Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
+                let fresh = Self::create_batch_descriptor_pool(device)?;
+                pools.push(fresh);
+                alloc_from(fresh)
+                    .context("alloc_descriptor_set: allocate from fresh pool")?[0]
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .context("alloc_descriptor_set: allocate")
+            }
+        };
+        drop(pools);
         let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
             .iter()
             .map(|&h| {
@@ -798,12 +796,27 @@ impl VulkanDevice {
         unsafe {
             device.update_descriptor_sets(&writes, &[]);
         }
-        let mut cache = self
-            .descriptor_set_cache
-            .lock()
-            .map_err(|_| anyhow!("Vulkan descriptor set cache mutex poisoned"))?;
-        cache.insert(key, descriptor_set);
         Ok(descriptor_set)
+    }
+
+    /// Reset every batch descriptor pool, freeing all sets allocated
+    /// from them. Called from `CommandBatch::new` once the cmd_pool
+    /// lock has been acquired (which serializes batches and means the
+    /// previous batch's `submit_and_wait` has completed, so no GPU
+    /// work is still reading those descriptor sets).
+    pub(crate) fn reset_batch_descriptor_pools(&self) -> Result<()> {
+        let pools = self
+            .batch_descriptor_pools
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))?;
+        for pool in pools.iter() {
+            unsafe {
+                self.device
+                    .reset_descriptor_pool(*pool, vk::DescriptorPoolResetFlags::empty())
+                    .context("reset batch descriptor pool")?;
+            }
+        }
+        Ok(())
     }
 
     /// True once any submit/wait has observed `VK_ERROR_DEVICE_LOST`.
@@ -923,9 +936,11 @@ impl Drop for VulkanDevice {
                 self.device.destroy_command_pool(*pool, None);
             }
         }
-        if let Ok(pool) = self.batch_descriptor_pool.lock() {
-            unsafe {
-                self.device.destroy_descriptor_pool(*pool, None);
+        if let Ok(pools) = self.batch_descriptor_pools.lock() {
+            for pool in pools.iter() {
+                unsafe {
+                    self.device.destroy_descriptor_pool(*pool, None);
+                }
             }
         }
         if let Ok(pool) = self.batch_command_pool.lock() {

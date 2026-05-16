@@ -68,7 +68,6 @@ pub struct CommandBatch<'a> {
     cmd_pool_guard: MutexGuard<'a, vk::CommandPool>,
     /// Live lock on the device's long-lived batch descriptor pool.
     /// Same semantics as `cmd_pool_guard`.
-    descriptor_pool_guard: MutexGuard<'a, vk::DescriptorPool>,
     cmd: vk::CommandBuffer,
     cmd_buffers_to_free: Vec<vk::CommandBuffer>,
     dispatch_count: usize,
@@ -91,7 +90,11 @@ impl<'a> CommandBatch<'a> {
         // avoiding the ~5 ms-per-pool create+destroy that dominated
         // per-layer batch construction.
         let cmd_pool_guard = vk_device.batch_command_pool()?;
-        let descriptor_pool_guard = vk_device.batch_descriptor_pool()?;
+        // Holding cmd_pool_guard exclusive means the previous
+        // CommandBatch's `submit_and_wait` has already completed, so
+        // no GPU work is still reading descriptors from the batch
+        // pools — safe to reset and reuse them for this batch.
+        vk_device.reset_batch_descriptor_pools()?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(*cmd_pool_guard)
             .level(vk::CommandBufferLevel::PRIMARY)
@@ -113,7 +116,6 @@ impl<'a> CommandBatch<'a> {
         Ok(Self {
             vk_device,
             cmd_pool_guard,
-            descriptor_pool_guard,
             cmd,
             cmd_buffers_to_free: cmd_buffers,
             dispatch_count: 0,
@@ -187,11 +189,9 @@ impl<'a> CommandBatch<'a> {
         // looked up on the device. After first call per shape the set
         // is just a lookup; no `allocate_descriptor_sets` /
         // `update_descriptor_sets` round-trip per dispatch.
-        let descriptor_set = self.vk_device.get_or_alloc_descriptor_set(
-            set_layout,
-            *self.descriptor_pool_guard,
-            handles,
-        )?;
+        let descriptor_set = self
+            .vk_device
+            .alloc_descriptor_set(set_layout, handles)?;
         unsafe {
 
             // Inter-dispatch barrier — needed BEFORE this dispatch so it
@@ -363,13 +363,11 @@ impl<'a> Drop for CommandBatch<'a> {
         let device = self.vk_device.device();
         unsafe {
             // Pools persist on `VulkanDevice`. Free this batch's
-            // command buffer back to the (transient) command pool, but
-            // do NOT reset the descriptor pool — the descriptor-set
-            // cache in `VulkanDevice` holds long-lived references to
-            // every `(layout, handles)` combination this batch
-            // allocated. After the first decode token the cache is
-            // warm and subsequent batches reuse the same descriptor
-            // sets without any allocate/update Vulkan API calls.
+            // command buffer back to the (transient) command pool;
+            // the descriptor pool gets reset at the next
+            // `CommandBatch::new` (under the cmd_pool lock, which
+            // implies the previous submit_and_wait has completed),
+            // so we don't reset it here.
             if !self.cmd_buffers_to_free.is_empty() {
                 device.free_command_buffers(*self.cmd_pool_guard, &self.cmd_buffers_to_free);
             }
