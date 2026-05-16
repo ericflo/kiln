@@ -2461,4 +2461,188 @@ mod tests {
             }
         }
     }
+
+    /// End-to-end roundtrip through the Vulkan-resident paged KV cache:
+    /// write each (K, V) token into the slot the block-table resolves,
+    /// then run the paged paged-attention read kernel against the same
+    /// pool, and verify against a CPU reference computation.
+    ///
+    /// This is the architectural integration test for the resident
+    /// decode KV path — the slot-write kernel produces a pool layout
+    /// that the paged_attn_decode_batch_paged.comp kernel reads
+    /// element-for-element.
+    #[test]
+    fn vk_paged_kv_cache_write_then_paged_attn_resident_roundtrip() {
+        use crate::VkPagedKvCache;
+        let Some(dev) = try_device() else { return };
+        let batch = 1usize;
+        let num_heads = 2usize;
+        let num_kv_heads = 1usize;
+        let head_dim = 8usize;
+        let block_size = 4usize;
+        let num_blocks = 4usize;
+        let total_slots = num_blocks * block_size;
+        let seq_len = 6usize;
+        let softmax_scale = (head_dim as f32).sqrt().recip();
+
+        let q_data: Vec<f32> = (0..batch * num_heads * head_dim)
+            .map(|i| (i as f32) * 0.027 - 0.5)
+            .collect();
+        let k_data: Vec<f32> = (0..seq_len * num_kv_heads * head_dim)
+            .map(|i| (i as f32) * 0.013 + 0.1)
+            .collect();
+        let v_data: Vec<f32> = (0..seq_len * num_kv_heads * head_dim)
+            .map(|i| (i as f32) * 0.019 - 0.2)
+            .collect();
+
+        let dev_arc = Arc::clone(&dev);
+        let cache = VkPagedKvCache::new(
+            &dev_arc,
+            1,
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+        )
+        .expect("VkPagedKvCache should allocate");
+
+        // Block table maps logical position p → physical slot. We use
+        // a non-trivial mapping (blocks 2, 0 — chosen so the read
+        // crosses a block boundary at p=4 from slot 11 back to slot 0).
+        // Layout: positions 0..3 land in block 2 (slots 8..11);
+        //         positions 4..5 land in block 0 (slots 0..1).
+        let block_ids: [u32; 2] = [2, 0];
+        let block_table_bytes: Vec<u8> = bytemuck::cast_slice(&block_ids).to_vec();
+
+        // Resolve slot for each position via the same arithmetic the
+        // legacy block-table does and call the resident slot-write
+        // kernel once per token.
+        let slot_for = |pos: usize| {
+            let block = pos / block_size;
+            let offset = pos % block_size;
+            (block_ids[block] as usize) * block_size + offset
+        };
+
+        let k_pool_buf = cache.k_buffer(0).unwrap();
+        let v_pool_buf = cache.v_buffer(0).unwrap();
+
+        for p in 0..seq_len {
+            let k_token: Vec<f32> = k_data[p * num_kv_heads * head_dim
+                ..(p + 1) * num_kv_heads * head_dim]
+                .to_vec();
+            let v_token: Vec<f32> = v_data[p * num_kv_heads * head_dim
+                ..(p + 1) * num_kv_heads * head_dim]
+                .to_vec();
+            let k_t = Tensor::from_vec(k_token, num_kv_heads * head_dim, &Device::Cpu).unwrap();
+            let v_t = Tensor::from_vec(v_token, num_kv_heads * head_dim, &Device::Cpu).unwrap();
+            let k_buf = upload_tensor_f32_buffer(&dev, &k_t).unwrap();
+            let v_buf = upload_tensor_f32_buffer(&dev, &v_t).unwrap();
+            let slot = slot_for(p);
+            dispatch_paged_kv_write_slot_resident(
+                &dev,
+                &k_buf,
+                &v_buf,
+                k_pool_buf,
+                v_pool_buf,
+                slot,
+                num_kv_heads,
+                head_dim,
+                total_slots,
+            )
+            .unwrap();
+        }
+
+        // Pack Q into a contiguous buffer, build seq_lens and the
+        // block table buffer on device.
+        let q_t = Tensor::from_vec(q_data.clone(), (batch, 1, num_heads, head_dim), &Device::Cpu)
+            .unwrap();
+        let q_buf = upload_tensor_f32_buffer(&dev, &q_t).unwrap();
+
+        let seq_lens: Vec<u32> = vec![seq_len as u32];
+        let seq_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens).to_vec();
+        let make_dev_buf = |bytes: &[u8]| -> VulkanBuffer {
+            let buf = VulkanBuffer::create_device_local(
+                dev.device(),
+                dev.device_local_mem_type(),
+                bytes.len() as u64,
+            )
+            .unwrap();
+            let pool = dev.transient_command_pool().unwrap();
+            VulkanBuffer::upload_data_with_command_pool(
+                dev.device(),
+                dev.host_visible_mem_type(),
+                dev.queue(),
+                *pool,
+                &buf,
+                bytes,
+            )
+            .unwrap();
+            buf
+        };
+        let seq_buf = make_dev_buf(&seq_bytes);
+        let block_table_buf = make_dev_buf(&block_table_bytes);
+
+        let out_buf = alloc_out(&dev, (batch * num_heads * head_dim * 4) as u64);
+        let max_blocks_per_seq = block_ids.len();
+        dispatch_paged_attn_decode_batch_paged_f32_resident(
+            &dev,
+            &q_buf,
+            k_pool_buf,
+            v_pool_buf,
+            &block_table_buf,
+            &seq_buf,
+            &out_buf,
+            batch,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            max_blocks_per_seq,
+            block_size,
+            softmax_scale,
+        )
+        .unwrap();
+        let got = read_back_f32(&dev, &out_buf);
+
+        // CPU reference: standard MHA softmax over the seq.
+        let mut expected = vec![0.0f32; num_heads * head_dim];
+        for h in 0..num_heads {
+            let kv_h = h * num_kv_heads / num_heads;
+            // Logits per timestep.
+            let mut logits = vec![0.0f32; seq_len];
+            for t in 0..seq_len {
+                let mut dot = 0.0f32;
+                for d in 0..head_dim {
+                    let q_idx = h * head_dim + d;
+                    let k_idx = t * num_kv_heads * head_dim + kv_h * head_dim + d;
+                    dot += q_data[q_idx] * k_data[k_idx];
+                }
+                logits[t] = dot * softmax_scale;
+            }
+            let max_l = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let mut exps = vec![0.0f32; seq_len];
+            let mut z = 0.0f32;
+            for t in 0..seq_len {
+                exps[t] = (logits[t] - max_l).exp();
+                z += exps[t];
+            }
+            for d in 0..head_dim {
+                let mut acc = 0.0f32;
+                for t in 0..seq_len {
+                    let v_idx = t * num_kv_heads * head_dim + kv_h * head_dim + d;
+                    acc += (exps[t] / z) * v_data[v_idx];
+                }
+                expected[h * head_dim + d] = acc;
+            }
+        }
+
+        for i in 0..(num_heads * head_dim) {
+            let e = expected[i];
+            let g = got[i];
+            let rel = (e - g).abs() / e.abs().max(g.abs()).max(1e-6);
+            assert!(
+                rel <= 1e-4,
+                "idx {i}: expected {e:e} got {g:e} (rel err {rel:e})"
+            );
+        }
+    }
 }
