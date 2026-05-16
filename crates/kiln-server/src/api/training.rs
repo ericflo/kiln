@@ -12,8 +12,8 @@ use axum::{
 
 use kiln_core::env_flag::env_tristate;
 use kiln_train::{
-    DistillRefreshRequest, GrpoGroup, GrpoRequest, OpdRequest, SftRequest, TrainingResponse,
-    TrainingState, TrainingStatus,
+    DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest, GrpoGroup,
+    GrpoRequest, OpdRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
 };
 use serde::Serialize;
 
@@ -709,6 +709,157 @@ async fn submit_distill_refresh(
     }))
 }
 
+/// `POST /v1/adapters/distill_merge` — §3.4 behaviour-space merge.
+async fn submit_distill_merge(
+    State(state): State<AppState>,
+    Json(req): Json<DistillMergeRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.sources.is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: `sources` must be non-empty".to_string(),
+        ));
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill_merge: `name` must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillMerge(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill_merge (milestone-9 stub; #32).".to_string(),
+    }))
+}
+
+/// `POST /v1/distill/pump` — §3.5 Knowledge Pump.
+async fn submit_distill_pump(
+    State(state): State<AppState>,
+    Json(req): Json<DistillPumpRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/pump: `teacher` alias must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillPump(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill/pump (milestone-9 stub; #36).".to_string(),
+    }))
+}
+
+/// `POST /v1/distill/self` — §3.12 PI self-distillation.
+async fn submit_distill_self(
+    State(state): State<AppState>,
+    Json(req): Json<DistillSelfRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "distill/self: `name` must be non-empty".to_string(),
+        ));
+    }
+    enforce_queue_caps(&state)?;
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req.name.clone();
+    let auto_load = req.config.auto_load;
+    register_and_enqueue_distill(
+        &state,
+        &job_id,
+        &adapter_name,
+        auto_load,
+        QueuedJob::DistillSelf(req),
+    );
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: "Queued distill/self (milestone-9 stub; #33).".to_string(),
+    }))
+}
+
+/// Shared queue-cap enforcement used by all distill_* endpoints.
+fn enforce_queue_caps(state: &AppState) -> Result<(), ApiError> {
+    let max_queued = state.max_queued_training_jobs;
+    if state.training_queue.lock().unwrap().len() >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    if state.training_jobs.read().unwrap().len() >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+    Ok(())
+}
+
+/// Shared registration+enqueue for distill_* endpoints. Same shape as
+/// `submit_distill_refresh`/`submit_opd` but inlined for the simpler
+/// distill variants.
+fn register_and_enqueue_distill(
+    state: &AppState,
+    job_id: &str,
+    adapter_name: &str,
+    auto_load: bool,
+    job: QueuedJob,
+) {
+    let info = TrainingJobInfo {
+        job_id: job_id.to_string(),
+        adapter_name: adapter_name.to_string(),
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        auto_load,
+        finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.to_string(), info);
+    let mut q = state.training_queue.lock().unwrap();
+    q.push(QueueEntry {
+        job_id: job_id.to_string(),
+        job,
+    });
+}
+
 /// GET /v1/train/status — overall training status (list all tracked jobs).
 async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>> {
     let jobs = state.training_jobs.read().unwrap();
@@ -940,6 +1091,18 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/distill/refresh",
             post(submit_distill_refresh).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/adapters/distill_merge",
+            post(submit_distill_merge).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/distill/pump",
+            post(submit_distill_pump).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
+        .route(
+            "/v1/distill/self",
+            post(submit_distill_self).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))

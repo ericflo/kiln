@@ -230,6 +230,155 @@ fn default_require_new_knowledge_gain() -> f64 {
     0.05
 }
 
+// ---------------------------------------------------------------------------
+// /v1/adapters/distill_merge — behaviour-space merge (§3.4)
+// ---------------------------------------------------------------------------
+
+/// One source adapter for the [`DistillMergeRequest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillMergeSource {
+    /// Adapter name on disk.
+    pub adapter: String,
+    /// Mixture weight when sampling prompts owned by this source.
+    /// Defaults to 1.0 — equal weighting across sources.
+    #[serde(default = "default_merge_source_weight")]
+    pub weight: f64,
+}
+
+fn default_merge_source_weight() -> f64 {
+    1.0
+}
+
+/// `POST /v1/adapters/distill_merge` payload — §3.4 "killer feature."
+///
+/// Each source LoRA is treated as a teacher over its retained training-
+/// prompt distribution. The merged adapter is OPD-trained to match
+/// each teacher on the prompts that teacher was good at. Multi-teacher
+/// reverse-KL weighting from DeepSeek-V4 §5.1.2 with per-prompt routing
+/// resolved by source-of-origin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillMergeRequest {
+    /// Output adapter name.
+    pub name: String,
+    /// Source adapters to merge. Each becomes a "teacher" over its
+    /// own prompt history.
+    pub sources: Vec<DistillMergeSource>,
+    /// Optional warm-start: adapter to initialise from before
+    /// running multi-teacher OPD. Default `"base"` (the unmodified
+    /// model).
+    #[serde(default = "default_merge_student")]
+    pub student: String,
+    /// Total rollout budget across all sources (per the §3.4
+    /// example: `5000`).
+    #[serde(default = "default_merge_rollout_budget")]
+    pub rollout_budget: usize,
+    /// Per-job OPD config; loss granularity defaults to
+    /// `teacher_top_k` so each source's distillation honours the §6
+    /// fast path.
+    #[serde(default)]
+    pub config: OpdConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+fn default_merge_student() -> String {
+    "base".to_string()
+}
+fn default_merge_rollout_budget() -> usize {
+    5_000
+}
+
+// ---------------------------------------------------------------------------
+// /v1/distill/pump — 27B → 4B Knowledge Pump (§3.5)
+// ---------------------------------------------------------------------------
+
+/// Three modes of operation per §3.5:
+/// - `Domain { domain }` — targeted-domain (canonical seed corpus).
+/// - `Wide` — wide-corpus generalist pump.
+/// - `Examples { examples }` — auto-domain from user prompts;
+///   data-multiplier mode auto-engages when `|examples| < 200`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DistillPumpMode {
+    Domain { domain: String },
+    Examples { examples: Vec<OpdPrompt> },
+    Wide { wide: bool },
+}
+
+/// `POST /v1/distill/pump` payload — §3.5.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillPumpRequest {
+    pub name: String,
+    /// Teacher alias.
+    pub teacher: String,
+    /// One of the three mode variants (§3.5.{1,2,3}).
+    pub mode: DistillPumpMode,
+    /// LoRA rank — overrides the OpdConfig default when set.
+    #[serde(default)]
+    pub rank: Option<usize>,
+    /// Total rollout budget.
+    #[serde(default = "default_pump_rollout_budget")]
+    pub rollout_budget: usize,
+    /// Honor the canonical cache + the community cache (§3.3).
+    /// Default `true` — pit-of-success pre-amortise.
+    #[serde(default = "default_use_cache")]
+    pub use_cache: bool,
+    #[serde(default)]
+    pub config: OpdConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+fn default_pump_rollout_budget() -> usize {
+    50_000
+}
+fn default_use_cache() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
+// /v1/distill/self — Privileged-Information self-distillation (§3.12)
+// ---------------------------------------------------------------------------
+
+/// One of the four PI modes described in §3.12.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDistillMode {
+    /// OPSD: ground-truth answer as privileged context to the
+    /// teacher copy of the model.
+    GroundTruthConditioning,
+    /// CRISP: condition on "be concise" — teaches concision. Lu et
+    /// al. report 57% token reduction at +9% accuracy.
+    Conciseness,
+    /// GATES: retrieval context to teacher only.
+    DocumentAsPi,
+    /// RLRT: reversed teacher signal.
+    ReverseTeacher,
+}
+
+/// `POST /v1/distill/self` payload — §3.12 PI self-distillation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillSelfRequest {
+    pub name: String,
+    /// Self-distillation mode.
+    pub mode: SelfDistillMode,
+    /// Prompts to OPD over. `None` = use the most recent training
+    /// dataset registered with the server.
+    #[serde(default)]
+    pub prompts: Option<Vec<OpdPrompt>>,
+    /// Optional ground-truth answers for `GroundTruthConditioning`.
+    /// Must match `prompts` length when both are set.
+    #[serde(default)]
+    pub ground_truth: Option<Vec<String>>,
+    /// Optional retrieval context for `DocumentAsPi`.
+    #[serde(default)]
+    pub documents: Option<Vec<String>>,
+    #[serde(default)]
+    pub config: OpdConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
 /// HTTP-shaped request for `POST /v1/train/opd`. Mirror of `GrpoRequest`,
 /// adapted to the OPD recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1200,6 +1349,74 @@ mod tests {
                 assert_eq!(dataset, "q4-2026-internal-docs");
             }
             other => panic!("expected Dataset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distill_merge_request_round_trips() {
+        let req = DistillMergeRequest {
+            name: "unified-coder".into(),
+            sources: vec![
+                DistillMergeSource { adapter: "rust-helper".into(), weight: 1.0 },
+                DistillMergeSource { adapter: "python-helper".into(), weight: 1.0 },
+                DistillMergeSource { adapter: "sql-helper".into(), weight: 0.7 },
+            ],
+            student: "base".into(),
+            rollout_budget: 5000,
+            config: OpdConfig::default(),
+            post_eval: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let parsed: DistillMergeRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed.sources.len(), 3);
+        assert!((parsed.sources[2].weight - 0.7).abs() < 1e-9);
+        assert_eq!(parsed.rollout_budget, 5000);
+    }
+
+    #[test]
+    fn distill_pump_request_three_modes_parse() {
+        let domain: DistillPumpRequest = serde_json::from_str(
+            r#"{"name":"math-lora","teacher":"qwen3.6@local","mode":{"domain":"math_reasoning"}}"#,
+        )
+        .unwrap();
+        match domain.mode {
+            DistillPumpMode::Domain { domain } => assert_eq!(domain, "math_reasoning"),
+            other => panic!("expected Domain, got {other:?}"),
+        }
+        assert!(domain.use_cache);
+
+        let wide: DistillPumpRequest = serde_json::from_str(
+            r#"{"name":"gen-lora","teacher":"qwen3.6@local","mode":{"wide":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(wide.mode, DistillPumpMode::Wide { wide: true }));
+
+        let examples: DistillPumpRequest = serde_json::from_str(
+            r#"{"name":"my-style","teacher":"x","mode":{"examples":[{"messages":[{"role":"user","content":"hi"}]}]}}"#,
+        )
+        .unwrap();
+        match examples.mode {
+            DistillPumpMode::Examples { examples } => assert_eq!(examples.len(), 1),
+            other => panic!("expected Examples, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distill_self_request_four_modes_parse() {
+        for mode_str in [
+            "ground_truth_conditioning",
+            "conciseness",
+            "document_as_pi",
+            "reverse_teacher",
+        ] {
+            let json = format!(r#"{{"name":"x","mode":"{mode_str}"}}"#);
+            let req: DistillSelfRequest = serde_json::from_str(&json).unwrap();
+            // Mode enum parses without panic; round-trip back to the same string.
+            let s = serde_json::to_string(&req).unwrap();
+            assert!(
+                s.contains(mode_str),
+                "expected mode {mode_str} in serialized {s}"
+            );
         }
     }
 

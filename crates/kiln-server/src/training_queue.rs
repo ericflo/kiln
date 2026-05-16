@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
-use kiln_train::{self, DistillRefreshRequest, GrpoRequest, OpdRequest, SftRequest, TrainingState};
+use kiln_train::{
+    self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
+    GrpoRequest, OpdRequest, SftRequest, TrainingState,
+};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -111,6 +114,15 @@ pub enum QueuedJob {
     /// against `behavioural_teacher`. Gated on dual eval (IF-eval
     /// recovery + new-knowledge gain).
     DistillRefresh(DistillRefreshRequest),
+    /// `/v1/adapters/distill_merge` — §3.4 behaviour-space merge.
+    /// Multi-teacher OPD over each source LoRA's retained training-
+    /// prompt distribution.
+    DistillMerge(DistillMergeRequest),
+    /// `/v1/distill/pump` — §3.5 27B → 4B Knowledge Pump in three
+    /// modes (Domain / Wide / Examples).
+    DistillPump(DistillPumpRequest),
+    /// `/v1/distill/self` — §3.12 PI self-distillation.
+    DistillSelf(DistillSelfRequest),
 }
 
 /// Entry in the training queue.
@@ -741,6 +753,176 @@ fn run_distill_refresh(
     Ok(output_dir)
 }
 
+/// `/v1/adapters/distill_merge` runtime — §3.4 behaviour-space merge.
+/// Each source LoRA is treated as a teacher over its retained
+/// training-prompt distribution. Multi-teacher reverse-KL with per-
+/// prompt routing (source-of-origin) plus DeepSeek-V4-style weighted
+/// averaging on shared prompts.
+///
+/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
+/// §3.1 trainer refactor (task #31).
+fn run_distill_merge(
+    req: &DistillMergeRequest,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.sources.is_empty() {
+        return Err("distill_merge: at least one source required".into());
+    }
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        num_sources = req.sources.len(),
+        student = %req.student,
+        rollout_budget = req.rollout_budget,
+        "distill_merge started (milestone-9 stub)"
+    );
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        format!("create distill_merge adapter dir {}: {e}", output_dir.display())
+    })?;
+    std::fs::write(
+        output_dir.join("KILN_DISTILL_MERGE_STUB.txt"),
+        format!(
+            "kiln /v1/adapters/distill_merge stub for job {job_id}.\n\
+             Runtime (multi-teacher OPD + coverage report) lands with #31.\n\
+             student: {student}\n\
+             sources: {sources:?}\n",
+            student = req.student,
+            sources = req.sources,
+        ),
+    )
+    .map_err(|e| format!("write distill_merge stub: {e}"))?;
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_merge", seed)
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_merge receipt: {e}");
+    }
+    progress_cb(trainer::TrainingProgress {
+        epoch: 1,
+        total_epochs: 1,
+        step: 1,
+        total_steps: 1,
+        loss: 0.0,
+        progress: 1.0,
+    });
+    Ok(output_dir)
+}
+
+/// `/v1/distill/pump` runtime — §3.5 27B → 4B Knowledge Pump.
+/// Three modes (Domain / Wide / Examples); §3.5.4 data-multiplier
+/// mode auto-engages internally when |examples| < 200.
+///
+/// Milestone-9 state: plumbing + receipt. Runtime body lands with the
+/// §3.1 trainer refactor.
+fn run_distill_pump(
+    req: &DistillPumpRequest,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.teacher.trim().is_empty() {
+        return Err("distill_pump: teacher alias must be non-empty".into());
+    }
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        teacher = %req.teacher,
+        rollout_budget = req.rollout_budget,
+        "distill_pump started (milestone-9 stub)"
+    );
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        format!("create distill_pump adapter dir {}: {e}", output_dir.display())
+    })?;
+    std::fs::write(
+        output_dir.join("KILN_DISTILL_PUMP_STUB.txt"),
+        format!(
+            "kiln /v1/distill/pump stub for job {job_id}.\n\
+             teacher: {teacher}\n\
+             mode: {mode:?}\n",
+            teacher = req.teacher,
+            mode = req.mode,
+        ),
+    )
+    .map_err(|e| format!("write distill_pump stub: {e}"))?;
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_pump", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: req.teacher.clone(),
+            model_id: req.teacher.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_pump receipt: {e}");
+    }
+    progress_cb(trainer::TrainingProgress {
+        epoch: 1,
+        total_epochs: 1,
+        step: 1,
+        total_steps: 1,
+        loss: 0.0,
+        progress: 1.0,
+    });
+    Ok(output_dir)
+}
+
+/// `/v1/distill/self` runtime — §3.12 PI self-distillation.
+///
+/// Milestone-9 state: plumbing + receipt. Runtime body wires alongside
+/// the trainer refactor.
+fn run_distill_self(
+    req: &DistillSelfRequest,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.name.trim().is_empty() {
+        return Err("distill_self: name must be non-empty".into());
+    }
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        mode = ?req.mode,
+        "distill_self started (milestone-9 stub)"
+    );
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        format!("create distill_self adapter dir {}: {e}", output_dir.display())
+    })?;
+    std::fs::write(
+        output_dir.join("KILN_DISTILL_SELF_STUB.txt"),
+        format!(
+            "kiln /v1/distill/self stub for job {job_id}.\n\
+             mode: {mode:?}\n",
+            mode = req.mode,
+        ),
+    )
+    .map_err(|e| format!("write distill_self stub: {e}"))?;
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_self", seed)
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| serde_json::json!({})));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_self receipt: {e}");
+    }
+    progress_cb(trainer::TrainingProgress {
+        epoch: 1,
+        total_epochs: 1,
+        step: 1,
+        total_steps: 1,
+        loss: 0.0,
+        progress: 1.0,
+    });
+    Ok(output_dir)
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -831,6 +1013,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         QueuedJob::Grpo(req) => req.post_eval.clone(),
         QueuedJob::Opd(req) => req.post_eval.clone(),
         QueuedJob::DistillRefresh(req) => req.post_eval.clone(),
+        QueuedJob::DistillMerge(req) => req.post_eval.clone(),
+        QueuedJob::DistillPump(req) => req.post_eval.clone(),
+        QueuedJob::DistillSelf(req) => req.post_eval.clone(),
     };
 
     let result: std::result::Result<PathBuf, String> = match entry.job {
@@ -930,6 +1115,21 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 progress_cb,
                 &job_id,
             )
+        }
+        QueuedJob::DistillMerge(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _guard = runner_arc.read().unwrap();
+            run_distill_merge(&req, &state.adapter_dir, &adapter_name, progress_cb, &job_id)
+        }
+        QueuedJob::DistillPump(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _guard = runner_arc.read().unwrap();
+            run_distill_pump(&req, &state.adapter_dir, &adapter_name, progress_cb, &job_id)
+        }
+        QueuedJob::DistillSelf(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _guard = runner_arc.read().unwrap();
+            run_distill_self(&req, &state.adapter_dir, &adapter_name, progress_cb, &job_id)
         }
     };
 
