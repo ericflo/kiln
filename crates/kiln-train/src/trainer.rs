@@ -1991,7 +1991,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
 ///
 /// The label_mask indicates which tokens are part of assistant responses
 /// (true = compute loss here, false = ignore).
-pub(crate) fn tokenize_for_training(
+pub fn tokenize_for_training(
     example: &SftExample,
     tokenizer: &KilnTokenizer,
 ) -> Result<(Vec<u32>, Vec<bool>)> {

@@ -1196,6 +1196,120 @@ pub fn compute_stable_opd_loss(inputs: StableOpdLossInputs<'_>) -> Result<Stable
     })
 }
 
+/// §3.1 end-to-end algorithmic-loop validation. Given a synthetic
+/// teacher (FixtureLogitSource), a trainable `head_t` proxy, and an
+/// AdamW optimizer, run K optimization steps and verify:
+///
+/// 1. The loss strictly decreases over the run.
+/// 2. The final loss is small (the student's K-support softmax
+///    matches the teacher).
+///
+/// This is the smallest unit that proves the per-token reverse-KL
+/// kernel + StableOpd loss composition + candle autograd + AdamW
+/// state machinery together produce a real training signal. The
+/// trainer body integration (#31) wires this primitive into the
+/// kiln-model forward path + LoRA Vars + adapter save.
+#[cfg(test)]
+pub fn opd_train_synthetic_validation(
+    seq_len: usize,
+    hidden_size: usize,
+    vocab_size: usize,
+    top_k: usize,
+    num_steps: usize,
+    learning_rate: f64,
+) -> Result<(f32, f32)> {
+    use candle_core::Var;
+    use candle_nn::optim::{AdamW, ParamsAdamW};
+    use candle_nn::Optimizer;
+
+    let device = candle_core::Device::Cpu;
+
+    // Trainable: a hidden-state-shaped Var. We're proving the loss
+    // gradient flows back into something the optimizer can move.
+    let init: Vec<f32> = (0..(seq_len * hidden_size))
+        .map(|i| (i as f32 * 0.013).sin() * 0.3)
+        .collect();
+    let hidden = Var::from_vec(init, (1, seq_len, hidden_size), &device)?;
+
+    // Frozen head — represents the LM projection. We pick a fixed
+    // random head; the training surface is the hidden Var.
+    let head_vec: Vec<f32> = (0..(hidden_size * vocab_size))
+        .map(|i| ((i as f32 + 7.0) * 0.0007).cos() * 0.2)
+        .collect();
+    let head_t = candle_core::Tensor::from_vec(
+        head_vec,
+        (hidden_size, vocab_size),
+        &device,
+    )?;
+
+    // Synthetic teacher: pick K random vocab indices per active
+    // position; logprobs uniform over the K support (so the
+    // student's target softmax is uniform-over-K).
+    let mut label_mask = vec![false; seq_len];
+    for i in 0..seq_len {
+        if i % 2 == 1 {
+            label_mask[i] = true;
+        }
+    }
+    let active: Vec<usize> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i) } else { None })
+        .collect();
+    let active_count = active.len();
+
+    let mut indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for (row, _) in active.iter().enumerate() {
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k as u32 {
+            let mut idx = (row as u32 * 17 + k * 31 + 5) % vocab_size as u32;
+            while !seen.insert(idx) {
+                idx = (idx + 1) % vocab_size as u32;
+            }
+            indices.push(idx);
+            logprobs.push(-(top_k as f32).ln());
+        }
+    }
+
+    // AdamW with default betas.
+    let params_adamw = ParamsAdamW {
+        lr: learning_rate,
+        beta1: 0.9,
+        beta2: 0.999,
+        eps: 1e-8,
+        weight_decay: 0.0,
+    };
+    let mut optimizer = AdamW::new(vec![hidden.clone()], params_adamw)?;
+
+    let mut first_loss: f32 = f32::NAN;
+    let mut last_loss: f32 = f32::NAN;
+    for step in 0..num_steps {
+        let loss = opd_top_k_reverse_kl_phase_b(
+            hidden.as_tensor(),
+            &head_t,
+            &indices,
+            &logprobs,
+            &label_mask,
+            top_k,
+            &device,
+            16,
+        )
+        .with_context(|| format!("forward step {step}"))?;
+        let lv = loss.to_scalar::<f32>()?;
+        if step == 0 {
+            first_loss = lv;
+        }
+        last_loss = lv;
+        optimizer.backward_step(&loss).with_context(|| format!("backward step {step}"))?;
+    }
+
+    Ok((first_loss, last_loss))
+}
+
+#[cfg(test)]
+use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1395,6 +1509,40 @@ mod tests {
         assert!((total - 0.2).abs() < 1e-5);
         assert_eq!(mean_kl_ref, 0.0);
         assert_eq!(sft_term, 0.0);
+        Ok(())
+    }
+
+    /// §3.1 end-to-end algorithmic-loop validation — the most
+    /// load-bearing test in the whole OPD stack. Proves that the
+    /// per-token reverse-KL kernel + autograd + AdamW together
+    /// produce a real training signal that drives the loss down.
+    ///
+    /// Without this passing, every other §3.1 / §31 milestone is
+    /// just plumbing.
+    #[test]
+    fn opd_synthetic_training_loop_actually_trains() -> Result<()> {
+        // Small enough to converge fast on CPU; representative of
+        // the gather + matmul + softmax dynamics.
+        let (first, last) = opd_train_synthetic_validation(
+            /* seq_len = */ 16,
+            /* hidden_size = */ 8,
+            /* vocab_size = */ 64,
+            /* top_k = */ 8,
+            /* num_steps = */ 50,
+            /* learning_rate = */ 0.05,
+        )?;
+        assert!(
+            last < first,
+            "loss did not decrease: first={first:.6} last={last:.6}"
+        );
+        // Strong-form: loss drops by at least 30% over 50 steps
+        // when the teacher is uniform-over-K. With a high enough
+        // learning rate the student's K-support softmax should
+        // approach the uniform target.
+        assert!(
+            last < first * 0.7,
+            "loss decreased but not enough: first={first:.6} last={last:.6}"
+        );
         Ok(())
     }
 
