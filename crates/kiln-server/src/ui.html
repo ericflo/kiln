@@ -3453,6 +3453,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       <div class="modal-head">
         <h2 id="drill-title">Eval results</h2>
         <span class="modal-meta" id="drill-meta"></span>
+        <button class="btn btn-sm" id="drill-cancel" type="button" hidden title="Cancel this eval job (queued only)">⏹ Cancel</button>
         <button class="btn btn-sm" id="drill-rerun" type="button" title="Queue a new eval job that runs only the failing examples again">↻ Re-run failures</button>
         <button class="modal-close" id="drill-close" aria-label="Close">×</button>
       </div>
@@ -7288,6 +7289,18 @@ function renderDrillModal(preserveSelection) {
   document.getElementById('drill-meta').innerHTML = `
     <span class="job-state-pill ${j.state}">${escapeHtml(j.state)}</span>
     <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
+  // Show Cancel only for queued / running jobs; show Re-run failures
+  // only for terminal jobs that produced at least one failing example.
+  const stateLower = (j.state || '').toString().toLowerCase();
+  const isActive = stateLower === 'queued' || stateLower === 'running';
+  const cancelBtn = document.getElementById('drill-cancel');
+  if (cancelBtn) cancelBtn.hidden = !isActive;
+  const rerunBtn = document.getElementById('drill-rerun');
+  if (rerunBtn) {
+    const failingInAnyRun = (j.runs || []).some(r =>
+      (r.outcomes || []).some(o => o.kind !== 'pass'));
+    rerunBtn.hidden = isActive || !failingInAnyRun;
+  }
 
   const runs = j.runs || [];
   const isCompare = (j.adapters && j.adapters.length > 1) || runs.length > 1;
@@ -7578,6 +7591,22 @@ document.querySelectorAll('[data-drill-filter]').forEach(b => {
     drillFilter = b.dataset.drillFilter;
     renderDrillOutcomes();
   });
+});
+
+document.getElementById('drill-cancel')?.addEventListener('click', async () => {
+  if (!drillJob) return;
+  const stateLower = (drillJob.state || '').toString().toLowerCase();
+  if (!['queued', 'running'].includes(stateLower)) {
+    toast('Only queued or running jobs can be cancelled', 'err');
+    return;
+  }
+  if (!confirm(`Cancel eval job ${drillJob.job_id.slice(0, 8)}?`)) return;
+  try {
+    await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id), { method: 'DELETE' });
+    toast('Cancelled eval job', 'ok');
+    closeDrillModal();
+    refreshEvalJobs();
+  } catch (e) { toast('Cancel failed: ' + e.message, 'err'); }
 });
 
 document.getElementById('drill-rerun')?.addEventListener('click', async () => {
