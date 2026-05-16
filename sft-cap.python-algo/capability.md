@@ -163,6 +163,11 @@ from §4 of SKILL.md plus the math-broad win:
 | 99 | deep-stack (very gentle 1e-6 stack on rec137-stacked) | 75 | 0.8462 | -0.016 | discard | even gentler still regresses |
 | 100 | recovery-s99-rerun (fresh re-run of iter 35 recipe) | 75 | 0.8475 | -0.039 | discard | confirms iter 35's 0.8866 was high tail |
 | 101 | double-99 (same recipe stacked on itself) | 75 | 0.8431 | -0.044 | discard | self-stack didn't help |
+| 102 | **think-sgd (SGD optimizer at lr 5e-5)** | 75 | **0.8694** | **+0.002 over best stable** | **kept** | **NEW STABLE BEST** — switching from AdamW to SGD lifted |
+| 103 | sgd-lr-1e-4 | 75 | 0.8460 | -0.023 | discard | SGD lr sweep |
+| 104 | sgd-lr-2e-5 | 75 | 0.8068 | -0.063 | discard | SGD lr too low (= baseline; no training effect) |
+| 105 | sgd-lr-1e-5 | 75 | 0.7556 | -0.114 | discard | SGD lr way too low |
+| 106 | sgd-lr-1e-3 | 75 | 0.0000 | -0.869 | discard | SGD lr 1e-3 catastrophic — adapter destroyed |
 
 ## Final summary (94 iters, 95 entries)
 
