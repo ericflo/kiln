@@ -3550,6 +3550,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         <h2 id="request-drill-title">Request</h2>
         <span class="modal-meta" id="request-drill-meta"></span>
         <button class="btn btn-sm" id="request-drill-copy-id" type="button" title="Copy request id">⧉ id</button>
+        <button class="btn btn-sm" id="request-drill-raw" type="button" title="Toggle the raw JSON view of this request record">{} raw</button>
         <button class="btn btn-sm" id="request-drill-replay" type="button" title="Open the prompt in the playground">▶ Replay in playground</button>
         <button class="modal-close" id="request-drill-close" aria-label="Close">×</button>
       </div>
@@ -4355,6 +4356,23 @@ document.addEventListener('DOMContentLoaded', () => {
     const id = modal?.dataset.requestId || '';
     if (!id) return;
     navigator.clipboard.writeText(id).then(() => toast('Request id copied', 'ok'), () => toast('Copy failed', 'err'));
+  });
+  document.getElementById('request-drill-raw')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    const r = findRecentRequest(id);
+    if (!r) return;
+    const content = document.getElementById('request-drill-content');
+    if (!content) return;
+    const existing = content.querySelector('#request-raw-block');
+    if (existing) { existing.remove(); return; }
+    const pre = document.createElement('pre');
+    pre.id = 'request-raw-block';
+    pre.className = 'req-pre';
+    pre.style.cssText = 'max-height:50vh; margin:var(--space-4) var(--space-5);';
+    pre.textContent = JSON.stringify(r, null, 2);
+    content.appendChild(pre);
+    pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
   document.getElementById('request-drill-replay')?.addEventListener('click', () => {
     const modal = document.getElementById('request-drill-modal');
