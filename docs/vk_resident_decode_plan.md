@@ -699,13 +699,19 @@ remaining levers (all shader-level) are:
      `linear_decode_bf16w`, `mlp_gate_up_decode_bf16w`,
      `full_attn_qkv_decode_bf16w`, `gdn_in_proj_decode_bf16w`.
    - Or wire raw FFI via `vk_raw` for the extension surface.
-2. **Process 2 bf16 outputs per weight u32 load.** The current
-   shaders read one u32 from the packed weight buffer and use only
-   one of the two bf16 halves. Reading both halves doubles
-   effective memory throughput. Some shaders have already done
-   this (rows4 / rows8 variants for batched paths) but the
-   decode-hot `linear_decode_bf16w` and friends have not — a
-   contained per-shader rewrite.
+2. ~~**Process 2 bf16 outputs per weight u32 load.**~~ *Tested
+   and reverted.* A `mlp_gate_up_decode_bf16w_pair.comp` variant
+   was written that handled 2 consecutive output columns per
+   col-lane by loading one u32 and using both bf16 halves. End-
+   to-end bench showed the change to be a wash (~40.7 vs 40.5
+   tok/s, within noise). Hypothesis: NVIDIA's L1 cache was
+   already coalescing the duplicate u32 reads from adjacent
+   col-lanes in the unpaired shader, so halving the explicit load
+   count didn't reduce actual memory traffic. Memory bandwidth is
+   apparently not the binding constraint inside the bf16w GEMM —
+   the remaining gap is likely the per-dispatch CPU+GPU overhead
+   (450 dispatches/token × ~35 µs each), not the kernels'
+   inner-loop throughput.
 3. **Cross-layer ADD + pre-norm fusion.** Layer N's final ADD
    writes the same buffer layer N+1's pre-norm reads. Currently
    two dispatches with a barrier between. A "(a + b) → out,
