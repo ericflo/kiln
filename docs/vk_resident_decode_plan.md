@@ -255,12 +255,72 @@ close. The headline 55 tok/s (= 80% of llama.cpp) is then a further
 ~2× away — exactly the cooperative-matrix follow-up the plan calls
 out.
 
+### Full-attn per-layer wire-up landed (2026-05-16)
+
+`crates/kiln-model/src/vk_decode_resident.rs` hosts
+`transformer_block_paged_decode_full_attn_resident_b1`, which
+composes 14 resident dispatchers (rmsnorm + QKV proj + gate-split
++ Q/K-norm + RoPE × 2 + KV-slot-write + paged-paged attn +
+gate × σ + o_proj + residual + post-norm + SwiGLU MLP + residual)
+through device-local activation buffers, threading the
+`VkPagedKvCache` for per-step K/V state.
+
+`transformer_block_paged_with_rope_tables` learns a Vulkan-resident
+fast-path: when the runtime preconditions hold (seq_len=1,
+start_pos>0, no LoRA, no MTP, no debug taps,
+`KILN_VK_RESIDENT_DECODE_BLOCK=1` default on, attn_output_gate=true,
+backend downcasts to `VulkanBackend`), the resident block runs
+instead of the legacy block. On any decline → falls through to the
+legacy block unchanged.
+
+KV state migration: on first resident call per layer per session,
+the resident KV pool is seeded from the legacy candle paged_cache
+so any prefill K/V is visible. Subsequent decode writes go to the
+resident pool only.
+
+**Validation**: parity test against the real Qwen3.5-4B checkpoint
+shows the resident path is **bit-identical** to legacy (worst-diff
+abs=0, rel=0 on the logits vector).
+
+### End-to-end measurement (real Qwen3.5-4B, RTX 6000 Ada)
+
+`kiln-bench --features vulkan --paged --latency-only` against the
+real `/workspace/models/Qwen3.5-4B` checkpoint:
+
+| Path | Decode tok/s | Mean ITL |
+|------|--------------|----------|
+| Legacy (no wire-up) | 1.04 | 965 ms |
+| **Resident wire-up (full-attn only)** | **1.33** | **752 ms** |
+
+That's a **28% speedup** from wiring just 8 of 32 layers
+(Qwen3.5-4B is hybrid: 8 full-attention + 24 GDN linear-attention
+layers). Per-full-attn-layer cost dropped from ~30 ms (legacy) to
+~3-4 ms (resident) — close to the 10× per-layer speedup the
+microbench projected.
+
+The remaining gap to the 55 tok/s headline target is now three
+distinct, additive pieces (the dispatchers/pool/cache are all
+landed and parity-tested; this is composition work):
+
+1. **GDN-layer resident wire-up.** 24 of 32 layers still take the
+   legacy ~30 ms path; lifting them to ~3-4 ms each would push
+   ITL from 752 ms → ~150 ms → ~7 tok/s.
+2. **CommandBatch chaining inside a layer.** Today each of the 14
+   resident dispatchers does its own `vkQueueSubmit + queue_wait_idle`;
+   chaining them into one submit per layer should drop per-layer
+   cost from ~3-4 ms to ~0.5 ms → ~25 tok/s.
+3. **CommandBatch chaining across a whole token.** Microbench
+   `full_token_resident_paged` shows 29 tok/s with all 32 layers
+   in one submit — that's the real ceiling of the submission
+   architecture as built.
+
+The 4th piece (cooperative-matrix BF16 GEMMs, out of scope per
+the plan) lifts past 29 tok/s toward the 55 tok/s headline.
+
 ### Plumbing in place for the wire-up
 
-The remaining piece is the per-layer wire-up — building
-`transformer_block_paged_decode_full_attn_resident` (and a GDN
-sibling) inside `crates/kiln-model/src/`. All the primitives it
-needs are now wired into `VulkanBackend`:
+The full-attn wire-up uses the following primitives, all wired
+into `VulkanBackend`:
 
 | Primitive | Where |
 |-----------|-------|
