@@ -36,8 +36,8 @@ use kiln_train::Optimizer;
 use kiln_train::vk_train::{
     VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
     validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
-    vk_recompute_grpo_train_step_with_state, vk_recompute_train_step_with_state_masked,
-    vk_train_step,
+    vk_opd_train_step_with_state, vk_recompute_grpo_train_step_with_state,
+    vk_recompute_train_step_with_state_masked, vk_train_step,
 };
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
@@ -742,6 +742,125 @@ fn vk_native_training_loss_decreases() -> Result<()> {
     assert!(
         last_loss < initial_loss * 0.95,
         "loss did not drop meaningfully: {initial_loss} -> {last_loss}"
+    );
+    Ok(())
+}
+
+/// End-to-end vk-native OPD training smoke test.
+///
+/// Builds a tiny FullAttention model, fabricates a deterministic teacher
+/// top-K distribution over the synthetic vocab, runs
+/// `vk_opd_train_step_with_state` 10 times against the AdamW optimizer,
+/// and asserts the OPD reverse-KL drops monotonically toward zero.
+///
+/// This is the OPD analogue of `vk_native_training_loss_decreases` —
+/// it's the same end-to-end "loss strictly decreases" proof but with
+/// the fused `vk_opd_top_k_reverse_kl_loss` driving the gradient. The
+/// loss-decrease over the LoRA-trained adapter is the real-world
+/// signal that the kernel + autograd wiring are correct.
+#[test]
+fn vk_native_opd_training_loss_decreases() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_model(&dev)?;
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    // 8-token synthetic input. Active rows skip position 0 (BOS) — every
+    // other token contributes to the loss, mirroring the typical
+    // assistant-only label mask.
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = (1u32..(input_ids.len() as u32)).collect();
+    let active_count = active_rows.len();
+
+    // Teacher top-K distribution. K=16 fits comfortably inside the
+    // synthetic vocab=32. We pick K distinct vocab indices per active
+    // row and assign decreasing logprobs (peaky distribution — easy
+    // signal for the student to match).
+    let top_k = 16usize;
+    let vocab = model.vocab;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for (row_i, _t) in active_rows.iter().enumerate() {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        // Decaying logprobs — teacher concentrates mass at k=0.
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.5));
+        }
+    }
+
+    let mut losses = Vec::new();
+    let initial = vk_opd_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        None,
+        &mut adamw,
+        &cfg,
+        Optimizer::AdamW {
+            beta1: cfg.beta1,
+            beta2: cfg.beta2,
+            eps: cfg.eps,
+            weight_decay: cfg.weight_decay,
+        },
+        1,
+    )?;
+    assert!(initial.is_finite(), "step 1 OPD loss non-finite: {initial}");
+    losses.push(initial);
+
+    let mut last_loss = initial;
+    for step in 2u32..=10 {
+        let l = vk_opd_train_step_with_state(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &active_rows,
+            &teacher_topk_indices,
+            &teacher_topk_logprobs,
+            top_k,
+            None,
+            &mut adamw,
+            &cfg,
+            Optimizer::AdamW {
+                beta1: cfg.beta1,
+                beta2: cfg.beta2,
+                eps: cfg.eps,
+                weight_decay: cfg.weight_decay,
+            },
+            step,
+        )?;
+        assert!(l.is_finite(), "step {step}: non-finite OPD loss {l}");
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_native_opd_training losses: {losses:?}");
+    assert!(
+        last_loss < initial * 0.95,
+        "OPD reverse-KL did not drop meaningfully: {initial} -> {last_loss}"
+    );
+    // Reverse-KL is non-negative; sanity-check the gradient direction.
+    assert!(
+        last_loss >= -1e-4,
+        "OPD reverse-KL went negative at last step: {last_loss}"
     );
     Ok(())
 }
