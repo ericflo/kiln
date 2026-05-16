@@ -284,24 +284,37 @@ async fn run_recipe(
         )));
     }
 
-    // Enqueue each step independently. Step ordering / dependency
-    // (one step's output becoming the next's base) is honoured by
-    // the trainer body when it lands (#31); here we land the multi-
-    // job enqueue so the surface works end-to-end.
+    // Enqueue each step independently. Steps run in FIFO order via the
+    // global training queue, so by the time step N+1 starts its base
+    // adapter (step N's output) is already on disk. We auto-chain by
+    // defaulting `base_adapter` on each training step to the previous
+    // step's output adapter when the recipe didn't set one. PostEval
+    // steps don't enqueue a job — they pin the next step's eval-gate
+    // hook (a follow-up wires real eval gating into post_eval).
     let mut job_ids = Vec::with_capacity(recipe.steps.len());
+    let mut previous_adapter: Option<String> = None;
     for step in &recipe.steps {
+        if matches!(step, RecipeStep::PostEval { .. }) {
+            tracing::info!(
+                recipe = %recipe_name,
+                step = ?step,
+                "PostEval step queued as no-op — real eval gating ships with the eval-suite registry follow-up"
+            );
+            continue;
+        }
         let job_id = uuid::Uuid::new_v4().to_string();
-        let (adapter_name, queued) = step_to_queued_job(step, &job_id)?;
-        // Register tracking entry, mirroring submit_* helpers.
+        let (adapter_name, queued) = step_to_queued_job(step, previous_adapter.as_deref(), &job_id)?;
         register_step_job(&state, &job_id, &adapter_name, queued);
+        previous_adapter = Some(adapter_name);
         job_ids.push(job_id);
     }
 
     Ok(Json(RecipeRunResponse {
         recipe: recipe_name.clone(),
         message: format!(
-            "Queued {} step(s) from recipe {recipe_name}. Note: cross-step \
-             adapter chaining lands with #31.",
+            "Queued {} training step(s) from recipe {recipe_name}. Steps run \
+             FIFO; each step's base_adapter chains to the previous output by \
+             default.",
             job_ids.len()
         ),
         job_ids,
@@ -309,8 +322,15 @@ async fn run_recipe(
 }
 
 /// Map a `RecipeStep` to a `(adapter_name, QueuedJob)` pair.
+///
+/// `previous_adapter`, when `Some`, is the output adapter name of the
+/// previous (training) step in the same recipe. Each training step
+/// auto-chains to it when its own `base_adapter` field is empty —
+/// the §3.7 recipe contract is "each step's output is the next
+/// step's input by default."
 fn step_to_queued_job(
     step: &RecipeStep,
+    previous_adapter: Option<&str>,
     _job_id: &str,
 ) -> Result<(String, crate::training_queue::QueuedJob), ApiError> {
     use crate::training_queue::QueuedJob;
@@ -326,13 +346,15 @@ fn step_to_queued_job(
                 ExamplesSource::Dataset { dataset } => {
                     return Err(ApiError::training_invalid_request(format!(
                         "SFT step with `dataset: {dataset}` requires server-side dataset \
-                         resolution (wired with #31)"
+                         resolution (eval-dataset registry follow-up)"
                     )));
                 }
             };
             let mut sft_config = config.clone();
             if sft_config.base_adapter.is_none() {
-                sft_config.base_adapter = base_adapter.clone();
+                sft_config.base_adapter = base_adapter
+                    .clone()
+                    .or_else(|| previous_adapter.map(|s| s.to_string()));
             }
             sft_config.output_name = Some(name.clone());
             Ok((
@@ -355,11 +377,14 @@ fn step_to_queued_job(
                 PromptsSource::Dataset { dataset } => {
                     return Err(ApiError::training_invalid_request(format!(
                         "OPD step with `dataset: {dataset}` requires server-side dataset \
-                         resolution (wired with #31)"
+                         resolution (eval-dataset registry follow-up)"
                     )));
                 }
             };
             let mut opd_config = config.clone();
+            if opd_config.base_adapter.is_none() {
+                opd_config.base_adapter = previous_adapter.map(|s| s.to_string());
+            }
             opd_config.output_name = Some(name.clone());
             Ok((
                 name.clone(),
@@ -400,6 +425,9 @@ fn step_to_queued_job(
             config,
         } => {
             let mut c = config.clone();
+            if c.base_adapter.is_none() {
+                c.base_adapter = previous_adapter.map(|s| s.to_string());
+            }
             c.output_name = Some(name.clone());
             Ok((
                 name.clone(),
@@ -440,6 +468,9 @@ fn step_to_queued_job(
         }
         RecipeStep::DistillSelf { name, mode, config } => {
             let mut c = config.clone();
+            if c.base_adapter.is_none() {
+                c.base_adapter = previous_adapter.map(|s| s.to_string());
+            }
             c.output_name = Some(name.clone());
             Ok((
                 name.clone(),
