@@ -27,6 +27,7 @@ shared float s_logits[32];
 shared float s_lpq[32];
 shared float exp_p[32];
 shared float exp_q[32];
+shared float kl_contrib[32];
 shared float bcast;
 
 float load_bf16_weight(uint flat_idx) {
@@ -118,12 +119,16 @@ void main() {
         float log_p = (s_logits[slot] - m_p) - log_z_p;
         float log_q = (s_lpq[slot]    - m_q) - log_z_q;
         float p_hat = exp_p[slot] / z_p;
-        partials[slot] = p_hat * (log_p - log_q);
+        kl_contrib[slot] = p_hat * (log_p - log_q);
     }
     barrier();
     if (tid == 0u) {
         float s = 0.0;
-        for (uint k = 0u; k < K; ++k) s += partials[k];
-        data_out[t] = s;
+        for (uint k = 0u; k < K; ++k) s += kl_contrib[k];
+        bcast = s;
+    }
+    barrier();
+    if (tid == 0u) {
+        data_out[t] = bcast;
     }
 }

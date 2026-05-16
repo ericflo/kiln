@@ -26,6 +26,7 @@ shared float exp_q[32];
 shared float Hp_partial[32];
 shared float Hq_partial[32];
 shared float KL_partial[32];
+shared float reduced[3];
 shared float bcast;
 
 float load_bf16_weight(uint flat_idx) {
@@ -132,8 +133,14 @@ void main() {
             h_q += Hq_partial[k];
             kl  += KL_partial[k];
         }
-        data_out[3u * t + 0u] = h_p;
-        data_out[3u * t + 1u] = h_q;
-        data_out[3u * t + 2u] = kl;
+        reduced[0] = h_p;
+        reduced[1] = h_q;
+        reduced[2] = kl;
+    }
+    barrier();
+    if (tid == 0u) {
+        data_out[3u * t + 0u] = reduced[0];
+        data_out[3u * t + 1u] = reduced[1];
+        data_out[3u * t + 2u] = reduced[2];
     }
 }

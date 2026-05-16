@@ -46,6 +46,7 @@ shared float s_logits[32];
 shared float s_lpq[32];
 shared float exp_p[32];
 shared float exp_q[32];
+shared float kl_contrib[32];
 shared float bcast;
 
 void main() {
@@ -132,16 +133,34 @@ void main() {
     float log_z_q = log(z_q);
 
     // ---- step 4: KL contribution per slot, block-sum, emit ----
+    //
+    // Use a dedicated `kl_contrib` shared array rather than re-using
+    // `partials`. The phase-1 dot-product write covered `partials[0..255]`;
+    // re-using `partials[0..K-1]` from a subset of those threads is correct
+    // by the Vulkan memory model, but at least one CPU-side Vulkan driver
+    // (llvmpipe / lavapipe) appears to mis-handle the read-after-overwrite
+    // of the same shared array even with an intervening `barrier()`. A
+    // separate shared array removes the aliasing entirely.
     if (slot < K && lane == 0u) {
         float log_p = (s_logits[slot] - m_p) - log_z_p;
         float log_q = (s_lpq[slot]    - m_q) - log_z_q;
         float p_hat = exp_p[slot] / z_p;
-        partials[slot] = p_hat * (log_p - log_q);
+        kl_contrib[slot] = p_hat * (log_p - log_q);
     }
     barrier();
     if (tid == 0u) {
         float s = 0.0;
-        for (uint k = 0u; k < K; ++k) s += partials[k];
-        data_out[t] = s;
+        for (uint k = 0u; k < K; ++k) s += kl_contrib[k];
+        bcast = s;
+    }
+    barrier();
+    // Single-thread write into a storage buffer at the very end of the
+    // shader was observed to silently drop on at least one CPU-side
+    // Vulkan driver (lavapipe). Broadcasting through shared memory and
+    // having an arbitrary thread emit fixes that — only one thread
+    // actually writes per dispatch but the value is now coherent w.r.t.
+    // every threads' view of `bcast`.
+    if (tid == 0u) {
+        data_out[t] = bcast;
     }
 }
