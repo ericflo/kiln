@@ -3635,9 +3635,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
             <span class="chat-adv-label">seed</span>
             <input type="number" id="chat-seed" placeholder="random" step="1">
           </label>
-          <label class="chat-adv-field chat-adv-stop" for="chat-stop">
+          <label class="chat-adv-field chat-adv-stop" for="chat-stop-sequences">
             <span class="chat-adv-label">stop (comma-separated)</span>
-            <input type="text" id="chat-stop" placeholder='e.g. ###, &lt;|endoftext|&gt;'>
+            <input type="text" id="chat-stop-sequences" placeholder='e.g. ###, &lt;|endoftext|&gt;'>
           </label>
         </div>
       </div>
@@ -5408,7 +5408,7 @@ function capturePlaygroundSettings() {
     frequencyPenalty:   get('chat-frequency-penalty')?.value ?? '',
     repetitionPenalty:  get('chat-repetition-penalty')?.value ?? '',
     seed:               get('chat-seed')?.value ?? '',
-    stop:               get('chat-stop')?.value ?? '',
+    stop:               get('chat-stop-sequences')?.value ?? '',
     system:             get('chat-system')?.value ?? '',
     advancedOpen:       !get('chat-advanced')?.hidden,
     compareMode:        !!document.getElementById('chat-compare-toggle')?.checked,
@@ -5436,7 +5436,7 @@ function applyPlaygroundSettings(settings) {
   set('chat-frequency-penalty',   settings.frequencyPenalty);
   set('chat-repetition-penalty',  settings.repetitionPenalty);
   set('chat-seed',                settings.seed);
-  set('chat-stop',                settings.stop);
+  set('chat-stop-sequences',      settings.stop);
   set('chat-system',              settings.system);
   const thinking = document.getElementById('chat-enable-thinking');
   if (thinking && typeof settings.enableThinking === 'boolean') thinking.checked = settings.enableThinking;
@@ -5558,7 +5558,7 @@ function buildChatRequestBody({ messages, temperature }) {
   if (repetitionPenalty !== undefined) body.repetition_penalty = repetitionPenalty;
   const seed = parseOptionalPositiveInt(document.getElementById('chat-seed')?.value);
   if (seed !== undefined) body.seed = seed;
-  const stop = parseChatStopSequences(document.getElementById('chat-stop')?.value);
+  const stop = parseChatStopSequences(document.getElementById('chat-stop-sequences')?.value);
   if (stop) body.stop = stop;
 
   const enableThinking = document.getElementById('chat-enable-thinking');
@@ -6551,7 +6551,7 @@ const PLAYGROUND_SETTING_IDS = [
   'chat-preset',
   'chat-top-p', 'chat-top-k', 'chat-min-p',
   'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
-  'chat-seed', 'chat-stop', 'chat-system',
+  'chat-seed', 'chat-stop-sequences', 'chat-system',
 ];
 PLAYGROUND_SETTING_IDS.forEach(id => {
   const el = document.getElementById(id);
@@ -7481,6 +7481,23 @@ function renderOutcomeDetail(o) {
     </div>
     ${o.detail ? `<div style="font-family:var(--font-mono); font-size:12px; padding:10px; background:var(--surface); border:1px solid var(--border); border-radius:6px;">${escapeHtml(o.detail)}</div>` : '<div class="hint" style="font-size:11px;">No scorer commentary.</div>'}
   </div>`;
+  // Per-outcome action toolbar: copy raw outputs, replay the failing
+  // prompt in the playground. Stash the prompt text on a dataset attribute
+  // so the click handler doesn't have to walk back through drillExamplesById.
+  const promptForReplay = example && example.messages && example.messages.length
+    ? example.messages
+        .filter(m => m.role !== 'system')
+        .map(m => `[${m.role}] ${m.content}`)
+        .join('\n\n')
+    : '';
+  const userMsg = example && example.messages
+    ? (example.messages.filter(m => m.role === 'user').pop()?.content || '')
+    : '';
+  const actionsHtml = `<div class="outcome-actions" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+    <button type="button" class="btn btn-sm" data-outcome-copy="completion" title="Copy the model's output">⧉ Copy output</button>
+    ${promptForReplay ? `<button type="button" class="btn btn-sm" data-outcome-copy="prompt" title="Copy the full prompt as role-prefixed text">⧉ Copy prompt</button>` : ''}
+    ${userMsg ? `<button type="button" class="btn btn-sm" data-outcome-replay="1" title="Drop the last user message into the playground so you can iterate">▶ Replay in playground</button>` : ''}
+  </div>`;
   detail.innerHTML = `
     <div class="detail-section">
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
@@ -7490,12 +7507,34 @@ function renderOutcomeDetail(o) {
         ${o.latency_ms != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.latency_ms.toFixed(0)}ms</span>` : ''}
         ${o.prompt_tokens != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.prompt_tokens}→${o.completion_tokens || 0} tok</span>` : ''}
       </div>
+      ${actionsHtml}
       <div>${tags}</div>
     </div>
     ${promptSection}
     ${tgSection}
     ${scorerSection}
   `;
+  // Wire the per-outcome action buttons.
+  detail.querySelectorAll('[data-outcome-copy]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.outcomeCopy;
+      const text = key === 'completion' ? (o.completion_text || '') : promptForReplay;
+      navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+    });
+  });
+  detail.querySelectorAll('[data-outcome-replay]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('chat-input');
+      if (input) {
+        input.value = userMsg;
+        if (typeof autoresizeChatInput === 'function') autoresizeChatInput();
+        if (typeof updateChatSendState === 'function') updateChatSendState();
+      }
+      closeDrillModal();
+      selectPage('playground');
+      if (input) setTimeout(() => input.focus(), 50);
+    });
+  });
 }
 
 document.getElementById('drill-close')?.addEventListener('click', closeDrillModal);
