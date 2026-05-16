@@ -385,3 +385,38 @@ in the model's distribution without disrupting the well-anchored
 single-turn code-output behavior.
 
 **Best stable**: 0.8702 — beats previous stable 0.8694 (iter 102).
+
+## Session 3 PART 2: SGD middle layer = NEW STABLE BEST 0.8732
+
+Continuing past 0.87 plateau, discovered that switching the WINNING-64
+middle stack layer from AdamW (lr 3e-6) to SGD (lr 5e-5) gave a significant
+lift:
+
+```
+base
+  -> SGD 3ep on think-sgd-exact = cap-sgd-run2 (0.857)
+    -> SGD 1ep lr 5e-5 on winning-64 = cap-stack-sgd2 (0.8732 stable)
+```
+
+One-off measurement showed 0.8799 but subsequent triple-verification
+landed at 0.8732 — eval has ~0.007 measurement variance.
+
+Confirmed regressions:
+- Adding IMT layer on SGD base (0.85)
+- Different SGD seed bases (cap-sgd-run3 = 0.87)
+- Shuffle variants of winning-64 (s7=0.88, s42=0.84, s137=0.83)
+- 2 epochs SGD (0.86)
+- rank 8 (0.81)
+- TIES merges (regress)
+- 3rd layer SGD extend on cap-stack-sgd2 (0.85)
+- GRPO OOM'd even at K=3
+
+**Final stable best: cap-stack-sgd2 = 0.8732**
+
+Beats iter 102 (0.8694) by +0.0038. Beats baseline (0.8068) by +0.066.
+Still ~0.13 below 100%, but the AdamW→SGD swap for middle layer was
+the meaningful discovery this session.
+
+The user's IMT (iterated multi-turn) idea also lifted earlier
+(0.8595 → 0.8702 on AdamW middle layer) but the SGD middle layer
+beats both the IMT 3-layer stack and itself + IMT.
