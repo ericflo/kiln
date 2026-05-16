@@ -61,6 +61,14 @@ pub struct VulkanDevice {
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
     transient_command_pool: Mutex<vk::CommandPool>,
     transient_descriptor_pool: Mutex<vk::DescriptorPool>,
+    /// Long-lived pools dedicated to `CommandBatch`. Sized to hold a full
+    /// multi-dispatch decode step's worth of descriptor sets and command
+    /// buffers so each batch can lock, allocate, submit, and `reset` —
+    /// instead of paying `vkCreateCommandPool` + `vkCreateDescriptorPool`
+    /// per layer (which dominated decode ITL on NVIDIA drivers, ~5 ms
+    /// each × 32 layers = 160 ms wasted per token).
+    batch_command_pool: Mutex<vk::CommandPool>,
+    batch_descriptor_pool: Mutex<vk::DescriptorPool>,
     /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
     /// Once true, subsequent dispatches short-circuit with a clear error
     /// instead of returning cryptic submit failures forever — the underlying
@@ -325,6 +333,32 @@ impl VulkanDevice {
         }
         .context("failed to create Vulkan transient descriptor pool")?;
 
+        // Batch pools: large enough to record a full decode step
+        // (1024 dispatches × 64 storage-buffer bindings each).
+        let batch_command_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::builder()
+                    .queue_family_index(compute_family)
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create Vulkan batch command pool")?;
+        let batch_descriptor_pool = unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::builder()
+                    .max_sets(1024)
+                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(64 * 1024)
+                        .build()])
+                    .build(),
+                None,
+            )
+        }
+        .context("failed to create Vulkan batch descriptor pool")?;
+
         Ok(Self {
             entry,
             instance,
@@ -342,6 +376,8 @@ impl VulkanDevice {
             pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
+            batch_command_pool: Mutex::new(batch_command_pool),
+            batch_descriptor_pool: Mutex::new(batch_descriptor_pool),
             terminally_lost: AtomicBool::new(false),
         })
     }
@@ -617,6 +653,20 @@ impl VulkanDevice {
             .map_err(|_| anyhow!("Vulkan descriptor pool mutex poisoned"))
     }
 
+    pub(crate) fn batch_command_pool(&self) -> Result<MutexGuard<'_, vk::CommandPool>> {
+        self.check_alive()?;
+        self.batch_command_pool
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch command pool mutex poisoned"))
+    }
+
+    pub(crate) fn batch_descriptor_pool(&self) -> Result<MutexGuard<'_, vk::DescriptorPool>> {
+        self.check_alive()?;
+        self.batch_descriptor_pool
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))
+    }
+
     /// True once any submit/wait has observed `VK_ERROR_DEVICE_LOST`.
     /// Subsequent dispatches will fail fast with a clear error rather than
     /// retry a permanently-dead device.
@@ -730,6 +780,16 @@ impl Drop for VulkanDevice {
             }
         }
         if let Ok(pool) = self.transient_command_pool.lock() {
+            unsafe {
+                self.device.destroy_command_pool(*pool, None);
+            }
+        }
+        if let Ok(pool) = self.batch_descriptor_pool.lock() {
+            unsafe {
+                self.device.destroy_descriptor_pool(*pool, None);
+            }
+        }
+        if let Ok(pool) = self.batch_command_pool.lock() {
             unsafe {
                 self.device.destroy_command_pool(*pool, None);
             }

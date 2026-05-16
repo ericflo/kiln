@@ -558,97 +558,131 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     )
     .context("upload x for GDN resident block")?;
 
-    // --- 1) GDN in_proj: x → [qkv | z | a | b] -------------------
-    use kiln_vulkan_kernel::resident::{
-        dispatch_causal_conv1d_update_resident, dispatch_gdn_in_proj_decode_cached_resident,
-        dispatch_gdn_in_proj_split_resident, dispatch_gdn_qkv_split_resident,
-        dispatch_gdn_decode_gates_recurrent_rmsnorm_resident,
-        dispatch_linear_decode_cached_bf16_weights_resident,
-        dispatch_qwen_rmsnorm_forward_resident,
-    };
-    dispatch_gdn_in_proj_decode_cached_resident(
-        vk_device,
-        &x_buf,
-        &qkv_w,
-        &z_w,
-        &a_w,
-        &b_w,
-        &in_proj_out,
-        1,
-        hidden,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        true,
+    // --- chain all 9 GDN dispatches into one CommandBatch + one submit ---
+    let total_in_proj = qkv_dim + z_dim + a_dim + b_dim;
+    let mut batch = CommandBatch::new(vk_device)?;
+
+    // 1) in_proj (bf16w, b=1). push = [hidden, qkv_dim, z_dim, a_dim, b_dim, total_out];
+    //    workgroups = total_out.div_ceil(16).
+    batch.record_shader(
+        shaders::GDN_IN_PROJ_DECODE_BF16W,
+        &[
+            x_buf.handle(),
+            qkv_w.handle(),
+            z_w.handle(),
+            a_w.handle(),
+            b_w.handle(),
+            in_proj_out.handle(),
+        ],
+        &[
+            hidden as u32,
+            qkv_dim as u32,
+            z_dim as u32,
+            a_dim as u32,
+            b_dim as u32,
+            total_in_proj as u32,
+        ],
+        Workgroups::OneD(total_in_proj.div_ceil(16) as u32),
     )?;
-    // 2) split in_proj_out → (mixed_qkv, z, a, b)
-    dispatch_gdn_in_proj_split_resident(
-        vk_device,
-        &in_proj_out,
-        &mixed_qkv,
-        &z_buf,
-        &a_buf,
-        &b_buf,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
+    // 2) split in_proj_out → (mixed_qkv, z, a, b). push = [qkv,z,a,b];
+    //    workgroups = total.div_ceil(64).
+    batch.record_shader(
+        shaders::GDN_IN_PROJ_SPLIT,
+        &[
+            in_proj_out.handle(),
+            mixed_qkv.handle(),
+            z_buf.handle(),
+            a_buf.handle(),
+            b_buf.handle(),
+        ],
+        &[qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32],
+        Workgroups::OneD(total_in_proj.div_ceil(64) as u32),
     )?;
-    // 3) causal conv1d update on mixed_qkv (mutates conv_state)
-    dispatch_causal_conv1d_update_resident(
-        vk_device,
-        &mixed_qkv,
-        &conv_w,
-        &conv_buf,
-        &conv_qkv,
-        1,
-        qkv_dim,
-        1,
-        conv_kernel,
+    // 3a) causal_conv1d stage 1: output. push = [batch, channels, seq_len, kernel];
+    //     workgroups = (batch*channels*seq_len).div_ceil(256).
+    let conv_total = 1 * qkv_dim * 1;
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D,
+        &[
+            mixed_qkv.handle(),
+            conv_w.handle(),
+            conv_buf.handle(),
+            conv_qkv.handle(),
+        ],
+        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
+        Workgroups::OneD(conv_total.div_ceil(256) as u32),
     )?;
-    // 4) split conv_qkv → (q, k, v)
-    dispatch_gdn_qkv_split_resident(
-        vk_device, &conv_qkv, &q_buf, &k_buf, &v_buf, qk_dim, v_dim,
+    // 3b) causal_conv1d stage 2: state advance.
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
+        &[mixed_qkv.handle(), conv_buf.handle()],
+        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
+        Workgroups::OneD((1 * qkv_dim) as u32),
     )?;
-    // 5) Q-norm (per-head): rows=nk, hidden=dk; in-place
-    dispatch_qwen_rmsnorm_forward_resident(
-        vk_device, &q_buf, &q_norm, &q_buf, nk, dk, eps,
+    // 4) split conv_qkv → (q, k, v). push = [qk_dim, v_dim].
+    batch.record_shader(
+        shaders::GDN_QKV_SPLIT,
+        &[
+            conv_qkv.handle(),
+            q_buf.handle(),
+            k_buf.handle(),
+            v_buf.handle(),
+        ],
+        &[qk_dim as u32, v_dim as u32],
+        Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
     )?;
-    // 6) K-norm (per-head): rows=nk (== num_key_heads), hidden=dk
-    dispatch_qwen_rmsnorm_forward_resident(
-        vk_device, &k_buf, &q_norm, &k_buf, nk, dk, eps,
+    // 5) Q-norm: push = [rows, hidden, eps_bits], workgroups = rows.
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[q_buf.handle(), q_norm.handle(), q_buf.handle()],
+        &[nk as u32, dk as u32, eps.to_bits()],
+        Workgroups::OneD(nk as u32),
     )?;
-    // 7) Fused gates+recurrent+rmsnorm: produces gated_norm of length v_dim
-    dispatch_gdn_decode_gates_recurrent_rmsnorm_resident(
-        vk_device,
-        &q_buf,
-        &k_buf,
-        &v_buf,
-        &a_buf,
-        &b_buf,
-        &a_log,
-        &dt_bias,
-        &recurrent_buf,
-        &z_buf,
-        &q_norm, // gated_rms_norm uses the same norm weight
-        &gated_norm,
-        1,
-        nv,
-        dk,
-        dv,
-        eps,
+    // 6) K-norm (rows = nk to match legacy dispatcher).
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[k_buf.handle(), q_norm.handle(), k_buf.handle()],
+        &[nk as u32, dk as u32, eps.to_bits()],
+        Workgroups::OneD(nk as u32),
     )?;
-    // 8) out_proj: gated_norm → out (linear bf16w, batch=1, hidden_in=v_dim, out_dim=hidden)
-    dispatch_linear_decode_cached_bf16_weights_resident(
-        vk_device,
-        &gated_norm,
-        &out_w,
-        &out_buf,
-        1,
-        v_dim,
-        hidden,
+    // 7) Fused gates+recurrent+rmsnorm. push = [nv, dk, dv, eps_bits, batch],
+    //    workgroups = batch*nv.
+    batch.record_shader(
+        shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            v_buf.handle(),
+            a_buf.handle(),
+            b_buf.handle(),
+            a_log.handle(),
+            dt_bias.handle(),
+            recurrent_buf.handle(),
+            z_buf.handle(),
+            q_norm.handle(),
+            gated_norm.handle(),
+        ],
+        &[
+            nv as u32,
+            dk as u32,
+            dv as u32,
+            eps.to_bits(),
+            1u32, // batch
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
+    // 8) out_proj (bf16w b=1). push = [hidden_in, out_dim],
+    //    workgroups = out_dim.div_ceil(16).
+    batch.record_shader(
+        shaders::LINEAR_DECODE_BF16W,
+        &[gated_norm.handle(), out_w.handle(), out_buf.handle()],
+        &[v_dim as u32, hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(16) as u32),
+    )?;
+
+    batch
+        .submit_and_wait("vk-resident GDN block")
+        .context("submit resident GDN CommandBatch")?;
 
     // --- read back result ---------------------------------------
     let out_bytes = VulkanBuffer::read_back(

@@ -25,6 +25,7 @@ use crate::pipeline::ShaderPipeline;
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use ash::vk;
+use std::sync::MutexGuard;
 
 /// 1D or 3D workgroup count selector. `OneD(n)` dispatches `(n, 1, 1)`.
 #[derive(Debug, Clone, Copy)]
@@ -61,8 +62,13 @@ pub struct KernelPlan<'a> {
 /// one `vkQueueSubmit`.
 pub struct CommandBatch<'a> {
     vk_device: &'a VulkanDevice,
-    cmd_pool: vk::CommandPool,
-    descriptor_pool: vk::DescriptorPool,
+    /// Live lock on the device's long-lived batch command pool. Held
+    /// for the lifetime of this batch so a single batch has exclusive
+    /// use of the pool's command buffers; released on drop.
+    cmd_pool_guard: MutexGuard<'a, vk::CommandPool>,
+    /// Live lock on the device's long-lived batch descriptor pool.
+    /// Same semantics as `cmd_pool_guard`.
+    descriptor_pool_guard: MutexGuard<'a, vk::DescriptorPool>,
     cmd: vk::CommandBuffer,
     cmd_buffers_to_free: Vec<vk::CommandBuffer>,
     dispatch_count: usize,
@@ -79,31 +85,15 @@ impl<'a> CommandBatch<'a> {
     /// covering Qwen3.5-4B's 32 layers × ~11 kernels = 352 dispatches).
     pub fn new(vk_device: &'a VulkanDevice) -> Result<Self> {
         let device = vk_device.device();
-        let cmd_pool = unsafe {
-            device.create_command_pool(
-                &vk::CommandPoolCreateInfo::builder()
-                    .queue_family_index(vk_device.queue_family_index())
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    .build(),
-                None,
-            )
-        }
-        .context("CommandBatch: create transient command pool")?;
-        let descriptor_pool = unsafe {
-            device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::builder()
-                    .max_sets(COMMAND_BATCH_MAX_DISPATCHES)
-                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
-                        .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .descriptor_count(COMMAND_BATCH_MAX_BINDINGS)
-                        .build()])
-                    .build(),
-                None,
-            )
-        }
-        .context("CommandBatch: create descriptor pool")?;
+        // Lock the device's long-lived batch pools. The guards are held
+        // for the lifetime of this `CommandBatch` so concurrent batches
+        // serialize on the pool — but the pools themselves are reused,
+        // avoiding the ~5 ms-per-pool create+destroy that dominated
+        // per-layer batch construction.
+        let cmd_pool_guard = vk_device.batch_command_pool()?;
+        let descriptor_pool_guard = vk_device.batch_descriptor_pool()?;
         let alloc_info = vk::CommandBufferAllocateInfo::builder()
-            .command_pool(cmd_pool)
+            .command_pool(*cmd_pool_guard)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1)
             .build();
@@ -122,8 +112,8 @@ impl<'a> CommandBatch<'a> {
         }
         Ok(Self {
             vk_device,
-            cmd_pool,
-            descriptor_pool,
+            cmd_pool_guard,
+            descriptor_pool_guard,
             cmd,
             cmd_buffers_to_free: cmd_buffers,
             dispatch_count: 0,
@@ -162,7 +152,7 @@ impl<'a> CommandBatch<'a> {
         let descriptor_set = unsafe {
             device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::builder()
-                    .descriptor_pool(self.descriptor_pool)
+                    .descriptor_pool(*self.descriptor_pool_guard)
                     .set_layouts(&set_layouts)
                     .build(),
             )
@@ -307,11 +297,16 @@ impl<'a> Drop for CommandBatch<'a> {
     fn drop(&mut self) {
         let device = self.vk_device.device();
         unsafe {
+            // Pools persist on `VulkanDevice` — we only free/reset what
+            // this batch borrowed from them, then release the locks
+            // (the guards drop after this scope).
             if !self.cmd_buffers_to_free.is_empty() {
-                device.free_command_buffers(self.cmd_pool, &self.cmd_buffers_to_free);
+                device.free_command_buffers(*self.cmd_pool_guard, &self.cmd_buffers_to_free);
             }
-            device.destroy_descriptor_pool(self.descriptor_pool, None);
-            device.destroy_command_pool(self.cmd_pool, None);
+            let _ = device.reset_descriptor_pool(
+                *self.descriptor_pool_guard,
+                vk::DescriptorPoolResetFlags::empty(),
+            );
         }
     }
 }
