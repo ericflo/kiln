@@ -12723,6 +12723,45 @@ fn transformer_block_paged_with_rope_tables(
         }
     };
     let (_batch, seq_len, _hidden) = x.dims3()?;
+
+    // Vulkan-resident decode fast-path. Gates: seq_len = 1 (decode hot
+    // path), start_pos > 0 (need at least one prefill K/V), no LoRA,
+    // no MTP, no debug taps armed, no CUDA graph inputs, and the
+    // backend exposes its resident-decode primitives. On any decline
+    // we fall through to the legacy code below.
+    #[cfg(feature = "vulkan")]
+    {
+        if seq_len == 1
+            && start_pos > 0
+            && lora.is_none()
+            && !crate::mtp_debug::is_subop_capture_armed()
+            && !crate::mtp_debug::current_b12_layer_is_31()
+            && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+            && config.attn_output_gate
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_BLOCK", true)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(out) = try_resident_block_full_attn_b1(
+                    vk_backend,
+                    x,
+                    layer,
+                    config,
+                    positions,
+                    start_pos,
+                    paged_cache,
+                    block_table,
+                    full_attn_layer_idx,
+                    inv_freq,
+                    rope_tables,
+                )? {
+                    return Ok(out);
+                }
+            }
+        }
+    }
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
     let b12_layer_31 = crate::mtp_debug::current_b12_layer_is_31();
     let use_metal_decode_ffn = seq_len == 1
@@ -13734,6 +13773,83 @@ pub fn model_forward_paged_last_token_resident(
         linear_state,
         lora,
         positions_gpu,
+    )
+}
+
+/// Try the Vulkan-resident full-attention decode block. Returns
+/// `Ok(Some(out))` when the resident path successfully produced this
+/// layer's post-MLP residual; `Ok(None)` when the resident helper
+/// declined (caller falls back to the legacy block). Errors propagate.
+///
+/// On first use per layer per session, this seeds the resident KV pool
+/// from the legacy candle pool so any prefill K/V already written are
+/// visible to subsequent resident attention reads. Once seeded, the
+/// resident block writes per-step K/V into the VRAM pool only — the
+/// legacy candle pool is no longer authoritative for that layer.
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn try_resident_block_full_attn_b1(
+    vk_backend: &crate::backend::vulkan::VulkanBackend,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &kiln_core::config::ModelConfig,
+    positions: &Tensor,
+    start_pos: usize,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    full_attn_layer_idx: usize,
+    inv_freq: &Tensor,
+    rope_tables: Option<(&Tensor, &Tensor)>,
+) -> Result<Option<Tensor>> {
+    // The resident KV cache geometry must match the legacy pool's.
+    let Some(vk_kv_cache) = vk_backend.vk_paged_kv_cache(
+        config.num_full_attention_layers,
+        paged_cache.num_blocks(),
+        paged_cache.block_size(),
+        config.num_kv_heads,
+        config.head_dim,
+    ) else {
+        return Ok(None);
+    };
+
+    // Build/derive RoPE cos/sin for the current single position. If the
+    // outer loop already built rope_tables we slice the active row out;
+    // otherwise we compute them here.
+    let (cos, sin) = if let Some((c, s)) = rope_tables {
+        // rope_tables is (num_positions, rotary_dim/2). For seq_len=1
+        // they should be 1 row already.
+        (c.clone(), s.clone())
+    } else {
+        rotary_tables_from_tensor(positions, inv_freq)?
+    };
+
+    // Seed this layer's resident K/V pool from the legacy candle pool
+    // on first use per session.
+    let Some(vk_device) = vk_backend.vulkan_device() else {
+        return Ok(None);
+    };
+    if !vk_backend.full_attn_layer_seeded(full_attn_layer_idx) {
+        crate::vk_decode_resident::seed_vk_kv_cache_layer_from_legacy(
+            vk_device,
+            vk_kv_cache,
+            paged_cache,
+            full_attn_layer_idx,
+        )?;
+        vk_backend.mark_full_attn_layer_seeded(full_attn_layer_idx);
+    }
+
+    crate::vk_decode_resident::transformer_block_paged_decode_full_attn_resident_b1(
+        vk_backend,
+        x,
+        layer,
+        config,
+        start_pos,
+        block_table,
+        full_attn_layer_idx,
+        paged_cache,
+        vk_kv_cache,
+        &cos,
+        &sin,
     )
 }
 

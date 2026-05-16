@@ -120,6 +120,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// methods must live on this device.
     fn device(&self) -> &Device;
 
+    /// `dyn Any` downcast target. Used by the Vulkan-resident decode
+    /// fast-path in `transformer_block_paged_with_rope_tables` to recover
+    /// the concrete `VulkanBackend` for direct access to its
+    /// resident-decode primitives. The default impl returns a
+    /// no-op-`Any`-shaped reference; the concrete backend overrides
+    /// this to return `self`.
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Default: return a Unit Any so `downcast_ref` against any
+        // concrete type returns None. Concrete backends override.
+        &()
+    }
+
     /// Operator-facing summary of which training paths are backend-native,
     /// candle-on-device, or intentionally declined. This is telemetry only:
     /// dispatch methods remain the source of truth for actual behavior.

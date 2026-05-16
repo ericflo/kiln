@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{BackendRuntime, TrainingCapabilities};
@@ -76,6 +76,12 @@ pub struct VulkanBackend {
     /// cache constructs it for the active model geometry.
     vk_paged_kv_cache:
         OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
+    /// Set of full-attention layer indices whose K/V state has already
+    /// been seeded into the Vulkan-resident paged cache from the legacy
+    /// candle pool. Each full-attention layer is seeded once at the
+    /// first call to the resident block helper for that layer; subsequent
+    /// decode steps only do per-token slot writes.
+    seeded_full_attn_layers: Mutex<HashSet<usize>>,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -341,6 +347,7 @@ impl VulkanBackend {
             resident_decode_enabled,
             decode_resident_pool: OnceLock::new(),
             vk_paged_kv_cache: OnceLock::new(),
+            seeded_full_attn_layers: Mutex::new(HashSet::new()),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -442,6 +449,35 @@ impl VulkanBackend {
                 }
             })
             .as_ref()
+    }
+
+    /// Test (without mutating) whether the given full-attention layer
+    /// has already been seeded into the resident KV cache for this
+    /// session. Returns true after the first successful call to
+    /// `mark_full_attn_layer_seeded` for the same `layer_idx`.
+    pub fn full_attn_layer_seeded(&self, layer_idx: usize) -> bool {
+        match self.seeded_full_attn_layers.lock() {
+            Ok(g) => g.contains(&layer_idx),
+            Err(_) => false,
+        }
+    }
+
+    /// Mark the given full-attention layer as having been seeded into
+    /// the resident KV cache for this session.
+    pub fn mark_full_attn_layer_seeded(&self, layer_idx: usize) {
+        if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
+            g.insert(layer_idx);
+        }
+    }
+
+    /// Reset the seeded-layer set. Tests / multi-session callers call
+    /// this when the legacy paged cache may have been reset between
+    /// resident decode calls; otherwise the resident path keeps reusing
+    /// stale K/V state.
+    pub fn reset_full_attn_seeded(&self) {
+        if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
+            g.clear();
+        }
     }
 
     pub fn cached_f32_weight_buffer(
@@ -746,6 +782,10 @@ impl BackendRuntime for VulkanBackend {
 
     fn device(&self) -> &Device {
         &self.device
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn training_capabilities(&self) -> TrainingCapabilities {

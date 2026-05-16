@@ -24,6 +24,8 @@ pub mod sampling;
 pub mod speculative;
 mod transposed_weight_cache;
 #[cfg(feature = "vulkan")]
+pub mod vk_decode_resident;
+#[cfg(feature = "vulkan")]
 pub mod vk_forward;
 pub mod weights;
 
