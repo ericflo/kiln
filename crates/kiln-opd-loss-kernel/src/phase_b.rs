@@ -106,6 +106,38 @@ unsafe extern "C" {
         top_k: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_opd_topk_kl_bwd_bf16(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        grad_loss: *const core::ffi::c_void,
+        scale_factor: f32,
+        d_hidden: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        output_mode: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_opd_topk_kl_bwd_f32(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        grad_loss: *const core::ffi::c_void,
+        scale_factor: f32,
+        d_hidden: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        output_mode: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Returns `true` when the fused CUDA kernel supports the requested
@@ -326,6 +358,34 @@ impl CustomOp1 for OpdLossCustomOp {
         _loss: &Tensor,
         grad_loss: &Tensor,
     ) -> candle_core::Result<Option<Tensor>> {
+        // CUDA fast path mirrors cuda_fwd's gating: route through the
+        // raw kernel when (a) we're on CUDA, (b) K and dtype are in the
+        // supported envelope, and (c) the kill-switch isn't on. On any
+        // decline / failure path we fall through to the analytic candle
+        // backward (which is the parity oracle for the kernel).
+        let on_cuda = matches!(hidden.device(), Device::Cuda(_));
+        let route_kernel = on_cuda
+            && !crate::kernel_disabled()
+            && cuda_kernel_supports(self.top_k, hidden.dtype());
+
+        #[cfg(feature = "cuda")]
+        {
+            if route_kernel {
+                match self.cuda_kernel_backward(hidden, grad_loss) {
+                    Ok(dh) => return Ok(Some(dh)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "opd-loss CUDA backward kernel failed, falling back to candle: {e:#}"
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = route_kernel;
+        }
+
         self.backward_inner(hidden, grad_loss)
             .map(Some)
             .map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b bwd: {e:#}")))
@@ -799,6 +859,309 @@ impl OpdLossCustomOp {
             }
             OpdLossOutput::PerPosition => Ok((host_kl, Shape::from(active_count))),
         }
+    }
+
+    /// CUDA fast-path backward — computes `d_hidden` analytically via
+    /// the fused `kiln_opd_topk_kl_bwd_*` kernel. Mirrors the active-row
+    /// gather + teacher tensor upload pattern from `cuda_kernel_forward`,
+    /// then scatters the K-by-token gradient back into the full
+    /// `[1, T, H]` shape that the candle autograd contract requires.
+    ///
+    /// `grad_loss` shape:
+    /// - `ScalarMean` output mode: a 0-dim tensor (or 1-element 1-D).
+    ///   The kernel multiplies by `1/T_active * grad_loss[0]`.
+    /// - `PerPosition` output mode: a 1-D `[T_active]` tensor. The
+    ///   kernel multiplies position-wise.
+    #[cfg(feature = "cuda")]
+    fn cuda_kernel_backward(
+        &self,
+        hidden: &Tensor,
+        grad_loss: &Tensor,
+    ) -> Result<Tensor> {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+        let device = match hidden.device() {
+            Device::Cuda(d) => d.clone(),
+            _ => return Err(anyhow!("cuda_kernel_backward called with non-CUDA device")),
+        };
+        let dtype = hidden.dtype();
+        if !cuda_kernel_supports(self.top_k, dtype) {
+            return Err(anyhow!(
+                "cuda_kernel_supports false for (top_k={}, dtype={:?})",
+                self.top_k,
+                dtype
+            ));
+        }
+
+        let seq_len = hidden.dim(1)?;
+        let hidden_size = hidden.dim(2)?;
+        if seq_len != self.label_mask.len() {
+            return Err(anyhow!(
+                "seq_len {} != label_mask len {}",
+                seq_len,
+                self.label_mask.len()
+            ));
+        }
+
+        let active_positions: Vec<u32> = self
+            .label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+            .collect();
+        let active_count = active_positions.len();
+        if active_count == 0 {
+            return Ok(Tensor::zeros(hidden.shape(), dtype, hidden.device())?);
+        }
+
+        // Gather active rows on device.
+        let active_indices = Tensor::new(active_positions.as_slice(), hidden.device())
+            .context("upload active indices")?;
+        let hidden_2d = hidden.squeeze(0).context("squeeze hidden")?;
+        let active_hidden = hidden_2d
+            .index_select(&active_indices, 0)
+            .context("gather active rows")?
+            .contiguous()
+            .context("contiguous active hidden")?;
+        let head_t_contig = self
+            .head_t
+            .contiguous()
+            .context("contiguous head_t for CUDA backward")?;
+        if active_hidden.dim(1)? != hidden_size {
+            return Err(anyhow!(
+                "shape mismatch: active_hidden H={} but hidden H={}",
+                active_hidden.dim(1)?,
+                hidden_size
+            ));
+        }
+        let vocab_size = head_t_contig.dim(1)?;
+
+        // Upload teacher tensors.
+        let topk_idx_dev = Tensor::new(
+            self.teacher_topk_indices.as_slice(),
+            hidden.device(),
+        )
+        .context("upload topk indices")?
+        .reshape((active_count, self.top_k))
+        .context("reshape topk indices")?;
+        let topk_lp_q_dev = Tensor::new(
+            self.teacher_topk_logprobs.as_slice(),
+            hidden.device(),
+        )
+        .context("upload topk logprobs")?
+        .reshape((active_count, self.top_k))
+        .context("reshape topk logprobs")?;
+
+        // Normalise grad_loss to a 1-D f32 tensor on device, shape
+        // {ScalarMean: [1], PerPosition: [active_count]}. The kernel
+        // reads grad_loss[0] in ScalarMean and grad_loss[t] in
+        // PerPosition.
+        let grad_loss_f32 = grad_loss
+            .to_dtype(DType::F32)
+            .context("cast grad_loss to f32")?;
+        let (grad_loss_dev, output_mode_i32, scale_factor) = match self.output_mode {
+            OpdLossOutput::ScalarMean => {
+                // grad_loss is a scalar (Shape::scalar()). Reshape to [1].
+                let g = grad_loss_f32
+                    .reshape(1)
+                    .context("reshape ScalarMean grad_loss to [1]")?
+                    .contiguous()?;
+                let scale = 1.0_f32 / (active_count as f32);
+                (g, 0_i32, scale)
+            }
+            OpdLossOutput::PerPosition => {
+                let dims = grad_loss_f32.dims().to_vec();
+                if dims.len() != 1 || dims[0] != active_count {
+                    return Err(anyhow!(
+                        "PerPosition grad_loss must have shape [{active_count}], got {dims:?}"
+                    ));
+                }
+                (grad_loss_f32.contiguous()?, 1_i32, 1.0_f32)
+            }
+        };
+
+        // Allocate the `[active_count, hidden_size]` output buffer on
+        // device in the same dtype as hidden.
+        let d_hidden_active_storage: Storage = match dtype {
+            DType::F32 => {
+                let slice = device
+                    .alloc_zeros::<f32>(active_count * hidden_size)
+                    .map_err(|e| anyhow!("alloc d_hidden_active f32: {e}"))?;
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(slice, device.clone()))
+            }
+            DType::BF16 => {
+                use half::bf16;
+                let slice = device
+                    .alloc_zeros::<bf16>(active_count * hidden_size)
+                    .map_err(|e| anyhow!("alloc d_hidden_active bf16: {e}"))?;
+                Storage::Cuda(CudaStorage::wrap_cuda_slice(slice, device.clone()))
+            }
+            other => return Err(anyhow!("unsupported dtype {other:?}")),
+        };
+        let d_hidden_active = Tensor::from_storage(
+            d_hidden_active_storage,
+            Shape::from((active_count, hidden_size)),
+            BackpropOp::none(),
+            false,
+        );
+
+        let stream = device.cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        // Pull device pointers out of every input/output tensor.
+        let (hidden_storage, hidden_layout) = active_hidden.storage_and_layout();
+        let (head_storage, head_layout) = head_t_contig.storage_and_layout();
+        let (idx_storage, idx_layout) = topk_idx_dev.storage_and_layout();
+        let (lpq_storage, lpq_layout) = topk_lp_q_dev.storage_and_layout();
+        let (gl_storage, gl_layout) = grad_loss_dev.storage_and_layout();
+        let (dh_storage, dh_layout) = d_hidden_active.storage_and_layout();
+
+        let hidden_cuda = match &*hidden_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("active_hidden not on CUDA")),
+        };
+        let head_cuda = match &*head_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("head_t not on CUDA")),
+        };
+        let idx_cuda = match &*idx_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("topk_idx not on CUDA")),
+        };
+        let lpq_cuda = match &*lpq_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("topk_lp_q not on CUDA")),
+        };
+        let gl_cuda = match &*gl_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("grad_loss not on CUDA")),
+        };
+        let dh_cuda = match &*dh_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("d_hidden not on CUDA")),
+        };
+
+        let status = unsafe {
+            match dtype {
+                DType::F32 => {
+                    let h_s = hidden_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("hidden f32: {e}"))?
+                        .slice(hidden_layout.start_offset()..);
+                    let head_s = head_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("head_t f32: {e}"))?
+                        .slice(head_layout.start_offset()..);
+                    let i_s = idx_cuda
+                        .as_cuda_slice::<u32>()
+                        .map_err(|e| anyhow!("idx u32: {e}"))?
+                        .slice(idx_layout.start_offset()..);
+                    let l_s = lpq_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("lpq f32: {e}"))?
+                        .slice(lpq_layout.start_offset()..);
+                    let g_s = gl_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("grad_loss f32: {e}"))?
+                        .slice(gl_layout.start_offset()..);
+                    let d_s = dh_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("d_hidden f32: {e}"))?
+                        .slice(dh_layout.start_offset()..);
+
+                    let (h_ptr, _g1) = h_s.device_ptr(&stream);
+                    let (head_ptr, _g2) = head_s.device_ptr(&stream);
+                    let (i_ptr, _g3) = i_s.device_ptr(&stream);
+                    let (l_ptr, _g4) = l_s.device_ptr(&stream);
+                    let (g_ptr, _g5) = g_s.device_ptr(&stream);
+                    let (d_ptr, _g6) = d_s.device_ptr(&stream);
+
+                    kiln_opd_topk_kl_bwd_f32(
+                        h_ptr as *const _,
+                        head_ptr as *const _,
+                        i_ptr as *const _,
+                        l_ptr as *const _,
+                        g_ptr as *const _,
+                        scale_factor,
+                        d_ptr as *mut _,
+                        active_count as i32,
+                        hidden_size as i32,
+                        vocab_size as i32,
+                        self.top_k as i32,
+                        output_mode_i32,
+                        raw_stream,
+                    )
+                }
+                DType::BF16 => {
+                    use half::bf16;
+                    let h_s = hidden_cuda
+                        .as_cuda_slice::<bf16>()
+                        .map_err(|e| anyhow!("hidden bf16: {e}"))?
+                        .slice(hidden_layout.start_offset()..);
+                    let head_s = head_cuda
+                        .as_cuda_slice::<bf16>()
+                        .map_err(|e| anyhow!("head_t bf16: {e}"))?
+                        .slice(head_layout.start_offset()..);
+                    let i_s = idx_cuda
+                        .as_cuda_slice::<u32>()
+                        .map_err(|e| anyhow!("idx u32: {e}"))?
+                        .slice(idx_layout.start_offset()..);
+                    let l_s = lpq_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("lpq f32: {e}"))?
+                        .slice(lpq_layout.start_offset()..);
+                    let g_s = gl_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("grad_loss f32: {e}"))?
+                        .slice(gl_layout.start_offset()..);
+                    let d_s = dh_cuda
+                        .as_cuda_slice::<bf16>()
+                        .map_err(|e| anyhow!("d_hidden bf16: {e}"))?
+                        .slice(dh_layout.start_offset()..);
+
+                    let (h_ptr, _g1) = h_s.device_ptr(&stream);
+                    let (head_ptr, _g2) = head_s.device_ptr(&stream);
+                    let (i_ptr, _g3) = i_s.device_ptr(&stream);
+                    let (l_ptr, _g4) = l_s.device_ptr(&stream);
+                    let (g_ptr, _g5) = g_s.device_ptr(&stream);
+                    let (d_ptr, _g6) = d_s.device_ptr(&stream);
+
+                    kiln_opd_topk_kl_bwd_bf16(
+                        h_ptr as *const _,
+                        head_ptr as *const _,
+                        i_ptr as *const _,
+                        l_ptr as *const _,
+                        g_ptr as *const _,
+                        scale_factor,
+                        d_ptr as *mut _,
+                        active_count as i32,
+                        hidden_size as i32,
+                        vocab_size as i32,
+                        self.top_k as i32,
+                        output_mode_i32,
+                        raw_stream,
+                    )
+                }
+                other => return Err(anyhow!("unsupported dtype {other:?}")),
+            }
+        };
+        if status != 0 {
+            return Err(anyhow!("kiln_opd_topk_kl_bwd_* returned status {status}"));
+        }
+
+        // Scatter the `[active_count, hidden_size]` gradient back into
+        // a `[seq_len, hidden_size]` zero buffer, then unsqueeze to
+        // `[1, seq_len, hidden_size]`. The active_indices select
+        // exactly the rows we just wrote.
+        let zeros_2d = Tensor::zeros((seq_len, hidden_size), dtype, hidden.device())
+            .context("zeros [seq_len, hidden_size]")?;
+        let d_hidden_2d = zeros_2d
+            .index_add(&active_indices, &d_hidden_active, 0)
+            .context("scatter d_hidden_active back into [seq_len, hidden_size]")?;
+        let d_hidden_3d = d_hidden_2d
+            .unsqueeze(0)
+            .context("unsqueeze to [1, seq_len, hidden_size]")?;
+        Ok(d_hidden_3d)
     }
 }
 

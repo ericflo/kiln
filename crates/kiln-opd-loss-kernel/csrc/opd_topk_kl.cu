@@ -202,6 +202,200 @@ static int launch_for_k(
     return 0;
 }
 
+// =====================================================================
+// Backward kernel: emit d_hidden[t, h] for the OPD top-K reverse-KL loss.
+// =====================================================================
+//
+// The forward computed per-position KL_t = sum_k p_hat[k] * (log_p_hat[k] -
+// log_q_hat[k]) where p_hat and log_p_hat are derived from s_logits =
+// hidden[t] @ head_t[:, idx[t, k]]. With log_q_hat depending only on the
+// (constant) teacher logprobs, the gradient through s_logits is:
+//
+//   d L / d s_logits[t, j] = p_hat[t, j] * (log_p_hat[t, j] - log_q_hat[t, j] - KL_t) * upstream[t]
+//
+// where upstream[t] depends on the output mode:
+//   ScalarMean   : upstream[t] = grad_loss / T_active
+//   PerPosition  : upstream[t] = grad_loss[t]
+//
+// Then d_hidden[t, h] = sum_k d_s_logits[t, k] * head_t[h, idx[t, k]].
+//
+// Implementation: same block layout as forward (one block per token, K
+// warps × 32 threads). We reproduce forward steps 1–3 to recover p_hat,
+// log_p_hat, log_q_hat, KL_t in shared memory; one warp lane writes
+// d_s_logits[k]; then ALL blockDim.x threads cooperatively stride over h
+// to compute d_hidden[t, h]. The per-h work is K mults + K adds + an
+// indexed read from head_t — small and well-balanced across threads.
+//
+// OutputMode: 0 = ScalarMean, 1 = PerPosition.
+
+template <typename T, int K, int OutputMode>
+__global__ void opd_topk_kl_bwd_kernel(
+    const T* __restrict__ hidden,
+    const T* __restrict__ head_t,
+    const uint32_t* __restrict__ topk_idx,
+    const float* __restrict__ topk_lp_q,
+    const float* __restrict__ grad_loss,    // scalar (mode 0) or [T_active] (mode 1)
+    float scale_factor,                      // (1/T_active) for ScalarMean, 1.0 for PerPosition
+    T* __restrict__ d_hidden,                // [T_active, H]
+    int hidden_size,
+    int vocab_size,
+    int t_active
+) {
+    const int t = blockIdx.x;
+    if (t >= t_active) return;
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / kWarpSize;
+    const int lane = tid & (kWarpSize - 1);
+
+    __shared__ float s_logits[64];
+    __shared__ float s_lp_q[64];
+    __shared__ float exp_p[64];
+    __shared__ float exp_q[64];
+    __shared__ float d_s_logits[64];
+    __shared__ float bcast[1];
+
+    // ---- recompute forward state to recover p_hat, log_p_hat, log_q_hat, KL_t ----
+    if (warp_id < K) {
+        if (lane == 0) {
+            s_lp_q[warp_id] = topk_lp_q[t * K + warp_id];
+        }
+        const uint32_t col = topk_idx[t * K + warp_id];
+        float acc = 0.0f;
+        for (int h = lane; h < hidden_size; h += kWarpSize) {
+            const float a = static_cast<float>(hidden[t * hidden_size + h]);
+            const float b = static_cast<float>(head_t[h * vocab_size + col]);
+            acc += a * b;
+        }
+        for (int o = kWarpSize / 2; o > 0; o >>= 1) {
+            acc += __shfl_xor_sync(0xffffffff, acc, o);
+        }
+        if (lane == 0) {
+            s_logits[warp_id] = acc;
+        }
+    }
+    __syncthreads();
+
+    block_reduce_k<K, ReduceOp::Max>(s_logits, bcast);
+    const float m_p = bcast[0];
+    if (warp_id < K && lane == 0) {
+        exp_p[warp_id] = expf(s_logits[warp_id] - m_p);
+    }
+    __syncthreads();
+    block_reduce_k<K, ReduceOp::Sum>(exp_p, bcast);
+    const float z_p = bcast[0];
+    const float log_z_p = logf(z_p);
+
+    block_reduce_k<K, ReduceOp::Max>(s_lp_q, bcast);
+    const float m_q = bcast[0];
+    if (warp_id < K && lane == 0) {
+        exp_q[warp_id] = expf(s_lp_q[warp_id] - m_q);
+    }
+    __syncthreads();
+    block_reduce_k<K, ReduceOp::Sum>(exp_q, bcast);
+    const float z_q = bcast[0];
+    const float log_z_q = logf(z_q);
+
+    // KL_t — needed below in the d_s_logits formula.
+    __shared__ float kl_partial[64];
+    if (warp_id < K && lane == 0) {
+        const float log_p = (s_logits[warp_id] - m_p) - log_z_p;
+        const float log_q = (s_lp_q[warp_id] - m_q) - log_z_q;
+        const float p_hat = exp_p[warp_id] / z_p;
+        kl_partial[warp_id] = p_hat * (log_p - log_q);
+    }
+    __syncthreads();
+    block_reduce_k<K, ReduceOp::Sum>(kl_partial, bcast);
+    const float kl_t = bcast[0];
+
+    // Decide the per-position upstream gradient.
+    float upstream;
+    if (OutputMode == 0) {
+        upstream = grad_loss[0] * scale_factor;
+    } else {
+        upstream = grad_loss[t] * scale_factor;
+    }
+
+    // ---- d_s_logits[k] = p_hat[k] * (log_p_hat[k] - log_q_hat[k] - KL_t) * upstream ----
+    if (warp_id < K && lane == 0) {
+        const float log_p = (s_logits[warp_id] - m_p) - log_z_p;
+        const float log_q = (s_lp_q[warp_id] - m_q) - log_z_q;
+        const float p_hat = exp_p[warp_id] / z_p;
+        d_s_logits[warp_id] = p_hat * (log_p - log_q - kl_t) * upstream;
+    }
+    __syncthreads();
+
+    // ---- d_hidden[t, h] = sum_k d_s_logits[k] * head_t[h, idx[t, k]] ----
+    // All blockDim.x threads stride over h. For K=32 the inner loop is 32
+    // gather-mul-adds with a known-small K; the compiler can unroll.
+    const int stride = blockDim.x;
+    for (int h = tid; h < hidden_size; h += stride) {
+        float acc = 0.0f;
+        #pragma unroll 16
+        for (int k = 0; k < K; ++k) {
+            const uint32_t col = topk_idx[t * K + k];
+            const float head_v = static_cast<float>(head_t[h * vocab_size + col]);
+            acc += d_s_logits[k] * head_v;
+        }
+        d_hidden[t * hidden_size + h] = static_cast<T>(acc);
+    }
+}
+
+// Dispatch on K + OutputMode + dtype for the backward.
+template <typename T>
+static int launch_bwd_for_k(
+    const void* hidden,
+    const void* head_t,
+    const void* topk_idx,
+    const void* topk_lp_q,
+    const void* grad_loss,
+    float scale_factor,
+    void* d_hidden,
+    int hidden_size,
+    int vocab_size,
+    int t_active,
+    int top_k,
+    int output_mode,
+    cudaStream_t stream
+) {
+    const T* hidden_t = reinterpret_cast<const T*>(hidden);
+    const T* head_t_t = reinterpret_cast<const T*>(head_t);
+    const uint32_t* idx = reinterpret_cast<const uint32_t*>(topk_idx);
+    const float* lp_q = reinterpret_cast<const float*>(topk_lp_q);
+    const float* gl = reinterpret_cast<const float*>(grad_loss);
+    T* dh = reinterpret_cast<T*>(d_hidden);
+
+    dim3 grid(t_active);
+    if (top_k == 16) {
+        dim3 block(16 * kWarpSize);
+        if (output_mode == 0) {
+            opd_topk_kl_bwd_kernel<T, 16, 0><<<grid, block, 0, stream>>>(
+                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_size, vocab_size, t_active);
+        } else {
+            opd_topk_kl_bwd_kernel<T, 16, 1><<<grid, block, 0, stream>>>(
+                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_size, vocab_size, t_active);
+        }
+    } else if (top_k == 32) {
+        dim3 block(32 * kWarpSize);
+        if (output_mode == 0) {
+            opd_topk_kl_bwd_kernel<T, 32, 0><<<grid, block, 0, stream>>>(
+                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_size, vocab_size, t_active);
+        } else {
+            opd_topk_kl_bwd_kernel<T, 32, 1><<<grid, block, 0, stream>>>(
+                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_size, vocab_size, t_active);
+        }
+    } else {
+        return -3;
+    }
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return static_cast<int>(err);
+    return 0;
+}
+
 }  // namespace
 
 extern "C" int32_t kiln_opd_topk_kl_fwd_bf16(
@@ -242,4 +436,61 @@ extern "C" int32_t kiln_opd_topk_kl_fwd_f32(
     return launch_for_k<float>(
         hidden, head_t, topk_indices, topk_lp_q, kl_out,
         hidden_size, vocab_size, t_active, top_k, s);
+}
+
+// =====================================================================
+// Backward C-ABI entry points.
+// =====================================================================
+//
+// `output_mode` is 0 for ScalarMean (grad_loss is a single scalar f32)
+// and 1 for PerPosition (grad_loss is a length-t_active f32 array).
+// `scale_factor` is (1 / t_active) for ScalarMean and 1.0 for
+// PerPosition — caller computes this once, kernel just multiplies.
+
+extern "C" int32_t kiln_opd_topk_kl_bwd_bf16(
+    const void* hidden,
+    const void* head_t,
+    const void* topk_indices,
+    const void* topk_lp_q,
+    const void* grad_loss,
+    float scale_factor,
+    void* d_hidden,
+    int32_t t_active,
+    int32_t hidden_size,
+    int32_t vocab_size,
+    int32_t top_k,
+    int32_t output_mode,
+    void* stream
+) {
+    if (t_active <= 0) return 0;
+    if (hidden_size <= 0 || vocab_size <= 0 || top_k <= 0) return -1;
+    if (output_mode != 0 && output_mode != 1) return -2;
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    return launch_bwd_for_k<__nv_bfloat16>(
+        hidden, head_t, topk_indices, topk_lp_q, grad_loss, scale_factor,
+        d_hidden, hidden_size, vocab_size, t_active, top_k, output_mode, s);
+}
+
+extern "C" int32_t kiln_opd_topk_kl_bwd_f32(
+    const void* hidden,
+    const void* head_t,
+    const void* topk_indices,
+    const void* topk_lp_q,
+    const void* grad_loss,
+    float scale_factor,
+    void* d_hidden,
+    int32_t t_active,
+    int32_t hidden_size,
+    int32_t vocab_size,
+    int32_t top_k,
+    int32_t output_mode,
+    void* stream
+) {
+    if (t_active <= 0) return 0;
+    if (hidden_size <= 0 || vocab_size <= 0 || top_k <= 0) return -1;
+    if (output_mode != 0 && output_mode != 1) return -2;
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    return launch_bwd_for_k<float>(
+        hidden, head_t, topk_indices, topk_lp_q, grad_loss, scale_factor,
+        d_hidden, hidden_size, vocab_size, t_active, top_k, output_mode, s);
 }

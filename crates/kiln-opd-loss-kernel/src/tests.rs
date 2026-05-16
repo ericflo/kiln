@@ -499,6 +499,184 @@ fn cuda_parity_for_k<T: 'static>(
     Ok(())
 }
 
+/// CUDA backward parity: with the kill-switch ON we get the analytic
+/// candle backward; with it OFF we get the fused CUDA bwd kernel. They
+/// must agree within tight tolerances.
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_bwd_kernel_matches_candle_f32_k32() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_bwd_parity_for_k::<f32>(&device, 32, /* tol = */ 1e-4)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_bwd_kernel_matches_candle_f32_k16() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_bwd_parity_for_k::<f32>(&device, 16, /* tol = */ 1e-4)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_bwd_kernel_matches_candle_bf16_k32() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_bwd_parity_for_k_bf16(&device, 32, /* tol = */ 5e-2)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_bwd_parity_for_k<T: 'static>(
+    device: &Device,
+    top_k: usize,
+    tol: f32,
+) -> Result<()> {
+    use candle_core::Var;
+    let seq_len = 32;
+    let hidden_size = 256;
+    let vocab_size = 1024;
+    let (hidden_init, head_t, idx, lp, mask) =
+        random_case(seq_len, hidden_size, vocab_size, top_k, 2, device)?;
+
+    // Reference path: KILN_DISABLE_OPD_LOSS_KERNEL=1 forces the
+    // analytic candle backward (the parity oracle).
+    let prior = std::env::var("KILN_DISABLE_OPD_LOSS_KERNEL").ok();
+    unsafe {
+        std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", "1");
+    }
+    let hidden_var_ref = Var::from_tensor(&hidden_init)?;
+    let loss_ref = opd_top_k_reverse_kl_phase_b(
+        hidden_var_ref.as_tensor(),
+        &head_t,
+        &idx,
+        &lp,
+        &mask,
+        top_k,
+        device,
+        4096,
+    )?;
+    let grads_ref = loss_ref.backward()?;
+    let g_ref = grads_ref
+        .get(hidden_var_ref.as_tensor())
+        .ok_or_else(|| anyhow!("no candle bwd grad"))?
+        .clone();
+    unsafe {
+        match prior.as_ref() {
+            Some(v) => std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", v),
+            None => std::env::remove_var("KILN_DISABLE_OPD_LOSS_KERNEL"),
+        }
+    }
+
+    // Kernel path: default behaviour.
+    let hidden_var_ker = Var::from_tensor(&hidden_init)?;
+    let loss_ker = opd_top_k_reverse_kl_phase_b(
+        hidden_var_ker.as_tensor(),
+        &head_t,
+        &idx,
+        &lp,
+        &mask,
+        top_k,
+        device,
+        4096,
+    )?;
+    let grads_ker = loss_ker.backward()?;
+    let g_ker = grads_ker
+        .get(hidden_var_ker.as_tensor())
+        .ok_or_else(|| anyhow!("no kernel bwd grad"))?
+        .clone();
+
+    let ref_v = g_ref.to_dtype(DType::F32)?;
+    let ker_v = g_ker.to_dtype(DType::F32)?;
+    let diff = (&ref_v - &ker_v)?.abs()?.max_all()?.to_scalar::<f32>()?;
+    let max_ref = ref_v.abs()?.max_all()?.to_scalar::<f32>()?;
+    let rel = if max_ref > 1e-6 {
+        diff / max_ref
+    } else {
+        diff
+    };
+    assert!(
+        diff < tol || rel < tol,
+        "bwd kernel vs candle f32 K={top_k}: max_abs={diff:.2e} max_ref={max_ref:.4} rel={rel:.2e}"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_bwd_parity_for_k_bf16(
+    device: &Device,
+    top_k: usize,
+    tol: f32,
+) -> Result<()> {
+    use candle_core::Var;
+    let seq_len = 32;
+    let hidden_size = 256;
+    let vocab_size = 1024;
+    let (hidden_f32, head_f32, idx, lp, mask) =
+        random_case(seq_len, hidden_size, vocab_size, top_k, 2, device)?;
+    let hidden_init = hidden_f32.to_dtype(DType::BF16)?;
+    let head_t = head_f32.to_dtype(DType::BF16)?;
+
+    let prior = std::env::var("KILN_DISABLE_OPD_LOSS_KERNEL").ok();
+    unsafe {
+        std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", "1");
+    }
+    let hidden_var_ref = Var::from_tensor(&hidden_init)?;
+    let loss_ref = opd_top_k_reverse_kl_phase_b(
+        hidden_var_ref.as_tensor(),
+        &head_t,
+        &idx,
+        &lp,
+        &mask,
+        top_k,
+        device,
+        4096,
+    )?;
+    let grads_ref = loss_ref.backward()?;
+    let g_ref = grads_ref
+        .get(hidden_var_ref.as_tensor())
+        .ok_or_else(|| anyhow!("no candle bwd grad"))?
+        .clone();
+    unsafe {
+        match prior.as_ref() {
+            Some(v) => std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", v),
+            None => std::env::remove_var("KILN_DISABLE_OPD_LOSS_KERNEL"),
+        }
+    }
+
+    let hidden_var_ker = Var::from_tensor(&hidden_init)?;
+    let loss_ker = opd_top_k_reverse_kl_phase_b(
+        hidden_var_ker.as_tensor(),
+        &head_t,
+        &idx,
+        &lp,
+        &mask,
+        top_k,
+        device,
+        4096,
+    )?;
+    let grads_ker = loss_ker.backward()?;
+    let g_ker = grads_ker
+        .get(hidden_var_ker.as_tensor())
+        .ok_or_else(|| anyhow!("no kernel bwd grad"))?
+        .clone();
+
+    let ref_v = g_ref.to_dtype(DType::F32)?;
+    let ker_v = g_ker.to_dtype(DType::F32)?;
+    let diff = (&ref_v - &ker_v)?.abs()?.max_all()?.to_scalar::<f32>()?;
+    let max_ref = ref_v.abs()?.max_all()?.to_scalar::<f32>()?;
+    let rel = if max_ref > 1e-6 {
+        diff / max_ref
+    } else {
+        diff
+    };
+    assert!(
+        diff < tol || rel < tol,
+        "bwd kernel vs candle bf16 K={top_k}: max_abs={diff:.2e} max_ref={max_ref:.4} rel={rel:.2e}"
+    );
+    Ok(())
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_parity_for_k_bf16(
     device: &Device,

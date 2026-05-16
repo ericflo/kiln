@@ -17,9 +17,10 @@
 //! K=16 and bf16 variants are also benchmarked.
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor, Var};
 use kiln_opd_loss_kernel::{
-    opd_top_k_reverse_kl_phase_a_per_position, opd_top_k_reverse_kl_phase_b_per_position,
+    opd_top_k_reverse_kl_phase_a_per_position, opd_top_k_reverse_kl_phase_b,
+    opd_top_k_reverse_kl_phase_b_per_position,
 };
 use std::time::Instant;
 
@@ -126,7 +127,90 @@ fn bench_one(
     let speedup = candle_ms / kernel_ms;
     let kernel_tok_s = (seq_len as f64) / (kernel_ms / 1000.0);
     println!(
-        "T={seq_len:5}  H={hidden_size}  V={vocab_size}  K={top_k:2}  {:?}  iters={iters:3}  kernel={kernel_ms:7.3}ms  candle={candle_ms:7.3}ms  {speedup:5.2}x  {kernel_tok_s:9.0} tok/s",
+        "FWD  T={seq_len:5}  H={hidden_size}  V={vocab_size}  K={top_k:2}  {:?}  iters={iters:3}  kernel={kernel_ms:7.3}ms  candle={candle_ms:7.3}ms  {speedup:5.2}x  {kernel_tok_s:9.0} tok/s",
+        dtype
+    );
+
+    // ----- Backward bench -----
+    //
+    // To time the backward pass we need an autograd graph rooted at a
+    // `Var` holding `hidden`. Building and tearing the graph is a tiny
+    // overhead compared to the actual matmul; we time the whole
+    // forward+backward together since that's the trainer's hot loop.
+    let hidden_var = Var::from_tensor(&hidden)?;
+    // Warm up.
+    {
+        let loss = opd_top_k_reverse_kl_phase_b(
+            hidden_var.as_tensor(),
+            &head_t,
+            &indices,
+            &logprobs,
+            &mask,
+            top_k,
+            device,
+            4096,
+        )?;
+        let _grads = loss.backward()?;
+    }
+    device.synchronize()?;
+
+    // Kernel bwd path (default: kernel ON).
+    let t2 = Instant::now();
+    for _ in 0..iters {
+        let loss = opd_top_k_reverse_kl_phase_b(
+            hidden_var.as_tensor(),
+            &head_t,
+            &indices,
+            &logprobs,
+            &mask,
+            top_k,
+            device,
+            4096,
+        )?;
+        let _grads = loss.backward()?;
+    }
+    device.synchronize()?;
+    let bwd_kernel_ms = t2.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+
+    // Candle bwd path (force kill switch).
+    // SAFETY: env mutation is single-threaded for the bench.
+    unsafe { std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", "1"); }
+    {
+        let loss = opd_top_k_reverse_kl_phase_b(
+            hidden_var.as_tensor(),
+            &head_t,
+            &indices,
+            &logprobs,
+            &mask,
+            top_k,
+            device,
+            4096,
+        )?;
+        let _grads = loss.backward()?;
+    }
+    device.synchronize()?;
+    let t3 = Instant::now();
+    for _ in 0..iters {
+        let loss = opd_top_k_reverse_kl_phase_b(
+            hidden_var.as_tensor(),
+            &head_t,
+            &indices,
+            &logprobs,
+            &mask,
+            top_k,
+            device,
+            4096,
+        )?;
+        let _grads = loss.backward()?;
+    }
+    device.synchronize()?;
+    let bwd_candle_ms = t3.elapsed().as_secs_f64() * 1000.0 / iters as f64;
+    unsafe { std::env::remove_var("KILN_DISABLE_OPD_LOSS_KERNEL"); }
+
+    let bwd_speedup = bwd_candle_ms / bwd_kernel_ms;
+    let bwd_tok_s = (seq_len as f64) / (bwd_kernel_ms / 1000.0);
+    println!(
+        "FWD+BWD T={seq_len:5}  H={hidden_size}  V={vocab_size}  K={top_k:2}  {:?}  iters={iters:3}  kernel={bwd_kernel_ms:7.3}ms  candle={bwd_candle_ms:7.3}ms  {bwd_speedup:5.2}x  {bwd_tok_s:9.0} tok/s",
         dtype
     );
     Ok(())
