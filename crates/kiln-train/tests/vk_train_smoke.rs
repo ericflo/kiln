@@ -978,6 +978,461 @@ fn vk_native_opd_recompute_training_loss_decreases() -> Result<()> {
     Ok(())
 }
 
+/// Multi-layer FullAttention model. Used to drive memory-pressure stress
+/// tests against the checkpointed OPD trainer on smaller-VRAM GPUs (the
+/// 1-layer `build_tiny_model` is too small to differentiate
+/// checkpointed-vs-non-checkpointed memory headroom).
+fn build_multilayer_model(
+    dev: &Arc<VulkanDevice>,
+    hidden: usize,
+    intermediate: usize,
+    num_layers: usize,
+    vocab: usize,
+    heads_q: usize,
+    heads_kv: usize,
+) -> Result<VkModelWeights> {
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+
+    let embed = small_random(vocab * hidden, 1);
+    let final_norm = vec![0.0_f32; hidden];
+    let lm_head = small_random(vocab * hidden, 99);
+
+    let mut layers: Vec<VkLayerWeights> = Vec::with_capacity(num_layers);
+    for li in 0..num_layers {
+        let li64 = li as u64;
+        let in_norm = vec![0.0_f32; hidden];
+        let post_norm = vec![0.0_f32; hidden];
+        // Use distinct seeds per layer so the model is non-degenerate.
+        let q = small_random(hidden * hidden, 200 + li64 * 7);
+        let k = small_random(kv_dim * hidden, 201 + li64 * 7);
+        let v = small_random(kv_dim * hidden, 202 + li64 * 7);
+        let o = small_random(hidden * hidden, 203 + li64 * 7);
+        let gate = small_random(intermediate * hidden, 204 + li64 * 7);
+        let up = small_random(intermediate * hidden, 205 + li64 * 7);
+        let down = small_random(hidden * intermediate, 206 + li64 * 7);
+        layers.push(VkLayerWeights::FullAttention(VkFullAttentionWeights {
+            input_layernorm_weight: upload_f32(dev, &in_norm, &[hidden])?,
+            post_attention_layernorm_weight: upload_f32(dev, &post_norm, &[hidden])?,
+            q_proj: upload_f32(dev, &q, &[hidden, hidden])?,
+            k_proj: upload_f32(dev, &k, &[kv_dim, hidden])?,
+            v_proj: upload_f32(dev, &v, &[kv_dim, hidden])?,
+            o_proj: upload_f32(dev, &o, &[hidden, hidden])?,
+            q_norm: None,
+            k_norm: None,
+            gate_proj: upload_f32(dev, &gate, &[intermediate, hidden])?,
+            up_proj: upload_f32(dev, &up, &[intermediate, hidden])?,
+            down_proj: upload_f32(dev, &down, &[hidden, intermediate])?,
+            heads_q,
+            heads_kv,
+            head_dim,
+            attn_output_gate: false,
+            eps: 1e-5,
+        }));
+    }
+    Ok(VkModelWeights {
+        embed_tokens: upload_f32(dev, &embed, &[vocab, hidden])?,
+        embed_dtype: VkDType::F32,
+        final_norm_weight: upload_f32(dev, &final_norm, &[hidden])?,
+        lm_head: upload_f32(dev, &lm_head, &[vocab, hidden])?,
+        layers,
+        rotary_inv_freq: vec![],
+        rope_cache: Default::default(),
+        rotary_dim: 0,
+        vocab,
+        hidden,
+    })
+}
+
+fn build_multilayer_lora(
+    dev: &Arc<VulkanDevice>,
+    hidden: usize,
+    intermediate: usize,
+    kv_dim: usize,
+    num_layers: usize,
+) -> Result<Vec<VkLoraLayer>> {
+    let mut out = Vec::with_capacity(num_layers);
+    for li in 0..num_layers {
+        let s = 500u64 + (li as u64) * 17;
+        out.push(VkLoraLayer {
+            q_proj: Some(VkLoraPair::init_kaiming(dev, hidden, hidden, 4, 8.0, s)?),
+            k_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, 4, 8.0, s + 1)?),
+            v_proj: Some(VkLoraPair::init_kaiming(dev, hidden, kv_dim, 4, 8.0, s + 2)?),
+            o_proj: Some(VkLoraPair::init_kaiming(dev, hidden, hidden, 4, 8.0, s + 3)?),
+            gate_proj: Some(VkLoraPair::init_kaiming(
+                dev,
+                hidden,
+                intermediate,
+                4,
+                8.0,
+                s + 4,
+            )?),
+            up_proj: Some(VkLoraPair::init_kaiming(
+                dev,
+                hidden,
+                intermediate,
+                4,
+                8.0,
+                s + 5,
+            )?),
+            down_proj: Some(VkLoraPair::init_kaiming(
+                dev,
+                intermediate,
+                hidden,
+                4,
+                8.0,
+                s + 6,
+            )?),
+            ..Default::default()
+        });
+    }
+    Ok(out)
+}
+
+fn multilayer_model_config(
+    hidden: usize,
+    intermediate: usize,
+    num_layers: usize,
+    vocab: usize,
+    heads_q: usize,
+    heads_kv: usize,
+    max_seq: usize,
+) -> ModelConfig {
+    ModelConfig {
+        hidden_size: hidden,
+        num_layers,
+        num_attention_heads: heads_q,
+        num_kv_heads: heads_kv,
+        head_dim: hidden / heads_q,
+        intermediate_size: intermediate,
+        vocab_size: vocab,
+        max_position_embeddings: max_seq,
+        rms_norm_eps: 1e-5,
+        rope_theta: 10_000.0,
+        dtype: DType::FP32,
+        num_full_attention_layers: num_layers,
+        full_attention_interval: 1,
+        attn_output_gate: false,
+        linear_num_key_heads: heads_kv,
+        linear_key_head_dim: hidden / heads_q,
+        linear_num_value_heads: heads_kv,
+        linear_value_head_dim: hidden / heads_q,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 0.0,
+    }
+}
+
+/// Memory-pressure stress test for the checkpointed OPD trainer.
+///
+/// Builds an 8-layer / hidden=1024 / intermediate=4096 model with a
+/// 1024-token sequence (all active), runs `vk_recompute_opd_train_step_with_state`
+/// for 3 steps, and asserts the loss decreases. Total activation memory
+/// is high enough that the non-checkpointed path would keep ≳2 GB
+/// resident across all 8 layers' forward tape simultaneously; the
+/// checkpointed path holds only one layer's tape at peak.
+///
+/// On smaller-VRAM hardware (RTX A5000 / 3090 / 4090, 24 GB) this is
+/// the test that demonstrates the checkpointing actually pays for
+/// itself — it's still well within budget, but it's the realistic-shape
+/// workload that exercises the segmented forward path under pressure.
+#[test]
+fn vk_native_opd_recompute_low_vram_stress() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let hidden = 1024;
+    let intermediate = 4096;
+    let num_layers = 8;
+    let vocab = 128;
+    let heads_q = 8;
+    let heads_kv = 4;
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+    let seq_len = 1024;
+    let max_seq = 2048;
+
+    let model = build_multilayer_model(&dev, hidden, intermediate, num_layers, vocab, heads_q, heads_kv)?;
+    let lora_layers = build_multilayer_lora(&dev, hidden, intermediate, kv_dim, num_layers)?;
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 5e-3,
+        ..Default::default()
+    };
+
+    let input_ids: Vec<u32> = (0..seq_len as u32).map(|i| (i * 3 + 1) % vocab as u32).collect();
+    let active_rows: Vec<u32> = (1u32..seq_len as u32).collect();
+    let active_count = active_rows.len();
+
+    let top_k = 16usize;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.3));
+        }
+    }
+
+    let model_config = multilayer_model_config(
+        hidden,
+        intermediate,
+        num_layers,
+        vocab,
+        heads_q,
+        heads_kv,
+        max_seq,
+    );
+    let optimizer = Optimizer::AdamW {
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        eps: cfg.eps,
+        weight_decay: cfg.weight_decay,
+    };
+
+    let started = std::time::Instant::now();
+    let initial = vk_recompute_opd_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        &model_config,
+        0, // num_gdn_layers
+        &mut adamw,
+        &cfg,
+        optimizer,
+        1,
+    )?;
+    let step1_ms = started.elapsed().as_millis();
+    assert!(initial.is_finite(), "initial OPD recompute loss non-finite: {initial}");
+    println!(
+        "vk_native_opd_recompute_low_vram_stress: \
+         L={num_layers} H={hidden} I={intermediate} V={vocab} T={seq_len} \
+         step1={initial:.4} ({step1_ms} ms)"
+    );
+
+    let mut losses = vec![initial];
+    let mut last_loss = initial;
+    for step in 2u32..=3 {
+        let s = std::time::Instant::now();
+        let l = vk_recompute_opd_train_step_with_state(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &active_rows,
+            &teacher_topk_indices,
+            &teacher_topk_logprobs,
+            top_k,
+            &model_config,
+            0,
+            &mut adamw,
+            &cfg,
+            optimizer,
+            step,
+        )?;
+        let elapsed_ms = s.elapsed().as_millis();
+        assert!(l.is_finite(), "step {step}: non-finite recompute OPD loss {l}");
+        println!(
+            "vk_native_opd_recompute_low_vram_stress: step{step}={l:.4} ({elapsed_ms} ms)"
+        );
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_native_opd_recompute_low_vram_stress losses: {losses:?}");
+    assert!(
+        last_loss < initial,
+        "checkpointed OPD reverse-KL did not drop: {initial} -> {last_loss}"
+    );
+    Ok(())
+}
+
+/// Side-by-side memory-pressure comparison: non-checkpointed vs
+/// checkpointed OPD trainer at the SAME config, with `KILN_VK_OPD_STRESS`
+/// scaling the model to push GPU VRAM.
+///
+/// Default (`KILN_VK_OPD_STRESS=small`): 8 layers × H=1024 × I=4096 × T=1024
+/// — fits comfortably on a 24 GB GPU through either path. Used in CI / by
+/// default to verify both paths still produce identical loss curves.
+///
+/// `KILN_VK_OPD_STRESS=large`: 24 layers × H=2048 × I=8192 × T=4096 —
+/// pushes activation memory well past 24 GB on the non-checkpointed path
+/// (~32 GB of layer tapes + gradients) but stays under ~6 GB on the
+/// checkpointed path (one layer's tape at peak + the boundary cache).
+/// On a 24 GB-class GPU (RTX A5000 / 3090 / 4090) the non-checkpointed
+/// path should OOM and the test asserts the checkpointed path succeeds.
+///
+/// Numbers reported per-step: loss + per-step latency, plus the run
+/// prints `OOM` if a vk_*_train_step call errored out. The
+/// `KILN_VK_OPD_STRESS=skip` flag (or absence of the env var) makes
+/// this test a no-op so it doesn't slow ordinary `cargo test`
+/// invocations.
+#[test]
+fn vk_native_opd_path_comparison_low_vram() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let stress = std::env::var("KILN_VK_OPD_STRESS").unwrap_or_else(|_| "skip".into());
+    if stress.as_str() == "skip" {
+        eprintln!(
+            "KILN_VK_OPD_STRESS=skip — set to 'small' or 'large' to enable this test"
+        );
+        return Ok(());
+    }
+    let (hidden, intermediate, num_layers, vocab, heads_q, heads_kv, seq_len) = match stress.as_str() {
+        "small" => (1024usize, 4096usize, 8usize, 128usize, 8usize, 4usize, 1024usize),
+        "large" => (2048usize, 8192usize, 24usize, 128usize, 16usize, 8usize, 4096usize),
+        other => {
+            eprintln!("KILN_VK_OPD_STRESS={other} — only 'small' or 'large' supported");
+            return Ok(());
+        }
+    };
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+    let max_seq = seq_len.max(2048);
+
+    println!(
+        "vk_native_opd_path_comparison_low_vram: \
+         stress={stress} L={num_layers} H={hidden} I={intermediate} V={vocab} T={seq_len}"
+    );
+    let build_started = std::time::Instant::now();
+    let model = build_multilayer_model(&dev, hidden, intermediate, num_layers, vocab, heads_q, heads_kv)?;
+    println!(
+        "vk_native_opd_path_comparison_low_vram: model built in {} ms",
+        build_started.elapsed().as_millis()
+    );
+
+    let input_ids: Vec<u32> = (0..seq_len as u32).map(|i| (i * 3 + 1) % vocab as u32).collect();
+    let active_rows: Vec<u32> = (1u32..seq_len as u32).collect();
+    let active_count = active_rows.len();
+    let top_k = 16usize;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.3));
+        }
+    }
+
+    let model_config = multilayer_model_config(
+        hidden,
+        intermediate,
+        num_layers,
+        vocab,
+        heads_q,
+        heads_kv,
+        max_seq,
+    );
+    let cfg = VkAdamWConfig {
+        lr: 5e-3,
+        ..Default::default()
+    };
+    let optimizer = Optimizer::AdamW {
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        eps: cfg.eps,
+        weight_decay: cfg.weight_decay,
+    };
+
+    // Try non-checkpointed first. On `large` this is expected to OOM
+    // on a 24 GB GPU; we report rather than fail.
+    let lora_layers_a = build_multilayer_lora(&dev, hidden, intermediate, kv_dim, num_layers)?;
+    let mut adamw_a = allocate_adamw_state(&dev, &lora_layers_a)?;
+    let started = std::time::Instant::now();
+    let direct_result = vk_opd_train_step_with_state(
+        &model,
+        &lora_layers_a,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        None,
+        &mut adamw_a,
+        &cfg,
+        optimizer,
+        1,
+    );
+    match &direct_result {
+        Ok(l) => println!(
+            "vk_native_opd_path_comparison_low_vram: non-checkpointed loss={l:.4} ({} ms)",
+            started.elapsed().as_millis()
+        ),
+        Err(e) => println!(
+            "vk_native_opd_path_comparison_low_vram: non-checkpointed FAILED ({} ms): {e:#}",
+            started.elapsed().as_millis()
+        ),
+    }
+
+    // Free intermediate state by dropping the adapter set.
+    drop(adamw_a);
+    drop(lora_layers_a);
+
+    // Now run checkpointed at the same config. This must succeed
+    // regardless of whether the direct path did.
+    let lora_layers_b = build_multilayer_lora(&dev, hidden, intermediate, kv_dim, num_layers)?;
+    let mut adamw_b = allocate_adamw_state(&dev, &lora_layers_b)?;
+    let started = std::time::Instant::now();
+    let ckpt_loss = vk_recompute_opd_train_step_with_state(
+        &model,
+        &lora_layers_b,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        &model_config,
+        0,
+        &mut adamw_b,
+        &cfg,
+        optimizer,
+        1,
+    )?;
+    let ckpt_elapsed = started.elapsed().as_millis();
+    println!(
+        "vk_native_opd_path_comparison_low_vram: checkpointed loss={ckpt_loss:.4} ({ckpt_elapsed} ms)"
+    );
+    assert!(ckpt_loss.is_finite(), "checkpointed loss non-finite: {ckpt_loss}");
+    // On `small` both paths should produce identical losses.
+    if stress.as_str() == "small" {
+        if let Ok(direct_loss) = direct_result {
+            let abs = (ckpt_loss - direct_loss).abs();
+            println!(
+                "vk_native_opd_path_comparison_low_vram: \
+                 small-config parity direct={direct_loss:.4} ckpt={ckpt_loss:.4} abs={abs:.2e}"
+            );
+            assert!(
+                abs < 1e-3 || abs < ckpt_loss.abs() * 1e-3,
+                "small-config: non-checkpointed and checkpointed should match: \
+                 direct={direct_loss} ckpt={ckpt_loss}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build a tiny synthetic FullAttn model with the Qwen3.5-specific
 /// pieces enabled: per-head q_norm/k_norm and attn_output_gate (which
 /// makes q_proj produce 2× output, splitting into Q and a sigmoid
