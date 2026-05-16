@@ -147,6 +147,7 @@ Each module exposes:
 | causal mask + scale | `vk_causal_mask_add_f32`, `vk_scale_inplace_f32` | in-place, no-grad |
 | embedding lookup | `vk_embedding_lookup_{f32,bf16w_f32}` | scatter-add (frozen by default) |
 | FLCE (fused linear + xent) | five `vk_flce_*` shaders | softmax−one_hot, per chunk |
+| OPD top-K reverse-KL | `vk_opd_topk_kl_{fwd,bwd}_{f32,bf16w}` + `vk_opd_topk_metrics_{f32,bf16w}` | analytic d_hidden, recomputes p_hat/log_p_hat in shared mem (mirrors CUDA) |
 | SDPA prefill (causal, GQA) | composition of the above | composition |
 
 Roughly **25 new `.comp` shaders** plus a handful of helper kernels;
@@ -225,6 +226,7 @@ tests/vk_rmsnorm_parity.rs       2 tests   (Phase B: RMSNorm)
 tests/vk_softmax_parity.rs       2 tests   (Phase C: softmax)
 tests/vk_attention_parity.rs     4 tests   (Phase C: SDPA + permute + GQA repeat)
 tests/vk_flce_parity.rs          1 test    (Phase E: FLCE forward + backward)
+tests/vk_opd_parity.rs           10 tests  (Phase F: OPD top-K reverse-KL fwd/bwd + metrics)
 src/vk_tensor.rs (unit)          3 tests   (roundtrip, detach)
 + pre-existing tests             43 tests  (gdn_parity, device, etc.)
 

@@ -347,6 +347,16 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_index_select_rows_bwd_f32",
         "SPIR_V_VK_INDEX_SELECT_ROWS_BWD_F32",
     ),
+    // OPD top-K reverse-KL — bit-equivalent (≤1e-5) Vulkan port of the
+    // CUDA kernel in crates/kiln-opd-loss-kernel/csrc/opd_topk_kl.cu.
+    // §9.2 + §9.10 of docs/plans/grand-plan-for-extraordinarily-great-
+    // on-policy-distillation-for-everyone.md.
+    ("vk_opd_topk_kl_fwd_f32",    "SPIR_V_VK_OPD_TOPK_KL_FWD_F32"),
+    ("vk_opd_topk_kl_fwd_bf16w",  "SPIR_V_VK_OPD_TOPK_KL_FWD_BF16W"),
+    ("vk_opd_topk_kl_bwd_f32",    "SPIR_V_VK_OPD_TOPK_KL_BWD_F32"),
+    ("vk_opd_topk_kl_bwd_bf16w",  "SPIR_V_VK_OPD_TOPK_KL_BWD_BF16W"),
+    ("vk_opd_topk_metrics_f32",   "SPIR_V_VK_OPD_TOPK_METRICS_F32"),
+    ("vk_opd_topk_metrics_bf16w", "SPIR_V_VK_OPD_TOPK_METRICS_BF16W"),
 ];
 
 fn compile_shader_command(

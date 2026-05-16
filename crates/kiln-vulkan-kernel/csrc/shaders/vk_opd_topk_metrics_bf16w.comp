@@ -1,0 +1,142 @@
+// OPD per-position distribution-alignment metrics — F32 hidden, BF16 weight.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden_size;
+    uint vocab_size;
+    uint t_active;
+    uint top_k;
+};
+
+layout(binding = 0) readonly  buffer HiddenBuf { float data_hidden[]; };
+layout(binding = 1) readonly  buffer WeightBuf { uint  data_weight[]; };
+layout(binding = 2) readonly  buffer IdxBuf    { uint  data_idx[]; };
+layout(binding = 3) readonly  buffer LpqBuf    { float data_lpq[]; };
+layout(binding = 4) writeonly buffer OutBuf    { float data_out[]; };
+
+shared float partials[256];
+shared float s_logits[32];
+shared float s_lpq[32];
+shared float exp_p[32];
+shared float exp_q[32];
+shared float Hp_partial[32];
+shared float Hq_partial[32];
+shared float KL_partial[32];
+shared float m_p_sh;
+shared float z_p_sh;
+shared float m_q_sh;
+shared float z_q_sh;
+
+float load_bf16_weight(uint flat_idx) {
+    uint packed = data_weight[flat_idx >> 1];
+    uint bf16_bits = ((flat_idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint t = gl_WorkGroupID.x;
+    if (t >= t_active) return;
+    uint tid = gl_LocalInvocationID.x;
+    uint K = top_k;
+    uint threads_per_slot = 256u / K;
+    uint slot = tid / threads_per_slot;
+    uint lane = tid - slot * threads_per_slot;
+
+    float acc = 0.0;
+    if (slot < K) {
+        if (lane == 0u) {
+            s_lpq[slot] = data_lpq[t * K + slot];
+        }
+        uint col = data_idx[t * K + slot];
+        uint w_row_base = col * hidden_size;
+        uint h_row_base = t * hidden_size;
+        for (uint h = lane; h < hidden_size; h += threads_per_slot) {
+            acc += data_hidden[h_row_base + h] * load_bf16_weight(w_row_base + h);
+        }
+    }
+    partials[tid] = acc;
+    barrier();
+    if (slot < K && lane == 0u) {
+        float total = 0.0;
+        for (uint l = 0u; l < threads_per_slot; ++l) {
+            total += partials[slot * threads_per_slot + l];
+        }
+        s_logits[slot] = total;
+    }
+    barrier();
+
+    if (tid == 0u) {
+        float m = -3.402823e38;
+        for (uint k = 0u; k < K; ++k) {
+            float v = s_logits[k];
+            if (v > m) m = v;
+        }
+        m_p_sh = m;
+    }
+    barrier();
+    float m_p = m_p_sh;
+    if (slot < K && lane == 0u) {
+        exp_p[slot] = exp(s_logits[slot] - m_p);
+    }
+    barrier();
+    if (tid == 0u) {
+        float s = 0.0;
+        for (uint k = 0u; k < K; ++k) s += exp_p[k];
+        z_p_sh = s;
+    }
+    barrier();
+    float z_p = z_p_sh;
+    float log_z_p = log(z_p);
+
+    if (tid == 0u) {
+        float m = -3.402823e38;
+        for (uint k = 0u; k < K; ++k) {
+            float v = s_lpq[k];
+            if (v > m) m = v;
+        }
+        m_q_sh = m;
+    }
+    barrier();
+    float m_q = m_q_sh;
+    if (slot < K && lane == 0u) {
+        exp_q[slot] = exp(s_lpq[slot] - m_q);
+    }
+    barrier();
+    if (tid == 0u) {
+        float s = 0.0;
+        for (uint k = 0u; k < K; ++k) s += exp_q[k];
+        z_q_sh = s;
+    }
+    barrier();
+    float z_q = z_q_sh;
+    float log_z_q = log(z_q);
+
+    if (slot < K && lane == 0u) {
+        float log_p = (s_logits[slot] - m_p) - log_z_p;
+        float log_q = (s_lpq[slot]    - m_q) - log_z_q;
+        float p_hat = exp_p[slot] / z_p;
+        float q_hat = exp_q[slot] / z_q;
+        Hp_partial[slot] = -p_hat * log_p;
+        Hq_partial[slot] = -q_hat * log_q;
+        KL_partial[slot] = p_hat * (log_p - log_q);
+    }
+    barrier();
+
+    if (tid == 0u) {
+        float h_p = 0.0;
+        float h_q = 0.0;
+        float kl  = 0.0;
+        for (uint k = 0u; k < K; ++k) {
+            h_p += Hp_partial[k];
+            h_q += Hq_partial[k];
+            kl  += KL_partial[k];
+        }
+        data_out[3u * t + 0u] = h_p;
+        data_out[3u * t + 1u] = h_q;
+        data_out[3u * t + 2u] = kl;
+    }
+}

@@ -30,6 +30,7 @@ pub mod matmul_batched;
 pub mod matmul_bf16w;
 pub mod mlp;
 pub mod narrow;
+pub mod opd;
 pub mod permute;
 pub mod reduce;
 pub mod reverse_cumsum;

@@ -74,6 +74,12 @@ pub mod shaders {
     pub const L2_NORM_PER_ROW: &str = shader_path!("l2_norm_per_row");
     pub const CAUSAL_CONV1D: &str = shader_path!("causal_conv1d");
     pub const CAUSAL_CONV1D_STATE_ADVANCE: &str = shader_path!("causal_conv1d_state_advance");
+    pub const VK_OPD_TOPK_KL_FWD_F32: &str = shader_path!("vk_opd_topk_kl_fwd_f32");
+    pub const VK_OPD_TOPK_KL_FWD_BF16W: &str = shader_path!("vk_opd_topk_kl_fwd_bf16w");
+    pub const VK_OPD_TOPK_KL_BWD_F32: &str = shader_path!("vk_opd_topk_kl_bwd_f32");
+    pub const VK_OPD_TOPK_KL_BWD_BF16W: &str = shader_path!("vk_opd_topk_kl_bwd_bf16w");
+    pub const VK_OPD_TOPK_METRICS_F32: &str = shader_path!("vk_opd_topk_metrics_f32");
+    pub const VK_OPD_TOPK_METRICS_BF16W: &str = shader_path!("vk_opd_topk_metrics_bf16w");
 }
 pub use vk_autograd::{VkGradStore, vk_backward};
 pub use vk_tensor::{VkBackwardOp, VkDType, VkTensor, VkTensorInner, next_op_id};
