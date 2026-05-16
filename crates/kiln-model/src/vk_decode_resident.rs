@@ -658,6 +658,14 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     let b_buf = backend.acquire_resident_scratch("gdnfb_b", (b_dim * 4) as u64)?;
     let q_buf = backend.acquire_resident_scratch("gdnfb_q", (qk_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("gdnfb_k", (qk_dim * 4) as u64)?;
+    // q_expanded / k_expanded: GQA-expanded [nv, dk] outputs of L2-norm.
+    // The gates_recurrent kernel indexes Q/K with (bidx*nv + h)*dk, so
+    // its input must be sized for nv heads (not just nk).
+    let qkv_expanded_bytes = (nv * dk * 4) as u64;
+    let q_expanded =
+        backend.acquire_resident_scratch("gdnfb_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded =
+        backend.acquire_resident_scratch("gdnfb_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("gdnfb_v", (v_dim * 4) as u64)?;
     let gated_norm =
         backend.acquire_resident_scratch("gdnfb_gated_norm", (v_dim * 4) as u64)?;
@@ -769,26 +777,54 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
         &[qk_dim as u32, v_dim as u32],
         Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
     )?;
-    // 6) Q-norm
+    // 6) Q-norm: per-head L2 normalize + GQA expansion from nk to nv heads,
+    //    scale = 1/sqrt(dk). Matches legacy `gdn_qk_norm` semantics:
+    //    `q.unsqueeze(3).expand(.., nk, gqa_ratio, dk).reshape(nv, dk)`
+    //    then `l2_normalize(q) * (1/sqrt(dk))`. Writes the expanded
+    //    [nv, dk] result into `q_expanded`. The legacy resident path used
+    //    qwen_rmsnorm with `lin_weights.norm` and skipped the expansion
+    //    entirely — the gates_recurrent kernel then read Q/K past the end
+    //    of the nk-sized buffer (returning zeros under robustBufferAccess)
+    //    for heads nk..nv. Bit-identical to legacy for one decode step
+    //    because of the storage-buffer zero-fill, but state diverged
+    //    immediately on multi-token decode.
+    let gqa_ratio = nv / nk;
+    debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
+    let l2_eps_q: f32 = 1e-6;
+    let q_scale: f32 = 1.0 / (dk as f32).sqrt();
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[q_buf.handle(), qk_norm.handle(), q_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
+        shaders::L2_NORM_PER_ROW,
+        &[q_buf.handle(), q_expanded.handle()],
+        &[
+            nk as u32,
+            dk as u32,
+            l2_eps_q.to_bits(),
+            q_scale.to_bits(),
+            gqa_ratio as u32,
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
-    // 7) K-norm (rows=nk same as legacy dispatcher)
+    // 7) K-norm: per-head L2 normalize + GQA expansion, no scale.
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[k_buf.handle(), qk_norm.handle(), k_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
+        shaders::L2_NORM_PER_ROW,
+        &[k_buf.handle(), k_expanded.handle()],
+        &[
+            nk as u32,
+            dk as u32,
+            l2_eps_q.to_bits(),
+            k_scale.to_bits(),
+            gqa_ratio as u32,
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
-    // 8) Fused gates+recurrent+rmsnorm
+    // 8) Fused gates+recurrent+rmsnorm — reads Q/K from the GQA-expanded
+    //    [nv, dk] buffers written by the L2-norm step above.
     batch.record_shader(
         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
         &[
-            q_buf.handle(),
-            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
             v_buf.handle(),
             a_buf.handle(),
             b_buf.handle(),
@@ -972,6 +1008,12 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     let b_buf = backend.acquire_resident_scratch("gdn_b", (b_dim * 4) as u64)?;
     let q_buf = backend.acquire_resident_scratch("gdn_q", (qk_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("gdn_k", (qk_dim * 4) as u64)?;
+    // GQA-expanded Q/K for the recurrent kernel (sized nv*dk, not nk*dk).
+    let qkv_expanded_bytes = (nv * dk * 4) as u64;
+    let q_expanded =
+        backend.acquire_resident_scratch("gdn_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded =
+        backend.acquire_resident_scratch("gdn_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("gdn_v", (v_dim * 4) as u64)?;
     let gated_norm = backend.acquire_resident_scratch("gdn_gated_norm", (v_dim * 4) as u64)?;
     let out_buf = backend.acquire_resident_scratch("gdn_out", (hidden * 4) as u64)?;
@@ -1073,27 +1115,45 @@ pub fn gated_deltanet_forward_decode_resident_b1(
         &[qk_dim as u32, v_dim as u32],
         Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
     )?;
-    // 5+6) Fused Q-norm + K-norm: one dispatch, 2*nk workgroups.
-    // GDN shares the same `q_norm` weight buffer for both Q and K
-    // (matches the legacy dispatcher), so we pass it twice.
+    // 5) Q-norm: per-head L2 normalize + GQA expansion (nk → nv heads),
+    //    scale = 1/sqrt(dk). Matches legacy `gdn_qk_norm` semantics.
+    let gqa_ratio = nv / nk;
+    debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
+    let l2_eps_qk: f32 = 1e-6;
+    let q_scale: f32 = 1.0 / (dk as f32).sqrt();
     batch.record_shader(
-        shaders::QWEN_RMSNORM_QK_COMBINED,
+        shaders::L2_NORM_PER_ROW,
+        &[q_buf.handle(), q_expanded.handle()],
         &[
-            q_buf.handle(),
-            q_norm.handle(),
-            k_buf.handle(),
-            q_norm.handle(),
+            nk as u32,
+            dk as u32,
+            l2_eps_qk.to_bits(),
+            q_scale.to_bits(),
+            gqa_ratio as u32,
         ],
-        &[nk as u32, nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD((nk + nk) as u32),
+        Workgroups::OneD(nv as u32),
+    )?;
+    // 6) K-norm: per-head L2 normalize + GQA expansion, no scale.
+    let k_scale: f32 = 1.0;
+    batch.record_shader(
+        shaders::L2_NORM_PER_ROW,
+        &[k_buf.handle(), k_expanded.handle()],
+        &[
+            nk as u32,
+            dk as u32,
+            l2_eps_qk.to_bits(),
+            k_scale.to_bits(),
+            gqa_ratio as u32,
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
     // 7) Fused gates+recurrent+rmsnorm. push = [nv, dk, dv, eps_bits, batch],
-    //    workgroups = batch*nv.
+    //    workgroups = batch*nv. Reads Q/K from the GQA-expanded buffers.
     batch.record_shader(
         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
         &[
-            q_buf.handle(),
-            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
             v_buf.handle(),
             a_buf.handle(),
             b_buf.handle(),
@@ -1642,6 +1702,12 @@ pub fn record_gdn_block_into(
     let b_buf = backend.acquire_resident_scratch("ngd_b", (b_dim * 4) as u64)?;
     let q_buf = backend.acquire_resident_scratch("ngd_q", (qk_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("ngd_k", (qk_dim * 4) as u64)?;
+    // GQA-expanded Q/K for the recurrent kernel (sized nv*dk, not nk*dk).
+    let qkv_expanded_bytes = (nv * dk * 4) as u64;
+    let q_expanded =
+        backend.acquire_resident_scratch("ngd_q_expanded", qkv_expanded_bytes)?;
+    let k_expanded =
+        backend.acquire_resident_scratch("ngd_k_expanded", qkv_expanded_bytes)?;
     let v_buf = backend.acquire_resident_scratch("ngd_v", (v_dim * 4) as u64)?;
     let gated_norm = backend.acquire_resident_scratch("ngd_gated_norm", (v_dim * 4) as u64)?;
     let gdn_out = backend.acquire_resident_scratch("ngd_gdn_out", (hidden * 4) as u64)?;
@@ -1718,23 +1784,41 @@ pub fn record_gdn_block_into(
         &[qk_dim as u32, v_dim as u32],
         Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
     )?;
+    // Q-norm: per-head L2 normalize + GQA expansion, scale = 1/sqrt(dk).
+    let gqa_ratio = nv / nk;
+    debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
+    let l2_eps_qk: f32 = 1e-6;
+    let q_scale: f32 = 1.0 / (dk as f32).sqrt();
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[q_buf.handle(), qk_norm.handle(), q_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
+        shaders::L2_NORM_PER_ROW,
+        &[q_buf.handle(), q_expanded.handle()],
+        &[
+            nk as u32,
+            dk as u32,
+            l2_eps_qk.to_bits(),
+            q_scale.to_bits(),
+            gqa_ratio as u32,
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
-        &[k_buf.handle(), qk_norm.handle(), k_buf.handle()],
-        &[nk as u32, dk as u32, eps.to_bits()],
-        Workgroups::OneD(nk as u32),
+        shaders::L2_NORM_PER_ROW,
+        &[k_buf.handle(), k_expanded.handle()],
+        &[
+            nk as u32,
+            dk as u32,
+            l2_eps_qk.to_bits(),
+            k_scale.to_bits(),
+            gqa_ratio as u32,
+        ],
+        Workgroups::OneD(nv as u32),
     )?;
     batch.record_shader(
         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
         &[
-            q_buf.handle(),
-            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
             v_buf.handle(),
             a_buf.handle(),
             b_buf.handle(),

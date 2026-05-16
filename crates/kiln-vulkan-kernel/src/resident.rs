@@ -224,6 +224,75 @@ pub fn dispatch_qwen_rmsnorm_forward_resident(
     .context("qwen_rmsnorm_resident kernel failed")
 }
 
+/// Resident per-row L2 normalization with an optional scalar scale.
+/// For each row r:
+///   out[r,i] = x[r,i] * scale / sqrt(sum(x[r,:]^2) + eps)
+///
+/// Matches the legacy `gdn_qk_norm`: it does an L2 normalize
+/// (sum over the last dim, sqrt with eps=1e-6), then multiplies Q by
+/// `1/sqrt(dk)` and leaves K as-is. The previous resident GDN path
+/// incorrectly substituted `dispatch_qwen_rmsnorm_forward_resident`
+/// here — RMS norm divides by sqrt(mean(x²)) (off by sqrt(hidden))
+/// AND multiplies by a learned weight, neither of which match L2
+/// normalization. Use this dispatcher for both Q (with scale =
+/// 1/sqrt(dk)) and K (with scale = 1.0).
+pub fn dispatch_l2_norm_per_row_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    out: &VulkanBuffer,
+    rows_in: usize,
+    hidden: usize,
+    eps: f32,
+    scale: f32,
+    gqa_ratio: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        hidden <= 256,
+        "l2_norm_per_row_resident: hidden={hidden} exceeds shader local_size_x=256"
+    );
+    anyhow::ensure!(
+        gqa_ratio >= 1,
+        "l2_norm_per_row_resident: gqa_ratio must be >= 1"
+    );
+    let need_in = (rows_in * hidden * 4) as u64;
+    let need_out = (rows_in * gqa_ratio * hidden * 4) as u64;
+    anyhow::ensure!(
+        x.size() >= need_in,
+        "l2_norm_per_row_resident: x buffer has {} bytes, needs at least {}",
+        x.size(),
+        need_in,
+    );
+    anyhow::ensure!(
+        out.size() >= need_out,
+        "l2_norm_per_row_resident: out buffer has {} bytes, needs at least {}",
+        out.size(),
+        need_out,
+    );
+    let handles: [vk::Buffer; 2] = [x.handle(), out.handle()];
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/l2_norm_per_row.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        rows_in as u32,
+        hidden as u32,
+        eps.to_bits(),
+        scale.to_bits(),
+        gqa_ratio as u32,
+    ];
+    let workgroups = (rows_in * gqa_ratio) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("l2_norm_per_row_resident kernel failed")
+}
+
 /// Selection helper shared between the three SwiGLU MLP resident
 /// variants. Returns
 /// `(gate_up_glsl, linear_glsl, gate_up_push, gate_up_workgroups,
@@ -2592,6 +2661,53 @@ mod tests {
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
             assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn l2_norm_per_row_resident_matches_cpu_reference() {
+        let Some(dev) = try_device() else { return };
+        let rows_in = 4usize;
+        let hidden = 128usize;
+        let gqa_ratio = 2usize;
+        let rows_out = rows_in * gqa_ratio;
+        let eps = 1e-6f32;
+        let scale = 0.5f32;
+
+        let x: Vec<f32> = (0..rows_in * hidden)
+            .map(|i| ((i % 37) as f32 - 18.0) * 0.07)
+            .collect();
+        let x_t = Tensor::from_vec(x.clone(), (rows_in, hidden), &Device::Cpu).unwrap();
+        let x_buf = upload_tensor_f32_buffer(&dev, &x_t).unwrap();
+        let out_buf = alloc_out(&dev, (rows_out * hidden * 4) as u64);
+
+        dispatch_l2_norm_per_row_resident(
+            &dev, &x_buf, &out_buf, rows_in, hidden, eps, scale, gqa_ratio,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+
+        // CPU reference: per-row L2 normalize with scale, then replicate
+        // each row gqa_ratio times.
+        let mut expected = vec![0.0f32; rows_out * hidden];
+        for r_in in 0..rows_in {
+            let base_in = r_in * hidden;
+            let sq: f32 = x[base_in..base_in + hidden].iter().map(|v| v * v).sum();
+            let coef = scale / (sq + eps).sqrt();
+            for g in 0..gqa_ratio {
+                let r_out = r_in * gqa_ratio + g;
+                let base_out = r_out * hidden;
+                for i in 0..hidden {
+                    expected[base_out + i] = x[base_in + i] * coef;
+                }
+            }
+        }
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            let diff = (e - r).abs();
+            assert!(
+                diff <= 1e-5 * e.abs().max(1.0),
+                "i={i}: expected {e}, resident {r}, diff {diff}"
+            );
         }
     }
 
