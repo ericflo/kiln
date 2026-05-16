@@ -159,3 +159,6 @@
 {"iter":166,"slug":"cap-stack-imt5","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8687,"delta":-0.0015,"n":75,"notes":"5 examples close but slightly under 11"}
 {"iter":167,"slug":"cap-stack-imt6b","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8493,"delta":-0.021,"n":75,"notes":"different 6 examples regressed"}
 {"iter":168,"slug":"cap-stack-imt-l4","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8349,"delta":-0.035,"n":75,"notes":"4 layers regress"}
+{"iter":169,"slug":"cap-ties-best","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8477,"delta":-0.023,"n":75,"notes":"weighted-avg merge regressed"}
+{"iter":170,"slug":"cap-imt-2e6","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8652,"delta":-0.005,"n":75,"notes":"lr 2e-6 close but not as good as 1e-6"}
+{"iter":171,"slug":"cap-imt-2ep","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8445,"delta":-0.026,"n":75,"notes":"2 epochs at 1e-6 overshoots"}
