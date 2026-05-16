@@ -13985,8 +13985,15 @@ fn model_forward_paged_last_token_resident_native_vk(
     let t_upload = std::time::Instant::now();
 
     // 3. Acquire the two persistent IO buffers (alternating across layers).
-    let io_a =
-        vk_backend.acquire_resident_scratch("native_io_a", (hidden_size * 4) as u64)?;
+    // io_a is the LAYER-0 INPUT (uploaded from host once per token), so
+    // it lives in host-visible memory — the GPU pulls it into L2 on
+    // the first dispatch's read and subsequent reads hit cache.
+    // io_b lives in device-local memory since it's a pure GPU-only
+    // ping-pong buffer; the alternating pattern means each io_a write
+    // happens on the GPU side too. Mixing matters less than keeping
+    // the host-write surface as small as possible.
+    let io_a = vk_backend
+        .acquire_resident_scratch_host_visible("native_io_a_hv", (hidden_size * 4) as u64)?;
     let io_b =
         vk_backend.acquire_resident_scratch("native_io_b", (hidden_size * 4) as u64)?;
 
@@ -14050,15 +14057,9 @@ fn model_forward_paged_last_token_resident_native_vk(
     block_table_buf.write_mapped(&block_table_bytes)?;
     seq_lens_buf.write_mapped(&seq_lens_bytes)?;
 
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &io_a,
-        &hidden_bytes,
-    )
-    .context("native: upload hidden state to io_a")?;
+    // io_a is host-visible; just memcpy directly into it.
+    io_a.write_mapped(&hidden_bytes)
+        .context("native: write hidden state to io_a")?;
     if timing_enabled {
         UPLOAD_NS.fetch_add(t_upload.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
