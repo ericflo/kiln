@@ -453,5 +453,45 @@ pub(crate) fn log_softmax_last(x: &Tensor) -> Result<Tensor> {
 /// Re-exports used by parity tests and downstream call sites.
 pub use crate::phase_b::OpdLossCustomOp;
 
+pub use crate::phase_b::{compute_per_position_metrics, PerPositionMetrics};
+
+/// One position's worth of distribution-alignment diagnostics, computed
+/// over the **teacher's** K support (§3.8 of the grand plan).
+///
+/// `overlap_ratio` (the |S^p ∩ S^q| / K metric from Li et al. 2026 eq 6)
+/// requires the student's own top-K, which is _not_ computed by the
+/// fused kernel — that's a separate full-vocab pass via
+/// [`compute_overlap_ratio_probe`]. The K-support metrics here are
+/// cheap and computed on the same kernel launch as the loss.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PerPositionMetricsRow {
+    /// `H(p_hat)` — entropy of the student distribution over the teacher's
+    /// K support. In nats. Higher = student less concentrated.
+    pub student_entropy: f32,
+    /// `H(q_hat)` — entropy of the renormalised teacher distribution
+    /// over the same K support. In nats.
+    pub teacher_entropy: f32,
+    /// `KL(p_hat || q_hat)` — the per-position reverse KL the trainer is
+    /// minimising. Same value the loss kernel emits.
+    pub reverse_kl: f32,
+}
+
+impl PerPositionMetricsRow {
+    /// `entropy_gap = |H(q) - H(p)|`, the §3.8 diagnostic. Narrows as
+    /// student converges to teacher.
+    pub fn entropy_gap(&self) -> f32 {
+        (self.teacher_entropy - self.student_entropy).abs()
+    }
+
+    /// `overlap_token_advantage` (Li et al. 2026 eq 7), restricted to
+    /// the K-support: `E_p[log q_hat - log p_hat]`. For the K-support
+    /// case this equals `-reverse_kl`; surfaced as a separate accessor
+    /// so callers can use the Li-et-al name in dashboards without
+    /// confusion.
+    pub fn overlap_token_advantage(&self) -> f32 {
+        -self.reverse_kl
+    }
+}
+
 #[cfg(test)]
 mod tests;

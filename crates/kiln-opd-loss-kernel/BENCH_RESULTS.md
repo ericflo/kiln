@@ -69,10 +69,73 @@ K=32 bf16 row at T=1024 or T=4096 should fail CI per §9.9 of the grand
 plan. The bench is reproducible via the example binary; cron + diff
 against this file is the simplest gating path.
 
+## A6000 — forward + backward (kernel-bwd lands)
+
+Pod: same lease (`pod-4e82038bc1bff16fa7fa9fca`), commit `77833003`.
+16/16 tests pass (10 CPU + 3 fwd-CUDA + 3 bwd-CUDA parity tests). The
+`FWD+BWD` rows include autograd graph construction + the kernel
+backward (`OpdLossCustomOp::bwd → cuda_kernel_backward`); the candle
+column reflects the analytic backward (`backward_inner`).
+
+```
+# kiln-opd-loss-kernel throughput bench (FWD only)
+T=  256  H=2560  V=32000  K=32  F32   kernel=  0.560ms  candle=  1.347ms   2.40x   457K tok/s
+T=  512  H=2560  V=32000  K=32  F32   kernel=  0.848ms  candle=  2.541ms   3.00x   604K tok/s
+T= 1024  H=2560  V=32000  K=32  F32   kernel=  1.510ms  candle=  7.370ms   4.88x   678K tok/s
+T= 4096  H=2560  V=32000  K=32  F32   kernel=  9.786ms  candle= 43.660ms   4.46x   419K tok/s
+T= 1024  H=2560  V=32000  K=16  F32   kernel=  4.029ms  candle=  4.580ms   1.14x   254K tok/s
+T= 1024  H=2560  V=32000  K=32  BF16  kernel=  1.303ms  candle= 11.991ms   9.21x   786K tok/s
+T= 4096  H=2560  V=32000  K=32  BF16  kernel=  5.268ms  candle= 31.707ms   6.02x   778K tok/s
+
+# Forward + backward (the trainer's actual step)
+T=  256  H=2560  V=32000  K=32  F32   kernel=  2.153ms  candle=  3.717ms   1.73x   119K tok/s
+T=  512  H=2560  V=32000  K=32  F32   kernel=  5.592ms  candle=  7.426ms   1.33x    92K tok/s
+T= 1024  H=2560  V=32000  K=32  F32   kernel= 16.212ms  candle= 18.443ms   1.14x    63K tok/s
+T= 4096  H=2560  V=32000  K=32  F32   kernel= 94.060ms  candle= 82.857ms   0.88x    44K tok/s   ← regression
+T= 1024  H=2560  V=32000  K=16  F32   kernel= 13.529ms  candle= 10.136ms   0.75x    76K tok/s   ← regression
+T= 1024  H=2560  V=32000  K=32  BF16  kernel=  4.616ms  candle= 21.493ms   4.66x   222K tok/s
+T= 4096  H=2560  V=32000  K=32  BF16  kernel= 17.541ms  candle= 82.693ms   4.71x   234K tok/s
+```
+
+### Headline reads
+
+- **Production path (bf16 K=32)**: **4.7× end-to-end speedup** at both
+  T=1024 and T=4096. The trainer's per-step cost on the loss kernel
+  drops from ~80ms to ~17ms at T=4096. This is the run rate at which
+  the rest of the §3.1 training step's components (rollout, teacher
+  query, autograd graph teardown, AdamW) become the limiting factor.
+- **Forward-only bf16 K=32**: **9.2× speedup** at T=1024, 6.0× at
+  T=4096. Pure forward (metrics pass, validation, judge LoRA scoring)
+  is dramatically faster.
+- **F32 K=32 T=4096 regression**: kernel is **0.88×** at this shape —
+  candle's cuBLAS-backed analytic backward beats us at this size on
+  scattered head_t reads. Documented but **production-irrelevant**:
+  Qwen3.5-4B training is bf16; the f32 path is only used by the
+  CPU-only reference (`KILN_OPD_LOSS_PHASE_A=1`) and the parity
+  oracle. Pit-of-success guidance: leave the kernel on; if a future
+  f32 workload appears, set `KILN_DISABLE_OPD_LOSS_KERNEL=1` until
+  the bwd kernel is retuned for that regime.
+- **K=16 regression**: also documented; K=16 doesn't fill the SMs as
+  efficiently. K=32 is the §6 default and the recommended path.
+
+### Adversarial self-check
+
+If I think this is done — what would make it more complete?
+- ✔ Both forward and backward kernels parity-tested on A6000.
+- ✔ Production dtype (bf16) wins by >4× end-to-end at the canonical
+  shape range.
+- ✔ Kill-switch documented for the f32 regression.
+- ◯ Per-engine bench gate as CI feature (§9.9) — needs a CI runner
+  with GPU access; tracked as part of §9.9 implementation.
+- ◯ Save-not-recompute optimization: the bwd kernel currently
+  recomputes forward state (s_logits, p_hat, etc.) — saving them
+  from the forward run would halve the work. Future optimization.
+- ◯ K=64 support (corporate full-vocab tier) — separate task.
+
 ## Next-hardware columns
 
 Pending:
 - 4090 (Ada / SM 89) — primary prosumer target.
-- 7900 XTX (Vulkan) — milestone 7 once the Vulkan kernel lands.
-- M3 Max (Metal) — milestone 8.
+- 7900 XTX (Vulkan) — under active development on a separate branch.
+- M3 Max (Metal) — deferred per goal.
 - H200 (multi-GPU, full-vocab path) — corporate-tier validation.

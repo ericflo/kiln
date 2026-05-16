@@ -711,6 +711,99 @@ fn cuda_parity_for_k_bf16(
     Ok(())
 }
 
+/// Per-position metrics: candle reference path returns three coherent
+/// vectors. KL ≥ 0; H(p), H(q) ∈ [0, log K]; KL recomputes the same
+/// value the loss kernel emits at every position.
+#[test]
+fn cpu_metrics_matches_loss_kernel_kl() -> Result<()> {
+    let device = Device::Cpu;
+    let (hidden, head_t, idx, lp, mask) = random_case(16, 8, 64, 8, 2, &device)?;
+
+    let metrics = compute_per_position_metrics(&hidden, &head_t, &idx, &lp, &mask, 8)?;
+    let loss = opd_top_k_reverse_kl_phase_b_per_position(
+        &hidden, &head_t, &idx, &lp, &mask, 8, &device, 16,
+    )?;
+    let loss_vec: Vec<f32> = loss.to_vec1()?;
+    assert_eq!(metrics.reverse_kl.len(), loss_vec.len());
+    for (i, (&m, &l)) in metrics.reverse_kl.iter().zip(loss_vec.iter()).enumerate() {
+        let abs = (m - l).abs();
+        assert!(
+            abs < 1e-5,
+            "metrics KL[{i}]={m:.6} vs loss kernel KL[{i}]={l:.6} abs={abs:.2e}"
+        );
+        assert!(m >= -1e-6, "KL negative at {i}: {m}");
+    }
+    // Entropies in [0, log K = log 8 ≈ 2.079] within rounding.
+    for &h in metrics.student_entropy.iter().chain(metrics.teacher_entropy.iter()) {
+        assert!(h >= -1e-6, "entropy negative: {h}");
+        assert!(h < 2.1, "entropy > log K (= {}): {h}", (8f32).ln());
+    }
+    // mean_entropy_gap is non-negative.
+    assert!(metrics.mean_entropy_gap() >= 0.0);
+    Ok(())
+}
+
+#[test]
+fn cpu_metrics_empty_mask_returns_empty() -> Result<()> {
+    let device = Device::Cpu;
+    let (hidden, head_t, _, _, _) = random_case(8, 4, 16, 4, 2, &device)?;
+    let empty = vec![false; 8];
+    let m = compute_per_position_metrics(&hidden, &head_t, &[], &[], &empty, 4)?;
+    assert!(m.student_entropy.is_empty());
+    assert!(m.teacher_entropy.is_empty());
+    assert!(m.reverse_kl.is_empty());
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_metrics_matches_cpu_reference_f32_k32() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    let (hidden, head_t, idx, lp, mask) =
+        random_case(32, 256, 1024, 32, 2, &device)?;
+    let cpu_metrics = {
+        let prior = std::env::var("KILN_DISABLE_OPD_LOSS_KERNEL").ok();
+        unsafe { std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", "1"); }
+        let m = compute_per_position_metrics(&hidden, &head_t, &idx, &lp, &mask, 32)?;
+        unsafe {
+            match prior.as_ref() {
+                Some(v) => std::env::set_var("KILN_DISABLE_OPD_LOSS_KERNEL", v),
+                None => std::env::remove_var("KILN_DISABLE_OPD_LOSS_KERNEL"),
+            }
+        }
+        m
+    };
+    let cuda_metrics =
+        compute_per_position_metrics(&hidden, &head_t, &idx, &lp, &mask, 32)?;
+    for (i, (&cpu_kl, &cuda_kl)) in cpu_metrics
+        .reverse_kl
+        .iter()
+        .zip(cuda_metrics.reverse_kl.iter())
+        .enumerate()
+    {
+        let abs = (cpu_kl - cuda_kl).abs();
+        let rel = if cpu_kl.abs() > 1e-6 { abs / cpu_kl.abs() } else { abs };
+        assert!(
+            abs < 1e-4 || rel < 1e-4,
+            "metrics-KL kernel vs candle pos {i}: cpu={cpu_kl:.6} cuda={cuda_kl:.6} abs={abs:.2e} rel={rel:.2e}"
+        );
+    }
+    for (i, (&cpu_h, &cuda_h)) in cpu_metrics
+        .student_entropy
+        .iter()
+        .zip(cuda_metrics.student_entropy.iter())
+        .enumerate()
+    {
+        let abs = (cpu_h - cuda_h).abs();
+        let rel = if cpu_h.abs() > 1e-6 { abs / cpu_h.abs() } else { abs };
+        assert!(
+            abs < 1e-4 || rel < 1e-4,
+            "metrics-H(p) kernel vs candle pos {i}: cpu={cpu_h:.6} cuda={cuda_h:.6} abs={abs:.2e} rel={rel:.2e}"
+        );
+    }
+    Ok(())
+}
+
 /// Sanity: KL between a distribution and itself is zero. When student
 /// logits at the K teacher indices are constructed to renormalise to the
 /// teacher's distribution exactly, the loss must vanish to round-off.

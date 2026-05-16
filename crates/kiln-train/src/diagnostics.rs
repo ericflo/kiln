@@ -81,6 +81,19 @@ pub struct OpdDiagnosticSnapshot {
     pub mean_response_tokens: f64,
     /// Number of rollouts the snapshot was computed over.
     pub num_rollouts: usize,
+    /// `|H(q_hat) - H(p_hat)|` mean over active positions, in nats
+    /// (Li et al. 2026 §3.8). Narrows in healthy runs; widening past
+    /// step 50 triggers `EntropyGapWidening` (§3.9). `None` when no
+    /// distribution-alignment metrics were collected this pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_entropy_gap: Option<f64>,
+    /// Overlap-ratio probe result: fraction of student top-K that
+    /// overlaps with teacher top-K, averaged over the rollout
+    /// (Li et al. 2026 eq 6). Healthy runs climb 70% → 90%; stagnant
+    /// runs trigger `OverlapStagnation`. `None` when no overlap probe
+    /// ran this pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_ratio: Option<f64>,
 }
 
 /// One rollout's worth of metadata for diagnostic-stack input.
@@ -234,7 +247,26 @@ pub fn build_snapshot(
         repetition_rate: rep,
         mean_response_tokens: mean_tokens,
         num_rollouts: rollouts.len(),
+        mean_entropy_gap: None,
+        overlap_ratio: None,
     }
+}
+
+/// Like [`build_snapshot`] but with the distribution-alignment metrics
+/// from a kernel-side metrics pass populated. The trainer calls this on
+/// the validation cadence; the cheap-trajectory-only path (build_snapshot)
+/// runs on every step.
+pub fn build_snapshot_with_alignment(
+    step: u64,
+    rollouts: &[RolloutSummary],
+    mean_kl: f64,
+    mean_entropy_gap: Option<f64>,
+    overlap_ratio: Option<f64>,
+) -> OpdDiagnosticSnapshot {
+    let mut s = build_snapshot(step, rollouts, mean_kl);
+    s.mean_entropy_gap = mean_entropy_gap;
+    s.overlap_ratio = overlap_ratio;
+    s
 }
 
 /// Decision returned by the `LengthInflation` guardrail.
@@ -252,6 +284,12 @@ pub enum GuardrailDecision {
     /// passing checkpoint, surface to the user. The §3.9 auto-rollback
     /// contract.
     RollBackAndPause { reason: GuardrailTrigger },
+    /// Overlap ratio stalled; pause and recommend off-policy cold-start
+    /// before resuming. §3.9 `OverlapStagnation`.
+    PauseAndRecommendColdStart { reason: GuardrailTrigger },
+    /// Entropy gap widening; reduce learning rate by 0.5×.
+    /// §3.9 `EntropyGapWidening`.
+    ReduceLearningRate { factor: f64, reason: GuardrailTrigger },
 }
 
 /// The specific paper-cited trigger that fired the guardrail.
@@ -263,21 +301,43 @@ pub enum GuardrailTrigger {
     /// Truncation rate spike — `recent` consecutive passes with
     /// TruncRate > 0.9. Indicates phase-transition collapse imminent.
     TruncationSpike { recent: usize },
+    /// Overlap ratio Δ < 0.01 over the watch window (§3.9
+    /// `OverlapStagnation` from Li et al. 2026). Auto-pause and
+    /// recommend off-policy cold-start.
+    OverlapStagnation { window: usize },
+    /// `|H(q) - H(p)|` trending up after step 50 (§3.9
+    /// `EntropyGapWidening`). Reduce learning rate by 0.5×.
+    EntropyGapWidening { window: usize },
 }
 
 /// Stateful guardrail that consumes snapshots in order and decides on
-/// mitigation. The trainer holds one of these for the duration of a
-/// run.
+/// mitigation. Implements the named §3.9 rules:
+/// `LengthInflation`, `OverlapStagnation`, `EntropyGapWidening`. The
+/// trainer holds one of these for the duration of a run.
 #[derive(Debug, Clone, Default)]
 pub struct LengthInflationGuardrail {
     /// Consecutive snapshots with RepRate above the threshold.
     consecutive_high_rep: usize,
     /// Consecutive snapshots with TruncRate > 0.9.
     consecutive_high_trunc: usize,
+    /// Overlap-ratio history (last few values). Bounded.
+    overlap_history: Vec<f64>,
+    /// Entropy-gap history (last few values). Bounded.
+    entropy_gap_history: Vec<f64>,
     /// Last decision made — used by callers that want to suppress
     /// duplicate logging of the same mitigation.
     last_decision: GuardrailDecision,
 }
+
+/// History window for the overlap / entropy-gap guardrails. The §3.9
+/// `OverlapStagnation` rule says "Δ < 0.01 over 30 steps". We default
+/// the validation-pass window to 6 (which represents 30 steps at the
+/// default 5-step validation cadence; pit-of-success value, tunable).
+pub const GUARDRAIL_WINDOW: usize = 6;
+
+/// Minimum Δ in overlap ratio over [`GUARDRAIL_WINDOW`] passes that
+/// counts as "still moving." Below this we fire `OverlapStagnation`.
+pub const OVERLAP_STAGNATION_MIN_DELTA: f64 = 0.01;
 
 impl LengthInflationGuardrail {
     /// Feed a fresh snapshot. Returns the current decision; the trainer
@@ -297,18 +357,49 @@ impl LengthInflationGuardrail {
         } else {
             self.consecutive_high_trunc = 0;
         }
+        // Append distribution-alignment metrics when present (None when
+        // the validation pass didn't run the metrics kernel).
+        if let Some(o) = snapshot.overlap_ratio {
+            self.overlap_history.push(o);
+            if self.overlap_history.len() > GUARDRAIL_WINDOW {
+                self.overlap_history.remove(0);
+            }
+        }
+        if let Some(g) = snapshot.mean_entropy_gap {
+            self.entropy_gap_history.push(g);
+            if self.entropy_gap_history.len() > GUARDRAIL_WINDOW {
+                self.entropy_gap_history.remove(0);
+            }
+        }
 
+        // Priority order (most critical first):
+        // 1. TruncationSpike → rollback.
+        // 2. OverlapStagnation → pause + recommend cold-start.
+        // 3. RepetitionRateAbove → bump Stable-OPD.
+        // 4. EntropyGapWidening → reduce LR.
         let decision = if self.consecutive_high_trunc >= 2 {
-            // Truncation spike sustained — critical, roll back.
             GuardrailDecision::RollBackAndPause {
                 reason: GuardrailTrigger::TruncationSpike {
                     recent: self.consecutive_high_trunc,
+                },
+            }
+        } else if self.overlap_stagnation_fires() {
+            GuardrailDecision::PauseAndRecommendColdStart {
+                reason: GuardrailTrigger::OverlapStagnation {
+                    window: self.overlap_history.len(),
                 },
             }
         } else if self.consecutive_high_rep >= 2 {
             GuardrailDecision::BumpStableOpd {
                 reason: GuardrailTrigger::RepetitionRateAbove {
                     recent: self.consecutive_high_rep,
+                },
+            }
+        } else if self.entropy_gap_widening() {
+            GuardrailDecision::ReduceLearningRate {
+                factor: 0.5,
+                reason: GuardrailTrigger::EntropyGapWidening {
+                    window: self.entropy_gap_history.len(),
                 },
             }
         } else {
@@ -321,6 +412,40 @@ impl LengthInflationGuardrail {
 
     pub fn last_decision(&self) -> GuardrailDecision {
         self.last_decision
+    }
+
+    /// Overlap stagnation: the window has filled AND
+    /// `max(overlap) - min(overlap) < OVERLAP_STAGNATION_MIN_DELTA`.
+    fn overlap_stagnation_fires(&self) -> bool {
+        if self.overlap_history.len() < GUARDRAIL_WINDOW {
+            return false;
+        }
+        let lo = self
+            .overlap_history
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        let hi = self
+            .overlap_history
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        (hi - lo).abs() < OVERLAP_STAGNATION_MIN_DELTA
+    }
+
+    /// Entropy gap widening: monotonically increasing over the window.
+    /// "After step 50" — we approximate that as "window fills"; since
+    /// `GUARDRAIL_WINDOW * validation_cadence` is the time, a trainer
+    /// with validation_cadence=5 steps fires this at step 30. Caller
+    /// can also gate on `snapshot.step >= 50` before calling
+    /// `observe`.
+    fn entropy_gap_widening(&self) -> bool {
+        if self.entropy_gap_history.len() < GUARDRAIL_WINDOW {
+            return false;
+        }
+        self.entropy_gap_history
+            .windows(2)
+            .all(|w| w[1] >= w[0] + 1e-6)
     }
 }
 
@@ -420,6 +545,8 @@ mod tests {
             repetition_rate: rep,
             mean_response_tokens: 0.0,
             num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
         };
         assert_eq!(g.observe(&mk_snap(0.04)), GuardrailDecision::Ok);
         assert_eq!(g.observe(&mk_snap(0.10)), GuardrailDecision::Ok); // 1st high
@@ -445,6 +572,8 @@ mod tests {
             repetition_rate: rep,
             mean_response_tokens: 0.0,
             num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
         };
         g.observe(&mk_snap(0.10));
         g.observe(&mk_snap(0.12));
@@ -468,6 +597,8 @@ mod tests {
             repetition_rate: 0.0,
             mean_response_tokens: 0.0,
             num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
         };
         g.observe(&mk_snap(0.95));
         match g.observe(&mk_snap(0.99)) {
@@ -488,11 +619,121 @@ mod tests {
             repetition_rate: 0.02,
             mean_response_tokens: 1234.5,
             num_rollouts: 64,
+            mean_entropy_gap: Some(0.07),
+            overlap_ratio: Some(0.88),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: OpdDiagnosticSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.step, snap.step);
         assert!((parsed.repetition_rate - snap.repetition_rate).abs() < 1e-12);
+        assert!((parsed.mean_entropy_gap.unwrap() - 0.07).abs() < 1e-9);
+        assert!((parsed.overlap_ratio.unwrap() - 0.88).abs() < 1e-9);
+    }
+
+    #[test]
+    fn guardrail_fires_overlap_stagnation_after_window() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk = |overlap: f64| OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: Some(overlap),
+        };
+        // Window is GUARDRAIL_WINDOW=6 entries. Feed 5 close together
+        // (no decision), then 6th close → fires.
+        for _ in 0..5 {
+            assert_eq!(g.observe(&mk(0.71)), GuardrailDecision::Ok);
+        }
+        // Sixth keeps |max-min| ≈ 0 < threshold ⇒ fires.
+        match g.observe(&mk(0.710)) {
+            GuardrailDecision::PauseAndRecommendColdStart {
+                reason: GuardrailTrigger::OverlapStagnation { window },
+            } => assert_eq!(window, GUARDRAIL_WINDOW),
+            other => panic!("expected PauseAndRecommendColdStart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_overlap_movement_keeps_ok() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk = |overlap: f64| OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: Some(overlap),
+        };
+        // Window with 0.10 spread → above 0.01 threshold ⇒ never fires.
+        let values = [0.70, 0.72, 0.74, 0.77, 0.79, 0.80];
+        for &v in &values {
+            assert_eq!(g.observe(&mk(v)), GuardrailDecision::Ok);
+        }
+    }
+
+    #[test]
+    fn guardrail_fires_entropy_gap_widening() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk = |gap: f64| OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: Some(gap),
+            overlap_ratio: None,
+        };
+        // Monotonically rising entropy gap over the window.
+        let rising = [0.10, 0.12, 0.15, 0.18, 0.22, 0.26];
+        for (i, &v) in rising.iter().enumerate() {
+            let d = g.observe(&mk(v));
+            if i + 1 < rising.len() {
+                assert_eq!(d, GuardrailDecision::Ok);
+            } else {
+                match d {
+                    GuardrailDecision::ReduceLearningRate {
+                        factor,
+                        reason: GuardrailTrigger::EntropyGapWidening { window },
+                    } => {
+                        assert!((factor - 0.5).abs() < 1e-9);
+                        assert_eq!(window, GUARDRAIL_WINDOW);
+                    }
+                    other => panic!("expected ReduceLearningRate, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guardrail_priority_truncation_beats_overlap() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.95,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: Some(0.71),
+        };
+        // Trunc spike both passes — must win over overlap stagnation.
+        g.observe(&mk);
+        match g.observe(&mk) {
+            GuardrailDecision::RollBackAndPause { .. } => {}
+            other => panic!("expected RollBackAndPause, got {other:?}"),
+        }
     }
 
     #[test]

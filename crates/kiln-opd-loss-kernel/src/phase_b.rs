@@ -138,6 +138,32 @@ unsafe extern "C" {
         output_mode: i32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_opd_topk_metrics_bf16(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        metrics_out: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_opd_topk_metrics_f32(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        metrics_out: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Returns `true` when the fused CUDA kernel supports the requested
@@ -1163,6 +1189,348 @@ impl OpdLossCustomOp {
             .context("unsqueeze to [1, seq_len, hidden_size]")?;
         Ok(d_hidden_3d)
     }
+}
+
+/// Output of [`compute_per_position_metrics`]: three parallel
+/// `[T_active]` arrays carrying the per-position distribution-alignment
+/// diagnostics. Lengths are all equal to the number of active positions.
+#[derive(Debug, Clone)]
+pub struct PerPositionMetrics {
+    /// Per-position student entropy over the teacher's K support.
+    pub student_entropy: Vec<f32>,
+    /// Per-position teacher entropy over the same K support.
+    pub teacher_entropy: Vec<f32>,
+    /// Per-position reverse KL (same value the loss kernel emits).
+    pub reverse_kl: Vec<f32>,
+}
+
+impl PerPositionMetrics {
+    /// `[T_active]` of `|H(q) - H(p)|` per position.
+    pub fn entropy_gap_vec(&self) -> Vec<f32> {
+        self.student_entropy
+            .iter()
+            .zip(self.teacher_entropy.iter())
+            .map(|(p, q)| (q - p).abs())
+            .collect()
+    }
+
+    /// Mean over active positions of `|H(q) - H(p)|`. Used as the
+    /// scalar §3.8 diagnostic.
+    pub fn mean_entropy_gap(&self) -> f64 {
+        if self.student_entropy.is_empty() {
+            return 0.0;
+        }
+        let n = self.student_entropy.len() as f64;
+        self.student_entropy
+            .iter()
+            .zip(self.teacher_entropy.iter())
+            .map(|(p, q)| (q - p).abs() as f64)
+            .sum::<f64>()
+            / n
+    }
+
+    /// Mean per-position KL — matches what the trainer already tracks,
+    /// but recomputed here so the metrics call doesn't depend on a
+    /// separate loss pass.
+    pub fn mean_reverse_kl(&self) -> f64 {
+        if self.reverse_kl.is_empty() {
+            return 0.0;
+        }
+        let n = self.reverse_kl.len() as f64;
+        self.reverse_kl.iter().map(|&v| v as f64).sum::<f64>() / n
+    }
+}
+
+/// Compute distribution-alignment metrics per-position over the
+/// teacher's K support. CUDA-only fast path (`top_k ∈ {16, 32}`,
+/// dtype ∈ {f32, bf16}); other configurations fall back to a candle
+/// reference computed in this function.
+///
+/// Caller convention matches the loss kernel: `hidden` is `[1, T, H]`,
+/// `head_t` is `[H, V]`, `teacher_topk_*` are flattened
+/// `[T_active * K]`, and `label_mask[t] == true` for positions that
+/// contribute. Output is in `T_active` order matching the mask
+/// left-to-right.
+pub fn compute_per_position_metrics(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<PerPositionMetrics> {
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    let active_count = active_positions.len();
+    if active_count == 0 {
+        return Ok(PerPositionMetrics {
+            student_entropy: Vec::new(),
+            teacher_entropy: Vec::new(),
+            reverse_kl: Vec::new(),
+        });
+    }
+    let on_cuda = matches!(hidden.device(), Device::Cuda(_));
+    let dtype = hidden.dtype();
+    let route_kernel = on_cuda
+        && !crate::kernel_disabled()
+        && cuda_kernel_supports(top_k, dtype);
+
+    #[cfg(feature = "cuda")]
+    {
+        if route_kernel {
+            match cuda_compute_per_position_metrics(
+                hidden,
+                head_t,
+                teacher_topk_indices,
+                teacher_topk_logprobs,
+                &active_positions,
+                top_k,
+            ) {
+                Ok(m) => return Ok(m),
+                Err(e) => {
+                    tracing::warn!(
+                        "opd metrics CUDA kernel failed, falling back to candle: {e:#}"
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = route_kernel;
+    }
+
+    // Candle reference path. Reuses the same active-row gather and
+    // per-token logit computation as the Phase A loss kernel; reads
+    // intermediates and produces the three metrics on host.
+    candle_reference_per_position_metrics(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        &active_positions,
+        top_k,
+    )
+}
+
+fn candle_reference_per_position_metrics(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    active_positions: &[u32],
+    top_k: usize,
+) -> Result<PerPositionMetrics> {
+    let device = hidden.device();
+    let active_count = active_positions.len();
+    let active_indices = Tensor::new(active_positions, device)?;
+    let hidden_2d = hidden.squeeze(0)?;
+    let active_hidden = hidden_2d
+        .index_select(&active_indices, 0)?
+        .to_dtype(DType::F32)?;
+    let head_t_f32 = head_t.to_dtype(DType::F32)?;
+    let hidden_size = head_t.dim(0)?;
+
+    // Per-position gather of K head columns, then matmul.
+    let flat_idx = Tensor::new(teacher_topk_indices, device)?;
+    let head_gather = head_t_f32.index_select(&flat_idx, 1)?;
+    let head_3d = head_gather
+        .reshape((hidden_size, active_count, top_k))?
+        .permute((1, 0, 2))?
+        .contiguous()?;
+    let lhs = active_hidden.unsqueeze(1)?;
+    let s_logits = lhs.matmul(&head_3d)?.squeeze(1)?;
+    let q_lp = Tensor::from_vec(teacher_topk_logprobs.to_vec(), (active_count, top_k), device)?;
+    let log_p_hat = crate::log_softmax_last(&s_logits)?;
+    let log_q_hat = crate::log_softmax_last(&q_lp)?;
+    let p_hat = log_p_hat.exp()?;
+    let q_hat = log_q_hat.exp()?;
+
+    // H(p) = -sum_k p_hat * log_p_hat, H(q) = -sum_k q_hat * log_q_hat, KL = sum_k p_hat * (log_p_hat - log_q_hat)
+    let h_p = (&p_hat * &log_p_hat)?
+        .sum(D::Minus1)?
+        .affine(-1.0, 0.0)?;
+    let h_q = (&q_hat * &log_q_hat)?
+        .sum(D::Minus1)?
+        .affine(-1.0, 0.0)?;
+    let diff = (&log_p_hat - &log_q_hat)?;
+    let kl = (p_hat * diff)?.sum(D::Minus1)?;
+    Ok(PerPositionMetrics {
+        student_entropy: h_p.to_vec1()?,
+        teacher_entropy: h_q.to_vec1()?,
+        reverse_kl: kl.to_vec1()?,
+    })
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_compute_per_position_metrics(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    active_positions: &[u32],
+    top_k: usize,
+) -> Result<PerPositionMetrics> {
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+    let device = match hidden.device() {
+        Device::Cuda(d) => d.clone(),
+        _ => return Err(anyhow!("non-CUDA device")),
+    };
+    let dtype = hidden.dtype();
+    let active_count = active_positions.len();
+    debug_assert!(active_count > 0);
+
+    let active_indices = Tensor::new(active_positions, hidden.device())?;
+    let hidden_2d = hidden.squeeze(0)?;
+    let active_hidden = hidden_2d
+        .index_select(&active_indices, 0)?
+        .contiguous()?;
+    let head_t_contig = head_t.contiguous()?;
+    let hidden_size = head_t_contig.dim(0)?;
+    let vocab_size = head_t_contig.dim(1)?;
+
+    let topk_idx_dev = Tensor::new(teacher_topk_indices, hidden.device())?
+        .reshape((active_count, top_k))?;
+    let topk_lp_q_dev = Tensor::new(teacher_topk_logprobs, hidden.device())?
+        .reshape((active_count, top_k))?;
+
+    // Output buffer: [T_active, 3] f32 — Hp, Hq, KL per row.
+    let out_slice = device
+        .alloc_zeros::<f32>(active_count * 3)
+        .map_err(|e| anyhow!("alloc metrics output: {e}"))?;
+    let stream = device.cuda_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let (h_storage, h_layout) = active_hidden.storage_and_layout();
+    let (head_storage, head_layout) = head_t_contig.storage_and_layout();
+    let (i_storage, i_layout) = topk_idx_dev.storage_and_layout();
+    let (l_storage, l_layout) = topk_lp_q_dev.storage_and_layout();
+    let h_c = match &*h_storage {
+        Storage::Cuda(c) => c,
+        _ => return Err(anyhow!("active_hidden not on CUDA")),
+    };
+    let head_c = match &*head_storage {
+        Storage::Cuda(c) => c,
+        _ => return Err(anyhow!("head_t not on CUDA")),
+    };
+    let i_c = match &*i_storage {
+        Storage::Cuda(c) => c,
+        _ => return Err(anyhow!("idx not on CUDA")),
+    };
+    let l_c = match &*l_storage {
+        Storage::Cuda(c) => c,
+        _ => return Err(anyhow!("lpq not on CUDA")),
+    };
+
+    let status = unsafe {
+        match dtype {
+            DType::F32 => {
+                let h_s = h_c
+                    .as_cuda_slice::<f32>()
+                    .map_err(|e| anyhow!("hidden f32: {e}"))?
+                    .slice(h_layout.start_offset()..);
+                let head_s = head_c
+                    .as_cuda_slice::<f32>()
+                    .map_err(|e| anyhow!("head_t f32: {e}"))?
+                    .slice(head_layout.start_offset()..);
+                let i_s = i_c
+                    .as_cuda_slice::<u32>()
+                    .map_err(|e| anyhow!("idx: {e}"))?
+                    .slice(i_layout.start_offset()..);
+                let l_s = l_c
+                    .as_cuda_slice::<f32>()
+                    .map_err(|e| anyhow!("lpq: {e}"))?
+                    .slice(l_layout.start_offset()..);
+
+                let (h_ptr, _g1) = h_s.device_ptr(&stream);
+                let (head_ptr, _g2) = head_s.device_ptr(&stream);
+                let (i_ptr, _g3) = i_s.device_ptr(&stream);
+                let (l_ptr, _g4) = l_s.device_ptr(&stream);
+                let (out_ptr, _g5) = out_slice.device_ptr(&stream);
+
+                kiln_opd_topk_metrics_f32(
+                    h_ptr as *const _,
+                    head_ptr as *const _,
+                    i_ptr as *const _,
+                    l_ptr as *const _,
+                    out_ptr as *mut _,
+                    active_count as i32,
+                    hidden_size as i32,
+                    vocab_size as i32,
+                    top_k as i32,
+                    raw_stream,
+                )
+            }
+            DType::BF16 => {
+                use half::bf16;
+                let h_s = h_c
+                    .as_cuda_slice::<bf16>()
+                    .map_err(|e| anyhow!("hidden bf16: {e}"))?
+                    .slice(h_layout.start_offset()..);
+                let head_s = head_c
+                    .as_cuda_slice::<bf16>()
+                    .map_err(|e| anyhow!("head_t bf16: {e}"))?
+                    .slice(head_layout.start_offset()..);
+                let i_s = i_c
+                    .as_cuda_slice::<u32>()
+                    .map_err(|e| anyhow!("idx: {e}"))?
+                    .slice(i_layout.start_offset()..);
+                let l_s = l_c
+                    .as_cuda_slice::<f32>()
+                    .map_err(|e| anyhow!("lpq: {e}"))?
+                    .slice(l_layout.start_offset()..);
+
+                let (h_ptr, _g1) = h_s.device_ptr(&stream);
+                let (head_ptr, _g2) = head_s.device_ptr(&stream);
+                let (i_ptr, _g3) = i_s.device_ptr(&stream);
+                let (l_ptr, _g4) = l_s.device_ptr(&stream);
+                let (out_ptr, _g5) = out_slice.device_ptr(&stream);
+
+                kiln_opd_topk_metrics_bf16(
+                    h_ptr as *const _,
+                    head_ptr as *const _,
+                    i_ptr as *const _,
+                    l_ptr as *const _,
+                    out_ptr as *mut _,
+                    active_count as i32,
+                    hidden_size as i32,
+                    vocab_size as i32,
+                    top_k as i32,
+                    raw_stream,
+                )
+            }
+            other => return Err(anyhow!("unsupported dtype {other:?}")),
+        }
+    };
+    if status != 0 {
+        return Err(anyhow!("opd metrics kernel status {status}"));
+    }
+    // Download flattened result.
+    let out_storage = CudaStorage::wrap_cuda_slice(out_slice, device.clone());
+    let out_tensor = Tensor::from_storage(
+        Storage::Cuda(out_storage),
+        Shape::from((active_count, 3)),
+        BackpropOp::none(),
+        false,
+    );
+    let flat: Vec<Vec<f32>> = out_tensor.to_vec2()?;
+    let mut h_p = Vec::with_capacity(active_count);
+    let mut h_q = Vec::with_capacity(active_count);
+    let mut kl = Vec::with_capacity(active_count);
+    for row in flat {
+        h_p.push(row[0]);
+        h_q.push(row[1]);
+        kl.push(row[2]);
+    }
+    Ok(PerPositionMetrics {
+        student_entropy: h_p,
+        teacher_entropy: h_q,
+        reverse_kl: kl,
+    })
 }
 
 /// Public default chunk size, re-exported by `lib.rs`. Mirrors FLCE.
