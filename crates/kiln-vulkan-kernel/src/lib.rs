@@ -65,6 +65,8 @@ pub mod shaders {
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");
     pub const GDN_IN_PROJ_DECODE_BF16W: &str = shader_path!("gdn_in_proj_decode_bf16w");
+    pub const GDN_IN_PROJ_DECODE_BF16W_WIDE: &str =
+        shader_path!("gdn_in_proj_decode_bf16w_wide");
     pub const GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =
         shader_path!("gdn_decode_gates_recurrent_rmsnorm");
     pub const CAUSAL_CONV1D: &str = shader_path!("causal_conv1d");
