@@ -182,3 +182,5 @@
 {"iter":189,"slug":"cap-merge-sgd2-s7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8500,"delta":-0.03,"n":75,"notes":"merge regressed"}
 {"iter":190,"slug":"cap-merge-sgd2-s7-w8","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8725,"delta":-0.007,"n":75,"notes":"0.8 weighted closer"}
 {"iter":191,"slug":"cap-merge-sgd2-s7-w9","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8675,"delta":-0.012,"n":75,"notes":"0.9 weighted hurts"}
+{"iter":192,"slug":"cap-sgd2-imt-low","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8484,"delta":-0.025,"n":75,"notes":"lr 5e-7 IMT on sgd2 base still hurts"}
+{"iter":193,"slug":"cap-stack-sgd2-verified","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8732,"delta":+0.0038,"n":75,"notes":"cap-stack-sgd2 re-verified stable 0.8732 (was 0.8799 one-off); new STABLE BEST over iter 102's 0.8694"}
