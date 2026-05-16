@@ -1534,6 +1534,141 @@ pub fn dispatch_qkv_gate_split_resident(
     .context("qkv_gate_split_resident kernel failed")
 }
 
+/// Split the combined GDN in_proj output buffer into four distinct
+/// output buffers (mixed_qkv, z, a, b). Companion to the GDN
+/// resident wire-up: the legacy path does this with four
+/// `.narrow().contiguous()` candle ops; this lands them on the GPU
+/// in one dispatch.
+///
+/// Combined layout per decode row:
+///   [0 .. qkv_dim)               : mixed_qkv
+///   [qkv_dim .. qkv_dim+z_dim)   : z
+///   [.. +a_dim)                  : a
+///   [.. +b_dim)                  : b
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_split_resident(
+    vk_device: &VulkanDevice,
+    combined: &VulkanBuffer,
+    mixed_qkv_out: &VulkanBuffer,
+    z_out: &VulkanBuffer,
+    a_out: &VulkanBuffer,
+    b_out: &VulkanBuffer,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+) -> Result<()> {
+    let total = qkv_dim + z_dim + a_dim + b_dim;
+    let need_comb = (total * 4) as u64;
+    anyhow::ensure!(
+        combined.size() >= need_comb,
+        "gdn_in_proj_split_resident: combined {} bytes < {need_comb}",
+        combined.size()
+    );
+    anyhow::ensure!(
+        mixed_qkv_out.size() >= (qkv_dim * 4) as u64,
+        "gdn_in_proj_split_resident: mixed_qkv_out too small"
+    );
+    anyhow::ensure!(
+        z_out.size() >= (z_dim * 4) as u64,
+        "gdn_in_proj_split_resident: z_out too small"
+    );
+    anyhow::ensure!(
+        a_out.size() >= (a_dim * 4) as u64,
+        "gdn_in_proj_split_resident: a_out too small"
+    );
+    anyhow::ensure!(
+        b_out.size() >= (b_dim * 4) as u64,
+        "gdn_in_proj_split_resident: b_out too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_in_proj_split.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 4] = [
+        qkv_dim as u32,
+        z_dim as u32,
+        a_dim as u32,
+        b_dim as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        combined.handle(),
+        mixed_qkv_out.handle(),
+        z_out.handle(),
+        a_out.handle(),
+        b_out.handle(),
+    ];
+    let workgroups = total.div_ceil(64) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("gdn_in_proj_split_resident kernel failed")
+}
+
+/// Split the GDN mixed_qkv buffer into three distinct output buffers
+/// (q, k, v). Companion to the GDN resident wire-up: the legacy path
+/// does this with three `.narrow().contiguous()` candle ops; this
+/// lands them on the GPU in one dispatch.
+pub fn dispatch_gdn_qkv_split_resident(
+    vk_device: &VulkanDevice,
+    mixed_qkv: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    k_out: &VulkanBuffer,
+    v_out: &VulkanBuffer,
+    qk_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    let total = 2 * qk_dim + v_dim;
+    let need = (total * 4) as u64;
+    anyhow::ensure!(
+        mixed_qkv.size() >= need,
+        "gdn_qkv_split_resident: mixed_qkv {} bytes < {need}",
+        mixed_qkv.size()
+    );
+    anyhow::ensure!(
+        q_out.size() >= (qk_dim * 4) as u64,
+        "gdn_qkv_split_resident: q_out too small"
+    );
+    anyhow::ensure!(
+        k_out.size() >= (qk_dim * 4) as u64,
+        "gdn_qkv_split_resident: k_out too small"
+    );
+    anyhow::ensure!(
+        v_out.size() >= (v_dim * 4) as u64,
+        "gdn_qkv_split_resident: v_out too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_qkv_split.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 2] = [qk_dim as u32, v_dim as u32];
+    let handles: [vk::Buffer; 4] = [
+        mixed_qkv.handle(),
+        q_out.handle(),
+        k_out.handle(),
+        v_out.handle(),
+    ];
+    let workgroups = total.div_ceil(64) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("gdn_qkv_split_resident kernel failed")
+}
+
 /// Resident-form paged KV-cache slot write: copy one freshly-projected
 /// `(k, v)` token into the device-resident pool at the given `slot`.
 ///
@@ -2611,6 +2746,97 @@ mod tests {
                 assert_eq!(k_got[h * head_dim + p].to_bits(), k_exp.to_bits());
                 assert_eq!(v_got[h * head_dim + p].to_bits(), v_exp.to_bits());
             }
+        }
+    }
+
+    /// Verify `dispatch_gdn_in_proj_split_resident` splits the
+    /// combined GDN in_proj output into four buffers preserving
+    /// element-for-element values at the published offsets.
+    #[test]
+    fn gdn_in_proj_split_resident_writes_correct_outputs() {
+        let Some(dev) = try_device() else { return };
+        let qkv_dim = 32usize;
+        let z_dim = 24usize;
+        let a_dim = 5usize;
+        let b_dim = 5usize;
+        let total = qkv_dim + z_dim + a_dim + b_dim;
+
+        let comb_data: Vec<f32> = (0..total).map(|i| i as f32 + 0.5).collect();
+        let comb_t = Tensor::from_vec(comb_data.clone(), total, &Device::Cpu).unwrap();
+        let comb_buf = upload_tensor_f32_buffer(&dev, &comb_t).unwrap();
+
+        let qkv_buf = alloc_out(&dev, (qkv_dim * 4) as u64);
+        let z_buf = alloc_out(&dev, (z_dim * 4) as u64);
+        let a_buf = alloc_out(&dev, (a_dim * 4) as u64);
+        let b_buf = alloc_out(&dev, (b_dim * 4) as u64);
+
+        dispatch_gdn_in_proj_split_resident(
+            &dev,
+            &comb_buf,
+            &qkv_buf,
+            &z_buf,
+            &a_buf,
+            &b_buf,
+            qkv_dim,
+            z_dim,
+            a_dim,
+            b_dim,
+        )
+        .unwrap();
+
+        let qkv = read_back_f32(&dev, &qkv_buf);
+        let z = read_back_f32(&dev, &z_buf);
+        let a = read_back_f32(&dev, &a_buf);
+        let b = read_back_f32(&dev, &b_buf);
+        assert_eq!(qkv.len(), qkv_dim);
+        assert_eq!(z.len(), z_dim);
+        assert_eq!(a.len(), a_dim);
+        assert_eq!(b.len(), b_dim);
+        for i in 0..qkv_dim {
+            assert_eq!(qkv[i].to_bits(), comb_data[i].to_bits());
+        }
+        for i in 0..z_dim {
+            assert_eq!(z[i].to_bits(), comb_data[qkv_dim + i].to_bits());
+        }
+        for i in 0..a_dim {
+            assert_eq!(a[i].to_bits(), comb_data[qkv_dim + z_dim + i].to_bits());
+        }
+        for i in 0..b_dim {
+            assert_eq!(b[i].to_bits(), comb_data[qkv_dim + z_dim + a_dim + i].to_bits());
+        }
+    }
+
+    /// Verify `dispatch_gdn_qkv_split_resident` splits the mixed_qkv
+    /// buffer into q, k, v.
+    #[test]
+    fn gdn_qkv_split_resident_writes_correct_outputs() {
+        let Some(dev) = try_device() else { return };
+        let qk_dim = 24usize;
+        let v_dim = 16usize;
+        let total = 2 * qk_dim + v_dim;
+
+        let qkv_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.013 - 0.7).collect();
+        let qkv_t = Tensor::from_vec(qkv_data.clone(), total, &Device::Cpu).unwrap();
+        let qkv_buf = upload_tensor_f32_buffer(&dev, &qkv_t).unwrap();
+
+        let q_buf = alloc_out(&dev, (qk_dim * 4) as u64);
+        let k_buf = alloc_out(&dev, (qk_dim * 4) as u64);
+        let v_buf = alloc_out(&dev, (v_dim * 4) as u64);
+
+        dispatch_gdn_qkv_split_resident(
+            &dev, &qkv_buf, &q_buf, &k_buf, &v_buf, qk_dim, v_dim,
+        )
+        .unwrap();
+
+        let q = read_back_f32(&dev, &q_buf);
+        let k = read_back_f32(&dev, &k_buf);
+        let v = read_back_f32(&dev, &v_buf);
+        for i in 0..qk_dim {
+            assert_eq!(q[i].to_bits(), qkv_data[i].to_bits());
+            assert_eq!(k[i].to_bits(), qkv_data[qk_dim + i].to_bits());
+        }
+        for i in 0..v_dim {
+            assert_eq!(v[i].to_bits(), qkv_data[2 * qk_dim + i].to_bits());
         }
     }
 

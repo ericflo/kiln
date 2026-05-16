@@ -53,6 +53,13 @@ pub mod shaders {
     pub const LINEAR_DECODE_BF16W: &str = shader_path!("linear_decode_bf16w");
     pub const ADD: &str = shader_path!("add");
     pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
+    pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
+    pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");
+    pub const GDN_IN_PROJ_DECODE_BF16W: &str = shader_path!("gdn_in_proj_decode_bf16w");
+    pub const GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =
+        shader_path!("gdn_decode_gates_recurrent_rmsnorm");
+    pub const CAUSAL_CONV1D: &str = shader_path!("causal_conv1d");
+    pub const CAUSAL_CONV1D_STATE_ADVANCE: &str = shader_path!("causal_conv1d_state_advance");
 }
 pub use vk_autograd::{VkGradStore, vk_backward};
 pub use vk_tensor::{VkBackwardOp, VkDType, VkTensor, VkTensorInner, next_op_id};
