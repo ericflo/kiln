@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch};
+use crate::logit_source::{LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs};
 
 /// Provider variations on the OpenAI `top_logprobs` schema. Most
 /// fields are URL/header conventions; the protocol body is the
@@ -212,12 +212,11 @@ impl LogitSource for RemoteTeacher {
 
     fn fetch_logprobs(
         &self,
-        _tokens: &[u32],
-        _positions: &[usize],
+        tokens: &[u32],
+        positions: &[usize],
         top_k: Option<usize>,
     ) -> Result<LogprobBatch, LogitSourceError> {
         let caps = self.capabilities();
-        // §8.6 cost lock — pre-flight check.
         if let Some(cap) = self.config.max_cost_usd {
             if self.cost_tally.total_usd() >= cap {
                 return Err(LogitSourceError::invalid(
@@ -239,27 +238,156 @@ impl LogitSource for RemoteTeacher {
             });
         }
 
-        // Milestone-10 surface: the HTTP fetch is a real call when
-        // the `remote-teacher-http` feature is on and the env var
-        // gives an API key. We surface the contract here so the
-        // trainer can call `RemoteTeacher` without conditionalising
-        // on the feature. The pragmatic shipping order is:
-        //   1. Land the shape + capabilities + cost lock (this
-        //      commit). Provider-specific HTTP impls slot in.
-        //   2. Wire reqwest::blocking calls per provider behind
-        //      `remote-teacher-http` once the §3.2 LocalTeacher is
-        //      operational (needs both for the §13 Phase 0 success
-        //      criterion's frontier-pump run).
-        Err(LogitSourceError::invalid(
-            &caps.teacher_id,
-            format!(
-                "RemoteTeacher::fetch_logprobs not yet wired for provider {provider:?} \
-                 (see §3.2 in the grand plan — concrete HTTP impl per provider lands \
-                 alongside the trainer body refactor in #31)",
-                provider = self.config.provider
-            ),
-        ))
+        match self.config.provider {
+            RemoteProvider::Vllm | RemoteProvider::Sglang => {
+                fetch_logprobs_vllm(&self.config, tokens, positions, requested_k)
+            }
+            _ => Err(LogitSourceError::invalid(
+                &caps.teacher_id,
+                format!(
+                    "RemoteTeacher HTTP impl not yet wired for provider {:?} — \
+                     only vLLM/sglang prompt_logprobs is supported today",
+                    self.config.provider
+                ),
+            )),
+        }
     }
+}
+
+/// vLLM / sglang `/v1/completions` `prompt_logprobs` impl.
+///
+/// vLLM exposes top-K logprobs at every prompt position via:
+/// ```
+/// POST /v1/completions
+/// { "model": "...", "prompt": [token ids...],
+///   "max_tokens": 1, "temperature": 0,
+///   "prompt_logprobs": K }
+/// ```
+/// Response includes a `prompt_logprobs` array (one entry per prompt
+/// position) where each entry is a dict mapping vocab-id → {logprob, ...}.
+/// The first entry is `null` (no logprob for the BOS token).
+fn fetch_logprobs_vllm(
+    cfg: &RemoteTeacherConfig,
+    tokens: &[u32],
+    positions: &[usize],
+    top_k: usize,
+) -> Result<LogprobBatch, LogitSourceError> {
+    use serde_json::Value;
+    let url = format!("{}/v1/completions", cfg.url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.model,
+        "prompt": tokens,
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "prompt_logprobs": top_k,
+    });
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.timeout_ms))
+        .build()
+        .map_err(|e| LogitSourceError::transport(&cfg.teacher_id, e.to_string()))?;
+    let mut req = client.post(&url).json(&body);
+    if let Some(env_name) = cfg.api_key_env.as_deref() {
+        if let Ok(key) = std::env::var(env_name) {
+            req = req.bearer_auth(key);
+        }
+    }
+    let resp = req
+        .send()
+        .map_err(|e| LogitSourceError::transport(&cfg.teacher_id, e.to_string()))?;
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .map_err(|e| LogitSourceError::transport(&cfg.teacher_id, e.to_string()))?;
+    if !status.is_success() {
+        return Err(LogitSourceError::invalid(
+            &cfg.teacher_id,
+            format!("vllm {} → {}: {}", url, status, &body_text[..body_text.len().min(400)]),
+        ));
+    }
+    let parsed: Value = serde_json::from_str(&body_text)
+        .map_err(|e| LogitSourceError::invalid(&cfg.teacher_id, format!("parse: {e}")))?;
+    // vLLM nests `prompt_logprobs` under `choices[0]` on /v1/completions;
+    // some forks/builds put it at the top level. Accept both.
+    let prompt_logprobs = parsed
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|c| c.get("prompt_logprobs"))
+        .or_else(|| parsed.get("prompt_logprobs"))
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            LogitSourceError::invalid(
+                &cfg.teacher_id,
+                "missing `prompt_logprobs` in vllm response (neither top-level nor choices[0])".to_string(),
+            )
+        })?;
+    if prompt_logprobs.len() != tokens.len() {
+        return Err(LogitSourceError::invalid(
+            &cfg.teacher_id,
+            format!(
+                "vllm returned {} prompt_logprobs entries; expected {} (= tokens.len())",
+                prompt_logprobs.len(),
+                tokens.len()
+            ),
+        ));
+    }
+    let mut indices = Vec::with_capacity(positions.len() * top_k);
+    let mut logprobs = Vec::with_capacity(positions.len() * top_k);
+    for &pos in positions {
+        let entry = prompt_logprobs.get(pos).ok_or_else(|| {
+            LogitSourceError::invalid(
+                &cfg.teacher_id,
+                format!("position {pos} out of range (len={})", prompt_logprobs.len()),
+            )
+        })?;
+        // vllm returns null for the first token (no preceding context).
+        if entry.is_null() {
+            return Err(LogitSourceError::invalid(
+                &cfg.teacher_id,
+                format!("position {pos} has null prompt_logprobs (BOS-like)"),
+            ));
+        }
+        let dict = entry.as_object().ok_or_else(|| {
+            LogitSourceError::invalid(
+                &cfg.teacher_id,
+                format!("prompt_logprobs[{pos}] is not an object"),
+            )
+        })?;
+        // Sort entries by logprob descending and take top_k.
+        let mut pairs: Vec<(u32, f32)> = dict
+            .iter()
+            .filter_map(|(k, v)| {
+                let id: u32 = k.parse().ok()?;
+                let lp: f32 = v.get("logprob")?.as_f64()? as f32;
+                Some((id, lp))
+            })
+            .collect();
+        pairs.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        pairs.truncate(top_k);
+        if pairs.len() < top_k {
+            return Err(LogitSourceError::invalid(
+                &cfg.teacher_id,
+                format!(
+                    "vllm returned only {} logprobs at position {pos}; need {}. \
+                     start the server with --max-logprobs {}.",
+                    pairs.len(),
+                    top_k,
+                    top_k
+                ),
+            ));
+        }
+        for (id, lp) in pairs {
+            indices.push(id);
+            logprobs.push(lp);
+        }
+    }
+    Ok(LogprobBatch::TopK(TopKLogprobs {
+        indices,
+        logprobs,
+        top_k,
+    }))
 }
 
 #[cfg(test)]
