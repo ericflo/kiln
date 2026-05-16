@@ -13937,6 +13937,24 @@ fn model_forward_paged_last_token_resident_native_vk(
     linear_state: Option<&LinearAttentionState>,
 ) -> Result<Option<Tensor>> {
     use kiln_vulkan_kernel::{CommandBatch, VulkanBuffer};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static NATIVE_PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let timing_enabled = *NATIVE_PHASE_TIMING.get_or_init(|| {
+        std::env::var("KILN_VK_NATIVE_PHASE_TIMING")
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
+            .unwrap_or(false)
+    });
+    static EMBED_NS: AtomicU64 = AtomicU64::new(0);
+    static ROPE_NS: AtomicU64 = AtomicU64::new(0);
+    static UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
+    static SEED_NS: AtomicU64 = AtomicU64::new(0);
+    static RECORD_NS: AtomicU64 = AtomicU64::new(0);
+    static SUBMIT_NS: AtomicU64 = AtomicU64::new(0);
+    static READBACK_NS: AtomicU64 = AtomicU64::new(0);
+    static LMHEAD_NS: AtomicU64 = AtomicU64::new(0);
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    let t0 = std::time::Instant::now();
     let Some(vk_device) = vk_backend.vulkan_device() else {
         return Ok(None);
     };
@@ -13949,6 +13967,10 @@ fn model_forward_paged_last_token_resident_native_vk(
     // 1. Embedding lookup (CPU/candle): produces [1, 1, hidden] f32.
     let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
     hidden = hidden.unsqueeze(0)?;
+    if timing_enabled {
+        EMBED_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_rope = std::time::Instant::now();
 
     // 2. Position tensor + RoPE tables for this single decode position.
     let positions = candle_core::Tensor::new(
@@ -13957,6 +13979,10 @@ fn model_forward_paged_last_token_resident_native_vk(
     )?;
     let (rope_cos_t, rope_sin_t) =
         rotary_tables_from_tensor(&positions, &weights.rotary_inv_freq)?;
+    if timing_enabled {
+        ROPE_NS.fetch_add(t_rope.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_upload = std::time::Instant::now();
 
     // 3. Acquire the two persistent IO buffers (alternating across layers).
     let io_a =
@@ -13994,6 +14020,10 @@ fn model_forward_paged_last_token_resident_native_vk(
     let block_table_buf = upload_u32_slice_native(vk_device, &blocks)?;
     let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
     let seq_lens_buf = upload_u32_slice_native(vk_device, &seq_lens)?;
+    if timing_enabled {
+        UPLOAD_NS.fetch_add(t_upload.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_seed = std::time::Instant::now();
 
     // 6. VkPagedKvCache (size matches paged cache).
     let num_full_attn_layers = weights
@@ -14029,6 +14059,11 @@ fn model_forward_paged_last_token_resident_native_vk(
             full_attn_idx += 1;
         }
     }
+
+    if timing_enabled {
+        SEED_NS.fetch_add(t_seed.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_record = std::time::Instant::now();
 
     // 8. Build ONE CommandBatch with all 32 layer blocks recorded.
     let mut batch = CommandBatch::new(vk_device)?;
@@ -14083,20 +14118,70 @@ fn model_forward_paged_last_token_resident_native_vk(
         std::mem::swap(&mut from_buf, &mut to_buf);
     }
 
-    // 9. Submit + wait — one queue submission for the whole token.
+    // Fold final RMSNorm + LM head GEMM into the same CommandBatch —
+    // no intermediate readback or Tensor bridge between the last
+    // transformer block and the lm_head. The legacy fast-path was
+    // costing ~12 ms / token; baking these two dispatches into the
+    // batch turns that into ~5 ms of pure GPU compute on the same
+    // queue submission.
+    let final_norm_buf = vk_backend.cached_f32_weight_buffer(&weights.final_norm)?;
+    let lm_head_w_buf =
+        vk_backend.cached_bf16_packed_weight_buffer(&weights.embed_tokens_t)?;
+    let vocab_size = weights.embed_tokens_t.dims().last().copied().unwrap_or(0);
+    if vocab_size == 0 {
+        return Ok(None);
+    }
+    let normed_final_buf = vk_backend
+        .acquire_resident_scratch("native_final_normed", (hidden_size * 4) as u64)?;
+    let logits_buf =
+        vk_backend.acquire_resident_scratch("native_logits", (vocab_size * 4) as u64)?;
+    // Final RMSNorm: from_buf → normed_final_buf
+    batch.record_shader(
+        kiln_vulkan_kernel::shaders::QWEN_RMSNORM_FORWARD,
+        &[
+            from_buf.handle(),
+            final_norm_buf.handle(),
+            normed_final_buf.handle(),
+        ],
+        &[1u32, hidden_size as u32, (config.rms_norm_eps as f32).to_bits()],
+        kiln_vulkan_kernel::Workgroups::OneD(1),
+    )?;
+    // LM head GEMM (bf16w b=1): normed_final_buf → logits_buf
+    batch.record_shader(
+        kiln_vulkan_kernel::shaders::LINEAR_DECODE_BF16W,
+        &[
+            normed_final_buf.handle(),
+            lm_head_w_buf.handle(),
+            logits_buf.handle(),
+        ],
+        &[hidden_size as u32, vocab_size as u32],
+        kiln_vulkan_kernel::Workgroups::OneD(vocab_size.div_ceil(16) as u32),
+    )?;
+
+    if timing_enabled {
+        RECORD_NS.fetch_add(t_record.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_submit = std::time::Instant::now();
+
+    // Submit + wait — one queue submission covers all 32 layer blocks
+    // PLUS the final norm + lm_head.
     batch
         .submit_and_wait("vk-resident native full-token forward")
         .context("native: submit full-token CommandBatch")?;
+    if timing_enabled {
+        SUBMIT_NS.fetch_add(t_submit.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_readback = std::time::Instant::now();
 
-    // 10. Read back final hidden from `from_buf` (post-swap on last layer).
+    // Read back the logits directly (vocab_size f32).
     let out_bytes = VulkanBuffer::read_back(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
         vk_device.queue(),
         vk_device.queue_family_index(),
-        from_buf,
+        &logits_buf,
     )
-    .context("native: read back final hidden")?;
+    .context("native: read back logits")?;
     let n = out_bytes.len() / 4;
     let mut out_f32: Vec<f32> = Vec::with_capacity(n);
     for i in 0..n {
@@ -14104,18 +14189,32 @@ fn model_forward_paged_last_token_resident_native_vk(
         b.copy_from_slice(&out_bytes[i * 4..i * 4 + 4]);
         out_f32.push(f32::from_le_bytes(b));
     }
-    let hidden_final =
-        candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden_size), device)?
-            .to_dtype(hidden.dtype())?;
+    let logits = candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, vocab_size), device)?
+        .to_dtype(hidden.dtype())?;
+    if timing_enabled {
+        READBACK_NS.fetch_add(t_readback.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let t_lmhead = std::time::Instant::now();
 
-    // 11. Final RMSNorm + LM head via legacy (one-shot, small ops).
-    let last = hidden_final.narrow(1, 0, 1)?;
-    let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = lm_head_forward_backend_decode_if(
-        Some(vk_backend as &dyn BackendRuntime),
-        &normed,
-        &weights.embed_tokens_t,
-    )?;
+    // (the rms_norm + lm_head are now part of the main batch; this
+    // phase just exists to keep the phase timing layout stable)
+    if timing_enabled {
+        LMHEAD_NS.fetch_add(t_lmhead.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let calls = CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Print every call so each token's breakdown is visible.
+        let ms = |ns: u64| (ns as f64) / 1e6;
+        eprintln!(
+            "[vk-native-phase] call={calls} embed={:.2} rope={:.2} upload={:.2} seed={:.2} record={:.2} submit={:.2} readback={:.2} lmhead={:.2} (ms; cumulative across all native calls)",
+            ms(EMBED_NS.load(Ordering::Relaxed)),
+            ms(ROPE_NS.load(Ordering::Relaxed)),
+            ms(UPLOAD_NS.load(Ordering::Relaxed)),
+            ms(SEED_NS.load(Ordering::Relaxed)),
+            ms(RECORD_NS.load(Ordering::Relaxed)),
+            ms(SUBMIT_NS.load(Ordering::Relaxed)),
+            ms(READBACK_NS.load(Ordering::Relaxed)),
+            ms(LMHEAD_NS.load(Ordering::Relaxed)),
+        );
+    }
     Ok(Some(logits))
 }
 
