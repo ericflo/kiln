@@ -26,8 +26,10 @@ shared float exp_q[32];
 shared float Hp_partial[32];
 shared float Hq_partial[32];
 shared float KL_partial[32];
-shared float reduced[3];
-shared float bcast;
+shared float m_p_sh;
+shared float z_p_sh;
+shared float m_q_sh;
+shared float z_q_sh;
 
 float load_bf16_weight(uint flat_idx) {
     uint packed = data_weight[flat_idx >> 1];
@@ -73,10 +75,10 @@ void main() {
             float v = s_logits[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_p_sh = m;
     }
     barrier();
-    float m_p = bcast;
+    float m_p = m_p_sh;
     if (slot < K && lane == 0u) {
         exp_p[slot] = exp(s_logits[slot] - m_p);
     }
@@ -84,10 +86,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_p[k];
-        bcast = s;
+        z_p_sh = s;
     }
     barrier();
-    float z_p = bcast;
+    float z_p = z_p_sh;
     float log_z_p = log(z_p);
 
     if (tid == 0u) {
@@ -96,10 +98,10 @@ void main() {
             float v = s_lpq[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_q_sh = m;
     }
     barrier();
-    float m_q = bcast;
+    float m_q = m_q_sh;
     if (slot < K && lane == 0u) {
         exp_q[slot] = exp(s_lpq[slot] - m_q);
     }
@@ -107,10 +109,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_q[k];
-        bcast = s;
+        z_q_sh = s;
     }
     barrier();
-    float z_q = bcast;
+    float z_q = z_q_sh;
     float log_z_q = log(z_q);
 
     if (slot < K && lane == 0u) {
@@ -133,12 +135,8 @@ void main() {
             h_q += Hq_partial[k];
             kl  += KL_partial[k];
         }
-        reduced[0] = h_p;
-        reduced[1] = h_q;
-        reduced[2] = kl;
+        data_out[3u * t + 0u] = h_p;
+        data_out[3u * t + 1u] = h_q;
+        data_out[3u * t + 2u] = kl;
     }
-    barrier();
-    data_out[3u * t + 0u] = reduced[0];
-    data_out[3u * t + 1u] = reduced[1];
-    data_out[3u * t + 2u] = reduced[2];
 }

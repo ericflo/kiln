@@ -9,19 +9,16 @@
 //     s_logits[k] = sum_h hidden[t, h] * weight[idx[t,k], h]
 // via a strided dot product over H, then a shared-mem reduction.
 //
-// The K-element max / sum-exp / KL reductions run on a single thread (K ≤ 32,
-// cheap) for absolute bit-for-bit determinism across drivers. Identical
-// accumulation order to the CUDA reference, modulo the warp-shuffle tree
-// (which is associatively equivalent at f32 within the published 1e-5 gate).
+// # Note on broadcasts
 //
-// Inputs:
-//   binding 0: hidden       [t_active, hidden_size] f32
-//   binding 1: weight       [vocab_size, hidden_size] f32  (row-major; column c = weight[c*H + h])
-//   binding 2: topk_idx     [t_active, K] u32
-//   binding 3: topk_lp_q    [t_active, K] f32
-//   binding 4: kl_out       [t_active] f32
-//
-// Push constants: hidden_size, vocab_size, t_active, top_k.
+// Each block-level reduction (max-over-K, sum-exp, KL-sum) broadcasts its
+// scalar through a DEDICATED shared variable (`m_p_sh`, `z_p_sh`, `m_q_sh`,
+// `z_q_sh`, `kl_sum_sh`) instead of recycling a single `bcast`. This is
+// functionally identical on a strictly-conformant Vulkan driver, but Mesa's
+// lavapipe CPU implementation was observed to **rematerialise** later loads
+// from the recycled shared variable in non-`tid==0` slot writers, producing
+// -inf at `slot>0`'s `kl_contrib` and a NaN-cascade through the final sum.
+// Dedicated per-reduction shared variables eliminate that hazard entirely.
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -47,7 +44,11 @@ shared float s_lpq[32];
 shared float exp_p[32];
 shared float exp_q[32];
 shared float kl_contrib[32];
-shared float bcast;
+shared float m_p_sh;
+shared float z_p_sh;
+shared float m_q_sh;
+shared float z_q_sh;
+shared float kl_sum_sh;
 
 void main() {
     uint t = gl_WorkGroupID.x;
@@ -74,7 +75,6 @@ void main() {
     partials[tid] = acc;
     barrier();
 
-    // Sum partials within each slot — one writer per slot.
     if (slot < K && lane == 0u) {
         float total = 0.0;
         for (uint l = 0u; l < threads_per_slot; ++l) {
@@ -91,10 +91,10 @@ void main() {
             float v = s_logits[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_p_sh = m;
     }
     barrier();
-    float m_p = bcast;
+    float m_p = m_p_sh;
     if (slot < K && lane == 0u) {
         exp_p[slot] = exp(s_logits[slot] - m_p);
     }
@@ -102,10 +102,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_p[k];
-        bcast = s;
+        z_p_sh = s;
     }
     barrier();
-    float z_p = bcast;
+    float z_p = z_p_sh;
     float log_z_p = log(z_p);
 
     // ---- step 3: log_softmax over the K teacher logprobs ----
@@ -115,10 +115,10 @@ void main() {
             float v = s_lpq[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_q_sh = m;
     }
     barrier();
-    float m_q = bcast;
+    float m_q = m_q_sh;
     if (slot < K && lane == 0u) {
         exp_q[slot] = exp(s_lpq[slot] - m_q);
     }
@@ -126,21 +126,13 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_q[k];
-        bcast = s;
+        z_q_sh = s;
     }
     barrier();
-    float z_q = bcast;
+    float z_q = z_q_sh;
     float log_z_q = log(z_q);
 
     // ---- step 4: KL contribution per slot, block-sum, emit ----
-    //
-    // Use a dedicated `kl_contrib` shared array rather than re-using
-    // `partials`. The phase-1 dot-product write covered `partials[0..255]`;
-    // re-using `partials[0..K-1]` from a subset of those threads is correct
-    // by the Vulkan memory model, but at least one CPU-side Vulkan driver
-    // (llvmpipe / lavapipe) appears to mis-handle the read-after-overwrite
-    // of the same shared array even with an intervening `barrier()`. A
-    // separate shared array removes the aliasing entirely.
     if (slot < K && lane == 0u) {
         float log_p = (s_logits[slot] - m_p) - log_z_p;
         float log_q = (s_lpq[slot]    - m_q) - log_z_q;
@@ -151,14 +143,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += kl_contrib[k];
-        bcast = s;
+        kl_sum_sh = s;
     }
     barrier();
-    // Idempotent multi-thread write: every thread emits the same scalar
-    // (broadcast through `bcast`). This is the same per-row scalar emit
-    // pattern the FLCE per-token-loss + selected-logprob shaders use,
-    // and avoids a pathological case observed on lavapipe (Mesa's CPU
-    // Vulkan) where a final single-thread `data_out[t] = s` emit at end
-    // of main was dropped for workgroup 0.
-    data_out[t] = bcast;
+    if (tid == 0u) {
+        data_out[t] = kl_sum_sh;
+    }
 }

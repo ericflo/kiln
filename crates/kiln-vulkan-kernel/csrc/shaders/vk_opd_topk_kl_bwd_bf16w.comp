@@ -29,7 +29,12 @@ shared float s_lpq[32];
 shared float exp_p[32];
 shared float exp_q[32];
 shared float d_s_logits[32];
-shared float bcast;
+shared float kl_contrib[32];
+shared float m_p_sh;
+shared float z_p_sh;
+shared float m_q_sh;
+shared float z_q_sh;
+shared float kl_t_sh;
 shared float upstream_sh;
 
 float load_bf16_weight(uint flat_idx) {
@@ -77,10 +82,10 @@ void main() {
             float v = s_logits[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_p_sh = m;
     }
     barrier();
-    float m_p = bcast;
+    float m_p = m_p_sh;
     if (slot < K && lane == 0u) {
         exp_p[slot] = exp(s_logits[slot] - m_p);
     }
@@ -88,10 +93,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_p[k];
-        bcast = s;
+        z_p_sh = s;
     }
     barrier();
-    float z_p = bcast;
+    float z_p = z_p_sh;
     float log_z_p = log(z_p);
 
     if (tid == 0u) {
@@ -100,10 +105,10 @@ void main() {
             float v = s_lpq[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_q_sh = m;
     }
     barrier();
-    float m_q = bcast;
+    float m_q = m_q_sh;
     if (slot < K && lane == 0u) {
         exp_q[slot] = exp(s_lpq[slot] - m_q);
     }
@@ -111,29 +116,29 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_q[k];
-        bcast = s;
+        z_q_sh = s;
     }
     barrier();
-    float z_q = bcast;
+    float z_q = z_q_sh;
     float log_z_q = log(z_q);
 
     if (slot < K && lane == 0u) {
         float log_p = (s_logits[slot] - m_p) - log_z_p;
         float log_q = (s_lpq[slot]    - m_q) - log_z_q;
         float p_hat = exp_p[slot] / z_p;
-        partials[slot] = p_hat * (log_p - log_q);
+        kl_contrib[slot] = p_hat * (log_p - log_q);
     }
     barrier();
     if (tid == 0u) {
         float s = 0.0;
-        for (uint k = 0u; k < K; ++k) s += partials[k];
-        bcast = s;
+        for (uint k = 0u; k < K; ++k) s += kl_contrib[k];
+        kl_t_sh = s;
         float scale = uintBitsToFloat(scale_factor_bits);
         float grad_v = (output_mode == 0u) ? data_grad_loss[0] : data_grad_loss[t];
         upstream_sh = grad_v * scale;
     }
     barrier();
-    float kl_t = bcast;
+    float kl_t = kl_t_sh;
     float upstream = upstream_sh;
 
     if (slot < K && lane == 0u) {

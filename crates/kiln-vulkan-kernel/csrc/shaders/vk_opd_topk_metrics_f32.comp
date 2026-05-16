@@ -6,8 +6,8 @@
 //   col 1: H(q_hat)  — teacher entropy over the same K support, nats
 //   col 2: KL(p||q)  — per-position reverse KL (same value as the loss kernel)
 //
-// Bindings + push constants match the forward kernel except `metrics_out`
-// replaces `kl_out` and has length `t_active * 3`.
+// Uses dedicated shared variables for each block-level broadcast — see
+// vk_opd_topk_kl_fwd_f32.comp for the lavapipe rationale.
 
 #version 450
 #extension GL_EXT_control_flow_attributes : enable
@@ -35,8 +35,10 @@ shared float exp_q[32];
 shared float Hp_partial[32];
 shared float Hq_partial[32];
 shared float KL_partial[32];
-shared float reduced[3];
-shared float bcast;
+shared float m_p_sh;
+shared float z_p_sh;
+shared float m_q_sh;
+shared float z_q_sh;
 
 void main() {
     uint t = gl_WorkGroupID.x;
@@ -76,10 +78,10 @@ void main() {
             float v = s_logits[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_p_sh = m;
     }
     barrier();
-    float m_p = bcast;
+    float m_p = m_p_sh;
     if (slot < K && lane == 0u) {
         exp_p[slot] = exp(s_logits[slot] - m_p);
     }
@@ -87,10 +89,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_p[k];
-        bcast = s;
+        z_p_sh = s;
     }
     barrier();
-    float z_p = bcast;
+    float z_p = z_p_sh;
     float log_z_p = log(z_p);
 
     if (tid == 0u) {
@@ -99,10 +101,10 @@ void main() {
             float v = s_lpq[k];
             if (v > m) m = v;
         }
-        bcast = m;
+        m_q_sh = m;
     }
     barrier();
-    float m_q = bcast;
+    float m_q = m_q_sh;
     if (slot < K && lane == 0u) {
         exp_q[slot] = exp(s_lpq[slot] - m_q);
     }
@@ -110,10 +112,10 @@ void main() {
     if (tid == 0u) {
         float s = 0.0;
         for (uint k = 0u; k < K; ++k) s += exp_q[k];
-        bcast = s;
+        z_q_sh = s;
     }
     barrier();
-    float z_q = bcast;
+    float z_q = z_q_sh;
     float log_z_q = log(z_q);
 
     // Per-slot H(p), H(q), KL contributions.
@@ -137,12 +139,8 @@ void main() {
             h_q += Hq_partial[k];
             kl  += KL_partial[k];
         }
-        reduced[0] = h_p;
-        reduced[1] = h_q;
-        reduced[2] = kl;
+        data_out[3u * t + 0u] = h_p;
+        data_out[3u * t + 1u] = h_q;
+        data_out[3u * t + 2u] = kl;
     }
-    barrier();
-    data_out[3u * t + 0u] = reduced[0];
-    data_out[3u * t + 1u] = reduced[1];
-    data_out[3u * t + 2u] = reduced[2];
 }
