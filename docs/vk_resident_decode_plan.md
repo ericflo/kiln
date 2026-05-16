@@ -380,10 +380,65 @@ The win is structural and reproducible.
 Gated on `KILN_VK_RESIDENT_DECODE_NATIVE` (default on); falls back
 transparently to the per-layer fast-paths on any decline.
 
-#### Remaining gap and the only realistic path past it
+#### Host-side bottleneck hunt (2026-05-16, after native land)
 
-Current 15.6 tok/s mean (≈21 tok/s p50) vs. the gate (e.2) target
-of 55 tok/s leaves a ~2.6-3.5× factor. Per-layer kernel breakdown:
+`nvtop` showed GPU utilization peaking at only 50-60% during decode
+under the native single-submit path — a clear sign that further
+host-side work was still keeping the GPU idle. Added
+`KILN_VK_NATIVE_PHASE_TIMING` instrumentation to attribute wall time
+per phase inside the native orchestrator. Steady-state per-token
+breakdown (from native land):
+
+| Phase | Wall time | What it covers |
+|-------|-----------|----------------|
+| embed | 0.2 ms | candle embedding lookup |
+| upload | 5.9 ms | host→device copies (x, RoPE, block_table, seq_lens) |
+| record | 11.1 ms | building the 32-block CommandBatch |
+| submit | 15.5 ms | one queue submission of all 32 blocks |
+| readback | 1.1 ms | logits → host |
+| lmhead | 12.5 ms | legacy candle path (final norm + LM head) |
+
+The lmhead phase was nearly as costly as the GPU compute itself —
+the legacy `backend.linear_decode` path bridged through candle
+Tensors with its own Vulkan submit. The next four commits attacked
+each row in order:
+
+1. **`1e0f27e2`** — Fold final RMSNorm + LM head into the same
+   `CommandBatch` (no readback before LM head). lmhead row drops
+   to 0 ms. ITL: ~30 → ~26 ms mean.
+2. **`c57789f3`** — Path-keyed pipeline cache: `record_shader` was
+   running `compile_shader` (Vec<u8> SPIR-V copy) + re-hashing the
+   SPIR-V on every call to find the pipeline. Memoize by
+   `(&'static path, total_bindings, push_size)`. record phase
+   drops 9.6 → 2.7 ms.
+3. **`c57789f3`** — Persistent small buffers: RoPE cos/sin,
+   block_table, seq_lens now live in the resident scratch pool
+   (stable handles, content updated per token) instead of
+   create_buffer + bind_memory + map per token.
+4. **`abace750`** — Batch the 5 per-token small uploads into one
+   `VulkanBuffer::upload_data_batch` (one command pool / one
+   command buffer / one queue submit). upload phase drops 4.8 → 3.1 ms.
+
+Steady-state phase budget after all four commits:
+
+| Phase | Wall time | vs. start |
+|-------|-----------|-----------|
+| embed | 0.2 ms | — |
+| upload | 3.1 ms | -2.8 ms |
+| record | 2.7 ms | -8.4 ms |
+| submit | 19.6 ms | +4.1 ms (LM head moved here) |
+| readback | 2.9 ms | +1.8 ms (logits, not hidden) |
+| lmhead | 0.0 ms | -12.5 ms |
+| **total** | **~28.5 ms** | **-17.5 ms / token** |
+
+Bench at 494-token prompt now: **~22 tok/s mean / ~30 ms p50
+(~33 tok/s p50)**.
+
+#### Remaining gap
+
+Current ~22 tok/s mean / ~33 tok/s p50 vs. the gate (e.2) target of
+55 tok/s leaves a ~1.7× p50 / ~2.5× mean factor. Per-layer kernel
+breakdown:
 
 - Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
   (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
