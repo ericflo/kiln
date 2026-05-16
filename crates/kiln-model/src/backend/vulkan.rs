@@ -69,6 +69,13 @@ pub struct VulkanBackend {
     /// Tensor path without re-checking.
     decode_resident_pool:
         OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
+    /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
+    /// legacy `PagedKvCache` layout in device-local f32 buffers so the
+    /// resident decode dispatchers can read/write K/V without crossing
+    /// the host boundary. The first resident decode call that needs the
+    /// cache constructs it for the active model geometry.
+    vk_paged_kv_cache:
+        OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -333,6 +340,7 @@ impl VulkanBackend {
             recurrent_state_residency_enabled,
             resident_decode_enabled,
             decode_resident_pool: OnceLock::new(),
+            vk_paged_kv_cache: OnceLock::new(),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -389,7 +397,54 @@ impl VulkanBackend {
             .as_ref()
     }
 
-    fn cached_f32_weight_buffer(
+    /// Lazily construct (and cache) the Vulkan-resident paged KV cache
+    /// for the given geometry.
+    ///
+    /// `num_full_attn_layers`, `num_blocks`, `block_size`, `num_kv_heads`,
+    /// `head_dim` mirror the legacy `PagedKvCache::new` geometry — the
+    /// resident cache is a device-local sibling laid out element-for-
+    /// element compatible with the existing paged-attn shaders.
+    ///
+    /// Returns `Some(&cache)` when the device allocation succeeds. Returns
+    /// `None` (with a one-time `tracing::warn!`) when the device can't fit
+    /// the geometry; callers fall back to the legacy CPU-backed pool.
+    /// The `None` outcome is cached on the backend so subsequent calls
+    /// don't re-probe.
+    pub fn vk_paged_kv_cache(
+        &self,
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Option<&Arc<kiln_vulkan_kernel::VkPagedKvCache>> {
+        let dev = self.vulkan_device.as_ref()?;
+        self.vk_paged_kv_cache
+            .get_or_init(|| {
+                match kiln_vulkan_kernel::VkPagedKvCache::try_new(
+                    dev,
+                    num_full_attn_layers,
+                    num_blocks,
+                    block_size,
+                    num_kv_heads,
+                    head_dim,
+                ) {
+                    Ok(Some(cache)) => Some(Arc::new(cache)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Vulkan-resident paged KV cache construction errored; \
+                             falling back to legacy CPU-backed pool"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    pub fn cached_f32_weight_buffer(
         &self,
         weight: &Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
@@ -439,7 +494,7 @@ impl VulkanBackend {
             && weights.iter().all(|weight| weight.dtype() == DType::BF16)
     }
 
-    fn cached_bf16_packed_weight_buffer(
+    pub fn cached_bf16_packed_weight_buffer(
         &self,
         weight: &Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
