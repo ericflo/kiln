@@ -629,6 +629,62 @@ async fn cancel_queued_job(
     }
 }
 
+/// DELETE /v1/train/jobs/:job_id — permanently delete a terminal training
+/// job from both the in-memory tracking map and the on-disk archive. Refuses
+/// to delete jobs that are still queued / running (use
+/// `DELETE /v1/train/queue/:job_id` for those).
+async fn delete_archived_job(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Refuse if the job is still active. The in-memory map is the source
+    // of truth for live state; an archived entry will only exist for jobs
+    // already in a terminal state.
+    {
+        let jobs = state.training_jobs.read().unwrap();
+        if let Some(job) = jobs.get(&job_id) {
+            match job.state {
+                TrainingState::Queued | TrainingState::Running => {
+                    return Err(ApiError::training_job_not_cancellable(
+                        &job_id,
+                        format!("{:?}", job.state),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // Missing from in-memory but present on-disk is also valid — we'll
+        // still try to delete the archive file below.
+    }
+
+    // Remove from in-memory map (idempotent — missing is fine).
+    {
+        let mut jobs = state.training_jobs.write().unwrap();
+        jobs.remove(&job_id);
+    }
+
+    // Delete the on-disk archive file. Missing is fine (already gone).
+    let archive_path = crate::training_history::archive_dir(&state.adapter_dir)
+        .join(format!("{job_id}.json"));
+    let removed_file = match std::fs::remove_file(&archive_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "failed to delete archive file {}: {}",
+                archive_path.display(),
+                e
+            )));
+        }
+    };
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "status": "deleted",
+        "removed_archive_file": removed_file,
+    })))
+}
+
 /// Body-size cap for SFT training submissions (audit LOW §1).
 /// 64 MiB accommodates long-context training examples that exceed the 2 MiB axum default.
 const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
@@ -695,7 +751,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
-        .route("/v1/train/jobs/{job_id}", get(job_detail))
+        .route(
+            "/v1/train/jobs/{job_id}",
+            get(job_detail).delete(delete_archived_job),
+        )
         .route("/v1/train/queue", get(list_queue))
         .route("/v1/train/queue/{job_id}", delete(cancel_queued_job))
 }

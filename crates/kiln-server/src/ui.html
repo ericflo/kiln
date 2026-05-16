@@ -3521,6 +3521,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         <h2 id="train-drill-title">Training job</h2>
         <span class="modal-meta" id="train-drill-meta"></span>
         <button class="btn btn-sm" id="train-drill-stop" type="button" title="Cancel this training job (queued only)">⏹ Stop</button>
+        <button class="btn btn-sm" id="train-drill-delete" type="button" hidden title="Permanently delete this terminal job from memory and from the on-disk archive">🗑 Delete</button>
         <button class="modal-close" id="train-drill-close" aria-label="Close">×</button>
       </div>
       <div class="modal-body" style="grid-template-columns: 1fr;">
@@ -8823,9 +8824,25 @@ async function fetchTrainDrill() {
        <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
 
     const stopBtn = document.getElementById('train-drill-stop');
-    if (stateLow === 'queued') { stopBtn.disabled = false; stopBtn.title = 'Cancel this queued job'; }
-    else if (stateLow === 'running') { stopBtn.disabled = true; stopBtn.title = 'Cancellation of running training jobs is not yet supported.'; }
-    else { stopBtn.disabled = true; stopBtn.title = 'Job already in terminal state'; }
+    const deleteBtn = document.getElementById('train-drill-delete');
+    if (stateLow === 'queued') {
+      stopBtn.disabled = false;
+      stopBtn.title = 'Cancel this queued job';
+      stopBtn.hidden = false;
+      if (deleteBtn) deleteBtn.hidden = true;
+    } else if (stateLow === 'running') {
+      stopBtn.disabled = true;
+      stopBtn.title = 'Cancellation of running training jobs is not yet supported.';
+      stopBtn.hidden = false;
+      if (deleteBtn) deleteBtn.hidden = true;
+    } else {
+      // Terminal (Completed / Failed) — hide Stop, show Delete instead.
+      stopBtn.hidden = true;
+      if (deleteBtn) {
+        deleteBtn.hidden = false;
+        deleteBtn.dataset.jobId = j.job_id;
+      }
+    }
     stopBtn.dataset.jobId = j.job_id;
 
     document.getElementById('train-drill-content').innerHTML = renderTrainDrillBody(j);
@@ -8931,6 +8948,20 @@ document.getElementById('train-drill-stop')?.addEventListener('click', () => {
   // would let rapid clicks fire duplicate requests.
   closeTrainDrillModal();
   window.cancelJob(jobId);
+});
+document.getElementById('train-drill-delete')?.addEventListener('click', async () => {
+  const jobId = document.getElementById('train-drill-delete').dataset.jobId;
+  if (!jobId) return;
+  if (!confirm('Permanently delete this training job? The adapter weights on disk are untouched; only the tracking entry and the on-disk archive file are removed.')) return;
+  try {
+    await api('/v1/train/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' });
+    toast('Training job deleted', 'ok');
+    closeTrainDrillModal();
+    lastTrainingKey = null; // bypass change-detection so re-render happens
+    pollTraining();
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'err');
+  }
 });
 
 /* =====================================================================
