@@ -13,6 +13,7 @@ mod health;
 mod metrics;
 mod models;
 mod stats;
+pub(crate) mod teachers;
 mod training;
 mod ui;
 
@@ -58,6 +59,7 @@ pub fn router(state: AppState) -> Router {
         .merge(models::routes())
         .merge(completions::routes())
         .merge(adapters::routes())
+        .merge(teachers::routes())
         .merge(training::routes())
         .merge(eval::routes())
         .merge(config::routes())
