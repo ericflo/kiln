@@ -63,6 +63,10 @@ struct Args {
     checkpoint_interval: Option<usize>,
     vram_poll_millis: u64,
     trainer: TrainerKind,
+    lora_rank: usize,
+    lora_alpha: f32,
+    learning_rate: f64,
+    base_adapter: Option<String>,
 }
 
 #[cfg(feature = "cuda")]
@@ -78,10 +82,38 @@ impl Args {
         let mut checkpoint_interval = None;
         let mut vram_poll_millis = 1_000u64;
         let mut trainer = TrainerKind::Native;
+        let mut lora_rank = 8usize;
+        let mut lora_alpha = 16.0f32;
+        let mut learning_rate = 1e-4f64;
+        let mut base_adapter: Option<String> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
+                "--rank" => {
+                    lora_rank = args
+                        .next()
+                        .context("--rank requires a value")?
+                        .parse()
+                        .context("--rank must be a positive integer")?
+                }
+                "--alpha" => {
+                    lora_alpha = args
+                        .next()
+                        .context("--alpha requires a value")?
+                        .parse()
+                        .context("--alpha must be a positive float")?
+                }
+                "--lr" => {
+                    learning_rate = args
+                        .next()
+                        .context("--lr requires a value")?
+                        .parse()
+                        .context("--lr must be a positive float")?
+                }
+                "--base-adapter" => {
+                    base_adapter = Some(args.next().context("--base-adapter requires a value")?)
+                }
                 "--data" => data = args.next().map(PathBuf::from),
                 "--model-path" => model_path = args.next().map(PathBuf::from),
                 "--output-dir" => {
@@ -166,6 +198,10 @@ impl Args {
             checkpoint_interval,
             vram_poll_millis,
             trainer,
+            lora_rank,
+            lora_alpha,
+            learning_rate,
+            base_adapter,
         })
     }
 }
@@ -295,10 +331,10 @@ fn main() -> Result<()> {
         .with_context(|| format!("creating {}", args.output_dir.display()))?;
     let config = SftConfig {
         epochs: args.epochs,
-        learning_rate: 1e-4,
-        lora_rank: 8,
-        lora_alpha: 16.0,
-        base_adapter: None,
+        learning_rate: args.learning_rate,
+        lora_rank: args.lora_rank,
+        lora_alpha: args.lora_alpha,
+        base_adapter: args.base_adapter.clone(),
         output_name: Some(args.adapter_name.clone()),
         auto_load: false,
         checkpoint_interval: args.checkpoint_interval,

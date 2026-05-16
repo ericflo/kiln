@@ -3139,7 +3139,7 @@ fn apply_adamw_update(
 
 /// Accumulate gradients from `src` into `dst`. Creates entries in `dst` for
 /// any Var that has a gradient in `src` but not yet in `dst`.
-fn accumulate_grads(
+pub(crate) fn accumulate_grads(
     dst: &mut HashMap<candle_core::TensorId, Tensor>,
     src: &candle_core::backprop::GradStore,
     vars: &[&Var],
@@ -3234,7 +3234,7 @@ fn sgd_step_from_map(
 }
 
 /// Configured-optimizer dispatch from accumulated gradient map.
-fn optimizer_step_from_map(
+pub(crate) fn optimizer_step_from_map(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
     grads: &HashMap<candle_core::TensorId, Tensor>,
@@ -3354,7 +3354,7 @@ impl CheckpointConfig {
 ///
 /// Returns a list of `(start_layer, end_layer)` pairs that partition
 /// `[0..num_layers)` into `num_segments` roughly-equal segments.
-fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(usize, usize)> {
+pub(crate) fn compute_segment_boundaries(num_layers: usize, num_segments: usize) -> Vec<(usize, usize)> {
     let seg_size = num_layers / num_segments;
     let remainder = num_layers % num_segments;
     let mut boundaries = Vec::with_capacity(num_segments);
@@ -3402,7 +3402,7 @@ fn model_is_gdn_only(weights: &GpuWeights) -> bool {
 /// computes activation VALUES). Without this, those backward passes would
 /// produce LoRA gradients that would then be discarded — wasted compute,
 /// and a correctness hazard if the discard is forgotten.
-fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights {
+pub(crate) fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights {
     let layers: Vec<LoraLayerWeights> = params
         .layers
         .iter()

@@ -505,6 +505,10 @@ pub struct OpdConfig {
     #[serde(default)]
     pub optimizer: Optimizer,
 
+    /// Number of training epochs. Default 1.
+    #[serde(default = "default_opd_epochs")]
+    pub epochs: usize,
+
     /// Hard cap on remote-teacher $ spend, in USD. §8.6 cost lock.
     /// `None` falls back to the server-wide default. Applies only when
     /// the resolved `LogitSource` reports a non-zero $/token cost.
@@ -533,6 +537,9 @@ fn default_opd_checkpoint_interval() -> Option<usize> {
 fn default_auto_load() -> bool {
     true
 }
+fn default_opd_epochs() -> usize {
+    1
+}
 
 impl Default for OpdConfig {
     fn default() -> Self {
@@ -556,6 +563,7 @@ impl Default for OpdConfig {
             seed: None,
             optimizer: Optimizer::default(),
             max_cost_usd: None,
+            epochs: 1,
         }
     }
 }
@@ -1460,10 +1468,16 @@ pub fn opd_train(
     use crate::SftExample;
     use crate::trainer::{
         TrainableLoraParams, optimizer_step, tokenize_for_training,
+        compute_segment_boundaries, lora_weights_detached, accumulate_grads,
     };
     use crate::Optimizer;
     use kiln_model::backend;
-    use kiln_model::forward::{LinearAttentionState, model_forward_no_head};
+    use kiln_model::forward::{
+        LinearAttentionState, model_forward_embed, model_forward_final_norm,
+        model_forward_segment,
+    };
+    use candle_core::Var;
+    use std::collections::HashMap;
 
     if prompts.is_empty() {
         anyhow::bail!("opd_train: prompts must be non-empty");
@@ -1543,7 +1557,7 @@ pub fn opd_train(
         anyhow::bail!("opd_train: no valid prompts after tokenization");
     }
 
-    let epochs = 1usize;
+    let epochs = config.epochs.max(1);
     let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
@@ -1572,35 +1586,142 @@ pub fn opd_train(
             }
 
             for sample_idx in 0..effective_samples_per_prompt.max(1) {
-                let lora_weights = params.as_lora_weights();
-                let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-                let hidden = model_forward_no_head(
-                    &*backend_rt,
-                    input_ids,
+                // Gradient-checkpointed step. Runs the model forward in
+                // detached segments to bound activation memory, computes the
+                // OPD top-K reverse-KL loss at the final boundary, then
+                // walks segments in reverse with autograd ON to accumulate
+                // LoRA gradients. Mirrors the SFT path's
+                // `checkpointed_forward_backward` so long-context OPD fits
+                // on a single 48GB GPU.
+                let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
+                let lora_detached = lora_weights_detached(&params);
+                let num_segments = 8usize.min(model_config.num_layers);
+                let segments = compute_segment_boundaries(model_config.num_layers, num_segments);
+
+                // === Step 1: detached forward; save segment boundaries ===
+                let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+                let mut boundary_states: Vec<Tensor> =
+                    Vec::with_capacity(segments.len() + 1);
+                boundary_states.push(embed_hidden.detach());
+                {
+                    let mut current = boundary_states[0].clone();
+                    let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+                    for &(start, end) in &segments {
+                        current = model_forward_segment(
+                            &*backend_rt,
+                            current,
+                            weights,
+                            model_config,
+                            &positions,
+                            start,
+                            end,
+                            Some(&mut linear_state),
+                            Some(&lora_detached),
+                        )
+                        .context("OPD checkpointed segmented forward")?;
+                        boundary_states.push(current.detach());
+                        current = boundary_states.last().unwrap().clone();
+                    }
+                }
+                let final_hidden = boundary_states.last().unwrap().clone();
+
+                // === Step 2: OPD loss at the final boundary ===
+                // Build a Var so candle autograd routes the kernel's backward
+                // into `final_var.grad()`.
+                let final_var = Var::from_tensor(&final_hidden)?;
+                let normed = model_forward_final_norm(
+                    final_var.as_tensor(),
                     weights,
                     model_config,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("OPD forward pass (no head)")?;
-
+                )?;
                 let out = opd_step_loss(OpdStepInputs {
                     tokens: input_ids,
                     active_positions: &active_positions,
-                    student_hidden: &hidden,
+                    student_hidden: &normed,
                     head_t: &head_t,
                     teacher: teacher.clone(),
                     loss: config.loss,
                     top_k: config.top_k,
                     chunk_size: 0,
                 })?;
-
                 let loss_val = out.mean_kl.to_scalar::<f32>()? as f64;
-                let grads = out.mean_kl.backward().context("OPD backward pass")?;
-                optimizer_step(
+                let active_count = out.active_count;
+                let head_grads = out
+                    .mean_kl
+                    .backward()
+                    .context("OPD loss kernel backward at final boundary")?;
+                let mut upstream_grad = head_grads
+                    .get(final_var.as_tensor())
+                    .ok_or_else(|| anyhow!("no gradient at final_hidden Var"))?
+                    .clone()
+                    .detach();
+                drop(head_grads);
+                drop(out);
+                drop(normed);
+                drop(final_var);
+
+                // === Step 3: walk segments in reverse, accumulate LoRA grads ===
+                let mut accumulated_grads: HashMap<candle_core::TensorId, Tensor> =
+                    HashMap::new();
+                let all_vars = params.all_vars();
+                for seg_idx in (0..segments.len()).rev() {
+                    let (seg_start, seg_end) = segments[seg_idx];
+                    let seg_input = boundary_states[seg_idx].clone();
+                    let seg_input_var = Var::from_tensor(&seg_input)?;
+                    let mut state = LinearAttentionState::new(model_config, &device)?;
+                    let lora_for_seg = params.as_lora_weights();
+                    let seg_output = model_forward_segment(
+                        &*backend_rt,
+                        seg_input_var.as_tensor().clone(),
+                        weights,
+                        model_config,
+                        &positions,
+                        seg_start,
+                        seg_end,
+                        Some(&mut state),
+                        Some(&lora_for_seg),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "OPD checkpointed reverse segment [{seg_start},{seg_end})"
+                        )
+                    })?;
+
+                    // Inject upstream gradient: scalar = sum(seg_output * upstream)
+                    let scalar = (&seg_output * &upstream_grad)?
+                        .sum_all()
+                        .context("OPD reverse segment gradient injection")?;
+                    let seg_grads = scalar
+                        .backward()
+                        .with_context(|| format!("OPD reverse segment backward {seg_idx}"))?;
+                    accumulate_grads(&mut accumulated_grads, &seg_grads, &all_vars)?;
+                    upstream_grad = seg_grads
+                        .get(seg_input_var.as_tensor())
+                        .ok_or_else(|| {
+                            anyhow!("no grad at seg_input_var (seg_idx={seg_idx})")
+                        })?
+                        .clone()
+                        .detach();
+                    drop(seg_grads);
+                    drop(seg_output);
+                }
+
+                // Move CPU-spilled gradients back to the device for the optimizer step.
+                let grads_on_device: HashMap<candle_core::TensorId, Tensor> = accumulated_grads
+                    .into_iter()
+                    .map(|(k, v)| {
+                        let v = if v.device().same_device(&device) {
+                            v
+                        } else {
+                            v.to_device(&device).unwrap_or(v)
+                        };
+                        (k, v)
+                    })
+                    .collect();
+                crate::trainer::optimizer_step_from_map(
                     &*backend_rt,
                     &params,
-                    &grads,
+                    &grads_on_device,
                     config.learning_rate,
                     config.optimizer,
                     opt_state.as_mut(),
@@ -1654,7 +1775,7 @@ pub fn opd_train(
                         step = global_step,
                         total_steps,
                         loss = format!("{loss_val:.6}"),
-                        active = out.active_count,
+                        active = active_count,
                         "OPD step"
                     );
                 }
