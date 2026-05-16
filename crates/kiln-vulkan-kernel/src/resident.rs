@@ -1444,6 +1444,89 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
     .context("paged_attn_decode_batch_paged_f32_resident kernel failed")
 }
 
+/// Resident-form paged KV-cache slot write: copy one freshly-projected
+/// `(k, v)` token into the device-resident pool at the given `slot`.
+///
+/// `k_in` and `v_in` are f32 buffers each containing `num_kv_heads × head_dim`
+/// floats — the projection output for the new decode token. `k_pool` and
+/// `v_pool` are the full pool buffers held by [`VkPagedKvCache`], laid out
+/// `[total_slots, num_kv_heads, head_dim]`. The kernel writes one slot's
+/// worth of data per call; the workgroup is sized to cover
+/// `elements_per_slot = num_kv_heads × head_dim` invocations.
+///
+/// This is the device-side equivalent of
+/// `PagedKvCache::write_token_major_native(layer, bt, start_pos, k, v)`
+/// for the `new_len == 1` case (decode), and matches its semantics
+/// element-for-element — write k/v into the slot resolved by
+/// `block_table.slot_for(start_pos, block_size)`. The slot resolution
+/// itself happens on the host (no GPU block-table lookup); the kernel
+/// only does the copy.
+pub fn dispatch_paged_kv_write_slot_resident(
+    vk_device: &VulkanDevice,
+    k_in: &VulkanBuffer,
+    v_in: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    slot: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    total_slots: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        slot < total_slots,
+        "paged_kv_write_slot_resident: slot {slot} out of range (total_slots={total_slots})"
+    );
+    let elements_per_slot = num_kv_heads
+        .checked_mul(head_dim)
+        .context("paged_kv_write_slot_resident: elements_per_slot overflow")?;
+    let need_in = (elements_per_slot * 4) as u64;
+    let need_pool = (total_slots * elements_per_slot * 4) as u64;
+    anyhow::ensure!(
+        k_in.size() >= need_in,
+        "paged_kv_write_slot_resident: k_in buffer has {} bytes, needs at least {need_in}",
+        k_in.size()
+    );
+    anyhow::ensure!(
+        v_in.size() >= need_in,
+        "paged_kv_write_slot_resident: v_in buffer has {} bytes, needs at least {need_in}",
+        v_in.size()
+    );
+    anyhow::ensure!(
+        k_pool.size() >= need_pool,
+        "paged_kv_write_slot_resident: k_pool buffer has {} bytes, needs at least {need_pool}",
+        k_pool.size()
+    );
+    anyhow::ensure!(
+        v_pool.size() >= need_pool,
+        "paged_kv_write_slot_resident: v_pool buffer has {} bytes, needs at least {need_pool}",
+        v_pool.size()
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_kv_write_slot.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 2] = [slot as u32, elements_per_slot as u32];
+    let handles: [vk::Buffer; 4] = [
+        k_in.handle(),
+        v_in.handle(),
+        k_pool.handle(),
+        v_pool.handle(),
+    ];
+    // local_size_x = 64 → one workgroup per 64 elements.
+    let workgroups = elements_per_slot.div_ceil(64) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("paged_kv_write_slot_resident kernel failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2284,6 +2367,98 @@ mod tests {
 
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
             assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+        }
+    }
+
+    /// Resident KV-write must land the input K/V f32 vector verbatim
+    /// into `pool[slot * elements_per_slot ..]` and leave all other
+    /// slots untouched. We check both: a slot at `slot=2` in a
+    /// `total_slots=4` pool, then verify slot 0/1/3 are still zero.
+    #[test]
+    fn paged_kv_write_slot_resident_writes_one_slot_exactly() {
+        let Some(dev) = try_device() else { return };
+        let num_kv_heads = 4usize;
+        let head_dim = 16usize;
+        let total_slots = 4usize;
+        let elements_per_slot = num_kv_heads * head_dim;
+
+        let k_data: Vec<f32> = (0..elements_per_slot)
+            .map(|i| (i as f32) * 0.013 - 0.5)
+            .collect();
+        let v_data: Vec<f32> = (0..elements_per_slot)
+            .map(|i| (i as f32) * 0.019 + 0.2)
+            .collect();
+        let k_t = Tensor::from_vec(k_data.clone(), elements_per_slot, &Device::Cpu).unwrap();
+        let v_t = Tensor::from_vec(v_data.clone(), elements_per_slot, &Device::Cpu).unwrap();
+        let k_in_buf = upload_tensor_f32_buffer(&dev, &k_t).unwrap();
+        let v_in_buf = upload_tensor_f32_buffer(&dev, &v_t).unwrap();
+
+        // Allocate zero-initialised pool buffers via VkPagedKvCache so
+        // the test exercises the same allocation path the resident
+        // decode pipeline uses.
+        let dev_arc = Arc::clone(&dev);
+        let cache = crate::VkPagedKvCache::new(
+            &dev_arc,
+            1,
+            total_slots,
+            1, // block_size = 1 so total_slots == num_blocks * block_size
+            num_kv_heads,
+            head_dim,
+        )
+        .expect("VkPagedKvCache should allocate");
+        let k_pool = cache.k_buffer(0).unwrap();
+        let v_pool = cache.v_buffer(0).unwrap();
+
+        let target_slot = 2usize;
+        dispatch_paged_kv_write_slot_resident(
+            &dev,
+            &k_in_buf,
+            &v_in_buf,
+            k_pool,
+            v_pool,
+            target_slot,
+            num_kv_heads,
+            head_dim,
+            total_slots,
+        )
+        .unwrap();
+
+        let k_pool_back = read_back_f32(&dev, k_pool);
+        let v_pool_back = read_back_f32(&dev, v_pool);
+        assert_eq!(k_pool_back.len(), total_slots * elements_per_slot);
+        assert_eq!(v_pool_back.len(), total_slots * elements_per_slot);
+
+        for slot in 0..total_slots {
+            let base = slot * elements_per_slot;
+            if slot == target_slot {
+                for i in 0..elements_per_slot {
+                    assert_eq!(
+                        k_pool_back[base + i].to_bits(),
+                        k_data[i].to_bits(),
+                        "K slot {slot} idx {i}: pool {} vs in {}",
+                        k_pool_back[base + i],
+                        k_data[i]
+                    );
+                    assert_eq!(
+                        v_pool_back[base + i].to_bits(),
+                        v_data[i].to_bits(),
+                        "V slot {slot} idx {i}: pool {} vs in {}",
+                        v_pool_back[base + i],
+                        v_data[i]
+                    );
+                }
+            } else {
+                for i in 0..elements_per_slot {
+                    assert_eq!(
+                        k_pool_back[base + i], 0.0,
+                        "K slot {slot} idx {i} must be untouched (= 0.0)"
+                    );
+                    assert_eq!(
+                        v_pool_back[base + i], 0.0,
+                        "V slot {slot} idx {i} must be untouched (= 0.0)"
+                    );
+                }
+            }
         }
     }
 }

@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod resident;
 pub mod vk_autograd;
 pub mod vk_ops;
+pub mod vk_paged_kv_cache;
 pub mod vk_raw;
 pub mod vk_tensor;
 
@@ -29,5 +30,6 @@ pub use cmd_batch::{CommandBatch, KernelPlan, Workgroups};
 pub use decode_resident_pool::DecodeResidentPool;
 pub use device::VulkanDevice;
 pub use pipeline::ShaderPipeline;
+pub use vk_paged_kv_cache::VkPagedKvCache;
 pub use vk_autograd::{VkGradStore, vk_backward};
 pub use vk_tensor::{VkBackwardOp, VkDType, VkTensor, VkTensorInner, next_op_id};
