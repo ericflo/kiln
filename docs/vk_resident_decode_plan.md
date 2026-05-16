@@ -168,9 +168,41 @@ That's **91 µs / call at batch=1** on the resident + batched path —
 well under the 200 µs / call ceiling gate (e.1) sets. Per-step
 latency at batch=1 lands at **31 tok/s** (vs 19 tok/s baseline).
 
+### Resident paged KV pool landed (2026-05-16)
+
+`crates/kiln-vulkan-kernel/src/vk_paged_kv_cache.rs` adds
+`VkPagedKvCache`: a device-local f32 paged pool laid out
+`[total_slots, num_kv_heads, head_dim]` per layer — element-for-
+element compatible with the existing `paged_attn_decode_batch_paged`
+shader. `paged_kv_write_slot.comp` + `dispatch_paged_kv_write_slot_resident`
+write one freshly-projected K/V token into the pool at a host-
+resolved slot. Validation:
+
+| Test | What | Result |
+|------|------|--------|
+| `paged_kv_write_slot_resident_writes_one_slot_exactly` | Slot write lands input bytes verbatim; neighbouring slots untouched | passes |
+| `vk_paged_kv_cache_write_then_paged_attn_resident_roundtrip` | Write 6 tokens via resident slot-write across a non-trivial block table that crosses a block boundary; read with `paged_attn_decode_batch_paged_f32_resident`; compare against CPU softmax reference | passes (rel err ≤ 1e-4) |
+| `vk_paged_kv_cache_constructs_when_device_up` + 2 sibling tests | Cache geometry, try_new fallback, zero-dim rejection | pass |
+
+`decode_microbench full_token_resident_paged` mode runs the
+architecturally-realistic resident decode loop:
+13 dispatches × 32 layers = **416 dispatches per token** in one
+`CommandBatch` submit, using the real `VkPagedKvCache` and a
+per-step slot write into it via the new kernel. Measured on RTX
+6000 Ada at Qwen3.5-4B shapes (batch=1, cur_seq=256):
+
+| Mode | per_iter | tok/s |
+|------|----------|-------|
+| `full_token_resident_batched` (no real KV pool, no per-step write) | 31.6 ms | 32 |
+| `full_token_resident_paged` (VkPagedKvCache + per-step KV slot write) | 35.0 ms | 29 |
+
+The 3 tok/s delta is the cost of the extra 32 KV-write dispatches
+per token plus the slower paged-paged attn read vs the contiguous
+variant.
+
 ### Remaining for the headline (e.2)/(e.3) tok/s targets
 
-Three pieces:
+Two pieces:
 
 1. **Per-layer wire-up inside `model_forward_paged_inner`.** Compose
    the resident dispatchers and `CommandBatch` into a per-layer
@@ -178,30 +210,26 @@ Three pieces:
    sibling), then swap
    `model_forward_paged_last_token_resident`'s delegation for a
    layer loop. The dispatchers, pool, and command-batch
-   infrastructure are all in place — this is the assembly job.
+   infrastructure are all in place — this is the assembly job. With
+   the resident KV pool in place, this work no longer has to do
+   per-step KV bridging.
 
-2. **Vulkan-resident paged KV pool.** Today `PagedKvCache::layers`
-   is `Vec<(Tensor, Tensor)>` and on Vulkan the candle device is
-   `Device::Cpu`. The decode-path KV write
-   (`write_token_major_native`) falls back through CPU storage. The
-   resident path needs the pool to be `vk::Buffer`-backed so each
-   layer's K/V write is a `vkCmdCopyBuffer` into the pool at the
-   block-table slot offset. This is the largest architectural piece.
+2. **Compute-throughput optimization for the BF16 GEMMs.** At
+   29 tok/s @ batch=1 on the architecturally-realistic path
+   (`full_token_resident_paged`) we're at 42 % of the 69 tok/s
+   llama.cpp baseline. The submit overhead has been collapsed to
+   zero by the work above; the remaining latency is **dominated by
+   GPU compute on the BF16 weight reads in the GEMM shaders**.
+   Reaching the 55 tok/s (= 80 % of 69) target requires arithmetic-
+   intensity work — the plan calls out cooperative-matrix as the
+   natural follow-up (out of scope for this goal). The RTX 6000 Ada
+   exposes `VK_KHR_cooperative_matrix` so that path is open
+   whenever this work is unblocked.
 
-3. **Compute-throughput optimization for the BF16 GEMMs.** At
-   31 tok/s @ batch=1 we're at 45 % of the 69 tok/s llama.cpp
-   baseline. The submit overhead has been collapsed to zero by the
-   work above; the remaining latency is **dominated by GPU compute
-   on the BF16 weight reads in the GEMM shaders**. Reaching the
-   55 tok/s (= 80 % of 69) target requires arithmetic-intensity
-   work — the plan calls out cooperative-matrix as the natural
-   follow-up (out of scope for this goal).
-
-The first two unblock end-to-end measurement against a real
-Qwen3.5-4B checkpoint via `kiln-bench --features vulkan` (today the
-entry point delegates so no end-to-end win materialises). The third
-is the path past the wall we hit at ~31 tok/s with the resident +
-batched submission infrastructure landed here.
+Piece (1) unblocks end-to-end measurement against a real Qwen3.5-4B
+checkpoint via `kiln-bench --features vulkan`. Piece (2) is the
+path past the wall we hit at ~29 tok/s with the resident + batched
+submission + resident paged KV pool landed here.
 
 ## Out of scope for this goal
 
