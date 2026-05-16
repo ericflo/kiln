@@ -320,14 +320,25 @@ stays bit-identical (worst-diff abs=0, rel=0). End-to-end:
 
 After full-attn wire-up, additional wire-up landed in this order:
 
-| Stage | Decode tok/s | Mean ITL | Lift |
-|-------|--------------|----------|------|
-| Legacy (no wire-up) | 1.04 | 965 ms | (baseline) |
-| Resident full-attn only | 1.33 | 752 ms | +28% |
-| + GDN-only resident (legacy bridge) | 1.6 | 600 ms | +20% |
-| + Pool persistence + GDN inner-CommandBatch | 1.8 | 555 ms | +12% |
-| **+ Full-block GDN resident (commit `876e791d`)** | **5.8** | **170 ms** | **+220%** |
-| + Native single-submit orchestrator (commit `40dec1ed`) | 5.8 | 170 ms | wash |
+| Stage | Decode tok/s (mean) | Mean ITL | p50 ITL | Lift |
+|-------|---------------------|----------|---------|------|
+| Legacy (no wire-up) | 1.04 | 965 ms | — | (baseline) |
+| Resident full-attn only | 1.33 | 752 ms | — | +28% |
+| + GDN-only resident (legacy bridge) | 1.6 | 600 ms | — | +20% |
+| + Pool persistence + GDN inner-CommandBatch | 1.8 | 555 ms | — | +12% |
+| + Full-block GDN resident (commit `876e791d`) | 5.8 | 170 ms | — | +220% |
+| **+ Native single-submit orchestrator (commit `40dec1ed`)** | **15.6** | **~64 ms** | **~48 ms** | **+170%** |
+
+5 runs at `--max-output-tokens 32` after wiring native into
+`model_forward_paged_last_token_greedy` (which is the actual decode
+hot-loop entry — `model_forward_paged_next_token_greedy` delegates
+here when the backend exposes `supports_linear_decode_argmax`):
+15.8 / 14.7 / 14.5 / 17.0 / 15.8 tok/s mean, p50 47-51 ms.
+Native-off (per-layer fast-paths only): 7.5 / 8.7 / 7.5 tok/s
+(average 7.9). The 2× delta is the win from collapsing the 32
+per-layer submits + Tensor↔VulkanBuffer round-trips into one
+`CommandBatch::submit_and_wait` plus one upload + one readback per
+token.
 
 Bit-identical parity preserved end-to-end through every stage
 (`vk_resident_decode_parity` worst-diff abs=0, rel=0 on
@@ -346,25 +357,33 @@ lifts the *entire* GDN-flavored transformer block into one
 `CommandBatch` (14 dispatches, mirrors the full-attn full-block
 shape) and eliminates the candle tail.
 
-#### Why the native single-submit orchestrator is a wash
+#### What the native single-submit orchestrator actually buys
 
 `model_forward_paged_last_token_resident_native_vk` chains all 32
 layer blocks into one `CommandBatch` and submits exactly once per
 token (vs. 32 submits — one per layer — in the per-layer
-fast-paths). Per-block timing shows submit-and-wait per layer is
-dominated by **actual GPU kernel time** (~5-7 ms / layer × 32 layers
-≈ 170 ms / token ≈ observed ITL). Per-submit driver overhead is
-sub-millisecond at this shape, so collapsing 32 submits to 1 reclaims
-very little wall time. The architectural win (cleaner buffer flow,
-no per-layer Tensor↔VulkanBuffer bridge) is real but
-*orchestration is no longer the bottleneck*. Kept gated on
-`KILN_VK_RESIDENT_DECODE_NATIVE` (default on) since it's still the
-right shape going forward.
+fast-paths). Activations stay on the GPU between layers, alternating
+between two pool buffers, so the only host transfers per token are:
+
+  - one upload of the embedding output (input x)
+  - one upload of RoPE cos/sin + block_table + seq_lens (tiny)
+  - one readback of the final hidden state
+
+That removes 31 of 32 per-layer x uploads, 31 of 32 per-layer final-
+output readbacks, and 31 of 32 per-layer command-buffer submits.
+The benchmark confirms a measured **2× speedup** vs. running the
+per-layer Tensor-in/Tensor-out fast-paths through
+`model_forward_paged_inner` (7.9 → 15.6 tok/s mean). An earlier
+quick measurement showed a wash; that was a stale-binary artifact.
+The win is structural and reproducible.
+
+Gated on `KILN_VK_RESIDENT_DECODE_NATIVE` (default on); falls back
+transparently to the per-layer fast-paths on any decline.
 
 #### Remaining gap and the only realistic path past it
 
-Current 5.8 tok/s vs. the gate (e.2) target of 55 tok/s leaves a
-~9.5× factor. Per-layer kernel breakdown:
+Current 15.6 tok/s mean (≈21 tok/s p50) vs. the gate (e.2) target
+of 55 tok/s leaves a ~2.6-3.5× factor. Per-layer kernel breakdown:
 
 - Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
   (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
