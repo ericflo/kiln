@@ -8961,9 +8961,10 @@ if (playgroundCard) {
   comparePair.className = 'compare-pair';
   comparePair.style.display = 'none';
   comparePair.style.padding = '0 var(--space-5) var(--space-4)';
+  const sidePlaceholder = `<div style="color:var(--text-quiet); font-style:italic; font-size:12px; padding:8px 0;">Pick adapters above and send a prompt to fan it out side-by-side.</div>`;
   comparePair.innerHTML = `
-    <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body"></div></div>
-    <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body"></div></div>`;
+    <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body">${sidePlaceholder}</div></div>
+    <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body">${sidePlaceholder}</div></div>`;
   const chatOutput = playgroundCard.querySelector('.chat-output-actions');
   if (chatOutput) chatOutput.parentNode.insertBefore(comparePair, chatOutput);
 }
