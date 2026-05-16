@@ -134,6 +134,8 @@ beyond the bf16w GEMMs in the gate (a) table:
 | Residual add | `dispatch_add_resident` | `add.comp` |
 | Attention output gate | `dispatch_mul_sigmoid_gate_resident` | `vk_mul_sigmoid_gate_f32.comp` |
 | Per-head Q-norm / K-norm | reuse `dispatch_qwen_rmsnorm_forward_resident` with `rows = batch * num_heads, hidden = head_dim` | — |
+| Paged KV-slot write | `dispatch_paged_kv_write_slot_resident` | `paged_kv_write_slot.comp` |
+| QKV gate-split | `dispatch_qkv_gate_split_resident` | `qkv_gate_split.comp` |
 
 Parity tests for each compare against a CPU reference at ≤1e-6 abs
 (≤2 ulps for the multiply-sigmoid). With these landed, the
@@ -252,6 +254,37 @@ roughly **30×**, which is the actual gap the plan is meant to
 close. The headline 55 tok/s (= 80% of llama.cpp) is then a further
 ~2× away — exactly the cooperative-matrix follow-up the plan calls
 out.
+
+### Plumbing in place for the wire-up
+
+The remaining piece is the per-layer wire-up — building
+`transformer_block_paged_decode_full_attn_resident` (and a GDN
+sibling) inside `crates/kiln-model/src/`. All the primitives it
+needs are now wired into `VulkanBackend`:
+
+| Primitive | Where |
+|-----------|-------|
+| Cached bf16-packed weight buffer (per-tensor, by `TensorId`) | `VulkanBackend::cached_bf16_packed_weight_buffer` |
+| Cached f32 weight buffer | `VulkanBackend::cached_f32_weight_buffer` |
+| Vulkan-resident paged KV cache (lazy, fits-or-falls-back) | `VulkanBackend::vk_paged_kv_cache(layers, blocks, block_size, kv_heads, head_dim)` |
+| Resident scratch ring (3-4 slots) | `VulkanBackend::decode_resident_pool` |
+| Single-submit dispatch batch | `kiln_vulkan_kernel::CommandBatch` |
+| KV slot write | `dispatch_paged_kv_write_slot_resident` |
+| QKV gate-split | `dispatch_qkv_gate_split_resident` |
+| All other resident dispatchers (gate (a) of the plan) | `crates/kiln-vulkan-kernel/src/resident.rs` |
+
+The assembly job — a per-layer loop that
+(a) materialises x in a pool slot,
+(b) records 13 resident dispatches into a `CommandBatch`,
+(c) writes the freshly-projected K/V into the
+`VkPagedKvCache` at the block-table-resolved slot,
+(d) reads the residual output back as a Tensor at the
+layer boundary, and
+(e) seeds the `VkPagedKvCache` from the legacy candle pool on
+the first decode call after a prefill —
+is the next session of focused work. The kernel-, pool-, cache-, and
+backend-plumbing surface is complete; only the orchestration in
+`forward.rs` (or a new `vk_decode_resident.rs`) remains.
 
 ## Out of scope for this goal
 
