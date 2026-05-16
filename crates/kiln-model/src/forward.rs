@@ -14188,7 +14188,10 @@ fn model_forward_paged_last_token_resident_native_vk(
     )?;
     // LM head GEMM (bf16w b=1): normed_final_buf → logits_buf
     batch.record_shader(
-        kiln_vulkan_kernel::shaders::LINEAR_DECODE_BF16W,
+        // LM head out_dim = vocab_size (151936 for Qwen3.5-4B) — the wide
+        // 64-col variant gives ~2374 workgroups (full SM saturation) AND
+        // 100% cache-line utilization per warp memory read.
+        kiln_vulkan_kernel::shaders::LINEAR_DECODE_BF16W_WIDE,
         &[
             normed_final_buf.handle(),
             lm_head_w_buf.handle(),
