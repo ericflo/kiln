@@ -8976,6 +8976,15 @@ chatCompareToggle?.addEventListener('change', ev => {
   document.getElementById('chat-adapter-b-label').style.display = chatCompareMode ? '' : 'none';
   document.getElementById('chat-adapter-b').style.display = chatCompareMode ? '' : 'none';
   document.getElementById('chat-compare-pair').style.display = chatCompareMode ? '' : 'none';
+  // Hide the simple-mode chat history when compare is on — compare runs
+  // are stateless, single-prompt, so showing prior turns is confusing.
+  // The chat history isn't cleared (toggling back off restores it).
+  const chatOutput = document.getElementById('chat-output');
+  if (chatOutput) chatOutput.style.display = chatCompareMode ? 'none' : '';
+  const chatExport = document.getElementById('chat-export');
+  if (chatExport) chatExport.style.display = chatCompareMode ? 'none' : '';
+  const chatCopy = document.querySelector('[data-copy-chat-response]');
+  if (chatCopy) chatCopy.style.display = chatCompareMode ? 'none' : '';
   // Sync the B dropdown to the same options as A.
   const a = document.getElementById('chat-adapter');
   const b = document.getElementById('chat-adapter-b');
