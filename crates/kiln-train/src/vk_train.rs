@@ -2791,6 +2791,73 @@ pub fn vk_grpo_train_step_with_state(
     Ok(loss_val)
 }
 
+/// Vulkan-native OPD training step.
+///
+/// Mirrors `vk_grpo_train_step_with_state` but uses the fused OPD top-K
+/// reverse-KL loss from `kiln_vulkan_kernel::vk_ops::opd` instead of the GRPO
+/// importance-sampling head. One forward through the model → gather active
+/// rows → fused-kernel forward+backward against the teacher's top-K → AdamW
+/// (or SGD) on the LoRA adapter pairs.
+///
+/// Arguments:
+/// - `active_rows`: row indices into `hidden` that contribute to the loss
+///   (the trainer's "active" positions — typically assistant tokens). The
+///   order must match the row order of `teacher_topk_indices` /
+///   `teacher_topk_logprobs`.
+/// - `teacher_topk_indices`: flattened `[active_rows.len() * top_k]` u32
+///   teacher top-K vocab indices.
+/// - `teacher_topk_logprobs`: flattened `[active_rows.len() * top_k]` f32
+///   teacher logprobs at those indices (full-vocab `log_softmax`; the
+///   kernel renormalises over the K support).
+/// - `top_k`: 16 or 32 (the supported K envelope).
+///
+/// Returns the scalar mean reverse-KL after the optimizer step.
+#[allow(clippy::too_many_arguments)]
+pub fn vk_opd_train_step_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    active_rows: &[u32],
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    top_k: usize,
+    gdn_state: Option<&mut VkLinearAttentionState>,
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    optimizer: Optimizer,
+    step: u32,
+) -> Result<f32> {
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_loss;
+
+    let h = vk_model_forward_final_norm_with_state(weights, lora_layers, input_ids, gdn_state)?;
+    let active_h = vk_index_select_rows(&h, active_rows)?;
+    let loss = vk_opd_top_k_reverse_kl_loss(
+        &active_h,
+        &weights.lm_head,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )?;
+    let loss_val = loss.to_vec_f32()?[0];
+    let grads = vk_backward(&loss)?;
+    let mut shared_grads = HashMap::new();
+    for (pid, grad) in grads.iter() {
+        shared_grads.insert(*pid, grad.clone());
+    }
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        optimizer,
+        step,
+        "vk_opd_train_step",
+    )?;
+    Ok(loss_val)
+}
+
 // ---------------------------------------------------------------------------
 // LoRA initialization (one VkLoraLayer per model layer)
 // ---------------------------------------------------------------------------
