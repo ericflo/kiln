@@ -828,6 +828,25 @@ select {
 }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
+
+/* Sitewide focus-visible — applies anywhere not already handled. Keeps
+   keyboard users oriented without ever showing the ring on mouse focus. */
+:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+.search-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+.primary-tab:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
 
 .btn-primary {
   background: linear-gradient(180deg, var(--kiln-500), var(--kiln-600));
@@ -3042,7 +3061,7 @@ select {
               <label for="upload-archive">Adapter archive</label>
               <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state">
             </div>
-            <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
+            <button type="button" class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
           </div>
           <div id="upload-adapter-state" style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);" aria-live="polite">Enter a name and choose an archive to enable upload.</div>
         </div>
@@ -3080,7 +3099,7 @@ select {
             <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
           </div>
           <div style="display: flex; justify-content: flex-end; margin-top: var(--space-3);">
-            <button class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge adapters</button>
+            <button type="button" class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge adapters</button>
           </div>
         </div>
       </div>
@@ -4055,6 +4074,19 @@ function fmtRelTime(unixMs) {
   return Math.floor(delta / 86400) + 'd ago';
 }
 
+/// Like `fmtRelTime` but switches to an absolute date once the entry is
+/// older than a week — relative ago times stop being meaningful after that.
+function fmtSmartTime(unixMs) {
+  if (!unixMs) return '—';
+  const delta = (Date.now() - unixMs) / 1000;
+  if (delta < 7 * 86400) return fmtRelTime(unixMs);
+  try {
+    const d = new Date(unixMs);
+    // e.g. "May 14"
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch { return fmtRelTime(unixMs); }
+}
+
 // `escapeHtml` is defined further down (the canonical version also
 // escapes single quotes); function-declaration hoisting makes the later
 // one win regardless of where this comment lives. Keeping a stub here
@@ -4777,6 +4809,18 @@ async function pollTraining() {
       setText('hero-training', String(data.queued.length));
       document.getElementById('hero-training').innerHTML = `${data.queued.length}<span class="unit">queued</span>`;
       setText('hero-training-sub', `Next: ${q.adapter_name || q.job_id}`);
+    } else if (data.completed && data.completed.length > 0) {
+      // When the queue is empty but archived jobs exist, surface the most
+      // recent one in the hero stat instead of the un-informative "idle"
+      // placeholder. Users land on the dashboard wanting to know what
+      // their last run did, not that nothing is running right now.
+      const last = data.completed[0];
+      const lastLoss = last.current_loss != null ? last.current_loss.toFixed(3) : '—';
+      const lastState = (last.state || 'completed').toString().toLowerCase();
+      const when = last.finished_unix_ms || last.submitted_unix_ms;
+      setText('hero-training', 'idle');
+      document.getElementById('hero-training').innerHTML = `${data.completed.length}<span class="unit">recent</span>`;
+      setText('hero-training-sub', `Last ${lastState}: ${last.adapter_name || last.job_id} · loss ${lastLoss}${when ? ' · ' + fmtSmartTime(when) : ''}`);
     } else {
       setText('hero-training', 'idle');
       document.getElementById('hero-training').textContent = 'idle';
@@ -4864,12 +4908,25 @@ function renderTrainingCard(j, state) {
   const cancelBtn = (state === 'queued')
     ? `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`
     : '';
+  // Prefer the wall-clock timestamps (`submitted_unix_ms` /
+  // `finished_unix_ms`) introduced with the on-disk archive — those
+  // survive restarts. Fall back to `elapsed_secs` only when the server
+  // is on an older payload (no wall-clock fields).
+  let timeBadge = '';
+  if (state === 'completed' && j.finished_unix_ms) {
+    timeBadge = `<span class="hint" style="font-size:11px;" title="${escapeHtml(new Date(j.finished_unix_ms).toISOString())}">finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}</span>`;
+  } else if (j.submitted_unix_ms) {
+    timeBadge = `<span class="hint" style="font-size:11px;" title="${escapeHtml(new Date(j.submitted_unix_ms).toISOString())}">started ${escapeHtml(fmtSmartTime(j.submitted_unix_ms))}</span>`;
+  } else if (j.elapsed_secs != null) {
+    timeBadge = `<span class="hint" style="font-size:11px;">${escapeHtml(Math.floor(j.elapsed_secs) + 's elapsed')}</span>`;
+  }
   return `<div class="${cardClass}" data-train-job-id="${escapeHtml(j.job_id)}">
     <div class="training-card-head">
       ${stateBadge}
       <span class="training-card-name"><span class="hint" style="font-weight:400;margin-right:4px;">Adapter:</span>${adapterLabel}</span>
       <span class="training-card-type ${escapeHtml(jobType)}">${escapeHtml(jobType)}</span>
       <span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(shortId(j.job_id))}</span>
+      ${timeBadge}
       ${cancelBtn}
     </div>
     <div class="training-card-progress">
@@ -6660,8 +6717,8 @@ async function refreshDatasets() {
         </div>
         <div class="row-sub" style="font-family:var(--font-mono);">${escapeHtml(pattern)}</div>
         <div class="row-actions">
-          <button class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
-          <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+          <button type="button" class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
+          <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
         </div>
       </div>`;
     }).join('');
@@ -6899,9 +6956,9 @@ async function refreshSuites() {
         <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
         <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
         <div class="row-actions">
-          <button class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
-          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
-          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
+          <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
         </div>
       </div>`;
     }).join('');
@@ -7496,9 +7553,9 @@ async function refreshJudgments() {
           <div class="tabular-nums">${m.num_rows} judgments</div>
           <div style="display:flex; gap:8px; align-items:center; font-size:11px;">${winnerBar}<span class="hint">A ${winners.a||0} · T ${winners.tie||0} · B ${winners.b||0}</span></div>
           <div class="row-actions">
-            <button class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
-            <button class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
-            <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+            <button type="button" class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
+            <button type="button" class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
+            <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
           </div>
         </div>`;
       }).join('');
@@ -8592,19 +8649,35 @@ function renderTrainDrillBody(j) {
   const finalLoss = j.current_loss != null ? j.current_loss.toFixed(4) : '—';
   const epoch = j.epoch != null ? j.epoch.toString() : '—';
   const samples = (j.loss_history || []).length;
+  // Prefer the on-disk wall-clock fields when present — `elapsed_secs`
+  // is wrong for archived jobs because the in-memory `Instant` reset
+  // when we restored from disk.
+  let durationSecs = j.elapsed_secs;
+  if (j.submitted_unix_ms && j.finished_unix_ms) {
+    durationSecs = Math.max(0, (j.finished_unix_ms - j.submitted_unix_ms) / 1000);
+  } else if (j.submitted_unix_ms) {
+    durationSecs = Math.max(0, (Date.now() - j.submitted_unix_ms) / 1000);
+  }
+  const timeRow = (j.submitted_unix_ms || j.finished_unix_ms)
+    ? `<div style="margin-top:6px; font-size:11px; color:var(--text-quiet);">
+        ${j.submitted_unix_ms ? `submitted ${escapeHtml(fmtSmartTime(j.submitted_unix_ms))}` : ''}
+        ${j.finished_unix_ms ? ` · finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}` : ''}
+      </div>`
+    : '';
   const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Progress</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${(j.progress*100).toFixed(0)}%</div></div>
-      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Current loss</div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">${j.state === 'completed' || j.state === 'failed' ? 'Final loss' : 'Current loss'}</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${finalLoss}</div></div>
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Epoch</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${epoch}</div></div>
-      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Elapsed</div>
-        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtDuration(j.elapsed_secs)}</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Duration</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtDuration(durationSecs)}</div></div>
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Samples</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${samples}</div></div>
     </div>
+    ${timeRow}
   </div>
   <div class="detail-section">
     <h4>Loss curve</h4>
