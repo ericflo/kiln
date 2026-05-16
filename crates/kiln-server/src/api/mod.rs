@@ -6,6 +6,7 @@ use tracing::Span;
 use crate::state::AppState;
 
 mod adapters;
+pub(crate) mod agent_traces;
 pub(crate) mod cache;
 pub(crate) mod completions;
 mod config;
@@ -15,6 +16,7 @@ pub(crate) mod library;
 mod metrics;
 mod models;
 pub(crate) mod recipes;
+pub(crate) mod self_improve;
 mod stats;
 pub(crate) mod teachers;
 mod training;
@@ -66,6 +68,8 @@ pub fn router(state: AppState) -> Router {
         .merge(recipes::routes())
         .merge(cache::routes())
         .merge(library::routes())
+        .merge(agent_traces::routes())
+        .merge(self_improve::routes())
         .merge(training::routes())
         .merge(eval::routes())
         .merge(config::routes())
