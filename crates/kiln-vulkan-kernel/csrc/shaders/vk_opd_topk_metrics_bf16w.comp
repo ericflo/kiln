@@ -138,9 +138,7 @@ void main() {
         reduced[2] = kl;
     }
     barrier();
-    if (tid == 0u) {
-        data_out[3u * t + 0u] = reduced[0];
-        data_out[3u * t + 1u] = reduced[1];
-        data_out[3u * t + 2u] = reduced[2];
-    }
+    data_out[3u * t + 0u] = reduced[0];
+    data_out[3u * t + 1u] = reduced[1];
+    data_out[3u * t + 2u] = reduced[2];
 }

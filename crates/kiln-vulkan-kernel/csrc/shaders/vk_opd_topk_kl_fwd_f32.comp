@@ -154,13 +154,11 @@ void main() {
         bcast = s;
     }
     barrier();
-    // Single-thread write into a storage buffer at the very end of the
-    // shader was observed to silently drop on at least one CPU-side
-    // Vulkan driver (lavapipe). Broadcasting through shared memory and
-    // having an arbitrary thread emit fixes that — only one thread
-    // actually writes per dispatch but the value is now coherent w.r.t.
-    // every threads' view of `bcast`.
-    if (tid == 0u) {
-        data_out[t] = bcast;
-    }
+    // Idempotent multi-thread write: every thread emits the same scalar
+    // (broadcast through `bcast`). This is the same per-row scalar emit
+    // pattern the FLCE per-token-loss + selected-logprob shaders use,
+    // and avoids a pathological case observed on lavapipe (Mesa's CPU
+    // Vulkan) where a final single-thread `data_out[t] = s` emit at end
+    // of main was dropped for workgroup 0.
+    data_out[t] = bcast;
 }

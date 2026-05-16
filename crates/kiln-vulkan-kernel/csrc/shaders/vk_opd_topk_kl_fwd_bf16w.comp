@@ -128,7 +128,5 @@ void main() {
         bcast = s;
     }
     barrier();
-    if (tid == 0u) {
-        data_out[t] = bcast;
-    }
+    data_out[t] = bcast;
 }
