@@ -1,0 +1,80 @@
+// Split the combined QKV-with-gate buffer produced by
+// full_attn_qkv_decode{,_bf16w}.comp into four distinct output
+// buffers: q, gate, k, v. Used by the Vulkan-resident decode wire-up
+// (docs/vk_resident_decode_plan.md) so the per-layer block stays
+// device-resident across the projection → norm/rotate/attention chain.
+//
+// Combined input layout (per decode row):
+//   [0 .. q_dim)         : q_raw, shape [num_heads, 2, head_dim]
+//                          → per head h: q_raw[h, 0, ·] = q[h, ·],
+//                                        q_raw[h, 1, ·] = gate[h, ·]
+//   [q_dim .. q_dim+k_dim): k, shape [num_kv_heads, head_dim]
+//   [q_dim+k_dim .. end) : v, shape [num_kv_heads, head_dim]
+//
+// where q_dim = 2 × num_heads × head_dim, k_dim = v_dim = num_kv_heads × head_dim.
+//
+// Outputs (each [num_*heads × head_dim] f32):
+//   - q     : per-head Q
+//   - gate  : per-head attention output gate
+//   - k     : per-KV-head K
+//   - v     : per-KV-head V
+//
+// Push constants: [num_heads, num_kv_heads, head_dim].
+//
+// Dispatch: enough invocations to cover max(num_heads, num_kv_heads) × head_dim;
+// each invocation copies one (head, element) tuple from the combined
+// buffer to each of the four outputs, masking on head_idx bounds.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_heads;
+    uint num_kv_heads;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly  buffer CombBuf { float data_comb[]; };
+layout(binding = 1) writeonly buffer QBuf    { float data_q[];    };
+layout(binding = 2) writeonly buffer GBuf    { float data_gate[]; };
+layout(binding = 3) writeonly buffer KBuf    { float data_k[];    };
+layout(binding = 4) writeonly buffer VBuf    { float data_v[];    };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint per_head = head_dim;
+    uint full_heads_total = num_heads * per_head;
+    uint kv_heads_total = num_kv_heads * per_head;
+
+    // Each invocation handles one element across up to four outputs.
+    // We use tid to index into a unified "(head_kind, head_idx, pos)" space:
+    //   - 0 ≤ tid < full_heads_total  → q & gate at head tid/per_head, pos tid%per_head
+    //   - full_heads_total ≤ tid < full_heads_total + kv_heads_total → k
+    //   - then v
+    if (tid < full_heads_total) {
+        uint h = tid / per_head;
+        uint p = tid - h * per_head;
+        // Combined: q_raw[h, 0, p] = q[h, p], q_raw[h, 1, p] = gate[h, p].
+        uint q_idx    = h * 2u * per_head + p;
+        uint gate_idx = h * 2u * per_head + per_head + p;
+        data_q[h * per_head + p]    = data_comb[q_idx];
+        data_gate[h * per_head + p] = data_comb[gate_idx];
+    } else if (tid < full_heads_total + kv_heads_total) {
+        uint local = tid - full_heads_total;
+        uint h = local / per_head;
+        uint p = local - h * per_head;
+        uint q_dim = 2u * num_heads * per_head;
+        uint k_idx = q_dim + h * per_head + p;
+        data_k[h * per_head + p] = data_comb[k_idx];
+    } else if (tid < full_heads_total + 2u * kv_heads_total) {
+        uint local = tid - full_heads_total - kv_heads_total;
+        uint h = local / per_head;
+        uint p = local - h * per_head;
+        uint q_dim = 2u * num_heads * per_head;
+        uint k_dim = num_kv_heads * per_head;
+        uint v_idx = q_dim + k_dim + h * per_head + p;
+        data_v[h * per_head + p] = data_comb[v_idx];
+    }
+}

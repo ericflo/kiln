@@ -1,0 +1,65 @@
+// Split the combined GDN in_proj output buffer into four distinct
+// output buffers: mixed_qkv, z, a, b. The legacy GDN forward path
+// emits these as separate candle Tensors via narrow + contiguous;
+// the Vulkan-resident wire-up needs the split to land on the GPU
+// so the following conv1d / norm / gates / recurrent kernels read
+// from device-resident inputs.
+//
+// Combined layout (per decode row):
+//   [0 .. qkv_dim)                    : mixed_qkv (q | k | v concatenated)
+//   [qkv_dim .. qkv_dim+z_dim)        : z
+//   [qkv_dim+z_dim .. +a_dim)         : a
+//   [qkv_dim+z_dim+a_dim .. end)      : b
+//
+// Outputs:
+//   - mixed_qkv : f32, length qkv_dim
+//   - z         : f32, length z_dim
+//   - a         : f32, length a_dim
+//   - b         : f32, length b_dim
+//
+// Push constants: [qkv_dim, z_dim, a_dim, b_dim].
+//
+// Dispatch: one workgroup per 64 elements covering
+// max(qkv_dim, z_dim, a_dim, b_dim); each invocation copies one
+// element to whichever output its tid range maps into.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint qkv_dim;
+    uint z_dim;
+    uint a_dim;
+    uint b_dim;
+};
+
+layout(binding = 0) readonly  buffer CombBuf { float data_comb[];      };
+layout(binding = 1) writeonly buffer QkvBuf  { float data_mixed_qkv[]; };
+layout(binding = 2) writeonly buffer ZBuf    { float data_z[];         };
+layout(binding = 3) writeonly buffer ABuf    { float data_a[];         };
+layout(binding = 4) writeonly buffer BBuf    { float data_b[];         };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint qkv_end = qkv_dim;
+    uint z_end   = qkv_end + z_dim;
+    uint a_end   = z_end   + a_dim;
+    uint total   = a_end   + b_dim;
+
+    if (tid >= total) return;
+
+    if (tid < qkv_end) {
+        data_mixed_qkv[tid] = data_comb[tid];
+    } else if (tid < z_end) {
+        uint p = tid - qkv_end;
+        data_z[p] = data_comb[tid];
+    } else if (tid < a_end) {
+        uint p = tid - z_end;
+        data_a[p] = data_comb[tid];
+    } else {
+        uint p = tid - a_end;
+        data_b[p] = data_comb[tid];
+    }
+}

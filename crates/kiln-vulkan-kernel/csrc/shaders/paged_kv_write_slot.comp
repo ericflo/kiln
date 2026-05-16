@@ -1,0 +1,41 @@
+// Write a single K/V token into the Vulkan-resident paged pool at a
+// caller-provided slot index.
+//
+// Inputs:
+//   - k_in     : f32, length = num_kv_heads * head_dim
+//   - v_in     : f32, length = num_kv_heads * head_dim
+//
+// Outputs:
+//   - k_pool   : f32, [total_slots, num_kv_heads, head_dim]
+//                  in row-major, write @ slot.
+//   - v_pool   : f32, same layout, write @ slot.
+//
+// Push constants: slot (u32), elements_per_slot (u32 = num_kv_heads * head_dim).
+//
+// Used by `dispatch_paged_kv_write_slot_resident` to land a freshly-
+// projected K/V token into the VRAM-resident paged cache without
+// going through host memory. One workgroup of 64 threads per
+// dispatch; total threads ≥ elements_per_slot.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint slot;
+    uint elements_per_slot;
+};
+
+layout(binding = 0) readonly  buffer KInBuf   { float data_k_in[];   };
+layout(binding = 1) readonly  buffer VInBuf   { float data_v_in[];   };
+layout(binding = 2) writeonly buffer KPoolBuf { float data_k_pool[]; };
+layout(binding = 3) writeonly buffer VPoolBuf { float data_v_pool[]; };
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= elements_per_slot) return;
+    uint dst = slot * elements_per_slot + i;
+    data_k_pool[dst] = data_k_in[i];
+    data_v_pool[dst] = data_v_in[i];
+}

@@ -59,8 +59,31 @@ pub struct VulkanDevice {
     /// vkCmdDispatch fail opaquely.
     max_compute_work_group_count: [u32; 3],
     pipeline_cache: Mutex<HashMap<PipelineKey, CachedComputePipeline>>,
+    /// Fast-path cache for `CommandBatch::record_shader` callers.
+    /// Keyed by `(shader_path, total_bindings, push_constant_size)` —
+    /// avoids re-hashing the SPIR-V bytes on every record. Returns
+    /// the same `CachedComputePipeline` slots as `pipeline_cache`.
+    path_pipeline_cache: Mutex<HashMap<(&'static str, u32, u32), CachedComputePipeline>>,
     transient_command_pool: Mutex<vk::CommandPool>,
     transient_descriptor_pool: Mutex<vk::DescriptorPool>,
+    /// Long-lived pools dedicated to `CommandBatch`. Sized to hold a full
+    /// multi-dispatch decode step's worth of descriptor sets and command
+    /// buffers so each batch can lock, allocate, submit, and `reset` —
+    /// instead of paying `vkCreateCommandPool` + `vkCreateDescriptorPool`
+    /// per layer (which dominated decode ITL on NVIDIA drivers, ~5 ms
+    /// each × 32 layers = 160 ms wasted per token).
+    batch_command_pool: Mutex<vk::CommandPool>,
+    /// Ring of long-lived descriptor pools dedicated to `CommandBatch`.
+    /// Grows on demand: when the most recent pool hits
+    /// `ERROR_OUT_OF_POOL_MEMORY`, a new pool is appended and the
+    /// allocation retries against it. Sets allocated from older pools
+    /// stay valid (the pools are never reset for the lifetime of the
+    /// device), which is what keeps the long-lived
+    /// `descriptor_set_cache` entries usable. Without this growth the
+    /// single pool exhausted after ~1024 unique buffer combos — fine
+    /// for bench but fatal under real serving where every request
+    /// brings fresh KV-cache slot and intermediate-buffer handles.
+    batch_descriptor_pools: Mutex<Vec<vk::DescriptorPool>>,
     /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
     /// Once true, subsequent dispatches short-circuit with a clear error
     /// instead of returning cryptic submit failures forever — the underlying
@@ -141,12 +164,12 @@ impl VulkanDevice {
             Err(_) => return false,
         };
 
-        let app_info = vk::ApplicationInfo::builder()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0));
 
-        let instance_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
+        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
 
         let instance = match unsafe { entry.create_instance(&instance_info, None) } {
             Ok(i) => i,
@@ -168,11 +191,11 @@ impl VulkanDevice {
             .map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;
 
         // Create instance
-        let app_info = vk::ApplicationInfo::builder()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Vulkan Backend\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0))
-            .build();
+            ;
 
         // Optional: enable Vulkan validation layers when KILN_VULKAN_VALIDATION
         // is set (truthy values: 1, true, on, yes). Useful for diagnosing
@@ -182,9 +205,11 @@ impl VulkanDevice {
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let mut layer_ptrs: Vec<*const i8> = Vec::new();
         if validation_requested() {
-            let layers = entry
-                .enumerate_instance_layer_properties()
-                .context("failed to enumerate Vulkan instance layers")?;
+            let layers = unsafe {
+                entry
+                    .enumerate_instance_layer_properties()
+                    .context("failed to enumerate Vulkan instance layers")?
+            };
             let available = layers.iter().any(|l| {
                 let name = unsafe { CStr::from_ptr(l.layer_name.as_ptr()) };
                 name == validation_layer.as_c_str()
@@ -205,7 +230,7 @@ impl VulkanDevice {
         }
 
         let mut instance_info_builder =
-            vk::InstanceCreateInfo::builder().application_info(&app_info);
+            vk::InstanceCreateInfo::default().application_info(&app_info);
         if !layer_ptrs.is_empty() {
             instance_info_builder = instance_info_builder.enabled_layer_names(&layer_ptrs);
         }
@@ -280,15 +305,15 @@ impl VulkanDevice {
         );
 
         // Create logical device
-        let queue_info = vk::DeviceQueueCreateInfo::builder()
+        let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(compute_family)
             .queue_priorities(&[1.0])
-            .build();
+            ;
         let queue_infos = vec![queue_info];
 
-        let device_info = vk::DeviceCreateInfo::builder()
+        let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .build();
+            ;
 
         let device = unsafe {
             Arc::new(
@@ -302,10 +327,10 @@ impl VulkanDevice {
 
         let transient_command_pool = unsafe {
             device.create_command_pool(
-                &vk::CommandPoolCreateInfo::builder()
+                &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(compute_family)
                     .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    .build(),
+                    ,
                 None,
             )
         }
@@ -313,17 +338,33 @@ impl VulkanDevice {
 
         let transient_descriptor_pool = unsafe {
             device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::builder()
+                &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(4)
-                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
                         .descriptor_count(64)
-                        .build()])
-                    .build(),
+                        ])
+                    ,
                 None,
             )
         }
         .context("failed to create Vulkan transient descriptor pool")?;
+
+        // Batch pools: large enough to record a full decode step
+        // (1024 dispatches × 64 storage-buffer bindings each).
+        let batch_command_pool = unsafe {
+            device.create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .queue_family_index(compute_family)
+                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    ,
+                None,
+            )
+        }
+        .context("failed to create Vulkan batch command pool")?;
+        let batch_descriptor_pool =
+            Self::create_batch_descriptor_pool(&device)
+                .context("failed to create Vulkan batch descriptor pool")?;
 
         Ok(Self {
             entry,
@@ -340,8 +381,11 @@ impl VulkanDevice {
             max_compute_shared_memory_size,
             max_compute_work_group_count,
             pipeline_cache: Mutex::new(HashMap::new()),
+            path_pipeline_cache: Mutex::new(HashMap::new()),
             transient_command_pool: Mutex::new(transient_command_pool),
             transient_descriptor_pool: Mutex::new(transient_descriptor_pool),
+            batch_command_pool: Mutex::new(batch_command_pool),
+            batch_descriptor_pools: Mutex::new(vec![batch_descriptor_pool]),
             terminally_lost: AtomicBool::new(false),
         })
     }
@@ -520,35 +564,35 @@ impl VulkanDevice {
 
         let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
             .map(|i| {
-                vk::DescriptorSetLayoutBinding::builder()
+                vk::DescriptorSetLayoutBinding::default()
                     .binding(i)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                    .build()
+                    
             })
             .collect();
         let set_layout = unsafe {
             self.device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::builder()
+                &vk::DescriptorSetLayoutCreateInfo::default()
                     .bindings(&desc_bindings)
-                    .build(),
+                    ,
                 None,
             )
         }
         .context("failed to create descriptor set layout")?;
 
-        let push_constant_range = vk::PushConstantRange::builder()
+        let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_constant_size)
-            .build();
+            ;
         let set_layouts = [set_layout];
         let layout = unsafe {
             self.device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::builder()
+                &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&set_layouts)
                     .push_constant_ranges(&[push_constant_range])
-                    .build(),
+                    ,
                 None,
             )
         }
@@ -557,26 +601,26 @@ impl VulkanDevice {
         let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
         let shader_module = unsafe {
             self.device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::builder()
+                &vk::ShaderModuleCreateInfo::default()
                     .code(spirv_words)
-                    .build(),
+                    ,
                 None,
             )
         }
         .context("failed to create shader module")?;
 
-        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
-            .build();
+            ;
         let pipeline = unsafe {
             self.device.create_compute_pipelines(
                 vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::builder()
+                &[vk::ComputePipelineCreateInfo::default()
                     .stage(stage_info)
                     .layout(layout)
-                    .build()],
+                    ],
                 None,
             )
         }
@@ -603,6 +647,47 @@ impl VulkanDevice {
         Ok((set_layout, layout, pipeline))
     }
 
+    /// Path-keyed variant of `get_or_create_compute_pipeline`. Avoids
+    /// re-hashing the SPIR-V bytes on every call from the hot decode
+    /// path (`CommandBatch::record_shader` runs this ~450× per token).
+    /// First-call falls through to `get_or_create_compute_pipeline`
+    /// and caches the result by `(path, total_bindings, push_size)`.
+    pub(crate) fn get_compute_pipeline_by_path(
+        &self,
+        path: &'static str,
+        total_bindings: usize,
+        push_constant_size: u32,
+    ) -> Result<(vk::DescriptorSetLayout, vk::PipelineLayout, vk::Pipeline)> {
+        let key = (path, total_bindings as u32, push_constant_size);
+        {
+            let cache = self
+                .path_pipeline_cache
+                .lock()
+                .map_err(|_| anyhow!("Vulkan path pipeline cache mutex poisoned"))?;
+            if let Some(c) = cache.get(&key) {
+                return Ok((c.set_layout, c.layout, c.pipeline));
+            }
+        }
+        // First-call: compile (or load embedded SPIR-V) and create the
+        // pipeline through the normal cache, then memoize by path.
+        let spirv = crate::pipeline::ShaderPipeline::compile_shader(path)?;
+        let (set_layout, layout, pipeline) =
+            self.get_or_create_compute_pipeline(&spirv, total_bindings, push_constant_size)?;
+        let mut cache = self
+            .path_pipeline_cache
+            .lock()
+            .map_err(|_| anyhow!("Vulkan path pipeline cache mutex poisoned"))?;
+        cache.insert(
+            key,
+            CachedComputePipeline {
+                set_layout,
+                layout,
+                pipeline,
+            },
+        );
+        Ok((set_layout, layout, pipeline))
+    }
+
     pub(crate) fn transient_command_pool(&self) -> Result<MutexGuard<'_, vk::CommandPool>> {
         self.check_alive()?;
         self.transient_command_pool
@@ -615,6 +700,123 @@ impl VulkanDevice {
         self.transient_descriptor_pool
             .lock()
             .map_err(|_| anyhow!("Vulkan descriptor pool mutex poisoned"))
+    }
+
+    pub(crate) fn batch_command_pool(&self) -> Result<MutexGuard<'_, vk::CommandPool>> {
+        self.check_alive()?;
+        self.batch_command_pool
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch command pool mutex poisoned"))
+    }
+
+    fn create_batch_descriptor_pool(device: &ash::Device) -> Result<vk::DescriptorPool> {
+        unsafe {
+            device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1024)
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
+                        .ty(vk::DescriptorType::STORAGE_BUFFER)
+                        .descriptor_count(64 * 1024)]),
+                None,
+            )
+        }
+        .context("failed to create Vulkan batch descriptor pool")
+    }
+
+    /// Allocate a fresh descriptor set from the latest batch pool and
+    /// write the storage-buffer bindings. Always allocates — no cross-
+    /// batch caching, because Vulkan recycles `vk::Buffer` handle values
+    /// after destruction (e.g. session-scoped KV caches, transient
+    /// per-request staging buffers), so a hash-of-handles cache key can
+    /// collide between a destroyed buffer and a freshly allocated one
+    /// and silently return a descriptor set bound to freed memory.
+    /// `CommandBatch::new` resets the pools, so allocations within a
+    /// single batch reuse pool slots cleanly across batches.
+    ///
+    /// When the latest pool returns `ERROR_OUT_OF_POOL_MEMORY` (a single
+    /// batch records >1024 dispatches), grows the ring with a fresh
+    /// pool and retries.
+    pub(crate) fn alloc_descriptor_set(
+        &self,
+        set_layout: vk::DescriptorSetLayout,
+        handles: &[vk::Buffer],
+    ) -> Result<vk::DescriptorSet> {
+        let device = &self.device;
+        let set_layouts = [set_layout];
+        let mut pools = self
+            .batch_descriptor_pools
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))?;
+        let alloc_from = |pool: vk::DescriptorPool| -> ash::prelude::VkResult<Vec<vk::DescriptorSet>> {
+            unsafe {
+                device.allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(pool)
+                        .set_layouts(&set_layouts),
+                )
+            }
+        };
+        let current = *pools.last().expect("at least one batch descriptor pool");
+        let descriptor_set = match alloc_from(current) {
+            Ok(sets) => sets[0],
+            Err(vk::Result::ERROR_OUT_OF_POOL_MEMORY) | Err(vk::Result::ERROR_FRAGMENTED_POOL) => {
+                let fresh = Self::create_batch_descriptor_pool(device)?;
+                pools.push(fresh);
+                alloc_from(fresh)
+                    .context("alloc_descriptor_set: allocate from fresh pool")?[0]
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .context("alloc_descriptor_set: allocate")
+            }
+        };
+        drop(pools);
+        let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
+            .iter()
+            .map(|&h| {
+                vk::DescriptorBufferInfo::default()
+                    .buffer(h)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE)
+                    
+            })
+            .collect();
+        let writes: Vec<vk::WriteDescriptorSet> = buf_infos
+            .iter()
+            .enumerate()
+            .map(|(i, info)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(i as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info))
+                    
+            })
+            .collect();
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+        Ok(descriptor_set)
+    }
+
+    /// Reset every batch descriptor pool, freeing all sets allocated
+    /// from them. Called from `CommandBatch::new` once the cmd_pool
+    /// lock has been acquired (which serializes batches and means the
+    /// previous batch's `submit_and_wait` has completed, so no GPU
+    /// work is still reading those descriptor sets).
+    pub(crate) fn reset_batch_descriptor_pools(&self) -> Result<()> {
+        let pools = self
+            .batch_descriptor_pools
+            .lock()
+            .map_err(|_| anyhow!("Vulkan batch descriptor pool mutex poisoned"))?;
+        for pool in pools.iter() {
+            unsafe {
+                self.device
+                    .reset_descriptor_pool(*pool, vk::DescriptorPoolResetFlags::empty())
+                    .context("reset batch descriptor pool")?;
+            }
+        }
+        Ok(())
     }
 
     /// True once any submit/wait has observed `VK_ERROR_DEVICE_LOST`.
@@ -667,7 +869,7 @@ impl VulkanDevice {
     pub fn submit_and_wait(&self, cmd: vk::CommandBuffer, label: &str) -> Result<()> {
         self.check_alive()?;
         let cmds = [cmd];
-        let submit_info = vk::SubmitInfo::builder().command_buffers(&cmds).build();
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
         let submit_res = unsafe {
             self.device
                 .queue_submit(self.queue, &[submit_info], vk::Fence::null())
@@ -730,6 +932,18 @@ impl Drop for VulkanDevice {
             }
         }
         if let Ok(pool) = self.transient_command_pool.lock() {
+            unsafe {
+                self.device.destroy_command_pool(*pool, None);
+            }
+        }
+        if let Ok(pools) = self.batch_descriptor_pools.lock() {
+            for pool in pools.iter() {
+                unsafe {
+                    self.device.destroy_descriptor_pool(*pool, None);
+                }
+            }
+        }
+        if let Ok(pool) = self.batch_command_pool.lock() {
             unsafe {
                 self.device.destroy_command_pool(*pool, None);
             }

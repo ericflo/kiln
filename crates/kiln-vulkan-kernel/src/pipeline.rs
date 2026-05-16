@@ -441,9 +441,9 @@ impl ShaderPipeline {
 
         // Create shader module
         let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
-        let shader_module_info = vk::ShaderModuleCreateInfo::builder()
+        let shader_module_info = vk::ShaderModuleCreateInfo::default()
             .code(spirv_words)
-            .build();
+            ;
 
         let shader_module = unsafe {
             self.device
@@ -452,15 +452,15 @@ impl ShaderPipeline {
         };
 
         // Create pipeline layout
-        let push_constant_range = vk::PushConstantRange::builder()
+        let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_constant_size)
-            .build();
+            ;
         let pcr = vec![push_constant_range];
 
-        let layout_info = vk::PipelineLayoutCreateInfo::builder()
+        let layout_info = vk::PipelineLayoutCreateInfo::default()
             .push_constant_ranges(&pcr)
-            .build();
+            ;
 
         let layout = unsafe {
             self.device
@@ -469,17 +469,17 @@ impl ShaderPipeline {
         };
 
         // Create compute pipeline
-        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-            .build();
+            ;
 
-        let pipeline_info = vk::ComputePipelineCreateInfo::builder()
+        let pipeline_info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .base_pipeline_handle(vk::Pipeline::null())
             .base_pipeline_index(-1)
-            .build();
+            ;
 
         let pipelines = unsafe {
             self.device

@@ -1,0 +1,78 @@
+// Reduce kernel that combines per-chunk partial-softmax outputs from
+// `paged_attn_decode_batch_paged_splitk.comp` into a single per-head
+// output via the standard online-softmax recurrence:
+//
+//   combined_max = max(chunk_max[c]) for c in 0..num_chunks
+//   scale[c]     = exp(chunk_max[c] - combined_max)
+//   combined_sum = sum(chunk_sum[c]  * scale[c])
+//   combined_acc = sum(chunk_acc[c]  * scale[c])  // element-wise
+//   out          = combined_acc / combined_sum
+//
+// Workgroup grid: x = batch * num_heads.
+// Workgroup size: 256 threads — lane < head_dim does element-wise work,
+// lane 0 handles the scalar max/sum, all other lanes are idle.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint num_heads;
+    uint head_dim;
+    uint num_chunks;
+};
+
+layout(binding = 0) readonly  buffer PartialsBuf { float data_partials[]; };
+layout(binding = 1) writeonly buffer OutBuf      { float data_out[]; };
+
+shared float shared_combined_max;
+shared float shared_combined_sum;
+
+void main() {
+    uint pair_idx = gl_WorkGroupID.x;
+    uint q_head = pair_idx % num_heads;
+    uint batch_idx = pair_idx / num_heads;
+    uint lane = gl_LocalInvocationID.x;
+
+    uint stride = 2u + head_dim;
+    uint pair_base = (batch_idx * num_heads + q_head) * num_chunks * stride;
+
+    // 1) Find combined_max.
+    if (lane == 0u) {
+        float m = -3.4028234663852886e38;
+        for (uint c = 0u; c < num_chunks; c++) {
+            float cm = data_partials[pair_base + c * stride];
+            m = max(m, cm);
+        }
+        shared_combined_max = m;
+    }
+    barrier();
+    float combined_max = shared_combined_max;
+
+    // 2) Combined_sum = sum_c(chunk_sum[c] * exp(chunk_max[c] - combined_max)).
+    if (lane == 0u) {
+        float s = 0.0;
+        for (uint c = 0u; c < num_chunks; c++) {
+            float cm = data_partials[pair_base + c * stride];
+            float cs = data_partials[pair_base + c * stride + 1u];
+            s += cs * exp(cm - combined_max);
+        }
+        shared_combined_sum = s;
+    }
+    barrier();
+    float combined_sum = shared_combined_sum;
+
+    // 3) Element-wise combined_acc per lane (head_dim parallel).
+    if (lane < head_dim) {
+        float acc = 0.0;
+        for (uint c = 0u; c < num_chunks; c++) {
+            float cm = data_partials[pair_base + c * stride];
+            float scale = exp(cm - combined_max);
+            float ca = data_partials[pair_base + c * stride + 2u + lane];
+            acc += ca * scale;
+        }
+        uint out_idx = (batch_idx * num_heads + q_head) * head_dim + lane;
+        data_out[out_idx] = acc / combined_sum;
+    }
+}

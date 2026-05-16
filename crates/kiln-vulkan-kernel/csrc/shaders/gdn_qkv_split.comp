@@ -1,0 +1,52 @@
+// Split the GDN mixed_qkv buffer into three distinct output buffers
+// (q, k, v). The legacy GDN forward path does this with three
+// narrow + contiguous candle ops on the CPU; the Vulkan-resident
+// wire-up needs the split to land on the GPU so the following
+// per-head norm + recurrent-step kernels read from device-resident
+// inputs.
+//
+// Combined layout (per decode row, after conv1d):
+//   [0 .. qk_dim)              : q     (nk × dk)
+//   [qk_dim .. 2*qk_dim)       : k     (nk × dk)
+//   [2*qk_dim .. 2*qk_dim+v_dim) : v   (nv × dv)
+//
+// Outputs:
+//   - q : f32, length qk_dim
+//   - k : f32, length qk_dim
+//   - v : f32, length v_dim
+//
+// Push constants: [qk_dim, v_dim].
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint qk_dim;
+    uint v_dim;
+};
+
+layout(binding = 0) readonly  buffer QkvBuf { float data_qkv[]; };
+layout(binding = 1) writeonly buffer QBuf   { float data_q[];   };
+layout(binding = 2) writeonly buffer KBuf   { float data_k[];   };
+layout(binding = 3) writeonly buffer VBuf   { float data_v[];   };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint q_end = qk_dim;
+    uint k_end = q_end + qk_dim;
+    uint v_end = k_end + v_dim;
+
+    if (tid >= v_end) return;
+
+    if (tid < q_end) {
+        data_q[tid] = data_qkv[tid];
+    } else if (tid < k_end) {
+        uint p = tid - q_end;
+        data_k[p] = data_qkv[tid];
+    } else {
+        uint p = tid - k_end;
+        data_v[p] = data_qkv[tid];
+    }
+}

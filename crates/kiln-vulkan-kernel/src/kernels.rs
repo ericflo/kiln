@@ -21,27 +21,27 @@ fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
 }
 
-fn mlp_bf16_gate_up_rows4_enabled() -> bool {
+pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4").is_err())
 }
 
-fn mlp_f32_down_rows4_enabled() -> bool {
+pub(crate) fn mlp_f32_down_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_F32_DOWN_ROWS4").is_err())
 }
 
-fn mlp_bf16_down_rows4_enabled() -> bool {
+pub(crate) fn mlp_bf16_down_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4").is_err())
 }
 
-fn mlp_bf16_rows8_enabled() -> bool {
+pub(crate) fn mlp_bf16_rows8_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
 }
 
-fn linear_decode_bf16w_rows4_enabled() -> bool {
+pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
@@ -90,7 +90,7 @@ fn causal_conv1d_single_submit_enabled() -> bool {
     })
 }
 
-fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
+pub(crate) fn full_attn_qkv_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4").is_err()
@@ -230,7 +230,7 @@ fn gdn_recurrent_parallel_reduce_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_PARALLEL_REDUCE").is_err())
 }
 
-fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
+pub(crate) fn use_gdn_recurrent_parallel_reduce(dk: usize, dv: usize) -> bool {
     dk >= 32 && dv > 0 && gdn_recurrent_parallel_reduce_enabled()
 }
 
@@ -257,19 +257,19 @@ fn gdn_in_proj_single_submit_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_SINGLE_SUBMIT").is_err())
 }
 
-fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_pair_qkv_z_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z").is_err())
 }
 
-fn gdn_in_proj_batch_row_pair_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_row_pair_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR").is_err())
 }
 
-fn gdn_in_proj_batch_row_quad_enabled() -> bool {
+pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD").is_err())
@@ -305,7 +305,7 @@ fn prefill_row_pair_matmul_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_PREFILL_ROW_PAIR_MATMUL").is_err())
 }
 
-fn use_prefill_row_pair_matmul(batch: usize) -> bool {
+pub(crate) fn use_prefill_row_pair_matmul(batch: usize) -> bool {
     batch >= 8 && prefill_row_pair_matmul_enabled()
 }
 
@@ -464,9 +464,9 @@ pub fn dispatch_kernel(
 
     // --- Shader module ---
     let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
-    let shader_module_info = vk::ShaderModuleCreateInfo::builder()
+    let shader_module_info = vk::ShaderModuleCreateInfo::default()
         .code(spirv_words)
-        .build();
+        ;
     let shader_module = unsafe {
         device
             .create_shader_module(&shader_module_info, None)
@@ -476,18 +476,18 @@ pub fn dispatch_kernel(
     // --- Descriptor set layout (STORAGE_BUFFER for all bindings) ---
     let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
         .map(|i| {
-            vk::DescriptorSetLayoutBinding::builder()
+            vk::DescriptorSetLayoutBinding::default()
                 .binding(i)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .build()
+                
         })
         .collect();
 
-    let set_layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
+    let set_layout_info = vk::DescriptorSetLayoutCreateInfo::default()
         .bindings(&desc_bindings)
-        .build();
+        ;
     let set_layout = unsafe {
         device
             .create_descriptor_set_layout(&set_layout_info, None)
@@ -495,17 +495,17 @@ pub fn dispatch_kernel(
     };
 
     // --- Pipeline layout ---
-    let push_constant_range = vk::PushConstantRange::builder()
+    let push_constant_range = vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::COMPUTE)
         .size((push_constants.len() * 4) as u32)
-        .build();
+        ;
     let pcr = vec![push_constant_range];
     let set_layouts = vec![set_layout];
 
-    let layout_info = vk::PipelineLayoutCreateInfo::builder()
+    let layout_info = vk::PipelineLayoutCreateInfo::default()
         .set_layouts(&set_layouts)
         .push_constant_ranges(&pcr)
-        .build();
+        ;
     let layout = unsafe {
         device
             .create_pipeline_layout(&layout_info, None)
@@ -513,16 +513,16 @@ pub fn dispatch_kernel(
     };
 
     // --- Compute pipeline ---
-    let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+    let stage_info = vk::PipelineShaderStageCreateInfo::default()
         .stage(vk::ShaderStageFlags::COMPUTE)
         .module(shader_module)
         .name(std::ffi::CStr::from_bytes_with_nul(b"main\0").unwrap())
-        .build();
+        ;
 
-    let pipeline_info = vk::ComputePipelineCreateInfo::builder()
+    let pipeline_info = vk::ComputePipelineCreateInfo::default()
         .stage(stage_info)
         .layout(layout)
-        .build();
+        ;
 
     let pipelines = unsafe {
         device
@@ -538,26 +538,26 @@ pub fn dispatch_kernel(
     let pipeline = pipelines[0];
 
     // --- Descriptor pool + set (STORAGE_BUFFER) ---
-    let pool_size = vk::DescriptorPoolSize::builder()
+    let pool_size = vk::DescriptorPoolSize::default()
         .ty(vk::DescriptorType::STORAGE_BUFFER)
         .descriptor_count(total_bindings as u32)
-        .build();
+        ;
     let pool_sizes = vec![pool_size];
 
-    let pool_info = vk::DescriptorPoolCreateInfo::builder()
+    let pool_info = vk::DescriptorPoolCreateInfo::default()
         .max_sets(1)
         .pool_sizes(&pool_sizes)
-        .build();
+        ;
     let pool = unsafe {
         device
             .create_descriptor_pool(&pool_info, None)
             .context("failed to create descriptor pool")?
     };
 
-    let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+    let alloc_info = vk::DescriptorSetAllocateInfo::default()
         .descriptor_pool(pool)
         .set_layouts(&set_layouts)
-        .build();
+        ;
     let descriptor_sets = unsafe {
         device
             .allocate_descriptor_sets(&alloc_info)
@@ -571,11 +571,11 @@ pub fn dispatch_kernel(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&buf_handle| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(buf_handle)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
 
@@ -693,78 +693,29 @@ pub fn dispatch_kernel(
         .context("failed to create output tensor")
 }
 
-/// Create a zero-init CommandPoolCreateInfo with fixed sType.
-fn make_cmd_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo {
-    use std::mem::MaybeUninit;
-    use std::ptr::write_bytes;
-    let mut info: MaybeUninit<vk::CommandPoolCreateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_POOL_CREATE_INFO;
-        (*ptr).queue_family_index = queue_family_index;
-        (*ptr).flags = vk::CommandPoolCreateFlags::TRANSIENT;
-    }
-    unsafe { info.assume_init() }
+/// CommandPoolCreateInfo via ash 0.38 default+chained builder.
+fn make_cmd_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo<'static> {
+    vk::CommandPoolCreateInfo::default()
+        .queue_family_index(queue_family_index)
+        .flags(vk::CommandPoolCreateFlags::TRANSIENT)
 }
 
-/// Create a zero-init CommandBufferAllocateInfo with fixed sType.
-fn make_cmd_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo {
-    use std::mem::MaybeUninit;
-    use std::ptr::write_bytes;
-    let mut info: MaybeUninit<vk::CommandBufferAllocateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO;
-        (*ptr).command_pool = pool;
-        (*ptr).level = vk::CommandBufferLevel::PRIMARY;
-        (*ptr).command_buffer_count = 1;
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferAllocateInfo via default+chained builder.
+fn make_cmd_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo<'static> {
+    vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1)
 }
 
-/// Create a zero-init CommandBufferBeginInfo with fixed sType.
-fn make_cmd_begin_info() -> vk::CommandBufferBeginInfo {
-    use std::mem::MaybeUninit;
-    use std::ptr::write_bytes;
-    let mut info: MaybeUninit<vk::CommandBufferBeginInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_BEGIN_INFO;
-        (*ptr).flags = vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT;
-        (*ptr).p_inheritance_info = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferBeginInfo via default+chained builder.
+fn make_cmd_begin_info() -> vk::CommandBufferBeginInfo<'static> {
+    vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
 }
 
-/// Create a zero-init SubmitInfo with fixed sType.
-fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo {
-    use std::mem::MaybeUninit;
-    use std::ptr::write_bytes;
-    let mut info: MaybeUninit<vk::SubmitInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::SUBMIT_INFO;
-        (*ptr).wait_semaphore_count = 0;
-        (*ptr).p_wait_semaphores = std::ptr::null();
-        (*ptr).p_wait_dst_stage_mask = std::ptr::null();
-        (*ptr).command_buffer_count = cmds.len() as u32;
-        (*ptr).p_command_buffers = cmds.as_ptr();
-        (*ptr).signal_semaphore_count = 0;
-        (*ptr).p_signal_semaphores = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// SubmitInfo via default+chained builder.
+fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo<'_> {
+    vk::SubmitInfo::default().command_buffers(cmds)
 }
 
 fn upload_buffers_with_command_pool(
@@ -799,7 +750,7 @@ fn upload_buffers_with_command_pool(
                 cmd,
                 stage.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
         }
         device
@@ -851,7 +802,7 @@ fn read_back_buffers_with_command_pool(
                 cmd,
                 src.handle(),
                 stage.handle(),
-                &[vk::BufferCopy::builder().size(src.size()).build()],
+                &[vk::BufferCopy::default().size(src.size())],
             );
         }
         device
@@ -900,20 +851,13 @@ fn make_write_descriptor_set_buf(
 }
 
 /// Create a zero-init MemoryBarrier with fixed sType.
-fn make_memory_barrier(src: vk::AccessFlags, dst: vk::AccessFlags) -> vk::MemoryBarrier {
-    use std::mem::MaybeUninit;
-    use std::ptr::write_bytes;
-    let mut info: MaybeUninit<vk::MemoryBarrier> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::MEMORY_BARRIER;
-        (*ptr).src_access_mask = src;
-        (*ptr).dst_access_mask = dst;
-    }
-    unsafe { info.assume_init() }
+fn make_memory_barrier(
+    src: vk::AccessFlags,
+    dst: vk::AccessFlags,
+) -> vk::MemoryBarrier<'static> {
+    vk::MemoryBarrier::default()
+        .src_access_mask(src)
+        .dst_access_mask(dst)
 }
 
 /// Extract raw f32 bytes from a candle-core Tensor.
@@ -1586,21 +1530,21 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate gdn_in_proj descriptor set")?[0]
     };
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -1642,7 +1586,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             cmd,
             x_stage.handle(),
             x_buf.handle(),
-            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+            &[vk::BufferCopy::default().size(x_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE,
@@ -1702,7 +1646,7 @@ fn dispatch_gdn_in_proj_decode_cached_single_submit(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -2521,21 +2465,21 @@ fn dispatch_linear_decode_cached_single_submit(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -2562,7 +2506,7 @@ fn dispatch_linear_decode_cached_single_submit(
             cmd,
             x_stage.handle(),
             x_buf.handle(),
-            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+            &[vk::BufferCopy::default().size(x_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE,
@@ -2611,7 +2555,7 @@ fn dispatch_linear_decode_cached_single_submit(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -2861,21 +2805,21 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     let block_descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&block_set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate linear argmax block descriptor set")?[0]
     };
     let block_buf_infos: Vec<vk::DescriptorBufferInfo> = block_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let block_descriptor_writes: Vec<vk::WriteDescriptorSet> = block_buf_infos
@@ -2888,21 +2832,21 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
     let reduce_descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&reduce_set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate linear argmax reduce descriptor set")?[0]
     };
     let reduce_buf_infos: Vec<vk::DescriptorBufferInfo> = reduce_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let reduce_descriptor_writes: Vec<vk::WriteDescriptorSet> = reduce_buf_infos
@@ -2930,7 +2874,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
             cmd,
             x_stage.handle(),
             x_buf.handle(),
-            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+            &[vk::BufferCopy::default().size(x_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE,
@@ -3011,7 +2955,7 @@ fn dispatch_linear_decode_argmax_cached_single_submit(
             cmd,
             out_index_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(4).build()],
+            &[vk::BufferCopy::default().size(4)],
         );
         device
             .end_command_buffer(cmd)
@@ -3400,21 +3344,21 @@ fn dispatch_linear_decode_argmax_batched_cached_impl(
     let block_descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&block_set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate batched linear argmax block descriptor set")?[0]
     };
     let block_buf_infos: Vec<vk::DescriptorBufferInfo> = block_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let block_descriptor_writes: Vec<vk::WriteDescriptorSet> = block_buf_infos
@@ -3427,21 +3371,21 @@ fn dispatch_linear_decode_argmax_batched_cached_impl(
     let reduce_descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&reduce_set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate batched linear argmax reduce descriptor set")?[0]
     };
     let reduce_buf_infos: Vec<vk::DescriptorBufferInfo> = reduce_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let reduce_descriptor_writes: Vec<vk::WriteDescriptorSet> = reduce_buf_infos
@@ -3469,7 +3413,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl(
             cmd,
             x_stage.handle(),
             x_buf.handle(),
-            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+            &[vk::BufferCopy::default().size(x_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE,
@@ -3550,7 +3494,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl(
             cmd,
             out_index_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size((batch * 4) as u64).build()],
+            &[vk::BufferCopy::default().size((batch * 4) as u64)],
         );
         device
             .end_command_buffer(cmd)
@@ -3774,21 +3718,21 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate full_attn_qkv_decode descriptor set")?[0]
     };
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -3815,7 +3759,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
             cmd,
             x_stage.handle(),
             x_buf.handle(),
-            &[vk::BufferCopy::builder().size(x_data.len() as u64).build()],
+            &[vk::BufferCopy::default().size(x_data.len() as u64)],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE,
@@ -3864,7 +3808,7 @@ fn dispatch_full_attn_qkv_decode_cached_single_submit(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -5495,10 +5439,10 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate gdn_decode fused resident descriptor set")?[0]
     };
@@ -5506,11 +5450,11 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -5549,7 +5493,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
                 cmd,
                 src.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(size).build()],
+                &[vk::BufferCopy::default().size(size)],
             );
         }
         if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
@@ -5557,9 +5501,9 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(state_data.len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -5612,7 +5556,7 @@ pub fn dispatch_gdn_decode_gates_recurrent_rmsnorm_resident_state(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
 
         device
@@ -5699,10 +5643,10 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -5710,11 +5654,11 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -5746,9 +5690,9 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
                 cmd,
                 stage.handle(),
                 buffers[idx].handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(input_data[idx].len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -5802,7 +5746,7 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
         if !use_host_visible_state && !skip_state_readback {
             let state_stage = staging[7]
@@ -5812,9 +5756,9 @@ fn dispatch_gdn_decode_gates_recurrent_rmsnorm_single_submit(
                 cmd,
                 buffers[7].handle(),
                 state_stage.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(input_data[7].len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -6684,10 +6628,10 @@ pub fn run_compute_pipeline(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -6697,11 +6641,11 @@ pub fn run_compute_pipeline(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -6810,10 +6754,10 @@ pub fn run_compute_pipeline_3d(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -6821,11 +6765,11 @@ pub fn run_compute_pipeline_3d(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let descriptor_write_infos: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -6942,10 +6886,10 @@ fn run_compute_pipeline_with_transfer_readback(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate transfer-readback descriptor set")?[0]
     };
@@ -6954,11 +6898,11 @@ fn run_compute_pipeline_with_transfer_readback(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -6986,9 +6930,9 @@ fn run_compute_pipeline_with_transfer_readback(
             cmd,
             upload_stage.handle(),
             upload_dst.handle(),
-            &[vk::BufferCopy::builder()
+            &[vk::BufferCopy::default()
                 .size(upload_data.len() as u64)
-                .build()],
+                ],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
@@ -7039,7 +6983,7 @@ fn run_compute_pipeline_with_transfer_readback(
             cmd,
             readback_src.handle(),
             readback_stage.handle(),
-            &[vk::BufferCopy::builder().size(readback_size).build()],
+            &[vk::BufferCopy::default().size(readback_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -7114,10 +7058,10 @@ fn run_compute_pipeline_with_transfers_readbacks(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate transfers-readbacks descriptor set")?[0]
     };
@@ -7126,11 +7070,11 @@ fn run_compute_pipeline_with_transfers_readbacks(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7159,7 +7103,7 @@ fn run_compute_pipeline_with_transfers_readbacks(
                 cmd,
                 stage.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
         }
         let upload_barrier = make_memory_barrier(
@@ -7212,7 +7156,7 @@ fn run_compute_pipeline_with_transfers_readbacks(
                 cmd,
                 src.handle(),
                 stage.handle(),
-                &[vk::BufferCopy::builder().size(*size).build()],
+                &[vk::BufferCopy::default().size(*size)],
             );
         }
         device
@@ -7289,10 +7233,10 @@ fn run_compute_pipeline_with_transfers_readback(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate transfers-readback descriptor set")?[0]
     };
@@ -7301,11 +7245,11 @@ fn run_compute_pipeline_with_transfers_readback(
         let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -7334,7 +7278,7 @@ fn run_compute_pipeline_with_transfers_readback(
                 cmd,
                 stage.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
         }
         let upload_barrier = make_memory_barrier(
@@ -7386,7 +7330,7 @@ fn run_compute_pipeline_with_transfers_readback(
             cmd,
             readback_src.handle(),
             readback_stage.handle(),
-            &[vk::BufferCopy::builder().size(readback_size).build()],
+            &[vk::BufferCopy::default().size(readback_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -7441,10 +7385,10 @@ fn run_two_stage_compute_pipeline(
     let descriptor_sets = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate two-stage descriptor sets")?
     };
@@ -7455,21 +7399,21 @@ fn run_two_stage_compute_pipeline(
         let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -7625,10 +7569,10 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
     let descriptor_sets = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate transfer two-stage descriptor sets")?
     };
@@ -7639,21 +7583,21 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
         let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -7688,9 +7632,9 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
             cmd,
             upload_stage.handle(),
             upload_dst.handle(),
-            &[vk::BufferCopy::builder()
+            &[vk::BufferCopy::default()
                 .size(upload_data.len() as u64)
-                .build()],
+                ],
         );
         let upload_barrier = make_memory_barrier(
             vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
@@ -7771,7 +7715,7 @@ fn run_two_stage_compute_pipeline_with_transfer_readback(
             cmd,
             readback_src.handle(),
             readback_stage.handle(),
-            &[vk::BufferCopy::builder().size(readback_size).build()],
+            &[vk::BufferCopy::default().size(readback_size)],
         );
         device
             .end_command_buffer(cmd)
@@ -7846,10 +7790,10 @@ fn run_two_stage_compute_pipeline_with_transfers(
     let descriptor_sets = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate transfer two-stage descriptor sets")?
     };
@@ -7860,21 +7804,21 @@ fn run_two_stage_compute_pipeline_with_transfers(
         let first_buf_infos: Vec<vk::DescriptorBufferInfo> = first_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let second_buf_infos: Vec<vk::DescriptorBufferInfo> = second_handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let mut descriptor_write_infos: Vec<vk::WriteDescriptorSet> =
@@ -7911,7 +7855,7 @@ fn run_two_stage_compute_pipeline_with_transfers(
                 cmd,
                 stage.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
         }
         if !uploads.is_empty() {
@@ -7999,7 +7943,7 @@ fn run_two_stage_compute_pipeline_with_transfers(
                 cmd,
                 src.handle(),
                 stage.handle(),
-                &[vk::BufferCopy::builder().size(src.size()).build()],
+                &[vk::BufferCopy::default().size(src.size())],
             );
         }
 
@@ -8198,11 +8142,11 @@ pub fn copy_gdn_recurrent_state_rows_to_batch(
                 cmd,
                 row.handle(),
                 batch_buf.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .src_offset(0)
                     .dst_offset(row_size * row_idx as u64)
                     .size(row_size)
-                    .build()],
+                    ],
             );
         }
         let copy_barrier = make_memory_barrier(
@@ -8294,11 +8238,11 @@ pub fn split_gdn_recurrent_state_batch_rows(
                 cmd,
                 batch_buffer.handle(),
                 row.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .src_offset(row_size * row_idx as u64)
                     .dst_offset(0)
                     .size(row_size)
-                    .build()],
+                    ],
             );
         }
         let post_copy_barrier = make_memory_barrier(
@@ -8689,10 +8633,10 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -8700,11 +8644,11 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -8739,7 +8683,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
                 cmd,
                 src.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(size).build()],
+                &[vk::BufferCopy::default().size(size)],
             );
         }
         if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
@@ -8747,9 +8691,9 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(state_data.len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -8802,7 +8746,7 @@ pub fn dispatch_gdn_recurrent_step_resident_state(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
 
         device
@@ -8987,10 +8931,10 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -8998,11 +8942,11 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -9037,7 +8981,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
                 cmd,
                 src.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(size).build()],
+                &[vk::BufferCopy::default().size(size)],
             );
         }
         if let (Some(state_stage), Some(state_data)) = (&state_stage, &state_data) {
@@ -9045,9 +8989,9 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(state_data.len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -9100,7 +9044,7 @@ pub fn dispatch_gdn_recurrent_step_native_head_last_resident_state(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
 
         device
@@ -9263,10 +9207,10 @@ fn dispatch_gdn_recurrent_step_single_submit(
     let descriptor_set = unsafe {
         device
             .allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(*descriptor_pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
             .context("failed to allocate descriptor sets")?[0]
     };
@@ -9274,11 +9218,11 @@ fn dispatch_gdn_recurrent_step_single_submit(
     let buf_infos: Vec<vk::DescriptorBufferInfo> = all_handles
         .iter()
         .map(|&h| {
-            vk::DescriptorBufferInfo::builder()
+            vk::DescriptorBufferInfo::default()
                 .buffer(h)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
-                .build()
+                
         })
         .collect();
     let descriptor_writes: Vec<vk::WriteDescriptorSet> = buf_infos
@@ -9325,7 +9269,7 @@ fn dispatch_gdn_recurrent_step_single_submit(
                 cmd,
                 src.handle(),
                 dst.handle(),
-                &[vk::BufferCopy::builder().size(size).build()],
+                &[vk::BufferCopy::default().size(size)],
             );
         }
         if let Some(state_stage) = &state_stage {
@@ -9333,9 +9277,9 @@ fn dispatch_gdn_recurrent_step_single_submit(
                 cmd,
                 state_stage.handle(),
                 state_buf.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(state_data.len() as u64)
-                    .build()],
+                    ],
             );
         }
 
@@ -9389,16 +9333,16 @@ fn dispatch_gdn_recurrent_step_single_submit(
             cmd,
             out_buf.handle(),
             out_stage.handle(),
-            &[vk::BufferCopy::builder().size(out_size).build()],
+            &[vk::BufferCopy::default().size(out_size)],
         );
         if !skip_state_readback && let Some(state_stage) = &state_stage {
             device.cmd_copy_buffer(
                 cmd,
                 state_buf.handle(),
                 state_stage.handle(),
-                &[vk::BufferCopy::builder()
+                &[vk::BufferCopy::default()
                     .size(state_data.len() as u64)
-                    .build()],
+                    ],
             );
         }
 

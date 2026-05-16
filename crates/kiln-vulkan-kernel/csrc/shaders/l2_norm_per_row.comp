@@ -1,0 +1,73 @@
+// Per-row L2 normalization with optional scalar scale and GQA-style
+// row replication.
+//
+// Input:  x[rows_in, hidden]                       f32 row-major
+// Output: out[rows_in * gqa_ratio, hidden]         f32 row-major
+//
+// For each output row r_out:
+//   r_in     = r_out / gqa_ratio        (heads expand consecutively)
+//   norm     = sqrt(sum(x[r_in,:]^2) + eps)
+//   out[r_out, i] = x[r_in, i] / norm * scale
+//
+// `gqa_ratio = 1` reduces to plain in-place L2 normalize (each
+// output row reads from a distinct input row). `gqa_ratio > 1`
+// matches candle's
+//   `q.unsqueeze(3).expand(..nk, gqa_ratio, dk).reshape(nv, dk)`
+// expansion pattern: input row 0 → output rows 0..gqa_ratio, input
+// row 1 → output rows gqa_ratio..2*gqa_ratio, etc. This is the
+// Qwen3.5 GDN layout: nk key heads expand into nv=nk*gqa_ratio
+// value heads before the recurrent step. The output buffer for
+// Q/K therefore needs to be sized `nv * dk` floats; the input is
+// `nk * dk`.
+//
+// One workgroup per output row; threads cooperate on the sum-of-
+// squares reduction via shared memory. `hidden` must be ≤ 256.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows_in;
+    uint hidden;
+    float eps;
+    float scale;
+    uint gqa_ratio;
+};
+
+layout(binding = 0) readonly buffer XIn { float data_in[]; };
+layout(binding = 1) writeonly buffer XOut { float data_out[]; };
+
+shared float sq_partial[256];
+
+void main() {
+    uint r_out = gl_WorkGroupID.x;
+    uint rows_out = rows_in * gqa_ratio;
+    if (r_out >= rows_out) return;
+    uint r_in = r_out / gqa_ratio;
+    uint tid = gl_LocalInvocationID.x;
+    uint base_in = r_in * hidden;
+    uint base_out = r_out * hidden;
+
+    float local_sq = 0.0;
+    for (uint i = tid; i < hidden; i += 256) {
+        float v = data_in[base_in + i];
+        local_sq += v * v;
+    }
+    sq_partial[tid] = local_sq;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            sq_partial[tid] += sq_partial[tid + stride];
+        }
+        barrier();
+    }
+
+    float coef = inversesqrt(sq_partial[0] + eps) * scale;
+
+    for (uint i = tid; i < hidden; i += 256) {
+        data_out[base_out + i] = data_in[base_in + i] * coef;
+    }
+}

@@ -120,11 +120,61 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// methods must live on this device.
     fn device(&self) -> &Device;
 
+    /// `dyn Any` downcast target. Used by the Vulkan-resident decode
+    /// fast-path in `transformer_block_paged_with_rope_tables` to recover
+    /// the concrete `VulkanBackend` for direct access to its
+    /// resident-decode primitives. The default impl returns a
+    /// no-op-`Any`-shaped reference; the concrete backend overrides
+    /// this to return `self`.
+    fn as_any(&self) -> &dyn std::any::Any {
+        // Default: return a Unit Any so `downcast_ref` against any
+        // concrete type returns None. Concrete backends override.
+        &()
+    }
+
     /// Operator-facing summary of which training paths are backend-native,
     /// candle-on-device, or intentionally declined. This is telemetry only:
     /// dispatch methods remain the source of truth for actual behavior.
     fn training_capabilities(&self) -> TrainingCapabilities {
         TrainingCapabilities::portable()
+    }
+
+    /// First-use feasibility check for the Vulkan-resident decode pool:
+    /// returns true when a 3-4 slot ring sized to `max(hidden, intermediate)
+    /// × max_batch × 4` bytes can be allocated within 1 % of the device-local
+    /// heap. CPU / CUDA / Metal return false by default; the Vulkan backend
+    /// constructs (and caches) the pool here.
+    ///
+    /// Gate (b) of docs/vk_resident_decode_plan.md. The cached `None`
+    /// outcome means subsequent decode steps see the same `false` answer
+    /// without re-probing the device.
+    #[allow(unused_variables)]
+    fn decode_resident_pool_ready(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> bool {
+        false
+    }
+
+    /// Whether the backend can run a full decode step "device-resident":
+    /// pay one host→device upload (input token / hidden) and one device→host
+    /// readback (sampled token / last-row logits) per decode step, instead
+    /// of `N kernel calls × (extract + upload + readback)` per layer.
+    ///
+    /// CUDA and Metal already keep activations resident through candle and
+    /// MPS respectively, so for those backends the resident-decode plan is
+    /// a no-op and they keep returning false here. The Vulkan backend
+    /// returns true when feature-gated `KILN_VULKAN_RESIDENT_DECODE`
+    /// is on (default on when the kernel ring fits in the device's memory
+    /// budget) AND the device has actually been brought up.
+    ///
+    /// Callers in `model_forward_paged_last_token*` use this predicate to
+    /// route into the resident decode path. Returning false routes to
+    /// today's Tensor-shaped path unchanged.
+    fn supports_resident_decode(&self) -> bool {
+        false
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -1122,6 +1172,81 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+    }
+
+    #[test]
+    fn portable_backend_declines_resident_decode_by_default() {
+        // The default trait implementation must return false so that
+        // every non-Vulkan backend continues to route through the
+        // unchanged `model_forward_paged_last_token*` path — the
+        // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
+        let cpu = cpu::CpuBackend::new(Device::Cpu);
+        assert!(
+            !cpu.supports_resident_decode(),
+            "CPU backend must decline resident decode so non-Vulkan call sites \
+             continue to use the existing per-call Tensor path"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_backend_declines_resident_decode() {
+        // CUDA already keeps activations resident through candle's CUDA
+        // device — the resident-decode plan does not apply.
+        let device = match Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return, // No CUDA at test time — skip.
+        };
+        let cuda = cuda::CudaBackend::new(device);
+        assert!(
+            !cuda.supports_resident_decode(),
+            "CUDA backend must decline resident decode; gate (c) requires CUDA path unchanged"
+        );
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_backend_publishes_decode_resident_pool() {
+        // Gate (b) of the vk-resident-decode plan: when the Vulkan
+        // backend is up, `decode_resident_pool(...)` returns Some on
+        // hardware that fits 3-4 slots within 1% of the device-local
+        // heap. The RTX 6000 Ada the test host uses has ~48 GiB of
+        // VRAM; the 10 MiB Qwen3.5-4B ring fits trivially.
+        if !vulkan::vulkan_is_available() {
+            return;
+        }
+        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        let pool = backend.decode_resident_pool(2560, 9216, 64);
+        assert!(
+            pool.is_some(),
+            "decode_resident_pool must succeed on a discrete GPU with ample VRAM"
+        );
+        let pool = pool.unwrap();
+        assert!(
+            pool.num_slots() >= 3,
+            "pool must fit at least the 3-slot minimum, got {}",
+            pool.num_slots()
+        );
+        // OnceLock contract: second call returns the same Arc.
+        let again = backend.decode_resident_pool(2560, 9216, 64).unwrap();
+        assert!(Arc::ptr_eq(pool, again));
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_backend_supports_resident_decode_when_device_up() {
+        // When the host has a working Vulkan device, the Vulkan backend
+        // must return true so call sites in `model_forward_paged_last_token*`
+        // route through the resident path.
+        if !vulkan::vulkan_is_available() {
+            return;
+        }
+        let backend = vulkan::VulkanBackend::new(Device::Cpu);
+        assert!(
+            backend.supports_resident_decode(),
+            "Vulkan backend must support resident decode by default when the \
+             logical device is up"
+        );
     }
 
     #[cfg(feature = "cuda")]

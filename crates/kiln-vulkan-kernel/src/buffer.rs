@@ -30,70 +30,29 @@ impl Drop for VulkanBuffer {
     }
 }
 
-/// Create a zero-init CommandPoolCreateInfo with fixed sType.
-fn make_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo {
-    let mut info: MaybeUninit<vk::CommandPoolCreateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_POOL_CREATE_INFO;
-        (*ptr).queue_family_index = queue_family_index;
-        (*ptr).flags = vk::CommandPoolCreateFlags::empty();
-    }
-    unsafe { info.assume_init() }
+/// Create a CommandPoolCreateInfo via the ash 0.38 default+chained builder.
+fn make_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo<'static> {
+    vk::CommandPoolCreateInfo::default()
+        .queue_family_index(queue_family_index)
+        .flags(vk::CommandPoolCreateFlags::empty())
 }
 
-/// Create a zero-init CommandBufferAllocateInfo with fixed sType.
-fn make_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo {
-    let mut info: MaybeUninit<vk::CommandBufferAllocateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO;
-        (*ptr).command_pool = pool;
-        (*ptr).level = vk::CommandBufferLevel::PRIMARY;
-        (*ptr).command_buffer_count = 1;
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferAllocateInfo via default+chained builder.
+fn make_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo<'static> {
+    vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1)
 }
 
-/// Create a zero-init CommandBufferBeginInfo with fixed sType.
-fn make_begin_info() -> vk::CommandBufferBeginInfo {
-    let mut info: MaybeUninit<vk::CommandBufferBeginInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_BEGIN_INFO;
-        (*ptr).flags = vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT;
-        (*ptr).p_inheritance_info = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferBeginInfo via default+chained builder.
+fn make_begin_info() -> vk::CommandBufferBeginInfo<'static> {
+    vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
 }
 
-/// Create a zero-init SubmitInfo with fixed sType.
-fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo {
-    let mut info: MaybeUninit<vk::SubmitInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::SUBMIT_INFO;
-        (*ptr).wait_semaphore_count = 0;
-        (*ptr).p_wait_semaphores = std::ptr::null();
-        (*ptr).p_wait_dst_stage_mask = std::ptr::null();
-        (*ptr).command_buffer_count = cmds.len() as u32;
-        (*ptr).p_command_buffers = cmds.as_ptr();
-        (*ptr).signal_semaphore_count = 0;
-        (*ptr).p_signal_semaphores = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// SubmitInfo via default+chained builder.
+fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo<'_> {
+    vk::SubmitInfo::default().command_buffers(cmds)
 }
 
 impl VulkanBuffer {
@@ -103,14 +62,14 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::builder()
+        let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_SRC
                     | vk::BufferUsageFlags::TRANSFER_DST,
             )
-            .build();
+            ;
 
         let buffer = unsafe {
             device
@@ -120,10 +79,10 @@ impl VulkanBuffer {
 
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index)
-            .build();
+            ;
 
         let memory = unsafe {
             device
@@ -151,14 +110,14 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::builder()
+        let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
                 vk::BufferUsageFlags::TRANSFER_SRC
                     | vk::BufferUsageFlags::TRANSFER_DST
                     | vk::BufferUsageFlags::STORAGE_BUFFER,
             )
-            .build();
+            ;
 
         let buffer = unsafe {
             device
@@ -168,10 +127,10 @@ impl VulkanBuffer {
 
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index)
-            .build();
+            ;
 
         let memory = unsafe {
             device
@@ -194,6 +153,76 @@ impl VulkanBuffer {
     }
 
     /// Upload data from CPU to this buffer via a staging buffer.
+    /// Upload `data` to `dst` starting at byte offset `dst_offset`.
+    /// Used by the resident KV-cache seeding path so we only stage and
+    /// copy the request's active blocks (a few tens of KB per layer)
+    /// instead of the whole multi-GB pool slab.
+    pub fn upload_data_at_offset(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        dst: &VulkanBuffer,
+        dst_offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        let mapped_ptr = unsafe {
+            device
+                .map_memory(
+                    staging.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| anyhow::anyhow!("failed to map memory: {:?}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), mapped_ptr as *mut u8, data.len());
+        }
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("failed to create command pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("failed to allocate command buffer")?;
+        let cmd = command_buffers[0];
+        let begin_info = make_begin_info();
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &begin_info)
+                .context("failed to begin command buffer")?
+        };
+        let copy = vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(dst_offset)
+            .size(data.len() as u64);
+        unsafe {
+            device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
+            device
+                .end_command_buffer(cmd)
+                .context("failed to end command buffer")?;
+        }
+        let cmds = vec![cmd];
+        let submit_info = make_submit_info(&cmds);
+        unsafe {
+            device
+                .queue_submit(queue, &[submit_info], vk::Fence::null())
+                .context("failed to submit transfer")?;
+            device
+                .queue_wait_idle(queue)
+                .context("failed to wait for queue")?;
+            device.unmap_memory(staging.memory);
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        Ok(())
+    }
+
     pub fn upload_data(
         device: &Arc<ash::Device>,
         host_mem_type: u32,
@@ -245,7 +274,7 @@ impl VulkanBuffer {
                 .context("failed to begin command buffer")?
         };
 
-        let copy = vk::BufferCopy::builder().size(data.len() as u64).build();
+        let copy = vk::BufferCopy::default().size(data.len() as u64);
         unsafe {
             device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
         }
@@ -273,6 +302,81 @@ impl VulkanBuffer {
             device.destroy_command_pool(pool, None);
         }
 
+        Ok(())
+    }
+
+    /// Batch-upload multiple small payloads to multiple destination
+    /// buffers in a single command buffer + single queue submission.
+    ///
+    /// Caller passes `&[(&dst_buffer, &payload_bytes)]`. The function
+    /// allocates one staging buffer per upload (each must hold its
+    /// own payload size — staging buffers can't safely overlap), but
+    /// only creates ONE command pool, ONE command buffer, and submits
+    /// + waits ONCE — collapsing what would otherwise be N round
+    /// trips into 1. Dramatically faster for the decode hot loop where
+    /// 4-5 per-token small inputs (RoPE cos/sin, block_table, seq_lens,
+    /// embedding) used to take ~6 ms / token through `upload_data`.
+    pub fn upload_data_batch(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        uploads: &[(&VulkanBuffer, &[u8])],
+    ) -> Result<()> {
+        if uploads.is_empty() {
+            return Ok(());
+        }
+        // Allocate one staging buffer per upload, copy payload into
+        // its mapped memory. Keep stagings alive in `stagings` so
+        // they outlast the GPU submit.
+        let mut stagings: Vec<VulkanBuffer> = Vec::with_capacity(uploads.len());
+        for (_dst, data) in uploads.iter() {
+            let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+            let mapped = unsafe {
+                device
+                    .map_memory(staging.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                    .map_err(|e| anyhow::anyhow!("upload_data_batch: map_memory failed: {:?}", e))?
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, data.len());
+                device.unmap_memory(staging.memory);
+            }
+            stagings.push(staging);
+        }
+
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("upload_data_batch: create_command_pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("upload_data_batch: allocate_command_buffers")?;
+        let cmd = command_buffers[0];
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &make_begin_info())
+                .context("upload_data_batch: begin_command_buffer")?;
+            for (i, (dst, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::default().size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
+            }
+            device
+                .end_command_buffer(cmd)
+                .context("upload_data_batch: end_command_buffer")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+                .context("upload_data_batch: queue_submit")?;
+            device
+                .queue_wait_idle(queue)
+                .context("upload_data_batch: queue_wait_idle")?;
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        // Drop stagings here (their Drop releases the host-visible memory).
+        drop(stagings);
         Ok(())
     }
 
@@ -316,7 +420,7 @@ impl VulkanBuffer {
                 cmd,
                 staging.buffer,
                 dst.buffer,
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
             device
                 .end_command_buffer(cmd)
@@ -365,7 +469,7 @@ impl VulkanBuffer {
                 .context("failed to begin command buffer")?
         };
 
-        let copy = vk::BufferCopy::builder().size(src.size).build();
+        let copy = vk::BufferCopy::default().size(src.size);
         unsafe {
             device.cmd_copy_buffer(cmd, src.buffer, staging.buffer, &[copy]);
         }
@@ -436,7 +540,7 @@ impl VulkanBuffer {
                 cmd,
                 src.buffer,
                 staging.buffer,
-                &[vk::BufferCopy::builder().size(src.size).build()],
+                &[vk::BufferCopy::default().size(src.size)],
             );
             device
                 .end_command_buffer(cmd)
@@ -520,5 +624,47 @@ impl VulkanBuffer {
     /// Get the buffer size.
     pub fn size(&self) -> u64 {
         self.size
+    }
+
+    /// Map this buffer's memory and `memcpy` `bytes` into it. Only
+    /// valid for buffers created with host-visible memory
+    /// (`create_host_visible`). No GPU submission; the GPU pulls the
+    /// data over PCIe on demand when the next dispatch reads.
+    pub fn write_mapped(&self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            (bytes.len() as u64) <= self.size,
+            "write_mapped: {} bytes > buffer size {}",
+            bytes.len(),
+            self.size,
+        );
+        let mapped = unsafe {
+            self.device
+                .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| anyhow::anyhow!("write_mapped: map_memory: {:?}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            self.device.unmap_memory(self.memory);
+        }
+        Ok(())
+    }
+
+    /// Map this buffer's memory and copy the first `bytes_len` bytes
+    /// into a fresh `Vec<u8>`. Only valid for buffers created with
+    /// host-visible memory (`create_host_visible`). Callers writing
+    /// to host-mapped memory should use `write_mapped` instead.
+    pub fn read_mapped(&self, bytes_len: usize) -> Result<Vec<u8>> {
+        let mapped = unsafe {
+            self.device
+                .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| anyhow::anyhow!("read_mapped: map_memory: {:?}", e))?
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(mapped as *const u8, bytes_len).to_vec()
+        };
+        unsafe {
+            self.device.unmap_memory(self.memory);
+        }
+        Ok(bytes)
     }
 }

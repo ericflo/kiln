@@ -12,7 +12,7 @@
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, TensorId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::{BackendRuntime, TrainingCapabilities};
@@ -52,6 +52,64 @@ pub struct VulkanBackend {
     bf16_packed_mlp_decode_weights_enabled: bool,
     weight_prewarm_enabled: bool,
     recurrent_state_residency_enabled: bool,
+    /// Cached `supports_resident_decode()` evaluation. The trait method
+    /// is called per-call on the hot path; reading env vars and checking
+    /// the device handle every time would be wasteful. Set at
+    /// construction from `KILN_VULKAN_RESIDENT_DECODE` (default on when
+    /// the device is up) and never changes.
+    resident_decode_enabled: bool,
+    /// Lazily constructed fixed ring of 3-4 reusable intermediate
+    /// `VulkanBuffer`s sized to `max(hidden, intermediate) × max_batch × 4`
+    /// bytes. The first resident-decode call ever made on this backend
+    /// publishes the ring; subsequent calls reuse the same slots.
+    ///
+    /// `OnceLock<Option<...>>` so a backend that fails the pool
+    /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
+    /// the `None` and routes every subsequent call to the per-call
+    /// Tensor path without re-checking.
+    decode_resident_pool:
+        OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
+    /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
+    /// legacy `PagedKvCache` layout in device-local f32 buffers so the
+    /// resident decode dispatchers can read/write K/V without crossing
+    /// the host boundary. The first resident decode call that needs the
+    /// cache constructs it for the active model geometry.
+    vk_paged_kv_cache:
+        OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
+    /// Set of full-attention layer indices whose K/V state has already
+    /// been seeded into the Vulkan-resident paged cache from the legacy
+    /// candle pool. Each full-attention layer is seeded once at the
+    /// first call to the resident block helper for that layer; subsequent
+    /// decode steps only do per-token slot writes.
+    seeded_full_attn_layers: Mutex<HashSet<usize>>,
+    /// Per linear-attention layer recurrent state buffer (f32, persistent),
+    /// keyed by the candle Tensor's `TensorId`. Seeded from the Tensor on
+    /// the first resident call that sees it.
+    linear_attn_recurrent_state:
+        Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// Per linear-attention layer conv1d state buffer, keyed by TensorId.
+    linear_attn_conv_state:
+        Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// Set of state TensorIds that have been seeded.
+    seeded_linear_attn_layers: Mutex<HashSet<TensorId>>,
+    /// Last `start_pos` we saw on the Vulkan-resident decode path.
+    /// Within a single request the resident decode runs once per
+    /// token with monotonically incrementing `start_pos`; a jump
+    /// (the first call after server start, or any new request whose
+    /// first decode step doesn't land at `last + 1`) marks a session
+    /// boundary, and `note_resident_session()` clears the per-layer
+    /// seeded sets so the next call re-seeds the resident
+    /// `VkPagedKvCache` from this request's prefill. Cheap because
+    /// the re-seed is now slot-range-aware (see
+    /// `vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_legacy`).
+    last_resident_start_pos: Mutex<Option<usize>>,
+    /// Scratch activation buffers reused across resident decode calls,
+    /// keyed by a stable role string. Each entry persists for the
+    /// backend's lifetime (single-sequence decode reuses the same
+    /// buffers across layers and across tokens). Avoids the
+    /// `create_device_local` + `Drop` pair that ran on every call
+    /// (≈ 200 µs × 12 buffers × N layers per token).
+    resident_scratch: Mutex<HashMap<&'static str, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Cached f32 device-local buffers for immutable CPU weight tensors.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
@@ -251,6 +309,15 @@ impl VulkanBackend {
         let recurrent_state_residency_enabled = gdn_enabled
             && std::env::var("KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_ok()
             && std::env::var("KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE").is_err();
+        // Default ON: every Vulkan build that brings up a logical device
+        // wants to route decode through the resident path. Pool feasibility
+        // is checked later at first use; if the device can't fit the ring
+        // (Strix Halo near memory limit) the call site falls back
+        // transparently to the per-call Tensor path and emits a one-time
+        // tracing::warn! — exactly the contract spelled out in gate (b)
+        // of docs/vk_resident_decode_plan.md.
+        let resident_decode_enabled =
+            kiln_core::env_flag::env_flag("KILN_VULKAN_RESIDENT_DECODE", true);
 
         let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
             Ok(dev) => {
@@ -305,6 +372,15 @@ impl VulkanBackend {
             bf16_packed_mlp_decode_weights_enabled,
             weight_prewarm_enabled,
             recurrent_state_residency_enabled,
+            resident_decode_enabled,
+            decode_resident_pool: OnceLock::new(),
+            vk_paged_kv_cache: OnceLock::new(),
+            seeded_full_attn_layers: Mutex::new(HashSet::new()),
+            linear_attn_recurrent_state: Mutex::new(HashMap::new()),
+            linear_attn_conv_state: Mutex::new(HashMap::new()),
+            seeded_linear_attn_layers: Mutex::new(HashSet::new()),
+            last_resident_start_pos: Mutex::new(None),
+            resident_scratch: Mutex::new(HashMap::new()),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -315,7 +391,326 @@ impl VulkanBackend {
         self.vulkan_device.is_some()
     }
 
-    fn cached_f32_weight_buffer(
+    /// Direct accessor for the owned `VulkanDevice`. Returns `None`
+    /// when device initialization failed (CPU fallback path); callers
+    /// that need device-resident work must short-circuit on `None`.
+    pub fn vulkan_device(&self) -> Option<&Arc<kiln_vulkan_kernel::VulkanDevice>> {
+        self.vulkan_device.as_ref()
+    }
+
+    /// Lazily construct (and cache) the resident-decode buffer ring.
+    ///
+    /// Returns `Some(&pool)` when the ring fits within 1% of the
+    /// device-local heap and every slot allocation succeeds.
+    /// Returns `None` (after a one-time `tracing::warn!`) when the
+    /// device can't fit the minimum 3 slots — e.g. Strix Halo near
+    /// its 16 GiB UMA limit. The `None` outcome is cached so the
+    /// per-call Tensor fallback does not re-probe on every decode
+    /// step.
+    pub fn decode_resident_pool(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> Option<&Arc<kiln_vulkan_kernel::DecodeResidentPool>> {
+        let dev = self.vulkan_device.as_ref()?;
+        self.decode_resident_pool
+            .get_or_init(|| {
+                match kiln_vulkan_kernel::DecodeResidentPool::try_new(
+                    dev,
+                    max_hidden,
+                    max_intermediate,
+                    max_batch,
+                ) {
+                    Ok(Some(pool)) => Some(Arc::new(pool)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Vulkan-resident decode pool construction errored; \
+                             falling back to per-call Tensor path"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    /// Lazily construct (and cache) the Vulkan-resident paged KV cache
+    /// for the given geometry.
+    ///
+    /// `num_full_attn_layers`, `num_blocks`, `block_size`, `num_kv_heads`,
+    /// `head_dim` mirror the legacy `PagedKvCache::new` geometry — the
+    /// resident cache is a device-local sibling laid out element-for-
+    /// element compatible with the existing paged-attn shaders.
+    ///
+    /// Returns `Some(&cache)` when the device allocation succeeds. Returns
+    /// `None` (with a one-time `tracing::warn!`) when the device can't fit
+    /// the geometry; callers fall back to the legacy CPU-backed pool.
+    /// The `None` outcome is cached on the backend so subsequent calls
+    /// don't re-probe.
+    pub fn vk_paged_kv_cache(
+        &self,
+        num_full_attn_layers: usize,
+        num_blocks: usize,
+        block_size: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> Option<&Arc<kiln_vulkan_kernel::VkPagedKvCache>> {
+        let dev = self.vulkan_device.as_ref()?;
+        self.vk_paged_kv_cache
+            .get_or_init(|| {
+                match kiln_vulkan_kernel::VkPagedKvCache::try_new(
+                    dev,
+                    num_full_attn_layers,
+                    num_blocks,
+                    block_size,
+                    num_kv_heads,
+                    head_dim,
+                ) {
+                    Ok(Some(cache)) => Some(Arc::new(cache)),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "Vulkan-resident paged KV cache construction errored; \
+                             falling back to legacy CPU-backed pool"
+                        );
+                        None
+                    }
+                }
+            })
+            .as_ref()
+    }
+
+    /// Test (without mutating) whether the given full-attention layer
+    /// has already been seeded into the resident KV cache for this
+    /// session. Returns true after the first successful call to
+    /// `mark_full_attn_layer_seeded` for the same `layer_idx`.
+    pub fn full_attn_layer_seeded(&self, layer_idx: usize) -> bool {
+        match self.seeded_full_attn_layers.lock() {
+            Ok(g) => g.contains(&layer_idx),
+            Err(_) => false,
+        }
+    }
+
+    /// Mark the given full-attention layer as having been seeded into
+    /// the resident KV cache for this session.
+    pub fn mark_full_attn_layer_seeded(&self, layer_idx: usize) {
+        if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
+            g.insert(layer_idx);
+        }
+    }
+
+    /// Reset the seeded-layer set. Tests / multi-session callers call
+    /// this when the legacy paged cache may have been reset between
+    /// resident decode calls; otherwise the resident path keeps reusing
+    /// stale K/V state.
+    pub fn reset_full_attn_seeded(&self) {
+        if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
+            g.clear();
+        }
+    }
+
+    /// Note this resident decode call's `start_pos`. Within one
+    /// request the resident path advances `start_pos` by 1 per token;
+    /// a discontinuity (first call after server boot, or a new
+    /// request whose first decode step doesn't follow the previous
+    /// request's last step) signals a fresh session — at that point
+    /// we clear the per-layer seeded flags so the next per-layer call
+    /// re-seeds the resident `VkPagedKvCache` from this request's
+    /// prefill. Returns `true` when a new session was detected.
+    ///
+    /// Without this, a second `/v1/chat/completions` request reuses
+    /// the persistent `VkPagedKvCache` slot data the previous request
+    /// wrote (because `seeded_full_attn_layers`, keyed only by layer
+    /// index, is stuck at `true` from request 1) — the model then
+    /// reasons about the prior request's prompt.
+    pub fn note_resident_session(&self, start_pos: usize) -> bool {
+        let mut last = match self.last_resident_start_pos.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let is_new_session = match *last {
+            // Same `start_pos` = another layer's call within the same
+            // decode token. Same `start_pos + 1` = the next decode
+            // step in the same request. Anything else = boundary.
+            Some(prev) => start_pos != prev && start_pos != prev.wrapping_add(1),
+            None => true,
+        };
+        // Only advance on a strictly-incrementing step so multi-layer
+        // calls within the same token don't trigger a spurious reset.
+        if match *last {
+            Some(prev) => start_pos == prev.wrapping_add(1) || is_new_session,
+            None => true,
+        } {
+            *last = Some(start_pos);
+        }
+        drop(last);
+        if is_new_session {
+            self.reset_full_attn_seeded();
+            self.reset_linear_attn_seeded();
+        }
+        is_new_session
+    }
+
+    /// Get or allocate the persistent recurrent-state buffer for a
+    /// GDN linear-attention layer, keyed by the candle Tensor's
+    /// `TensorId`. Subsequent calls with the same Tensor return the
+    /// same buffer so the resident GDN block reads/writes state in
+    /// place across decode steps.
+    pub fn linear_attn_recurrent_state_buffer(
+        &self,
+        key: TensorId,
+        bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .linear_attn_recurrent_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recurrent state mutex poisoned"))?;
+        if let Some(buf) = g.get(&key) {
+            if buf.size() >= bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            bytes,
+        )
+        .context("alloc linear-attn recurrent state buffer")?;
+        let arc = Arc::new(buf);
+        g.insert(key, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Get or allocate the persistent conv1d-state buffer.
+    pub fn linear_attn_conv_state_buffer(
+        &self,
+        key: TensorId,
+        bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .linear_attn_conv_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("conv state mutex poisoned"))?;
+        if let Some(buf) = g.get(&key) {
+            if buf.size() >= bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            bytes,
+        )
+        .context("alloc linear-attn conv state buffer")?;
+        let arc = Arc::new(buf);
+        g.insert(key, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    pub fn linear_attn_layer_seeded(&self, key: TensorId) -> bool {
+        match self.seeded_linear_attn_layers.lock() {
+            Ok(g) => g.contains(&key),
+            Err(_) => false,
+        }
+    }
+
+    pub fn mark_linear_attn_layer_seeded(&self, key: TensorId) {
+        if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
+            g.insert(key);
+        }
+    }
+
+    pub fn reset_linear_attn_seeded(&self) {
+        if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
+            g.clear();
+        }
+    }
+
+    /// Acquire (or lazily create) a persistent scratch
+    /// [`VulkanBuffer`] under the given role key, sized to at least
+    /// `min_bytes`. The same buffer is returned on every subsequent
+    /// call with the same role, so the resident decode block helpers
+    /// pay zero allocation cost on the steady-state hot path.
+    ///
+    /// If a previously-cached buffer for the role is too small for
+    /// the new `min_bytes` it is replaced.
+    pub fn acquire_resident_scratch(
+        &self,
+        role: &'static str,
+        min_bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .resident_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
+        if let Some(buf) = g.get(role) {
+            if buf.size() >= min_bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            min_bytes.max(4),
+        )
+        .with_context(|| format!("alloc resident scratch '{role}'"))?;
+        let arc = Arc::new(buf);
+        g.insert(role, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    /// Host-visible variant of `acquire_resident_scratch`. Used by the
+    /// native decode orchestrator to keep a persistent readback
+    /// staging buffer (for logits) — folding the readback's
+    /// `cmd_copy_buffer` into the main `CommandBatch` so the post-
+    /// submit step is just a `map_memory` rather than a fresh queue
+    /// submission.
+    pub fn acquire_resident_scratch_host_visible(
+        &self,
+        role: &'static str,
+        min_bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .resident_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
+        if let Some(buf) = g.get(role) {
+            if buf.size() >= min_bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_host_visible(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            min_bytes.max(4),
+        )
+        .with_context(|| format!("alloc host-visible resident scratch '{role}'"))?;
+        let arc = Arc::new(buf);
+        g.insert(role, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    pub fn cached_f32_weight_buffer(
         &self,
         weight: &Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
@@ -365,7 +760,7 @@ impl VulkanBackend {
             && weights.iter().all(|weight| weight.dtype() == DType::BF16)
     }
 
-    fn cached_bf16_packed_weight_buffer(
+    pub fn cached_bf16_packed_weight_buffer(
         &self,
         weight: &Tensor,
     ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
@@ -619,6 +1014,10 @@ impl BackendRuntime for VulkanBackend {
         &self.device
     }
 
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     fn training_capabilities(&self) -> TrainingCapabilities {
         TrainingCapabilities {
             projection_training: "VulkanLinearOp CustomOp1 when enabled",
@@ -630,6 +1029,28 @@ impl BackendRuntime for VulkanBackend {
             adamw_step: "Vulkan in-place registry update when operands are resident",
             native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
         }
+    }
+
+    fn decode_resident_pool_ready(
+        &self,
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> bool {
+        if !self.has_vulkan() || !self.resident_decode_enabled {
+            return false;
+        }
+        self.decode_resident_pool(max_hidden, max_intermediate, max_batch)
+            .is_some()
+    }
+
+    fn supports_resident_decode(&self) -> bool {
+        // The Vulkan-resident decode path (docs/vk_resident_decode_plan.md)
+        // applies whenever the logical device is up. The runtime pool
+        // feasibility check (the "fall back if the device can't fit even
+        // the minimum pool" rule in gate (b)) is enforced later, the
+        // first time a resident decode actually requests a buffer.
+        self.has_vulkan() && self.resident_decode_enabled
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
