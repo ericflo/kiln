@@ -13990,7 +13990,12 @@ fn model_forward_paged_last_token_resident_native_vk(
     let io_b =
         vk_backend.acquire_resident_scratch("native_io_b", (hidden_size * 4) as u64)?;
 
-    // 4. Upload the embedding output into io_a.
+    // 4. Prep the per-token upload payloads (embedding, RoPE cos/sin,
+    //    block_table, seq_lens) and ship them all to GPU in ONE
+    //    batched submit. Previously this phase issued 5 separate
+    //    `VulkanBuffer::upload_data` calls, each with its own command
+    //    pool create + queue_submit + queue_wait_idle round-trip,
+    //    which cost ~6 ms / token of pure orchestration.
     let hidden_flat = if hidden.dtype() == candle_core::DType::F32 {
         hidden.flatten_all()?
     } else {
@@ -14001,21 +14006,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     for &x in &hidden_data {
         hidden_bytes.extend_from_slice(&x.to_le_bytes());
     }
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &io_a,
-        &hidden_bytes,
-    )
-    .context("native: upload embedding output to io_a")?;
 
-    // 5. Pre-upload RoPE cos/sin, block_table, seq_lens — into
-    // persistent pool buffers so each decode token reuses the same
-    // VkBuffer handles. Avoids the per-token vk::create_buffer +
-    // bind_memory + map/unmap overhead that previously cost ~5 ms per
-    // token in the upload phase.
     let rope_cos_data: Vec<f32> = rope_cos_t.flatten_all()?.to_vec1()?;
     let rope_sin_data: Vec<f32> = rope_sin_t.flatten_all()?.to_vec1()?;
     let rope_bytes = (rope_cos_data.len() * 4).max(4) as u64;
@@ -14025,26 +14016,11 @@ fn model_forward_paged_last_token_resident_native_vk(
     for &x in &rope_cos_data {
         rope_cos_bytes.extend_from_slice(&x.to_le_bytes());
     }
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &rope_cos_buf,
-        &rope_cos_bytes,
-    )?;
     let mut rope_sin_bytes: Vec<u8> = Vec::with_capacity(rope_sin_data.len() * 4);
     for &x in &rope_sin_data {
         rope_sin_bytes.extend_from_slice(&x.to_le_bytes());
     }
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &rope_sin_buf,
-        &rope_sin_bytes,
-    )?;
+
     let blocks: Vec<u32> = block_table.blocks.clone();
     let block_table_bytes_size = (blocks.len() * 4).max(4) as u64;
     let block_table_buf =
@@ -14053,25 +14029,24 @@ fn model_forward_paged_last_token_resident_native_vk(
     for &x in &blocks {
         block_table_bytes.extend_from_slice(&x.to_le_bytes());
     }
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &block_table_buf,
-        &block_table_bytes,
-    )?;
     let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
     let seq_lens_buf = vk_backend.acquire_resident_scratch("native_seq_lens", 4)?;
     let seq_lens_bytes: Vec<u8> = seq_lens[0].to_le_bytes().to_vec();
-    VulkanBuffer::upload_data(
+
+    VulkanBuffer::upload_data_batch(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
         vk_device.queue(),
         vk_device.queue_family_index(),
-        &seq_lens_buf,
-        &seq_lens_bytes,
-    )?;
+        &[
+            (&io_a, &hidden_bytes),
+            (&rope_cos_buf, &rope_cos_bytes),
+            (&rope_sin_buf, &rope_sin_bytes),
+            (&block_table_buf, &block_table_bytes),
+            (&seq_lens_buf, &seq_lens_bytes),
+        ],
+    )
+    .context("native: batched per-token upload")?;
     if timing_enabled {
         UPLOAD_NS.fetch_add(t_upload.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }

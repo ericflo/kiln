@@ -276,6 +276,81 @@ impl VulkanBuffer {
         Ok(())
     }
 
+    /// Batch-upload multiple small payloads to multiple destination
+    /// buffers in a single command buffer + single queue submission.
+    ///
+    /// Caller passes `&[(&dst_buffer, &payload_bytes)]`. The function
+    /// allocates one staging buffer per upload (each must hold its
+    /// own payload size — staging buffers can't safely overlap), but
+    /// only creates ONE command pool, ONE command buffer, and submits
+    /// + waits ONCE — collapsing what would otherwise be N round
+    /// trips into 1. Dramatically faster for the decode hot loop where
+    /// 4-5 per-token small inputs (RoPE cos/sin, block_table, seq_lens,
+    /// embedding) used to take ~6 ms / token through `upload_data`.
+    pub fn upload_data_batch(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        uploads: &[(&VulkanBuffer, &[u8])],
+    ) -> Result<()> {
+        if uploads.is_empty() {
+            return Ok(());
+        }
+        // Allocate one staging buffer per upload, copy payload into
+        // its mapped memory. Keep stagings alive in `stagings` so
+        // they outlast the GPU submit.
+        let mut stagings: Vec<VulkanBuffer> = Vec::with_capacity(uploads.len());
+        for (_dst, data) in uploads.iter() {
+            let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+            let mapped = unsafe {
+                device
+                    .map_memory(staging.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                    .map_err(|e| anyhow::anyhow!("upload_data_batch: map_memory failed: {:?}", e))?
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, data.len());
+                device.unmap_memory(staging.memory);
+            }
+            stagings.push(staging);
+        }
+
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("upload_data_batch: create_command_pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("upload_data_batch: allocate_command_buffers")?;
+        let cmd = command_buffers[0];
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &make_begin_info())
+                .context("upload_data_batch: begin_command_buffer")?;
+            for (i, (dst, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::builder().size(data.len() as u64).build();
+                device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
+            }
+            device
+                .end_command_buffer(cmd)
+                .context("upload_data_batch: end_command_buffer")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+                .context("upload_data_batch: queue_submit")?;
+            device
+                .queue_wait_idle(queue)
+                .context("upload_data_batch: queue_wait_idle")?;
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        // Drop stagings here (their Drop releases the host-visible memory).
+        drop(stagings);
+        Ok(())
+    }
+
     /// Upload data using an externally synchronized reusable command pool.
     pub fn upload_data_with_command_pool(
         device: &Arc<ash::Device>,
