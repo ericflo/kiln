@@ -24,6 +24,8 @@ Kiln is the **single best vehicle in the open-source world to deliver this to ev
 - **The primitives are already 80% there.** SFT-over-HTTP, GRPO-over-HTTP, LoRA hot-swap, paged KV, prefix caching, FP8 KV, weight-space adapter merge (`linear` / `ties` / `concat`), 128K context, eval suites, judgment flywheel. OPD is the natural third training mode — its UX is GRPO without the reward function, plus a teacher.
 - **The 4B → 27B brain-pump is uniquely powerful.** Hosted Qwen3.6-27B logits exist on every major inference provider. Buying a million teacher logits costs roughly the price of a sandwich. A one-click "distill a slice of 27B into a LoRA" flow turns frontier capability into a downloadable adapter.
 
+**The primary deployment is agentic.** Kiln serves a 4B model. The 4B's job is not to write essays — it is to be the brain inside an agent loop (the canonical client is [pi](https://github.com/earendil-works/pi), pointed at kiln's existing OpenAI-compat surface) doing real work: coding, terminal ops, CLI slinging, data fetching, recovering from errors. Pi already captures every session as JSONL at `~/.pi/agent/sessions/` with `id`+`parentId` for branching, and ships `pi-share-hf` for community session distribution — the trajectory-capture and corpus-distribution layers we need are already built upstream. **§10 reframes this entire plan around that fact**, with the **self-distillation engine (§10.6)** as the centerpiece: distil a 27B-quality turn-judge into a small local LoRA *once*; use that judge as the reward model for ongoing GRPO on the agent forever — paid in pennies, run on your hardware, compounding weekly with no per-cycle teacher cost. Around it: agent-trace capture as the primary training-data path, rollouts that run via pi itself with no bespoke sandbox infrastructure, the Trajectory Studio as the judgment surface, and the user's daily pi use as the continuous-learning signal. Everything in §3 through §9 exists to make this loop fast, easy, safe, and free for an *agent user*, not just a chat user.
+
 **The non-negotiable design principle — the pit of success.** Every default in this plan is chosen so that a user who reads no documentation, runs no diagnostics, and presses one button still ends up with a working adapter. Failure modes have automatic mitigations engaged *before* the user sees the failure. Knobs default to values that work for 95% of cases; sub-optimal values require explicit override; destructive choices require explicit confirmation. Cold-start is auto-injected when the student/teacher gap demands it. Cost is hard-capped before the first API call. Bad runs auto-rollback to the prior checkpoint. The OPD literature is not the user's homework — it is the manual kiln consults on the user's behalf, with every auto-decision linked to a one-paragraph "Why?" the user can click if curious. **The user's job is to express intent. Kiln's job is to make the right thing happen.** §8 elaborates this principle into the concrete defaults, guardrails, and surfaces that deliver it.
 
 **The bet of this document:**
@@ -640,6 +642,12 @@ The defaults below are not arbitrary; each one is the conclusion of a paper in t
 | Cost cap (remote teachers) | Hard cap at user-set ceiling, default $25; pause on cap; cache fall-through option | Pragmatic — no surprise bills, ever |
 | First-run dry-run | Mandatory on first use of any remote `LogitSource`; estimates $ and wall-clock before any token sent | Pragmatic — informed consent before paid API calls |
 | Adapter promotion gate | Eval gate required; auto-promote off by default | Pragmatic — bad runs do not regress production traffic |
+| Agentic loss extras | SCoRe earliest-error weighting + TIP tool-call upweight + verifier reward (λ=0.3) when programmatic outcome available | Lyu et al. (2025); Xu et al. (2026); §10.4 |
+| Rollout execution (agentic) | Via pi (subprocess or SDK); kiln inherits pi's trust model | §10.5 — no bespoke sandbox infrastructure |
+| **Self-distillation engine** | Auto-engaged: judge distil from 27B once (§10.6.1) → Saturday `self-improve` GRPO with local-judge advantages (§10.6.2) → drift-triggered judge refresh (§10.6.3) → CRISP terseness pass (§10.6.4) | §10.6 — the centerpiece of agentic deployment; pay once for the judge, improve forever |
+| Turn-judge LoRA rank | 16 default (capacity calculator can adjust) | §10.6.1 — judging is easier than generating; small judges work |
+| Judge refresh trigger | Automatic on drift (judge-vs-27B agreement on contested cases drops below 80% on a 50-trajectory sample) | §10.6.3 (CoPD pattern, Gu et al. 2026) |
+| Agent harness identity in receipt | Tool-manifest SHA + harness name (pi / cursor / aider / custom) | §10.12 portability protections |
 
 When a default is wrong for a given user, kiln tells them which paper says so, and offers the alternative.
 
@@ -1096,7 +1104,407 @@ The user will not see any of this complexity. They will see a steadily-decreasin
 
 ---
 
-## 10. Failure modes anticipated, and where each is addressed
+## 10. Agentic deployment as the primary use case
+
+§1–§9 frame OPD as a generic post-training tool: "make a 4B better at math, code, writing." That framing is correct but secondary. **The actual primary deployment of kiln-tuned 4B models is as the brain inside an agent loop** — [pi](https://github.com/earendil-works/pi) pointing at kiln, doing real work: navigating codebases, running terminals, slinging CLIs, fetching data, recovering from errors. Everything in §1–§9 stands; §10 reframes priorities, training data, loss, harness, and eval to match the actual deployment shape.
+
+### 10.1. The canonical setup — pi + kiln + Qwen3.5-4B + tools
+
+The reference deployment is one Mac (or 4090, or H200), one terminal, two binaries:
+
+```
+┌──────────────┐  OpenAI-compat   ┌──────────────────────────┐
+│              │  /v1/chat/...    │  kiln server             │
+│  pi          │ ───────────────► │  - Qwen3.5-4B + active   │
+│  (terminal   │ ◄─────────────── │    LoRA (hot-swappable)  │
+│   coding     │   tool calls,    │  - inference engine      │
+│   agent)     │   reasoning,     │  - training engine       │
+│              │   responses      │  - eval engine           │
+└──────────────┘                  │  - judgment flywheel     │
+       │                          └──────────────────────────┘
+       │ writes
+       ▼
+~/.pi/agent/sessions/{id}.jsonl   ◄── kiln reads as
+  (each session: messages,             trajectory training data
+   tool_calls, tool_results,
+   id + parentId for branching)
+```
+
+Pi already ships exactly the integration kiln needs:
+
+- **OpenAI-compat client with tool use** → kiln's existing `/v1/chat/completions` is the endpoint; zero protocol work needed.
+- **Custom-provider configuration** via `~/.pi/agent/models.json` → one-line setup.
+- **JSONL session capture at `~/.pi/agent/sessions/`** with `id` + `parentId` for branching → trajectory storage is solved upstream.
+- **`/tree` branching and `/share`** to publish sessions via [`pi-share-hf`](https://huggingface.co/) → community-distribution channel for agent traces is solved upstream.
+- **Default tools (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`) + extension API** → known tool surface to optimise against.
+
+**Kiln's job is to make the 4B inside this loop better at this exact loop, every day, automatically, on whatever hardware the user owns.** That is the primary deployment path. Everything else is a corollary.
+
+### 10.2. Why agentic OPD is qualitatively different
+
+Generic OPD optimises (prompt → response). Agentic OPD optimises (prompt → trajectory of [reasoning → tool_call → tool_result] × N → final outcome). The shifts:
+
+| Dimension | Generic OPD | Agentic OPD |
+|---|---|---|
+| Training datum | (prompt, response) pair | full multi-turn trajectory with tool calls and results |
+| Rollout shape | single-shot generation | interactive loop with real or sandboxed tool execution |
+| Reward signal | teacher KL | teacher KL + programmatic verifier (test passed, build succeeded, CLI returned 0) + user judgment from trajectory branching |
+| Failure mode | hallucination, repetition | tool misuse, context bloat, looped retries, abandoning the task |
+| Critical credit assignment | per-token | per-turn + earliest-divergence (SCoRe pattern) |
+| Eval suite | static benchmarks (AIME, MATH) | end-to-end agent benchmarks (SWE-bench, Terminal-Bench, MCPAtlas, repo-grounded mini-benchmarks) |
+| Teacher | bigger LLM | bigger *agent* (frontier model + same tool harness) |
+| Data source | curated prompt corpus | the user's own session log |
+| Continual learning | refresh against new docs | refresh against the user's daily agent runs |
+
+Five methods catalogued in the survey (`2604.00626_survey_on_policy_distillation.md` §5.3, §6.1, §10.4) become first-class instead of research curiosities:
+
+- **SCoRe** (Lyu et al. 2025) — earliest-error correction for agent trajectories. The single most important loss-shaping idea for agents.
+- **TT-OPD** (Jeong 2026) — turn-level truncated KL for multi-turn agentic OPD.
+- **SOD** (Zhong et al. 2026) — step-level divergence reweighting for tool-use steps.
+- **TIP** (Xu et al. 2026) — token importance profiling becomes "tool-call-token reweighting" for agent rollouts.
+- **DeepSeek-V4 GRM** — generative reward model can act as a per-trajectory verifier when no programmatic test is available.
+
+### 10.3. The Agent Trace Layer — `kiln-server::agent_traces`
+
+A new module that consumes pi-format sessions as a first-class data source.
+
+**Discovery and ingestion:**
+
+```
+$ kiln agent traces discover ~/.pi/agent/sessions/
+   → indexes 247 sessions from the last 90 days
+   → groups by working directory, tool set, outcome heuristic
+   → registers as queryable kiln dataset agent-traces:pi-default
+```
+
+The ingester normalises pi's JSONL format to a canonical kiln trajectory schema (existing `kiln-eval::trajectory` types, extended for tool semantics — kiln-eval already has `trajectory.rs`, this is an extension not a greenfield). One-way prefix hashes are computed for the cache layer (§3.3) so trajectories can become teacher-cache keys later.
+
+**Outcome heuristics** (used to prefilter what shows up in the Trajectory Studio when the user hasn't labelled):
+
+- Did the session end with a `bash` exit-0 sequence on the user's task command?
+- Did the user run `/tree` to fork (likely indicates the original branch went wrong)?
+- Did the user manually edit files the agent had written (indicates agent's edits needed correction)?
+- Is there a follow-up session in the same directory with similar intent (indicates repeat-attempts)?
+
+These aren't perfect signals but they're cheap and they prefilter the inbox.
+
+**Privacy defaults:**
+
+- All processing local by default. Nothing leaves the box.
+- Sharing requires explicit opt-in *per session*. Pi's existing `pi-share-hf` flow is the upstream model.
+- Redaction layer between local store and any outbound: scrubs paths, env vars, stdout matching secret patterns (AWS keys, API keys, .env contents, etc.). Default-on; configurable.
+- Reproducibility receipts (§8.11) for adapters trained on private agent traces include only hashes of trace IDs, never content.
+
+### 10.4. The agentic OPD training loop — three additions on top of §3.1
+
+Same one-line claim ("OPD = swap GRPO's per-token advantage from `reward - baseline` to `-reverse_kl`"), with three additions for agentic mode:
+
+**A. The rollout is an agent loop, not pure generation.**
+
+The trainer doesn't just call the inference engine to sample tokens. It calls **pi itself** as a subprocess (or via SDK; §10.5) — kiln's inference engine serves the agent's brain; pi runs the agent loop; tool calls execute in pi's normal trust environment. Each rollout produces a real trajectory: assistant turns interleaved with real tool calls and their actual results. The teacher gets logprobs for the *assistant tokens only*; tool-result tokens are masked from the loss (they are inputs the model didn't generate).
+
+**B. SCoRe earliest-error weighting (default on for agentic mode).**
+
+Within a multi-turn trajectory, the loss is up-weighted on the *earliest* token where student and teacher diverge above a threshold. Late-turn errors are often consequences of early-turn errors; correcting the root is more effective than correcting the leaves. We track a per-trajectory earliest-divergence index and modulate per-token loss with a decay schedule based on distance from that index.
+
+**C. Tool-call vs prose token weighting (TIP-style, default on for agentic mode).**
+
+Tool-call tokens (function name, JSON parameters) get higher weight than reasoning prose:
+
+- A wrong reasoning paragraph can still produce a correct tool call (recoverable within the trajectory).
+- A wrong tool call sends the agent down a bad branch (not recoverable in the current rollout).
+
+The weighting comes from a small token-classifier head shipped with kiln that tags each position as `prose` / `tool_call_name` / `tool_call_params` / `tool_result`. Loss multipliers per class auto-tuned by the diagnostic guardrails.
+
+**D. Optional verifier reward, blended with the per-token KL.**
+
+When a trajectory's final outcome is programmatically verifiable, kiln blends a sequence-level GRPO-style advantage on top of the per-token reverse KL:
+
+```
+L_total = L_OPD_per_token (with SCoRe + TIP weighting)
+        + λ_verifier · L_GRPO_outcome
+        + β_kl · KL(π_θ || π_ref)             # Stable-OPD reference penalty
+        + λ_sft · L_SFT_golden_minibatch       # Stable-OPD goldens
+```
+
+`λ_verifier` defaults to 0.3 — anchors on outcome, doesn't drown out the per-token signal. Auto-tuned. **The §8.2 "hybrid OPD + GRPO" mode I marked as a §14 research direction for chat is the *default* for agentic.**
+
+For trajectories without programmatic outcomes (refactors, exploration, summarisation), `λ_verifier = 0` and we fall back to pure OPD with optional **DeepSeek-V4 GRM-style trajectory judging** — using the user's existing kiln judge LoRA as the verifier. **The judgment flywheel meets the agent loop**: every kiln user already builds a judge through A/B picks; that judge can directly serve as the GRM here.
+
+### 10.5. Rollouts run via pi itself
+
+Kiln does not invent sandbox infrastructure. For training rollouts, kiln calls **pi as a subprocess** (or links its SDK — pi already supports both modes) and lets pi do what it always does: run the agent loop in the user's working directory with whatever tool surface pi is configured with.
+
+**The user's existing pi trust model is the kiln trust model.** If you already trust pi to run on your machine (you do — you installed it), kiln rollouts inherit that trust without ceremony.
+
+For headless or unattended training jobs, kiln runs pi in `--print` / JSON mode against synthesised task prompts, capturing the resulting JSONL session as a normal pi trajectory. The same Trajectory Studio (§10.10) and judge LoRA (§10.6) consume both interactive and headless sessions.
+
+Users with stricter isolation requirements run pi inside their preferred container/VM — kiln does not impose this. Whatever pi runs in, kiln rollouts run in.
+
+**No bespoke sandbox engineering. No new failure modes. Just pi, run more times.**
+
+### 10.6. The self-distillation engine — the most powerful idea in this plan
+
+The killer insight, and the pattern that makes kiln genuinely different from every other small-model post-training tool:
+
+> *27B-quality **judgment** of agent turns is dramatically easier to distil than 27B-quality **generation**. Distil the judge once. Apply the judge locally forever. Use the judge as the reward model for ongoing GRPO on the agent. **The user pays once for the judge; the agent improves forever.***
+
+This is **SPIN** (Chen 2024) refined by **AlignDistil** (Zhang 2025) unified by **IRIS** (Liao 2026) operationalized by **DeepSeek-V4's GRM** (`§5.1.1`) — but with the explicit twist that the judge is a *small* LoRA distilled from 27B, not the actor itself trained jointly. All the pieces exist in kiln already (SFT, GRPO, judge flywheel, hot-swap, multi-tenant LoRA serving via Punica); they need to be composed and surfaced as one click.
+
+#### 10.6.1. Turn-Judge Distillation — the one-time investment
+
+```
+$ kiln judge distill
+```
+
+Defaults to Qwen3.6-27B as teacher, the user's discovered pi sessions as the corpus. What kiln does:
+
+1. Collects (turn, context) pairs from the user's pi sessions + (optionally) `pi-share-hf` public sessions.
+2. For each turn, queries the teacher for a multi-axis quality score: `tool_correctness`, `goal_progress`, `reasoning_quality`, `terseness`, `instruction_following`. The 27B produces these as JSON; kiln has a structured-output scorer in `kiln-eval` already.
+3. OPD-distils a small judge LoRA (rank 16 default; auto-tuned by §8.5 capacity calculator) to match the teacher's score distribution on student-sampled turns. Per-axis cross-entropy + reverse-KL on the axis distribution.
+4. Validates judge agreement with teacher on a held-out slice (≥90% agreement at the highest axis is the gate; auto-fails otherwise; surfaces the failure with the §8.8 "Why?" explanation).
+5. Ships the judge LoRA as `judge-pi-vNN` in the user's adapter store.
+
+**Cost:** one-time teacher inference run. ~$5 on hosted Qwen3.6-27B with cache; near-zero against a local 27B; near-zero on subsequent re-distillations (same logit cache as §3.3).
+
+**Output:** a 5–20 MB LoRA that judges agent turns at ~95% agreement to 27B at <1% the inference cost.
+
+#### 10.6.2. Local-Judge GRPO — the perpetual loop
+
+With the judge in hand, GRPO becomes self-sufficient:
+
+```
+$ kiln self-improve   # auto-runs Saturday by default
+```
+
+What kiln does:
+
+1. Samples agent rollouts on the week's pi tasks (or synthesised tasks if user opted out of capture).
+2. Hot-swaps to judge LoRA; scores every rollout per axis.
+3. Hot-swaps back to agent LoRA; runs GRPO using the per-axis scores as advantages (weighted blend, default `goal_progress` heaviest).
+4. Mixes in any trajectories where a programmatic verifier (`pytest`, `cargo test`, exit-0, file-exists) exists — they reinforce the judge-derived signal at higher confidence (`λ_verifier` = 0.3, §10.4 D).
+5. Stable-OPD safeguards (§3.1) and all guardrails active.
+
+**Cost:** local compute only. **Zero teacher inference at training time.** The judge LoRA is the standing approximation of the teacher.
+
+**This is the perpetual motion machine.** The agent improves toward outputs the judge approves of; the judge approximates 27B; therefore the agent improves toward 27B-judged quality, paying nothing per cycle.
+
+This is exactly **HDPO** (Ding 2026) — GRPO + JSD self-distil with GT-conditioning — applied with the judge LoRA standing in as the GT proxy.
+
+#### 10.6.3. Co-evolution + drift detection (CoPD pattern, survey §5.3.3)
+
+The agent improves week over week. The judge stays static between refreshes. **Eventually the agent surpasses the judge's discrimination ceiling** — the judge approves everything the agent now produces. At that point further GRPO training is wasted (and the §3.8 entropy guardrail will flag it).
+
+Kiln detects this automatically:
+
+- Track the rolling distribution of judge scores on student rollouts. If the median crosses 0.9 on the primary axis and judgment entropy collapses, the judge can no longer discriminate.
+- Sample a small slice (~50 trajectories) and re-query 27B for ground-truth scores. If teacher-judge agreement on the contested ones (mid-scored cases) drops below 80%, the judge needs refresh.
+- Auto-trigger a brief judge re-distillation against 27B (cost: ~$5 with full cache benefit).
+
+**The judge gets sharper as the agent gets better.** This is **CoPD** (Gu et al. 2026) — co-evolving bidirectional distillation — applied to the (judge, agent) LoRA pair on a single base model. The two adapters co-evolve indefinitely.
+
+> **The agent's quality is bounded not by the original judge distillation but by the *latest* judge refresh.** Periodic refreshes (drift-triggered, typically monthly) keep the ceiling raising.
+
+#### 10.6.4. Self-distil for terseness (CRISP pattern, survey §5.3.1)
+
+Agent UX cares about **speed**, not just quality. Verbose reasoning and bloated tool-call params increase decode latency and consume context budget faster.
+
+Kiln auto-engages a CRISP-style conciseness self-distillation phase as part of every Saturday `self-improve`:
+
+1. Take the student's recent successful trajectories.
+2. Re-sample the same student conditioned on a "be concise" system prompt — produces shorter equivalents.
+3. Train the student to emit the shorter forms as long as the judge (or verifier) still accepts.
+
+**Result per CRISP (Sang et al. 2026): 57% token reduction at +9% task accuracy.** Compounded with §10.6.2: faster decode, less context bloat, smarter outputs — all from the same weekly cycle. Free.
+
+#### 10.6.5. The judge stacks on the agent — multi-tenant LoRA serving
+
+Both judge and agent are LoRA adapters on the same base 4B. Kiln already supports adapter composition and hot-swap. So at inference time:
+
+- Single base model in memory (~8 GB at FP8)
+- Agent LoRA active during user-facing inference
+- Judge LoRA hot-swap during background scoring (~milliseconds; existing adapter swap path)
+- No second model to load; no GPU contention beyond what's already paid
+
+This is the multi-tenant LoRA serving pattern (Punica, already noted in §3.11). **Self-distillation costs one base + N adapter slots, not N base models.**
+
+#### 10.6.6. Why the self-distillation engine is more important than the 27B Knowledge Pump
+
+The §3.5 Knowledge Pump distils a static slice of 27B into a static LoRA. Useful but bounded — the LoRA captures what 27B knew at distillation time, applied to the prompts in the seed corpus.
+
+The self-distillation engine is **dynamic**. It captures the user's actual workflow, refreshes against the latest 27B periodically, and compounds week over week. **The Knowledge Pump is the cold-start; the self-distillation engine is the steady state.** Together they are the full lifecycle: pump once to get a strong baseline; self-distil forever to keep getting better at the user's actual work.
+
+The architecture in deployment:
+
+- **Base:** Qwen3.5-4B (immutable)
+- **Knowledge LoRA** (optional, from §3.5): pumped once from 27B over a broad corpus
+- **Judge LoRA** (from §10.6.1): pumped once from 27B as a quality discriminator
+- **Agent LoRA** (active in deployment): GRPO-trained against the judge weekly via §10.6.2, starting from `Base + KnowledgeLoRA` as the warm initialisation
+- All hot-swappable on the same base. All managed by the existing kiln adapter infrastructure.
+
+**This is what *"your model gets better every time you use it"* means in practice for agentic deployment.**
+
+### 10.7. The agent compatibility table — extended dimensions
+
+§8.4's compatibility table records (teacher × student × domain). Agentic adds three more axes:
+
+- **Tool set fingerprint** — the SHA of the JSON tool manifest pi (or any harness) is configured with. Adapters bind to a specific tool set; using them with a different set is a known source of bad behaviour.
+- **Harness identity** — pi vs Cursor vs Aider vs custom; each has slightly different prompting conventions, special tokens, response-format expectations. Adapters trained with pi's conventions ship as `harness:pi`.
+- **Task family** — `code-edit`, `code-navigate`, `terminal-ops`, `data-fetch`, `multi-file-refactor`, `debug-and-fix`. Coverage report shows per-family overlap convergence so the user can see which task types their adapter actually mastered.
+
+The day-1 table seeds with kiln's own validation runs across pi's default tool set, against a small set of teachers (Claude Sonnet 4.5/4.6 via API, Qwen3.6-27B local, Qwen3-Coder-32B if/when available). Community-contributed entries via the same opt-in pipeline as §3.10's Adapter Library.
+
+### 10.8. Agent-shaped recipes
+
+Stored as YAML in `crates/kiln-server/recipes/agentic/`. The marquee recipe:
+
+**`coding-agent-from-this-repo`**
+
+```yaml
+name: coding-agent-from-this-repo
+inputs:
+  repo_path: { type: directory, required: true }
+  teacher: { type: logit_source, default: best-available-agent-teacher }
+  baseline_sessions: { type: trace_dataset, default: discover from ~/.pi/agent/sessions }
+
+steps:
+  - kind: synthesise_seed_tasks
+    from: repo_path
+    output: seed_tasks
+    strategies: [bug_to_fix, feature_to_add, refactor_to_perform, file_to_navigate, command_to_run]
+
+  - kind: rollout_with_teacher
+    teacher: ${inputs.teacher}
+    tasks: ${seed_tasks}
+    via: pi
+    output: teacher_traces
+
+  - kind: cold_start
+    sft_data: ${teacher_traces}
+    output: cold-start-lora
+
+  - kind: opd_agentic
+    base: cold-start-lora
+    teacher: ${inputs.teacher}
+    tasks: ${seed_tasks ∪ baseline_sessions}
+    loss: hybrid_opd_verifier
+    score_weighting: scoreEarliestError + TIP
+    via: pi
+    output: ${inputs.name}
+
+  - kind: post_eval
+    suite: pi-mini-bench-${inputs.repo_path}
+    adapter: ${inputs.name}
+    require_min_score: 0.55
+
+  - kind: ab_judge
+    versus: current_active
+    sessions: 10_synthesised_held_out
+```
+
+**Other day-one agentic recipes:**
+
+- **`learn-from-my-pi-history`** — continual-learning on the user's existing pi sessions instead of synthesised tasks. Auto-runs nightly or on-demand.
+- **`merge-my-agent-loras`** — behaviour-space merge (§3.4) wired for the agent case. Combines (rust-coder + bash-ops + repo-navigator) → unified agent adapter, with coverage report per task family.
+- **`recover-tool-following`** — agent analog of `recover-instruction-following` (Lu's IF-recovery experiment). After a midtrain on new code or docs degrades the agent's tool-use fluency, OPD-recover from the prior agent adapter.
+- **`pi-share-then-pump`** — pulls public sessions from `pi-share-hf`, filters to a chosen domain (Rust, Python, ops, etc.), runs the pump against a frontier teacher. The Knowledge Pump (§3.5) wired with agent-shaped data.
+
+### 10.9. The Trajectory Studio — judgment flywheel for agents
+
+Augment kiln's existing A/B judgment view with a trajectory-aware UI:
+
+- **Inbox view** — recently-captured sessions grouped by repo, intent, outcome heuristic.
+- **Tree-diff view** — trajectory shown as a tree (using pi's `parentId` graph). Branches are visually distinct. User clicks a branch to mark "this is the right way".
+- **Earliest-error annotation** — for failed sessions, the user clicks a turn to mark "this is where it went wrong". That click becomes a SCoRe earliest-divergence label fed directly into the loss weighting (§10.4 B).
+- **Tool-call inspector** — each tool call expandable, showing parameters, result, latency. Failed tool calls highlighted.
+- **Bulk actions** — *"all sessions in `~/code/myrepo/` from the last week marked as positive examples"* → one click queues an OPD job.
+
+This replaces "judge two responses" with "judge two trajectories" as the primary loop. The existing judgment-derived **judge LoRA** still works — but now the judge LoRA is judging trajectories, not single responses, and **directly serves as the GRM in the verifier-augmented OPD (§10.6)**. The two flywheels merge.
+
+### 10.10. Online learning — the §10.6 engine in motion
+
+The killer continuous loop, end-to-end:
+
+```
+1. User installs kiln + pi, points pi at kiln, picks a starting adapter (one command set, §10.14).
+2. Kiln (one-time): distil judge LoRA from 27B (§10.6.1) — ~$5, ~1 hour with cache.
+3. User does pi work for a week. Sessions accumulate at ~/.pi/agent/sessions/.
+4. Saturday morning, kiln auto-runs `kiln self-improve`:
+   - Local judge scores the week's rollouts (§10.6.2).
+   - GRPO trains the agent against judge advantages.
+   - CRISP terseness pass on top of successful rollouts (§10.6.4).
+   - Stable-OPD safeguards + auto-checkpoint + post-eval gate.
+   - Drift check on the judge — refresh against 27B if needed (§10.6.3).
+5. Notification: "Adapter pi-coder-vN ready. +8 points on your held-out sessions,
+   12% shorter responses on average. Click to A/B."
+6. User reviews 3 trajectories side-by-side in the Trajectory Studio, approves.
+   Hot-swap automatic. pi continues with the improved brain. No restart, no migration.
+7. Goto 3.
+```
+
+**Cost per week:** local electricity. **Cost per judge refresh** (occasional, drift-triggered): ~$5 with full cache. **No fixed teacher cost per training cycle.**
+
+**This is kiln's tagline — *"your model gets better every time you use it"* — applied to agentic deployment, with the self-distillation engine making the perpetual loop genuinely free.**
+
+### 10.11. Tool-schema versioning — adapters bound to a tool manifest
+
+Every agentic adapter records its tool-manifest fingerprint in its reproducibility receipt (§8.11). Three protections:
+
+- **Mismatch warning** — when an adapter is loaded for a session whose tool manifest differs (different MCP servers, modified pi extensions), kiln warns: *"adapter trained against tool manifest v2.4; current session is v2.7 — 3 new tools, 1 renamed. May need refresh."*
+- **Schema-aware retraining** — when the user adds new tools, kiln offers to spin up a brief OPD pass that introduces the new tool definitions to the adapter without losing existing capabilities. The same SFT-cold-start logic (§3.1) applies: the model needs forward-KL exposure to new tool tokens before reverse-KL OPD can refine usage.
+- **Tool-set portability** — an adapter trained on pi's default tools should mostly work with similar tools under a different name. Kiln tracks per-tool-family transfer scores; warns when a substitution is risky.
+
+### 10.12. The agent benchmark suite — what we eval against
+
+Phase 0 ships these as registered eval suites in `kiln-eval`:
+
+- **`swe-bench-mini`** — a 50-instance subset of SWE-bench Verified, runnable on a single 4090 in ~1 hour.
+- **`terminal-bench-mini`** — 30 representative terminal tasks from Terminal-Bench 2.0.
+- **`pi-mini-mcpatlas`** — 20-task agentic tool-use benchmark seeded from MCPAtlas public set.
+- **`repo-grounded-tasks`** — auto-synthesised from any repo path; 20 tasks per repo (file-find, function-locate, bug-fix-for-known-bug, etc.). Lets the user evaluate against their own repo, not an abstract benchmark.
+
+Each suite ships with a scorer in `kiln-eval::scorers` that handles agent-trajectory outputs (does the final commit pass tests? does the command succeed? does the answer match expected?). The `trajectory.rs` already in `kiln-eval` is the foundation.
+
+### 10.13. Engine efficiency for agent inference — what changes from §9
+
+The user is *watching the agent work*. Time-to-first-token, decode latency at batch=1, and steady-state throughput all matter more than they do for offline training:
+
+- **PR #1030 matters even more for agents** than for OPD training. Each tool-call cycle is a separate decode invocation; per-decode overhead dominates at low batch. The 1.5 ms → 200 µs reduction directly drops agent latency.
+- **Prefix caching is the single highest-impact inference optimisation for agents** because the system prompt + tool definitions + most of the running conversation is shared across every decode call within a session. Kiln already does this; agents amplify the benefit.
+- **24+8 hybrid attention is a structural win for long agent sessions** — GDN layers' constant per-token state cost means a 50-turn session with cumulative tool results doesn't quadratically blow up the KV cache.
+- **FP8 KV cache doubles the agent's effective context** — directly extends how many tool-call cycles fit before compression is needed.
+- **Vulkan + UMA hardware (Strix Halo) is especially attractive for agents** — teacher (during background training) and student (during foreground inference) co-resident in the same memory pool. The user can have pi running interactively in the foreground while overnight OPD trains a new adapter, on the same hardware, with no thrashing. **A single Strix Halo box is a self-contained agent factory.**
+
+### 10.14. The pi + kiln canonical pipeline — five commands
+
+```bash
+# One-time setup:
+brew install kiln pi             # or: cargo install kiln; bun install -g @badlogic/pi
+kiln serve &                     # serves Qwen3.5-4B at :8420 (the only model kiln targets)
+kiln pi-setup                    # writes ~/.pi/agent/models.json pointing pi at the local kiln
+kiln judge distill               # one-time: distil a turn-judge LoRA from Qwen3.6-27B (§10.6.1)
+
+# Just use pi normally. Sessions captured automatically at ~/.pi/agent/sessions/.
+pi   # → "Refactor src/parser.rs to use the new error type."
+
+# Saturday morning, kiln auto-runs `kiln self-improve` (§10.6.2).
+# Notification arrives:
+#   "Adapter pi-coder-vN ready. +8 points on your sessions. -12% tokens. A/B?"
+# Click. Review three trajectories side-by-side in the Trajectory Studio. Approve.
+# Hot-swap is automatic. Done. Loop forever.
+```
+
+**A user with a laptop and pi installed, pointing at kiln, gets an agent that compounds in capability over months of normal use, on hardware they already own, with their data never leaving the box, paying nothing beyond electricity (and one occasional $5 judge refresh).** This is the deployment shape that justifies every line of the rest of the plan.
+
+### 10.15. The contract for agentic users, in one sentence
+
+> *Use pi normally. Kiln watches, learns from your good runs and your corrections, distils a better brain overnight, and asks you to approve the upgrade Saturday morning — every week, on your hardware, with your data, getting closer to the frontier with no work from you.*
+
+Everything in §3 through §9 — the kernels, the cache, the guardrails, the recipes, the diagnostics, the perf gates — exists to make that sentence true for an agent user, not just a chat user.
+
+---
+
+## 11. Failure modes anticipated, and where each is addressed
 
 A fully populated table that the engineering team can tick off.
 
@@ -1114,12 +1522,18 @@ A fully populated table that the engineering team can tick off.
 | Variance from sampled-token estimator | Fu et al. 2026 | Top-K renormalised default | §3.1 |
 | Forgetting on continual learning | Lu 2025 | OPD against prior self in the refresh recipe | §3.6 |
 | Capacity gap (teacher too strong for tiny LoRA) | Busbridge et al. 2025 + LoRA Without Regret | Per-tier rank defaults; capacity warning when bits-required > rank-capacity | §6 |
+| Agent tool-schema mismatch (adapter trained against tool manifest v2; current session is v3) | Pragmatic | Adapter receipt records tool-manifest SHA; mismatch warning with offer to schema-aware retrain | §10.11 |
+| Untrusted commands during agentic rollouts | Pragmatic — pi already runs on the user's machine | Kiln rollouts go through pi; the user's existing pi trust model applies; nothing to engineer or escape from on the kiln side | §10.5 |
+| Judge-vs-agent ceiling collision (judge approves everything; further GRPO is wasted) | CoPD pattern (Gu et al. 2026) | Drift detector samples 27B periodically; auto-refreshes judge on disagreement; entropy guardrail flags ceiling | §10.6.3 |
+| Judge over-fits to a narrow trajectory style | §3.8 entropy guardrail + §10.6.1 multi-axis training | Multi-axis judge scoring + held-out validation gate at distillation time + ongoing entropy monitoring | §10.6.1 |
+| Agent context blowup from large tool-result payloads (giant stdout, multi-MB file reads) | Kiln existing FP8 KV + paged KV + pi `/compact` | Truncation guardrails + auto-compact when context > threshold; tool-result tokens masked from loss anyway (§10.4 A) | §10.13 |
+| Looped retries (agent calls same failing tool repeatedly) | Pragmatic + agent-trajectory pattern | Per-trajectory tool-call repetition detector; reward-penalised during training; surfaced in Trajectory Studio for the user to label as "wrong path" | §10.4 B + §10.9 |
 
 We are not planning around hopes. Every known failure has a named, paper-cited mitigation that ships on by default.
 
 ---
 
-## 11. The network effects
+## 12. The network effects
 
 Three compounding loops kiln unlocks once Phase 3 ships.
 
@@ -1133,7 +1547,7 @@ The combined effect: kiln gets disproportionately better as more people use it, 
 
 ---
 
-## 12. How we'll know it worked
+## 13. How we'll know it worked
 
 Concrete success criteria, gated by phase.
 
@@ -1141,6 +1555,7 @@ Concrete success criteria, gated by phase.
 - Reproduce Lu's recovery experiment: a kiln 4B mid-trained on internal docs degrades IF-eval; `distill/refresh` recovers it from <50% to ≥80% with no new internal-QA loss.
 - **`kiln-opd-loss-kernel` ships on CUDA, Vulkan, and Metal**, bit-equivalent within 1e-5, all three meeting the per-engine speed gates in §9.7's "today" column. **No engine ships before its gate is met.** A >5% perf regression on any engine fails CI thereafter.
 - Vulkan path uses `dispatch_opd_loss_resident` (resident-buffer pattern from PR #1030) from the first commit — no later "Vulkan retrofit" needed.
+- **Agentic Phase 0 gate:** pi-format session ingestion shipped (`kiln agent traces discover`); the `swe-bench-mini` and `terminal-bench-mini` eval suites registered; one full end-to-end run of `learn-from-my-pi-history` produces a measurable adapter improvement on a captured-session held-out split.
 
 **Phase 1 success (~10 weeks):**
 - `distill_merge` of three domain LoRAs (math, code, instruction) outperforms the best of the three on each of their respective held-out evals while keeping all of them within 5% of single-source performance. **Beats `linear` and `ties` weight-space merges by ≥10 absolute points on average.**
@@ -1149,6 +1564,7 @@ Concrete success criteria, gated by phase.
 - A laptop user on a 16GB MacBook completes `frontier-pump` against a hosted Qwen3.6-27B teacher in ≤8 hours and ≤$10, producing a domain LoRA that scores within 5% of the same pump run from a corporate H200 box (using the same cache). **The reproducibility-across-tiers guarantee, met empirically.**
 - **Pit-of-success metric:** in a controlled study with 20 first-time kiln users (none with prior OPD experience), ≥18 successfully complete an OPD run that improves their target eval, with **zero manual hyperparameter tuning**, within their first 30 minutes of using kiln. Failures (if any) are auto-rolled-back; no user lands on a broken adapter.
 - **Vulkan parity check:** the same canonical `frontier-pump` recipe completes on a 7900 XTX (Vulkan) within 25% of the wall-clock of an equivalent 4090 (CUDA) run, validating that the trajectory in §9.10 is materialising. By Phase 5 the gap should be ≤10%.
+- **pi + kiln canonical pipeline gate:** a developer with a fresh laptop installs kiln + pi, points pi at kiln, uses pi for a week of real coding work (≥30 sessions), runs `learn-from-my-pi-history`, and the resulting adapter wins a blind A/B against the starting adapter in ≥6/10 trajectories from a held-out slice of the user's own sessions. **The full §10.10 loop closed end-to-end on consumer hardware.**
 
 **Phase 3 success (~24 weeks):**
 - Adapter Library has 50+ published adapters across the 10 canonical domains.
@@ -1164,7 +1580,7 @@ Concrete success criteria, gated by phase.
 
 ---
 
-## 13. Open research frontiers kiln can lead
+## 14. Open research frontiers kiln can lead
 
 Kiln is the right place for the field to advance because we control the full stack and can run cheap, repeatable studies.
 
@@ -1179,7 +1595,7 @@ Each of these is a publishable paper, with reproducible artefacts users can re-r
 
 ---
 
-## 14. The closing vision
+## 15. The closing vision
 
 Today, AI personalisation looks like this: pay a hyperscaler $X/month, hand them your data, get a chatbot that may or may not do what you want, can't be inspected, can't be ported, will be deprecated when their pricing model changes.
 
@@ -1187,7 +1603,7 @@ Tomorrow — with kiln + OPD shipped well — it looks like this:
 
 > Alice opens kiln on her MacBook. She drops in a folder of her writing. She picks `frontier-pump` against `qwen3.6-27b@best-cached-source`. Six hours and four dollars later she has a 200 MB LoRA that writes like her, runs entirely on her laptop, never phones home, and got verifiably better than the same run yesterday because of a quiet improvement to the teacher cache. She can publish it (with a reproducibility receipt — anyone can rebuild it from the same teacher and same data), sell it, gift it, version it, *or merge it with three more LoRAs from her colleagues into a team-wide adapter* with one button.
 >
-> Bob's startup has a 4090 in the back office. Their support agent runs on Qwen3.5-4B + a kiln adapter that was distilled from Qwen3.6-27B over their three years of support tickets. Each Friday, kiln runs `distill/refresh` against the past week's new tickets, recovers any IF degradation by self-distilling against last Friday's snapshot, and publishes the new adapter behind an A/B gate that the support team approves on Monday morning from `/ui`. Their model gets better every week. Their cost is electricity.
+> Bob's startup has a 4090 in the back office. Every developer's terminal runs [pi](https://github.com/earendil-works/pi) pointed at the office kiln server — one Qwen3.5-4B with hot-swappable LoRAs serves the whole team. They paid $5 once to distil a 27B-quality turn-judge into a small judge LoRA (§10.6.1). Each Saturday morning, kiln auto-runs `kiln self-improve`: scores the week's pi sessions with the local judge, runs GRPO using those scores as advantages, compresses successful trajectories via CRISP, and publishes a new adapter behind an A/B gate the team approves Monday morning in the Trajectory Studio. The judge refreshes against 27B once a quarter when drift detection fires — another $5. **Their agent gets better every week from their own work, and they have not called a frontier API since Tuesday.** Their cost is electricity.
 >
 > Carol's bank has a rack of H200s. They run kiln in `full_vocab` mode with eight domain specialists each trained on a separate compliance vertical. The unified adapter, consolidated by `distill_merge`, beats their previous Qwen3.6-27B-based generic deployment on every internal eval at 1/7th the inference cost. The data never leaves the building. The auditor gets a reproducibility receipt for every model in production.
 
