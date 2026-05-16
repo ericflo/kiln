@@ -31,5 +31,28 @@ pub use decode_resident_pool::DecodeResidentPool;
 pub use device::VulkanDevice;
 pub use pipeline::ShaderPipeline;
 pub use vk_paged_kv_cache::VkPagedKvCache;
+
+/// Public shader source paths for callers (in this crate or downstream)
+/// that want to record dispatches into a [`CommandBatch`] directly
+/// instead of going through the per-dispatch `dispatch_*_resident`
+/// wrappers. Each constant is the absolute path under this crate's
+/// `csrc/shaders/` directory, baked in at compile time.
+pub mod shaders {
+    macro_rules! shader_path {
+        ($name:literal) => {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/", $name, ".comp")
+        };
+    }
+    pub const QWEN_RMSNORM_FORWARD: &str = shader_path!("qwen_rmsnorm_forward");
+    pub const FULL_ATTN_QKV_DECODE_BF16W: &str = shader_path!("full_attn_qkv_decode_bf16w");
+    pub const QKV_GATE_SPLIT: &str = shader_path!("qkv_gate_split");
+    pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
+    pub const PAGED_KV_WRITE_SLOT: &str = shader_path!("paged_kv_write_slot");
+    pub const PAGED_ATTN_DECODE_BATCH_PAGED: &str = shader_path!("paged_attn_decode_batch_paged");
+    pub const VK_MUL_SIGMOID_GATE_F32: &str = shader_path!("vk_mul_sigmoid_gate_f32");
+    pub const LINEAR_DECODE_BF16W: &str = shader_path!("linear_decode_bf16w");
+    pub const ADD: &str = shader_path!("add");
+    pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
+}
 pub use vk_autograd::{VkGradStore, vk_backward};
 pub use vk_tensor::{VkBackwardOp, VkDType, VkTensor, VkTensorInner, next_op_id};
