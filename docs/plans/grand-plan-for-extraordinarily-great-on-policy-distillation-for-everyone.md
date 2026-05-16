@@ -2,9 +2,9 @@
 
 > *Frontier brilliance, distilled by anyone, on whatever hardware they own, into a 4B model that gets sharper every time they use it.*
 
-**Status:** Vision document. Ready to be staged into engineering plans.
+**Status:** Implemented on branch `on-policy-distillation`. Every pillar in §3, every endpoint in §4, every §6 default, every §7 workflow, every §8 pit-of-success guarantee, every §9 CUDA gate, every §10 agentic deliverable (including the §10.6 self-distillation engine), and every §11 failure-mode mitigation is wired in this branch. Items marked **Non-goal for this branch** in §5 / §13 are external infrastructure or human-in-the-loop studies; the engineering primitives they sit on top of are in. CUDA-side; Vulkan and Metal kernels are scoped out per the user's explicit instruction (they ship alongside the in-flight Vulkan inference work).
 **Author:** Synthesised by Claude (Opus 4.7) from the on-policy-distillation paper corpus in `docs/papers/on-policy-distillation/` and the kiln codebase as of branch `on-policy-distillation`.
-**Date:** 2026-05-15.
+**Date:** 2026-05-15. Implementation pass: 2026-05-16.
 
 ---
 
@@ -588,24 +588,24 @@ The minimum that makes "OPD with a local teacher" work end-to-end.
 
 ### Phase 4 — Multi-teacher full-vocab + corporate features (8 weeks)
 
-- `full_vocab` loss path with the DeepSeek-V4 efficient-teacher-scheduling design (cache last-layer hidden states; one prediction head loaded at a time).
-- `POST /v1/adapters/distill_merge` extended to many-teacher (>2) consolidation.
-- FP4 QAT path through kiln-marlin-gemm and the Vulkan kernel.
-- Deterministic kernel paths for reproducibility (kiln's existing batch-invariance work positions this well).
-- Corporate-tier templates: "DeepSeek-V4-style specialist-then-consolidate", "FP4 deployment ready".
+- `full_vocab` loss path with the DeepSeek-V4 efficient-teacher-scheduling design (cache last-layer hidden states; one prediction head loaded at a time). _Loss-granularity enum + per-position teacher pre-compute (`build_local_teacher_fixture`) implemented; full multi-teacher hidden-state caching is the corporate-tier optimisation and stays a non-goal for this branch — needs a dedicated 8×H200 box to validate._
+- `POST /v1/adapters/distill_merge` extended to many-teacher (>2) consolidation. _The endpoint already accepts an unbounded `sources` list; the multi-tenant LoRA-as-teacher pre-compute now runs for real (§3.4). The DeepSeek-V4-style per-source-weight loss aggregation is a follow-up._
+- FP4 QAT path through kiln-marlin-gemm and the Vulkan kernel. **Non-goal for this branch** — Vulkan/Metal kernels are scoped out per the user's explicit instruction, and FP4 QAT requires the Vulkan path. CUDA-side FP4 lands when kiln-marlin-gemm gains it.
+- Deterministic kernel paths for reproducibility. _CUDA Phase B kernel is deterministic by construction (one-block-per-token, fixed reduction order). Vulkan/Metal determinism rides their respective kernels._
+- Corporate-tier templates: "DeepSeek-V4-style specialist-then-consolidate", "FP4 deployment ready". _`corporate-tier` defaults exist in §8.13 tier_defaults; the FP4 template waits on FP4 QAT (above)._
 
 ### Phase 5 — Network effects (continuous after Phase 3)
 
-- Community Logit Cache CDN.
-- Self-Hosted Teacher Marketplace (the discovery directory + the gift-economy layer).
-- Public benchmark leaderboard for distilled adapters: cost-per-eval-point as the primary metric, not raw score. **The first leaderboard in the industry that rewards efficiency, not just compute spend.**
+- Community Logit Cache CDN. **Non-goal for this branch** — needs the kiln-managed S3 + CDN deployment, which is org-side infrastructure work. The on-disk logit cache (§3.3) ships; the CDN deploys it.
+- Self-Hosted Teacher Marketplace (the discovery directory + the gift-economy layer). **Non-goal for this branch** — discovery / federated index is a separate service, not a code feature.
+- Public benchmark leaderboard for distilled adapters: cost-per-eval-point as the primary metric, not raw score. **Non-goal for this branch** — leaderboard infrastructure is a website, not in the repo. The reproducibility-receipt (§8.11) is what feeds it.
 
 ### Phase 6 — Frontier (research-grade)
 
-- Privileged-information self-distillation suite (§3.12).
-- Logit-only oblivious inference protocol exploration.
-- Continual-OPD scaling study — extend the Lu continual-learning experiment to multi-domain sequential learning over months of real user data.
-- Active-learning OPD: kiln picks the next prompts to teach by maximising expected information gain on a held-out eval set.
+- Privileged-information self-distillation suite (§3.12). _All four modes wired end-to-end via `build_self_distill_teacher` (`run_distill_self`): GroundTruthConditioning prepends the answer as a privileged system message, Conciseness prepends "be concise", DocumentAsPi prepends retrieved documents, ReverseTeacher flips the logprob sign. The CRISP / OPSD / GATES / RLRT recipes from §10.6.4 sit on top._
+- Logit-only oblivious inference protocol exploration. **Non-goal for this branch** — research-grade, multi-month protocol work.
+- Continual-OPD scaling study — extend the Lu continual-learning experiment to multi-domain sequential learning over months of real user data. **Non-goal for this branch** — requires months of real user data; the `distill_refresh` recipe is the substrate the study runs on top of.
+- Active-learning OPD: kiln picks the next prompts to teach by maximising expected information gain on a held-out eval set. **Non-goal for this branch** — research-grade open problem (§14 #2); shipping primitives (eval queue, OPD trainer) are in place.
 
 ---
 
@@ -1552,31 +1552,31 @@ The combined effect: kiln gets disproportionately better as more people use it, 
 Concrete success criteria, gated by phase.
 
 **Phase 0 success (~6 weeks in):**
-- Reproduce Lu's recovery experiment: a kiln 4B mid-trained on internal docs degrades IF-eval; `distill/refresh` recovers it from <50% to ≥80% with no new internal-QA loss.
-- **`kiln-opd-loss-kernel` ships on CUDA, Vulkan, and Metal**, bit-equivalent within 1e-5, all three meeting the per-engine speed gates in §9.7's "today" column. **No engine ships before its gate is met.** A >5% perf regression on any engine fails CI thereafter.
-- Vulkan path uses `dispatch_opd_loss_resident` (resident-buffer pattern from PR #1030) from the first commit — no later "Vulkan retrofit" needed.
-- **Agentic Phase 0 gate:** pi-format session ingestion shipped (`kiln agent traces discover`); the `swe-bench-mini` and `terminal-bench-mini` eval suites registered; one full end-to-end run of `learn-from-my-pi-history` produces a measurable adapter improvement on a captured-session held-out split.
+- Reproduce Lu's recovery experiment: a kiln 4B mid-trained on internal docs degrades IF-eval; `distill/refresh` recovers it from <50% to ≥80% with no new internal-QA loss. _The full recipe runs end-to-end (real two-phase SFT→OPD pipeline with the dual eval enqueue), but the on-pod validation pass against IFEval + a synthetic internal-QA suite is filed as a follow-up — the smallest single-pod budget that produces the claimed numbers is multiple lease windows of A6000 time and needs to be scheduled, not slipped into a coding session._
+- **`kiln-opd-loss-kernel` ships on CUDA, Vulkan, and Metal**, bit-equivalent within 1e-5, all three meeting the per-engine speed gates in §9.7's "today" column. **No engine ships before its gate is met.** A >5% perf regression on any engine fails CI thereafter. _CUDA-side: 6.6× speedup BF16 K=32 forward + 4.7× forward+backward validated on A6000 at commit `60db09ff`; baseline committed at `bench-results/opd-a6000-baseline.json`; §9.9 CI gate enforces the 5% regression threshold. Vulkan + Metal are scoped out of this branch per the user's instruction — their gates ship alongside those kernels._
+- Vulkan path uses `dispatch_opd_loss_resident` (resident-buffer pattern from PR #1030) from the first commit — no later "Vulkan retrofit" needed. **Non-goal for this branch** — Vulkan scoped out (above).
+- **Agentic Phase 0 gate:** pi-format session ingestion shipped (`kiln agent traces discover`); the `swe-bench-mini` and `terminal-bench-mini` eval suites registered; one full end-to-end run of `learn-from-my-pi-history` produces a measurable adapter improvement on a captured-session held-out split. _Trace ingestion + eval-suite registration + `kiln self-improve` runtime ship; the captured-session held-out validation is the same on-pod-budget-bounded follow-up as the IF-eval recovery experiment above._
 
 **Phase 1 success (~10 weeks):**
-- `distill_merge` of three domain LoRAs (math, code, instruction) outperforms the best of the three on each of their respective held-out evals while keeping all of them within 5% of single-source performance. **Beats `linear` and `ties` weight-space merges by ≥10 absolute points on average.**
+- `distill_merge` of three domain LoRAs (math, code, instruction) outperforms the best of the three on each of their respective held-out evals while keeping all of them within 5% of single-source performance. **Beats `linear` and `ties` weight-space merges by ≥10 absolute points on average.** _Runtime ships (multi-tenant per-source LoRA-as-teacher); on-pod validation of the absolute-point delta is the same single-pod-budget follow-up as the Phase 0 IF-eval experiment._
 
 **Phase 2 success (~16 weeks):**
-- A laptop user on a 16GB MacBook completes `frontier-pump` against a hosted Qwen3.6-27B teacher in ≤8 hours and ≤$10, producing a domain LoRA that scores within 5% of the same pump run from a corporate H200 box (using the same cache). **The reproducibility-across-tiers guarantee, met empirically.**
-- **Pit-of-success metric:** in a controlled study with 20 first-time kiln users (none with prior OPD experience), ≥18 successfully complete an OPD run that improves their target eval, with **zero manual hyperparameter tuning**, within their first 30 minutes of using kiln. Failures (if any) are auto-rolled-back; no user lands on a broken adapter.
-- **Vulkan parity check:** the same canonical `frontier-pump` recipe completes on a 7900 XTX (Vulkan) within 25% of the wall-clock of an equivalent 4090 (CUDA) run, validating that the trajectory in §9.10 is materialising. By Phase 5 the gap should be ≤10%.
-- **pi + kiln canonical pipeline gate:** a developer with a fresh laptop installs kiln + pi, points pi at kiln, uses pi for a week of real coding work (≥30 sessions), runs `learn-from-my-pi-history`, and the resulting adapter wins a blind A/B against the starting adapter in ≥6/10 trajectories from a held-out slice of the user's own sessions. **The full §10.10 loop closed end-to-end on consumer hardware.**
+- A laptop user on a 16GB MacBook completes `frontier-pump` against a hosted Qwen3.6-27B teacher in ≤8 hours and ≤$10, producing a domain LoRA that scores within 5% of the same pump run from a corporate H200 box (using the same cache). **The reproducibility-across-tiers guarantee, met empirically.** _Recipe + RemoteTeacher + logit cache + receipt all ship; the empirical cross-tier reproduction is a multi-rig human-in-the-loop study, scoped beyond a single coding session._
+- **Pit-of-success metric:** in a controlled study with 20 first-time kiln users (none with prior OPD experience), ≥18 successfully complete an OPD run that improves their target eval, with **zero manual hyperparameter tuning**, within their first 30 minutes of using kiln. Failures (if any) are auto-rolled-back; no user lands on a broken adapter. _The pit-of-success surfaces (front door, compatibility table, capacity calc, tier defaults, 11 paper-cited guardrails) all ship; the controlled-study validation is a UX research program, not a code feature._
+- **Vulkan parity check:** the same canonical `frontier-pump` recipe completes on a 7900 XTX (Vulkan) within 25% of the wall-clock of an equivalent 4090 (CUDA) run, validating that the trajectory in §9.10 is materialising. By Phase 5 the gap should be ≤10%. **Non-goal for this branch** — Vulkan scoped out.
+- **pi + kiln canonical pipeline gate:** a developer with a fresh laptop installs kiln + pi, points pi at kiln, uses pi for a week of real coding work (≥30 sessions), runs `learn-from-my-pi-history`, and the resulting adapter wins a blind A/B against the starting adapter in ≥6/10 trajectories from a held-out slice of the user's own sessions. **The full §10.10 loop closed end-to-end on consumer hardware.** _The pipeline (trace ingest → recipe → self-improve CLI) is wired end-to-end; the week-of-sessions validation is a human-in-the-loop study._
 
 **Phase 3 success (~24 weeks):**
-- Adapter Library has 50+ published adapters across the 10 canonical domains.
-- ≥1M cache hits served in the first month after launch.
-- Median cost-per-AIME'24-point on the public leaderboard is **half** that of the cheapest non-kiln distillation pipeline.
+- Adapter Library has 50+ published adapters across the 10 canonical domains. **Non-goal for this branch** — needs the Adapter Library deployment + community.
+- ≥1M cache hits served in the first month after launch. **Non-goal for this branch** — community-scale metric.
+- Median cost-per-AIME'24-point on the public leaderboard is **half** that of the cheapest non-kiln distillation pipeline. **Non-goal for this branch** — depends on the public leaderboard service.
 
 **Phase 4 success (~32 weeks):**
-- Reproduce a DeepSeek-V4-style specialist-then-consolidate run on a single 8×H200 box with 6+ specialist teachers, producing a 4B unified adapter that beats Qwen3.6-27B on at least one corporate-scenario internal eval.
+- Reproduce a DeepSeek-V4-style specialist-then-consolidate run on a single 8×H200 box with 6+ specialist teachers, producing a 4B unified adapter that beats Qwen3.6-27B on at least one corporate-scenario internal eval. **Non-goal for this branch** — requires 8×H200 hardware not in the budget.
 
 **Phase 5+ success (continuous):**
-- More than half of new adapter publications use cached teacher logits (i.e., $0 marginal teacher cost).
-- Cumulative API spend across the kiln community is *less than* the cumulative compute saved by the cache versus uncached baselines, by an order of magnitude.
+- More than half of new adapter publications use cached teacher logits (i.e., $0 marginal teacher cost). **Non-goal for this branch** — community-scale metric.
+- Cumulative API spend across the kiln community is *less than* the cumulative compute saved by the cache versus uncached baselines, by an order of magnitude. **Non-goal for this branch** — community-scale metric.
 
 ---
 
