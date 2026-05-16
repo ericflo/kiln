@@ -901,6 +901,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
   list-style: none;
   display: flex;
   flex-direction: column;
+  /* Cap height so a busy server (up to 100 retained requests by default)
+     doesn't push the page footer hundreds of viewports down. Scroll
+     inside the panel instead. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 .recent-row {
   display: grid;
