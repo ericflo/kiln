@@ -580,6 +580,20 @@ shader actually benefits from each transformation**.
   - p50 ITL across runs:    **18.30 ms** (range 18.20-18.40)
   - **sustained tok/s (1000/p50): 54.6** — **99.3% of gate (e.2)**
 
+Mean tok/s amortization vs generation length (--max-output-tokens):
+
+| Tokens | Mean tok/s | P50 ITL (ms) | Notes |
+|--------|------------|--------------|-------|
+|   128  | 45.5       | 18.30        | dominated by first-token costs |
+|   256  | 49.3       | 18.30        | first-token cost halves in mean |
+|   512  | 51.5       | 18.35        | first-token cost quarters in mean |
+| ∞ (limit) | → 54.6  | 18.30        | sustained (= 1000 / p50)       |
+
+The sustained p50 is the architecture's actual decode rate; the
+mean's slower convergence to it reflects ~200-500 ms of first-
+token pipeline-compile + descriptor-cache-fill cost that
+amortizes across the run.
+
 End-to-end parity bit-identical against the legacy path at every
 commit (`vk_resident_decode_parity`: worst-diff abs=0 rel=0 on
 Qwen3.5-4B). The mean is dragged down by first-token pipeline-
