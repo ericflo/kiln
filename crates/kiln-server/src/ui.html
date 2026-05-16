@@ -8561,7 +8561,7 @@ function renderAdaptersAsCards(data) {
       <div class="adapter-card-name adapter-name">${escapeHtml(a.name)}</div>
       <div class="adapter-card-meta">
         <span><span class="tabular-nums">${fmtBytes(a.size_bytes)}</span> on disk</span>
-        ${a.modified_at ? `<span title="${escapeHtml(a.modified_at)}">${escapeHtml(a.modified_at.split('T')[0])}</span>` : ''}
+        ${a.modified_at ? `<span title="modified ${escapeHtml(a.modified_at)}">${escapeHtml(fmtSmartTime(Date.parse(a.modified_at)))}</span>` : ''}
         ${a.files ? `<span class="tabular-nums">${a.files.length} file${a.files.length === 1 ? '' : 's'}</span>` : ''}
       </div>
       <div class="adapter-card-actions">
