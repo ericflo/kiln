@@ -33,13 +33,16 @@ pub use logit_source::{
     LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
 };
 pub use opd::{
-    COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS, COLD_START_OVERLAP_THRESHOLD,
-    ColdStartDecision, DistillMergeRequest, DistillMergeSource, DistillPumpMode,
-    DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest, NewKnowledgeSource, OpdConfig,
-    OpdLossGranularity, OpdPrompt, OpdRequest, SelfDistillMode, StableOpdCoefficients,
-    StableOpdLossInputs, StableOpdLossOutputs, cold_start_probe, cold_start_probe_default,
-    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl, default_lambda_sft,
-    default_opd_samples_per_prompt, default_opd_top_k,
+    AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,
+    COLD_START_OVERLAP_THRESHOLD, ColdStartDecision, DistillMergeRequest, DistillMergeSource,
+    DistillPumpMode, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
+    NewKnowledgeSource, OpdConfig, OpdLossGranularity, OpdPrompt, OpdRequest, SelfDistillMode,
+    StableOpdCoefficients, StableOpdLossInputs, StableOpdLossOutputs, TipTokenClass,
+    cold_start_probe, cold_start_probe_default, compute_agentic_loss_weights,
+    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl,
+    default_lambda_sft, default_lambda_verifier, default_opd_samples_per_prompt,
+    default_opd_top_k, default_score_decay_steps, default_score_earliest_weight,
+    default_tip_tool_call_weight, default_tip_tool_name_weight,
 };
 
 pub use replay::{

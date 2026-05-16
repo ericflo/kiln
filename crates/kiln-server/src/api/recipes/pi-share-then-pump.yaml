@@ -1,0 +1,20 @@
+name: pi-share-then-pump
+description: |
+  §10.8 day-one agentic recipe: pull public sessions from
+  pi-share-hf, filter to a chosen domain, run the §3.5 Knowledge
+  Pump against a frontier teacher.
+
+  The bridge between the §10.3 agent-trace layer's
+  community-distribution channel (pi-share-hf) and the §3.5
+  Knowledge Pump.
+
+steps:
+  - kind: distill_pump
+    name: rust-agentic-lora
+    teacher: qwen3.6-27b@local
+    mode:
+      domain: pi_share_rust
+    config:
+      top_k: 32
+      lora_rank: 64
+      samples_per_prompt: 4

@@ -176,7 +176,8 @@ pub struct RecipeDescriptor {
     pub num_steps: usize,
 }
 
-// Six day-one recipes baked into the binary (§3.7).
+// Six day-one recipes baked into the binary (§3.7) + four agentic
+// recipes (§10.8).
 const RECIPE_RECOVER_IF: &str = include_str!("recipes/recover-instruction-following.yaml");
 const RECIPE_FRONTIER_PUMP: &str = include_str!("recipes/frontier-pump.yaml");
 const RECIPE_MERGE_LORAS: &str = include_str!("recipes/merge-my-loras.yaml");
@@ -185,6 +186,13 @@ const RECIPE_CODING_FROM_REPO: &str =
     include_str!("recipes/coding-assistant-from-repo.yaml");
 const RECIPE_JUDGE_FROM_PICKS: &str =
     include_str!("recipes/make-a-judge-lora-from-my-picks.yaml");
+
+// §10.8 agentic recipes.
+const RECIPE_LEARN_PI_HISTORY: &str = include_str!("recipes/learn-from-my-pi-history.yaml");
+const RECIPE_MERGE_AGENT_LORAS: &str = include_str!("recipes/merge-my-agent-loras.yaml");
+const RECIPE_RECOVER_TOOL_FOLLOWING: &str =
+    include_str!("recipes/recover-tool-following.yaml");
+const RECIPE_PI_SHARE_THEN_PUMP: &str = include_str!("recipes/pi-share-then-pump.yaml");
 
 /// Load all day-one recipes baked into the server binary.
 pub fn builtin_recipes() -> Vec<(String, &'static str)> {
@@ -200,6 +208,23 @@ pub fn builtin_recipes() -> Vec<(String, &'static str)> {
         (
             "make-a-judge-lora-from-my-picks".to_string(),
             RECIPE_JUDGE_FROM_PICKS,
+        ),
+        // §10.8 agentic recipes
+        (
+            "learn-from-my-pi-history".to_string(),
+            RECIPE_LEARN_PI_HISTORY,
+        ),
+        (
+            "merge-my-agent-loras".to_string(),
+            RECIPE_MERGE_AGENT_LORAS,
+        ),
+        (
+            "recover-tool-following".to_string(),
+            RECIPE_RECOVER_TOOL_FOLLOWING,
+        ),
+        (
+            "pi-share-then-pump".to_string(),
+            RECIPE_PI_SHARE_THEN_PUMP,
         ),
     ]
 }

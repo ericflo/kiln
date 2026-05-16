@@ -1,0 +1,19 @@
+name: recover-tool-following
+description: |
+  §10.8 day-one agentic recipe: agent analog of
+  recover-instruction-following.
+
+  After a midtrain on new code or docs degrades the agent's
+  tool-use fluency, OPD-recover from the prior agent adapter.
+  Same §3.9 dual-eval gate (tool-following recovery + new-
+  knowledge gain).
+
+steps:
+  - kind: distill_refresh
+    name: pi-coder-tool-recovered
+    new_data:
+      dataset: pi-tool-traces
+    behavioural_teacher: pi-coder@v17
+    background_chat: tulu3
+    config:
+      top_k: 32

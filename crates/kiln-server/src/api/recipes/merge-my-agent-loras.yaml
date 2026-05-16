@@ -1,0 +1,25 @@
+name: merge-my-agent-loras
+description: |
+  §10.8 day-one agentic recipe: behaviour-space merge for agent
+  adapters (rust-coder + bash-ops + repo-navigator → unified
+  agent).
+
+  Mirrors the prose-side merge-my-loras but tuned for agentic
+  task families (per §10.7 the compatibility table tracks coverage
+  per task family).
+
+steps:
+  - kind: distill_merge
+    name: unified-agent
+    student: base
+    sources:
+      - adapter: rust-coder
+        weight: 1.0
+      - adapter: bash-ops
+        weight: 1.0
+      - adapter: repo-navigator
+        weight: 0.7
+    rollout_budget: 5000
+    config:
+      top_k: 32
+      samples_per_prompt: 4

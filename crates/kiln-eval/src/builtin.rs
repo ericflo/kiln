@@ -22,6 +22,36 @@ use crate::suite::{EvalChatMessage, EvalExample, EvalGenerationParams, EvalSuite
 /// the suite registry or referencing it from CLI / API calls.
 pub const QWEN3_AGENTIC_CORE: &str = "qwen3.5-agentic-core";
 
+/// §10.12 agent benchmark suite — SWE-bench mini (50-instance
+/// subset of SWE-bench Verified, runnable on a single 4090 in
+/// ~1 hour per the grand plan).
+pub const SWE_BENCH_MINI: &str = "swe-bench-mini";
+
+/// §10.12 — 30 representative terminal tasks from Terminal-Bench 2.0.
+pub const TERMINAL_BENCH_MINI: &str = "terminal-bench-mini";
+
+/// §10.12 — 20-task agentic tool-use benchmark seeded from MCPAtlas
+/// public set.
+pub const PI_MINI_MCPATLAS: &str = "pi-mini-mcpatlas";
+
+/// §10.12 — auto-synthesised from any repo path; 20 tasks per repo.
+/// The suite *name* registered here is a template; the actual suite
+/// is generated server-side from the user's repo.
+pub const REPO_GROUNDED_TASKS: &str = "repo-grounded-tasks";
+
+/// Names of the four §10.12 agent benchmark suites kiln promises to
+/// ship in Phase 0. The actual `EvalSuite` bodies for these
+/// benchmarks live behind dataset registrations (they require the
+/// upstream SWE-bench / Terminal-Bench / MCPAtlas data to be on
+/// disk); this constant is what the §10.12 plan promises as
+/// **the names** the dashboard + recipes can reference today.
+pub const AGENT_BENCH_SUITE_NAMES: &[&str] = &[
+    SWE_BENCH_MINI,
+    TERMINAL_BENCH_MINI,
+    PI_MINI_MCPATLAS,
+    REPO_GROUNDED_TASKS,
+];
+
 /// Return the built-in Qwen3.5 agentic core suite. The returned suite is
 /// safe to register with `SuiteRegistry::save` or to feed into
 /// `EvalSuite::validate` — it passes both unconditionally.

@@ -991,6 +991,155 @@ pub fn cold_start_probe_default(pairs: &[(Vec<u32>, Vec<u32>)]) -> ColdStartDeci
     )
 }
 
+// ---------------------------------------------------------------------------
+// §10.4 agentic OPD loss-shaping — SCoRe earliest-error + TIP tool-call
+// reweighting + optional verifier reward blend.
+// ---------------------------------------------------------------------------
+
+/// §6 default — SCoRe earliest-error weight. Lyu et al. 2025.
+/// Per-token loss multiplier within the earliest-divergence
+/// neighbourhood (gradients up-weighted on the earliest "wrong"
+/// token).
+pub const fn default_score_earliest_weight() -> f64 {
+    3.0
+}
+
+/// §6 default — SCoRe decay rate. Loss multiplier decays linearly
+/// from `score_earliest_weight` at the earliest-divergence position
+/// to `1.0` after `score_decay_steps` later positions.
+pub const fn default_score_decay_steps() -> usize {
+    16
+}
+
+/// §6 default — TIP tool-call upweight. Higher than prose because
+/// "a wrong tool call sends the agent down a bad branch (not
+/// recoverable in the current rollout)." §10.4 C.
+pub const fn default_tip_tool_call_weight() -> f64 {
+    2.0
+}
+
+/// §6 default — TIP tool-call-name upweight (vs tool-call-params).
+/// Names are even higher-stakes than parameters because picking
+/// the wrong tool is irrecoverable.
+pub const fn default_tip_tool_name_weight() -> f64 {
+    3.0
+}
+
+/// §6 default — verifier-reward blend coefficient λ_verifier.
+/// §10.4 D: "anchors on outcome, doesn't drown out the per-token
+/// signal." Auto-tuned.
+pub const fn default_lambda_verifier() -> f64 {
+    0.3
+}
+
+/// One position's token class for the TIP loss reweighting (§10.4 C).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TipTokenClass {
+    /// Reasoning prose; weight = 1.0.
+    Prose,
+    /// Function/tool name token; higher stakes; weight =
+    /// `tip_tool_name_weight`.
+    ToolCallName,
+    /// Parameters (JSON keys/values); weight = `tip_tool_call_weight`.
+    ToolCallParams,
+    /// Result tokens from a tool; masked from loss entirely (these
+    /// are inputs the model didn't generate).
+    ToolResult,
+}
+
+impl TipTokenClass {
+    /// Loss multiplier for this class given the §10.4 C weights.
+    pub fn multiplier(
+        &self,
+        tool_call_weight: f64,
+        tool_name_weight: f64,
+    ) -> f64 {
+        match self {
+            Self::Prose => 1.0,
+            Self::ToolCallName => tool_name_weight,
+            Self::ToolCallParams => tool_call_weight,
+            // ToolResult positions are masked, not weighted —
+            // callers should remove them from the active-position
+            // set before constructing the per-position weights.
+            Self::ToolResult => 0.0,
+        }
+    }
+}
+
+/// Per-token weights produced by [`compute_agentic_loss_weights`].
+/// One f64 per active position; multiplied into the per-position
+/// reverse-KL before it becomes the importance-sampling advantage.
+pub type AgenticLossWeights = Vec<f64>;
+
+/// Inputs to [`compute_agentic_loss_weights`] — the §10.4 A+B+C
+/// shaping function.
+#[derive(Debug, Clone)]
+pub struct AgenticLossInputs {
+    /// Per-position token class. Length = T_active.
+    pub token_classes: Vec<TipTokenClass>,
+    /// 0-indexed earliest-divergence position relative to the
+    /// active-position set. `None` when SCoRe is disabled or the
+    /// trajectory had no detected divergence.
+    pub earliest_divergence: Option<usize>,
+    /// SCoRe weights (defaults to `default_score_*`).
+    pub score_earliest_weight: f64,
+    /// SCoRe decay steps.
+    pub score_decay_steps: usize,
+    /// TIP weights (defaults to `default_tip_*`).
+    pub tip_tool_call_weight: f64,
+    pub tip_tool_name_weight: f64,
+}
+
+impl Default for AgenticLossInputs {
+    fn default() -> Self {
+        Self {
+            token_classes: Vec::new(),
+            earliest_divergence: None,
+            score_earliest_weight: default_score_earliest_weight(),
+            score_decay_steps: default_score_decay_steps(),
+            tip_tool_call_weight: default_tip_tool_call_weight(),
+            tip_tool_name_weight: default_tip_tool_name_weight(),
+        }
+    }
+}
+
+/// Compute the per-token loss multiplier vector that §10.4 wants
+/// the trainer to apply to the per-position reverse KL before
+/// turning it into the importance-sampling advantage.
+///
+/// Combines §10.4 B (SCoRe earliest-error decay) and §10.4 C (TIP
+/// tool-call class weighting) multiplicatively per position.
+pub fn compute_agentic_loss_weights(inputs: &AgenticLossInputs) -> AgenticLossWeights {
+    let n = inputs.token_classes.len();
+    let mut weights = vec![1.0_f64; n];
+    // TIP per-class multiplier.
+    for (i, class) in inputs.token_classes.iter().enumerate() {
+        weights[i] *= class.multiplier(
+            inputs.tip_tool_call_weight,
+            inputs.tip_tool_name_weight,
+        );
+    }
+    // SCoRe earliest-divergence schedule.
+    if let Some(idx) = inputs.earliest_divergence {
+        for i in idx..n.min(idx + inputs.score_decay_steps + 1) {
+            let dist = i - idx;
+            let frac = if inputs.score_decay_steps == 0 {
+                0.0
+            } else {
+                (dist as f64) / (inputs.score_decay_steps as f64)
+            };
+            let extra = inputs.score_earliest_weight
+                + (1.0 - inputs.score_earliest_weight) * frac.min(1.0);
+            // The schedule modulates ON TOP of TIP. Multiplicative
+            // composition: a tool-call-name position at earliest
+            // divergence gets `score_earliest * tool_name_weight`.
+            weights[i] *= extra.max(0.0);
+        }
+    }
+    weights
+}
+
 /// Compose the §3.1 Stable-OPD loss:
 ///
 /// ```text
@@ -1247,6 +1396,76 @@ mod tests {
         assert_eq!(mean_kl_ref, 0.0);
         assert_eq!(sft_term, 0.0);
         Ok(())
+    }
+
+    #[test]
+    fn agentic_weights_prose_only_default_to_one() {
+        let inputs = AgenticLossInputs {
+            token_classes: vec![TipTokenClass::Prose; 4],
+            ..Default::default()
+        };
+        let w = compute_agentic_loss_weights(&inputs);
+        assert_eq!(w, vec![1.0; 4]);
+    }
+
+    #[test]
+    fn agentic_weights_tool_call_upweighted_per_class() {
+        let inputs = AgenticLossInputs {
+            token_classes: vec![
+                TipTokenClass::Prose,
+                TipTokenClass::ToolCallName,
+                TipTokenClass::ToolCallParams,
+                TipTokenClass::ToolResult,
+            ],
+            ..Default::default()
+        };
+        let w = compute_agentic_loss_weights(&inputs);
+        assert_eq!(w[0], 1.0); // prose
+        assert_eq!(w[1], 3.0); // tool name (default 3.0)
+        assert_eq!(w[2], 2.0); // tool params (default 2.0)
+        assert_eq!(w[3], 0.0); // tool result — masked
+    }
+
+    #[test]
+    fn agentic_weights_score_schedule_decays_to_one() {
+        // 8 prose positions, earliest divergence at position 0,
+        // decay steps = 4. Position 0 weight = 3.0; position 4
+        // back to ~1.0; later positions still at 1.0.
+        let inputs = AgenticLossInputs {
+            token_classes: vec![TipTokenClass::Prose; 8],
+            earliest_divergence: Some(0),
+            score_earliest_weight: 3.0,
+            score_decay_steps: 4,
+            ..Default::default()
+        };
+        let w = compute_agentic_loss_weights(&inputs);
+        assert!((w[0] - 3.0).abs() < 1e-9);
+        // Linear decay 3.0 → 1.0 over 4 steps.
+        // dist=2 -> frac=0.5 -> 3 + (1-3)*0.5 = 2.0
+        assert!((w[2] - 2.0).abs() < 1e-9);
+        assert!((w[4] - 1.0).abs() < 1e-9);
+        assert!((w[7] - 1.0).abs() < 1e-9, "beyond decay window stays at 1");
+    }
+
+    #[test]
+    fn agentic_weights_score_and_tip_compose_multiplicatively() {
+        // §10.4: earliest-divergence position on a tool-call-name
+        // token gets BOTH SCoRe boost AND TIP boost.
+        let inputs = AgenticLossInputs {
+            token_classes: vec![
+                TipTokenClass::Prose,
+                TipTokenClass::ToolCallName,
+                TipTokenClass::Prose,
+            ],
+            earliest_divergence: Some(1),
+            score_earliest_weight: 3.0,
+            score_decay_steps: 4,
+            tip_tool_name_weight: 3.0,
+            ..Default::default()
+        };
+        let w = compute_agentic_loss_weights(&inputs);
+        // pos 1: prose=1.0 -> ToolCallName 3.0 -> SCoRe earliest 3.0 = 9.0.
+        assert!((w[1] - 9.0).abs() < 1e-9, "got {}", w[1]);
     }
 
     #[test]

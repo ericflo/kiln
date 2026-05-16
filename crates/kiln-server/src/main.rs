@@ -70,6 +70,21 @@ async fn main() -> Result<()> {
                 return cli::run_adapters_delete(url, name).await;
             }
         },
+        // §10.14 — pi + kiln canonical pipeline subcommands.
+        Some(Commands::PiSetup { ref url, ref out }) => {
+            return cli::run_pi_setup(url, out.as_deref()).await;
+        }
+        Some(Commands::Judge(ref jc)) => {
+            return cli::run_judge(jc).await;
+        }
+        Some(Commands::SelfImprove {
+            ref url,
+            ref agent,
+            ref judge,
+            no_crisp,
+        }) => {
+            return cli::run_self_improve(url, agent, judge, !no_crisp).await;
+        }
         // Serve mode (default)
         Some(Commands::Serve {
             ref served_model_id,

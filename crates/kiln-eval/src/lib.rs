@@ -42,7 +42,10 @@ pub use suite::{
     EvalChatMessage, EvalCompareSpec, EvalExample, EvalGenerationParams, EvalSuite,
     EvalSuiteSummary, PostEvalConfig, default_max_tokens, default_temperature,
 };
-pub use builtin::{QWEN3_AGENTIC_CORE, qwen3_agentic_core};
+pub use builtin::{
+    AGENT_BENCH_SUITE_NAMES, PI_MINI_MCPATLAS, QWEN3_AGENTIC_CORE, REPO_GROUNDED_TASKS,
+    SWE_BENCH_MINI, TERMINAL_BENCH_MINI, qwen3_agentic_core,
+};
 pub use synthesis::{
     Sampling, ScorerChoice, SftConversation, SftMessage, SynthesisConfig, SynthesisError,
     SynthesisStats, SynthesisStrategy, auto_detect_scorer, synthesize_suite,
