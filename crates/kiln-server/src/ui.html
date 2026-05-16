@@ -3019,6 +3019,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       <div class="card-head">
         <h2>Recent requests</h2>
         <span class="eyebrow">Latest chat completions</span>
+        <span style="flex:1;"></span>
+        <input class="search-input" id="recent-requests-filter" type="search" placeholder="Filter by prompt, completion, id…" aria-label="Filter recent requests" style="max-width:280px;">
       </div>
       <div class="card-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
         <div class="empty">Loading recent requests…</div>
@@ -4122,6 +4124,7 @@ function apiFailureHtml(action, e, retryFn) {
   </div>`;
 }
 
+let recentRequestsFilter = '';
 function renderRecentRequests(rows) {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
@@ -4133,7 +4136,20 @@ function renderRecentRequests(rows) {
     </div>`;
     return;
   }
-  const items = rows.map(r => {
+  // Apply the live filter (substring match on prompt preview, completion
+  // preview, and id). Empty filter is a no-op pass-through.
+  const q = (recentRequestsFilter || '').trim().toLowerCase();
+  const filtered = q
+    ? rows.filter(r =>
+        (r.prompt_preview || '').toLowerCase().includes(q) ||
+        (r.completion_preview || '').toLowerCase().includes(q) ||
+        (r.id || '').toLowerCase().includes(q))
+    : rows;
+  if (filtered.length === 0) {
+    el.innerHTML = `<div class="empty">No requests match <code>${escapeHtml(q)}</code>.</div>`;
+    return;
+  }
+  const items = filtered.map(r => {
     const finish = r.finish_reason || 'stop';
     const finishClass = finish.replace(/[^a-z_]/gi, '_');
     const streamPill = r.streamed ? '<span class="recent-pill streamed">stream</span>' : '';
@@ -4332,6 +4348,19 @@ function refreshRecentTimes() {
   });
   if (liveMode) el.setAttribute('aria-live', liveMode);
 }
+
+// Wire the filter input. Re-render on every input event using the
+// already-cached list (no extra fetch). Done outside DOMContentLoaded
+// so it runs as soon as the input exists.
+document.addEventListener('input', (ev) => {
+  if (ev.target && ev.target.id === 'recent-requests-filter') {
+    recentRequestsFilter = ev.target.value || '';
+    // Skip the change-detection guard for the next render so the filter
+    // applies immediately even when the upstream cache is unchanged.
+    lastRecentRequestsKey = null;
+    renderRecentRequests(recentRequestsCache);
+  }
+});
 
 // Content key from the most recent request fingerprints. Skipping the
 // re-render when unchanged preserves text-selection / hover / scroll
