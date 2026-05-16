@@ -8842,6 +8842,35 @@ function renderAdapterDrillBody(d) {
       </div>`).join('')
     : '<div class="hint">No evals against this adapter yet. Click "Run eval…" above.</div>';
 
+  // Lineage section: surface the on-disk lineage.json fields when present
+  // so users can see base model + Kiln build + created_at without
+  // opening the file. Falls back gracefully when the adapter was
+  // uploaded or pre-dates the lineage format.
+  let lineageHtml = '';
+  if (d.lineage && typeof d.lineage === 'object') {
+    const lin = d.lineage;
+    const rows = [];
+    if (lin.base_model && lin.base_model.id) {
+      rows.push(`<div><span class="hint">Base model:</span> <code>${escapeHtml(lin.base_model.id)}</code></div>`);
+    }
+    if (lin.created_at) {
+      const t = Date.parse(lin.created_at);
+      rows.push(`<div><span class="hint">Created:</span> ${escapeHtml(isFinite(t) ? fmtSmartTime(t) : lin.created_at)} <span class="hint" title="${escapeHtml(lin.created_at)}">(${escapeHtml(lin.created_at.split('T')[0])})</span></div>`);
+    }
+    if (lin.kiln_commit) {
+      rows.push(`<div><span class="hint">Kiln build:</span> <code>${escapeHtml(lin.kiln_commit)}</code></div>`);
+    }
+    if (lin.replay_hash) {
+      rows.push(`<div><span class="hint">Replay hash:</span> <code style="font-size:11px;">${escapeHtml(String(lin.replay_hash).slice(0, 16))}…</code></div>`);
+    }
+    if (rows.length) {
+      lineageHtml = `<div class="detail-section">
+        <h4>Lineage</h4>
+        <div style="display:flex; flex-direction:column; gap:4px; font-size:13px;">${rows.join('')}</div>
+      </div>`;
+    }
+  }
+
   return `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div>
@@ -8862,6 +8891,7 @@ function renderAdapterDrillBody(d) {
       </div>
     </div>
   </div>
+  ${lineageHtml}
   <div class="detail-section">
     <h4>Eval history</h4>
     ${evalHtml}
