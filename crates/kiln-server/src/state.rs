@@ -183,7 +183,7 @@ impl GpuMemoryBudget {
 pub type GpuCoordinationLock = Arc<std::sync::RwLock<()>>;
 
 /// Type of training job.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TrainingJobType {
     Sft,
@@ -194,8 +194,12 @@ pub enum TrainingJobType {
     Opd,
 }
 
+fn now_instant_default() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// Tracked training job info stored in AppState.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct TrainingJobInfo {
     pub job_id: String,
     pub adapter_name: String,
@@ -205,16 +209,27 @@ pub struct TrainingJobInfo {
     pub loss: Option<f64>,
     pub epoch: Option<u32>,
     pub adapter_path: Option<String>,
-    #[serde(skip)]
+    #[serde(skip, default = "now_instant_default")]
     pub submitted_at: std::time::Instant,
+    /// Wall-clock submit time as Unix milliseconds. Set at enqueue. Survives
+    /// process restarts (the `Instant` above does not). Defaults to the load
+    /// timestamp for legacy archived entries without this field.
+    #[serde(default = "crate::recent_requests::now_unix_ms")]
+    pub submitted_unix_ms: u64,
     pub auto_load: bool,
     /// Wall-clock instant at which the job entered a terminal state
     /// (`Completed` or `Failed`). `None` while the job is still
     /// `Queued` or `Running`. Used by the training-queue worker's GC
     /// pass to TTL-evict stale terminal entries from the tracking map.
     /// See `AppState::tracked_job_ttl`.
-    #[serde(skip)]
+    #[serde(skip, default)]
     pub finished_at: Option<std::time::Instant>,
+    /// Wall-clock terminal-transition time as Unix milliseconds. `None`
+    /// while the job is still active. Populated when the job hits
+    /// Completed / Failed; persisted to disk so the dashboard can show
+    /// "finished 3h ago" even after a restart.
+    #[serde(default)]
+    pub finished_unix_ms: Option<u64>,
     /// Eval job IDs that ran against this training run via the
     /// `post_eval` auto-hook. Populated at *enqueue* time by
     /// `enqueue_post_training_eval` (so the training-side dashboard can
@@ -233,7 +248,7 @@ pub struct TrainingJobInfo {
 
 /// Single point on the live loss curve. Lightweight on purpose — the
 /// callback fires on every step.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct TrainingLossSample {
     pub epoch: u32,
     pub progress: f32,
@@ -1389,7 +1404,7 @@ impl AppState {
             training_webhook_url: None,
             max_queued_training_jobs: 32,
             max_tracked_jobs: 1024,
-            tracked_job_ttl: std::time::Duration::from_secs(3600),
+            tracked_job_ttl: std::time::Duration::from_secs(604_800),
             adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
             composed_cache_max_bytes: Some(10 * 1024u64.pow(3)),
             composed_cache_max_entries: Some(64),
@@ -1841,7 +1856,7 @@ impl AppState {
             training_webhook_url: None,
             max_queued_training_jobs: 32,
             max_tracked_jobs: 1024,
-            tracked_job_ttl: std::time::Duration::from_secs(3600),
+            tracked_job_ttl: std::time::Duration::from_secs(604_800),
             adapter_max_disk_bytes: Some(100 * 1024u64.pow(3)),
             composed_cache_max_bytes: Some(10 * 1024u64.pow(3)),
             composed_cache_max_entries: Some(64),

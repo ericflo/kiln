@@ -172,7 +172,9 @@ pub struct TrainingConfig {
     /// seconds, bounding the steady-state size of the tracking map.
     /// Active jobs (`Queued` / `Running`) are never GC'd, regardless of
     /// age. Override via `KILN_TRAINING_TRACKED_JOB_TTL_SECS`. Default:
-    /// 3600 (1 hour).
+    /// 604800 (7 days) — long enough that the /ui still shows last
+    /// week's runs, while `max_tracked_jobs` (default 1024) still bounds
+    /// memory.
     pub tracked_job_ttl_secs: u64,
 }
 
@@ -407,7 +409,7 @@ impl Default for TrainingConfig {
             webhook_url: None,
             max_queued_jobs: 32,
             max_tracked_jobs: 1024,
-            tracked_job_ttl_secs: 3600,
+            tracked_job_ttl_secs: 604_800,
         }
     }
 }
@@ -826,7 +828,7 @@ mod tests {
         assert!(config.training.webhook_url.is_none());
         assert_eq!(config.training.max_queued_jobs, 32);
         assert_eq!(config.training.max_tracked_jobs, 1024);
-        assert_eq!(config.training.tracked_job_ttl_secs, 3600);
+        assert_eq!(config.training.tracked_job_ttl_secs, 604_800);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.logging.format, "auto");
         assert!(config.prefix_cache.enabled);

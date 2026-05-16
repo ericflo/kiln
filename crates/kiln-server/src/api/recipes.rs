@@ -525,8 +525,10 @@ fn register_step_job(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load: true,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };

@@ -312,8 +312,10 @@ async fn submit_sft(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -441,8 +443,10 @@ async fn submit_grpo(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -577,8 +581,10 @@ async fn submit_opd(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -678,8 +684,10 @@ async fn submit_distill_refresh(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -841,8 +849,10 @@ fn register_and_enqueue_distill(
         epoch: None,
         adapter_path: None,
         submitted_at: std::time::Instant::now(),
+        submitted_unix_ms: crate::recent_requests::now_unix_ms(),
         auto_load,
         finished_at: None,
+        finished_unix_ms: None,
         linked_eval_job_ids: Vec::new(),
         loss_history: Vec::new(),
     };
@@ -858,21 +868,32 @@ fn register_and_enqueue_distill(
     });
 }
 
+fn training_status_from_info(j: &crate::state::TrainingJobInfo) -> TrainingStatus {
+    TrainingStatus {
+        job_id: j.job_id.clone(),
+        state: j.state,
+        progress: j.progress,
+        current_loss: j.loss,
+        adapter_name: Some(j.adapter_name.clone()),
+        started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
+        elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
+        submitted_unix_ms: Some(j.submitted_unix_ms),
+        finished_unix_ms: j.finished_unix_ms,
+        job_type: Some(
+            match j.job_type {
+                TrainingJobType::Sft => "sft",
+                TrainingJobType::Grpo => "grpo",
+                TrainingJobType::Opd => "opd",
+            }
+            .into(),
+        ),
+    }
+}
+
 /// GET /v1/train/status — overall training status (list all tracked jobs).
 async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>> {
     let jobs = state.training_jobs.read().unwrap();
-    let statuses: Vec<TrainingStatus> = jobs
-        .values()
-        .map(|j| TrainingStatus {
-            job_id: j.job_id.clone(),
-            state: j.state,
-            progress: j.progress,
-            current_loss: j.loss,
-            adapter_name: Some(j.adapter_name.clone()),
-            started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
-            elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
-        })
-        .collect();
+    let statuses: Vec<TrainingStatus> = jobs.values().map(training_status_from_info).collect();
     Json(statuses)
 }
 
@@ -886,15 +907,7 @@ async fn job_status(
         .get(&job_id)
         .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
 
-    Ok(Json(TrainingStatus {
-        job_id: job.job_id.clone(),
-        state: job.state,
-        progress: job.progress,
-        current_loss: job.loss,
-        adapter_name: Some(job.adapter_name.clone()),
-        started_at: format!("{}s ago", job.submitted_at.elapsed().as_secs()),
-        elapsed_secs: job.submitted_at.elapsed().as_secs_f64(),
-    }))
+    Ok(Json(training_status_from_info(job)))
 }
 
 /// GET /v1/train/queue — list queue contents organized by state.
@@ -906,15 +919,7 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
     let mut completed = Vec::new();
 
     for j in jobs.values() {
-        let status = TrainingStatus {
-            job_id: j.job_id.clone(),
-            state: j.state,
-            progress: j.progress,
-            current_loss: j.loss,
-            adapter_name: Some(j.adapter_name.clone()),
-            started_at: format!("{}s ago", j.submitted_at.elapsed().as_secs()),
-            elapsed_secs: j.submitted_at.elapsed().as_secs_f64(),
-        };
+        let status = training_status_from_info(j);
         match j.state {
             TrainingState::Running => running = Some(status),
             TrainingState::Completed | TrainingState::Failed => completed.push(status),
@@ -941,8 +946,14 @@ async fn list_queue(State(state): State<AppState>) -> Json<QueueResponse> {
         })
         .collect();
 
-    // Sort completed by most recent first
-    completed.sort_by(|a, b| a.elapsed_secs.partial_cmp(&b.elapsed_secs).unwrap());
+    // Sort completed by most-recently-finished first (falls back to submit
+    // time when the terminal-transition timestamp is missing — e.g., an
+    // archived entry that pre-dates the `finished_unix_ms` field).
+    completed.sort_by(|a, b| {
+        let a_t = a.finished_unix_ms.unwrap_or_else(|| a.submitted_unix_ms.unwrap_or(0));
+        let b_t = b.finished_unix_ms.unwrap_or_else(|| b.submitted_unix_ms.unwrap_or(0));
+        b_t.cmp(&a_t)
+    });
 
     Json(QueueResponse {
         running,
@@ -1006,6 +1017,62 @@ async fn cancel_queued_job(
     }
 }
 
+/// DELETE /v1/train/jobs/:job_id — permanently delete a terminal training
+/// job from both the in-memory tracking map and the on-disk archive. Refuses
+/// to delete jobs that are still queued / running (use
+/// `DELETE /v1/train/queue/:job_id` for those).
+async fn delete_archived_job(
+    State(state): State<AppState>,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Refuse if the job is still active. The in-memory map is the source
+    // of truth for live state; an archived entry will only exist for jobs
+    // already in a terminal state.
+    {
+        let jobs = state.training_jobs.read().unwrap();
+        if let Some(job) = jobs.get(&job_id) {
+            match job.state {
+                TrainingState::Queued | TrainingState::Running => {
+                    return Err(ApiError::training_job_not_cancellable(
+                        &job_id,
+                        format!("{:?}", job.state),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        // Missing from in-memory but present on-disk is also valid — we'll
+        // still try to delete the archive file below.
+    }
+
+    // Remove from in-memory map (idempotent — missing is fine).
+    {
+        let mut jobs = state.training_jobs.write().unwrap();
+        jobs.remove(&job_id);
+    }
+
+    // Delete the on-disk archive file. Missing is fine (already gone).
+    let archive_path = crate::training_history::archive_dir(&state.adapter_dir)
+        .join(format!("{job_id}.json"));
+    let removed_file = match std::fs::remove_file(&archive_path) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(ApiError::internal(format!(
+                "failed to delete archive file {}: {}",
+                archive_path.display(),
+                e
+            )));
+        }
+    };
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "status": "deleted",
+        "removed_archive_file": removed_file,
+    })))
+}
+
 /// Body-size cap for SFT training submissions (audit LOW §1).
 /// 64 MiB accommodates long-context training examples that exceed the 2 MiB axum default.
 const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
@@ -1050,17 +1117,8 @@ async fn job_detail(
         let job = jobs
             .get(&job_id)
             .ok_or_else(|| ApiError::training_job_not_found(&job_id))?;
-        let elapsed_secs = job.submitted_at.elapsed().as_secs_f64();
         TrainingJobDetail {
-            status: TrainingStatus {
-                job_id: job.job_id.clone(),
-                state: job.state,
-                progress: job.progress,
-                current_loss: job.loss,
-                adapter_name: Some(job.adapter_name.clone()),
-                started_at: format!("{}s ago", job.submitted_at.elapsed().as_secs()),
-                elapsed_secs,
-            },
+            status: training_status_from_info(job),
             job_type: job.job_type,
             epoch: job.epoch,
             adapter_path: job.adapter_path.clone(),
@@ -1104,7 +1162,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
-        .route("/v1/train/jobs/{job_id}", get(job_detail))
+        .route(
+            "/v1/train/jobs/{job_id}",
+            get(job_detail).delete(delete_archived_job),
+        )
         .route("/v1/train/queue", get(list_queue))
         .route("/v1/train/queue/{job_id}", delete(cancel_queued_job))
 }

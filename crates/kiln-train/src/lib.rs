@@ -299,6 +299,18 @@ pub struct TrainingStatus {
     pub adapter_name: Option<String>,
     pub started_at: String,
     pub elapsed_secs: f64,
+    /// Wall-clock submit time as Unix milliseconds — survives server restarts
+    /// so the /ui can render real timestamps for archived terminal jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_unix_ms: Option<u64>,
+    /// Wall-clock terminal-transition time as Unix milliseconds. `None` while
+    /// the job is still active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_unix_ms: Option<u64>,
+    /// "sft" or "grpo" — populated by the server side; absent on older
+    /// payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -18,7 +18,32 @@ use kiln_train::{
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
+use crate::recent_requests::now_unix_ms;
 use crate::state::{AppState, ModelBackend, TrainingJobType};
+use crate::training_history;
+
+/// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
+/// + `finished_unix_ms`, and persist a clone to the on-disk archive.
+/// Archive write failures are logged, never propagated — disk wedged or
+/// quota-exceeded must not derail the worker's reporting path.
+fn finalize_job(state: &AppState, job_id: &str, new_state: TrainingState) {
+    let snapshot = {
+        let mut jobs = state.training_jobs.write().unwrap();
+        if let Some(job) = jobs.get_mut(job_id) {
+            job.state = new_state;
+            job.finished_at = Some(std::time::Instant::now());
+            job.finished_unix_ms = Some(now_unix_ms());
+            Some(job.clone())
+        } else {
+            None
+        }
+    };
+    let Some(job) = snapshot else { return };
+    if let Err(e) = training_history::save(&state.adapter_dir, &job) {
+        tracing::warn!(error = %e, job_id = %job_id, "failed to archive terminal training job");
+    }
+    training_history::prune_to_max(&state.adapter_dir, training_history::MAX_ARCHIVED_JOBS);
+}
 
 /// JSON payload POSTed to the training-completion webhook.
 ///
@@ -234,9 +259,14 @@ pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
     });
 }
 
-/// Evict `Completed` / `Failed` entries from `state.training_jobs` whose
-/// `finished_at` timestamp is older than `state.tracked_job_ttl`. Active
-/// entries (`Queued` / `Running`) are never removed regardless of age.
+/// Evict `Completed` / `Failed` entries from `state.training_jobs` when the
+/// tracking map grows past `state.max_tracked_jobs`. Oldest-by-finish-time
+/// entries go first. Active entries (`Queued` / `Running`) are never
+/// removed regardless of age. The TTL field is honored as a soft floor —
+/// nothing inside the TTL window gets evicted, even when over the cap (in
+/// that case a submission will be rejected with `training_tracked_full`
+/// per the existing contract). Terminal entries that pass the TTL window
+/// are eligible for cap-based eviction.
 ///
 /// Returns the number of entries removed.
 ///
@@ -244,26 +274,40 @@ pub fn spawn_training_worker(state: AppState, shutdown: ShutdownFlag) {
 /// `training_jobs`. Called from the training worker loop on every
 /// iteration and from tests directly.
 pub fn gc_tracked_jobs(state: &AppState) -> usize {
+    let cap = state.max_tracked_jobs;
     let ttl = state.tracked_job_ttl;
     let now = std::time::Instant::now();
     let mut jobs = state.training_jobs.write().unwrap();
-    let before = jobs.len();
-    jobs.retain(|_id, job| match job.state {
-        TrainingState::Completed | TrainingState::Failed => match job.finished_at {
-            // No timestamp recorded (legacy or in-flight transition) —
-            // keep until the next pass observes a timestamp.
-            None => true,
-            Some(t) => now.saturating_duration_since(t) < ttl,
-        },
-        // Active jobs are never GC'd.
-        TrainingState::Queued | TrainingState::Running => true,
-    });
-    let removed = before - jobs.len();
+    if jobs.len() <= cap {
+        return 0;
+    }
+    // Build a candidate list of terminal jobs past the TTL window, ordered
+    // oldest-first by `finished_at`. We evict from the front of this list
+    // until we're back under the cap or the candidate list is exhausted.
+    let mut candidates: Vec<(String, std::time::Instant)> = jobs
+        .iter()
+        .filter_map(|(id, j)| match (j.state, j.finished_at) {
+            (TrainingState::Completed | TrainingState::Failed, Some(t))
+                if now.saturating_duration_since(t) >= ttl =>
+            {
+                Some((id.clone(), t))
+            }
+            _ => None,
+        })
+        .collect();
+    candidates.sort_by_key(|(_, t)| *t);
+    let want_to_remove = jobs.len().saturating_sub(cap);
+    let mut removed = 0;
+    for (id, _) in candidates.into_iter().take(want_to_remove) {
+        jobs.remove(&id);
+        removed += 1;
+    }
     if removed > 0 {
         tracing::debug!(
             removed,
             remaining = jobs.len(),
-            "GC'd terminal training jobs past TTL"
+            cap,
+            "evicted oldest terminal training jobs past TTL to honor max_tracked_jobs cap"
         );
     }
     removed
@@ -1771,11 +1815,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let runner_arc = match state.backend.as_ref() {
         ModelBackend::Real { runner, .. } => runner.clone(),
         ModelBackend::Mock { .. } => {
-            let mut jobs = state.training_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
-                job.state = TrainingState::Failed;
-                job.finished_at = Some(std::time::Instant::now());
-            }
+            finalize_job(&state, &job_id, TrainingState::Failed);
             tracing::error!(job_id = %job_id, "training requires real model weights");
             return;
         }
@@ -2009,12 +2049,11 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             {
                 let mut jobs = state.training_jobs.write().unwrap();
                 if let Some(job) = jobs.get_mut(&job_id) {
-                    job.state = TrainingState::Completed;
                     job.progress = 1.0;
                     job.adapter_path = Some(path_str.clone());
-                    job.finished_at = Some(std::time::Instant::now());
                 }
             }
+            finalize_job(&state, &job_id, TrainingState::Completed);
             state
                 .metrics
                 .inc_training(metric_type, TrainingMetricStatus::Completed);
@@ -2107,13 +2146,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         Err(e) => {
             tracing::error!(job_id = %job_id, job_type = ?job_type, "training failed: {e}");
             let error_msg = e.clone();
-            {
-                let mut jobs = state.training_jobs.write().unwrap();
-                if let Some(job) = jobs.get_mut(&job_id) {
-                    job.state = TrainingState::Failed;
-                    job.finished_at = Some(std::time::Instant::now());
-                }
-            }
+            finalize_job(&state, &job_id, TrainingState::Failed);
             state
                 .metrics
                 .inc_training(metric_type, TrainingMetricStatus::Failed);

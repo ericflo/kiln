@@ -14,9 +14,13 @@ pub const DEFAULT_CAPACITY: usize = 100;
 
 /// One row in the recent-requests panel.
 ///
-/// Previews are stored already-truncated to keep the JSON payload small. The
-/// truncation is char-boundary safe (see [`truncate_chars`]).
-#[derive(Debug, Clone, Serialize)]
+/// Previews are stored already-truncated to keep the list payload small. The
+/// `*_full` fields carry a larger (but still bounded) copy used by the /ui
+/// inspect modal — they are capped at [`FULL_BODY_MAX_CHARS`] characters so
+/// a single 1M-token prompt cannot bloat the ring.
+///
+/// Optional fields are skipped from JSON when `None` so cold rings stay tiny.
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct RequestRecord {
     pub id: String,
     pub timestamp_unix_ms: u64,
@@ -28,7 +32,30 @@ pub struct RequestRecord {
     pub duration_ms: u64,
     pub streamed: bool,
     pub finish_reason: String,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_full: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_full: Option<String>,
 }
+
+/// Cap on full prompt / completion body size kept in the ring (chars).
+/// The ring caps at 100 records by default, so worst case ~12.8 MB of body
+/// text — comfortable, and the modal can render arbitrarily large entries
+/// from the API response.
+pub const FULL_BODY_MAX_CHARS: usize = 64 * 1024;
 
 /// Bounded FIFO ring of [`RequestRecord`]s, newest at the back.
 pub struct RecentRequestsRing {
@@ -122,6 +149,7 @@ mod tests {
             duration_ms: 0,
             streamed: false,
             finish_reason: "stop".to_owned(),
+            ..Default::default()
         }
     }
 

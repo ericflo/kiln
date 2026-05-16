@@ -4,7 +4,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use kiln_eval::{EvalCompareSpec, EvalJobState, EvalProgress, EvalResult, EvalSuite, SuiteResult};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// What a queued eval job actually contains. Either:
 ///
@@ -48,7 +48,7 @@ impl QueuedEvalJob {
 
 /// What kind of submission produced this job — used by the metrics layer to
 /// distinguish on-demand evals from post-training auto-evals.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalSubmissionKind {
     OnDemand,
@@ -64,9 +64,13 @@ pub struct EvalQueueEntry {
     pub job: QueuedEvalJob,
 }
 
+fn now_instant_default() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// Tracked eval job — mirrors `TrainingJobInfo` so the UI can render both
 /// with one code path. Stored under `state.eval_jobs`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalJobInfo {
     pub job_id: String,
     pub suite_name: String,
@@ -88,9 +92,9 @@ pub struct EvalJobInfo {
     pub started_at_iso: Option<String>,
     /// ISO-8601 timestamp when the job entered a terminal state.
     pub finished_at_iso: Option<String>,
-    #[serde(skip)]
+    #[serde(skip, default = "now_instant_default")]
     pub submitted_at: std::time::Instant,
-    #[serde(skip)]
+    #[serde(skip, default)]
     pub finished_at: Option<std::time::Instant>,
 }
 

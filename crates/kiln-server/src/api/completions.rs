@@ -25,7 +25,7 @@ use crate::batching_engine::{EngineEvent, EngineRequest};
 use crate::config::{SpecMethod, SpeculativeDecodingConfig};
 use crate::error::ApiError;
 use crate::metrics::RequestStatus;
-use crate::recent_requests::{RequestRecord, now_unix_ms, truncate_chars};
+use crate::recent_requests::{FULL_BODY_MAX_CHARS, RequestRecord, now_unix_ms, truncate_chars};
 use crate::state::{
     AppState, DeterministicBatchCache, DeterministicBatchCacheClaim, DeterministicBatchCacheItem,
     DeterministicBatchCacheKey, DeterministicBatchCacheValue, DeterministicBatchInFlightState,
@@ -61,6 +61,32 @@ fn last_user_message_text(req: &ChatCompletionRequest) -> String {
         .or_else(|| req.messages.last())
         .map(|m| m.content.clone())
         .unwrap_or_default()
+}
+
+/// Build a [`RequestRecord`] pre-populated with everything we know from the
+/// request side: id, model, adapter, sampling knobs, prompt preview + full
+/// body. Each call site overrides the response-side fields (completion text,
+/// token counts, duration, finish reason, optional ttft / error).
+fn request_record_from_req(
+    req: &ChatCompletionRequest,
+    id: &str,
+    model: &str,
+    streamed: bool,
+) -> RequestRecord {
+    let prompt = last_user_message_text(req);
+    RequestRecord {
+        id: id.to_owned(),
+        timestamp_unix_ms: now_unix_ms(),
+        model: model.to_owned(),
+        prompt_preview: truncate_chars(&prompt, PROMPT_PREVIEW_MAX_CHARS),
+        prompt_full: Some(truncate_chars(&prompt, FULL_BODY_MAX_CHARS)),
+        streamed,
+        adapter: req.adapter.clone(),
+        temperature: req.temperature,
+        top_p: req.top_p,
+        max_tokens: req.max_tokens.map(|n| n as u32),
+        ..RequestRecord::default()
+    }
 }
 
 const REASONING_OPEN_TAG: &str = "<think>\n";
@@ -1151,16 +1177,13 @@ fn response_from_cached_completion(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: cached.completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: false,
             finish_reason: cached.finish_reason.clone(),
+            ..request_record_from_req(req, &id, &model, false)
         },
     );
 
@@ -1223,20 +1246,17 @@ fn response_from_cached_chat_choices(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: cached.prompt_tokens as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: false,
             finish_reason: cached
                 .completions
                 .first()
                 .map(|completion| completion.finish_reason.clone())
                 .unwrap_or_else(|| "length".to_string()),
+            ..request_record_from_req(req, &id, &model, false)
         },
     );
 
@@ -1295,16 +1315,13 @@ fn streaming_response_from_cached_completion(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: cached.completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: true,
             finish_reason: cached.finish_reason.clone(),
+            ..request_record_from_req(req, &id, &model, true)
         },
     );
 
@@ -3033,16 +3050,13 @@ async fn generate_real_batched(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: false,
             finish_reason: finish_reason.to_string(),
+            ..request_record_from_req(req, &id, &model, false)
         },
     );
 
@@ -3108,7 +3122,13 @@ async fn generate_real_batched_streaming(
     let tokenizer = state.tokenizer.clone();
     let metrics = state.metrics.clone();
     let recent_requests = state.recent_requests.clone();
-    let prompt_preview = truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS);
+    let prompt_text_full = last_user_message_text(req);
+    let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
+    let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
+    let req_adapter = req.adapter.clone();
+    let req_temperature = req.temperature;
+    let req_top_p = req.top_p;
+    let req_max_tokens = req.max_tokens.map(|n| n as u32);
     let prompt_starts_in_reasoning = prompt_starts_in_reasoning(prompt_text);
     let batching_engine = batching_engine.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -3124,19 +3144,26 @@ async fn generate_real_batched_streaming(
             let mut completion_token_count: u32 = 0;
             let mut generated_tokens: Vec<TokenId> = Vec::new();
             let mut decoded_prefix = String::new();
-
             let record = |finish_reason: String, completion: &str, completion_tokens: u32| {
                 let record = RequestRecord {
                     id: id.clone(),
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
                     prompt_preview: prompt_preview.clone(),
+                    prompt_full: Some(prompt_full.clone()),
                     completion_preview: truncate_chars(completion, COMPLETION_PREVIEW_MAX_CHARS),
+                    completion_full: Some(truncate_chars(completion, FULL_BODY_MAX_CHARS)),
                     prompt_tokens: prompt_token_count as u32,
                     completion_tokens,
                     duration_ms: request_start.elapsed().as_millis() as u64,
                     streamed: true,
                     finish_reason,
+                    adapter: req_adapter.clone(),
+                    temperature: req_temperature,
+                    top_p: req_top_p,
+                    max_tokens: req_max_tokens,
+                    ttft_ms: None,
+                    error: None,
                 };
                 match recent_requests.lock() {
                     Ok(mut ring) => ring.record(record),
@@ -3626,16 +3653,13 @@ async fn generate_real(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(preview_source, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(preview_source, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: false,
             finish_reason: finish_reason.to_string(),
+            ..request_record_from_req(req, &id, &model, false)
         },
     );
 
@@ -3731,7 +3755,13 @@ async fn generate_real_streaming(
     let recent_requests = state.recent_requests.clone();
     let completion_cache = state.completion_cache.clone();
     let chat_request_cache = state.chat_request_cache.clone();
-    let prompt_preview = truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS);
+    let prompt_text_full = last_user_message_text(req);
+    let prompt_preview = truncate_chars(&prompt_text_full, PROMPT_PREVIEW_MAX_CHARS);
+    let prompt_full = truncate_chars(&prompt_text_full, FULL_BODY_MAX_CHARS);
+    let req_adapter = req.adapter.clone();
+    let req_temperature = req.temperature;
+    let req_top_p = req.top_p;
+    let req_max_tokens = req.max_tokens.map(|n| n as u32);
 
     // Use a tokio mpsc channel to bridge sync generation -> async SSE stream.
     let (tx, rx) = tokio::sync::mpsc::channel::<Event>(32);
@@ -3756,12 +3786,20 @@ async fn generate_real_streaming(
                     timestamp_unix_ms: now_unix_ms(),
                     model: model.clone(),
                     prompt_preview: prompt_preview.clone(),
+                    prompt_full: Some(prompt_full.clone()),
                     completion_preview: truncate_chars(completion, COMPLETION_PREVIEW_MAX_CHARS),
+                    completion_full: Some(truncate_chars(completion, FULL_BODY_MAX_CHARS)),
                     prompt_tokens: prompt_token_count as u32,
                     completion_tokens,
                     duration_ms: request_start.elapsed().as_millis() as u64,
                     streamed: true,
                     finish_reason,
+                    adapter: req_adapter.clone(),
+                    temperature: req_temperature,
+                    top_p: req_top_p,
+                    max_tokens: req_max_tokens,
+                    ttft_ms: None,
+                    error: None,
                 };
                 match recent_requests.lock() {
                     Ok(mut ring) => ring.record(record),
@@ -4341,16 +4379,13 @@ async fn generate_mock(
     record_recent_request(
         state,
         RequestRecord {
-            id: id.clone(),
-            timestamp_unix_ms: now_unix_ms(),
-            model: model.clone(),
-            prompt_preview: truncate_chars(&last_user_message_text(req), PROMPT_PREVIEW_MAX_CHARS),
             completion_preview: truncate_chars(&completion_text, COMPLETION_PREVIEW_MAX_CHARS),
+            completion_full: Some(truncate_chars(&completion_text, FULL_BODY_MAX_CHARS)),
             prompt_tokens: prompt_token_count as u32,
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
-            streamed: false,
             finish_reason: "stop".to_string(),
+            ..request_record_from_req(req, &id, &model, false)
         },
     );
 
