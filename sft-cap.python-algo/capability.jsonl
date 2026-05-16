@@ -162,3 +162,7 @@
 {"iter":169,"slug":"cap-ties-best","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8477,"delta":-0.023,"n":75,"notes":"weighted-avg merge regressed"}
 {"iter":170,"slug":"cap-imt-2e6","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8652,"delta":-0.005,"n":75,"notes":"lr 2e-6 close but not as good as 1e-6"}
 {"iter":171,"slug":"cap-imt-2ep","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8445,"delta":-0.026,"n":75,"notes":"2 epochs at 1e-6 overshoots"}
+{"iter":172,"slug":"cap-stack-iter2-5","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8394,"delta":-0.031,"n":75,"notes":"5 iter2 dialogs on imt2 regressed"}
+{"iter":173,"slug":"cap-combined-stack","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8410,"delta":-0.029,"n":75,"notes":"single-layer combined regressed (order matters)"}
+{"iter":174,"slug":"cap-imt-twice","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8634,"delta":-0.007,"n":75,"notes":"stacking imt-tiny twice slight regression"}
+{"iter":175,"slug":"cap-imt-8e7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8464,"delta":-0.024,"n":75,"notes":"lr 8e-7 still bad"}

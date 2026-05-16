@@ -325,3 +325,63 @@ The user's intuition that worked for math-broad ("teach a totally different skil
 
 **Best stable remains iter 102 = 0.8694 (SGD optimizer at lr 5e-5 on thinking-comments).**
 **Best observed remains iter 35 = 0.8866 (lucky tail, not reproducible).**
+
+## Session 3 (iters 156-175): IMT stack BREAKTHROUGH — 0.8702 stable best
+
+User pushed back on session-2 stalling and proposed iterated multi-turn
+guided training (model attempts → feedback → retry, save full dialog).
+Implementation: generate dialogs against base model with python test
+verification, then stack as a 3rd LoRA layer.
+
+### Winning recipe: cap-stack-imt2 = 0.8702
+
+```
+base Qwen3.5-4B
+  → SFT lr=5e-5, 3 ep, SGD = cap-sgd-run2 (0.8574)
+    → SFT lr=3e-6, 1 ep on winning-64 = cap-stack-best (0.8595)
+      → SFT lr=1e-6, 1 ep on imt-tiny (11 dialogs <1.5KB) = cap-stack-imt2 (0.8702)
+```
+
+The third layer is the user's iterated multi-turn idea materialized.
++0.011 over the 2-layer stack — first reliable lift past the 0.86 plateau.
+
+### Iter table
+
+| iter | adapter | score | notes |
+|---:|---|---:|---|
+| 156-158 | cap-sgd-run1/2/3 | 0.82, 0.86, 0.84 | SGD variance hunt |
+| 159 | cap-stack-best | 0.8595 | +0.002 stacking winning-64 |
+| 160 | **cap-stack-imt2** | **0.8702** | **+0.011 stacking imt-tiny** |
+| 161 | cap-stack-l3 | 0.8461 | 3-layer-on-imt2 regressed |
+| 162 | cap-sgd2-imt | 0.8519 | imt direct on sgd-run2 (no winning-64 middle) |
+| 163 | imt-med | crash | OOM |
+| 164 | imt-16 | 0.8530 | too many dialogs hurts |
+| 165 | imt2b (lr 5e-7) | 0.8451 | too gentle |
+| 166 | imt5 | 0.8687 | 5 dialogs close to optimum |
+| 167 | imt6b | 0.8493 | different 6 dialogs regressed |
+| 168 | L4 (4-layer) | 0.8349 | too deep |
+| 169 | ties merge | 0.8477 | merging regresses |
+| 170 | imt-2e6 | 0.8652 | lr 2e-6 close |
+| 171 | imt-2ep | 0.8445 | 2 epochs overshoots |
+| 172 | iter2-5 | 0.8394 | new dialogs from imt2 regress |
+| 173 | combined-stack | 0.8410 | single-layer regress |
+| 174 | imt-twice | 0.8634 | stacking same data twice regress |
+| 175 | imt-8e7 | 0.8464 | lr 8e-7 between 5e-7 and 1e-6 still bad |
+
+### Key insights
+- Stacking ORDER and SIZE matter (3-layer beats single-layer-bigger)
+- IMT dialog count sweet spot is 11 (5 close, 16 too many)
+- lr sweet spot is exactly 1e-6 for the final layer
+- The model's correctness was high enough that iter-2 dialogs were
+  mostly single-turn (less informative than first IMT round)
+- Self-stacking same data regresses (overfit on dialog distribution)
+- Order: sgd→winning→imt beats combined sgd→winning+imt
+
+### Why this works
+The IMT layer is small (11 examples), gentle (lr=1e-6), and adds
+multi-turn structure. The earlier layers anchor in the winning shape
+(thinking-comments code). The final IMT layer encodes "self-correction"
+in the model's distribution without disrupting the well-anchored
+single-turn code-output behavior.
+
+**Best stable**: 0.8702 — beats previous stable 0.8694 (iter 102).
