@@ -1022,6 +1022,8 @@ fn bench_latency_paged(
                 current_pos - 1
             );
         }
+        #[cfg(feature = "vulkan")]
+        kiln_model::vk_decode_resident::drain_resident_decode_timing();
         num_tokens += 1;
         if log_tokens {
             decoded_tokens.push(next_token);

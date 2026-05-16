@@ -29,6 +29,8 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Tensor};
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use kiln_vulkan_kernel::shaders as shaders;
 use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevice, Workgroups};
@@ -36,6 +38,69 @@ use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevic
 use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::paged_kv_cache::PagedKvCache;
+
+// Env-gated per-block timing accumulators. Enable with
+// `KILN_VK_RESIDENT_DECODE_TIMING=1`. Each accumulator records nanos
+// across (block_total, upload, submit_wait, readback). Call sites
+// also drive call counts so the average per layer is recoverable.
+static TIMING_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static FA_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static FA_UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
+static FA_SUBMIT_NS: AtomicU64 = AtomicU64::new(0);
+static FA_READBACK_NS: AtomicU64 = AtomicU64::new(0);
+static FA_CALLS: AtomicUsize = AtomicUsize::new(0);
+static GDN_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static GDN_UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
+static GDN_SUBMIT_NS: AtomicU64 = AtomicU64::new(0);
+static GDN_READBACK_NS: AtomicU64 = AtomicU64::new(0);
+static GDN_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+fn timing_enabled() -> bool {
+    *TIMING_ENABLED.get_or_init(|| {
+        std::env::var("KILN_VK_RESIDENT_DECODE_TIMING")
+            .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
+            .unwrap_or(false)
+    })
+}
+
+/// Print accumulated per-block timing to stderr and zero the counters.
+/// Call from the bench / harness once per decode token to see a
+/// per-token breakdown.
+pub fn drain_resident_decode_timing() {
+    if !timing_enabled() {
+        return;
+    }
+    let fa_calls = FA_CALLS.swap(0, Ordering::SeqCst);
+    let gdn_calls = GDN_CALLS.swap(0, Ordering::SeqCst);
+    if fa_calls == 0 && gdn_calls == 0 {
+        return;
+    }
+    let fa_total = FA_TOTAL_NS.swap(0, Ordering::SeqCst);
+    let fa_upload = FA_UPLOAD_NS.swap(0, Ordering::SeqCst);
+    let fa_submit = FA_SUBMIT_NS.swap(0, Ordering::SeqCst);
+    let fa_readback = FA_READBACK_NS.swap(0, Ordering::SeqCst);
+    let gdn_total = GDN_TOTAL_NS.swap(0, Ordering::SeqCst);
+    let gdn_upload = GDN_UPLOAD_NS.swap(0, Ordering::SeqCst);
+    let gdn_submit = GDN_SUBMIT_NS.swap(0, Ordering::SeqCst);
+    let gdn_readback = GDN_READBACK_NS.swap(0, Ordering::SeqCst);
+    let ms = |ns: u64| (ns as f64) / 1e6;
+    eprintln!(
+        "[vk-resident-timing] full-attn calls={fa_calls} total={:.2}ms upload={:.2}ms submit={:.2}ms readback={:.2}ms cpu={:.2}ms",
+        ms(fa_total),
+        ms(fa_upload),
+        ms(fa_submit),
+        ms(fa_readback),
+        ms(fa_total.saturating_sub(fa_upload + fa_submit + fa_readback)),
+    );
+    eprintln!(
+        "[vk-resident-timing] GDN       calls={gdn_calls} total={:.2}ms upload={:.2}ms submit={:.2}ms readback={:.2}ms cpu={:.2}ms",
+        ms(gdn_total),
+        ms(gdn_upload),
+        ms(gdn_submit),
+        ms(gdn_readback),
+        ms(gdn_total.saturating_sub(gdn_upload + gdn_submit + gdn_readback)),
+    );
+}
 
 /// Run one full-attention decode block on the Vulkan-resident path.
 ///
@@ -162,7 +227,10 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
     let seq_lens_buf = upload_u32_slice(vk_device, &seq_lens)?;
 
+    let fa_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+
     // --- upload x ----------------------------------------------------
+    let upload_t0 = fa_t0.map(|_| Instant::now());
     let x_f32 = if x.dtype() == DType::F32 {
         x.flatten_all()?
     } else {
@@ -179,6 +247,9 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         &x_bytes,
     )
     .context("upload x for resident block")?;
+    if let Some(t) = upload_t0 {
+        FA_UPLOAD_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     // --- chain all 15 dispatches into one CommandBatch + one submit ---
     let k_pool = vk_kv_cache.k_buffer(full_attn_layer_idx).ok_or_else(|| {
@@ -191,6 +262,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let total_qkv_out = q_dim + k_dim + v_dim;
     let q_h_d = num_heads * head_dim;
 
+    let submit_t0 = fa_t0.map(|_| Instant::now());
     let mut batch = CommandBatch::new(vk_device)?;
 
     // 1) pre-attn rmsnorm
@@ -381,8 +453,12 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     batch
         .submit_and_wait("vk-resident full-attn block")
         .context("submit resident full-attn CommandBatch")?;
+    if let Some(t) = submit_t0 {
+        FA_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     // --- read back final_out as a candle Tensor on the input's device
+    let readback_t0 = fa_t0.map(|_| Instant::now());
     let out_bytes = VulkanBuffer::read_back(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
@@ -394,6 +470,13 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let out_f32: Vec<f32> = bytes_to_f32_vec(&out_bytes);
     let out_tensor =
         Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?.to_dtype(x.dtype())?;
+    if let Some(t) = readback_t0 {
+        FA_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    if let Some(t) = fa_t0 {
+        FA_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        FA_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
     Ok(Some(out_tensor))
 }
 
@@ -541,7 +624,10 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     let gated_norm = backend.acquire_resident_scratch("gdn_gated_norm", (v_dim * 4) as u64)?;
     let out_buf = backend.acquire_resident_scratch("gdn_out", (hidden * 4) as u64)?;
 
+    let gdn_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+
     // --- upload x -----------------------------------------------
+    let gdn_upload_t0 = gdn_t0.map(|_| Instant::now());
     let x_f32 = if x_normed.dtype() == DType::F32 {
         x_normed.flatten_all()?
     } else {
@@ -557,6 +643,10 @@ pub fn gated_deltanet_forward_decode_resident_b1(
         &f32_slice_to_bytes(&x_data),
     )
     .context("upload x for GDN resident block")?;
+    if let Some(t) = gdn_upload_t0 {
+        GDN_UPLOAD_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    let gdn_submit_t0 = gdn_t0.map(|_| Instant::now());
 
     // --- chain all 9 GDN dispatches into one CommandBatch + one submit ---
     let total_in_proj = qkv_dim + z_dim + a_dim + b_dim;
@@ -683,8 +773,12 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     batch
         .submit_and_wait("vk-resident GDN block")
         .context("submit resident GDN CommandBatch")?;
+    if let Some(t) = gdn_submit_t0 {
+        GDN_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     // --- read back result ---------------------------------------
+    let gdn_readback_t0 = gdn_t0.map(|_| Instant::now());
     let out_bytes = VulkanBuffer::read_back(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
@@ -696,6 +790,13 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     let out_f32 = bytes_to_f32_vec(&out_bytes);
     let out_tensor = Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x_normed.device())?
         .to_dtype(x_normed.dtype())?;
+    if let Some(t) = gdn_readback_t0 {
+        GDN_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    if let Some(t) = gdn_t0 {
+        GDN_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        GDN_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
     Ok(Some(out_tensor))
 }
 
