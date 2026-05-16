@@ -71,11 +71,7 @@ use candle_core::{
 };
 
 #[cfg(feature = "cuda")]
-use candle_core::{
-    CudaStorage,
-    backend::{BackendDevice, BackendStorage},
-    cuda_backend::cudarc::driver::DevicePtr,
-};
+use candle_core::{CudaStorage, backend::BackendStorage};
 
 use crate::{log_softmax_last, DEFAULT_CHUNK_SIZE};
 
@@ -779,11 +775,21 @@ impl OpdLossCustomOp {
             ));
         }
 
-        // Download per-position KL to host.
-        let mut host_kl = vec![0.0f32; active_count];
-        device
-            .dtoh_sync_copy_into(&out_slice, &mut host_kl)
-            .map_err(|e| anyhow!("dtoh copy of kl output: {e}"))?;
+        // Download per-position KL to host via a candle Tensor wrapper.
+        // `wrap_cuda_slice` doesn't move data; the subsequent
+        // `to_vec1::<f32>()` performs the D2H copy through candle's
+        // own backend path.
+        let out_storage =
+            CudaStorage::wrap_cuda_slice(out_slice, device.clone());
+        let out_tensor = Tensor::from_storage(
+            Storage::Cuda(out_storage),
+            Shape::from(active_count),
+            BackpropOp::none(),
+            false,
+        );
+        let host_kl: Vec<f32> = out_tensor
+            .to_vec1::<f32>()
+            .context("D2H copy of kl output")?;
 
         match self.output_mode {
             OpdLossOutput::ScalarMean => {
