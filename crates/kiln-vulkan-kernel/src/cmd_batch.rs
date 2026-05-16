@@ -92,11 +92,11 @@ impl<'a> CommandBatch<'a> {
         // per-layer batch construction.
         let cmd_pool_guard = vk_device.batch_command_pool()?;
         let descriptor_pool_guard = vk_device.batch_descriptor_pool()?;
-        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
             .command_pool(*cmd_pool_guard)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1)
-            .build();
+            ;
         let cmd_buffers = unsafe { device.allocate_command_buffers(&alloc_info) }
             .context("CommandBatch: allocate command buffer")?;
         let cmd = cmd_buffers[0];
@@ -104,9 +104,9 @@ impl<'a> CommandBatch<'a> {
             device
                 .begin_command_buffer(
                     cmd,
-                    &vk::CommandBufferBeginInfo::builder()
+                    &vk::CommandBufferBeginInfo::default()
                         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-                        .build(),
+                        ,
                 )
                 .context("CommandBatch: begin command buffer")?;
         }
@@ -197,10 +197,10 @@ impl<'a> CommandBatch<'a> {
             // Inter-dispatch barrier — needed BEFORE this dispatch so it
             // sees the previous dispatch's writes (skip on first call).
             if self.dispatch_count > 0 {
-                let barrier = vk::MemoryBarrier::builder()
+                let barrier = vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                    .build();
+                    ;
                 device.cmd_pipeline_barrier(
                     self.cmd,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -278,10 +278,10 @@ impl<'a> CommandBatch<'a> {
             // sees the previous compute dispatch's writes. The
             // submit_and_wait tail barrier (added below) handles the
             // TRANSFER_WRITE → HOST_READ side for the host map.
-            let barrier = vk::MemoryBarrier::builder()
+            let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
-                .build();
+                ;
             device.cmd_pipeline_barrier(
                 self.cmd,
                 vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -291,14 +291,14 @@ impl<'a> CommandBatch<'a> {
                 &[],
                 &[],
             );
-            let copy = vk::BufferCopy::builder().size(size).build();
+            let copy = vk::BufferCopy::default().size(size);
             device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
             // TRANSFER_WRITE → HOST_READ so the post-submit map sees
             // the copy's writes.
-            let host_barrier = vk::MemoryBarrier::builder()
+            let host_barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::HOST_READ)
-                .build();
+                ;
             device.cmd_pipeline_barrier(
                 self.cmd,
                 vk::PipelineStageFlags::TRANSFER,
@@ -326,10 +326,10 @@ impl<'a> CommandBatch<'a> {
             // so the next readback / copy off the batch's last output
             // buffer sees the writes.
             if self.dispatch_count > 0 {
-                let barrier = vk::MemoryBarrier::builder()
+                let barrier = vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ)
-                    .build();
+                    ;
                 device.cmd_pipeline_barrier(
                     self.cmd,
                     vk::PipelineStageFlags::COMPUTE_SHADER,

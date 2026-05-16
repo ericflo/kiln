@@ -74,7 +74,7 @@ fn copy_device_buffer(
     .with_context(|| format!("{label}: alloc dst buffer"))?;
 
     let command_pool = device.transient_command_pool()?;
-    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(*command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1);
@@ -86,13 +86,13 @@ fn copy_device_buffer(
     unsafe {
         device
             .device()
-            .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::builder().build())
+            .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())
             .with_context(|| format!("{label}: begin command buffer"))?;
         device.device().cmd_copy_buffer(
             cmd,
             src.handle(),
             dst.handle(),
-            &[vk::BufferCopy::builder().size(bytes.max(4) as u64).build()],
+            &[vk::BufferCopy::default().size(bytes.max(4) as u64)],
         );
         device
             .device()

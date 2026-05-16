@@ -30,70 +30,29 @@ impl Drop for VulkanBuffer {
     }
 }
 
-/// Create a zero-init CommandPoolCreateInfo with fixed sType.
-fn make_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo {
-    let mut info: MaybeUninit<vk::CommandPoolCreateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_POOL_CREATE_INFO;
-        (*ptr).queue_family_index = queue_family_index;
-        (*ptr).flags = vk::CommandPoolCreateFlags::empty();
-    }
-    unsafe { info.assume_init() }
+/// Create a CommandPoolCreateInfo via the ash 0.38 default+chained builder.
+fn make_pool_info(queue_family_index: u32) -> vk::CommandPoolCreateInfo<'static> {
+    vk::CommandPoolCreateInfo::default()
+        .queue_family_index(queue_family_index)
+        .flags(vk::CommandPoolCreateFlags::empty())
 }
 
-/// Create a zero-init CommandBufferAllocateInfo with fixed sType.
-fn make_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo {
-    let mut info: MaybeUninit<vk::CommandBufferAllocateInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_ALLOCATE_INFO;
-        (*ptr).command_pool = pool;
-        (*ptr).level = vk::CommandBufferLevel::PRIMARY;
-        (*ptr).command_buffer_count = 1;
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferAllocateInfo via default+chained builder.
+fn make_alloc_info(pool: vk::CommandPool) -> vk::CommandBufferAllocateInfo<'static> {
+    vk::CommandBufferAllocateInfo::default()
+        .command_pool(pool)
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_buffer_count(1)
 }
 
-/// Create a zero-init CommandBufferBeginInfo with fixed sType.
-fn make_begin_info() -> vk::CommandBufferBeginInfo {
-    let mut info: MaybeUninit<vk::CommandBufferBeginInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::COMMAND_BUFFER_BEGIN_INFO;
-        (*ptr).flags = vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT;
-        (*ptr).p_inheritance_info = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// CommandBufferBeginInfo via default+chained builder.
+fn make_begin_info() -> vk::CommandBufferBeginInfo<'static> {
+    vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
 }
 
-/// Create a zero-init SubmitInfo with fixed sType.
-fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo {
-    let mut info: MaybeUninit<vk::SubmitInfo> = MaybeUninit::uninit();
-    unsafe {
-        write_bytes(info.as_mut_ptr(), 0, 1);
-    }
-    unsafe {
-        let ptr = info.as_mut_ptr();
-        (*ptr).s_type = vk::StructureType::SUBMIT_INFO;
-        (*ptr).wait_semaphore_count = 0;
-        (*ptr).p_wait_semaphores = std::ptr::null();
-        (*ptr).p_wait_dst_stage_mask = std::ptr::null();
-        (*ptr).command_buffer_count = cmds.len() as u32;
-        (*ptr).p_command_buffers = cmds.as_ptr();
-        (*ptr).signal_semaphore_count = 0;
-        (*ptr).p_signal_semaphores = std::ptr::null();
-    }
-    unsafe { info.assume_init() }
+/// SubmitInfo via default+chained builder.
+fn make_submit_info(cmds: &[vk::CommandBuffer]) -> vk::SubmitInfo<'_> {
+    vk::SubmitInfo::default().command_buffers(cmds)
 }
 
 impl VulkanBuffer {
@@ -103,14 +62,14 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::builder()
+        let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_SRC
                     | vk::BufferUsageFlags::TRANSFER_DST,
             )
-            .build();
+            ;
 
         let buffer = unsafe {
             device
@@ -120,10 +79,10 @@ impl VulkanBuffer {
 
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index)
-            .build();
+            ;
 
         let memory = unsafe {
             device
@@ -151,14 +110,14 @@ impl VulkanBuffer {
         mem_type_index: u32,
         size: u64,
     ) -> Result<Self> {
-        let buffer_info = vk::BufferCreateInfo::builder()
+        let buffer_info = vk::BufferCreateInfo::default()
             .size(size)
             .usage(
                 vk::BufferUsageFlags::TRANSFER_SRC
                     | vk::BufferUsageFlags::TRANSFER_DST
                     | vk::BufferUsageFlags::STORAGE_BUFFER,
             )
-            .build();
+            ;
 
         let buffer = unsafe {
             device
@@ -168,10 +127,10 @@ impl VulkanBuffer {
 
         let mem_requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        let alloc_info = vk::MemoryAllocateInfo::builder()
+        let alloc_info = vk::MemoryAllocateInfo::default()
             .allocation_size(mem_requirements.size)
             .memory_type_index(mem_type_index)
-            .build();
+            ;
 
         let memory = unsafe {
             device
@@ -245,7 +204,7 @@ impl VulkanBuffer {
                 .context("failed to begin command buffer")?
         };
 
-        let copy = vk::BufferCopy::builder().size(data.len() as u64).build();
+        let copy = vk::BufferCopy::default().size(data.len() as u64);
         unsafe {
             device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
         }
@@ -331,7 +290,7 @@ impl VulkanBuffer {
                 .begin_command_buffer(cmd, &make_begin_info())
                 .context("upload_data_batch: begin_command_buffer")?;
             for (i, (dst, data)) in uploads.iter().enumerate() {
-                let copy = vk::BufferCopy::builder().size(data.len() as u64).build();
+                let copy = vk::BufferCopy::default().size(data.len() as u64);
                 device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
             }
             device
@@ -391,7 +350,7 @@ impl VulkanBuffer {
                 cmd,
                 staging.buffer,
                 dst.buffer,
-                &[vk::BufferCopy::builder().size(data.len() as u64).build()],
+                &[vk::BufferCopy::default().size(data.len() as u64)],
             );
             device
                 .end_command_buffer(cmd)
@@ -440,7 +399,7 @@ impl VulkanBuffer {
                 .context("failed to begin command buffer")?
         };
 
-        let copy = vk::BufferCopy::builder().size(src.size).build();
+        let copy = vk::BufferCopy::default().size(src.size);
         unsafe {
             device.cmd_copy_buffer(cmd, src.buffer, staging.buffer, &[copy]);
         }
@@ -511,7 +470,7 @@ impl VulkanBuffer {
                 cmd,
                 src.buffer,
                 staging.buffer,
-                &[vk::BufferCopy::builder().size(src.size).build()],
+                &[vk::BufferCopy::default().size(src.size)],
             );
             device
                 .end_command_buffer(cmd)

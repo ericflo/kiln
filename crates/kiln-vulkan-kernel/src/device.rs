@@ -165,12 +165,12 @@ impl VulkanDevice {
             Err(_) => return false,
         };
 
-        let app_info = vk::ApplicationInfo::builder()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Probe\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0));
 
-        let instance_info = vk::InstanceCreateInfo::builder().application_info(&app_info);
+        let instance_info = vk::InstanceCreateInfo::default().application_info(&app_info);
 
         let instance = match unsafe { entry.create_instance(&instance_info, None) } {
             Ok(i) => i,
@@ -192,11 +192,11 @@ impl VulkanDevice {
             .map_err(|e| anyhow::anyhow!("failed to load Vulkan entry: {}", e))?;
 
         // Create instance
-        let app_info = vk::ApplicationInfo::builder()
+        let app_info = vk::ApplicationInfo::default()
             .application_name(CStr::from_bytes_with_nul(b"Kiln Vulkan Backend\0").unwrap())
             .engine_name(CStr::from_bytes_with_nul(b"Kiln\0").unwrap())
             .api_version(vk::make_api_version(0, 1, 2, 0))
-            .build();
+            ;
 
         // Optional: enable Vulkan validation layers when KILN_VULKAN_VALIDATION
         // is set (truthy values: 1, true, on, yes). Useful for diagnosing
@@ -206,9 +206,11 @@ impl VulkanDevice {
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let mut layer_ptrs: Vec<*const i8> = Vec::new();
         if validation_requested() {
-            let layers = entry
-                .enumerate_instance_layer_properties()
-                .context("failed to enumerate Vulkan instance layers")?;
+            let layers = unsafe {
+                entry
+                    .enumerate_instance_layer_properties()
+                    .context("failed to enumerate Vulkan instance layers")?
+            };
             let available = layers.iter().any(|l| {
                 let name = unsafe { CStr::from_ptr(l.layer_name.as_ptr()) };
                 name == validation_layer.as_c_str()
@@ -229,7 +231,7 @@ impl VulkanDevice {
         }
 
         let mut instance_info_builder =
-            vk::InstanceCreateInfo::builder().application_info(&app_info);
+            vk::InstanceCreateInfo::default().application_info(&app_info);
         if !layer_ptrs.is_empty() {
             instance_info_builder = instance_info_builder.enabled_layer_names(&layer_ptrs);
         }
@@ -304,15 +306,15 @@ impl VulkanDevice {
         );
 
         // Create logical device
-        let queue_info = vk::DeviceQueueCreateInfo::builder()
+        let queue_info = vk::DeviceQueueCreateInfo::default()
             .queue_family_index(compute_family)
             .queue_priorities(&[1.0])
-            .build();
+            ;
         let queue_infos = vec![queue_info];
 
-        let device_info = vk::DeviceCreateInfo::builder()
+        let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
-            .build();
+            ;
 
         let device = unsafe {
             Arc::new(
@@ -326,10 +328,10 @@ impl VulkanDevice {
 
         let transient_command_pool = unsafe {
             device.create_command_pool(
-                &vk::CommandPoolCreateInfo::builder()
+                &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(compute_family)
                     .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    .build(),
+                    ,
                 None,
             )
         }
@@ -337,13 +339,13 @@ impl VulkanDevice {
 
         let transient_descriptor_pool = unsafe {
             device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::builder()
+                &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(4)
-                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
                         .descriptor_count(64)
-                        .build()])
-                    .build(),
+                        ])
+                    ,
                 None,
             )
         }
@@ -353,23 +355,23 @@ impl VulkanDevice {
         // (1024 dispatches × 64 storage-buffer bindings each).
         let batch_command_pool = unsafe {
             device.create_command_pool(
-                &vk::CommandPoolCreateInfo::builder()
+                &vk::CommandPoolCreateInfo::default()
                     .queue_family_index(compute_family)
                     .flags(vk::CommandPoolCreateFlags::TRANSIENT)
-                    .build(),
+                    ,
                 None,
             )
         }
         .context("failed to create Vulkan batch command pool")?;
         let batch_descriptor_pool = unsafe {
             device.create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::builder()
+                &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(1024)
-                    .pool_sizes(&[vk::DescriptorPoolSize::builder()
+                    .pool_sizes(&[vk::DescriptorPoolSize::default()
                         .ty(vk::DescriptorType::STORAGE_BUFFER)
                         .descriptor_count(64 * 1024)
-                        .build()])
-                    .build(),
+                        ])
+                    ,
                 None,
             )
         }
@@ -574,35 +576,35 @@ impl VulkanDevice {
 
         let desc_bindings: Vec<vk::DescriptorSetLayoutBinding> = (0..total_bindings as u32)
             .map(|i| {
-                vk::DescriptorSetLayoutBinding::builder()
+                vk::DescriptorSetLayoutBinding::default()
                     .binding(i)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .descriptor_count(1)
                     .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                    .build()
+                    
             })
             .collect();
         let set_layout = unsafe {
             self.device.create_descriptor_set_layout(
-                &vk::DescriptorSetLayoutCreateInfo::builder()
+                &vk::DescriptorSetLayoutCreateInfo::default()
                     .bindings(&desc_bindings)
-                    .build(),
+                    ,
                 None,
             )
         }
         .context("failed to create descriptor set layout")?;
 
-        let push_constant_range = vk::PushConstantRange::builder()
+        let push_constant_range = vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_constant_size)
-            .build();
+            ;
         let set_layouts = [set_layout];
         let layout = unsafe {
             self.device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::builder()
+                &vk::PipelineLayoutCreateInfo::default()
                     .set_layouts(&set_layouts)
                     .push_constant_ranges(&[push_constant_range])
-                    .build(),
+                    ,
                 None,
             )
         }
@@ -611,26 +613,26 @@ impl VulkanDevice {
         let spirv_words: &[u32] = bytemuck::cast_slice(spirv);
         let shader_module = unsafe {
             self.device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::builder()
+                &vk::ShaderModuleCreateInfo::default()
                     .code(spirv_words)
-                    .build(),
+                    ,
                 None,
             )
         }
         .context("failed to create shader module")?;
 
-        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+        let stage_info = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader_module)
             .name(CStr::from_bytes_with_nul(b"main\0").unwrap())
-            .build();
+            ;
         let pipeline = unsafe {
             self.device.create_compute_pipelines(
                 vk::PipelineCache::null(),
-                &[vk::ComputePipelineCreateInfo::builder()
+                &[vk::ComputePipelineCreateInfo::default()
                     .stage(stage_info)
                     .layout(layout)
-                    .build()],
+                    ],
                 None,
             )
         }
@@ -764,33 +766,33 @@ impl VulkanDevice {
         let set_layouts = [set_layout];
         let descriptor_set = unsafe {
             device.allocate_descriptor_sets(
-                &vk::DescriptorSetAllocateInfo::builder()
+                &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(pool)
                     .set_layouts(&set_layouts)
-                    .build(),
+                    ,
             )
         }
         .context("get_or_alloc_descriptor_set: allocate")?[0];
         let buf_infos: Vec<vk::DescriptorBufferInfo> = handles
             .iter()
             .map(|&h| {
-                vk::DescriptorBufferInfo::builder()
+                vk::DescriptorBufferInfo::default()
                     .buffer(h)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)
-                    .build()
+                    
             })
             .collect();
         let writes: Vec<vk::WriteDescriptorSet> = buf_infos
             .iter()
             .enumerate()
             .map(|(i, info)| {
-                vk::WriteDescriptorSet::builder()
+                vk::WriteDescriptorSet::default()
                     .dst_set(descriptor_set)
                     .dst_binding(i as u32)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(std::slice::from_ref(info))
-                    .build()
+                    
             })
             .collect();
         unsafe {
@@ -854,7 +856,7 @@ impl VulkanDevice {
     pub fn submit_and_wait(&self, cmd: vk::CommandBuffer, label: &str) -> Result<()> {
         self.check_alive()?;
         let cmds = [cmd];
-        let submit_info = vk::SubmitInfo::builder().command_buffers(&cmds).build();
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmds);
         let submit_res = unsafe {
             self.device
                 .queue_submit(self.queue, &[submit_info], vk::Fence::null())

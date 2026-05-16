@@ -532,27 +532,27 @@ fn copy_buffer_region(
     label: &str,
 ) -> Result<()> {
     let command_pool = device.transient_command_pool()?;
-    let alloc_info = vk::CommandBufferAllocateInfo::builder()
+    let alloc_info = vk::CommandBufferAllocateInfo::default()
         .command_pool(*command_pool)
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_buffer_count(1)
-        .build();
+        ;
     let command_buffers = unsafe { device.device().allocate_command_buffers(&alloc_info) }
         .with_context(|| format!("{label}: allocate command buffer"))?;
     let cmd = command_buffers[0];
-    let begin_info = vk::CommandBufferBeginInfo::builder()
+    let begin_info = vk::CommandBufferBeginInfo::default()
         .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)
-        .build();
+        ;
     unsafe {
         device
             .device()
             .begin_command_buffer(cmd, &begin_info)
             .with_context(|| format!("{label}: begin command buffer"))?;
-        let copy = vk::BufferCopy::builder()
+        let copy = vk::BufferCopy::default()
             .src_offset(src_offset)
             .dst_offset(dst_offset)
             .size(size)
-            .build();
+            ;
         device
             .device()
             .cmd_copy_buffer(cmd, src.handle(), dst.handle(), &[copy]);
