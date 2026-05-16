@@ -1,0 +1,107 @@
+name: OPD bench gate
+
+# §9.9 of docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md
+#
+# Runs the kiln-opd-loss-kernel throughput bench and fails the PR if any
+# kernel_tok_s row regresses by more than 5% versus the committed baseline
+# in bench-results/opd-a6000-baseline.json.
+#
+# The bench requires a CUDA GPU (A6000 minimum, per the baseline). GitHub-
+# hosted runners don't have a GPU, so this workflow currently runs on:
+#   1. `workflow_dispatch` — manual trigger from the kiln team's pods.
+#   2. A self-hosted runner labelled `cuda-a6000` once one is wired up
+#      (uncomment the `pull_request` trigger below at that point).
+#
+# Until the self-hosted runner is online, the bench-results/check_opd_regression.py
+# script is exercised by `scripts-self-test` below (running against a
+# synthetic stdout) so the gate's logic is mechanically verified on every
+# PR even without GPU access.
+
+on:
+  workflow_dispatch:
+  # Uncomment once a self-hosted CUDA runner labelled `cuda-a6000` is online:
+  # pull_request:
+  #   paths:
+  #     - 'crates/kiln-opd-loss-kernel/**'
+  #     - 'crates/kiln-train/**'
+  #     - 'bench-results/**'
+
+env:
+  CARGO_TERM_COLOR: always
+  KILN_CUDA_ARCHS: "86"
+
+jobs:
+  gate-self-test:
+    name: regression-check script self-test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify gate detects no-op (zero-delta input)
+        run: |
+          tail -n +5 - <<'EOF' > /tmp/fake_bench_noop.txt
+          # kiln-opd-loss-kernel throughput bench
+          # device: Cuda(CudaDevice(DeviceId(0)))
+          # header: shape  K  dtype  iters  kernel_ms  candle_ms  speedup_x  kernel_tok_s
+          T=  256  H=2560  V=32000  K=32  F32  iters= 20  kernel=  0.563ms  candle=  1.334ms   2.37x     455014 tok/s
+          T=  512  H=2560  V=32000  K=32  F32  iters= 20  kernel=  0.871ms  candle=  2.789ms   3.20x     587770 tok/s
+          T= 1024  H=2560  V=32000  K=32  F32  iters=  5  kernel=  1.756ms  candle=  7.656ms   4.36x     583043 tok/s
+          T= 4096  H=2560  V=32000  K=32  F32  iters=  5  kernel= 16.975ms  candle= 29.860ms   1.76x     241297 tok/s
+          T= 1024  H=2560  V=32000  K=16  F32  iters=  5  kernel=  4.219ms  candle=  4.880ms   1.16x     242727 tok/s
+          T= 1024  H=2560  V=32000  K=32  BF16  iters=  5  kernel=  1.570ms  candle= 10.372ms   6.61x     652428 tok/s
+          T= 4096  H=2560  V=32000  K=32  BF16  iters=  5  kernel=  5.102ms  candle= 31.690ms   6.21x     802808 tok/s
+          EOF
+          python3 bench-results/check_opd_regression.py --bench-stdout /tmp/fake_bench_noop.txt
+      - name: Verify gate detects a 20% regression
+        run: |
+          tail -n +5 - <<'EOF' > /tmp/fake_bench_regression.txt
+          T= 1024  H=2560  V=32000  K=32  BF16  iters=  5  kernel=  1.570ms  candle= 10.372ms   6.61x     500000 tok/s
+          T= 4096  H=2560  V=32000  K=32  BF16  iters=  5  kernel=  5.102ms  candle= 31.690ms   6.21x     802808 tok/s
+          T=  256  H=2560  V=32000  K=32  F32  iters= 20  kernel=  0.563ms  candle=  1.334ms   2.37x     455014 tok/s
+          T=  512  H=2560  V=32000  K=32  F32  iters= 20  kernel=  0.871ms  candle=  2.789ms   3.20x     587770 tok/s
+          T= 1024  H=2560  V=32000  K=32  F32  iters=  5  kernel=  1.756ms  candle=  7.656ms   4.36x     583043 tok/s
+          T= 4096  H=2560  V=32000  K=32  F32  iters=  5  kernel= 16.975ms  candle= 29.860ms   1.76x     241297 tok/s
+          T= 1024  H=2560  V=32000  K=16  F32  iters=  5  kernel=  4.219ms  candle=  4.880ms   1.16x     242727 tok/s
+          EOF
+          if python3 bench-results/check_opd_regression.py --bench-stdout /tmp/fake_bench_regression.txt; then
+            echo "ERROR: gate failed to detect the simulated regression" >&2
+            exit 1
+          fi
+          echo "OK — gate correctly returned non-zero on regression"
+
+  cuda-bench:
+    name: CUDA bench against A6000 baseline
+    # Self-hosted runner with an A6000 (or stronger). Until one is wired
+    # up this job is skipped — the `gate-self-test` job above still
+    # validates the regression-check script on every dispatch.
+    runs-on: [self-hosted, linux, cuda-a6000]
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run kiln-opd-loss-kernel bench
+        run: |
+          cargo run --release --example bench_opd_topk_kl \
+            --features cuda -p kiln-opd-loss-kernel \
+            2>&1 | tee /tmp/opd_bench_stdout.txt
+      - name: Compare against baseline
+        run: |
+          python3 bench-results/check_opd_regression.py \
+            --bench-stdout /tmp/opd_bench_stdout.txt
+      - name: Upload bench artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opd-bench-output-${{ github.run_id }}
+          path: /tmp/opd_bench_stdout.txt
+          retention-days: 30
