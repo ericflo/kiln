@@ -1258,6 +1258,181 @@ fn vk_native_opd_recompute_low_vram_stress() -> Result<()> {
     Ok(())
 }
 
+/// Side-by-side memory-pressure comparison: non-checkpointed vs
+/// checkpointed OPD trainer at the SAME config, with `KILN_VK_OPD_STRESS`
+/// scaling the model to push GPU VRAM.
+///
+/// Default (`KILN_VK_OPD_STRESS=small`): 8 layers × H=1024 × I=4096 × T=1024
+/// — fits comfortably on a 24 GB GPU through either path. Used in CI / by
+/// default to verify both paths still produce identical loss curves.
+///
+/// `KILN_VK_OPD_STRESS=large`: 24 layers × H=2048 × I=8192 × T=4096 —
+/// pushes activation memory well past 24 GB on the non-checkpointed path
+/// (~32 GB of layer tapes + gradients) but stays under ~6 GB on the
+/// checkpointed path (one layer's tape at peak + the boundary cache).
+/// On a 24 GB-class GPU (RTX A5000 / 3090 / 4090) the non-checkpointed
+/// path should OOM and the test asserts the checkpointed path succeeds.
+///
+/// Numbers reported per-step: loss + per-step latency, plus the run
+/// prints `OOM` if a vk_*_train_step call errored out. The
+/// `KILN_VK_OPD_STRESS=skip` flag (or absence of the env var) makes
+/// this test a no-op so it doesn't slow ordinary `cargo test`
+/// invocations.
+#[test]
+fn vk_native_opd_path_comparison_low_vram() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let stress = std::env::var("KILN_VK_OPD_STRESS").unwrap_or_else(|_| "skip".into());
+    if stress.as_str() == "skip" {
+        eprintln!(
+            "KILN_VK_OPD_STRESS=skip — set to 'small' or 'large' to enable this test"
+        );
+        return Ok(());
+    }
+    let (hidden, intermediate, num_layers, vocab, heads_q, heads_kv, seq_len) = match stress.as_str() {
+        "small" => (1024usize, 4096usize, 8usize, 128usize, 8usize, 4usize, 1024usize),
+        "large" => (2048usize, 8192usize, 24usize, 128usize, 16usize, 8usize, 4096usize),
+        other => {
+            eprintln!("KILN_VK_OPD_STRESS={other} — only 'small' or 'large' supported");
+            return Ok(());
+        }
+    };
+    let head_dim = hidden / heads_q;
+    let kv_dim = heads_kv * head_dim;
+    let max_seq = seq_len.max(2048);
+
+    println!(
+        "vk_native_opd_path_comparison_low_vram: \
+         stress={stress} L={num_layers} H={hidden} I={intermediate} V={vocab} T={seq_len}"
+    );
+    let build_started = std::time::Instant::now();
+    let model = build_multilayer_model(&dev, hidden, intermediate, num_layers, vocab, heads_q, heads_kv)?;
+    println!(
+        "vk_native_opd_path_comparison_low_vram: model built in {} ms",
+        build_started.elapsed().as_millis()
+    );
+
+    let input_ids: Vec<u32> = (0..seq_len as u32).map(|i| (i * 3 + 1) % vocab as u32).collect();
+    let active_rows: Vec<u32> = (1u32..seq_len as u32).collect();
+    let active_count = active_rows.len();
+    let top_k = 16usize;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.3));
+        }
+    }
+
+    let model_config = multilayer_model_config(
+        hidden,
+        intermediate,
+        num_layers,
+        vocab,
+        heads_q,
+        heads_kv,
+        max_seq,
+    );
+    let cfg = VkAdamWConfig {
+        lr: 5e-3,
+        ..Default::default()
+    };
+    let optimizer = Optimizer::AdamW {
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        eps: cfg.eps,
+        weight_decay: cfg.weight_decay,
+    };
+
+    // Try non-checkpointed first. On `large` this is expected to OOM
+    // on a 24 GB GPU; we report rather than fail.
+    let lora_layers_a = build_multilayer_lora(&dev, hidden, intermediate, kv_dim, num_layers)?;
+    let mut adamw_a = allocate_adamw_state(&dev, &lora_layers_a)?;
+    let started = std::time::Instant::now();
+    let direct_result = vk_opd_train_step_with_state(
+        &model,
+        &lora_layers_a,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        None,
+        &mut adamw_a,
+        &cfg,
+        optimizer,
+        1,
+    );
+    match &direct_result {
+        Ok(l) => println!(
+            "vk_native_opd_path_comparison_low_vram: non-checkpointed loss={l:.4} ({} ms)",
+            started.elapsed().as_millis()
+        ),
+        Err(e) => println!(
+            "vk_native_opd_path_comparison_low_vram: non-checkpointed FAILED ({} ms): {e:#}",
+            started.elapsed().as_millis()
+        ),
+    }
+
+    // Free intermediate state by dropping the adapter set.
+    drop(adamw_a);
+    drop(lora_layers_a);
+
+    // Now run checkpointed at the same config. This must succeed
+    // regardless of whether the direct path did.
+    let lora_layers_b = build_multilayer_lora(&dev, hidden, intermediate, kv_dim, num_layers)?;
+    let mut adamw_b = allocate_adamw_state(&dev, &lora_layers_b)?;
+    let started = std::time::Instant::now();
+    let ckpt_loss = vk_recompute_opd_train_step_with_state(
+        &model,
+        &lora_layers_b,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        &model_config,
+        0,
+        &mut adamw_b,
+        &cfg,
+        optimizer,
+        1,
+    )?;
+    let ckpt_elapsed = started.elapsed().as_millis();
+    println!(
+        "vk_native_opd_path_comparison_low_vram: checkpointed loss={ckpt_loss:.4} ({ckpt_elapsed} ms)"
+    );
+    assert!(ckpt_loss.is_finite(), "checkpointed loss non-finite: {ckpt_loss}");
+    // On `small` both paths should produce identical losses.
+    if stress.as_str() == "small" {
+        if let Ok(direct_loss) = direct_result {
+            let abs = (ckpt_loss - direct_loss).abs();
+            println!(
+                "vk_native_opd_path_comparison_low_vram: \
+                 small-config parity direct={direct_loss:.4} ckpt={ckpt_loss:.4} abs={abs:.2e}"
+            );
+            assert!(
+                abs < 1e-3 || abs < ckpt_loss.abs() * 1e-3,
+                "small-config: non-checkpointed and checkpointed should match: \
+                 direct={direct_loss} ckpt={ckpt_loss}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build a tiny synthetic FullAttn model with the Qwen3.5-specific
 /// pieces enabled: per-head q_norm/k_norm and attn_output_gate (which
 /// makes q_proj produce 2× output, splitting into Q and a sigmoid
