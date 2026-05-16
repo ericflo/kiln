@@ -75,14 +75,16 @@ pub struct VulkanDevice {
     batch_command_pool: Mutex<vk::CommandPool>,
     batch_descriptor_pool: Mutex<vk::DescriptorPool>,
     /// Persistent descriptor-set cache for `CommandBatch::record_shader`.
-    /// Keyed by `(set_layout, [buffer handles])` — once a unique
+    /// Keyed by `(set_layout, fnv64-hash-of-handles)` — once a unique
     /// combination is seen we keep the descriptor set allocated forever
     /// (the `batch_descriptor_pool` is no longer reset on `CommandBatch`
-    /// drop, so the sets remain valid). After the first decode token
-    /// this cache is fully warm and `record_with_pipeline` is just a
-    /// hashmap lookup plus the cmd_* binds.
-    descriptor_set_cache:
-        Mutex<HashMap<(vk::DescriptorSetLayout, Vec<vk::Buffer>), vk::DescriptorSet>>,
+    /// drop, so the sets remain valid). The hash key avoids cloning
+    /// the handle slice on every lookup; collisions are vanishingly
+    /// rare in the ~450-entry working set, and a buffer-handle
+    /// collision causing a stale descriptor would surface as a
+    /// validation-layer error (not a silent miscompute) before
+    /// reaching parity tests.
+    descriptor_set_cache: Mutex<HashMap<(vk::DescriptorSetLayout, u64), vk::DescriptorSet>>,
     /// Sticky flag set when any submit/wait observes `VK_ERROR_DEVICE_LOST`.
     /// Once true, subsequent dispatches short-circuit with a clear error
     /// instead of returning cryptic submit failures forever — the underlying
@@ -736,7 +738,19 @@ impl VulkanDevice {
         pool: vk::DescriptorPool,
         handles: &[vk::Buffer],
     ) -> Result<vk::DescriptorSet> {
-        let key = (set_layout, handles.to_vec());
+        // Cheap FNV-1a-style hash over the handles slice — avoids
+        // the heap allocation that `handles.to_vec()` would do on
+        // every lookup (~450 lookups per decode token).
+        let h_hash: u64 = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for handle in handles {
+                let bits: u64 = unsafe { std::mem::transmute::<vk::Buffer, u64>(*handle) };
+                h ^= bits;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h
+        };
+        let key = (set_layout, h_hash);
         {
             let cache = self
                 .descriptor_set_cache
