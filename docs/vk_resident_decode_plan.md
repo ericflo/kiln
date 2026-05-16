@@ -419,26 +419,37 @@ each row in order:
    `VulkanBuffer::upload_data_batch` (one command pool / one
    command buffer / one queue submit). upload phase drops 4.8 → 3.1 ms.
 
-Steady-state phase budget after all four commits:
+After all four host-side commits, a fifth commit `47274e7f` folded
+the logits readback into the same `CommandBatch` — emitting a
+`cmd_copy_buffer` from the device-local logits buffer to a
+persistent host-visible staging buffer as the last command in the
+batch, so the post-`submit_and_wait` step is just `map_memory`
+instead of a fresh queue submission.
+
+Steady-state phase budget after all five commits:
 
 | Phase | Wall time | vs. start |
 |-------|-----------|-----------|
 | embed | 0.2 ms | — |
 | upload | 3.1 ms | -2.8 ms |
 | record | 2.7 ms | -8.4 ms |
-| submit | 19.6 ms | +4.1 ms (LM head moved here) |
-| readback | 2.9 ms | +1.8 ms (logits, not hidden) |
+| submit | ~19 ms | +3.5 ms (LM head + logits-copy moved here) |
+| readback | ~0 ms | -1.1 ms (now just `map_memory`) |
 | lmhead | 0.0 ms | -12.5 ms |
-| **total** | **~28.5 ms** | **-17.5 ms / token** |
+| **total** | **~25 ms** | **-21 ms / token** |
 
-Bench at 494-token prompt now: **~22 tok/s mean / ~30 ms p50
-(~33 tok/s p50)**.
+Bench at 494-token prompt, `--max-output-tokens 128` (warmed):
+**~30 tok/s mean / ~28.8 ms p50 (~35 tok/s p50)**. The mean tracks
+p50 once first-token costs amortize over enough output tokens —
+`--max-output-tokens 32` shows ~24 tok/s mean because the first
+token's pipeline-compilation + cold-cache costs dominate the
+average.
 
 #### Remaining gap
 
-Current ~22 tok/s mean / ~33 tok/s p50 vs. the gate (e.2) target of
-55 tok/s leaves a ~1.7× p50 / ~2.5× mean factor. Per-layer kernel
-breakdown:
+Current ~30 tok/s mean (steady) / ~35 tok/s p50 vs. the gate (e.2)
+target of 55 tok/s leaves a ~1.5× p50 / ~1.8× mean factor. Per-layer
+kernel breakdown:
 
 - Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
   (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
