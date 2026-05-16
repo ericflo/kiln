@@ -1550,6 +1550,16 @@ pub fn opd_train(
 
     let head_t = weights.embed_tokens_t.clone();
 
+    // §3.9 guardrail observer + per-step rollout summary buffer.
+    // The guardrail watches loss / repetition / overlap signals every
+    // step and produces a `GuardrailDecision`; on any non-Ok decision
+    // we log the trigger via tracing so the dashboard / receipt can
+    // pick it up. Programmatic in-process rollback to the last
+    // passing checkpoint is the remaining §3.9 wire-up; for now the
+    // detector fires and the user sees it in the run log.
+    let mut guardrail = crate::diagnostics::LengthInflationGuardrail::default();
+    let validation_cadence: u64 = 5;
+
     for epoch in 0..epochs {
         for (prompt_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
             let active_positions: Vec<usize> = label_mask
@@ -1598,6 +1608,33 @@ pub fn opd_train(
 
                 last_loss = loss_val;
                 global_step += 1;
+
+                // §3.9 guardrail observation on the validation
+                // cadence. We build a snapshot from the active-token
+                // tokens-as-bytes proxy (since opd_train uses the
+                // ground-truth assistant turn as the rollout for the
+                // milestone wire-up — true student-sampled rollouts
+                // arrive with the rollout sampler). The repetition /
+                // truncation signals are best-effort against the
+                // ground-truth tail; the kl / loss signals are real.
+                if global_step as u64 % validation_cadence == 0 {
+                    let rollout = crate::diagnostics::RolloutSummary::from_tokens(
+                        input_ids, true,
+                    );
+                    let snapshot = crate::diagnostics::build_snapshot(
+                        global_step as u64,
+                        std::slice::from_ref(&rollout),
+                        loss_val,
+                    );
+                    let decision = guardrail.observe(&snapshot);
+                    if !matches!(decision, crate::diagnostics::GuardrailDecision::Ok) {
+                        tracing::warn!(
+                            step = global_step,
+                            decision = ?decision,
+                            "§3.9 guardrail fired"
+                        );
+                    }
+                }
 
                 if let Some(ref cb) = progress_cb {
                     cb(crate::trainer::TrainingProgress {
