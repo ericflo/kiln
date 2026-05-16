@@ -3041,6 +3041,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
       <div class="card-head">
         <h2>Saved adapters</h2>
         <span class="eyebrow" id="adapters-card-eyebrow">LoRA adapters on disk</span>
+        <span style="flex:1;"></span>
+        <input class="search-input" id="adapters-filter" type="search" placeholder="Filter adapters by name…" aria-label="Filter adapters" style="max-width:240px;">
       </div>
       <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true" style="padding: var(--space-4);">
         <div class="empty">Loading adapter list…</div>
@@ -4414,6 +4416,10 @@ document.addEventListener('input', (ev) => {
     // Bypass the change-detection guard for an immediate re-render.
     lastTrainingKey = null;
     if (trainingJobsCache) renderTrainingQueue(trainingJobsCache);
+  } else if (ev.target && ev.target.id === 'adapters-filter') {
+    adaptersFilter = ev.target.value || '';
+    if (typeof lastAdaptersKey !== 'undefined') lastAdaptersKey = null;
+    if (typeof pollAdapters === 'function') pollAdapters();
   }
 });
 
@@ -8666,11 +8672,14 @@ document.querySelectorAll('[data-quick-action]').forEach(btn => {
    Adapter cards renderer + drill-in modal
    ===================================================================== */
 
+let adaptersFilter = '';
 function renderAdaptersAsCards(data) {
   const panel = document.getElementById('adapters-panel');
   if (!panel) return;
   const adapters = data.available || [];
   const active = data.active || '';
+  const q = adaptersFilter.trim().toLowerCase();
+  const filtered = q ? adapters.filter(a => (a.name || '').toLowerCase().includes(q)) : adapters;
   if (!adapters.length) {
     panel.innerHTML = `<div class="eval-empty empty">
       <div class="eval-empty-icon">🧬</div>
@@ -8684,7 +8693,11 @@ function renderAdaptersAsCards(data) {
     });
     return;
   }
-  const cards = adapters.map(a => {
+  if (q && filtered.length === 0) {
+    panel.innerHTML = `<div class="eval-empty"><div class="eval-empty-body">No adapters match <code>${escapeHtml(q)}</code>.</div></div>`;
+    return;
+  }
+  const cards = filtered.map(a => {
     const isActive = a.name === active;
     return `<div class="adapter-card adapter-item ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
       ${isActive ? '<span class="adapter-card-active-pill">active</span>' : ''}
