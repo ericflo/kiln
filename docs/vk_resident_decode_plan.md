@@ -712,19 +712,27 @@ remaining levers (all shader-level) are:
    the remaining gap is likely the per-dispatch CPU+GPU overhead
    (450 dispatches/token × ~35 µs each), not the kernels'
    inner-loop throughput.
-3. **Cross-layer ADD + pre-norm fusion.** Layer N's final ADD
-   writes the same buffer layer N+1's pre-norm reads. Currently
-   two dispatches with a barrier between. A "(a + b) → out,
-   RMSNorm with NEXT layer's weight → normed_pre" shader would
-   collapse them for 31 of 32 layer boundaries — ~1 ms / token.
+3. ~~**Cross-layer ADD + pre-norm fusion.**~~ *De-prioritised by
+   the Q-norm + K-norm wash.* The paired-load and Q/K-norm-fusion
+   experiments both produced no measurable speedup — strong
+   evidence that per-dispatch CPU+GPU overhead is **not** the
+   binding constraint at this dispatch count. The fused Q/K norm
+   was kept for architectural cleanliness (commit `9aa702f4`).
 4. **Subgroup-arithmetic reductions in the bf16w GEMMs.** The
    current shaders use shared-mem reductions; `subgroupAdd`
    collapses a 32-lane reduction to one instruction. Modest
    (~10 cycles saved per output) but compounds across ~10k
-   outputs / layer.
+   outputs / layer. Likely the same wash story as (3).
 
-(1) is the only one that closes the full ~14 ms gap on its own.
-(2-4) together likely get within 10-15% of the target.
+After (2)–(4) were ruled out empirically, **(1) is the only
+remaining lever that moves the headline number**. The ~14 ms of
+GEMM compute observed is bounded below by:
+  - memory bandwidth: 7.3 ms (touching 7 GB of bf16 weights @ 960 GB/s)
+  - FP32 compute: ~1 ms theoretical
+The ~6 ms of overhead above the bandwidth floor lives in the
+shaders' inner-loop ALU utilization and L1/L2 cache pressure;
+unlocking it requires Tensor-Core multiplication, which only
+cooperative-matrix exposes on this GPU.
 
 ## Out of scope for this goal
 
