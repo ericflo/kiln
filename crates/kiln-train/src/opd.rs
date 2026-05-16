@@ -142,6 +142,94 @@ pub struct OpdPrompt {
     pub messages: Vec<ChatMessage>,
 }
 
+/// Reference to a new-knowledge dataset for [`DistillRefreshRequest`].
+/// Two shapes:
+/// - `dataset_name` — server-registered dataset (the eval-dataset
+///   upload path produces these); the trainer resolves to a JSONL
+///   file on disk.
+/// - `examples` — inline list of `OpdPrompt`s. Useful for tiny
+///   personalisation runs and unit tests.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NewKnowledgeSource {
+    Dataset {
+        /// Server-side registered dataset name. Resolves to a path
+        /// inside the server's eval-datasets directory.
+        dataset: String,
+    },
+    Inline {
+        /// Inline prompts (and optional teacher completions when
+        /// `mode=behaviour_recovery_only`).
+        examples: Vec<OpdPrompt>,
+    },
+}
+
+/// HTTP-shaped request for `POST /v1/distill/refresh` — the §3.6
+/// continual-learning recipe (Lu 2025 instruction-following recovery
+/// experiment).
+///
+/// Two-phase pipeline:
+/// 1. **Mid-train** on `new_data` mixed with `background_chat`
+///    (default Tulu3) — student learns the new knowledge but
+///    typically degrades on instruction-following.
+/// 2. **OPD-recover** against `behavioural_teacher` (the prior
+///    checkpoint of the model itself, per Lu's recipe) — reverse-KL
+///    on Tulu3-flavoured prompts. The instruction-following is
+///    restored without losing the new knowledge.
+///
+/// Both phases pre-eval (baseline) and post-eval (after each phase),
+/// gated on the two thresholds. The new adapter is only published
+/// when both gates pass; otherwise the run is marked failed and the
+/// previous adapter remains active. §8.7 auto-rollback contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistillRefreshRequest {
+    /// Name of the existing adapter being refreshed. The new adapter
+    /// is named with the same prefix + a version suffix (e.g.
+    /// `company-assistant@v18`).
+    pub name: String,
+    /// New knowledge to mid-train on.
+    pub new_data: NewKnowledgeSource,
+    /// Alias of the prior-self teacher to recover against. Per
+    /// Lu (2025): "an earlier version of the model itself." Typically
+    /// resolves to the previous `name@vN` checkpoint via the §3.2
+    /// teacher registry.
+    pub behavioural_teacher: String,
+    /// Background-chat distribution for mid-training (§3.1 / §3.6
+    /// regulariser). Default `tulu3`; resolves server-side.
+    #[serde(default = "default_background_chat")]
+    pub background_chat: String,
+    /// Required fractional recovery on the instruction-following
+    /// eval suite before the refreshed adapter is published.
+    /// `0.95` (default) means "IF-eval after refresh must be ≥ 95%
+    /// of the pre-refresh score" — Lu's recipe target.
+    #[serde(default = "default_require_if_eval_recovery")]
+    pub require_if_eval_recovery: f64,
+    /// Required absolute gain on the new-knowledge eval suite.
+    /// `0.05` (default) = 5 percentage points.
+    #[serde(default = "default_require_new_knowledge_gain")]
+    pub require_internal_qa_gain: f64,
+    /// Per-job OPD config (knobs for the recovery phase). Defaults
+    /// match `OpdConfig::default`.
+    #[serde(default)]
+    pub config: OpdConfig,
+    /// Optional auto-eval hook firing after the run completes
+    /// (instruction-following + new-knowledge suites are eval'd
+    /// internally regardless; this is the extra one the dashboard
+    /// uses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_eval: Option<kiln_eval::PostEvalConfig>,
+}
+
+fn default_background_chat() -> String {
+    "tulu3".to_string()
+}
+fn default_require_if_eval_recovery() -> f64 {
+    0.95
+}
+fn default_require_new_knowledge_gain() -> f64 {
+    0.05
+}
+
 /// HTTP-shaped request for `POST /v1/train/opd`. Mirror of `GrpoRequest`,
 /// adapted to the OPD recipe.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1084,6 +1172,57 @@ mod tests {
             cold_start_probe_default(&[]),
             ColdStartDecision::Skip
         );
+    }
+
+    #[test]
+    fn distill_refresh_request_round_trips() {
+        let req = DistillRefreshRequest {
+            name: "company-assistant".into(),
+            new_data: NewKnowledgeSource::Dataset {
+                dataset: "q4-2026-internal-docs".into(),
+            },
+            behavioural_teacher: "company-assistant@v17".into(),
+            background_chat: "tulu3".into(),
+            require_if_eval_recovery: 0.95,
+            require_internal_qa_gain: 0.05,
+            config: OpdConfig::default(),
+            post_eval: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let parsed: DistillRefreshRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed.name, req.name);
+        assert_eq!(parsed.behavioural_teacher, "company-assistant@v17");
+        assert_eq!(parsed.background_chat, "tulu3");
+        assert!((parsed.require_if_eval_recovery - 0.95).abs() < 1e-9);
+        assert!((parsed.require_internal_qa_gain - 0.05).abs() < 1e-9);
+        match parsed.new_data {
+            NewKnowledgeSource::Dataset { dataset } => {
+                assert_eq!(dataset, "q4-2026-internal-docs");
+            }
+            other => panic!("expected Dataset, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn distill_refresh_request_accepts_inline_examples() {
+        let json = r#"{
+            "name": "demo",
+            "new_data": {"examples": [
+                {"messages":[{"role":"user","content":"hi"}]}
+            ]},
+            "behavioural_teacher": "self@v1"
+        }"#;
+        let req: DistillRefreshRequest = serde_json::from_str(json).unwrap();
+        match req.new_data {
+            NewKnowledgeSource::Inline { examples } => {
+                assert_eq!(examples.len(), 1);
+                assert_eq!(examples[0].messages[0].content, "hi");
+            }
+            other => panic!("expected Inline, got {other:?}"),
+        }
+        // Defaults applied.
+        assert_eq!(req.background_chat, "tulu3");
+        assert!((req.require_if_eval_recovery - 0.95).abs() < 1e-9);
     }
 
     /// Stable-OPD `BumpStableOpd` semantics: doubled coefficients

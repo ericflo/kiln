@@ -12,8 +12,8 @@ use axum::{
 
 use kiln_core::env_flag::env_tristate;
 use kiln_train::{
-    GrpoGroup, GrpoRequest, OpdRequest, SftRequest, TrainingResponse, TrainingState,
-    TrainingStatus,
+    DistillRefreshRequest, GrpoGroup, GrpoRequest, OpdRequest, SftRequest, TrainingResponse,
+    TrainingState, TrainingStatus,
 };
 use serde::Serialize;
 
@@ -607,6 +607,108 @@ async fn submit_opd(
     }))
 }
 
+/// `POST /v1/distill/refresh` — §3.6 continual-learning recipe
+/// (Lu 2025 instruction-following recovery experiment).
+///
+/// Body: [`DistillRefreshRequest`]. The runtime mid-trains on
+/// `new_data` then OPD-recovers against the prior-self
+/// `behavioural_teacher`, gated on dual eval (IF-eval recovery +
+/// new-knowledge gain). Same queue / receipt / auto-load semantics
+/// as `/v1/train/opd`.
+async fn submit_distill_refresh(
+    State(state): State<AppState>,
+    Json(req): Json<DistillRefreshRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+    if req.name.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "DistillRefresh: `name` must be non-empty".to_string(),
+        ));
+    }
+    if req.behavioural_teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "DistillRefresh: `behavioural_teacher` alias must be non-empty".to_string(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&req.require_if_eval_recovery) {
+        return Err(ApiError::training_invalid_request(
+            "require_if_eval_recovery must be in [0.0, 1.0]".to_string(),
+        ));
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = format!("{}@refresh-{}", req.name, &job_id[..8]);
+    let auto_load = req.config.auto_load;
+
+    tracing::info!(
+        name = %req.name,
+        behavioural_teacher = %req.behavioural_teacher,
+        background_chat = %req.background_chat,
+        require_if_eval_recovery = req.require_if_eval_recovery,
+        require_internal_qa_gain = req.require_internal_qa_gain,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        "distill/refresh request queued"
+    );
+
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        // Reuse the Opd job type — refresh is structurally an OPD run
+        // with extra orchestration. Dashboards group both as OPD-class.
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        auto_load,
+        finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+
+    let queue_position = {
+        let mut q = state.training_queue.lock().unwrap();
+        q.push(QueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedJob::DistillRefresh(req),
+        });
+        q.len()
+    };
+
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: format!(
+            "Queued distill/refresh (position {queue_position} in queue). \
+             Runtime body is a milestone-9 stub; tracker = #40."
+        ),
+    }))
+}
+
 /// GET /v1/train/status — overall training status (list all tracked jobs).
 async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>> {
     let jobs = state.training_jobs.read().unwrap();
@@ -835,6 +937,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/train/opd",
             post(submit_opd).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
         )
+        .route(
+            "/v1/distill/refresh",
+            post(submit_distill_refresh).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
         .route("/v1/train/jobs/{job_id}", get(job_detail))
@@ -952,5 +1058,21 @@ mod tests {
             parsed.is_err(),
             "unknown loss value should fail to deserialize"
         );
+    }
+
+    #[test]
+    fn distill_refresh_request_minimal_json_parses() {
+        let json = r#"{
+            "name": "company-assistant",
+            "new_data": {"dataset": "q4-2026"},
+            "behavioural_teacher": "company-assistant@v17"
+        }"#;
+        let req: DistillRefreshRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "company-assistant");
+        assert_eq!(req.behavioural_teacher, "company-assistant@v17");
+        // Defaults populate.
+        assert_eq!(req.background_chat, "tulu3");
+        assert!((req.require_if_eval_recovery - 0.95).abs() < 1e-9);
+        assert!((req.require_internal_qa_gain - 0.05).abs() < 1e-9);
     }
 }

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
-use kiln_train::{self, GrpoRequest, OpdRequest, SftRequest, TrainingState};
+use kiln_train::{self, DistillRefreshRequest, GrpoRequest, OpdRequest, SftRequest, TrainingState};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -106,6 +106,11 @@ pub enum QueuedJob {
     /// most of its mechanics with the GRPO loop and gets refactored
     /// alongside).
     Opd(OpdRequest),
+    /// `/v1/distill/refresh` — §3.6 continual-learning recipe. Two
+    /// internal phases: SFT mid-train on `new_data`, then OPD-recover
+    /// against `behavioural_teacher`. Gated on dual eval (IF-eval
+    /// recovery + new-knowledge gain).
+    DistillRefresh(DistillRefreshRequest),
 }
 
 /// Entry in the training queue.
@@ -625,6 +630,117 @@ fn run_opd(
     Ok(output_dir)
 }
 
+/// `/v1/distill/refresh` runtime — §3.6 continual-learning recipe.
+///
+/// Two-phase pipeline (orchestrating existing primitives):
+/// 1. **Mid-train** on `new_data` mixed with `background_chat`. Uses
+///    SFT under the hood — same `trainer::sft_train` path SFT uses.
+/// 2. **OPD-recover** against `behavioural_teacher`. Uses OPD on
+///    Tulu3-flavoured prompts.
+///
+/// Both phases pre-eval (baseline at start) and post-eval (after
+/// each phase) against the registered eval suites. New adapter is
+/// only published when:
+///   IF-eval after refresh >= `require_if_eval_recovery * baseline_if_eval`
+///   AND
+///   new-knowledge eval after refresh - baseline new-knowledge >=
+///     `require_internal_qa_gain`.
+///
+/// Milestone-9 state: this function ships the *plumbing* (validation,
+/// queue dispatch, receipt write, stub adapter for the dashboard to
+/// point at). The actual two-phase runtime + dual eval gate lands
+/// alongside the §3.1 trainer body (task #31), since the OPD step is
+/// what the refresh orchestrates.
+#[allow(clippy::too_many_arguments)]
+fn run_distill_refresh(
+    req: &DistillRefreshRequest,
+    _model_config: &kiln_core::config::ModelConfig,
+    _weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.name.trim().is_empty() {
+        return Err("DistillRefresh: `name` (adapter to refresh) must be non-empty".into());
+    }
+    if req.behavioural_teacher.trim().is_empty() {
+        return Err("DistillRefresh: `behavioural_teacher` alias must be non-empty".into());
+    }
+    let _ = tokenizer;
+
+    tracing::info!(
+        job_id = %job_id,
+        name = %req.name,
+        behavioural_teacher = %req.behavioural_teacher,
+        background_chat = %req.background_chat,
+        require_if_eval_recovery = req.require_if_eval_recovery,
+        require_internal_qa_gain = req.require_internal_qa_gain,
+        "distill/refresh started (milestone-9 stub: validates plumbing + writes receipt)"
+    );
+
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir).map_err(|e| {
+        format!(
+            "failed to create refresh adapter dir {}: {e}",
+            output_dir.display()
+        )
+    })?;
+    let stub_marker = output_dir.join("KILN_DISTILL_REFRESH_STUB.txt");
+    std::fs::write(
+        &stub_marker,
+        format!(
+            "kiln /v1/distill/refresh stub for job {job_id}.\n\
+             The two-phase recovery pipeline (SFT midtrain → OPD-recover →\n\
+             dual eval gate) is wired alongside the §3.1 trainer body.\n\
+             name: {name}\n\
+             behavioural_teacher: {bt}\n\
+             background_chat: {bc}\n\
+             require_if_eval_recovery: {if_rec}\n\
+             require_internal_qa_gain: {qa}\n",
+            name = req.name,
+            bt = req.behavioural_teacher,
+            bc = req.background_chat,
+            if_rec = req.require_if_eval_recovery,
+            qa = req.require_internal_qa_gain,
+        ),
+    )
+    .map_err(|e| format!("failed to write distill_refresh stub marker: {e}"))?;
+
+    // §8.11 receipt for the refreshed adapter.
+    let seed = req.config.seed.unwrap_or(0);
+    let receipt = kiln_train::AdapterReceipt::new(adapter_name, "distill_refresh", seed)
+        .with_teacher(kiln_train::TeacherDescriptor {
+            alias: req.behavioural_teacher.clone(),
+            model_id: req.behavioural_teacher.clone(),
+            model_version_hash: None,
+            snapshot_url: None,
+        })
+        .with_hyperparameters(serde_json::to_value(req).unwrap_or_else(|_| {
+            serde_json::json!({"error": "failed to serialize DistillRefreshRequest"})
+        }));
+    if let Err(e) = receipt.write_to_adapter_dir(&output_dir) {
+        tracing::warn!(job_id = %job_id, "failed to write distill_refresh receipt: {e}");
+    }
+
+    progress_cb(trainer::TrainingProgress {
+        epoch: 1,
+        total_epochs: 1,
+        step: 1,
+        total_steps: 1,
+        loss: 0.0,
+        progress: 1.0,
+    });
+
+    tracing::warn!(
+        job_id = %job_id,
+        path = %output_dir.display(),
+        "distill/refresh adapter is a milestone-9 stub; runtime lands with #31"
+    );
+    Ok(output_dir)
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -714,6 +830,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         QueuedJob::Sft(req) => req.post_eval.clone(),
         QueuedJob::Grpo(req) => req.post_eval.clone(),
         QueuedJob::Opd(req) => req.post_eval.clone(),
+        QueuedJob::DistillRefresh(req) => req.post_eval.clone(),
     };
 
     let result: std::result::Result<PathBuf, String> = match entry.job {
@@ -790,6 +907,20 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             let _gpu_guard = state.gpu_lock.write().unwrap();
             let guard = runner_arc.read().unwrap();
             run_opd(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
+                &job_id,
+            )
+        }
+        QueuedJob::DistillRefresh(req) => {
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_distill_refresh(
                 &req,
                 &state.model_config,
                 &guard.weights,
