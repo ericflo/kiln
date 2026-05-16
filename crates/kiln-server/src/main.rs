@@ -297,6 +297,23 @@ async fn main() -> Result<()> {
             );
         }
     }
+
+    // Restore terminal eval jobs persisted from previous runs — same
+    // pattern as training, so the Evals tab survives a restart too.
+    {
+        use kiln_server::eval_history;
+        let archived = eval_history::load_all(&state.adapter_dir);
+        if !archived.is_empty() {
+            let mut jobs = state.eval_jobs.write().unwrap();
+            for job in archived.iter() {
+                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+            }
+            tracing::info!(
+                count = archived.len(),
+                "restored archived eval jobs from disk"
+            );
+        }
+    }
     match state.adapter_max_disk_bytes {
         Some(cap) => tracing::debug!(
             cap_bytes = cap,

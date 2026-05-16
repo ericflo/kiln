@@ -37,26 +37,41 @@ pub fn spawn_eval_worker(state: AppState, shutdown: ShutdownFlag) {
 }
 
 /// Evict terminal (`Completed` / `Failed` / `Cancelled`) entries from
-/// `state.eval_jobs` whose `finished_at` is older than `tracked_job_ttl`.
-/// Mirrors `training_queue::gc_tracked_jobs`. Without this, terminal
-/// entries pile up until `max_tracked_eval_jobs` rejects new submissions.
+/// `state.eval_jobs` past TTL only when the map exceeds
+/// `max_tracked_eval_jobs`. Oldest-by-finish-time first. Mirrors
+/// `training_queue::gc_tracked_jobs` (cap-driven, not TTL-driven).
 pub fn gc_eval_jobs(state: &AppState) -> usize {
+    let cap = state.max_tracked_eval_jobs;
     let ttl = state.tracked_job_ttl;
     let now = std::time::Instant::now();
     let mut jobs = state.eval_jobs.write().unwrap();
-    let before = jobs.len();
-    jobs.retain(|_id, job| match job.state {
-        EvalJobState::Completed | EvalJobState::Failed | EvalJobState::Cancelled => {
-            match job.finished_at {
-                None => true,
-                Some(t) => now.saturating_duration_since(t) < ttl,
-            }
-        }
-        EvalJobState::Queued | EvalJobState::Running => true,
-    });
-    let removed = before - jobs.len();
+    if jobs.len() <= cap {
+        return 0;
+    }
+    let mut candidates: Vec<(String, std::time::Instant)> = jobs
+        .iter()
+        .filter_map(|(id, j)| match (j.state, j.finished_at) {
+            (
+                EvalJobState::Completed | EvalJobState::Failed | EvalJobState::Cancelled,
+                Some(t),
+            ) if now.saturating_duration_since(t) >= ttl => Some((id.clone(), t)),
+            _ => None,
+        })
+        .collect();
+    candidates.sort_by_key(|(_, t)| *t);
+    let want_to_remove = jobs.len().saturating_sub(cap);
+    let mut removed = 0;
+    for (id, _) in candidates.into_iter().take(want_to_remove) {
+        jobs.remove(&id);
+        removed += 1;
+    }
     if removed > 0 {
-        tracing::debug!(removed, remaining = jobs.len(), "GC'd terminal eval jobs past TTL");
+        tracing::debug!(
+            removed,
+            remaining = jobs.len(),
+            cap,
+            "evicted oldest terminal eval jobs past TTL to honor max_tracked_eval_jobs cap"
+        );
     }
     removed
 }
@@ -113,28 +128,39 @@ async fn run_one_job(state: AppState, entry: EvalQueueEntry) {
     let now_iso = chrono::Utc::now().to_rfc3339();
     let now_instant = std::time::Instant::now();
 
-    match result {
+    let archive_snapshot = match result {
         Ok(runs) => {
             let headline = runs.iter().last().map(|r| r.metrics.accuracy);
             let mut jobs = state.eval_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
+            jobs.get_mut(&job_id).map(|job| {
                 job.state = EvalJobState::Completed;
                 job.finished_runs = runs;
                 job.headline_accuracy = headline;
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
-            }
+                job.clone()
+            })
         }
         Err(err) => {
             tracing::error!(job_id = %job_id, error = %err, "eval job failed");
             let mut jobs = state.eval_jobs.write().unwrap();
-            if let Some(job) = jobs.get_mut(&job_id) {
+            jobs.get_mut(&job_id).map(|job| {
                 job.state = EvalJobState::Failed;
                 job.error = Some(err);
                 job.finished_at_iso = Some(now_iso);
                 job.finished_at = Some(now_instant);
-            }
+                job.clone()
+            })
         }
+    };
+    if let Some(snapshot) = archive_snapshot {
+        if let Err(e) = crate::eval_history::save(&state.adapter_dir, &snapshot) {
+            tracing::warn!(error = %e, job_id = %job_id, "failed to archive terminal eval job");
+        }
+        crate::eval_history::prune_to_max(
+            &state.adapter_dir,
+            crate::eval_history::MAX_ARCHIVED_JOBS,
+        );
     }
 
     // Back-linking from eval-completion → training-job is intentionally
