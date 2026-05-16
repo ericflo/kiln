@@ -887,13 +887,17 @@ select {
   display: grid;
   grid-template-columns: 90px 1fr 200px;
   gap: var(--space-4);
-  padding: var(--space-3) 0;
+  padding: var(--space-3) var(--space-3);
+  margin: 0 calc(var(--space-3) * -1);
   border-bottom: 1px solid var(--border);
   align-items: start;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
   transition: background var(--t-fast) var(--ease-out);
 }
 .recent-row:last-child { border-bottom: 0; }
-.recent-row:hover { background: rgba(255, 255, 255, 0.02); }
+.recent-row:hover { background: rgba(255, 255, 255, 0.04); }
+.recent-row:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
 .recent-time {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -2038,6 +2042,7 @@ select {
   background: var(--surface-2);
   display: flex; flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 .modal-content {
   display: flex; flex-direction: column;
@@ -2067,8 +2072,57 @@ select {
   text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; color: var(--text-quiet);
 }
 
+/* Recent-request inspect modal */
+.req-detail {
+  display: flex; flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+.req-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+.req-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.req-stat-k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-quiet); }
+.req-stat-v { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text); overflow-wrap: anywhere; }
+.req-section { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.req-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-quiet);
+}
+.req-pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 38vh;
+  overflow-y: auto;
+}
+.req-section.req-error .req-pre { border-color: var(--danger-bd); background: var(--danger-bg); color: var(--danger-fg); }
+.req-section.req-meta { gap: 4px; }
+
 /* Tag bars */
-.tag-bars { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tag-bars {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 38vh;
+  overflow-y: auto;
+}
 .tag-bar { display: grid; grid-template-columns: minmax(80px, 130px) 1fr 50px; gap: var(--space-2); align-items: center; font-size: var(--text-xs); }
 .tag-bar .tag-name { color: var(--text-2); font-weight: 500; }
 .tag-bar .tag-track { background: var(--surface-3); border-radius: 3px; height: 6px; overflow: hidden; }
@@ -3451,6 +3505,26 @@ select {
   </div>
 
   <!-- =================================================================
+       Recent-request inspect modal
+       ================================================================= -->
+  <div id="request-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="request-drill-title">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="request-drill-title">Request</h2>
+        <span class="modal-meta" id="request-drill-meta"></span>
+        <button class="btn btn-sm" id="request-drill-copy-id" type="button" title="Copy request id">⧉ id</button>
+        <button class="btn btn-sm" id="request-drill-replay" type="button" title="Open the prompt in the playground">▶ Replay in playground</button>
+        <button class="modal-close" id="request-drill-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="request-drill-content">
+          <div class="detail-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
        Adapter drill-in modal
        ================================================================= -->
   <div id="adapter-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="adapter-drill-title">
@@ -4027,7 +4101,7 @@ function renderRecentRequests(rows) {
     const promptText = r.prompt_preview || '—';
     const completionText = r.completion_preview || '—';
     return `
-      <li class="recent-row" data-ts="${r.timestamp_unix_ms || 0}">
+      <li class="recent-row" data-ts="${r.timestamp_unix_ms || 0}" data-id="${escapeHtml(r.id || '')}" tabindex="0" role="button" aria-label="Inspect request ${escapeHtml(shortId(r.id || ''))}">
         <div class="recent-time">${fmtRelTime(r.timestamp_unix_ms)}</div>
         <div class="recent-previews">
           <div class="recent-prompt" title="${escapeHtml(promptText)}">${streamPill}${escapeHtml(promptText)}</div>
@@ -4041,7 +4115,167 @@ function renderRecentRequests(rows) {
     `;
   }).join('');
   el.innerHTML = `<ul class="recent-list">${items}</ul>`;
+  el.querySelectorAll('.recent-row').forEach(row => {
+    const id = row.dataset.id;
+    if (!id) return;
+    row.addEventListener('click', () => openRequestDrillModal(id));
+    row.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        openRequestDrillModal(id);
+      }
+    });
+  });
 }
+
+/* ---------------------------------------------------------------------
+   Recent-request inspect modal
+
+   The recent-requests panel only shows previews; clicking a row pops
+   this modal which exposes everything we captured on the server side
+   (model, adapter, finish reason, tokens, timings, full prompt + full
+   completion). Replay button drops the prompt into the playground.
+   --------------------------------------------------------------------- */
+function findRecentRequest(id) {
+  return (recentRequestsCache || []).find(r => r.id === id) || null;
+}
+
+function formatUnixMs(ms) {
+  if (!ms) return '—';
+  try {
+    const d = new Date(ms);
+    return d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+  } catch { return String(ms); }
+}
+
+function openRequestDrillModal(id) {
+  const modal = document.getElementById('request-drill-modal');
+  if (!modal) return;
+  const r = findRecentRequest(id);
+  const titleEl = document.getElementById('request-drill-title');
+  const metaEl = document.getElementById('request-drill-meta');
+  const content = document.getElementById('request-drill-content');
+  if (!r) {
+    titleEl.textContent = 'Request';
+    metaEl.textContent = id;
+    content.innerHTML = '<div class="detail-empty">No record for that request id (it may have been evicted from the in-memory ring).</div>';
+    modal.hidden = false;
+    modal.dataset.requestId = id;
+    document.body.style.overflow = 'hidden';
+    return;
+  }
+  // Strip the API-style `chatcmpl-` prefix so the shortened id is the
+  // distinguishing tail (the first 8 chars of a UUID), not the prefix
+  // every id shares.
+  const trimmedId = String(r.id || '').replace(/^chatcmpl-/, '');
+  titleEl.textContent = `Request ${trimmedId.slice(0, 8) || 'unknown'}`;
+  const pieces = [];
+  pieces.push(escapeHtml(r.model || '—'));
+  if (r.adapter) pieces.push(`adapter <code>${escapeHtml(r.adapter)}</code>`);
+  pieces.push(r.streamed ? 'streamed' : 'unary');
+  metaEl.innerHTML = pieces.join(' · ');
+
+  const stats = [
+    ['Started',         formatUnixMs(r.timestamp_unix_ms)],
+    ['Finish reason',   r.finish_reason || '—'],
+    ['Duration',        r.duration_ms != null ? `${r.duration_ms} ms` : '—'],
+    ['Prompt tokens',   r.prompt_tokens != null ? String(r.prompt_tokens) : '—'],
+    ['Completion tok',  r.completion_tokens != null ? String(r.completion_tokens) : '—'],
+    ['Tokens/sec',      (r.duration_ms && r.completion_tokens) ? (r.completion_tokens / (r.duration_ms / 1000)).toFixed(1) : '—'],
+  ];
+  if (r.ttft_ms != null) stats.push(['TTFT', `${r.ttft_ms} ms`]);
+  if (r.temperature != null) stats.push(['Temperature', String(r.temperature)]);
+  if (r.top_p != null) stats.push(['top_p', String(r.top_p)]);
+  if (r.max_tokens != null) stats.push(['max_tokens', String(r.max_tokens)]);
+  const statRow = stats
+    .map(([k, v]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(k)}</span><span class="req-stat-v">${escapeHtml(v)}</span></div>`)
+    .join('');
+
+  const prompt = r.prompt_full || r.prompt_preview || '';
+  const completion = r.completion_full || r.completion_preview || '';
+  const errBlock = r.error
+    ? `<div class="req-section req-error"><div class="req-section-head">Error</div><pre class="req-pre">${escapeHtml(r.error)}</pre></div>`
+    : '';
+  content.innerHTML = `
+    <div class="req-detail">
+      <div class="req-stats">${statRow}</div>
+      ${errBlock}
+      <div class="req-section">
+        <div class="req-section-head">Prompt
+          <button class="btn btn-sm" type="button" data-copy="prompt">Copy</button>
+        </div>
+        <pre class="req-pre" data-pre="prompt">${escapeHtml(prompt)}</pre>
+      </div>
+      <div class="req-section">
+        <div class="req-section-head">Completion
+          <button class="btn btn-sm" type="button" data-copy="completion">Copy</button>
+        </div>
+        <pre class="req-pre" data-pre="completion">${escapeHtml(completion)}</pre>
+      </div>
+      <div class="req-section req-meta">
+        <div class="req-section-head">Identity</div>
+        <div class="req-stat"><span class="req-stat-k">Request id</span><span class="req-stat-v"><code>${escapeHtml(r.id || '')}</code></span></div>
+      </div>
+    </div>`;
+  content.querySelectorAll('button[data-copy]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.copy;
+      const pre = content.querySelector(`pre[data-pre="${key}"]`);
+      const text = pre ? pre.textContent : '';
+      navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+    });
+  });
+  modal.hidden = false;
+  modal.dataset.requestId = id;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeRequestDrillModal() {
+  const modal = document.getElementById('request-drill-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  delete modal.dataset.requestId;
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('request-drill-close')?.addEventListener('click', closeRequestDrillModal);
+  document.getElementById('request-drill-modal')?.addEventListener('click', (ev) => {
+    if (ev.target.id === 'request-drill-modal') closeRequestDrillModal();
+  });
+  document.getElementById('request-drill-copy-id')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    if (!id) return;
+    navigator.clipboard.writeText(id).then(() => toast('Request id copied', 'ok'), () => toast('Copy failed', 'err'));
+  });
+  document.getElementById('request-drill-replay')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    const r = findRecentRequest(id);
+    if (!r) return;
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.value = r.prompt_full || r.prompt_preview || '';
+      if (typeof autoresizeChatInput === 'function') autoresizeChatInput();
+      if (typeof updateChatSendState === 'function') updateChatSendState();
+    }
+    if (r.adapter) {
+      const sel = document.getElementById('chat-adapter');
+      if (sel && Array.from(sel.options).some(o => o.value === r.adapter)) sel.value = r.adapter;
+    }
+    closeRequestDrillModal();
+    const playgroundTab = document.querySelector('[data-page="playground"]');
+    if (playgroundTab) playgroundTab.click();
+    if (input) setTimeout(() => input.focus(), 50);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') {
+      const m = document.getElementById('request-drill-modal');
+      if (m && !m.hidden) closeRequestDrillModal();
+    }
+  });
+});
 
 function refreshRecentTimes() {
   const el = document.getElementById('recent-requests-panel');
@@ -4522,7 +4756,7 @@ async function pollTraining() {
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
       (data.queued || []).map(j => j.job_id).join(','),
-      (data.completed || []).slice(0, 5).map(j => `${j.job_id}:${j.state}`).join(','),
+      (data.completed || []).map(j => `${j.job_id}:${j.state}`).join(','),
     ].join('|');
     if (key !== lastTrainingKey) {
       lastTrainingKey = key;
@@ -4572,8 +4806,9 @@ function renderTrainingQueue(data) {
     });
   }
   if (data.completed && data.completed.length > 0) {
-    html += `<div class="queue-section-label">Recent</div>`;
-    data.completed.slice(0, 5).forEach(j => {
+    const total = data.completed.length;
+    html += `<div class="queue-section-label">Recent <span class="hint" style="font-weight:400;">· ${total} job${total === 1 ? '' : 's'}</span></div>`;
+    data.completed.forEach(j => {
       html += renderTrainingCard(j, 'completed');
     });
   }
@@ -5792,6 +6027,10 @@ function makeAssistantPlaceholder() {
 
 async function sendChat() {
   if (chatAbort) return;
+  // When compare mode is on, the dedicated A/B handler (wired further
+  // down) owns the send. Skipping here prevents the single-side bubble
+  // from rendering on top of the side-by-side compare panel.
+  if (typeof chatCompareMode !== 'undefined' && chatCompareMode) return;
   const input = document.getElementById('chat-input');
   const tempInput = document.getElementById('chat-temp');
   const msg = input.value.trim();
@@ -8422,23 +8661,40 @@ document.getElementById('train-drill-stop')?.addEventListener('click', () => {
 // pair into a chosen judgment dataset. Saves the inevitable copy-paste
 // dance into the Evals tab.
 
-const compareToolbar = document.createElement('div');
-compareToolbar.className = 'chat-controls';
-compareToolbar.style.borderTop = '1px solid var(--border)';
-compareToolbar.style.borderBottom = '1px solid var(--border)';
-compareToolbar.innerHTML = `
-  <label style="user-select:none; display:flex; align-items:center; gap:6px; cursor:pointer;">
-    <input type="checkbox" id="chat-compare-toggle"> Compare mode
-  </label>
-  <label for="chat-adapter-b" id="chat-adapter-b-label" style="display:none;">Adapter B</label>
-  <select id="chat-adapter-b" style="display:none;"><option value="">Base model</option></select>
-  <span style="flex:1;"></span>
-  <button class="btn btn-sm" id="chat-save-judgment" type="button" disabled title="Send this A/B pair into a judgment dataset">↗ Save A/B preference</button>`;
-
+// Inject the compare-mode controls into the top .chat-controls row so
+// the toggle is right next to the adapter dropdown — previously the
+// toggle hid below the input row where users never found it.
 const playgroundCard = document.querySelector('.playground-card');
 if (playgroundCard) {
-  const inputRow = playgroundCard.querySelector('.chat-input-row');
-  if (inputRow) inputRow.parentNode.insertBefore(compareToolbar, inputRow);
+  const topControls = playgroundCard.querySelector('.chat-controls');
+  if (topControls) {
+    const compareFrag = document.createElement('span');
+    compareFrag.style.cssText = 'display:flex; align-items:center; gap:var(--space-3);';
+    compareFrag.innerHTML = `
+      <label class="chat-toggle-label" style="user-select:none; cursor:pointer;" title="Send the same prompt to two adapters side-by-side for direct comparison.">
+        <input type="checkbox" id="chat-compare-toggle">
+        <span>Compare</span>
+      </label>
+      <label for="chat-adapter-b" id="chat-adapter-b-label" style="display:none;">vs</label>
+      <select id="chat-adapter-b" style="display:none;"><option value="">Base model</option></select>`;
+    const advanced = topControls.querySelector('#chat-toggle-advanced');
+    if (advanced) topControls.insertBefore(compareFrag, advanced);
+    else topControls.appendChild(compareFrag);
+  }
+  // Save-pair action sits in chat-output-actions next to Copy/Export.
+  const outputActions = playgroundCard.querySelector('.chat-output-actions');
+  if (outputActions) {
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-sm';
+    saveBtn.id = 'chat-save-judgment';
+    saveBtn.disabled = true;
+    saveBtn.title = 'Send this A/B pair into a judgment dataset';
+    saveBtn.textContent = '↗ Save A/B preference';
+    const exportBtn = outputActions.querySelector('#chat-export');
+    if (exportBtn) outputActions.insertBefore(saveBtn, exportBtn);
+    else outputActions.appendChild(saveBtn);
+  }
   // The compare reply panel — appears under the existing chat-output.
   const comparePair = document.createElement('div');
   comparePair.id = 'chat-compare-pair';
@@ -8617,52 +8873,65 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
 
 // Hook send button: when compare mode is on, fan out to A and B in
 // parallel and render side-by-side with live streaming. Otherwise
-// let the existing handler do its thing.
-const chatSendBtn = document.getElementById('chat-send');
+// let the existing `sendChat` handler take it (it early-returns when
+// compare mode is on, so the two handlers don't fight).
 let chatCompareAbort = null;
-if (chatSendBtn) {
-  chatSendBtn.addEventListener('click', async () => {
-    if (!chatCompareMode) return;  // existing handler runs
-    if (chatCompareAbort) return;
-    const promptEl = document.getElementById('chat-input');
-    const prompt = (promptEl?.value || '').trim();
-    if (!prompt) return;
-    let temp;
-    try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
-    catch (error) { toast(error.message, 'err'); return; }
+async function sendChatCompare() {
+  if (chatCompareAbort) return;
+  const promptEl = document.getElementById('chat-input');
+  const prompt = (promptEl?.value || '').trim();
+  if (!prompt) return;
+  let temp;
+  try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
+  catch (error) { toast(error.message, 'err'); return; }
 
-    const adapterA = document.getElementById('chat-adapter').value;
-    const adapterB = document.getElementById('chat-adapter-b').value;
-    document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
-    document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
-    promptEl.value = '';
-    autoresizeChatInput();
-    updateChatSendState();
-    setChatGenerating(true);
-    document.getElementById('chat-save-judgment').disabled = true;
+  const adapterA = document.getElementById('chat-adapter').value;
+  const adapterB = document.getElementById('chat-adapter-b').value;
+  document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
+  document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
+  promptEl.value = '';
+  autoresizeChatInput();
+  updateChatSendState();
+  setChatGenerating(true);
+  document.getElementById('chat-save-judgment').disabled = true;
 
-    chatCompareAbort = new AbortController();
-    try {
-      const [a, b] = await Promise.all([
-        streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
-        streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
-      ]);
-      if (a.content || b.content) {
-        chatComparePair = {
-          prompt: [{ role: 'user', content: prompt }],
-          adapter_a: adapterA || null,
-          adapter_b: adapterB || null,
-          response_a: a.content || '',
-          response_b: b.content || '',
-        };
-        document.getElementById('chat-save-judgment').disabled = false;
-      }
-    } finally {
-      chatCompareAbort = null;
-      setChatGenerating(false);
+  chatCompareAbort = new AbortController();
+  try {
+    const [a, b] = await Promise.all([
+      streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
+      streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
+    ]);
+    if (a.content || b.content) {
+      chatComparePair = {
+        prompt: [{ role: 'user', content: prompt }],
+        adapter_a: adapterA || null,
+        adapter_b: adapterB || null,
+        response_a: a.content || '',
+        response_b: b.content || '',
+      };
+      document.getElementById('chat-save-judgment').disabled = false;
     }
+  } finally {
+    chatCompareAbort = null;
+    setChatGenerating(false);
+  }
+}
+const chatSendBtn = document.getElementById('chat-send');
+if (chatSendBtn) {
+  chatSendBtn.addEventListener('click', () => {
+    if (!chatCompareMode) return;  // sendChat handler covers simple mode
+    sendChatCompare();
   });
 }
+// Enter-key in the textarea routes through sendChat, which early-returns
+// when compare mode is on. Route those Enter presses to the compare flow.
+document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  if (!chatCompareMode) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  sendChatCompare();
+}, { capture: true });
 
 // Wire the existing #chat-stop button so it aborts compare-mode
 // streams too (the simple-mode handler already aborts `chatAbort`).

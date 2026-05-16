@@ -133,6 +133,7 @@ mod tests {
                     duration_ms: 50 + i as u64 * 10,
                     streamed: i % 2 == 0,
                     finish_reason: "stop".to_owned(),
+                    ..Default::default()
                 });
             }
         }
