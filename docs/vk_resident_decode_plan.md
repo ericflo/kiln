@@ -305,6 +305,30 @@ The remaining **720 ms / token spent in GDN layers** (24 layers ×
 resident path should drop ITL toward ~150 ms (~7 tok/s) by the same
 mechanism.
 
+### CommandBatch chaining inside a layer (2026-05-16)
+
+The 14 dispatches in the resident full-attn block now record into a
+single `CommandBatch` and ship in one `submit_and_wait`. Parity test
+stays bit-identical (worst-diff abs=0, rel=0). End-to-end:
+
+| Path | Decode tok/s | Mean ITL |
+|------|--------------|----------|
+| Resident + 14 separate submits | 1.33 | 752 ms |
+| **Resident + chained submit** | **1.26** | **792 ms** |
+
+The chaining is approximately a wash, ±10% noise. **The per-resident-
+kernel submit overhead was already small** (~0.2 ms), so the saved
+queue_wait_idle calls are offset by `CommandBatch::new`'s per-call
+command-pool + descriptor-pool allocation (8 full-attn layers × per-
+layer batches per token). A pooled CommandBatch (reused across
+layers and across steps) would recover the marginal win but the gain
+is small compared to the still-unaddressed GDN-layer bridging cost.
+
+Revised expectation: **GDN-layer resident wire-up is the only big
+remaining multiplier** before hitting the kernel-compute wall the
+microbench measured at 29 tok/s. CommandBatch chaining adds a few
+percent on top once GDN is wired.
+
 The remaining gap to the 55 tok/s headline target is now three
 distinct, additive pieces (the dispatchers/pool/cache are all
 landed and parity-tested; this is composition work):
