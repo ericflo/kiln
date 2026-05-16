@@ -74,9 +74,60 @@ use candle_core::{
 use candle_core::{
     CudaStorage,
     backend::{BackendDevice, BackendStorage},
+    cuda_backend::cudarc::driver::DevicePtr,
 };
 
 use crate::{log_softmax_last, DEFAULT_CHUNK_SIZE};
+
+// FFI declarations for the raw CUDA fused kernel (§9.2 of the grand
+// plan). These are linked in only when the `cuda` feature is active —
+// the `build.rs` compiles `csrc/opd_topk_kl.cu` and produces
+// `libkiln_opd_loss_kernel.a` which Cargo links into the binary.
+#[cfg(feature = "cuda")]
+unsafe extern "C" {
+    fn kiln_opd_topk_kl_fwd_bf16(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        kl_out: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_opd_topk_kl_fwd_f32(
+        hidden: *const core::ffi::c_void,
+        head_t: *const core::ffi::c_void,
+        topk_indices: *const core::ffi::c_void,
+        topk_lp_q: *const core::ffi::c_void,
+        kl_out: *mut core::ffi::c_void,
+        t_active: i32,
+        hidden_size: i32,
+        vocab_size: i32,
+        top_k: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+/// Returns `true` when the fused CUDA kernel supports the requested
+/// `(top_k, dtype)` combination. K ∈ {16, 32} is the milestone-5 fast
+/// path (§6 default is 32; the kernel hits that with 1024 threads per
+/// block, the Ampere max). Other K values fall back to the candle
+/// reference path on CUDA storage.
+#[cfg(feature = "cuda")]
+pub(crate) fn cuda_kernel_supports(top_k: usize, dtype: DType) -> bool {
+    let dtype_ok = matches!(dtype, DType::F32 | DType::BF16);
+    dtype_ok && (top_k == 16 || top_k == 32)
+}
+
+#[cfg(not(feature = "cuda"))]
+#[allow(dead_code)]
+pub(crate) fn cuda_kernel_supports(_top_k: usize, _dtype: DType) -> bool {
+    false
+}
 
 /// Phase B entry point — scalar mean reverse-KL. Behaviourally identical
 /// to [`crate::opd_top_k_reverse_kl_phase_a`] up to f32 associativity.
@@ -237,9 +288,34 @@ impl CustomOp1 for OpdLossCustomOp {
         let hidden_shape = Shape::from(l_hidden.shape().dims());
         let hidden_leaf =
             Tensor::from_storage(storage, hidden_shape, BackpropOp::none(), false);
-        let (loss_vec, out_shape) = self
-            .forward_inner(&hidden_leaf)
-            .map_err(|e| candle_core::Error::Msg(format!("opd-loss phase b cuda_fwd: {e:#}")))?;
+
+        // Route through the raw fused CUDA kernel when the dtype + K are
+        // in the milestone-5 fast-path set AND the kill switch isn't on.
+        // Otherwise fall through to the candle reference path (same as
+        // CPU but on CUDA storage) — this preserves correctness for all
+        // dtype/K combinations while we incrementally widen the kernel.
+        let route_kernel = !crate::kernel_disabled()
+            && cuda_kernel_supports(self.top_k, hidden_leaf.dtype());
+
+        let (loss_vec, out_shape) = if route_kernel {
+            match self.cuda_kernel_forward(&hidden_leaf) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(
+                        "opd-loss CUDA kernel failed, falling back to candle: {e:#}"
+                    );
+                    self.forward_inner(&hidden_leaf).map_err(|e2| {
+                        candle_core::Error::Msg(format!(
+                            "opd-loss phase b cuda_fwd fallback: {e2:#}"
+                        ))
+                    })?
+                }
+            }
+        } else {
+            self.forward_inner(&hidden_leaf).map_err(|e| {
+                candle_core::Error::Msg(format!("opd-loss phase b cuda_fwd: {e:#}"))
+            })?
+        };
         let device = s_hidden.device();
         let out_slice = device.clone_htod(&loss_vec)?;
         Ok((
@@ -497,6 +573,226 @@ impl OpdLossCustomOp {
         let d_s_3d = d_s.unsqueeze(1)?; // [len, 1, K]
         let d_h_chunk = d_s_3d.matmul(&head_3d_kh)?.squeeze(1)?; // [len, H]
         Ok(d_h_chunk)
+    }
+
+    /// CUDA fast-path forward: gather active rows on device, upload
+    /// teacher tensors, and call the fused `kiln_opd_topk_kl_fwd_*`
+    /// kernel. Output is `[T_active]` f32 per-position KL; we then
+    /// optionally mean-reduce on host for the `ScalarMean` mode.
+    ///
+    /// Falls within milestone 5's K ∈ {16, 32} dtype ∈ {f32, bf16}
+    /// envelope. Out-of-envelope cases are caught by
+    /// [`cuda_kernel_supports`] before this method is called.
+    #[cfg(feature = "cuda")]
+    fn cuda_kernel_forward(
+        &self,
+        hidden_leaf: &Tensor,
+    ) -> Result<(Vec<f32>, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+
+        let device = match hidden_leaf.device() {
+            Device::Cuda(d) => d.clone(),
+            _ => return Err(anyhow!("cuda_kernel_forward called with non-CUDA device")),
+        };
+        let dtype = hidden_leaf.dtype();
+        if !cuda_kernel_supports(self.top_k, dtype) {
+            return Err(anyhow!(
+                "cuda_kernel_supports false for (top_k={}, dtype={:?})",
+                self.top_k,
+                dtype
+            ));
+        }
+
+        let active_positions: Vec<u32> = self
+            .label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+            .collect();
+        let active_count = active_positions.len();
+        if active_count == 0 {
+            return match self.output_mode {
+                OpdLossOutput::ScalarMean => Ok((vec![0.0], Shape::from(()))),
+                OpdLossOutput::PerPosition => Ok((Vec::new(), Shape::from(0_usize))),
+            };
+        }
+
+        // Gather active rows on device. `index_select` over a contiguous
+        // hidden tensor on CUDA storage executes via candle's CUDA
+        // backend — no host round-trip.
+        let active_indices = Tensor::new(active_positions.as_slice(), hidden_leaf.device())
+            .context("upload active indices")?;
+        let hidden_2d = hidden_leaf.squeeze(0).context("squeeze hidden")?;
+        let active_hidden = hidden_2d
+            .index_select(&active_indices, 0)
+            .context("gather active rows")?
+            .contiguous()
+            .context("contiguous active hidden")?;
+        let head_t_contig = self
+            .head_t
+            .contiguous()
+            .context("contiguous head_t for CUDA kernel")?;
+
+        let hidden_size = head_t_contig.dim(0)?;
+        let vocab_size = head_t_contig.dim(1)?;
+        if active_hidden.dim(1)? != hidden_size {
+            return Err(anyhow!(
+                "shape mismatch: active_hidden has H={} but head_t has H={}",
+                active_hidden.dim(1)?,
+                hidden_size
+            ));
+        }
+
+        // Upload teacher tensors to device.
+        let topk_idx_dev = Tensor::new(
+            self.teacher_topk_indices.as_slice(),
+            hidden_leaf.device(),
+        )
+        .context("upload topk indices")?
+        .reshape((active_count, self.top_k))
+        .context("reshape topk indices")?;
+        let topk_lp_q_dev = Tensor::new(
+            self.teacher_topk_logprobs.as_slice(),
+            hidden_leaf.device(),
+        )
+        .context("upload topk logprobs")?
+        .reshape((active_count, self.top_k))
+        .context("reshape topk logprobs")?;
+
+        // Allocate output `[active_count]` f32 buffer on device.
+        let out_slice = device
+            .alloc_zeros::<f32>(active_count)
+            .map_err(|e| anyhow!("alloc opd kl output: {e}"))?;
+        let stream = device.cuda_stream();
+        let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+        // Extract device pointers. Each tensor's storage must be
+        // contiguous (asserted upstream).
+        let (hidden_storage, hidden_layout) = active_hidden.storage_and_layout();
+        let (head_storage, head_layout) = head_t_contig.storage_and_layout();
+        let (idx_storage, idx_layout) = topk_idx_dev.storage_and_layout();
+        let (lpq_storage, lpq_layout) = topk_lp_q_dev.storage_and_layout();
+        let hidden_cuda = match &*hidden_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("active_hidden not on CUDA")),
+        };
+        let head_cuda = match &*head_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("head_t not on CUDA")),
+        };
+        let idx_cuda = match &*idx_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("topk_idx not on CUDA")),
+        };
+        let lpq_cuda = match &*lpq_storage {
+            Storage::Cuda(c) => c,
+            _ => return Err(anyhow!("topk_lp_q not on CUDA")),
+        };
+
+        let status = unsafe {
+            match dtype {
+                DType::F32 => {
+                    let hidden_slice = hidden_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("hidden as f32 slice: {e}"))?
+                        .slice(hidden_layout.start_offset()..);
+                    let head_slice = head_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("head_t as f32 slice: {e}"))?
+                        .slice(head_layout.start_offset()..);
+                    let idx_slice = idx_cuda
+                        .as_cuda_slice::<u32>()
+                        .map_err(|e| anyhow!("topk_idx as u32 slice: {e}"))?
+                        .slice(idx_layout.start_offset()..);
+                    let lpq_slice = lpq_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("topk_lp_q as f32 slice: {e}"))?
+                        .slice(lpq_layout.start_offset()..);
+
+                    let (h_ptr, _g1) = hidden_slice.device_ptr(&stream);
+                    let (head_ptr, _g2) = head_slice.device_ptr(&stream);
+                    let (idx_ptr, _g3) = idx_slice.device_ptr(&stream);
+                    let (lpq_ptr, _g4) = lpq_slice.device_ptr(&stream);
+                    let (out_ptr, _g5) = out_slice.device_ptr(&stream);
+
+                    kiln_opd_topk_kl_fwd_f32(
+                        h_ptr as *const _,
+                        head_ptr as *const _,
+                        idx_ptr as *const _,
+                        lpq_ptr as *const _,
+                        out_ptr as *mut _,
+                        active_count as i32,
+                        hidden_size as i32,
+                        vocab_size as i32,
+                        self.top_k as i32,
+                        raw_stream,
+                    )
+                }
+                DType::BF16 => {
+                    use half::bf16;
+                    let hidden_slice = hidden_cuda
+                        .as_cuda_slice::<bf16>()
+                        .map_err(|e| anyhow!("hidden as bf16 slice: {e}"))?
+                        .slice(hidden_layout.start_offset()..);
+                    let head_slice = head_cuda
+                        .as_cuda_slice::<bf16>()
+                        .map_err(|e| anyhow!("head_t as bf16 slice: {e}"))?
+                        .slice(head_layout.start_offset()..);
+                    let idx_slice = idx_cuda
+                        .as_cuda_slice::<u32>()
+                        .map_err(|e| anyhow!("topk_idx as u32 slice: {e}"))?
+                        .slice(idx_layout.start_offset()..);
+                    let lpq_slice = lpq_cuda
+                        .as_cuda_slice::<f32>()
+                        .map_err(|e| anyhow!("topk_lp_q as f32 slice: {e}"))?
+                        .slice(lpq_layout.start_offset()..);
+
+                    let (h_ptr, _g1) = hidden_slice.device_ptr(&stream);
+                    let (head_ptr, _g2) = head_slice.device_ptr(&stream);
+                    let (idx_ptr, _g3) = idx_slice.device_ptr(&stream);
+                    let (lpq_ptr, _g4) = lpq_slice.device_ptr(&stream);
+                    let (out_ptr, _g5) = out_slice.device_ptr(&stream);
+
+                    kiln_opd_topk_kl_fwd_bf16(
+                        h_ptr as *const _,
+                        head_ptr as *const _,
+                        idx_ptr as *const _,
+                        lpq_ptr as *const _,
+                        out_ptr as *mut _,
+                        active_count as i32,
+                        hidden_size as i32,
+                        vocab_size as i32,
+                        self.top_k as i32,
+                        raw_stream,
+                    )
+                }
+                other => {
+                    return Err(anyhow!(
+                        "cuda_kernel_forward: unsupported dtype {other:?}"
+                    ));
+                }
+            }
+        };
+        if status != 0 {
+            return Err(anyhow!(
+                "kiln_opd_topk_kl_fwd_* returned status {status}"
+            ));
+        }
+
+        // Download per-position KL to host.
+        let mut host_kl = vec![0.0f32; active_count];
+        device
+            .dtoh_sync_copy_into(&out_slice, &mut host_kl)
+            .map_err(|e| anyhow!("dtoh copy of kl output: {e}"))?;
+
+        match self.output_mode {
+            OpdLossOutput::ScalarMean => {
+                let sum: f32 = host_kl.iter().sum();
+                let mean = sum / (active_count as f32);
+                Ok((vec![mean], Shape::from(())))
+            }
+            OpdLossOutput::PerPosition => Ok((host_kl, Shape::from(active_count))),
+        }
     }
 }
 

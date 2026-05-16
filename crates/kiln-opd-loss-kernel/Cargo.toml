@@ -6,10 +6,18 @@ publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+cc = "1"
 
 [dependencies]
 candle-core = { workspace = true }
 anyhow = { workspace = true }
+half = "2"
+# `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and
+# already pulled in by every consumer of kiln-train.
+tracing = { workspace = true }
 
 [features]
 # Activates the raw-CUDA forward/backward path in `cuda_fwd`/`bwd`. Without

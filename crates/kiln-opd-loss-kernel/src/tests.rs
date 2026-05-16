@@ -428,6 +428,111 @@ fn cpu_phase_b_per_position_backward_matches_naive() -> Result<()> {
     Ok(())
 }
 
+/// CUDA parity: the raw fused kernel must produce the same per-position
+/// reverse-KL as the CPU reference (Phase A) within 1e-4 abs at f32 and
+/// 5e-2 at bf16. Per §9.2 of the grand plan ("bit-equivalence within
+/// 1e-5 across CUDA/Vulkan/Metal" is the ship gate; we test the tighter
+/// numbers below as the production tolerance).
+///
+/// Runs only when the crate is built with `--features cuda`. Run on the
+/// A6000 pod from `kiln-pod-acquire`.
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_kernel_matches_phase_a_f32_k32() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_parity_for_k::<f32>(&device, 32, /* tol = */ 1e-4)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_kernel_matches_phase_a_f32_k16() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_parity_for_k::<f32>(&device, 16, /* tol = */ 1e-4)?;
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_kernel_matches_phase_a_bf16_k32() -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    cuda_parity_for_k_bf16(&device, 32, /* tol = */ 5e-2)?;
+    Ok(())
+}
+
+/// CUDA parity helper for f32 inputs. Runs the same test fixture as the
+/// CPU parity suite but with a CUDA device, then compares per-position
+/// KL produced by Phase B (which routes through the kernel) against
+/// Phase A (which forces the candle CPU reference).
+#[cfg(feature = "cuda")]
+fn cuda_parity_for_k<T: 'static>(
+    device: &Device,
+    top_k: usize,
+    tol: f32,
+) -> Result<()> {
+    // Use the larger vocabulary the kernel was tuned for.
+    let seq_len = 32;
+    let hidden_size = 256;
+    let vocab_size = 1024;
+    let (hidden, head_t, idx, lp, mask) =
+        random_case(seq_len, hidden_size, vocab_size, top_k, 2, device)?;
+
+    // Reference: Phase A on the same device (autograd-aware candle path).
+    let reference = opd_top_k_reverse_kl_phase_a_per_position(
+        &hidden, &head_t, &idx, &lp, &mask, top_k, device,
+    )?;
+    // Kernel: Phase B with the cuda kernel active.
+    let kernel = opd_top_k_reverse_kl_phase_b_per_position(
+        &hidden, &head_t, &idx, &lp, &mask, top_k, device, 4096,
+    )?;
+    let ref_vec: Vec<f32> = reference.to_vec1()?;
+    let ker_vec: Vec<f32> = kernel.to_vec1()?;
+    assert_eq!(ref_vec.len(), ker_vec.len(), "shape mismatch");
+    for (i, (&r, &k)) in ref_vec.iter().zip(ker_vec.iter()).enumerate() {
+        let abs = (r - k).abs();
+        let rel = if r.abs() > 1e-6 { abs / r.abs() } else { abs };
+        assert!(
+            abs < tol || rel < tol,
+            "f32 K={top_k} pos {i}: ref={r:.6} kernel={k:.6} abs={abs:.2e} rel={rel:.2e}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+fn cuda_parity_for_k_bf16(
+    device: &Device,
+    top_k: usize,
+    tol: f32,
+) -> Result<()> {
+    let seq_len = 32;
+    let hidden_size = 256;
+    let vocab_size = 1024;
+    let (hidden_f32, head_f32, idx, lp, mask) =
+        random_case(seq_len, hidden_size, vocab_size, top_k, 2, device)?;
+    let hidden = hidden_f32.to_dtype(DType::BF16)?;
+    let head_t = head_f32.to_dtype(DType::BF16)?;
+
+    let reference = opd_top_k_reverse_kl_phase_a_per_position(
+        &hidden, &head_t, &idx, &lp, &mask, top_k, device,
+    )?;
+    let kernel = opd_top_k_reverse_kl_phase_b_per_position(
+        &hidden, &head_t, &idx, &lp, &mask, top_k, device, 4096,
+    )?;
+    let ref_vec: Vec<f32> = reference.to_vec1()?;
+    let ker_vec: Vec<f32> = kernel.to_vec1()?;
+    assert_eq!(ref_vec.len(), ker_vec.len());
+    for (i, (&r, &k)) in ref_vec.iter().zip(ker_vec.iter()).enumerate() {
+        let abs = (r - k).abs();
+        let rel = if r.abs() > 1e-6 { abs / r.abs() } else { abs };
+        assert!(
+            abs < tol || rel < tol,
+            "bf16 K={top_k} pos {i}: ref={r:.6} kernel={k:.6} abs={abs:.2e} rel={rel:.2e}"
+        );
+    }
+    Ok(())
+}
+
 /// Sanity: KL between a distribution and itself is zero. When student
 /// logits at the K teacher indices are constructed to renormalise to the
 /// teacher's distribution exactly, the loss must vanish to round-off.

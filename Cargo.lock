@@ -1853,6 +1853,9 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-nn",
+ "cc",
+ "half",
+ "tracing",
 ]
 
 [[package]]
