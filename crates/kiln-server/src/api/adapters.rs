@@ -1116,6 +1116,13 @@ struct AdapterDetail {
     training_jobs: Vec<AdapterLinkedJob>,
     /// Eval jobs whose `adapters` includes this adapter. Sorted newest first.
     eval_jobs: Vec<AdapterLinkedEval>,
+    /// Provenance loaded from `<adapter>/lineage.json` if present. Lets
+    /// the UI surface which Kiln build / base model / training input
+    /// produced this adapter without forcing the user to open the file
+    /// on disk. `None` when no lineage file exists (e.g. uploaded
+    /// adapters or pre-lineage adapters).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lineage: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -1221,6 +1228,14 @@ async fn adapter_detail(
     eval_pairs.sort_by(|a, b| b.0.cmp(&a.0));
     let eval_jobs: Vec<AdapterLinkedEval> = eval_pairs.into_iter().map(|(_, v)| v).collect();
 
+    // Best-effort: load `<adapter>/lineage.json` if present. Schema is
+    // intentionally opaque (any `serde_json::Value`) so future lineage
+    // schema bumps don't require touching this handler — the UI knows
+    // how to render whatever fields are there.
+    let lineage = std::fs::read(path.join("lineage.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+
     Ok(Json(AdapterDetail {
         name: name.clone(),
         is_active,
@@ -1230,6 +1245,7 @@ async fn adapter_detail(
         files,
         training_jobs,
         eval_jobs,
+        lineage,
     }))
 }
 

@@ -289,6 +289,18 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
         apiFailure(res, 'Training queue', url.pathname);
         return;
       }
+      // The eval-jobs background poll runs in every scenario — return
+      // the configured failure shape rather than letting it 404 and
+      // poison the failure-state browser-error assertion.
+      if (
+        url.pathname === '/v1/eval/jobs' ||
+        url.pathname === '/v1/eval/suites' ||
+        url.pathname === '/v1/eval/datasets' ||
+        url.pathname === '/v1/judgments'
+      ) {
+        apiFailure(res, 'Evals', url.pathname);
+        return;
+      }
     }
     if (url.pathname === '/health') {
       json(res, {
@@ -477,6 +489,28 @@ async function startServer({ failDashboardApis = false, availableAdapters = defa
     }
     if (url.pathname === '/v1/stats/recent-requests') {
       json(res, []);
+      return;
+    }
+    // The UI polls /v1/eval/jobs at startup to keep the Evals badge
+    // accurate before the user has visited the tab. Stub an empty list
+    // so the empty-adapter smoke run doesn't see a 404 in the console.
+    if (url.pathname === '/v1/eval/jobs') {
+      json(res, { jobs: [] });
+      return;
+    }
+    // Same shape as the production endpoints — only the empty cases
+    // are exercised in smoke, but keep them registered so future UI
+    // background polls don't surprise the mock.
+    if (url.pathname === '/v1/eval/suites') {
+      json(res, { suites: [] });
+      return;
+    }
+    if (url.pathname === '/v1/eval/datasets') {
+      json(res, { datasets: [] });
+      return;
+    }
+    if (url.pathname === '/v1/judgments') {
+      json(res, { judgments: [] });
       return;
     }
     if (url.pathname === '/v1/chat/completions') {

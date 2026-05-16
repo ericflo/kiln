@@ -828,6 +828,25 @@ select {
 }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
+
+/* Sitewide focus-visible — applies anywhere not already handled. Keeps
+   keyboard users oriented without ever showing the ring on mouse focus. */
+:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+input:focus-visible, select:focus-visible, textarea:focus-visible,
+.search-input:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+.primary-tab:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: -2px;
+}
 
 .btn-primary {
   background: linear-gradient(180deg, var(--kiln-500), var(--kiln-600));
@@ -882,18 +901,27 @@ select {
   list-style: none;
   display: flex;
   flex-direction: column;
+  /* Cap height so a busy server (up to 100 retained requests by default)
+     doesn't push the page footer hundreds of viewports down. Scroll
+     inside the panel instead. */
+  max-height: 60vh;
+  overflow-y: auto;
 }
 .recent-row {
   display: grid;
   grid-template-columns: 90px 1fr 200px;
   gap: var(--space-4);
-  padding: var(--space-3) 0;
+  padding: var(--space-3) var(--space-3);
+  margin: 0 calc(var(--space-3) * -1);
   border-bottom: 1px solid var(--border);
   align-items: start;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
   transition: background var(--t-fast) var(--ease-out);
 }
 .recent-row:last-child { border-bottom: 0; }
-.recent-row:hover { background: rgba(255, 255, 255, 0.02); }
+.recent-row:hover { background: rgba(255, 255, 255, 0.04); }
+.recent-row:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
 .recent-time {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
@@ -2038,6 +2066,7 @@ select {
   background: var(--surface-2);
   display: flex; flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
 }
 .modal-content {
   display: flex; flex-direction: column;
@@ -2067,8 +2096,57 @@ select {
   text-transform: uppercase; font-size: 10px; letter-spacing: 0.06em; color: var(--text-quiet);
 }
 
+/* Recent-request inspect modal */
+.req-detail {
+  display: flex; flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  overflow-y: auto;
+}
+.req-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-2);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+.req-stat { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.req-stat-k { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-quiet); }
+.req-stat-v { font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text); overflow-wrap: anywhere; }
+.req-section { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.req-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-quiet);
+}
+.req-pre {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: var(--space-3);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 38vh;
+  overflow-y: auto;
+}
+.req-section.req-error .req-pre { border-color: var(--danger-bd); background: var(--danger-bg); color: var(--danger-fg); }
+.req-section.req-meta { gap: 4px; }
+
 /* Tag bars */
-.tag-bars { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.tag-bars {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  max-height: 38vh;
+  overflow-y: auto;
+}
 .tag-bar { display: grid; grid-template-columns: minmax(80px, 130px) 1fr 50px; gap: var(--space-2); align-items: center; font-size: var(--text-xs); }
 .tag-bar .tag-name { color: var(--text-2); font-weight: 500; }
 .tag-bar .tag-track { background: var(--surface-3); border-radius: 3px; height: 6px; overflow: hidden; }
@@ -2946,6 +3024,8 @@ select {
       <div class="card-head">
         <h2>Recent requests</h2>
         <span class="eyebrow">Latest chat completions</span>
+        <span style="flex:1;"></span>
+        <input class="search-input" id="recent-requests-filter" type="search" placeholder="Filter by prompt, completion, id…" aria-label="Filter recent requests" style="max-width:280px;">
       </div>
       <div class="card-body" id="recent-requests-panel" aria-live="polite" aria-atomic="false" aria-busy="true">
         <div class="empty">Loading recent requests…</div>
@@ -2961,6 +3041,8 @@ select {
       <div class="card-head">
         <h2>Saved adapters</h2>
         <span class="eyebrow" id="adapters-card-eyebrow">LoRA adapters on disk</span>
+        <span style="flex:1;"></span>
+        <input class="search-input" id="adapters-filter" type="search" placeholder="Filter adapters by name…" aria-label="Filter adapters" style="max-width:240px;">
       </div>
       <div class="card-body" id="adapters-panel" aria-live="polite" aria-atomic="false" aria-busy="true" style="padding: var(--space-4);">
         <div class="empty">Loading adapter list…</div>
@@ -2988,7 +3070,7 @@ select {
               <label for="upload-archive">Adapter archive</label>
               <input type="file" id="upload-archive" accept=".tar.gz,.tgz,application/gzip,application/x-gzip,application/x-tar" aria-describedby="upload-adapter-help upload-adapter-state">
             </div>
-            <button class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
+            <button type="button" class="btn btn-primary" id="upload-adapter-btn" onclick="uploadAdapter()" disabled>Upload</button>
           </div>
           <div id="upload-adapter-state" style="font-size: var(--text-xs); color: var(--text-muted); margin-top: var(--space-2);" aria-live="polite">Enter a name and choose an archive to enable upload.</div>
         </div>
@@ -3026,7 +3108,7 @@ select {
             <input type="number" id="merge-density" step="0.05" min="0.01" max="1" value="0.2">
           </div>
           <div style="display: flex; justify-content: flex-end; margin-top: var(--space-3);">
-            <button class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge adapters</button>
+            <button type="button" class="btn btn-primary" id="merge-btn" onclick="mergeAdapters()">Merge adapters</button>
           </div>
         </div>
       </div>
@@ -3263,6 +3345,13 @@ select {
 
       <!-- Jobs sub-tab -->
       <div class="tab-content" id="tab-evals-jobs" role="tabpanel" aria-labelledby="evals-tab-jobs" hidden inert data-panel-id="evals-jobs-panel">
+        <div class="evals-toolbar" style="padding:0; margin-bottom:var(--space-3);">
+          <input class="search-input" id="eval-jobs-filter" type="search" placeholder="Filter by suite name, adapter, job id…" aria-label="Filter eval jobs">
+          <button type="button" class="filter-pill active" data-eval-jobs-filter="all">All</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="running">Running / queued</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="completed">Completed</button>
+          <button type="button" class="filter-pill" data-eval-jobs-filter="failed">Failed / cancelled</button>
+        </div>
         <div id="eval-jobs-list" class="empty">Loading eval jobs…</div>
       </div>
 
@@ -3373,6 +3462,7 @@ select {
       <div class="modal-head">
         <h2 id="drill-title">Eval results</h2>
         <span class="modal-meta" id="drill-meta"></span>
+        <button class="btn btn-sm" id="drill-cancel" type="button" hidden title="Cancel this eval job (queued only)">⏹ Cancel</button>
         <button class="btn btn-sm" id="drill-rerun" type="button" title="Queue a new eval job that runs only the failing examples again">↻ Re-run failures</button>
         <button class="modal-close" id="drill-close" aria-label="Close">×</button>
       </div>
@@ -3440,10 +3530,32 @@ select {
         <h2 id="train-drill-title">Training job</h2>
         <span class="modal-meta" id="train-drill-meta"></span>
         <button class="btn btn-sm" id="train-drill-stop" type="button" title="Cancel this training job (queued only)">⏹ Stop</button>
+        <button class="btn btn-sm" id="train-drill-delete" type="button" hidden title="Permanently delete this terminal job from memory and from the on-disk archive">🗑 Delete</button>
         <button class="modal-close" id="train-drill-close" aria-label="Close">×</button>
       </div>
       <div class="modal-body" style="grid-template-columns: 1fr;">
         <div class="modal-content" id="train-drill-content">
+          <div class="detail-empty">Loading…</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================================================================
+       Recent-request inspect modal
+       ================================================================= -->
+  <div id="request-drill-modal" class="modal-backdrop" hidden role="dialog" aria-modal="true" aria-labelledby="request-drill-title">
+    <div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="request-drill-title">Request</h2>
+        <span class="modal-meta" id="request-drill-meta"></span>
+        <button class="btn btn-sm" id="request-drill-copy-id" type="button" title="Copy request id">⧉ id</button>
+        <button class="btn btn-sm" id="request-drill-raw" type="button" title="Toggle the raw JSON view of this request record">{} raw</button>
+        <button class="btn btn-sm" id="request-drill-replay" type="button" title="Open the prompt in the playground">▶ Replay in playground</button>
+        <button class="modal-close" id="request-drill-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="request-drill-content">
           <div class="detail-empty">Loading…</div>
         </div>
       </div>
@@ -3540,9 +3652,9 @@ select {
             <span class="chat-adv-label">seed</span>
             <input type="number" id="chat-seed" placeholder="random" step="1">
           </label>
-          <label class="chat-adv-field chat-adv-stop" for="chat-stop">
+          <label class="chat-adv-field chat-adv-stop" for="chat-stop-sequences">
             <span class="chat-adv-label">stop (comma-separated)</span>
-            <input type="text" id="chat-stop" placeholder='e.g. ###, &lt;|endoftext|&gt;'>
+            <input type="text" id="chat-stop-sequences" placeholder='e.g. ###, &lt;|endoftext|&gt;'>
           </label>
         </div>
       </div>
@@ -3563,7 +3675,7 @@ select {
         <label class="sr-only" for="chat-input">Message</label>
         <textarea id="chat-input" rows="1" placeholder="Type a message — Enter to send, Shift+Enter for a new line" aria-describedby="chat-input-help"></textarea>
         <button type="button" class="btn btn-primary" id="chat-send">Send</button>
-        <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
+        <button type="button" class="btn" id="chat-stop" disabled hidden title="Abort the current generation (Esc)">Stop <kbd style="font-size:10px; padding:1px 4px; margin-left:4px; background:rgba(255,255,255,0.08); border:1px solid var(--border); border-radius:3px;">Esc</kbd></button>
         <button type="button" class="btn btn-ghost" id="chat-clear">Clear</button>
       </div>
       <div class="form-help" id="chat-input-help" style="padding: 0 var(--space-5) var(--space-4);">Send a quick prompt to test the selected adapter or base model. <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.</div>
@@ -3695,6 +3807,10 @@ function selectPage(name) {
     u.hash = name;
     history.replaceState(null, '', u);
   }
+  // Remember the user's last tab so a fresh visit (no hash, no bookmark)
+  // lands them back where they were instead of always on Overview.
+  // The hash still wins — bookmarks deep-link as expected.
+  try { localStorage.setItem('kiln.lastPage', name); } catch {}
   // Lazy-refresh page-scoped data when activating a tab. Avoids firing
   // /v1/eval/* and /v1/judgments/* at page load when the user might never
   // visit the Evals page — and catches the case of someone landing on
@@ -3718,24 +3834,52 @@ function refreshActiveEvalSubTab() {
 document.querySelectorAll('.primary-tab').forEach(tab => {
   tab.addEventListener('click', () => selectPage(tab.dataset.page));
 });
-const initialHash = (location.hash || '#overview').slice(1);
-if (['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialHash)) {
-  selectPage(initialHash);
+// Prefer the URL hash (bookmarkable), then the user's last tab from
+// localStorage, then Overview.
+let initialPage = (location.hash || '').slice(1);
+if (!initialPage) {
+  try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
+if (!['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialPage)) {
+  initialPage = 'overview';
+}
+selectPage(initialPage);
 
 // --- Toast Notifications ---
 function toast(msg, type) {
   const c = document.getElementById('toasts');
+  // Dedupe: a poll that errors every 2s shouldn't stack 30 identical
+  // toasts. If the most-recent live toast matches the message + type,
+  // bump a small (xN) counter on it and reset its dismiss timer
+  // instead of stacking a new one.
+  const last = c.lastElementChild;
+  if (last && last.dataset.toastKey === `${type || 'ok'}|${msg}`) {
+    const cnt = (Number(last.dataset.toastCount) || 1) + 1;
+    last.dataset.toastCount = String(cnt);
+    last.querySelector('.toast-count')?.remove();
+    const counter = document.createElement('span');
+    counter.className = 'toast-count';
+    counter.style.cssText = 'margin-left:8px; opacity:0.7; font-variant-numeric: tabular-nums;';
+    counter.textContent = `×${cnt}`;
+    last.appendChild(counter);
+    clearTimeout(Number(last.dataset.toastTimer));
+    last.dataset.toastTimer = String(setTimeout(() => last.remove(), 4000));
+    return;
+  }
   const el = document.createElement('div');
   el.className = 'toast ' + (type || 'ok');
+  el.dataset.toastKey = `${type || 'ok'}|${msg}`;
   if (type === 'err') {
     el.setAttribute('role', 'alert');
     el.setAttribute('aria-live', 'assertive');
     el.setAttribute('aria-atomic', 'true');
   }
   el.textContent = msg;
+  el.title = 'Click to dismiss';
+  el.style.cursor = 'pointer';
+  el.addEventListener('click', () => el.remove());
   c.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  el.dataset.toastTimer = String(setTimeout(() => el.remove(), 4000));
 }
 
 // --- API Helpers ---
@@ -3770,6 +3914,7 @@ function selectTrainingTab(tab, focus = false) {
     tabPanel.inert = !selected;
   });
   if (focus) tab.focus();
+  try { localStorage.setItem('kiln.trainingSubTab', tab.dataset.tab); } catch {}
 }
 
 document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
@@ -3788,6 +3933,16 @@ document.querySelectorAll('[data-training-tabs] [role="tab"]').forEach(tab => {
     }
   });
 });
+
+// Restore last visited training sub-tab so users return to Submit SFT
+// (or GRPO) instead of always-Queue after a refresh.
+try {
+  const lastTrainingSubTab = localStorage.getItem('kiln.trainingSubTab');
+  if (lastTrainingSubTab && lastTrainingSubTab !== 'queue') {
+    const target = document.getElementById(`training-tab-${lastTrainingSubTab}`);
+    if (target) selectTrainingTab(target);
+  }
+} catch {}
 
 // --- Formatting ---
 function fmtBytes(b) {
@@ -3981,6 +4136,19 @@ function fmtRelTime(unixMs) {
   return Math.floor(delta / 86400) + 'd ago';
 }
 
+/// Like `fmtRelTime` but switches to an absolute date once the entry is
+/// older than a week — relative ago times stop being meaningful after that.
+function fmtSmartTime(unixMs) {
+  if (!unixMs) return '—';
+  const delta = (Date.now() - unixMs) / 1000;
+  if (delta < 7 * 86400) return fmtRelTime(unixMs);
+  try {
+    const d = new Date(unixMs);
+    // e.g. "May 14"
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch { return fmtRelTime(unixMs); }
+}
+
 // `escapeHtml` is defined further down (the canonical version also
 // escapes single quotes); function-declaration hoisting makes the later
 // one win regardless of where this comment lives. Keeping a stub here
@@ -4006,6 +4174,7 @@ function apiFailureHtml(action, e, retryFn) {
   </div>`;
 }
 
+let recentRequestsFilter = '';
 function renderRecentRequests(rows) {
   const el = document.getElementById('recent-requests-panel');
   if (!el) return;
@@ -4017,7 +4186,20 @@ function renderRecentRequests(rows) {
     </div>`;
     return;
   }
-  const items = rows.map(r => {
+  // Apply the live filter (substring match on prompt preview, completion
+  // preview, and id). Empty filter is a no-op pass-through.
+  const q = (recentRequestsFilter || '').trim().toLowerCase();
+  const filtered = q
+    ? rows.filter(r =>
+        (r.prompt_preview || '').toLowerCase().includes(q) ||
+        (r.completion_preview || '').toLowerCase().includes(q) ||
+        (r.id || '').toLowerCase().includes(q))
+    : rows;
+  if (filtered.length === 0) {
+    el.innerHTML = `<div class="empty">No requests match <code>${escapeHtml(q)}</code>.</div>`;
+    return;
+  }
+  const items = filtered.map(r => {
     const finish = r.finish_reason || 'stop';
     const finishClass = finish.replace(/[^a-z_]/gi, '_');
     const streamPill = r.streamed ? '<span class="recent-pill streamed">stream</span>' : '';
@@ -4027,7 +4209,7 @@ function renderRecentRequests(rows) {
     const promptText = r.prompt_preview || '—';
     const completionText = r.completion_preview || '—';
     return `
-      <li class="recent-row" data-ts="${r.timestamp_unix_ms || 0}">
+      <li class="recent-row" data-ts="${r.timestamp_unix_ms || 0}" data-id="${escapeHtml(r.id || '')}" tabindex="0" role="button" aria-label="Inspect request ${escapeHtml(shortId(r.id || ''))}">
         <div class="recent-time">${fmtRelTime(r.timestamp_unix_ms)}</div>
         <div class="recent-previews">
           <div class="recent-prompt" title="${escapeHtml(promptText)}">${streamPill}${escapeHtml(promptText)}</div>
@@ -4041,7 +4223,184 @@ function renderRecentRequests(rows) {
     `;
   }).join('');
   el.innerHTML = `<ul class="recent-list">${items}</ul>`;
+  el.querySelectorAll('.recent-row').forEach(row => {
+    const id = row.dataset.id;
+    if (!id) return;
+    row.addEventListener('click', () => openRequestDrillModal(id));
+    row.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        openRequestDrillModal(id);
+      }
+    });
+  });
 }
+
+/* ---------------------------------------------------------------------
+   Recent-request inspect modal
+
+   The recent-requests panel only shows previews; clicking a row pops
+   this modal which exposes everything we captured on the server side
+   (model, adapter, finish reason, tokens, timings, full prompt + full
+   completion). Replay button drops the prompt into the playground.
+   --------------------------------------------------------------------- */
+function findRecentRequest(id) {
+  return (recentRequestsCache || []).find(r => r.id === id) || null;
+}
+
+function formatUnixMs(ms) {
+  if (!ms) return '—';
+  try {
+    const d = new Date(ms);
+    return d.toISOString().replace('T', ' ').replace('Z', ' UTC');
+  } catch { return String(ms); }
+}
+
+function openRequestDrillModal(id) {
+  const modal = document.getElementById('request-drill-modal');
+  if (!modal) return;
+  const r = findRecentRequest(id);
+  const titleEl = document.getElementById('request-drill-title');
+  const metaEl = document.getElementById('request-drill-meta');
+  const content = document.getElementById('request-drill-content');
+  if (!r) {
+    titleEl.textContent = 'Request';
+    metaEl.textContent = id;
+    content.innerHTML = '<div class="detail-empty">No record for that request id (it may have been evicted from the in-memory ring).</div>';
+    modal.hidden = false;
+    modal.dataset.requestId = id;
+    document.body.style.overflow = 'hidden';
+    return;
+  }
+  // Strip the API-style `chatcmpl-` prefix so the shortened id is the
+  // distinguishing tail (the first 8 chars of a UUID), not the prefix
+  // every id shares.
+  const trimmedId = String(r.id || '').replace(/^chatcmpl-/, '');
+  titleEl.textContent = `Request ${trimmedId.slice(0, 8) || 'unknown'}`;
+  const pieces = [];
+  pieces.push(escapeHtml(r.model || '—'));
+  if (r.adapter) pieces.push(`adapter <code>${escapeHtml(r.adapter)}</code>`);
+  pieces.push(r.streamed ? 'streamed' : 'unary');
+  metaEl.innerHTML = pieces.join(' · ');
+
+  const stats = [
+    ['Started',         formatUnixMs(r.timestamp_unix_ms)],
+    ['Finish reason',   r.finish_reason || '—'],
+    ['Duration',        r.duration_ms != null ? `${r.duration_ms} ms` : '—'],
+    ['Prompt tokens',   r.prompt_tokens != null ? String(r.prompt_tokens) : '—'],
+    ['Completion tok',  r.completion_tokens != null ? String(r.completion_tokens) : '—'],
+    ['Tokens/sec',      (r.duration_ms && r.completion_tokens) ? (r.completion_tokens / (r.duration_ms / 1000)).toFixed(1) : '—'],
+  ];
+  if (r.ttft_ms != null) stats.push(['TTFT', `${r.ttft_ms} ms`]);
+  if (r.temperature != null) stats.push(['Temperature', String(r.temperature)]);
+  if (r.top_p != null) stats.push(['top_p', String(r.top_p)]);
+  if (r.max_tokens != null) stats.push(['max_tokens', String(r.max_tokens)]);
+  const statRow = stats
+    .map(([k, v]) => `<div class="req-stat"><span class="req-stat-k">${escapeHtml(k)}</span><span class="req-stat-v">${escapeHtml(v)}</span></div>`)
+    .join('');
+
+  const prompt = r.prompt_full || r.prompt_preview || '';
+  const completion = r.completion_full || r.completion_preview || '';
+  const errBlock = r.error
+    ? `<div class="req-section req-error"><div class="req-section-head">Error</div><pre class="req-pre">${escapeHtml(r.error)}</pre></div>`
+    : '';
+  content.innerHTML = `
+    <div class="req-detail">
+      <div class="req-stats">${statRow}</div>
+      ${errBlock}
+      <div class="req-section">
+        <div class="req-section-head">Prompt
+          <button class="btn btn-sm" type="button" data-copy="prompt">Copy</button>
+        </div>
+        <pre class="req-pre" data-pre="prompt">${escapeHtml(prompt)}</pre>
+      </div>
+      <div class="req-section">
+        <div class="req-section-head">Completion
+          <button class="btn btn-sm" type="button" data-copy="completion">Copy</button>
+        </div>
+        <pre class="req-pre" data-pre="completion">${escapeHtml(completion)}</pre>
+      </div>
+      <div class="req-section req-meta">
+        <div class="req-section-head">Identity</div>
+        <div class="req-stat"><span class="req-stat-k">Request id</span><span class="req-stat-v"><code>${escapeHtml(r.id || '')}</code></span></div>
+      </div>
+    </div>`;
+  content.querySelectorAll('button[data-copy]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.copy;
+      const pre = content.querySelector(`pre[data-pre="${key}"]`);
+      const text = pre ? pre.textContent : '';
+      navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+    });
+  });
+  modal.hidden = false;
+  modal.dataset.requestId = id;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeRequestDrillModal() {
+  const modal = document.getElementById('request-drill-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  delete modal.dataset.requestId;
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('request-drill-close')?.addEventListener('click', closeRequestDrillModal);
+  document.getElementById('request-drill-modal')?.addEventListener('click', (ev) => {
+    if (ev.target.id === 'request-drill-modal') closeRequestDrillModal();
+  });
+  document.getElementById('request-drill-copy-id')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    if (!id) return;
+    navigator.clipboard.writeText(id).then(() => toast('Request id copied', 'ok'), () => toast('Copy failed', 'err'));
+  });
+  document.getElementById('request-drill-raw')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    const r = findRecentRequest(id);
+    if (!r) return;
+    const content = document.getElementById('request-drill-content');
+    if (!content) return;
+    const existing = content.querySelector('#request-raw-block');
+    if (existing) { existing.remove(); return; }
+    const pre = document.createElement('pre');
+    pre.id = 'request-raw-block';
+    pre.className = 'req-pre';
+    pre.style.cssText = 'max-height:50vh; margin:var(--space-4) var(--space-5);';
+    pre.textContent = JSON.stringify(r, null, 2);
+    content.appendChild(pre);
+    pre.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+  document.getElementById('request-drill-replay')?.addEventListener('click', () => {
+    const modal = document.getElementById('request-drill-modal');
+    const id = modal?.dataset.requestId || '';
+    const r = findRecentRequest(id);
+    if (!r) return;
+    const input = document.getElementById('chat-input');
+    if (input) {
+      input.value = r.prompt_full || r.prompt_preview || '';
+      if (typeof autoresizeChatInput === 'function') autoresizeChatInput();
+      if (typeof updateChatSendState === 'function') updateChatSendState();
+    }
+    if (r.adapter) {
+      const sel = document.getElementById('chat-adapter');
+      if (sel && Array.from(sel.options).some(o => o.value === r.adapter)) sel.value = r.adapter;
+    }
+    closeRequestDrillModal();
+    const playgroundTab = document.querySelector('[data-page="playground"]');
+    if (playgroundTab) playgroundTab.click();
+    if (input) setTimeout(() => input.focus(), 50);
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') {
+      const m = document.getElementById('request-drill-modal');
+      if (m && !m.hidden) closeRequestDrillModal();
+    }
+  });
+});
 
 function refreshRecentTimes() {
   const el = document.getElementById('recent-requests-panel');
@@ -4056,6 +4415,46 @@ function refreshRecentTimes() {
   });
   if (liveMode) el.setAttribute('aria-live', liveMode);
 }
+
+// Wire the filter input. Re-render on every input event using the
+// already-cached list (no extra fetch). Done outside DOMContentLoaded
+// so it runs as soon as the input exists.
+document.addEventListener('input', (ev) => {
+  if (ev.target && ev.target.id === 'recent-requests-filter') {
+    recentRequestsFilter = ev.target.value || '';
+    // Skip the change-detection guard for the next render so the filter
+    // applies immediately even when the upstream cache is unchanged.
+    lastRecentRequestsKey = null;
+    renderRecentRequests(recentRequestsCache);
+  } else if (ev.target && ev.target.id === 'eval-jobs-filter') {
+    evalJobsFilter.query = ev.target.value || '';
+    if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
+  } else if (ev.target && ev.target.id === 'training-queue-filter') {
+    trainingQueueFilter = ev.target.value || '';
+    // Bypass the change-detection guard for an immediate re-render.
+    lastTrainingKey = null;
+    if (trainingJobsCache) renderTrainingQueue(trainingJobsCache);
+  } else if (ev.target && ev.target.id === 'adapters-filter') {
+    adaptersFilter = ev.target.value || '';
+    if (typeof lastAdaptersKey !== 'undefined') lastAdaptersKey = null;
+    if (typeof pollAdapters === 'function') pollAdapters();
+  }
+});
+
+// State-pill clicks for the eval-jobs filter. Delegated so a re-render
+// of the pill DOM doesn't tear off the handler.
+document.addEventListener('click', (ev) => {
+  const t = ev.target.closest('[data-eval-jobs-filter]');
+  if (!t) return;
+  // Don't double-handle the "Clear filter" button rendered inside the
+  // empty state — it already re-runs refresh on its own listener.
+  if (!t.classList.contains('filter-pill')) return;
+  evalJobsFilter.state = t.dataset.evalJobsFilter;
+  document.querySelectorAll('.filter-pill[data-eval-jobs-filter]').forEach(p => {
+    p.classList.toggle('active', p.dataset.evalJobsFilter === evalJobsFilter.state);
+  });
+  if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
+});
 
 // Content key from the most recent request fingerprints. Skipping the
 // re-render when unchanged preserves text-selection / hover / scroll
@@ -4508,6 +4907,10 @@ window.mergeAdapters = async function() {
 
 // --- Training Queue ---
 const cancellingTrainingJobIds = new Set();
+// Flat snapshot of the latest /v1/train/queue payload so the command
+// palette (and any other consumer) can search training jobs without
+// re-issuing the request. Updated on every pollTraining tick.
+let trainingJobsCache = { running: null, queued: [], completed: [] };
 // Skip the wholesale `tab-queue` innerHTML rewrite when nothing changed
 // (running progress, queued list identity, recent finish-state). Mirrors
 // the `lastAdaptersKey` guard on the adapters tab.
@@ -4518,11 +4921,16 @@ async function pollTraining() {
   if (!queuePanel) return;
   try {
     const data = await api('/v1/train/queue');
+    trainingJobsCache = {
+      running: data.running || null,
+      queued: data.queued || [],
+      completed: data.completed || [],
+    };
     const r = data.running;
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
       (data.queued || []).map(j => j.job_id).join(','),
-      (data.completed || []).slice(0, 5).map(j => `${j.job_id}:${j.state}`).join(','),
+      (data.completed || []).map(j => `${j.job_id}:${j.state}`).join(','),
     ].join('|');
     if (key !== lastTrainingKey) {
       lastTrainingKey = key;
@@ -4543,6 +4951,18 @@ async function pollTraining() {
       setText('hero-training', String(data.queued.length));
       document.getElementById('hero-training').innerHTML = `${data.queued.length}<span class="unit">queued</span>`;
       setText('hero-training-sub', `Next: ${q.adapter_name || q.job_id}`);
+    } else if (data.completed && data.completed.length > 0) {
+      // When the queue is empty but archived jobs exist, surface the most
+      // recent one in the hero stat instead of the un-informative "idle"
+      // placeholder. Users land on the dashboard wanting to know what
+      // their last run did, not that nothing is running right now.
+      const last = data.completed[0];
+      const lastLoss = last.current_loss != null ? last.current_loss.toFixed(3) : '—';
+      const lastState = (last.state || 'completed').toString().toLowerCase();
+      const when = last.finished_unix_ms || last.submitted_unix_ms;
+      setText('hero-training', 'idle');
+      document.getElementById('hero-training').innerHTML = `${data.completed.length}<span class="unit">recent</span>`;
+      setText('hero-training-sub', `Last ${lastState}: ${last.adapter_name || last.job_id} · loss ${lastLoss}${when ? ' · ' + fmtSmartTime(when) : ''}`);
     } else {
       setText('hero-training', 'idle');
       document.getElementById('hero-training').textContent = 'idle';
@@ -4555,29 +4975,74 @@ async function pollTraining() {
   }
 }
 
+let trainingQueueFilter = '';
+function matchTraining(j) {
+  const q = trainingQueueFilter.trim().toLowerCase();
+  if (!q) return true;
+  return [
+    j.job_id || '',
+    j.adapter_name || '',
+    (j.job_type || '').toString(),
+    (j.state || '').toString(),
+  ].join(' ').toLowerCase().includes(q);
+}
 function renderTrainingQueue(data) {
   const el = document.getElementById('tab-queue');
+  // Snapshot filter focus/selection BEFORE rewriting innerHTML so a
+  // background poll that fires while the user is typing doesn't yank
+  // focus away mid-keystroke.
+  let restoreFocus = false;
+  let restoreSelStart = 0;
+  let restoreSelEnd = 0;
+  const prevFilter = document.getElementById('training-queue-filter');
+  if (prevFilter && document.activeElement === prevFilter) {
+    restoreFocus = true;
+    restoreSelStart = prevFilter.selectionStart || 0;
+    restoreSelEnd = prevFilter.selectionEnd || 0;
+  }
+  const totalAll = (data.running ? 1 : 0)
+    + (data.queued ? data.queued.length : 0)
+    + (data.completed ? data.completed.length : 0);
+  // Filter input is always present (even when 0 results) so the user can
+  // clear / change the filter without re-navigating.
+  const filterBar = totalAll > 0
+    ? `<div class="evals-toolbar" style="padding:0 0 var(--space-3) 0;">
+        <input class="search-input" id="training-queue-filter" type="search" placeholder="Filter by adapter, type, state, job id…" aria-label="Filter training jobs" value="${escapeHtml(trainingQueueFilter)}">
+      </div>`
+    : '';
+
+  const runningMatch = data.running && matchTraining(data.running);
+  const queuedMatch = (data.queued || []).filter(matchTraining);
+  const completedMatch = (data.completed || []).filter(matchTraining);
+
   // Always render in the same flat container (training-cards) — separate
   // queue/running/completed visually with section labels but a uniform
   // card style so eye-tracking is constant across job states.
-  let html = '<div class="training-cards">';
-  if (data.running) {
+  let html = filterBar + '<div class="training-cards">';
+  if (runningMatch) {
     html += `<div class="queue-section-label">Running</div>`;
     html += renderTrainingCard(data.running, 'running');
   }
-  if (data.queued && data.queued.length > 0) {
+  if (queuedMatch.length > 0) {
     html += `<div class="queue-section-label">Queued</div>`;
-    data.queued.forEach(q => {
+    queuedMatch.forEach(q => {
       html += renderTrainingCard(q, 'queued');
     });
   }
-  if (data.completed && data.completed.length > 0) {
-    html += `<div class="queue-section-label">Recent</div>`;
-    data.completed.slice(0, 5).forEach(j => {
+  if (completedMatch.length > 0) {
+    const total = completedMatch.length;
+    const totalLabel = totalAll && total !== (data.completed?.length || 0)
+      ? `${total} of ${data.completed?.length || 0}`
+      : `${total}`;
+    html += `<div class="queue-section-label">Recent <span class="hint" style="font-weight:400;">· ${totalLabel} job${total === 1 ? '' : 's'}</span></div>`;
+    completedMatch.forEach(j => {
       html += renderTrainingCard(j, 'completed');
     });
   }
   html += '</div>';
+  if (totalAll > 0 && !runningMatch && !queuedMatch.length && !completedMatch.length) {
+    html += `<div class="eval-empty" style="margin-top:var(--space-3);"><div class="eval-empty-body">No training jobs match <code>${escapeHtml(trainingQueueFilter)}</code>.</div></div>`;
+  }
 
   if (!data.running && (!data.queued || !data.queued.length) && (!data.completed || !data.completed.length)) {
     html = `<div class="eval-empty empty">
@@ -4602,6 +5067,13 @@ function renderTrainingQueue(data) {
       cancelJobFromButton(b);
     });
   });
+  if (restoreFocus) {
+    const f = document.getElementById('training-queue-filter');
+    if (f) {
+      f.focus();
+      try { f.setSelectionRange(restoreSelStart, restoreSelEnd); } catch {}
+    }
+  }
 }
 
 /// Render a training job as a rich card with progress bar, loss curve
@@ -4629,12 +5101,25 @@ function renderTrainingCard(j, state) {
   const cancelBtn = (state === 'queued')
     ? `<button class="btn btn-sm" data-train-cancel data-job-id="${escapeHtml(j.job_id)}" type="button" style="margin-left:auto;">Cancel</button>`
     : '';
+  // Prefer the wall-clock timestamps (`submitted_unix_ms` /
+  // `finished_unix_ms`) introduced with the on-disk archive — those
+  // survive restarts. Fall back to `elapsed_secs` only when the server
+  // is on an older payload (no wall-clock fields).
+  let timeBadge = '';
+  if (state === 'completed' && j.finished_unix_ms) {
+    timeBadge = `<span class="hint" style="font-size:11px;" title="${escapeHtml(new Date(j.finished_unix_ms).toISOString())}">finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}</span>`;
+  } else if (j.submitted_unix_ms) {
+    timeBadge = `<span class="hint" style="font-size:11px;" title="${escapeHtml(new Date(j.submitted_unix_ms).toISOString())}">started ${escapeHtml(fmtSmartTime(j.submitted_unix_ms))}</span>`;
+  } else if (j.elapsed_secs != null) {
+    timeBadge = `<span class="hint" style="font-size:11px;">${escapeHtml(Math.floor(j.elapsed_secs) + 's elapsed')}</span>`;
+  }
   return `<div class="${cardClass}" data-train-job-id="${escapeHtml(j.job_id)}">
     <div class="training-card-head">
       ${stateBadge}
       <span class="training-card-name"><span class="hint" style="font-weight:400;margin-right:4px;">Adapter:</span>${adapterLabel}</span>
       <span class="training-card-type ${escapeHtml(jobType)}">${escapeHtml(jobType)}</span>
       <span class="hint" style="font-family:var(--font-mono); font-size:11px;">${escapeHtml(shortId(j.job_id))}</span>
+      ${timeBadge}
       ${cancelBtn}
     </div>
     <div class="training-card-progress">
@@ -5068,7 +5553,7 @@ function capturePlaygroundSettings() {
     frequencyPenalty:   get('chat-frequency-penalty')?.value ?? '',
     repetitionPenalty:  get('chat-repetition-penalty')?.value ?? '',
     seed:               get('chat-seed')?.value ?? '',
-    stop:               get('chat-stop')?.value ?? '',
+    stop:               get('chat-stop-sequences')?.value ?? '',
     system:             get('chat-system')?.value ?? '',
     advancedOpen:       !get('chat-advanced')?.hidden,
     compareMode:        !!document.getElementById('chat-compare-toggle')?.checked,
@@ -5096,7 +5581,7 @@ function applyPlaygroundSettings(settings) {
   set('chat-frequency-penalty',   settings.frequencyPenalty);
   set('chat-repetition-penalty',  settings.repetitionPenalty);
   set('chat-seed',                settings.seed);
-  set('chat-stop',                settings.stop);
+  set('chat-stop-sequences',      settings.stop);
   set('chat-system',              settings.system);
   const thinking = document.getElementById('chat-enable-thinking');
   if (thinking && typeof settings.enableThinking === 'boolean') thinking.checked = settings.enableThinking;
@@ -5218,7 +5703,7 @@ function buildChatRequestBody({ messages, temperature }) {
   if (repetitionPenalty !== undefined) body.repetition_penalty = repetitionPenalty;
   const seed = parseOptionalPositiveInt(document.getElementById('chat-seed')?.value);
   if (seed !== undefined) body.seed = seed;
-  const stop = parseChatStopSequences(document.getElementById('chat-stop')?.value);
+  const stop = parseChatStopSequences(document.getElementById('chat-stop-sequences')?.value);
   if (stop) body.stop = stop;
 
   const enableThinking = document.getElementById('chat-enable-thinking');
@@ -5792,6 +6277,10 @@ function makeAssistantPlaceholder() {
 
 async function sendChat() {
   if (chatAbort) return;
+  // When compare mode is on, the dedicated A/B handler (wired further
+  // down) owns the send. Skipping here prevents the single-side bubble
+  // from rendering on top of the side-by-side compare panel.
+  if (typeof chatCompareMode !== 'undefined' && chatCompareMode) return;
   const input = document.getElementById('chat-input');
   const tempInput = document.getElementById('chat-temp');
   const msg = input.value.trim();
@@ -6116,6 +6605,22 @@ document.getElementById('chat-stop').addEventListener('click', () => {
   if (chatAbort) chatAbort.abort();
   updateChatSendState();
 });
+// Esc aborts the active streaming generation when no other modal owns
+// the key. Standard chat-app keyboard shortcut — saves a mouse trip to
+// the Stop button mid-stream. Modal handlers run on their own listeners
+// and stop propagation, so this only fires when nothing else is open.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== 'Escape') return;
+  // Only intervene when chat is actually streaming.
+  if (!chatAbort && !chatCompareAbort) return;
+  // Don't fight any open modal — the modal's own Esc handler ran first.
+  const openModal = ['eval-drill-modal', 'train-drill-modal', 'adapter-drill-modal', 'request-drill-modal', 'cmdk-modal']
+    .some(id => { const el = document.getElementById(id); return el && !el.hidden; });
+  if (openModal) return;
+  if (chatAbort) { chatAbort.abort(); }
+  if (chatCompareAbort) { chatCompareAbort.abort(); }
+  ev.preventDefault();
+});
 document.getElementById('chat-clear').addEventListener('click', () => {
   if (chatAbort) { chatAbort.abort(); chatAbort = null; }
   chatMessages.length = 0;
@@ -6207,7 +6712,7 @@ const PLAYGROUND_SETTING_IDS = [
   'chat-preset',
   'chat-top-p', 'chat-top-k', 'chat-min-p',
   'chat-presence-penalty', 'chat-frequency-penalty', 'chat-repetition-penalty',
-  'chat-seed', 'chat-stop', 'chat-system',
+  'chat-seed', 'chat-stop-sequences', 'chat-system',
 ];
 PLAYGROUND_SETTING_IDS.forEach(id => {
   const el = document.getElementById(id);
@@ -6304,6 +6809,7 @@ function selectEvalsTab(tab, focus = false) {
   });
   if (focus) tab.focus();
   const which = tab.dataset.tab;
+  try { localStorage.setItem('kiln.evalsSubTab', which); } catch {}
   if (which === 'datasets') refreshDatasets();
   else if (which === 'suites') refreshSuites();
   else if (which === 'jobs') refreshEvalJobs();
@@ -6322,6 +6828,16 @@ document.querySelectorAll('[data-evals-tabs] [role="tab"]').forEach(tab => {
     if (nextTab) { event.preventDefault(); selectEvalsTab(nextTab, true); }
   });
 });
+
+// Restore the last visited eval sub-tab so users return to Jobs (or
+// Suites / Judgments) instead of always-Datasets after a refresh.
+try {
+  const lastEvalsSubTab = localStorage.getItem('kiln.evalsSubTab');
+  if (lastEvalsSubTab && lastEvalsSubTab !== 'datasets') {
+    const target = document.getElementById(`evals-tab-${lastEvalsSubTab}`);
+    if (target) selectEvalsTab(target);
+  }
+} catch {}
 
 let evalAdaptersCache = [];
 let evalActiveAdapter = null;
@@ -6421,8 +6937,8 @@ async function refreshDatasets() {
         </div>
         <div class="row-sub" style="font-family:var(--font-mono);">${escapeHtml(pattern)}</div>
         <div class="row-actions">
-          <button class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
-          <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+          <button type="button" class="btn primary btn-sm" data-action="synth" data-name="${escapeHtml(m.name)}">Synthesize →</button>
+          <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
         </div>
       </div>`;
     }).join('');
@@ -6626,7 +7142,6 @@ async function refreshSuites() {
     const d = await api('/v1/eval/suites');
     const suites = d.suites || [];
     const el = document.getElementById('suites-list');
-    document.getElementById('evals-count').textContent = String(suites.length);
     if (!suites.length) {
       el.className = 'eval-empty';
       el.innerHTML = `
@@ -6660,9 +7175,10 @@ async function refreshSuites() {
         <div class="tabular-nums">${s.num_examples.toLocaleString()} examples · <span class="scorer-badge">${escapeHtml(s.default_scorer_kind)}</span></div>
         <div style="display:flex; gap:6px; align-items:center;">${recentBadge} ${sparkline}</div>
         <div class="row-actions">
-          <button class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
-          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
-          <button class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
+          <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="preview" title="Show the first few examples without running">Preview</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
         </div>
       </div>`;
     }).join('');
@@ -6687,6 +7203,8 @@ async function refreshSuites() {
             toast('Queued compare ' + res.job_id.slice(0, 8), 'ok');
             document.getElementById('evals-tab-jobs')?.click();
             refreshEvalJobs();
+          } else if (action === 'preview') {
+            await openSuitePreview(suite);
           } else if (action === 'del') {
             if (!confirm(`Delete suite "${suite}"?`)) return;
             await api('/v1/eval/suites/' + encodeURIComponent(suite), { method: 'DELETE' });
@@ -6701,14 +7219,130 @@ async function refreshSuites() {
   }
 }
 
+/* ---------- Suite preview (lightweight modal — first N examples) ---------- */
+async function openSuitePreview(name) {
+  // Lazy-create the modal scaffolding on first use. Reuses the same
+  // CSS classes as the other drill-ins for consistency.
+  let modal = document.getElementById('suite-preview-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'suite-preview-modal';
+    modal.className = 'modal-backdrop';
+    modal.role = 'dialog';
+    modal.setAttribute('aria-modal', 'true');
+    modal.innerHTML = `<div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="suite-preview-title">Suite preview</h2>
+        <span class="modal-meta" id="suite-preview-meta"></span>
+        <button class="modal-close" id="suite-preview-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="suite-preview-content"><div class="detail-empty">Loading…</div></div>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+    document.getElementById('suite-preview-close').addEventListener('click', () => {
+      modal.hidden = true; document.body.style.overflow = '';
+    });
+    modal.addEventListener('click', (ev) => {
+      if (ev.target === modal) { modal.hidden = true; document.body.style.overflow = ''; }
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !modal.hidden) {
+        modal.hidden = true; document.body.style.overflow = '';
+      }
+    });
+  }
+  modal.hidden = false;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('suite-preview-title').textContent = `Suite: ${name}`;
+  document.getElementById('suite-preview-meta').textContent = '';
+  const content = document.getElementById('suite-preview-content');
+  content.innerHTML = '<div class="detail-empty">Loading…</div>';
+  try {
+    const suite = await api('/v1/eval/suites/' + encodeURIComponent(name));
+    const examples = suite.examples || [];
+    const preview = examples.slice(0, 20);
+    document.getElementById('suite-preview-meta').innerHTML =
+      `${examples.length} example${examples.length === 1 ? '' : 's'}` +
+      (suite.default_scorer ? ` · <span class="scorer-badge">${escapeHtml(suite.default_scorer.kind || 'scorer')}</span>` : '');
+    if (!preview.length) {
+      content.innerHTML = '<div class="detail-empty">This suite has no examples.</div>';
+      return;
+    }
+    const rows = preview.map((ex, i) => {
+      const msgs = (ex.messages || [])
+        .map(m => `<div style="margin-bottom:4px;"><span class="role ${escapeHtml(m.role)}" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-right:6px;">${escapeHtml(m.role)}</span><span style="white-space:pre-wrap; font-family:var(--font-mono); font-size:12px;">${escapeHtml(truncate(m.content || '', 600))}</span></div>`)
+        .join('');
+      const target = ex.target != null
+        ? `<div style="margin-top:6px;"><span class="hint" style="font-size:11px;">target:</span> <code style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(truncate(String(ex.target), 200))}</code></div>`
+        : '';
+      const tags = (ex.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+      return `<div style="border:1px solid var(--border); border-radius:var(--radius-md); padding:var(--space-3); margin-bottom:var(--space-3); background:var(--surface-2);">
+        <div style="font-size:11px; color:var(--text-quiet); font-family:var(--font-mono); margin-bottom:6px;">#${i + 1}${ex.id ? ' · ' + escapeHtml(ex.id) : ''}</div>
+        ${msgs}
+        ${target}
+        ${tags ? `<div style="margin-top:6px;">${tags}</div>` : ''}
+      </div>`;
+    }).join('');
+    const more = examples.length > preview.length
+      ? `<div class="hint" style="text-align:center; padding:var(--space-3);">…showing first ${preview.length} of ${examples.length}. The Run action evaluates all of them.</div>`
+      : '';
+    content.innerHTML = `<div style="padding:var(--space-4) var(--space-5); overflow-y:auto;">${rows}${more}</div>`;
+  } catch (e) {
+    content.innerHTML = `<div class="detail-empty">Failed to load suite: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
 /* ---------- Jobs ---------- */
 
+let evalJobsFilter = { query: '', state: 'all' };
+function matchesEvalJobsFilter(j) {
+  const q = (evalJobsFilter.query || '').trim().toLowerCase();
+  if (q) {
+    const hay = [
+      j.suite_name || '',
+      j.job_id || '',
+      ...(j.adapters || []).map(a => a || 'base'),
+    ].join(' ').toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  const st = (j.state || '').toString().toLowerCase();
+  if (evalJobsFilter.state === 'running') return st === 'queued' || st === 'running';
+  if (evalJobsFilter.state === 'completed') return st === 'completed';
+  if (evalJobsFilter.state === 'failed') return st === 'failed' || st === 'cancelled';
+  return true;
+}
 async function refreshEvalJobs() {
   try {
     const d = await api('/v1/eval/jobs');
     const jobs = d.jobs || [];
     evalJobsCache = jobs;
+    // Header badge counts active jobs (queued + running), mirroring the
+    // training badge — total job history is shown inside the tab so the
+    // badge should signal "needs attention now", not "lifetime count".
+    const liveCount = jobs.filter(j => {
+      const st = (j.state || '').toString().toLowerCase();
+      return st === 'queued' || st === 'running';
+    }).length;
+    setText('evals-count', String(liveCount));
     const el = document.getElementById('eval-jobs-list');
+    const filtered = jobs.filter(matchesEvalJobsFilter);
+    if (jobs.length && !filtered.length) {
+      el.className = 'eval-empty';
+      el.innerHTML = `<div class="eval-empty-body">No eval jobs match the current filter. <button class="btn btn-sm" type="button" data-eval-jobs-filter="all">Clear filter</button></div>`;
+      el.querySelectorAll('[data-eval-jobs-filter]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('[data-eval-jobs-filter]').forEach(b => b.classList.toggle('active', b.dataset.evalJobsFilter === 'all'));
+          evalJobsFilter.state = 'all';
+          const inp = document.getElementById('eval-jobs-filter');
+          if (inp) inp.value = '';
+          evalJobsFilter.query = '';
+          refreshEvalJobs();
+        });
+      });
+      return;
+    }
     if (!jobs.length) {
       el.className = 'eval-empty';
       el.innerHTML = `
@@ -6719,7 +7353,7 @@ async function refreshEvalJobs() {
       return;
     }
     el.className = '';
-    el.innerHTML = jobs.map(j => renderJobCard(j)).join('');
+    el.innerHTML = filtered.map(j => renderJobCard(j)).join('');
     el.querySelectorAll('.job-card').forEach(card => {
       card.addEventListener('click', () => openDrillModal(card.dataset.jobId));
     });
@@ -6910,6 +7544,25 @@ function renderDrillModal(preserveSelection) {
   document.getElementById('drill-meta').innerHTML = `
     <span class="job-state-pill ${j.state}">${escapeHtml(j.state)}</span>
     <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
+  // Cancel / Delete: same DELETE endpoint, different copy. Active jobs
+  // get cancelled; terminal jobs get deleted from memory + archive.
+  const stateLower = (j.state || '').toString().toLowerCase();
+  const isActive = stateLower === 'queued' || stateLower === 'running';
+  const cancelBtn = document.getElementById('drill-cancel');
+  if (cancelBtn) {
+    cancelBtn.hidden = false;
+    cancelBtn.textContent = isActive ? '⏹ Cancel' : '🗑 Delete';
+    cancelBtn.title = isActive
+      ? 'Cancel this eval job (queued or running)'
+      : 'Permanently delete this terminal job from memory and the on-disk archive';
+    cancelBtn.dataset.mode = isActive ? 'cancel' : 'delete';
+  }
+  const rerunBtn = document.getElementById('drill-rerun');
+  if (rerunBtn) {
+    const failingInAnyRun = (j.runs || []).some(r =>
+      (r.outcomes || []).some(o => o.kind !== 'pass'));
+    rerunBtn.hidden = isActive || !failingInAnyRun;
+  }
 
   const runs = j.runs || [];
   const isCompare = (j.adapters && j.adapters.length > 1) || runs.length > 1;
@@ -7130,6 +7783,23 @@ function renderOutcomeDetail(o) {
     </div>
     ${o.detail ? `<div style="font-family:var(--font-mono); font-size:12px; padding:10px; background:var(--surface); border:1px solid var(--border); border-radius:6px;">${escapeHtml(o.detail)}</div>` : '<div class="hint" style="font-size:11px;">No scorer commentary.</div>'}
   </div>`;
+  // Per-outcome action toolbar: copy raw outputs, replay the failing
+  // prompt in the playground. Stash the prompt text on a dataset attribute
+  // so the click handler doesn't have to walk back through drillExamplesById.
+  const promptForReplay = example && example.messages && example.messages.length
+    ? example.messages
+        .filter(m => m.role !== 'system')
+        .map(m => `[${m.role}] ${m.content}`)
+        .join('\n\n')
+    : '';
+  const userMsg = example && example.messages
+    ? (example.messages.filter(m => m.role === 'user').pop()?.content || '')
+    : '';
+  const actionsHtml = `<div class="outcome-actions" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:6px;">
+    <button type="button" class="btn btn-sm" data-outcome-copy="completion" title="Copy the model's output">⧉ Copy output</button>
+    ${promptForReplay ? `<button type="button" class="btn btn-sm" data-outcome-copy="prompt" title="Copy the full prompt as role-prefixed text">⧉ Copy prompt</button>` : ''}
+    ${userMsg ? `<button type="button" class="btn btn-sm" data-outcome-replay="1" title="Drop the last user message into the playground so you can iterate">▶ Replay in playground</button>` : ''}
+  </div>`;
   detail.innerHTML = `
     <div class="detail-section">
       <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
@@ -7139,12 +7809,34 @@ function renderOutcomeDetail(o) {
         ${o.latency_ms != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.latency_ms.toFixed(0)}ms</span>` : ''}
         ${o.prompt_tokens != null ? `<span class="tabular-nums hint" style="font-size:11px;">${o.prompt_tokens}→${o.completion_tokens || 0} tok</span>` : ''}
       </div>
+      ${actionsHtml}
       <div>${tags}</div>
     </div>
     ${promptSection}
     ${tgSection}
     ${scorerSection}
   `;
+  // Wire the per-outcome action buttons.
+  detail.querySelectorAll('[data-outcome-copy]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.outcomeCopy;
+      const text = key === 'completion' ? (o.completion_text || '') : promptForReplay;
+      navigator.clipboard.writeText(text).then(() => toast(`Copied ${key}`, 'ok'), () => toast('Copy failed', 'err'));
+    });
+  });
+  detail.querySelectorAll('[data-outcome-replay]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = document.getElementById('chat-input');
+      if (input) {
+        input.value = userMsg;
+        if (typeof autoresizeChatInput === 'function') autoresizeChatInput();
+        if (typeof updateChatSendState === 'function') updateChatSendState();
+      }
+      closeDrillModal();
+      selectPage('playground');
+      if (input) setTimeout(() => input.focus(), 50);
+    });
+  });
 }
 
 document.getElementById('drill-close')?.addEventListener('click', closeDrillModal);
@@ -7161,6 +7853,21 @@ document.querySelectorAll('[data-drill-filter]').forEach(b => {
     drillFilter = b.dataset.drillFilter;
     renderDrillOutcomes();
   });
+});
+
+document.getElementById('drill-cancel')?.addEventListener('click', async () => {
+  if (!drillJob) return;
+  const mode = document.getElementById('drill-cancel')?.dataset?.mode || 'cancel';
+  const verbMsg = mode === 'delete'
+    ? `Permanently delete eval job ${drillJob.job_id.slice(0, 8)}? Adapter weights are untouched; only the tracking entry and the on-disk archive file are removed.`
+    : `Cancel eval job ${drillJob.job_id.slice(0, 8)}?`;
+  if (!confirm(verbMsg)) return;
+  try {
+    await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id), { method: 'DELETE' });
+    toast(mode === 'delete' ? 'Eval job deleted' : 'Cancelled eval job', 'ok');
+    closeDrillModal();
+    refreshEvalJobs();
+  } catch (e) { toast((mode === 'delete' ? 'Delete' : 'Cancel') + ' failed: ' + e.message, 'err'); }
 });
 
 document.getElementById('drill-rerun')?.addEventListener('click', async () => {
@@ -7257,9 +7964,9 @@ async function refreshJudgments() {
           <div class="tabular-nums">${m.num_rows} judgments</div>
           <div style="display:flex; gap:8px; align-items:center; font-size:11px;">${winnerBar}<span class="hint">A ${winners.a||0} · T ${winners.tie||0} · B ${winners.b||0}</span></div>
           <div class="row-actions">
-            <button class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
-            <button class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
-            <button class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
+            <button type="button" class="btn primary btn-sm" data-action="judge" data-name="${escapeHtml(m.name)}">${isActive ? 'Continue' : 'Judge →'}</button>
+            <button type="button" class="btn btn-sm" data-action="promote" data-name="${escapeHtml(m.name)}">Promote</button>
+            <button type="button" class="btn btn-sm" data-action="del" data-name="${escapeHtml(m.name)}">Delete</button>
           </div>
         </div>`;
       }).join('');
@@ -7714,6 +8421,43 @@ function buildCmdkIndex() {
       action: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); openDrillModal(j.job_id); },
     });
   }
+  // Training runs (running + queued + most-recent completed) — same
+  // drill-modal jump as clicking a card on the Training tab. Lets
+  // power users find a finished run by adapter name without scrolling.
+  const trainingPool = [
+    ...(trainingJobsCache.running ? [trainingJobsCache.running] : []),
+    ...(trainingJobsCache.queued || []),
+    ...(trainingJobsCache.completed || []).slice(0, 30),
+  ];
+  for (const j of trainingPool) {
+    const stateNorm = (j.state || '').toString().toLowerCase() || 'queued';
+    const lossLbl = j.current_loss != null ? `loss ${j.current_loss.toFixed(3)}` : 'no loss yet';
+    items.push({
+      kind: 'train-job', icon: '🧪',
+      title: j.adapter_name || j.job_id,
+      sub: `${(j.job_type || 'train').toString().toUpperCase()} · ${stateNorm} · ${lossLbl} · ${j.job_id.slice(0, 8)}`,
+      action: () => {
+        selectPage('training');
+        document.getElementById('training-tab-queue')?.click();
+        if (typeof openTrainDrillModal === 'function') openTrainDrillModal(j.job_id);
+      },
+    });
+  }
+  // Recent requests (last 20) — jump back into the request inspect modal
+  // by short id or by prompt content. Most useful for retrieving "what
+  // was the prompt that produced that weird answer five minutes ago".
+  for (const r of (recentRequestsCache || []).slice(0, 20)) {
+    const preview = (r.prompt_preview || '').replace(/\s+/g, ' ').slice(0, 60) || '(no prompt)';
+    items.push({
+      kind: 'recent-req', icon: '↩',
+      title: preview,
+      sub: `Request · ${r.streamed ? 'stream' : 'unary'} · ${r.completion_tokens || 0} tok · ${(r.id || '').replace(/^chatcmpl-/, '').slice(0, 8)}`,
+      action: () => {
+        selectPage('overview');
+        if (typeof openRequestDrillModal === 'function') openRequestDrillModal(r.id);
+      },
+    });
+  }
   return items;
 }
 
@@ -8024,11 +8768,14 @@ document.querySelectorAll('[data-quick-action]').forEach(btn => {
    Adapter cards renderer + drill-in modal
    ===================================================================== */
 
+let adaptersFilter = '';
 function renderAdaptersAsCards(data) {
   const panel = document.getElementById('adapters-panel');
   if (!panel) return;
   const adapters = data.available || [];
   const active = data.active || '';
+  const q = adaptersFilter.trim().toLowerCase();
+  const filtered = q ? adapters.filter(a => (a.name || '').toLowerCase().includes(q)) : adapters;
   if (!adapters.length) {
     panel.innerHTML = `<div class="eval-empty empty">
       <div class="eval-empty-icon">🧬</div>
@@ -8042,14 +8789,18 @@ function renderAdaptersAsCards(data) {
     });
     return;
   }
-  const cards = adapters.map(a => {
+  if (q && filtered.length === 0) {
+    panel.innerHTML = `<div class="eval-empty"><div class="eval-empty-body">No adapters match <code>${escapeHtml(q)}</code>.</div></div>`;
+    return;
+  }
+  const cards = filtered.map(a => {
     const isActive = a.name === active;
     return `<div class="adapter-card adapter-item ${isActive ? 'adapter-card-active' : ''}" data-adapter-name="${escapeHtml(a.name)}">
       ${isActive ? '<span class="adapter-card-active-pill">active</span>' : ''}
       <div class="adapter-card-name adapter-name">${escapeHtml(a.name)}</div>
       <div class="adapter-card-meta">
         <span><span class="tabular-nums">${fmtBytes(a.size_bytes)}</span> on disk</span>
-        ${a.modified_at ? `<span title="${escapeHtml(a.modified_at)}">${escapeHtml(a.modified_at.split('T')[0])}</span>` : ''}
+        ${a.modified_at ? `<span title="modified ${escapeHtml(a.modified_at)}">${escapeHtml(fmtSmartTime(Date.parse(a.modified_at)))}</span>` : ''}
         ${a.files ? `<span class="tabular-nums">${a.files.length} file${a.files.length === 1 ? '' : 's'}</span>` : ''}
       </div>
       <div class="adapter-card-actions">
@@ -8176,7 +8927,7 @@ function renderAdapterDrillBody(d) {
         <span class="tabular-nums hint">${j.final_loss != null ? 'loss '+j.final_loss.toFixed(3) : '—'}</span>
         <span class="tabular-nums hint">${fmtDuration(j.elapsed_secs)}</span>
       </div>`).join('')
-    : '<div class="hint">No training jobs in tracking map (may have TTL\'d out).</div>';
+    : '<div class="hint">No training jobs have produced this adapter (yet). Submit one from the Training tab.</div>';
 
   const evalHtml = d.eval_jobs.length
     ? d.eval_jobs.map(j => `<div class="eval-row" data-eval-job="${escapeHtml(j.job_id)}" style="grid-template-columns:auto 1fr auto auto; cursor:pointer;">
@@ -8186,6 +8937,35 @@ function renderAdapterDrillBody(d) {
         <span class="hint" style="font-family:var(--font-mono);">${escapeHtml(j.job_id.slice(0,8))}</span>
       </div>`).join('')
     : '<div class="hint">No evals against this adapter yet. Click "Run eval…" above.</div>';
+
+  // Lineage section: surface the on-disk lineage.json fields when present
+  // so users can see base model + Kiln build + created_at without
+  // opening the file. Falls back gracefully when the adapter was
+  // uploaded or pre-dates the lineage format.
+  let lineageHtml = '';
+  if (d.lineage && typeof d.lineage === 'object') {
+    const lin = d.lineage;
+    const rows = [];
+    if (lin.base_model && lin.base_model.id) {
+      rows.push(`<div><span class="hint">Base model:</span> <code>${escapeHtml(lin.base_model.id)}</code></div>`);
+    }
+    if (lin.created_at) {
+      const t = Date.parse(lin.created_at);
+      rows.push(`<div><span class="hint">Created:</span> ${escapeHtml(isFinite(t) ? fmtSmartTime(t) : lin.created_at)} <span class="hint" title="${escapeHtml(lin.created_at)}">(${escapeHtml(lin.created_at.split('T')[0])})</span></div>`);
+    }
+    if (lin.kiln_commit) {
+      rows.push(`<div><span class="hint">Kiln build:</span> <code>${escapeHtml(lin.kiln_commit)}</code></div>`);
+    }
+    if (lin.replay_hash) {
+      rows.push(`<div><span class="hint">Replay hash:</span> <code style="font-size:11px;">${escapeHtml(String(lin.replay_hash).slice(0, 16))}…</code></div>`);
+    }
+    if (rows.length) {
+      lineageHtml = `<div class="detail-section">
+        <h4>Lineage</h4>
+        <div style="display:flex; flex-direction:column; gap:4px; font-size:13px;">${rows.join('')}</div>
+      </div>`;
+    }
+  }
 
   return `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
@@ -8207,6 +8987,7 @@ function renderAdapterDrillBody(d) {
       </div>
     </div>
   </div>
+  ${lineageHtml}
   <div class="detail-section">
     <h4>Eval history</h4>
     ${evalHtml}
@@ -8318,9 +9099,25 @@ async function fetchTrainDrill() {
        <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
 
     const stopBtn = document.getElementById('train-drill-stop');
-    if (stateLow === 'queued') { stopBtn.disabled = false; stopBtn.title = 'Cancel this queued job'; }
-    else if (stateLow === 'running') { stopBtn.disabled = true; stopBtn.title = 'Cancellation of running training jobs is not yet supported.'; }
-    else { stopBtn.disabled = true; stopBtn.title = 'Job already in terminal state'; }
+    const deleteBtn = document.getElementById('train-drill-delete');
+    if (stateLow === 'queued') {
+      stopBtn.disabled = false;
+      stopBtn.title = 'Cancel this queued job';
+      stopBtn.hidden = false;
+      if (deleteBtn) deleteBtn.hidden = true;
+    } else if (stateLow === 'running') {
+      stopBtn.disabled = true;
+      stopBtn.title = 'Cancellation of running training jobs is not yet supported.';
+      stopBtn.hidden = false;
+      if (deleteBtn) deleteBtn.hidden = true;
+    } else {
+      // Terminal (Completed / Failed) — hide Stop, show Delete instead.
+      stopBtn.hidden = true;
+      if (deleteBtn) {
+        deleteBtn.hidden = false;
+        deleteBtn.dataset.jobId = j.job_id;
+      }
+    }
     stopBtn.dataset.jobId = j.job_id;
 
     document.getElementById('train-drill-content').innerHTML = renderTrainDrillBody(j);
@@ -8353,19 +9150,35 @@ function renderTrainDrillBody(j) {
   const finalLoss = j.current_loss != null ? j.current_loss.toFixed(4) : '—';
   const epoch = j.epoch != null ? j.epoch.toString() : '—';
   const samples = (j.loss_history || []).length;
+  // Prefer the on-disk wall-clock fields when present — `elapsed_secs`
+  // is wrong for archived jobs because the in-memory `Instant` reset
+  // when we restored from disk.
+  let durationSecs = j.elapsed_secs;
+  if (j.submitted_unix_ms && j.finished_unix_ms) {
+    durationSecs = Math.max(0, (j.finished_unix_ms - j.submitted_unix_ms) / 1000);
+  } else if (j.submitted_unix_ms) {
+    durationSecs = Math.max(0, (Date.now() - j.submitted_unix_ms) / 1000);
+  }
+  const timeRow = (j.submitted_unix_ms || j.finished_unix_ms)
+    ? `<div style="margin-top:6px; font-size:11px; color:var(--text-quiet);">
+        ${j.submitted_unix_ms ? `submitted ${escapeHtml(fmtSmartTime(j.submitted_unix_ms))}` : ''}
+        ${j.finished_unix_ms ? ` · finished ${escapeHtml(fmtSmartTime(j.finished_unix_ms))}` : ''}
+      </div>`
+    : '';
   const html = `<div style="padding: var(--space-4) var(--space-5); border-bottom:1px solid var(--border);">
     <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Progress</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${(j.progress*100).toFixed(0)}%</div></div>
-      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Current loss</div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">${j.state === 'completed' || j.state === 'failed' ? 'Final loss' : 'Current loss'}</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${finalLoss}</div></div>
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Epoch</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${epoch}</div></div>
-      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Elapsed</div>
-        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtDuration(j.elapsed_secs)}</div></div>
+      <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Duration</div>
+        <div style="font-size:18px; font-weight:600;" class="tabular-nums">${fmtDuration(durationSecs)}</div></div>
       <div><div class="hint" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em;">Samples</div>
         <div style="font-size:18px; font-weight:600;" class="tabular-nums">${samples}</div></div>
     </div>
+    ${timeRow}
   </div>
   <div class="detail-section">
     <h4>Loss curve</h4>
@@ -8411,6 +9224,20 @@ document.getElementById('train-drill-stop')?.addEventListener('click', () => {
   closeTrainDrillModal();
   window.cancelJob(jobId);
 });
+document.getElementById('train-drill-delete')?.addEventListener('click', async () => {
+  const jobId = document.getElementById('train-drill-delete').dataset.jobId;
+  if (!jobId) return;
+  if (!confirm('Permanently delete this training job? The adapter weights on disk are untouched; only the tracking entry and the on-disk archive file are removed.')) return;
+  try {
+    await api('/v1/train/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' });
+    toast('Training job deleted', 'ok');
+    closeTrainDrillModal();
+    lastTrainingKey = null; // bypass change-detection so re-render happens
+    pollTraining();
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'err');
+  }
+});
 
 /* =====================================================================
    Playground: A/B compare mode + send-to-judgments
@@ -8422,32 +9249,50 @@ document.getElementById('train-drill-stop')?.addEventListener('click', () => {
 // pair into a chosen judgment dataset. Saves the inevitable copy-paste
 // dance into the Evals tab.
 
-const compareToolbar = document.createElement('div');
-compareToolbar.className = 'chat-controls';
-compareToolbar.style.borderTop = '1px solid var(--border)';
-compareToolbar.style.borderBottom = '1px solid var(--border)';
-compareToolbar.innerHTML = `
-  <label style="user-select:none; display:flex; align-items:center; gap:6px; cursor:pointer;">
-    <input type="checkbox" id="chat-compare-toggle"> Compare mode
-  </label>
-  <label for="chat-adapter-b" id="chat-adapter-b-label" style="display:none;">Adapter B</label>
-  <select id="chat-adapter-b" style="display:none;"><option value="">Base model</option></select>
-  <span style="flex:1;"></span>
-  <button class="btn btn-sm" id="chat-save-judgment" type="button" disabled title="Send this A/B pair into a judgment dataset">↗ Save A/B preference</button>`;
-
+// Inject the compare-mode controls into the top .chat-controls row so
+// the toggle is right next to the adapter dropdown — previously the
+// toggle hid below the input row where users never found it.
 const playgroundCard = document.querySelector('.playground-card');
 if (playgroundCard) {
-  const inputRow = playgroundCard.querySelector('.chat-input-row');
-  if (inputRow) inputRow.parentNode.insertBefore(compareToolbar, inputRow);
+  const topControls = playgroundCard.querySelector('.chat-controls');
+  if (topControls) {
+    const compareFrag = document.createElement('span');
+    compareFrag.style.cssText = 'display:flex; align-items:center; gap:var(--space-3);';
+    compareFrag.innerHTML = `
+      <label class="chat-toggle-label" style="user-select:none; cursor:pointer;" title="Send the same prompt to two adapters side-by-side for direct comparison.">
+        <input type="checkbox" id="chat-compare-toggle">
+        <span>Compare</span>
+      </label>
+      <label for="chat-adapter-b" id="chat-adapter-b-label" style="display:none;">vs</label>
+      <select id="chat-adapter-b" style="display:none;"><option value="">Base model</option></select>`;
+    const advanced = topControls.querySelector('#chat-toggle-advanced');
+    if (advanced) topControls.insertBefore(compareFrag, advanced);
+    else topControls.appendChild(compareFrag);
+  }
+  // Save-pair action sits in chat-output-actions next to Copy/Export.
+  const outputActions = playgroundCard.querySelector('.chat-output-actions');
+  if (outputActions) {
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.className = 'btn btn-sm';
+    saveBtn.id = 'chat-save-judgment';
+    saveBtn.disabled = true;
+    saveBtn.title = 'Send this A/B pair into a judgment dataset';
+    saveBtn.textContent = '↗ Save A/B preference';
+    const exportBtn = outputActions.querySelector('#chat-export');
+    if (exportBtn) outputActions.insertBefore(saveBtn, exportBtn);
+    else outputActions.appendChild(saveBtn);
+  }
   // The compare reply panel — appears under the existing chat-output.
   const comparePair = document.createElement('div');
   comparePair.id = 'chat-compare-pair';
   comparePair.className = 'compare-pair';
   comparePair.style.display = 'none';
   comparePair.style.padding = '0 var(--space-5) var(--space-4)';
+  const sidePlaceholder = `<div style="color:var(--text-quiet); font-style:italic; font-size:12px; padding:8px 0;">Pick adapters above and send a prompt to fan it out side-by-side.</div>`;
   comparePair.innerHTML = `
-    <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body"></div></div>
-    <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body"></div></div>`;
+    <div class="compare-side"><div class="compare-side-head">A · <span id="chat-compare-a-name">base</span></div><div class="compare-side-body" id="chat-compare-a-body">${sidePlaceholder}</div></div>
+    <div class="compare-side"><div class="compare-side-head">B · <span id="chat-compare-b-name">base</span></div><div class="compare-side-body" id="chat-compare-b-body">${sidePlaceholder}</div></div>`;
   const chatOutput = playgroundCard.querySelector('.chat-output-actions');
   if (chatOutput) chatOutput.parentNode.insertBefore(comparePair, chatOutput);
 }
@@ -8460,6 +9305,15 @@ chatCompareToggle?.addEventListener('change', ev => {
   document.getElementById('chat-adapter-b-label').style.display = chatCompareMode ? '' : 'none';
   document.getElementById('chat-adapter-b').style.display = chatCompareMode ? '' : 'none';
   document.getElementById('chat-compare-pair').style.display = chatCompareMode ? '' : 'none';
+  // Hide the simple-mode chat history when compare is on — compare runs
+  // are stateless, single-prompt, so showing prior turns is confusing.
+  // The chat history isn't cleared (toggling back off restores it).
+  const chatOutput = document.getElementById('chat-output');
+  if (chatOutput) chatOutput.style.display = chatCompareMode ? 'none' : '';
+  const chatExport = document.getElementById('chat-export');
+  if (chatExport) chatExport.style.display = chatCompareMode ? 'none' : '';
+  const chatCopy = document.querySelector('[data-copy-chat-response]');
+  if (chatCopy) chatCopy.style.display = chatCompareMode ? 'none' : '';
   // Sync the B dropdown to the same options as A.
   const a = document.getElementById('chat-adapter');
   const b = document.getElementById('chat-adapter-b');
@@ -8617,52 +9471,65 @@ async function streamCompareSide(side, adapterName, prompt, temp, signal) {
 
 // Hook send button: when compare mode is on, fan out to A and B in
 // parallel and render side-by-side with live streaming. Otherwise
-// let the existing handler do its thing.
-const chatSendBtn = document.getElementById('chat-send');
+// let the existing `sendChat` handler take it (it early-returns when
+// compare mode is on, so the two handlers don't fight).
 let chatCompareAbort = null;
-if (chatSendBtn) {
-  chatSendBtn.addEventListener('click', async () => {
-    if (!chatCompareMode) return;  // existing handler runs
-    if (chatCompareAbort) return;
-    const promptEl = document.getElementById('chat-input');
-    const prompt = (promptEl?.value || '').trim();
-    if (!prompt) return;
-    let temp;
-    try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
-    catch (error) { toast(error.message, 'err'); return; }
+async function sendChatCompare() {
+  if (chatCompareAbort) return;
+  const promptEl = document.getElementById('chat-input');
+  const prompt = (promptEl?.value || '').trim();
+  if (!prompt) return;
+  let temp;
+  try { temp = parseQuickInferenceTemperature(document.getElementById('chat-temp')); }
+  catch (error) { toast(error.message, 'err'); return; }
 
-    const adapterA = document.getElementById('chat-adapter').value;
-    const adapterB = document.getElementById('chat-adapter-b').value;
-    document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
-    document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
-    promptEl.value = '';
-    autoresizeChatInput();
-    updateChatSendState();
-    setChatGenerating(true);
-    document.getElementById('chat-save-judgment').disabled = true;
+  const adapterA = document.getElementById('chat-adapter').value;
+  const adapterB = document.getElementById('chat-adapter-b').value;
+  document.getElementById('chat-compare-a-name').textContent = adapterA || 'base';
+  document.getElementById('chat-compare-b-name').textContent = adapterB || 'base';
+  promptEl.value = '';
+  autoresizeChatInput();
+  updateChatSendState();
+  setChatGenerating(true);
+  document.getElementById('chat-save-judgment').disabled = true;
 
-    chatCompareAbort = new AbortController();
-    try {
-      const [a, b] = await Promise.all([
-        streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
-        streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
-      ]);
-      if (a.content || b.content) {
-        chatComparePair = {
-          prompt: [{ role: 'user', content: prompt }],
-          adapter_a: adapterA || null,
-          adapter_b: adapterB || null,
-          response_a: a.content || '',
-          response_b: b.content || '',
-        };
-        document.getElementById('chat-save-judgment').disabled = false;
-      }
-    } finally {
-      chatCompareAbort = null;
-      setChatGenerating(false);
+  chatCompareAbort = new AbortController();
+  try {
+    const [a, b] = await Promise.all([
+      streamCompareSide('a', adapterA, prompt, temp, chatCompareAbort.signal),
+      streamCompareSide('b', adapterB, prompt, temp, chatCompareAbort.signal),
+    ]);
+    if (a.content || b.content) {
+      chatComparePair = {
+        prompt: [{ role: 'user', content: prompt }],
+        adapter_a: adapterA || null,
+        adapter_b: adapterB || null,
+        response_a: a.content || '',
+        response_b: b.content || '',
+      };
+      document.getElementById('chat-save-judgment').disabled = false;
     }
+  } finally {
+    chatCompareAbort = null;
+    setChatGenerating(false);
+  }
+}
+const chatSendBtn = document.getElementById('chat-send');
+if (chatSendBtn) {
+  chatSendBtn.addEventListener('click', () => {
+    if (!chatCompareMode) return;  // sendChat handler covers simple mode
+    sendChatCompare();
   });
 }
+// Enter-key in the textarea routes through sendChat, which early-returns
+// when compare mode is on. Route those Enter presses to the compare flow.
+document.getElementById('chat-input')?.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  if (!chatCompareMode) return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  sendChatCompare();
+}, { capture: true });
 
 // Wire the existing #chat-stop button so it aborts compare-mode
 // streams too (the simple-mode handler already aborts `chatAbort`).
@@ -8719,6 +9586,11 @@ pollAdapters();
 pollTraining();
 pollDecodePerf();
 pollRecentRequests();
+// Pull eval jobs once at startup so the Evals tab badge reflects archived
+// runs immediately. The Evals tab also refreshes on its own tab-switch
+// handler — this just makes the dashboard's header count accurate before
+// the user has visited the tab.
+if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
 
 setInterval(pollHealth, 2000);
 setInterval(pollAdapters, 5000);
@@ -8727,6 +9599,15 @@ setInterval(pollDecodePerf, 2000);
 setInterval(pollRecentRequests, 2000);
 // Refresh relative timestamps every second without re-fetching the list.
 setInterval(refreshRecentTimes, 1000);
+// Refresh eval-jobs badge count every 5s so it tracks queued / running
+// changes even when the user is on a different tab.
+setInterval(() => {
+  if (typeof refreshEvalJobs !== 'function') return;
+  // Only refresh the badge when the Evals tab isn't already actively
+  // polling — its own polling cadence is more aggressive when visible.
+  const evalsActive = document.querySelector('[data-page="evals"]')?.classList.contains('active');
+  if (!evalsActive) refreshEvalJobs();
+}, 5000);
 
 })();
 </script>

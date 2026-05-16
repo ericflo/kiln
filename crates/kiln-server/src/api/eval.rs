@@ -416,35 +416,66 @@ async fn cancel_job(
         let mut q = state.eval_queue.lock().unwrap();
         q.remove(&job_id)
     };
-    // Mark in tracking map.
-    let mut jobs = state.eval_jobs.write().unwrap();
-    let job = jobs
-        .get_mut(&job_id)
-        .ok_or_else(|| ApiError::eval_job_not_found(&job_id))?;
-    match job.state {
-        EvalJobState::Queued => {
-            job.state = EvalJobState::Cancelled;
-            job.finished_at_iso = Some(chrono::Utc::now().to_rfc3339());
-            job.finished_at = Some(std::time::Instant::now());
+    // Look up current state. We may mutate (cancel) or delete (terminal).
+    let current_state = {
+        let jobs = state.eval_jobs.read().unwrap();
+        jobs.get(&job_id).map(|j| j.state)
+    };
+    match current_state {
+        None => Err(ApiError::eval_job_not_found(&job_id)),
+        Some(EvalJobState::Queued) => {
+            let mut jobs = state.eval_jobs.write().unwrap();
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.state = EvalJobState::Cancelled;
+                job.finished_at_iso = Some(chrono::Utc::now().to_rfc3339());
+                job.finished_at = Some(std::time::Instant::now());
+            }
             Ok(Json(serde_json::json!({
                 "status": "cancelled",
                 "job_id": job_id,
                 "was_in_queue": removed,
             })))
         }
-        EvalJobState::Running => {
+        Some(EvalJobState::Running) => {
             // Running cancellation is best-effort: the worker checks the
             // tracked state at iteration boundaries.
-            job.state = EvalJobState::Cancelled;
+            let mut jobs = state.eval_jobs.write().unwrap();
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.state = EvalJobState::Cancelled;
+            }
             Ok(Json(serde_json::json!({
                 "status": "cancelling",
                 "job_id": job_id,
                 "note": "running job will exit at the next example boundary",
             })))
         }
-        EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed => Err(
-            ApiError::eval_invalid_request("job is already in a terminal state"),
-        ),
+        Some(
+            EvalJobState::Cancelled | EvalJobState::Completed | EvalJobState::Failed,
+        ) => {
+            // Terminal — DELETE means "remove from tracking + archive".
+            {
+                let mut jobs = state.eval_jobs.write().unwrap();
+                jobs.remove(&job_id);
+            }
+            let archive_path = crate::eval_history::archive_dir(&state.adapter_dir)
+                .join(format!("{job_id}.json"));
+            let removed_file = match std::fs::remove_file(&archive_path) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return Err(ApiError::internal(format!(
+                        "failed to delete archive file {}: {}",
+                        archive_path.display(),
+                        e
+                    )));
+                }
+            };
+            Ok(Json(serde_json::json!({
+                "status": "deleted",
+                "job_id": job_id,
+                "removed_archive_file": removed_file,
+            })))
+        }
     }
 }
 
