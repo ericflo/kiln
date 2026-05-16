@@ -75,33 +75,114 @@ async fn submit_front_door(
     State(state): State<AppState>,
     Json(req): Json<FrontDoorRequest>,
 ) -> Result<Json<FrontDoorResponse>, ApiError> {
-    let pipeline = match &req {
-        FrontDoorRequest::DistillRefresh(_) => "distill_refresh",
-        FrontDoorRequest::DistillMerge(_) => "distill_merge",
-        FrontDoorRequest::DistillPump(_) => "distill_pump",
-        FrontDoorRequest::Opd(_) => "opd",
-        FrontDoorRequest::Grpo(_) => "grpo",
-        FrontDoorRequest::Sft(_) => "sft",
+    use crate::state::{TrainingJobInfo, TrainingJobType};
+    use crate::training_queue::{QueueEntry, QueuedJob};
+    use std::sync::atomic::Ordering;
+
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+
+    let max_queued = state.max_queued_training_jobs;
+    if state.training_queue.lock().unwrap().len() >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+
+    let (pipeline, job_type, adapter_name, auto_load, queued): (
+        &'static str,
+        TrainingJobType,
+        String,
+        bool,
+        QueuedJob,
+    ) = match req {
+        FrontDoorRequest::DistillRefresh(r) => (
+            "distill_refresh",
+            TrainingJobType::Opd,
+            r.config
+                .output_name
+                .clone()
+                .unwrap_or_else(|| format!("{}-refresh", r.name)),
+            r.config.auto_load,
+            QueuedJob::DistillRefresh(r),
+        ),
+        FrontDoorRequest::DistillMerge(r) => (
+            "distill_merge",
+            TrainingJobType::Opd,
+            r.name.clone(),
+            r.config.auto_load,
+            QueuedJob::DistillMerge(r),
+        ),
+        FrontDoorRequest::DistillPump(r) => (
+            "distill_pump",
+            TrainingJobType::Opd,
+            r.name.clone(),
+            r.config.auto_load,
+            QueuedJob::DistillPump(r),
+        ),
+        FrontDoorRequest::Opd(r) => (
+            "opd",
+            TrainingJobType::Opd,
+            r.config
+                .output_name
+                .clone()
+                .unwrap_or_else(|| format!("opd-{}", uuid::Uuid::new_v4())),
+            r.config.auto_load,
+            QueuedJob::Opd(r),
+        ),
+        FrontDoorRequest::Grpo(r) => (
+            "grpo",
+            TrainingJobType::Grpo,
+            r.config
+                .output_name
+                .clone()
+                .unwrap_or_else(|| format!("grpo-{}", uuid::Uuid::new_v4())),
+            r.config.auto_load,
+            QueuedJob::Grpo(r),
+        ),
+        FrontDoorRequest::Sft(r) => (
+            "sft",
+            TrainingJobType::Sft,
+            r.config
+                .output_name
+                .clone()
+                .unwrap_or_else(|| format!("sft-{}", uuid::Uuid::new_v4())),
+            r.config.auto_load,
+            QueuedJob::Sft(r),
+        ),
     };
-    let _ = state;
-    // For milestone-13 we surface the dispatch decision via the
-    // FrontDoorResponse. The actual queued-job creation reuses the
-    // existing submit_* helpers; we surface a synthesized job_id
-    // here so the dashboard can poll. Full chained dispatch lands
-    // alongside the trainer-body wiring; the routing decision logic
-    // is the load-bearing piece (and the most likely place for
-    // future tweaks per §8.2).
+
     let job_id = uuid::Uuid::new_v4().to_string();
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        job_type,
+        state: kiln_train::TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        auto_load,
+        finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+    state.training_queue.lock().unwrap().push(QueueEntry {
+        job_id: job_id.clone(),
+        job: queued,
+    });
+
     Ok(Json(FrontDoorResponse {
         picked: pipeline,
         training: TrainingResponse {
             job_id,
             state: kiln_train::TrainingState::Queued,
-            message: format!(
-                "§8.2 front-door dispatched to {pipeline}. \
-                 Call the per-pipeline endpoint directly to enqueue execution \
-                 until the dispatcher routes through the queue (#31)."
-            ),
+            message: format!("§8.2 front-door dispatched to {pipeline}."),
         },
     }))
 }
