@@ -94,6 +94,27 @@ pub struct OpdDiagnosticSnapshot {
     /// ran this pass.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlap_ratio: Option<f64>,
+    /// §11 `LongTailRewardDecay` — first position at which the
+    /// trainer detected the per-position KL trending up
+    /// monotonically. `None` when no decay observed. Li et al.
+    /// 2026 §6.1 reports degradation past 7K tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub long_tail_decay_position: Option<usize>,
+    /// §11 / §8.5 `CapacityGap` — bits_storable / bits_needed
+    /// ratio. <0.3 fires the guardrail. `None` when the calculator
+    /// hasn't run this pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capacity_ratio: Option<f64>,
+    /// §11 `ThinkingPatternMismatch` — observed median overlap
+    /// from the cold-start probe. <0.3 even after cold-start
+    /// fires the guardrail. `None` when no probe this pass.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_cold_start_overlap: Option<f64>,
+    /// True when a Stable-OPD `BumpStableOpd` was already applied
+    /// in a previous validation pass. Used by `FlawedPrefixCollapse`
+    /// to detect "bump didn't help" cases.
+    #[serde(default)]
+    pub stable_opd_already_bumped: bool,
 }
 
 /// One rollout's worth of metadata for diagnostic-stack input.
@@ -249,6 +270,10 @@ pub fn build_snapshot(
         num_rollouts: rollouts.len(),
         mean_entropy_gap: None,
         overlap_ratio: None,
+        long_tail_decay_position: None,
+        capacity_ratio: None,
+        post_cold_start_overlap: None,
+        stable_opd_already_bumped: false,
     }
 }
 
@@ -290,6 +315,29 @@ pub enum GuardrailDecision {
     /// Entropy gap widening; reduce learning rate by 0.5×.
     /// §3.9 `EntropyGapWidening`.
     ReduceLearningRate { factor: f64, reason: GuardrailTrigger },
+    /// §11 `LongTailRewardDecay`: cap rollout length at the
+    /// `last_healthy_position` before resuming. The trainer
+    /// applies via `OpdConfig::max_tokens`.
+    CapRolloutLength {
+        max_tokens: usize,
+        reason: GuardrailTrigger,
+    },
+    /// §11 `ThinkingPatternMismatch`: refuse to start the run.
+    /// User must change the teacher or accept an explicit override.
+    RefuseRun { reason: GuardrailTrigger },
+    /// §11 `CapacityGap`: increase LoRA rank before retrying.
+    /// `suggested_rank` derived from §8.5 capacity calc.
+    IncreaseLoRARank {
+        suggested_rank: usize,
+        reason: GuardrailTrigger,
+    },
+    /// §11 `FlawedPrefixCollapse`: combine halve-LR + cap rollout
+    /// length. Last-resort mitigation before the auto-rollback.
+    HalveLrAndCapTokens {
+        new_lr_factor: f64,
+        new_max_tokens: usize,
+        reason: GuardrailTrigger,
+    },
 }
 
 /// The specific paper-cited trigger that fired the guardrail.
@@ -308,6 +356,26 @@ pub enum GuardrailTrigger {
     /// `|H(q) - H(p)|` trending up after step 50 (§3.9
     /// `EntropyGapWidening`). Reduce learning rate by 0.5×.
     EntropyGapWidening { window: usize },
+    /// §11 / Li et al. 2026 §6.1 — per-position KL increases
+    /// monotonically past position 7K, indicating the teacher's
+    /// reward decays at depth. Cap rollout length at the position
+    /// where the signal degrades.
+    LongTailRewardDecay { last_healthy_position: usize },
+    /// §11 — initial overlap stayed below 0.3 even after cold-start
+    /// (Li et al. §3.1). The chosen teacher is stylistically
+    /// incompatible with the student. Refuse the run; suggest
+    /// alternatives from the compatibility table.
+    ThinkingPatternMismatch { observed_overlap: f64 },
+    /// §11 / §8.5 — `bits_storable < 0.3 × bits_needed`. The LoRA
+    /// can't hold the information the run wants to teach.
+    CapacityGap { ratio: f64 },
+    /// §11 — truncation rate STILL > 0.9 in the validation pass
+    /// AFTER a Stable-OPD bump was already applied. The bump
+    /// didn't help; the prefix-collapse failure mode (flawed
+    /// student-generated prefixes the teacher can't score reliably)
+    /// is in flight. Drastic action: halve learning rate AND drop
+    /// max_tokens.
+    FlawedPrefixCollapse { passes_since_bump: usize },
 }
 
 /// Stateful guardrail that consumes snapshots in order and decides on
@@ -373,41 +441,100 @@ impl LengthInflationGuardrail {
         }
 
         // Priority order (most critical first):
-        // 1. TruncationSpike → rollback.
-        // 2. OverlapStagnation → pause + recommend cold-start.
-        // 3. RepetitionRateAbove → bump Stable-OPD.
-        // 4. EntropyGapWidening → reduce LR.
-        let decision = if self.consecutive_high_trunc >= 2 {
-            GuardrailDecision::RollBackAndPause {
-                reason: GuardrailTrigger::TruncationSpike {
-                    recent: self.consecutive_high_trunc,
-                },
+        // 0a. ThinkingPatternMismatch → refuse the run (terminal).
+        // 0b. CapacityGap → ask user to bump rank (terminal).
+        // 1.  FlawedPrefixCollapse → halve LR + cap tokens.
+        // 2.  TruncationSpike → rollback.
+        // 3.  OverlapStagnation → pause + recommend cold-start.
+        // 4.  LongTailRewardDecay → cap rollout length.
+        // 5.  RepetitionRateAbove → bump Stable-OPD.
+        // 6.  EntropyGapWidening → reduce LR.
+        let decision = if let Some(o) = snapshot.post_cold_start_overlap {
+            if o < 0.3 {
+                GuardrailDecision::RefuseRun {
+                    reason: GuardrailTrigger::ThinkingPatternMismatch {
+                        observed_overlap: o,
+                    },
+                }
+            } else {
+                self.decide_no_terminal(snapshot)
             }
-        } else if self.overlap_stagnation_fires() {
-            GuardrailDecision::PauseAndRecommendColdStart {
-                reason: GuardrailTrigger::OverlapStagnation {
-                    window: self.overlap_history.len(),
-                },
-            }
-        } else if self.consecutive_high_rep >= 2 {
-            GuardrailDecision::BumpStableOpd {
-                reason: GuardrailTrigger::RepetitionRateAbove {
-                    recent: self.consecutive_high_rep,
-                },
-            }
-        } else if self.entropy_gap_widening() {
-            GuardrailDecision::ReduceLearningRate {
-                factor: 0.5,
-                reason: GuardrailTrigger::EntropyGapWidening {
-                    window: self.entropy_gap_history.len(),
-                },
+        } else if let Some(r) = snapshot.capacity_ratio {
+            if r < 0.3 {
+                // Suggested rank: scale up to hit ratio 1.0 with
+                // some headroom (2×). Conservative.
+                let scale = (1.0 / r).max(1.0);
+                GuardrailDecision::IncreaseLoRARank {
+                    suggested_rank: ((scale * 32.0).round() as usize).max(32),
+                    reason: GuardrailTrigger::CapacityGap { ratio: r },
+                }
+            } else {
+                self.decide_no_terminal(snapshot)
             }
         } else {
-            GuardrailDecision::Ok
+            self.decide_no_terminal(snapshot)
         };
 
         self.last_decision = decision;
         decision
+    }
+
+    /// Run the non-terminal guardrail priority. Called after the
+    /// terminal-condition checks (ThinkingPatternMismatch /
+    /// CapacityGap).
+    fn decide_no_terminal(
+        &mut self,
+        snapshot: &OpdDiagnosticSnapshot,
+    ) -> GuardrailDecision {
+        if snapshot.stable_opd_already_bumped && self.consecutive_high_trunc >= 1 {
+            // §11 FlawedPrefixCollapse: bump didn't help, take
+            // harsher action.
+            return GuardrailDecision::HalveLrAndCapTokens {
+                new_lr_factor: 0.5,
+                new_max_tokens: 4_096,
+                reason: GuardrailTrigger::FlawedPrefixCollapse {
+                    passes_since_bump: self.consecutive_high_trunc,
+                },
+            };
+        }
+        if self.consecutive_high_trunc >= 2 {
+            return GuardrailDecision::RollBackAndPause {
+                reason: GuardrailTrigger::TruncationSpike {
+                    recent: self.consecutive_high_trunc,
+                },
+            };
+        }
+        if self.overlap_stagnation_fires() {
+            return GuardrailDecision::PauseAndRecommendColdStart {
+                reason: GuardrailTrigger::OverlapStagnation {
+                    window: self.overlap_history.len(),
+                },
+            };
+        }
+        if let Some(pos) = snapshot.long_tail_decay_position {
+            return GuardrailDecision::CapRolloutLength {
+                max_tokens: pos,
+                reason: GuardrailTrigger::LongTailRewardDecay {
+                    last_healthy_position: pos,
+                },
+            };
+        }
+        if self.consecutive_high_rep >= 2 {
+            return GuardrailDecision::BumpStableOpd {
+                reason: GuardrailTrigger::RepetitionRateAbove {
+                    recent: self.consecutive_high_rep,
+                },
+            };
+        }
+        if self.entropy_gap_widening() {
+            return GuardrailDecision::ReduceLearningRate {
+                factor: 0.5,
+                reason: GuardrailTrigger::EntropyGapWidening {
+                    window: self.entropy_gap_history.len(),
+                },
+            };
+        }
+        GuardrailDecision::Ok
     }
 
     pub fn last_decision(&self) -> GuardrailDecision {
@@ -547,6 +674,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         assert_eq!(g.observe(&mk_snap(0.04)), GuardrailDecision::Ok);
         assert_eq!(g.observe(&mk_snap(0.10)), GuardrailDecision::Ok); // 1st high
@@ -574,6 +705,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         g.observe(&mk_snap(0.10));
         g.observe(&mk_snap(0.12));
@@ -599,6 +734,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         g.observe(&mk_snap(0.95));
         match g.observe(&mk_snap(0.99)) {
@@ -621,6 +760,10 @@ mod tests {
             num_rollouts: 64,
             mean_entropy_gap: Some(0.07),
             overlap_ratio: Some(0.88),
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: OpdDiagnosticSnapshot = serde_json::from_str(&json).unwrap();
@@ -643,6 +786,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: Some(overlap),
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         // Window is GUARDRAIL_WINDOW=6 entries. Feed 5 close together
         // (no decision), then 6th close → fires.
@@ -671,6 +818,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: Some(overlap),
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         // Window with 0.10 spread → above 0.01 threshold ⇒ never fires.
         let values = [0.70, 0.72, 0.74, 0.77, 0.79, 0.80];
@@ -692,6 +843,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: Some(gap),
             overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         // Monotonically rising entropy gap over the window.
         let rising = [0.10, 0.12, 0.15, 0.18, 0.22, 0.26];
@@ -715,6 +870,131 @@ mod tests {
     }
 
     #[test]
+    fn guardrail_thinking_pattern_mismatch_refuses_run() {
+        let mut g = LengthInflationGuardrail::default();
+        let snap = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            // Cold-start ran; even afterwards overlap is below 0.3 →
+            // §11 ThinkingPatternMismatch → RefuseRun.
+            post_cold_start_overlap: Some(0.22),
+            stable_opd_already_bumped: false,
+        };
+        match g.observe(&snap) {
+            GuardrailDecision::RefuseRun {
+                reason: GuardrailTrigger::ThinkingPatternMismatch { observed_overlap },
+            } => {
+                assert!((observed_overlap - 0.22).abs() < 1e-9);
+            }
+            other => panic!("expected RefuseRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_capacity_gap_suggests_rank_increase() {
+        let mut g = LengthInflationGuardrail::default();
+        let snap = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            // Capacity calc says we're 5× short.
+            capacity_ratio: Some(0.2),
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+        };
+        match g.observe(&snap) {
+            GuardrailDecision::IncreaseLoRARank {
+                suggested_rank,
+                reason: GuardrailTrigger::CapacityGap { ratio },
+            } => {
+                assert!((ratio - 0.2).abs() < 1e-9);
+                // scale ≈ 1/0.2 = 5.0; suggested ≈ 5 * 32 = 160.
+                assert!(suggested_rank >= 32);
+                assert!(suggested_rank >= 100);
+            }
+            other => panic!("expected IncreaseLoRARank, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_long_tail_reward_decay_caps_rollout() {
+        let mut g = LengthInflationGuardrail::default();
+        let snap = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: Some(7168),
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+        };
+        match g.observe(&snap) {
+            GuardrailDecision::CapRolloutLength {
+                max_tokens,
+                reason: GuardrailTrigger::LongTailRewardDecay { last_healthy_position },
+            } => {
+                assert_eq!(max_tokens, 7168);
+                assert_eq!(last_healthy_position, 7168);
+            }
+            other => panic!("expected CapRolloutLength, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_flawed_prefix_collapse_after_bump() {
+        let mut g = LengthInflationGuardrail::default();
+        let snap = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.95, // still high
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 10,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: true, // bump already applied
+        };
+        match g.observe(&snap) {
+            GuardrailDecision::HalveLrAndCapTokens {
+                new_lr_factor,
+                new_max_tokens,
+                reason: GuardrailTrigger::FlawedPrefixCollapse { passes_since_bump },
+            } => {
+                assert!((new_lr_factor - 0.5).abs() < 1e-9);
+                assert_eq!(new_max_tokens, 4096);
+                assert!(passes_since_bump >= 1);
+            }
+            other => panic!("expected HalveLrAndCapTokens, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn guardrail_priority_truncation_beats_overlap() {
         let mut g = LengthInflationGuardrail::default();
         let mk = OpdDiagnosticSnapshot {
@@ -727,6 +1007,10 @@ mod tests {
             num_rollouts: 10,
             mean_entropy_gap: None,
             overlap_ratio: Some(0.71),
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
         };
         // Trunc spike both passes — must win over overlap stagnation.
         g.observe(&mk);
