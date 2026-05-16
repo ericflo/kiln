@@ -54,6 +54,11 @@ static GDN_UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
 static GDN_SUBMIT_NS: AtomicU64 = AtomicU64::new(0);
 static GDN_READBACK_NS: AtomicU64 = AtomicU64::new(0);
 static GDN_CALLS: AtomicUsize = AtomicUsize::new(0);
+static GDNFB_TOTAL_NS: AtomicU64 = AtomicU64::new(0);
+static GDNFB_UPLOAD_NS: AtomicU64 = AtomicU64::new(0);
+static GDNFB_SUBMIT_NS: AtomicU64 = AtomicU64::new(0);
+static GDNFB_READBACK_NS: AtomicU64 = AtomicU64::new(0);
+static GDNFB_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 fn timing_enabled() -> bool {
     *TIMING_ENABLED.get_or_init(|| {
@@ -72,7 +77,8 @@ pub fn drain_resident_decode_timing() {
     }
     let fa_calls = FA_CALLS.swap(0, Ordering::SeqCst);
     let gdn_calls = GDN_CALLS.swap(0, Ordering::SeqCst);
-    if fa_calls == 0 && gdn_calls == 0 {
+    let gdnfb_calls = GDNFB_CALLS.swap(0, Ordering::SeqCst);
+    if fa_calls == 0 && gdn_calls == 0 && gdnfb_calls == 0 {
         return;
     }
     let fa_total = FA_TOTAL_NS.swap(0, Ordering::SeqCst);
@@ -83,6 +89,10 @@ pub fn drain_resident_decode_timing() {
     let gdn_upload = GDN_UPLOAD_NS.swap(0, Ordering::SeqCst);
     let gdn_submit = GDN_SUBMIT_NS.swap(0, Ordering::SeqCst);
     let gdn_readback = GDN_READBACK_NS.swap(0, Ordering::SeqCst);
+    let gdnfb_total = GDNFB_TOTAL_NS.swap(0, Ordering::SeqCst);
+    let gdnfb_upload = GDNFB_UPLOAD_NS.swap(0, Ordering::SeqCst);
+    let gdnfb_submit = GDNFB_SUBMIT_NS.swap(0, Ordering::SeqCst);
+    let gdnfb_readback = GDNFB_READBACK_NS.swap(0, Ordering::SeqCst);
     let ms = |ns: u64| (ns as f64) / 1e6;
     eprintln!(
         "[vk-resident-timing] full-attn calls={fa_calls} total={:.2}ms upload={:.2}ms submit={:.2}ms readback={:.2}ms cpu={:.2}ms",
@@ -99,6 +109,14 @@ pub fn drain_resident_decode_timing() {
         ms(gdn_submit),
         ms(gdn_readback),
         ms(gdn_total.saturating_sub(gdn_upload + gdn_submit + gdn_readback)),
+    );
+    eprintln!(
+        "[vk-resident-timing] GDN-fblk  calls={gdnfb_calls} total={:.2}ms upload={:.2}ms submit={:.2}ms readback={:.2}ms cpu={:.2}ms",
+        ms(gdnfb_total),
+        ms(gdnfb_upload),
+        ms(gdnfb_submit),
+        ms(gdnfb_readback),
+        ms(gdnfb_total.saturating_sub(gdnfb_upload + gdnfb_submit + gdnfb_readback)),
     );
 }
 
@@ -537,6 +555,345 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 /// only the GDN-specific portion).
 ///
 /// Returns `Ok(None)` when the input does not match the supported
+/// Full transformer block for a GDN (linear-attention) layer, end to
+/// end on the Vulkan-resident path.
+///
+/// Mirrors [`transformer_block_paged_decode_full_attn_resident_b1`] but
+/// with GDN compute in place of full attention. The block is everything
+/// the legacy orchestration does for a GDN layer:
+///
+///   pre_norm → GDN(in_proj + split + conv1d + qkv_split + qk_norm +
+///   fused_gates_recurrent_rmsnorm + out_proj) → +residual → post_norm
+///   → MLP gate_up + down → +residual
+///
+/// Lifting all of this into one `CommandBatch` per layer eliminates the
+/// 24 GDN layers × 5 candle ops (pre-norm + residual + post-norm + MLP
+/// + final-residual) that previously dominated decode ITL (~17 ms /
+/// GDN layer = ~408 ms / token observed via `KILN_VK_RESIDENT_DECODE_TIMING`).
+///
+/// Returns `Ok(Some(post_block_residual_tensor))` on success;
+/// `Ok(None)` on any unsupported configuration so the caller falls back
+/// to the legacy path bit-identically.
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_paged_decode_gdn_resident_b1(
+    backend: &VulkanBackend,
+    x: &Tensor,
+    layer: &GpuLayerWeights,
+    config: &ModelConfig,
+    recurrent_state_t: &Tensor,
+    conv_state_t: &Tensor,
+) -> Result<Option<Tensor>> {
+    let state_key = recurrent_state_t.id();
+    let dims = x.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
+        return Ok(None);
+    }
+    let hidden = dims[2];
+    if hidden != config.hidden_size {
+        return Ok(None);
+    }
+    let lin_weights = match &layer.attention {
+        crate::forward::GpuAttentionWeights::Linear(w) => w,
+        _ => return Ok(None),
+    };
+    let Some(vk_device) = backend.vulkan_device() else {
+        return Ok(None);
+    };
+
+    let nk = config.linear_num_key_heads;
+    let dk = config.linear_key_head_dim;
+    let nv = config.linear_num_value_heads;
+    let dv = config.linear_value_head_dim;
+    let qk_dim = nk * dk;
+    let v_dim = nv * dv;
+    let qkv_dim = 2 * qk_dim + v_dim;
+    let z_dim = v_dim;
+    let a_dim = nv;
+    let b_dim = nv;
+    let in_proj_total = qkv_dim + z_dim + a_dim + b_dim;
+    let conv_kernel = config.linear_conv_kernel_dim;
+    let intermediate = config.intermediate_size;
+    let eps = config.rms_norm_eps as f32;
+
+    let fb_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+
+    // --- weight buffer lookups (cached on backend) -------------------
+    let qkv_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_qkv_t)?;
+    let z_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_z_t)?;
+    let a_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_a_t)?;
+    let b_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_b_t)?;
+    let out_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.out_proj_t)?;
+    let conv_w = backend.cached_f32_weight_buffer(&lin_weights.conv1d)?;
+    let qk_norm = backend.cached_f32_weight_buffer(&lin_weights.norm)?;
+    let a_log = backend.cached_f32_weight_buffer(&lin_weights.a_log)?;
+    let dt_bias = backend.cached_f32_weight_buffer(&lin_weights.dt_bias)?;
+    let gate_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.gate_proj_t)?;
+    let up_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.up_proj_t)?;
+    let down_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.down_proj_t)?;
+    let in_norm = backend.cached_f32_weight_buffer(&layer.input_layernorm)?;
+    let post_norm = backend.cached_f32_weight_buffer(&layer.post_attention_layernorm)?;
+
+    // --- persistent state buffers --------------------------------
+    let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
+    let recurrent_buf =
+        backend.linear_attn_recurrent_state_buffer(state_key, recurrent_bytes)?;
+    let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_buf = backend.linear_attn_conv_state_buffer(state_key, conv_state_bytes)?;
+
+    if !backend.linear_attn_layer_seeded(state_key) {
+        seed_recurrent_state(vk_device, &recurrent_buf, recurrent_state_t)?;
+        seed_conv_state(vk_device, &conv_buf, conv_state_t)?;
+        backend.mark_linear_attn_layer_seeded(state_key);
+    }
+
+    // --- pooled scratch buffers (own keyspace from full-attn / per-call GDN) ---
+    let x_buf = backend.acquire_resident_scratch("gdnfb_x", (hidden * 4) as u64)?;
+    let normed_pre = backend.acquire_resident_scratch("gdnfb_normed_pre", (hidden * 4) as u64)?;
+    let in_proj_out =
+        backend.acquire_resident_scratch("gdnfb_in_proj_out", (in_proj_total * 4) as u64)?;
+    let mixed_qkv = backend.acquire_resident_scratch("gdnfb_mixed_qkv", (qkv_dim * 4) as u64)?;
+    let conv_qkv = backend.acquire_resident_scratch("gdnfb_conv_qkv", (qkv_dim * 4) as u64)?;
+    let z_buf = backend.acquire_resident_scratch("gdnfb_z", (z_dim * 4) as u64)?;
+    let a_buf = backend.acquire_resident_scratch("gdnfb_a", (a_dim * 4) as u64)?;
+    let b_buf = backend.acquire_resident_scratch("gdnfb_b", (b_dim * 4) as u64)?;
+    let q_buf = backend.acquire_resident_scratch("gdnfb_q", (qk_dim * 4) as u64)?;
+    let k_buf = backend.acquire_resident_scratch("gdnfb_k", (qk_dim * 4) as u64)?;
+    let v_buf = backend.acquire_resident_scratch("gdnfb_v", (v_dim * 4) as u64)?;
+    let gated_norm =
+        backend.acquire_resident_scratch("gdnfb_gated_norm", (v_dim * 4) as u64)?;
+    let gdn_out = backend.acquire_resident_scratch("gdnfb_gdn_out", (hidden * 4) as u64)?;
+    let attn_residual =
+        backend.acquire_resident_scratch("gdnfb_attn_residual", (hidden * 4) as u64)?;
+    let normed_post =
+        backend.acquire_resident_scratch("gdnfb_normed_post", (hidden * 4) as u64)?;
+    let mlp_scratch =
+        backend.acquire_resident_scratch("gdnfb_mlp_scratch", (intermediate * 4) as u64)?;
+    let mlp_out = backend.acquire_resident_scratch("gdnfb_mlp_out", (hidden * 4) as u64)?;
+    let final_out = backend.acquire_resident_scratch("gdnfb_final_out", (hidden * 4) as u64)?;
+
+    // --- upload x ------------------------------------------------
+    let upload_t0 = fb_t0.map(|_| Instant::now());
+    let x_f32 = if x.dtype() == DType::F32 {
+        x.flatten_all()?
+    } else {
+        x.to_dtype(DType::F32)?.flatten_all()?
+    };
+    let x_data: Vec<f32> = x_f32.to_vec1()?;
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &x_buf,
+        &f32_slice_to_bytes(&x_data),
+    )
+    .context("upload x for GDN full-block resident")?;
+    if let Some(t) = upload_t0 {
+        GDNFB_UPLOAD_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    // --- chain all 14 dispatches into one CommandBatch + one submit ---
+    let submit_t0 = fb_t0.map(|_| Instant::now());
+    let mut batch = CommandBatch::new(vk_device)?;
+
+    // 1) pre-attn rmsnorm: x → normed_pre
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[x_buf.handle(), in_norm.handle(), normed_pre.handle()],
+        &[1u32, hidden as u32, eps.to_bits()],
+        Workgroups::OneD(1),
+    )?;
+    // 2) GDN in_proj (bf16w, b=1)
+    batch.record_shader(
+        shaders::GDN_IN_PROJ_DECODE_BF16W,
+        &[
+            normed_pre.handle(),
+            qkv_w.handle(),
+            z_w.handle(),
+            a_w.handle(),
+            b_w.handle(),
+            in_proj_out.handle(),
+        ],
+        &[
+            hidden as u32,
+            qkv_dim as u32,
+            z_dim as u32,
+            a_dim as u32,
+            b_dim as u32,
+            in_proj_total as u32,
+        ],
+        Workgroups::OneD(in_proj_total.div_ceil(16) as u32),
+    )?;
+    // 3) in_proj split → (mixed_qkv, z, a, b)
+    batch.record_shader(
+        shaders::GDN_IN_PROJ_SPLIT,
+        &[
+            in_proj_out.handle(),
+            mixed_qkv.handle(),
+            z_buf.handle(),
+            a_buf.handle(),
+            b_buf.handle(),
+        ],
+        &[qkv_dim as u32, z_dim as u32, a_dim as u32, b_dim as u32],
+        Workgroups::OneD(in_proj_total.div_ceil(64) as u32),
+    )?;
+    // 4a) causal_conv1d stage 1: output
+    let conv_total = 1 * qkv_dim * 1;
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D,
+        &[
+            mixed_qkv.handle(),
+            conv_w.handle(),
+            conv_buf.handle(),
+            conv_qkv.handle(),
+        ],
+        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
+        Workgroups::OneD(conv_total.div_ceil(256) as u32),
+    )?;
+    // 4b) causal_conv1d stage 2: state advance
+    batch.record_shader(
+        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
+        &[mixed_qkv.handle(), conv_buf.handle()],
+        &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
+        Workgroups::OneD((1 * qkv_dim) as u32),
+    )?;
+    // 5) split conv_qkv → (q, k, v)
+    batch.record_shader(
+        shaders::GDN_QKV_SPLIT,
+        &[
+            conv_qkv.handle(),
+            q_buf.handle(),
+            k_buf.handle(),
+            v_buf.handle(),
+        ],
+        &[qk_dim as u32, v_dim as u32],
+        Workgroups::OneD((2 * qk_dim + v_dim).div_ceil(64) as u32),
+    )?;
+    // 6) Q-norm
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[q_buf.handle(), qk_norm.handle(), q_buf.handle()],
+        &[nk as u32, dk as u32, eps.to_bits()],
+        Workgroups::OneD(nk as u32),
+    )?;
+    // 7) K-norm (rows=nk same as legacy dispatcher)
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[k_buf.handle(), qk_norm.handle(), k_buf.handle()],
+        &[nk as u32, dk as u32, eps.to_bits()],
+        Workgroups::OneD(nk as u32),
+    )?;
+    // 8) Fused gates+recurrent+rmsnorm
+    batch.record_shader(
+        shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            v_buf.handle(),
+            a_buf.handle(),
+            b_buf.handle(),
+            a_log.handle(),
+            dt_bias.handle(),
+            recurrent_buf.handle(),
+            z_buf.handle(),
+            qk_norm.handle(),
+            gated_norm.handle(),
+        ],
+        &[
+            nv as u32,
+            dk as u32,
+            dv as u32,
+            eps.to_bits(),
+            1u32,
+        ],
+        Workgroups::OneD(nv as u32),
+    )?;
+    // 9) GDN out_proj (bf16w b=1) → gdn_out
+    batch.record_shader(
+        shaders::LINEAR_DECODE_BF16W,
+        &[gated_norm.handle(), out_w.handle(), gdn_out.handle()],
+        &[v_dim as u32, hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(16) as u32),
+    )?;
+    // 10) Residual: attn_residual = x + gdn_out
+    batch.record_shader(
+        shaders::ADD,
+        &[x_buf.handle(), gdn_out.handle(), attn_residual.handle()],
+        &[hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(256) as u32),
+    )?;
+    // 11) Pre-MLP norm: attn_residual → normed_post
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[
+            attn_residual.handle(),
+            post_norm.handle(),
+            normed_post.handle(),
+        ],
+        &[1u32, hidden as u32, eps.to_bits()],
+        Workgroups::OneD(1),
+    )?;
+    // 12) MLP gate_up
+    batch.record_shader(
+        shaders::MLP_GATE_UP_DECODE_BF16W,
+        &[
+            normed_post.handle(),
+            gate_w.handle(),
+            up_w.handle(),
+            mlp_scratch.handle(),
+        ],
+        &[hidden as u32, intermediate as u32],
+        Workgroups::OneD(intermediate.div_ceil(64) as u32),
+    )?;
+    // 13) MLP down (linear_decode_bf16w(scratch, down_w, mlp_out))
+    batch.record_shader(
+        shaders::LINEAR_DECODE_BF16W,
+        &[mlp_scratch.handle(), down_w.handle(), mlp_out.handle()],
+        &[intermediate as u32, hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(16) as u32),
+    )?;
+    // 14) Final residual: final_out = attn_residual + mlp_out
+    batch.record_shader(
+        shaders::ADD,
+        &[
+            attn_residual.handle(),
+            mlp_out.handle(),
+            final_out.handle(),
+        ],
+        &[hidden as u32],
+        Workgroups::OneD(hidden.div_ceil(256) as u32),
+    )?;
+
+    batch
+        .submit_and_wait("vk-resident GDN full-block")
+        .context("submit resident GDN full-block CommandBatch")?;
+    if let Some(t) = submit_t0 {
+        GDNFB_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    // --- read back ------------------------------------------------
+    let readback_t0 = fb_t0.map(|_| Instant::now());
+    let out_bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &final_out,
+    )
+    .context("read back GDN full-block final_out")?;
+    let out_f32 = bytes_to_f32_vec(&out_bytes);
+    let out_tensor = Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?
+        .to_dtype(x.dtype())?;
+    if let Some(t) = readback_t0 {
+        GDNFB_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    if let Some(t) = fb_t0 {
+        GDNFB_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        GDNFB_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(Some(out_tensor))
+}
+
 /// configuration; caller falls back to the legacy
 /// `gated_deltanet_forward_decode_if` path.
 ///

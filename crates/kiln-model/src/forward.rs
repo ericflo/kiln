@@ -15226,6 +15226,60 @@ fn model_forward_paged_inner(
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
                 let capture_b11_taps = crate::mtp_debug::should_capture_b11_tap_for_layer(i);
+                // Vulkan-resident full-block GDN fast-path. Gates: seq_len=1
+                // decode hot path, start_pos > 0, no MTP/debug taps armed,
+                // no LoRA, and KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK default on.
+                // Bypasses the legacy pre-norm/residual/post-norm/MLP/final-residual
+                // candle path entirely when active.
+                #[cfg(feature = "vulkan")]
+                {
+                    if seq_len == 1
+                        && start_pos > 0
+                        && lora.is_none()
+                        && !crate::mtp_debug::is_subop_capture_armed()
+                        && !crate::mtp_debug::current_b12_layer_is_31()
+                        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+                        && !capture_b11_taps
+                        && !crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c43_layer1_preweight_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c44_layer1_f32_row_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c45_layer1_row_tap_for_layer(i)
+                        && !crate::mtp_debug::should_capture_c46_layer1_row_provenance_tap_for_layer(i)
+                        && kiln_core::env_flag::env_flag(
+                            "KILN_VK_RESIDENT_DECODE_GDN_FULL_BLOCK",
+                            true,
+                        )
+                    {
+                        if let Some(vk_backend) = backend
+                            .as_any()
+                            .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+                        {
+                            let recurrent_t = &state.recurrent_states[linear_attn_idx];
+                            let conv_t = &state.conv_states[linear_attn_idx];
+                            if let Some(out) =
+                                crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1(
+                                    vk_backend,
+                                    &hidden,
+                                    layer,
+                                    config,
+                                    recurrent_t,
+                                    conv_t,
+                                )?
+                            {
+                                hidden = out;
+                                linear_attn_idx += 1;
+                                if let Some(start) = layer_profile_start {
+                                    synchronize_for_profile(device)?;
+                                    log_paged_layer_profile(
+                                        i, "linear", seq_len, start_pos, start.elapsed(),
+                                    );
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let capture_c41_taps = crate::mtp_debug::should_capture_c41_layer1_tap_for_layer(i);
                 let capture_c42_taps =
                     crate::mtp_debug::should_capture_c42_layer1_norm_tap_for_layer(i);
