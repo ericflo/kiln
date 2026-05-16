@@ -49,6 +49,10 @@ pub mod shaders {
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
     pub const PAGED_KV_WRITE_SLOT: &str = shader_path!("paged_kv_write_slot");
     pub const PAGED_ATTN_DECODE_BATCH_PAGED: &str = shader_path!("paged_attn_decode_batch_paged");
+    pub const PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK: &str =
+        shader_path!("paged_attn_decode_batch_paged_splitk");
+    pub const PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE: &str =
+        shader_path!("paged_attn_decode_batch_paged_splitk_reduce");
     pub const VK_MUL_SIGMOID_GATE_F32: &str = shader_path!("vk_mul_sigmoid_gate_f32");
     pub const LINEAR_DECODE_BF16W: &str = shader_path!("linear_decode_bf16w");
     pub const ADD: &str = shader_path!("add");

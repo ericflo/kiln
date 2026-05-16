@@ -1450,15 +1450,31 @@ pub fn record_full_attn_block_into(
         &[slot as u32, elements_per_slot as u32],
         Workgroups::OneD(elements_per_slot.div_ceil(64) as u32),
     )?;
+    // Split-K paged attention: spread each (batch, q_head) pair's K/V
+    // scan across `num_chunks` workgroups so we use more SMs.
+    // Combined via a reduce pass that performs the online-softmax
+    // recurrence. Default 8 chunks (16 heads × 8 = 128 workgroups,
+    // ≈90% of the RTX 6000 Ada's 144 SMs) — tunable via
+    // `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`. Anything ≥ seq_len degrades
+    // gracefully (chunks beyond `seq_len` write neutral identities).
+    let num_chunks: usize = std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(8);
+    let partials_stride = 2 + head_dim;
+    let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
+    let attn_partials =
+        backend.acquire_resident_scratch("nfa_attn_partials", partials_bytes)?;
     batch.record_shader(
-        shaders::PAGED_ATTN_DECODE_BATCH_PAGED,
+        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
         &[
             q_rot.handle(),
             k_pool.handle(),
             v_pool.handle(),
             block_table_buf.handle(),
             seq_lens_buf.handle(),
-            attn_pre_gate.handle(),
+            attn_partials.handle(),
         ],
         &[
             max_blocks_per_seq as u32,
@@ -1467,7 +1483,17 @@ pub fn record_full_attn_block_into(
             num_kv_heads as u32,
             head_dim as u32,
             softmax_scale.to_bits(),
+            num_chunks as u32,
         ],
+        Workgroups::OneD((num_heads * num_chunks) as u32),
+    )?;
+    batch.record_shader(
+        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
+        &[
+            attn_partials.handle(),
+            attn_pre_gate.handle(),
+        ],
+        &[num_heads as u32, head_dim as u32, num_chunks as u32],
         Workgroups::OneD(num_heads as u32),
     )?;
     batch.record_shader(

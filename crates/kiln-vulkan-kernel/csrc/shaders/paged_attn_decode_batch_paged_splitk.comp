@@ -1,0 +1,138 @@
+// Split-K version of `paged_attn_decode_batch_paged`. Instead of one
+// workgroup per (batch, q_head) pair, each pair's K/V scan is divided
+// across `num_chunks` workgroups; each workgroup processes a slice of
+// the per-row K/V window and emits a partial-softmax output
+// `(chunk_max, chunk_sum, chunk_acc[head_dim])` that
+// `paged_attn_decode_batch_paged_splitk_reduce.comp` then combines.
+//
+// Q layout:           [batch, 1, num_heads, head_dim]
+// K/V pool layouts:   [total_slots, num_kv_heads, head_dim]
+// block_table layout: [batch, max_blocks_per_seq]
+// seq_lens:           [batch] active K/V length per row
+// Partials layout:    [batch, num_heads, num_chunks, 2 + head_dim] f32
+//   per-chunk: [0] = chunk_max, [1] = chunk_sum, [2..2+head_dim] = chunk_acc
+//
+// Workgroup grid: x = batch * num_heads * num_chunks (each (b, h, c)).
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint max_blocks_per_seq;
+    uint page_block_size;
+    uint num_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    float softmax_scale;
+    uint num_chunks;
+};
+
+layout(binding = 0) readonly  buffer QBuf          { float data_q[]; };
+layout(binding = 1) readonly  buffer KPoolBuf      { float data_k_pool[]; };
+layout(binding = 2) readonly  buffer VPoolBuf      { float data_v_pool[]; };
+layout(binding = 3) readonly  buffer BlockTableBuf { uint  data_block_table[]; };
+layout(binding = 4) readonly  buffer SeqLenBuf     { uint  data_seq_lens[]; };
+layout(binding = 5) writeonly buffer PartialsBuf   { float data_partials[]; };
+
+shared float partial_dot[256];
+shared float shared_logit;
+shared uint shared_slot;
+
+uint resolve_slot(uint batch_idx, uint token_idx) {
+    uint block_idx = token_idx / page_block_size;
+    uint offset = token_idx - block_idx * page_block_size;
+    uint block = data_block_table[batch_idx * max_blocks_per_seq + block_idx];
+    return block * page_block_size + offset;
+}
+
+float dot_for_token(uint kv_head, uint slot, uint lane, float q_lane) {
+    float part = 0.0;
+    if (lane < head_dim) {
+        uint k_idx = (slot * num_kv_heads + kv_head) * head_dim + lane;
+        part = q_lane * data_k_pool[k_idx];
+    }
+    partial_dot[lane] = part;
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (lane < stride) {
+            partial_dot[lane] += partial_dot[lane + stride];
+        }
+        barrier();
+    }
+    if (lane == 0u) {
+        shared_logit = partial_dot[0] * softmax_scale;
+    }
+    barrier();
+    return shared_logit;
+}
+
+void main() {
+    uint linear = gl_WorkGroupID.x;
+    uint chunk_idx = linear % num_chunks;
+    uint per_chunk_pairs = num_chunks;
+    uint pair_idx = linear / per_chunk_pairs;
+    uint q_head = pair_idx % num_heads;
+    uint batch_idx = pair_idx / num_heads;
+
+    uint lane = gl_LocalInvocationID.x;
+    uint seq_len = data_seq_lens[batch_idx];
+    uint gqa_ratio = num_heads / num_kv_heads;
+    uint kv_head = q_head / gqa_ratio;
+
+    uint q_base = (batch_idx * num_heads + q_head) * head_dim;
+    float q_lane = lane < head_dim ? data_q[q_base + lane] : 0.0;
+
+    // Per-chunk range: divide [0, seq_len) into num_chunks contiguous
+    // slices. The last chunk picks up any remainder. Each token is
+    // visited by exactly one chunk.
+    uint base = (seq_len * chunk_idx) / num_chunks;
+    uint end = (seq_len * (chunk_idx + 1u)) / num_chunks;
+
+    float row_max = -3.4028234663852886e38;
+    float row_sum = 0.0;
+    float acc = 0.0;
+    for (uint t = base; t < end; t++) {
+        if (lane == 0u) {
+            shared_slot = resolve_slot(batch_idx, t);
+        }
+        barrier();
+        uint slot = shared_slot;
+        float logit = dot_for_token(kv_head, slot, lane, q_lane);
+        float new_max = max(row_max, logit);
+        float old_scale = exp(row_max - new_max);
+        float new_scale = exp(logit - new_max);
+        row_sum = row_sum * old_scale + new_scale;
+        if (lane < head_dim) {
+            uint v_idx = (slot * num_kv_heads + kv_head) * head_dim + lane;
+            acc = acc * old_scale + new_scale * data_v_pool[v_idx];
+        }
+        row_max = new_max;
+    }
+
+    // Write partial: layout
+    //   [batch, num_heads, num_chunks, 2 + head_dim]
+    // Index by (batch_idx, q_head, chunk_idx) → base = ((batch*num_heads + q_head)*num_chunks + chunk_idx)*(2+head_dim).
+    uint stride = 2u + head_dim;
+    uint out_base = (((batch_idx * num_heads) + q_head) * num_chunks + chunk_idx) * stride;
+    if (lane == 0u) {
+        // Guard for an empty chunk (only possible if seq_len < num_chunks
+        // and this chunk's range is empty). Use neutral identities so the
+        // reduce kernel's stable softmax-recurrence ignores it.
+        if (end == base) {
+            data_partials[out_base] = -3.4028234663852886e38;
+            data_partials[out_base + 1u] = 0.0;
+        } else {
+            data_partials[out_base] = row_max;
+            data_partials[out_base + 1u] = row_sum;
+        }
+    }
+    if (lane < head_dim) {
+        if (end == base) {
+            data_partials[out_base + 2u + lane] = 0.0;
+        } else {
+            data_partials[out_base + 2u + lane] = acc;
+        }
+    }
+}
