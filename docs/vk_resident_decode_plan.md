@@ -231,6 +231,28 @@ checkpoint via `kiln-bench --features vulkan`. Piece (2) is the
 path past the wall we hit at ~29 tok/s with the resident + batched
 submission + resident paged KV pool landed here.
 
+### Real-model baseline (2026-05-16, RTX 6000 Ada)
+
+End-to-end `kiln-bench --features vulkan --paged --latency-only` on
+the Qwen/Qwen3.5-4B checkpoint:
+
+| Phase | Result |
+|-------|--------|
+| Model load | 26.6 s |
+| Prefill (10 tokens) | 836 ms (12 tok/s) |
+| Decode (33 tokens) | mean ITL 965 ms (**1.04 tok/s**) |
+| Parity test on the same checkpoint (legacy vs resident-delegating) | bit-identical (rel err 0) |
+
+The legacy Vulkan decode path is at **1.0 tok/s**, not 19 — every
+per-kernel `extract + upload + readback` boundary costs ≈ 30 ms at
+real bf16-weight × hidden=2560 GEMM shapes, and there are
+~12 kernels × 32 layers per token. The resident microbench at
+29-32 tok/s suggests the per-layer wire-up can lift end-to-end by
+roughly **30×**, which is the actual gap the plan is meant to
+close. The headline 55 tok/s (= 80% of llama.cpp) is then a further
+~2× away — exactly the cooperative-matrix follow-up the plan calls
+out.
+
 ## Out of scope for this goal
 
 - Cooperative-matrix / Tensor-Core kernels via
