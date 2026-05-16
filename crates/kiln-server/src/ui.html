@@ -7177,6 +7177,7 @@ async function refreshSuites() {
         <div class="row-actions">
           <button type="button" class="btn primary btn-sm" data-suite="${escapeHtml(s.name)}" data-action="run" title="Queue an eval against the active adapter">Run</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="compare" title="Compare base model vs active adapter">A/B</button>
+          <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="preview" title="Show the first few examples without running">Preview</button>
           <button type="button" class="btn btn-sm" data-suite="${escapeHtml(s.name)}" data-action="del">Delete</button>
         </div>
       </div>`;
@@ -7202,6 +7203,8 @@ async function refreshSuites() {
             toast('Queued compare ' + res.job_id.slice(0, 8), 'ok');
             document.getElementById('evals-tab-jobs')?.click();
             refreshEvalJobs();
+          } else if (action === 'preview') {
+            await openSuitePreview(suite);
           } else if (action === 'del') {
             if (!confirm(`Delete suite "${suite}"?`)) return;
             await api('/v1/eval/suites/' + encodeURIComponent(suite), { method: 'DELETE' });
@@ -7213,6 +7216,81 @@ async function refreshSuites() {
     });
   } catch (e) {
     document.getElementById('suites-list').innerHTML = `<div class="eval-empty"><div class="eval-empty-body">Failed: ${escapeHtml(e.message)}</div></div>`;
+  }
+}
+
+/* ---------- Suite preview (lightweight modal — first N examples) ---------- */
+async function openSuitePreview(name) {
+  // Lazy-create the modal scaffolding on first use. Reuses the same
+  // CSS classes as the other drill-ins for consistency.
+  let modal = document.getElementById('suite-preview-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'suite-preview-modal';
+    modal.className = 'modal-backdrop';
+    modal.role = 'dialog';
+    modal.setAttribute('aria-modal', 'true');
+    modal.innerHTML = `<div class="modal-shell">
+      <div class="modal-head">
+        <h2 id="suite-preview-title">Suite preview</h2>
+        <span class="modal-meta" id="suite-preview-meta"></span>
+        <button class="modal-close" id="suite-preview-close" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body" style="grid-template-columns: 1fr;">
+        <div class="modal-content" id="suite-preview-content"><div class="detail-empty">Loading…</div></div>
+      </div>
+    </div>`;
+    document.body.appendChild(modal);
+    document.getElementById('suite-preview-close').addEventListener('click', () => {
+      modal.hidden = true; document.body.style.overflow = '';
+    });
+    modal.addEventListener('click', (ev) => {
+      if (ev.target === modal) { modal.hidden = true; document.body.style.overflow = ''; }
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !modal.hidden) {
+        modal.hidden = true; document.body.style.overflow = '';
+      }
+    });
+  }
+  modal.hidden = false;
+  document.body.style.overflow = 'hidden';
+  document.getElementById('suite-preview-title').textContent = `Suite: ${name}`;
+  document.getElementById('suite-preview-meta').textContent = '';
+  const content = document.getElementById('suite-preview-content');
+  content.innerHTML = '<div class="detail-empty">Loading…</div>';
+  try {
+    const suite = await api('/v1/eval/suites/' + encodeURIComponent(name));
+    const examples = suite.examples || [];
+    const preview = examples.slice(0, 20);
+    document.getElementById('suite-preview-meta').innerHTML =
+      `${examples.length} example${examples.length === 1 ? '' : 's'}` +
+      (suite.default_scorer ? ` · <span class="scorer-badge">${escapeHtml(suite.default_scorer.kind || 'scorer')}</span>` : '');
+    if (!preview.length) {
+      content.innerHTML = '<div class="detail-empty">This suite has no examples.</div>';
+      return;
+    }
+    const rows = preview.map((ex, i) => {
+      const msgs = (ex.messages || [])
+        .map(m => `<div style="margin-bottom:4px;"><span class="role ${escapeHtml(m.role)}" style="font-size:10px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-muted); margin-right:6px;">${escapeHtml(m.role)}</span><span style="white-space:pre-wrap; font-family:var(--font-mono); font-size:12px;">${escapeHtml(truncate(m.content || '', 600))}</span></div>`)
+        .join('');
+      const target = ex.target != null
+        ? `<div style="margin-top:6px;"><span class="hint" style="font-size:11px;">target:</span> <code style="font-family:var(--font-mono); font-size:12px;">${escapeHtml(truncate(String(ex.target), 200))}</code></div>`
+        : '';
+      const tags = (ex.tags || []).map(t => `<span class="tag-chip">${escapeHtml(t)}</span>`).join('');
+      return `<div style="border:1px solid var(--border); border-radius:var(--radius-md); padding:var(--space-3); margin-bottom:var(--space-3); background:var(--surface-2);">
+        <div style="font-size:11px; color:var(--text-quiet); font-family:var(--font-mono); margin-bottom:6px;">#${i + 1}${ex.id ? ' · ' + escapeHtml(ex.id) : ''}</div>
+        ${msgs}
+        ${target}
+        ${tags ? `<div style="margin-top:6px;">${tags}</div>` : ''}
+      </div>`;
+    }).join('');
+    const more = examples.length > preview.length
+      ? `<div class="hint" style="text-align:center; padding:var(--space-3);">…showing first ${preview.length} of ${examples.length}. The Run action evaluates all of them.</div>`
+      : '';
+    content.innerHTML = `<div style="padding:var(--space-4) var(--space-5); overflow-y:auto;">${rows}${more}</div>`;
+  } catch (e) {
+    content.innerHTML = `<div class="detail-empty">Failed to load suite: ${escapeHtml(e.message)}</div>`;
   }
 }
 
