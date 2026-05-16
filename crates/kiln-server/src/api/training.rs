@@ -562,11 +562,11 @@ async fn submit_opd(
         return Err(ApiError::mock_mode_no_training());
     }
 
-    // Register the job and enqueue. We deliberately do not yet route
-    // OPD through the SFT/GRPO working-set preflight: the runtime body
-    // is a milestone-4 stub (the actual GPU steps land next commit),
-    // so the preflight estimate doesn't apply. The preflight wires in
-    // alongside the trainer body refactor.
+    // Register the job and enqueue. OPD now runs through the real
+    // trainer body (kiln_train::opd::opd_train) — same GPU lock /
+    // replay / hot-swap / receipt semantics as SFT and GRPO. Wiring
+    // OPD into the SFT/GRPO working-set preflight (so the §8.5
+    // capacity calc applies) is a follow-up.
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
@@ -601,8 +601,7 @@ async fn submit_opd(
         job_id,
         state: TrainingState::Queued,
         message: format!(
-            "Queued OPD training (position {queue_position} in queue). Runtime body is a \
-             milestone-4 stub — see commit message for status."
+            "Queued OPD training (position {queue_position} in queue)."
         ),
     }))
 }
@@ -703,8 +702,7 @@ async fn submit_distill_refresh(
         job_id,
         state: TrainingState::Queued,
         message: format!(
-            "Queued distill/refresh (position {queue_position} in queue). \
-             Runtime body is a milestone-9 stub; tracker = #40."
+            "Queued distill/refresh (position {queue_position} in queue)."
         ),
     }))
 }
@@ -741,7 +739,7 @@ async fn submit_distill_merge(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill_merge (milestone-9 stub; #32).".to_string(),
+        message: "Queued distill_merge.".to_string(),
     }))
 }
 
@@ -772,7 +770,7 @@ async fn submit_distill_pump(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill/pump (milestone-9 stub; #36).".to_string(),
+        message: "Queued distill/pump.".to_string(),
     }))
 }
 
@@ -803,7 +801,7 @@ async fn submit_distill_self(
     Ok(Json(TrainingResponse {
         job_id,
         state: TrainingState::Queued,
-        message: "Queued distill/self (milestone-9 stub; #33).".to_string(),
+        message: "Queued distill/self.".to_string(),
     }))
 }
 

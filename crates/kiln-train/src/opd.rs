@@ -14,9 +14,7 @@
 //! `-reverse_kl_per_token`. That observation is what makes this module
 //! a sibling of `trainer.rs::grpo_loss` rather than a fork.
 //!
-//! # Milestone 2 (this commit)
-//!
-//! What lands now:
+//! # What's in the module
 //!
 //! * Request / config types matching `SftRequest` / `GrpoRequest` shape
 //!   (the §4 endpoint payload).
@@ -27,15 +25,14 @@
 //!   rollout's positions, and a `LogitSource` to query the teacher.
 //!   Returns the scalar loss + per-position KL vector for diagnostics
 //!   (`overlap_ratio`, `entropy_gap`, etc. — §3.8 wires off these).
-//!
-//! What's deferred to the next commit:
-//!
-//! * The full `opd_train` function that loops the §3.1 pseudocode over
-//!   prompts × rollouts × optimizer steps with hot-swap and replay log
-//!   integration — that step depends on the trainer's
-//!   `checkpointed_grpo_forward_backward` body, which the wiring will
-//!   factor out so OPD and GRPO share the segment-checkpointing path
-//!   (no duplication).
+//! * `opd_train` — the full §3.1 trainer body. Mirrors `sft_train`'s
+//!   structure but with `opd_step_loss` for the per-step loss.
+//! * `build_local_teacher_fixture` — in-process LocalTeacher path: run
+//!   the loaded model forward once per prompt, stash top-K teacher
+//!   logprobs in a `FixtureLogitSource` keyed by tokens_hash. Used by
+//!   `run_distill_refresh` / `run_distill_pump` / `run_distill_self`
+//!   to materialise the §3.2 Local teacher when the registered alias
+//!   resolves to a Local kind.
 //!
 //! # Math
 //!
