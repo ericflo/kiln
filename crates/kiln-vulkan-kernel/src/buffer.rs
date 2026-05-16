@@ -597,10 +597,33 @@ impl VulkanBuffer {
         self.size
     }
 
+    /// Map this buffer's memory and `memcpy` `bytes` into it. Only
+    /// valid for buffers created with host-visible memory
+    /// (`create_host_visible`). No GPU submission; the GPU pulls the
+    /// data over PCIe on demand when the next dispatch reads.
+    pub fn write_mapped(&self, bytes: &[u8]) -> Result<()> {
+        anyhow::ensure!(
+            (bytes.len() as u64) <= self.size,
+            "write_mapped: {} bytes > buffer size {}",
+            bytes.len(),
+            self.size,
+        );
+        let mapped = unsafe {
+            self.device
+                .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| anyhow::anyhow!("write_mapped: map_memory: {:?}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped as *mut u8, bytes.len());
+            self.device.unmap_memory(self.memory);
+        }
+        Ok(())
+    }
+
     /// Map this buffer's memory and copy the first `bytes_len` bytes
     /// into a fresh `Vec<u8>`. Only valid for buffers created with
     /// host-visible memory (`create_host_visible`). Callers writing
-    /// to host-mapped memory should use `map_for_write` instead.
+    /// to host-mapped memory should use `write_mapped` instead.
     pub fn read_mapped(&self, bytes_len: usize) -> Result<Vec<u8>> {
         let mapped = unsafe {
             self.device

@@ -14010,8 +14010,17 @@ fn model_forward_paged_last_token_resident_native_vk(
     let rope_cos_data: Vec<f32> = rope_cos_t.flatten_all()?.to_vec1()?;
     let rope_sin_data: Vec<f32> = rope_sin_t.flatten_all()?.to_vec1()?;
     let rope_bytes = (rope_cos_data.len() * 4).max(4) as u64;
-    let rope_cos_buf = vk_backend.acquire_resident_scratch("native_rope_cos", rope_bytes)?;
-    let rope_sin_buf = vk_backend.acquire_resident_scratch("native_rope_sin", rope_bytes)?;
+    // The small per-token inputs (RoPE cos/sin, block_table,
+    // seq_lens) are each read once by the GPU within the main batch,
+    // so host-visible memory is fine — no staging buffer + transfer
+    // submit needed. We just `map → memcpy → unmap` straight into the
+    // GPU-readable backing memory and the layer's read pulls them
+    // over PCIe on demand. Eliminates ~4 of 5 staging-buffer creates
+    // (≈ 2 ms / token) the batched upload would otherwise pay.
+    let rope_cos_buf =
+        vk_backend.acquire_resident_scratch_host_visible("native_rope_cos_hv", rope_bytes)?;
+    let rope_sin_buf =
+        vk_backend.acquire_resident_scratch_host_visible("native_rope_sin_hv", rope_bytes)?;
     let mut rope_cos_bytes: Vec<u8> = Vec::with_capacity(rope_cos_data.len() * 4);
     for &x in &rope_cos_data {
         rope_cos_bytes.extend_from_slice(&x.to_le_bytes());
@@ -14023,30 +14032,33 @@ fn model_forward_paged_last_token_resident_native_vk(
 
     let blocks: Vec<u32> = block_table.blocks.clone();
     let block_table_bytes_size = (blocks.len() * 4).max(4) as u64;
-    let block_table_buf =
-        vk_backend.acquire_resident_scratch("native_block_table", block_table_bytes_size)?;
+    let block_table_buf = vk_backend
+        .acquire_resident_scratch_host_visible("native_block_table_hv", block_table_bytes_size)?;
     let mut block_table_bytes: Vec<u8> = Vec::with_capacity(blocks.len() * 4);
     for &x in &blocks {
         block_table_bytes.extend_from_slice(&x.to_le_bytes());
     }
     let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
-    let seq_lens_buf = vk_backend.acquire_resident_scratch("native_seq_lens", 4)?;
+    let seq_lens_buf = vk_backend.acquire_resident_scratch_host_visible("native_seq_lens_hv", 4)?;
     let seq_lens_bytes: Vec<u8> = seq_lens[0].to_le_bytes().to_vec();
 
-    VulkanBuffer::upload_data_batch(
+    // Write directly into the host-visible buffers (no command
+    // submission). The previous batched upload now handles only the
+    // 10 KB hidden state into device-local io_a.
+    rope_cos_buf.write_mapped(&rope_cos_bytes)?;
+    rope_sin_buf.write_mapped(&rope_sin_bytes)?;
+    block_table_buf.write_mapped(&block_table_bytes)?;
+    seq_lens_buf.write_mapped(&seq_lens_bytes)?;
+
+    VulkanBuffer::upload_data(
         vk_device.device(),
         vk_device.host_visible_mem_type(),
         vk_device.queue(),
         vk_device.queue_family_index(),
-        &[
-            (&io_a, &hidden_bytes),
-            (&rope_cos_buf, &rope_cos_bytes),
-            (&rope_sin_buf, &rope_sin_bytes),
-            (&block_table_buf, &block_table_bytes),
-            (&seq_lens_buf, &seq_lens_bytes),
-        ],
+        &io_a,
+        &hidden_bytes,
     )
-    .context("native: batched per-token upload")?;
+    .context("native: upload hidden state to io_a")?;
     if timing_enabled {
         UPLOAD_NS.fetch_add(t_upload.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
