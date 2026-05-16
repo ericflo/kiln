@@ -6,10 +6,19 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
+pub mod logit_source;
+pub mod opd;
 pub mod replay;
 pub mod trainer;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
+
+pub use logit_source::{
+    LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
+};
+pub use opd::{
+    OpdConfig, OpdLossGranularity, OpdRequest, default_opd_top_k, default_opd_samples_per_prompt,
+};
 
 pub use replay::{
     BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,

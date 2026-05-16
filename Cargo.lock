@@ -1927,6 +1927,7 @@ dependencies = [
  "kiln-eval",
  "kiln-flce-kernel",
  "kiln-model",
+ "kiln-opd-loss-kernel",
  "kiln-vulkan-kernel",
  "rand 0.10.1",
  "safetensors 0.7.0",

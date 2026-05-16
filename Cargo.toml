@@ -101,6 +101,7 @@ kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
+kiln-opd-loss-kernel = { path = "crates/kiln-opd-loss-kernel" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }
 kiln-vulkan-kernel = { path = "crates/kiln-vulkan-kernel" }
 # Random number generation
