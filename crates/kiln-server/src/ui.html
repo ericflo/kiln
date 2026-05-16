@@ -7312,12 +7312,19 @@ function renderDrillModal(preserveSelection) {
   document.getElementById('drill-meta').innerHTML = `
     <span class="job-state-pill ${j.state}">${escapeHtml(j.state)}</span>
     <span class="hint" style="margin-left:8px; font-family:var(--font-mono);">${escapeHtml(j.job_id)}</span>`;
-  // Show Cancel only for queued / running jobs; show Re-run failures
-  // only for terminal jobs that produced at least one failing example.
+  // Cancel / Delete: same DELETE endpoint, different copy. Active jobs
+  // get cancelled; terminal jobs get deleted from memory + archive.
   const stateLower = (j.state || '').toString().toLowerCase();
   const isActive = stateLower === 'queued' || stateLower === 'running';
   const cancelBtn = document.getElementById('drill-cancel');
-  if (cancelBtn) cancelBtn.hidden = !isActive;
+  if (cancelBtn) {
+    cancelBtn.hidden = false;
+    cancelBtn.textContent = isActive ? '⏹ Cancel' : '🗑 Delete';
+    cancelBtn.title = isActive
+      ? 'Cancel this eval job (queued or running)'
+      : 'Permanently delete this terminal job from memory and the on-disk archive';
+    cancelBtn.dataset.mode = isActive ? 'cancel' : 'delete';
+  }
   const rerunBtn = document.getElementById('drill-rerun');
   if (rerunBtn) {
     const failingInAnyRun = (j.runs || []).some(r =>
@@ -7618,18 +7625,17 @@ document.querySelectorAll('[data-drill-filter]').forEach(b => {
 
 document.getElementById('drill-cancel')?.addEventListener('click', async () => {
   if (!drillJob) return;
-  const stateLower = (drillJob.state || '').toString().toLowerCase();
-  if (!['queued', 'running'].includes(stateLower)) {
-    toast('Only queued or running jobs can be cancelled', 'err');
-    return;
-  }
-  if (!confirm(`Cancel eval job ${drillJob.job_id.slice(0, 8)}?`)) return;
+  const mode = document.getElementById('drill-cancel')?.dataset?.mode || 'cancel';
+  const verbMsg = mode === 'delete'
+    ? `Permanently delete eval job ${drillJob.job_id.slice(0, 8)}? Adapter weights are untouched; only the tracking entry and the on-disk archive file are removed.`
+    : `Cancel eval job ${drillJob.job_id.slice(0, 8)}?`;
+  if (!confirm(verbMsg)) return;
   try {
     await api('/v1/eval/jobs/' + encodeURIComponent(drillJob.job_id), { method: 'DELETE' });
-    toast('Cancelled eval job', 'ok');
+    toast(mode === 'delete' ? 'Eval job deleted' : 'Cancelled eval job', 'ok');
     closeDrillModal();
     refreshEvalJobs();
-  } catch (e) { toast('Cancel failed: ' + e.message, 'err'); }
+  } catch (e) { toast((mode === 'delete' ? 'Delete' : 'Cancel') + ' failed: ' + e.message, 'err'); }
 });
 
 document.getElementById('drill-rerun')?.addEventListener('click', async () => {
