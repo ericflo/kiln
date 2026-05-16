@@ -2613,6 +2613,435 @@ pub fn vk_recompute_grpo_train_step_with_state(
     Ok(loss_val)
 }
 
+/// Exact layerwise reverse-recompute OPD step — the gradient-checkpointed
+/// counterpart of `vk_opd_train_step_with_state`.
+///
+/// The non-checkpointed `vk_opd_train_step_with_state` keeps every layer's
+/// activation tape alive through the OPD reverse-KL backward and OOMs at
+/// long context. This variant mirrors `vk_recompute_grpo_train_step_with_state`
+/// exactly:
+///
+/// 1. Forward through every layer with autograd OFF (using the detached
+///    LoRA copy) to get `final_hidden`.
+/// 2. Re-attach `final_hidden` as a fresh parameter, apply final RMSNorm
+///    + index_select(active_rows), call `vk_opd_top_k_reverse_kl_loss`,
+///    and backward to get the upstream gradient at `final_hidden`.
+/// 3. Walk layers in REVERSE order; at each layer recompute the layer's
+///    forward with autograd ON (against the live LoRA parameters) and
+///    propagate the upstream gradient backward through that layer's
+///    attention + MLP. Accumulate LoRA gradients into `shared_grads`
+///    chunk-by-chunk so peak memory stays at one layer's tape, not 32.
+/// 4. Single optimizer step at the end against `shared_grads`.
+///
+/// Mirrors the CUDA-side `opd_train` gradient-checkpointing pattern Eric
+/// landed in `opd: gradient-checkpointed trainer + example binaries`.
+/// Same `(teacher_topk_indices, teacher_topk_logprobs, top_k)` contract
+/// as the non-checkpointed variant.
+#[allow(clippy::too_many_arguments)]
+pub fn vk_recompute_opd_train_step_with_state(
+    weights: &VkModelWeights,
+    lora_layers: &[VkLoraLayer],
+    input_ids: &[u32],
+    active_rows: &[u32],
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    top_k: usize,
+    model_config: &ModelConfig,
+    num_gdn_layers: usize,
+    adamw_state: &mut VkAdamWBook,
+    cfg: &VkAdamWConfig,
+    optimizer: Optimizer,
+    step: u32,
+) -> Result<f32> {
+    use kiln_model::vk_forward::{
+        vk_compute_rope_tables, vk_full_attention_attention_block_with_rope,
+        vk_full_attention_mlp_down_from_gated, vk_full_attention_mlp_gated,
+        vk_linear_attention_mlp_down_from_gated, vk_linear_attention_mlp_gated,
+    };
+    use kiln_vulkan_kernel::vk_autograd::vk_backward;
+    use kiln_vulkan_kernel::vk_ops::elementwise::{vk_add_no_grad, vk_mul};
+    use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
+    use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_loss;
+    use kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all;
+    use kiln_vulkan_kernel::vk_ops::rmsnorm::vk_rmsnorm;
+
+    anyhow::ensure!(
+        input_ids.len() >= 2,
+        "vk_recompute_opd_train_step: need at least 2 tokens"
+    );
+    anyhow::ensure!(
+        !active_rows.is_empty(),
+        "vk_recompute_opd_train_step: no active OPD tokens"
+    );
+    anyhow::ensure!(
+        top_k == 16 || top_k == 32,
+        "vk_recompute_opd_train_step: top_k must be 16 or 32 (got {top_k})"
+    );
+    let expected_lpq = active_rows.len() * top_k;
+    anyhow::ensure!(
+        teacher_topk_indices.len() == expected_lpq,
+        "vk_recompute_opd_train_step: teacher_topk_indices.len() {} != active_rows * top_k = {}",
+        teacher_topk_indices.len(),
+        expected_lpq
+    );
+    anyhow::ensure!(
+        teacher_topk_logprobs.len() == expected_lpq,
+        "vk_recompute_opd_train_step: teacher_topk_logprobs.len() {} != active_rows * top_k = {}",
+        teacher_topk_logprobs.len(),
+        expected_lpq
+    );
+    for &row in active_rows {
+        anyhow::ensure!(
+            (row as usize) < input_ids.len(),
+            "vk_recompute_opd_train_step: active row {row} out of range for {} tokens",
+            input_ids.len()
+        );
+    }
+
+    let device = weights.embed_tokens.device();
+    let detached_lora = detach_lora_layers(lora_layers);
+    let gdn_map = gdn_layer_index_map(weights);
+    let rope_tables = if !weights.rotary_inv_freq.is_empty() && weights.rotary_dim > 0 {
+        Some(vk_compute_rope_tables(
+            device,
+            &weights.rotary_inv_freq,
+            input_ids.len(),
+        )?)
+    } else {
+        None
+    };
+    let rope_refs = rope_tables.as_ref().map(|(cos, sin)| (cos, sin));
+    let profile = env_flag("KILN_PROFILE_VK_RECOMPUTE", false);
+    let boundary_cache_limit = recompute_boundary_cache_limit_bytes();
+    let boundary_cache_bytes = (weights.layers.len() + 1)
+        .saturating_mul(input_ids.len())
+        .saturating_mul(weights.hidden)
+        .saturating_mul(std::mem::size_of::<f32>());
+    let use_boundary_cache = kiln_core::env_flag::env_tristate("KILN_VK_RECOMPUTE_BOUNDARY_CACHE")
+        .unwrap_or(true)
+        && boundary_cache_limit > 0
+        && boundary_cache_bytes <= boundary_cache_limit;
+
+    if profile {
+        tracing::info!(
+            step,
+            seq_len = input_ids.len(),
+            active = active_rows.len(),
+            top_k,
+            boundary_cache = use_boundary_cache,
+            "vk-native OPD recompute final forward begin"
+        );
+    }
+    let (final_hidden, boundary_cache) = if use_boundary_cache {
+        let (boundaries, _state) = vk_forward_layer_boundaries(
+            weights,
+            &detached_lora,
+            input_ids,
+            model_config,
+            num_gdn_layers,
+            &gdn_map,
+            rope_refs,
+        )?;
+        let final_hidden = boundaries
+            .last()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("vk_recompute_opd_train_step: empty boundary cache"))?;
+        (final_hidden, Some(boundaries))
+    } else {
+        let (final_hidden, _state) = vk_forward_to_layer_input(
+            weights,
+            &detached_lora,
+            input_ids,
+            weights.layers.len(),
+            model_config,
+            num_gdn_layers,
+            &gdn_map,
+            rope_refs,
+        )?;
+        (final_hidden, None)
+    };
+
+    let final_id = mint_fresh_tensor_id()?;
+    let final_param = VkTensor::parameter(
+        Arc::clone(final_hidden.buffer()),
+        final_hidden.shape().to_vec(),
+        final_hidden.dtype(),
+        Arc::clone(final_hidden.device()),
+        final_id,
+    );
+    let h_norm = vk_rmsnorm(&final_param, &weights.final_norm_weight, 1e-5)?;
+    let active_h = vk_index_select_rows(&h_norm, active_rows)?;
+    let loss = vk_opd_top_k_reverse_kl_loss(
+        &active_h,
+        &weights.lm_head,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )?;
+    let loss_val = loss.to_vec_f32()?[0];
+    if profile {
+        tracing::info!(
+            step,
+            seq_len = input_ids.len(),
+            active = active_rows.len(),
+            loss = format!("{loss_val:.6}"),
+            "vk-native OPD recompute reverse-KL computed"
+        );
+    }
+    let final_grads = vk_backward(&loss)?;
+    let mut upstream = final_grads.get(final_id).cloned().ok_or_else(|| {
+        anyhow::anyhow!("vk_recompute_opd_train_step: missing final upstream grad")
+    })?;
+
+    let mut shared_grads: HashMap<TensorId, VkTensor> = HashMap::new();
+
+    for layer_idx in (0..weights.layers.len()).rev() {
+        if profile {
+            tracing::info!(
+                step,
+                layer_idx,
+                seq_len = input_ids.len(),
+                "vk-native OPD recompute reverse layer begin"
+            );
+        }
+        let (boundary, state) = if let Some(boundaries) = boundary_cache.as_ref() {
+            let boundary = boundaries
+                .get(layer_idx)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing cached boundary for layer {layer_idx}"))?;
+            let state =
+                fresh_gdn_state(weights.embed_tokens.device(), model_config, num_gdn_layers)?;
+            (boundary, state)
+        } else {
+            vk_forward_to_layer_input(
+                weights,
+                &detached_lora,
+                input_ids,
+                layer_idx,
+                model_config,
+                num_gdn_layers,
+                &gdn_map,
+                rope_refs,
+            )
+            .with_context(|| format!("vk_recompute_opd_train_step: prefix to layer {layer_idx}"))?
+        };
+        match &weights.layers[layer_idx] {
+            VkLayerWeights::FullAttention(full) => {
+                let rope_arg = rope_refs.map(|(cos, sin)| (cos, sin, weights.rotary_dim));
+                let after_attn_value = vk_full_attention_attention_block_with_rope(
+                    &boundary,
+                    full,
+                    &detached_lora[layer_idx],
+                    rope_arg,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_opd_train_step: full-attn prefix block {layer_idx}")
+                })?;
+
+                let gated_value = vk_full_attention_mlp_gated(
+                    &after_attn_value,
+                    full,
+                    &detached_lora[layer_idx],
+                )
+                .with_context(|| {
+                    format!("vk_recompute_opd_train_step: full layer {layer_idx} MLP gated value")
+                })?;
+
+                let gated_id = mint_fresh_tensor_id()?;
+                let gated_param = VkTensor::parameter(
+                    Arc::clone(gated_value.buffer()),
+                    gated_value.shape().to_vec(),
+                    gated_value.dtype(),
+                    Arc::clone(gated_value.device()),
+                    gated_id,
+                );
+                let down_out = vk_full_attention_mlp_down_from_gated(
+                    &gated_param,
+                    full,
+                    &lora_layers[layer_idx],
+                )?;
+                let prod = vk_mul(&down_out, &upstream)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_opd_train_step: backward full layer {layer_idx} MLP down")
+                })?;
+                let upstream_gated = grads.get(gated_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing gated grad for full layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != gated_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let after_id = mint_fresh_tensor_id()?;
+                let after_param = VkTensor::parameter(
+                    Arc::clone(after_attn_value.buffer()),
+                    after_attn_value.shape().to_vec(),
+                    after_attn_value.dtype(),
+                    Arc::clone(after_attn_value.device()),
+                    after_id,
+                );
+                let gated =
+                    vk_full_attention_mlp_gated(&after_param, full, &lora_layers[layer_idx])?;
+                let prod = vk_mul(&gated, &upstream_gated)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_opd_train_step: backward full layer {layer_idx} MLP gate/up"
+                    )
+                })?;
+                let mlp_grad_after = grads.get(after_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing after-attn MLP grad for full layer {layer_idx}")
+                })?;
+                let upstream_after_attn = vk_add_no_grad(&upstream, &mlp_grad_after)?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != after_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let boundary_id = mint_fresh_tensor_id()?;
+                let h_param = VkTensor::parameter(
+                    Arc::clone(boundary.buffer()),
+                    boundary.shape().to_vec(),
+                    boundary.dtype(),
+                    Arc::clone(boundary.device()),
+                    boundary_id,
+                );
+                let after_attn = vk_full_attention_attention_block_with_rope(
+                    &h_param,
+                    full,
+                    &lora_layers[layer_idx],
+                    rope_arg,
+                )?;
+                let prod = vk_mul(&after_attn, &upstream_after_attn)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_opd_train_step: backward full layer {layer_idx} attention")
+                })?;
+                upstream = grads.get(boundary_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing boundary grad for full layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != boundary_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+                continue;
+            }
+            VkLayerWeights::LinearAttention(linear) => {
+                let gdn_idx = gdn_map[layer_idx]
+                    .ok_or_else(|| anyhow::anyhow!("missing GDN index for layer {layer_idx}"))?;
+                let s = state
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("GDN layer {layer_idx} requires state"))?;
+
+                let after_attn_value = gdn_attention_block_value(
+                    &boundary,
+                    linear,
+                    &detached_lora[layer_idx],
+                    s,
+                    gdn_idx,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_opd_train_step: GDN layer {layer_idx} attention value")
+                })?;
+
+                let gated_value = vk_linear_attention_mlp_gated(
+                    &after_attn_value,
+                    linear,
+                    &detached_lora[layer_idx],
+                )
+                .with_context(|| {
+                    format!("vk_recompute_opd_train_step: GDN layer {layer_idx} MLP gated value")
+                })?;
+
+                let gated_id = mint_fresh_tensor_id()?;
+                let gated_param = VkTensor::parameter(
+                    Arc::clone(gated_value.buffer()),
+                    gated_value.shape().to_vec(),
+                    gated_value.dtype(),
+                    Arc::clone(gated_value.device()),
+                    gated_id,
+                );
+                let down_out = vk_linear_attention_mlp_down_from_gated(
+                    &gated_param,
+                    linear,
+                    &lora_layers[layer_idx],
+                )?;
+                let prod = vk_mul(&down_out, &upstream)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!("vk_recompute_opd_train_step: backward GDN layer {layer_idx} MLP down")
+                })?;
+                let upstream_gated = grads.get(gated_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing gated grad for GDN layer {layer_idx}")
+                })?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != gated_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                let after_id = mint_fresh_tensor_id()?;
+                let after_param = VkTensor::parameter(
+                    Arc::clone(after_attn_value.buffer()),
+                    after_attn_value.shape().to_vec(),
+                    after_attn_value.dtype(),
+                    Arc::clone(after_attn_value.device()),
+                    after_id,
+                );
+                let gated =
+                    vk_linear_attention_mlp_gated(&after_param, linear, &lora_layers[layer_idx])?;
+                let prod = vk_mul(&gated, &upstream_gated)?;
+                let scalar = vk_sum_all(&prod)?;
+                let grads = vk_backward(&scalar).with_context(|| {
+                    format!(
+                        "vk_recompute_opd_train_step: backward GDN layer {layer_idx} MLP gate/up"
+                    )
+                })?;
+                let mlp_grad_after = grads.get(after_id).cloned().ok_or_else(|| {
+                    anyhow::anyhow!("missing after-attn MLP grad for GDN layer {layer_idx}")
+                })?;
+                let upstream_after_attn = vk_add_no_grad(&upstream, &mlp_grad_after)?;
+                for (pid, grad) in grads.iter() {
+                    if *pid != after_id {
+                        accumulate_grad(&mut shared_grads, *pid, grad)?;
+                    }
+                }
+
+                upstream = vk_gdn_layer_backward_split(
+                    &boundary,
+                    &upstream_after_attn,
+                    linear,
+                    &lora_layers[layer_idx],
+                    s,
+                    gdn_idx,
+                    &mut shared_grads,
+                )
+                .with_context(|| {
+                    format!("vk_recompute_opd_train_step: split backward GDN layer {layer_idx}")
+                })?;
+                continue;
+            }
+        }
+    }
+
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        optimizer,
+        step,
+        "vk_recompute_opd_train_step",
+    )?;
+
+    Ok(loss_val)
+}
+
 /// Same as `vk_train_step` but threads optional GDN state. For
 /// hybrid models (Qwen3.5-4B), pass a freshly-zeroed
 /// `VkLinearAttentionState`. The state is mutated in place and can

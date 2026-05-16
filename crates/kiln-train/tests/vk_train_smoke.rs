@@ -37,7 +37,8 @@ use kiln_train::vk_train::{
     VkAdamWConfig, allocate_adamw_state, grpo_jsonl_stats, save_vk_lora_adapter,
     validate_vk_grpo_seq_lens, vk_init_lora_layers, vk_native_grpo_train_jsonl,
     vk_opd_train_step_with_state, vk_recompute_grpo_train_step_with_state,
-    vk_recompute_train_step_with_state_masked, vk_train_step,
+    vk_recompute_opd_train_step_with_state, vk_recompute_train_step_with_state_masked,
+    vk_train_step,
 };
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanDevice};
@@ -861,6 +862,118 @@ fn vk_native_opd_training_loss_decreases() -> Result<()> {
     assert!(
         last_loss >= -1e-4,
         "OPD reverse-KL went negative at last step: {last_loss}"
+    );
+    Ok(())
+}
+
+/// End-to-end vk-native OPD training loss-decreases test against the
+/// gradient-checkpointed `vk_recompute_opd_train_step_with_state`.
+///
+/// Same proof as `vk_native_opd_training_loss_decreases`, but driven through
+/// the layerwise reverse-recompute path that mirrors the CUDA-side
+/// `opd_train` checkpointing pattern. Without checkpointing, long-context
+/// OPD ran out of memory at ~750 tokens on a 48 GB GPU; the recompute
+/// variant trades peak memory for re-doing each layer's forward once.
+/// This test exercises the recompute path's correctness — the synthetic
+/// 1-layer model fits in either path, so the goal is purely to verify
+/// the layerwise propagation produces the same monotonic loss decrease.
+#[test]
+fn vk_native_opd_recompute_training_loss_decreases() -> Result<()> {
+    let Some(dev) = vk_dev() else {
+        eprintln!("Vulkan device not available — skipping");
+        return Ok(());
+    };
+    let model = build_tiny_model(&dev)?;
+    let lora_layers = vec![build_lora_layer(&dev, model.hidden, 16, 64)?];
+    let mut adamw = allocate_adamw_state(&dev, &lora_layers)?;
+    let cfg = VkAdamWConfig {
+        lr: 1e-2,
+        ..Default::default()
+    };
+
+    let input_ids: Vec<u32> = vec![5, 12, 7, 19, 3, 22, 11, 0];
+    let active_rows: Vec<u32> = (1u32..(input_ids.len() as u32)).collect();
+    let active_count = active_rows.len();
+
+    let top_k = 16usize;
+    let vocab = model.vocab;
+    let mut teacher_topk_indices: Vec<u32> = Vec::with_capacity(active_count * top_k);
+    let mut teacher_topk_logprobs: Vec<f32> = Vec::with_capacity(active_count * top_k);
+    for row_i in 0..active_count {
+        let mut row: Vec<u32> = (0..top_k as u32)
+            .map(|k| ((row_i * 7 + k as usize * 3 + 1) % vocab) as u32)
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..top_k {
+            while !seen.insert(row[k]) {
+                row[k] = (row[k] + 1) % vocab as u32;
+            }
+        }
+        teacher_topk_indices.extend_from_slice(&row);
+        for k in 0..top_k {
+            teacher_topk_logprobs.push(-((k as f32) * 0.5));
+        }
+    }
+
+    // tiny_model_config matches build_tiny_model's choices.
+    let model_config = tiny_model_config();
+    let num_gdn_layers = 0; // build_tiny_model has no GDN layers
+
+    let optimizer = Optimizer::AdamW {
+        beta1: cfg.beta1,
+        beta2: cfg.beta2,
+        eps: cfg.eps,
+        weight_decay: cfg.weight_decay,
+    };
+
+    let mut losses = Vec::new();
+    let initial = vk_recompute_opd_train_step_with_state(
+        &model,
+        &lora_layers,
+        &input_ids,
+        &active_rows,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        top_k,
+        &model_config,
+        num_gdn_layers,
+        &mut adamw,
+        &cfg,
+        optimizer,
+        1,
+    )?;
+    assert!(initial.is_finite(), "step 1 recompute OPD loss non-finite: {initial}");
+    losses.push(initial);
+
+    let mut last_loss = initial;
+    for step in 2u32..=10 {
+        let l = vk_recompute_opd_train_step_with_state(
+            &model,
+            &lora_layers,
+            &input_ids,
+            &active_rows,
+            &teacher_topk_indices,
+            &teacher_topk_logprobs,
+            top_k,
+            &model_config,
+            num_gdn_layers,
+            &mut adamw,
+            &cfg,
+            optimizer,
+            step,
+        )?;
+        assert!(l.is_finite(), "step {step}: non-finite recompute OPD loss {l}");
+        losses.push(l);
+        last_loss = l;
+    }
+    println!("vk_native_opd_recompute_training losses: {losses:?}");
+    assert!(
+        last_loss < initial * 0.95,
+        "checkpointed OPD reverse-KL did not drop meaningfully: {initial} -> {last_loss}"
+    );
+    assert!(
+        last_loss >= -1e-4,
+        "checkpointed OPD reverse-KL went negative at last step: {last_loss}"
     );
     Ok(())
 }
