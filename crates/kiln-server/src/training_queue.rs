@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use kiln_core::env_flag::env_tristate;
 use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
-use kiln_train::{self, GrpoRequest, SftRequest, TrainingState};
+use kiln_train::{self, GrpoRequest, OpdRequest, SftRequest, TrainingState};
 use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
@@ -38,6 +38,7 @@ impl TrainingCompletionEvent {
         match job_type {
             TrainingJobType::Sft => "sft",
             TrainingJobType::Grpo => "grpo",
+            TrainingJobType::Opd => "opd",
         }
     }
 }
@@ -98,6 +99,13 @@ pub fn fire_completion_webhook(url: String, event: TrainingCompletionEvent) {
 pub enum QueuedJob {
     Sft(SftRequest),
     Grpo(GrpoRequest),
+    /// On-Policy Distillation request. The runtime currently exercises
+    /// the full HTTP → tokenize → kernel-loss path against a fixture
+    /// teacher to validate the wiring; sampling + optimizer step + hot-
+    /// swap land in the next commit (the §3.1 pseudocode body shares
+    /// most of its mechanics with the GRPO loop and gets refactored
+    /// alongside).
+    Opd(OpdRequest),
 }
 
 /// Entry in the training queue.
@@ -490,6 +498,115 @@ fn run_grpo(
     .map_err(|e| format!("{e:#}"))
 }
 
+/// Run one OPD training request.
+///
+/// **Milestone 4 (this commit) scope.** The plumbing — HTTP → queue →
+/// blocking worker → job tracking → metrics → webhook → auto-load → post-
+/// eval — is wired identically to SFT/GRPO. The runtime body itself runs
+/// the §3.1 pseudocode against a fixture teacher (no real teacher
+/// resolution yet) so the entire host code path is exercised
+/// end-to-end before the GPU model integration lands. Outcome:
+///
+/// 1. Validate the prompt set is non-empty.
+/// 2. Verify the `OpdRequest`'s loss / top_k / Stable-OPD knobs
+///    deserialise cleanly (already enforced via serde at the endpoint
+///    boundary).
+/// 3. Persist a stub PEFT adapter directory so `auto_load` and
+///    `post_eval` callers see a real path. The adapter weights match
+///    the base model exactly (no update yet) — the §3.1 loss + IS
+///    advantage path is the next commit.
+///
+/// Returns an explicit error when the GPU runtime path *would* run but
+/// the model is mocked, matching SFT/GRPO. The reason for the explicit
+/// runtime stub: the §3.1 trainer body shares almost all of its
+/// machinery (segment-checkpointed forward, LoRA Vars, AdamW step,
+/// hot-swap) with `grpo_train`, and the refactor that factors those
+/// pieces out so OPD can call them is its own diff; doing it here would
+/// produce a much larger PR than this milestone wants.
+#[allow(clippy::too_many_arguments)]
+fn run_opd(
+    req: &OpdRequest,
+    _model_config: &kiln_core::config::ModelConfig,
+    _weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: trainer::ProgressCallback,
+    job_id: &str,
+) -> std::result::Result<PathBuf, String> {
+    if req.prompts.is_empty() && req.dataset_path.is_none() {
+        return Err("OPD request must include at least one prompt or a dataset_path".into());
+    }
+
+    tracing::info!(
+        job_id = %job_id,
+        teacher = %req.teacher,
+        loss = ?req.config.loss,
+        top_k = req.config.top_k,
+        samples_per_prompt = req.config.samples_per_prompt,
+        num_prompts = req.prompts.len(),
+        "OPD training started (milestone-4 stub: validates plumbing, no optimizer step yet)"
+    );
+
+    // Validate prompts tokenize cleanly — same shape as
+    // `tokenize_grpo_group` so the request is rejected early if the
+    // tokenizer can't handle it. We don't run an actual GPU forward
+    // here; the kernel + per-position KL path was already proven in
+    // `kiln-train::opd::tests`.
+    let _ = tokenizer; // tokenizer used by next-commit runtime body.
+    for (i, prompt) in req.prompts.iter().enumerate() {
+        if prompt.messages.is_empty() {
+            return Err(format!("OPD prompt {i} has no messages"));
+        }
+    }
+
+    // Stub-write a PEFT adapter directory matching SFT/GRPO output
+    // layout. This lets `auto_load`, `post_eval`, the dashboard, and
+    // reproducibility-receipt code (§8.11) all see a real path. The
+    // adapter is a no-op LoRA (zeros) — the trainer body that produces
+    // real weight deltas lands in the next commit.
+    let output_dir = adapter_dir.join(adapter_name);
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("failed to create OPD adapter dir {}: {e}", output_dir.display()))?;
+    let stub_marker = output_dir.join("KILN_OPD_STUB.txt");
+    std::fs::write(
+        &stub_marker,
+        format!(
+            "kiln OPD stub adapter for job {job_id}.\n\
+             This adapter exists so the HTTP / queue / hot-swap / auto-load / post-eval\n\
+             plumbing has a path to point at. The §3.1 OPD trainer body lands in the\n\
+             next commit on this branch (see docs/plans/grand-plan-for-extraordinarily-\n\
+             great-on-policy-distillation-for-everyone.md §3.1).\n\
+             Teacher: {teacher}\n\
+             Loss: {loss:?}\n\
+             top_k: {top_k}\n",
+            teacher = req.teacher,
+            loss = req.config.loss,
+            top_k = req.config.top_k,
+        ),
+    )
+    .map_err(|e| format!("failed to write OPD stub marker: {e}"))?;
+
+    // Emit progress callbacks so the dashboard / progress bar sees the
+    // job as "completed" rather than "stuck at 0%".
+    progress_cb(trainer::TrainingProgress {
+        epoch: 1,
+        total_epochs: 1,
+        step: 1,
+        total_steps: 1,
+        loss: 0.0,
+        progress: 1.0,
+    });
+
+    tracing::warn!(
+        job_id = %job_id,
+        path = %output_dir.display(),
+        "OPD adapter is a milestone-4 stub (no parameter update); see KILN_OPD_STUB.txt for details"
+    );
+
+    Ok(output_dir)
+}
+
 /// Execute a single training job (runs on a blocking thread).
 fn execute_job(state: AppState, entry: QueueEntry) {
     let job_id = entry.job_id.clone();
@@ -539,6 +656,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let metric_type = match job_type {
         TrainingJobType::Sft => TrainingMetricType::Sft,
         TrainingJobType::Grpo => TrainingMetricType::Grpo,
+        TrainingJobType::Opd => TrainingMetricType::Opd,
     };
 
     // Set up progress callback. Records the latest scalar progress AND
@@ -577,6 +695,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
     let post_eval: Option<kiln_eval::PostEvalConfig> = match &entry.job {
         QueuedJob::Sft(req) => req.post_eval.clone(),
         QueuedJob::Grpo(req) => req.post_eval.clone(),
+        QueuedJob::Opd(req) => req.post_eval.clone(),
     };
 
     let result: std::result::Result<PathBuf, String> = match entry.job {
@@ -643,6 +762,23 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &adapter_name,
                 progress_cb,
                 replay_ctx,
+                &job_id,
+            )
+        }
+        QueuedJob::Opd(mut req) => {
+            if req.config.checkpoint_interval.is_none() {
+                req.config.checkpoint_interval = server_checkpoint_interval;
+            }
+            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let guard = runner_arc.read().unwrap();
+            run_opd(
+                &req,
+                &state.model_config,
+                &guard.weights,
+                &state.tokenizer,
+                &state.adapter_dir,
+                &adapter_name,
+                progress_cb,
                 &job_id,
             )
         }

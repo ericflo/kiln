@@ -188,6 +188,10 @@ pub type GpuCoordinationLock = Arc<std::sync::RwLock<()>>;
 pub enum TrainingJobType {
     Sft,
     Grpo,
+    /// On-Policy Distillation (§3.1 of the grand plan). Sampling +
+    /// teacher reverse-KL + importance-sampling loss. Same hot-swap
+    /// semantics as SFT/GRPO.
+    Opd,
 }
 
 /// Tracked training job info stored in AppState.

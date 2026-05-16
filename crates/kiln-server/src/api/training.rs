@@ -12,7 +12,8 @@ use axum::{
 
 use kiln_core::env_flag::env_tristate;
 use kiln_train::{
-    GrpoGroup, GrpoRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
+    GrpoGroup, GrpoRequest, OpdRequest, SftRequest, TrainingResponse, TrainingState,
+    TrainingStatus,
 };
 use serde::Serialize;
 
@@ -478,6 +479,134 @@ async fn submit_grpo(
     }))
 }
 
+/// `POST /v1/train/opd` — submit an On-Policy Distillation training run.
+///
+/// Mirror of `submit_grpo` adapted to the §3.1 OPD recipe. The request
+/// shape is `OpdRequest` (defined in `kiln-train::opd`): a list of
+/// prompts, a teacher alias, and an `OpdConfig` whose §6 paper-cited
+/// defaults match the grand plan exactly (top_k=32, temperature=1.0,
+/// top_p=0.9, max_tokens=7K, γ=0, Stable-OPD auto, etc.).
+///
+/// Same queue / hot-swap / auto-load / post-eval semantics as SFT/GRPO.
+/// Job tracking via `/v1/train/status`, `/v1/train/queue`, etc.
+async fn submit_opd(
+    State(state): State<AppState>,
+    Json(mut req): Json<OpdRequest>,
+) -> Result<Json<TrainingResponse>, ApiError> {
+    // Reject during shutdown.
+    if state.shutdown.load(Ordering::Relaxed) {
+        return Err(ApiError::shutting_down());
+    }
+
+    // Queue / tracking caps — mirror SFT/GRPO.
+    let max_queued = state.max_queued_training_jobs;
+    let queued_now = state.training_queue.lock().unwrap().len();
+    if queued_now >= max_queued {
+        return Err(ApiError::training_queue_full(max_queued));
+    }
+    let max_tracked = state.max_tracked_jobs;
+    let tracked_now = state.training_jobs.read().unwrap().len();
+    if tracked_now >= max_tracked {
+        return Err(ApiError::training_tracked_full(max_tracked));
+    }
+
+    // Trim a blank dataset_path the same way GRPO does.
+    if let Some(path) = req.dataset_path.take() {
+        let path = path.trim().to_string();
+        if !path.is_empty() {
+            req.dataset_path = Some(path);
+        }
+    }
+
+    if req.prompts.is_empty() && req.dataset_path.is_none() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must include at least one prompt or a dataset_path".to_string(),
+        ));
+    }
+    if req.teacher.trim().is_empty() {
+        return Err(ApiError::training_invalid_request(
+            "OPD request must specify a teacher alias (e.g. \"qwen3.6-27b@local\")".to_string(),
+        ));
+    }
+    if req.config.top_k == 0 {
+        return Err(ApiError::training_invalid_request(
+            "OPD top_k must be > 0".to_string(),
+        ));
+    }
+    if req.config.samples_per_prompt == 0 {
+        return Err(ApiError::training_invalid_request(
+            "OPD samples_per_prompt must be > 0".to_string(),
+        ));
+    }
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let adapter_name = req
+        .config
+        .output_name
+        .clone()
+        .unwrap_or_else(|| format!("opd-{}", &job_id[..8]));
+    let auto_load = req.config.auto_load;
+
+    tracing::info!(
+        num_prompts = req.prompts.len(),
+        teacher = %req.teacher,
+        loss = ?req.config.loss,
+        top_k = req.config.top_k,
+        samples_per_prompt = req.config.samples_per_prompt,
+        job_id = %job_id,
+        adapter = %adapter_name,
+        "OPD training request queued"
+    );
+
+    if matches!(state.backend.as_ref(), ModelBackend::Mock { .. }) {
+        return Err(ApiError::mock_mode_no_training());
+    }
+
+    // Register the job and enqueue. We deliberately do not yet route
+    // OPD through the SFT/GRPO working-set preflight: the runtime body
+    // is a milestone-4 stub (the actual GPU steps land next commit),
+    // so the preflight estimate doesn't apply. The preflight wires in
+    // alongside the trainer body refactor.
+    let info = TrainingJobInfo {
+        job_id: job_id.clone(),
+        adapter_name: adapter_name.clone(),
+        job_type: TrainingJobType::Opd,
+        state: TrainingState::Queued,
+        progress: 0.0,
+        loss: None,
+        epoch: None,
+        adapter_path: None,
+        submitted_at: std::time::Instant::now(),
+        auto_load,
+        finished_at: None,
+        linked_eval_job_ids: Vec::new(),
+        loss_history: Vec::new(),
+    };
+    state
+        .training_jobs
+        .write()
+        .unwrap()
+        .insert(job_id.clone(), info);
+
+    let queue_position = {
+        let mut q = state.training_queue.lock().unwrap();
+        q.push(QueueEntry {
+            job_id: job_id.clone(),
+            job: QueuedJob::Opd(req),
+        });
+        q.len()
+    };
+
+    Ok(Json(TrainingResponse {
+        job_id,
+        state: TrainingState::Queued,
+        message: format!(
+            "Queued OPD training (position {queue_position} in queue). Runtime body is a \
+             milestone-4 stub — see commit message for status."
+        ),
+    }))
+}
+
 /// GET /v1/train/status — overall training status (list all tracked jobs).
 async fn training_status(State(state): State<AppState>) -> Json<Vec<TrainingStatus>> {
     let jobs = state.training_jobs.read().unwrap();
@@ -611,6 +740,7 @@ async fn cancel_queued_job(
             let mt = match jt {
                 TrainingJobType::Sft => TrainingMetricType::Sft,
                 TrainingJobType::Grpo => TrainingMetricType::Grpo,
+                TrainingJobType::Opd => TrainingMetricType::Opd,
             };
             state
                 .metrics
@@ -631,6 +761,9 @@ const SFT_BODY_LIMIT: usize = 64 * 1024 * 1024;
 /// Body-size cap for GRPO training submissions (audit LOW §1).
 /// 64 MiB accommodates batches of scored completions.
 const GRPO_BODY_LIMIT: usize = 64 * 1024 * 1024;
+/// Body-size cap for OPD training submissions. Matches GRPO since the
+/// payload shape — prompts + config — is structurally similar.
+const OPD_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Rich detail payload exposed at `GET /v1/train/jobs/:job_id`. Flattens
 /// `TrainingStatus` so the wire shape stays a superset (no field drift)
@@ -698,6 +831,10 @@ pub fn routes() -> Router<AppState> {
             "/v1/train/grpo",
             post(submit_grpo).layer(DefaultBodyLimit::max(GRPO_BODY_LIMIT)),
         )
+        .route(
+            "/v1/train/opd",
+            post(submit_opd).layer(DefaultBodyLimit::max(OPD_BODY_LIMIT)),
+        )
         .route("/v1/train/status", get(training_status))
         .route("/v1/train/status/{job_id}", get(job_status))
         .route("/v1/train/jobs/{job_id}", get(job_detail))
@@ -708,7 +845,8 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_train::{ChatMessage, GrpoConfig, ScoredCompletion};
+    use kiln_train::{ChatMessage, GrpoConfig, OpdLossGranularity, ScoredCompletion};
+    use kiln_train::opd::{OpdConfig, OpdPrompt};
 
     fn grpo_group() -> GrpoGroup {
         GrpoGroup {
@@ -764,5 +902,55 @@ mod tests {
         assert_eq!(stats.num_groups, None);
         assert_eq!(stats.total_completions, None);
         assert!(stats.max_seq_len > 0);
+    }
+
+    fn opd_request_payload() -> OpdRequest {
+        OpdRequest {
+            prompts: vec![OpdPrompt {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Solve 5x + 7 = 22".into(),
+                }],
+            }],
+            dataset_path: None,
+            teacher: "qwen3.6-27b@local".into(),
+            config: OpdConfig::default(),
+            post_eval: None,
+        }
+    }
+
+    #[test]
+    fn opd_request_serde_round_trip_carries_grand_plan_defaults() {
+        let req = opd_request_payload();
+        let json = serde_json::to_string(&req).expect("serialize");
+        let parsed: OpdRequest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.teacher, "qwen3.6-27b@local");
+        assert_eq!(parsed.config.top_k, 32);
+        assert_eq!(parsed.config.samples_per_prompt, 4);
+        assert!((parsed.config.top_p - 0.9).abs() < 1e-9);
+        assert!(matches!(parsed.config.loss, OpdLossGranularity::TeacherTopK));
+        assert_eq!(parsed.config.max_tokens, 7168);
+    }
+
+    #[test]
+    fn opd_request_accepts_dataset_path_in_place_of_prompts() {
+        // A streaming-dataset payload — no inline prompts but a
+        // `dataset_path` set. The `submit_opd` handler treats this as
+        // valid; tested at the wire level.
+        let json = r#"{"prompts":[],"dataset_path":"/tmp/opd.jsonl","teacher":"qwen3.6-27b@openrouter"}"#;
+        let req: OpdRequest = serde_json::from_str(json).unwrap();
+        assert!(req.prompts.is_empty());
+        assert_eq!(req.dataset_path.as_deref(), Some("/tmp/opd.jsonl"));
+        assert_eq!(req.teacher, "qwen3.6-27b@openrouter");
+    }
+
+    #[test]
+    fn opd_request_rejects_unknown_loss_granularity() {
+        let json = r#"{"prompts":[],"teacher":"x","config":{"loss":"sampled_lobotomy"}}"#;
+        let parsed: Result<OpdRequest, _> = serde_json::from_str(json);
+        assert!(
+            parsed.is_err(),
+            "unknown loss value should fail to deserialize"
+        );
     }
 }
