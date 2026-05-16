@@ -25,9 +25,10 @@ pub use receipt::{
 };
 
 pub use diagnostics::{
-    GuardrailDecision, GuardrailTrigger, LengthInflationGuardrail, OpdDiagnosticSnapshot,
-    REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary, build_snapshot, repetition_rate,
-    truncation_rate,
+    DIVERSITY_COLLAPSE_THRESHOLD, DIVERSITY_COLLAPSE_WINDOW, GuardrailDecision, GuardrailTrigger,
+    LengthInflationGuardrail, OpdDiagnosticSnapshot, REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary,
+    SELF_PLAY_SATURATION_THRESHOLD, SELF_PLAY_SATURATION_WINDOW, build_snapshot, repetition_rate,
+    rollout_diversity, truncation_rate,
 };
 pub use logit_source::{
     DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,

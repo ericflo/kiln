@@ -115,6 +115,29 @@ pub struct OpdDiagnosticSnapshot {
     /// to detect "bump didn't help" cases.
     #[serde(default)]
     pub stable_opd_already_bumped: bool,
+    /// §11 `DiversityCollapse` — fraction of *distinct* unigrams
+    /// across the K rollouts in this validation pass, normalised
+    /// against the per-rollout count. Healthy runs hover near
+    /// `1/K + (K-1)/K * unique_rate_per_rollout`. Reverse-KL
+    /// mode-seeking pulls this toward the lower bound; when the
+    /// guardrail loop sees it below threshold for `window` passes
+    /// it surfaces `DiversityCollapse`. `None` when not measured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rollout_diversity: Option<f64>,
+    /// §11 `SelfPlaySaturation` — mean KL between consecutive
+    /// self-distill iterations (i_n → i_{n+1}). Trends to zero as
+    /// the student cannot squeeze further signal from itself.
+    /// Survey §7.2 mitigation: stop iterating, suggest a new
+    /// teacher. `None` outside of self-distill loops.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub self_play_inter_iteration_kl: Option<f64>,
+    /// §11 `TokenizerDrift` — set when the teacher's
+    /// `tokenizer_hash` doesn't match the student's tokenizer hash.
+    /// Fired pre-flight by the trainer; safer to fail fast than
+    /// silently train on mistokenised logprobs. `None` when no
+    /// teacher hash was registered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer_hash_mismatch: Option<bool>,
 }
 
 /// One rollout's worth of metadata for diagnostic-stack input.
@@ -211,6 +234,48 @@ pub fn repetition_rate(
     repetitive as f64 / rollouts.len() as f64
 }
 
+/// Cross-rollout diversity (Survey §7.2 mitigation for
+/// `DiversityCollapse`).
+///
+/// Operationalised as the *distinct unigram ratio* across the union of
+/// the K rollouts' token streams: `|distinct_tokens_overall| /
+/// total_tokens`. Each rollout's text is hashed into a byte stream
+/// and split into 4-byte unigrams.
+///
+/// Healthy reasoning runs land in the 0.4–0.7 range. Mode-seeking
+/// collapse (the failure mode Survey §7.2 names) drives this toward
+/// `1/total_tokens`. Returns 1.0 for empty inputs so an absent
+/// measurement never trips the guardrail.
+pub fn rollout_diversity(rollouts: &[RolloutSummary]) -> f64 {
+    if rollouts.is_empty() {
+        return 1.0;
+    }
+    let mut distinct: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut total: usize = 0;
+    for r in rollouts {
+        let bytes = r.text.as_bytes();
+        if bytes.len() < 4 {
+            // Treat each character as its own bucket — short rollouts
+            // are otherwise trivially "diverse" and the guardrail
+            // would never fire on a degenerate case.
+            for &b in bytes {
+                distinct.insert(b as u64);
+                total += 1;
+            }
+            continue;
+        }
+        for window in bytes.windows(4) {
+            let val = u32::from_le_bytes([window[0], window[1], window[2], window[3]]);
+            distinct.insert(val as u64);
+            total += 1;
+        }
+    }
+    if total == 0 {
+        return 1.0;
+    }
+    distinct.len() as f64 / total as f64
+}
+
 /// zlib-based compression-ratio detector matching Luo et al. 2026 §3.2.
 ///
 /// `compress_ratio(input) = |input| / |zlib(input)|`. Repetitive text
@@ -260,6 +325,7 @@ pub fn build_snapshot(
         rollouts.iter().map(|r| r.generated_tokens as f64).sum::<f64>()
             / rollouts.len() as f64
     };
+    let diversity = rollout_diversity(rollouts);
     OpdDiagnosticSnapshot {
         step,
         at: chrono::Utc::now().to_rfc3339(),
@@ -274,6 +340,9 @@ pub fn build_snapshot(
         capacity_ratio: None,
         post_cold_start_overlap: None,
         stable_opd_already_bumped: false,
+        rollout_diversity: Some(diversity),
+        self_play_inter_iteration_kl: None,
+        tokenizer_hash_mismatch: None,
     }
 }
 
@@ -338,6 +407,15 @@ pub enum GuardrailDecision {
         new_max_tokens: usize,
         reason: GuardrailTrigger,
     },
+    /// §11 `DiversityCollapse` (Survey §7.2): suggest switching to
+    /// an asymmetric divergence (ToDi / AKL) for open-ended tasks
+    /// where reverse-KL's mode-seeking is collapsing the rollout
+    /// distribution.
+    SuggestAsymmetricDivergence { reason: GuardrailTrigger },
+    /// §11 `SelfPlaySaturation` (Survey §7.2): the iterative
+    /// self-distill loop has converged — further iterations buy
+    /// nothing. Stop iterating; suggest a richer teacher.
+    StopIteratingAndSwitchTeacher { reason: GuardrailTrigger },
 }
 
 /// The specific paper-cited trigger that fired the guardrail.
@@ -376,6 +454,21 @@ pub enum GuardrailTrigger {
     /// is in flight. Drastic action: halve learning rate AND drop
     /// max_tokens.
     FlawedPrefixCollapse { passes_since_bump: usize },
+    /// §11 (Survey §7.2) — rollout diversity (distinct unigram
+    /// ratio across the K rollouts) has dropped below
+    /// [`DIVERSITY_COLLAPSE_THRESHOLD`] for `window` consecutive
+    /// validation passes. Reverse-KL's mode-seeking is collapsing
+    /// the rollout distribution.
+    DiversityCollapse { window: usize, observed: f64 },
+    /// §11 (Survey §7.2) — inter-iteration self-distill KL has
+    /// dropped below [`SELF_PLAY_SATURATION_THRESHOLD`] for
+    /// `window` consecutive iterations. The student cannot
+    /// extract further signal from itself.
+    SelfPlaySaturation { window: usize, observed_kl: f64 },
+    /// §11 — teacher and student tokenizer hashes do not match.
+    /// Fired pre-flight before the first optimizer step. Silent
+    /// drift mistokenises logprobs and gives a wrong KL signal.
+    TokenizerDrift,
 }
 
 /// Stateful guardrail that consumes snapshots in order and decides on
@@ -392,6 +485,15 @@ pub struct LengthInflationGuardrail {
     overlap_history: Vec<f64>,
     /// Entropy-gap history (last few values). Bounded.
     entropy_gap_history: Vec<f64>,
+    /// Consecutive snapshots with rollout_diversity below threshold.
+    consecutive_low_diversity: usize,
+    /// Last observed rollout_diversity (so the trigger can report it).
+    last_diversity: f64,
+    /// Consecutive snapshots with `self_play_inter_iteration_kl` below
+    /// threshold. §11 SelfPlaySaturation.
+    consecutive_low_self_play_kl: usize,
+    /// Last observed self-play KL (for the trigger report).
+    last_self_play_kl: f64,
     /// Last decision made — used by callers that want to suppress
     /// duplicate logging of the same mitigation.
     last_decision: GuardrailDecision,
@@ -406,6 +508,27 @@ pub const GUARDRAIL_WINDOW: usize = 6;
 /// Minimum Δ in overlap ratio over [`GUARDRAIL_WINDOW`] passes that
 /// counts as "still moving." Below this we fire `OverlapStagnation`.
 pub const OVERLAP_STAGNATION_MIN_DELTA: f64 = 0.01;
+
+/// §11 `DiversityCollapse` (Survey §7.2) — rollout-diversity threshold
+/// below which we fire the guardrail. 0.15 is conservative — Lu (2025)
+/// reports healthy reasoning runs land in the 0.4–0.7 range; below 0.2
+/// is the mode-seeking-collapse regime.
+pub const DIVERSITY_COLLAPSE_THRESHOLD: f64 = 0.15;
+
+/// Consecutive validation passes with `rollout_diversity` below
+/// [`DIVERSITY_COLLAPSE_THRESHOLD`] before the guardrail fires. Same
+/// "twice in a row" rule as RepRate, to keep noise off.
+pub const DIVERSITY_COLLAPSE_WINDOW: usize = 2;
+
+/// §11 `SelfPlaySaturation` (Survey §7.2) — inter-iteration self-distill
+/// KL below this nats value over `SELF_PLAY_SATURATION_WINDOW` rounds
+/// fires the guardrail. 0.005 nats ≈ a 0.5% relative shift in
+/// distribution — within reproducibility noise.
+pub const SELF_PLAY_SATURATION_THRESHOLD: f64 = 0.005;
+
+/// Consecutive self-distill iterations below
+/// [`SELF_PLAY_SATURATION_THRESHOLD`] before firing the guardrail.
+pub const SELF_PLAY_SATURATION_WINDOW: usize = 2;
 
 impl LengthInflationGuardrail {
     /// Feed a fresh snapshot. Returns the current decision; the trainer
@@ -433,6 +556,27 @@ impl LengthInflationGuardrail {
                 self.overlap_history.remove(0);
             }
         }
+        // Diversity counter — fires on `DIVERSITY_COLLAPSE_WINDOW`
+        // consecutive low-diversity passes.
+        if let Some(d) = snapshot.rollout_diversity {
+            self.last_diversity = d;
+            if d < DIVERSITY_COLLAPSE_THRESHOLD {
+                self.consecutive_low_diversity += 1;
+            } else {
+                self.consecutive_low_diversity = 0;
+            }
+        }
+        // Self-play saturation counter — fires on
+        // `SELF_PLAY_SATURATION_WINDOW` consecutive iterations with
+        // inter-iteration KL below the threshold.
+        if let Some(k) = snapshot.self_play_inter_iteration_kl {
+            self.last_self_play_kl = k;
+            if k < SELF_PLAY_SATURATION_THRESHOLD {
+                self.consecutive_low_self_play_kl += 1;
+            } else {
+                self.consecutive_low_self_play_kl = 0;
+            }
+        }
         if let Some(g) = snapshot.mean_entropy_gap {
             self.entropy_gap_history.push(g);
             if self.entropy_gap_history.len() > GUARDRAIL_WINDOW {
@@ -441,15 +585,23 @@ impl LengthInflationGuardrail {
         }
 
         // Priority order (most critical first):
-        // 0a. ThinkingPatternMismatch → refuse the run (terminal).
-        // 0b. CapacityGap → ask user to bump rank (terminal).
+        // 0a. TokenizerDrift → refuse the run (terminal, pre-flight).
+        // 0b. ThinkingPatternMismatch → refuse the run (terminal).
+        // 0c. CapacityGap → ask user to bump rank (terminal).
+        // 0d. SelfPlaySaturation → stop iterating (terminal for the
+        //     enclosing self-distill loop, not the optimizer step).
         // 1.  FlawedPrefixCollapse → halve LR + cap tokens.
         // 2.  TruncationSpike → rollback.
         // 3.  OverlapStagnation → pause + recommend cold-start.
         // 4.  LongTailRewardDecay → cap rollout length.
         // 5.  RepetitionRateAbove → bump Stable-OPD.
         // 6.  EntropyGapWidening → reduce LR.
-        let decision = if let Some(o) = snapshot.post_cold_start_overlap {
+        // 7.  DiversityCollapse → suggest asymmetric divergence.
+        let decision = if snapshot.tokenizer_hash_mismatch == Some(true) {
+            GuardrailDecision::RefuseRun {
+                reason: GuardrailTrigger::TokenizerDrift,
+            }
+        } else if let Some(o) = snapshot.post_cold_start_overlap {
             if o < 0.3 {
                 GuardrailDecision::RefuseRun {
                     reason: GuardrailTrigger::ThinkingPatternMismatch {
@@ -470,6 +622,13 @@ impl LengthInflationGuardrail {
                 }
             } else {
                 self.decide_no_terminal(snapshot)
+            }
+        } else if self.consecutive_low_self_play_kl >= SELF_PLAY_SATURATION_WINDOW {
+            GuardrailDecision::StopIteratingAndSwitchTeacher {
+                reason: GuardrailTrigger::SelfPlaySaturation {
+                    window: self.consecutive_low_self_play_kl,
+                    observed_kl: self.last_self_play_kl,
+                },
             }
         } else {
             self.decide_no_terminal(snapshot)
@@ -531,6 +690,14 @@ impl LengthInflationGuardrail {
                 factor: 0.5,
                 reason: GuardrailTrigger::EntropyGapWidening {
                     window: self.entropy_gap_history.len(),
+                },
+            };
+        }
+        if self.consecutive_low_diversity >= DIVERSITY_COLLAPSE_WINDOW {
+            return GuardrailDecision::SuggestAsymmetricDivergence {
+                reason: GuardrailTrigger::DiversityCollapse {
+                    window: self.consecutive_low_diversity,
+                    observed: self.last_diversity,
                 },
             };
         }
@@ -678,6 +845,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         assert_eq!(g.observe(&mk_snap(0.04)), GuardrailDecision::Ok);
         assert_eq!(g.observe(&mk_snap(0.10)), GuardrailDecision::Ok); // 1st high
@@ -709,6 +879,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         g.observe(&mk_snap(0.10));
         g.observe(&mk_snap(0.12));
@@ -738,6 +911,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         g.observe(&mk_snap(0.95));
         match g.observe(&mk_snap(0.99)) {
@@ -764,6 +940,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let parsed: OpdDiagnosticSnapshot = serde_json::from_str(&json).unwrap();
@@ -790,6 +969,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         // Window is GUARDRAIL_WINDOW=6 entries. Feed 5 close together
         // (no decision), then 6th close → fires.
@@ -822,6 +1004,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         // Window with 0.10 spread → above 0.01 threshold ⇒ never fires.
         let values = [0.70, 0.72, 0.74, 0.77, 0.79, 0.80];
@@ -847,6 +1032,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         // Monotonically rising entropy gap over the window.
         let rising = [0.10, 0.12, 0.15, 0.18, 0.22, 0.26];
@@ -888,6 +1076,9 @@ mod tests {
             // §11 ThinkingPatternMismatch → RefuseRun.
             post_cold_start_overlap: Some(0.22),
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         match g.observe(&snap) {
             GuardrailDecision::RefuseRun {
@@ -917,6 +1108,9 @@ mod tests {
             capacity_ratio: Some(0.2),
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         match g.observe(&snap) {
             GuardrailDecision::IncreaseLoRARank {
@@ -949,6 +1143,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         match g.observe(&snap) {
             GuardrailDecision::CapRolloutLength {
@@ -979,6 +1176,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: true, // bump already applied
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         match g.observe(&snap) {
             GuardrailDecision::HalveLrAndCapTokens {
@@ -1011,6 +1211,9 @@ mod tests {
             capacity_ratio: None,
             post_cold_start_overlap: None,
             stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
         };
         // Trunc spike both passes — must win over overlap stagnation.
         g.observe(&mk);
@@ -1030,5 +1233,180 @@ mod tests {
         let r = RolloutSummary::from_tokens(&repeated, true);
         let ratio = compress_ratio(r.text.as_bytes());
         assert!(ratio > 10.0, "expected highly-compressible token stream, got {ratio}");
+    }
+
+    #[test]
+    fn rollout_diversity_collapses_for_identical_rollouts() {
+        // K identical rollouts → tokens all come from the same
+        // 4-byte window stream; distinct-token ratio is tiny.
+        let single_token_stream = "ababababababababababababababababab".to_string();
+        let rollouts: Vec<RolloutSummary> = (0..8)
+            .map(|_| RolloutSummary {
+                text: single_token_stream.clone(),
+                generated_tokens: single_token_stream.len(),
+                hit_eos: true,
+            })
+            .collect();
+        let d = rollout_diversity(&rollouts);
+        assert!(
+            d < DIVERSITY_COLLAPSE_THRESHOLD,
+            "expected low-diversity, got {d}"
+        );
+    }
+
+    #[test]
+    fn rollout_diversity_high_for_distinct_rollouts() {
+        // Eight rollouts of full-byte pseudo-random text so the
+        // 4-byte unigram distribution is wide.
+        let rollouts: Vec<RolloutSummary> = (0..8)
+            .map(|i| {
+                let mut buf = Vec::with_capacity(400);
+                let mut state: u64 = (i as u64).wrapping_mul(2_654_435_761) ^ 0xdead_beefu64;
+                for _ in 0..400 {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    // Map to printable ASCII so the text is valid UTF-8.
+                    let b = 0x20 + ((state >> 33) % 95) as u8;
+                    buf.push(b);
+                }
+                RolloutSummary {
+                    text: String::from_utf8(buf).unwrap(),
+                    generated_tokens: 400,
+                    hit_eos: true,
+                }
+            })
+            .collect();
+        let d = rollout_diversity(&rollouts);
+        // Diverse stream: at least an order of magnitude above the
+        // collapse threshold.
+        assert!(
+            d > DIVERSITY_COLLAPSE_THRESHOLD * 2.0,
+            "expected diverse rollouts well above threshold, got {d}"
+        );
+    }
+
+    #[test]
+    fn guardrail_fires_diversity_collapse_after_window() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk_snap = |div: f64| OpdDiagnosticSnapshot {
+            step: 100,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 8,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+            rollout_diversity: Some(div),
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
+        };
+        // One pass below threshold — not yet enough.
+        assert_eq!(g.observe(&mk_snap(0.05)), GuardrailDecision::Ok);
+        // Second consecutive pass → fires.
+        match g.observe(&mk_snap(0.04)) {
+            GuardrailDecision::SuggestAsymmetricDivergence { reason } => {
+                assert!(matches!(
+                    reason,
+                    GuardrailTrigger::DiversityCollapse { window, .. } if window >= 2
+                ));
+            }
+            other => panic!("expected SuggestAsymmetricDivergence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_resets_diversity_on_recovery() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk_snap = |div: f64| OpdDiagnosticSnapshot {
+            step: 100,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 8,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+            rollout_diversity: Some(div),
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: None,
+        };
+        g.observe(&mk_snap(0.05));
+        // Bounce back above threshold → counter resets.
+        g.observe(&mk_snap(0.4));
+        assert_eq!(g.observe(&mk_snap(0.04)), GuardrailDecision::Ok);
+    }
+
+    #[test]
+    fn guardrail_fires_self_play_saturation_after_window() {
+        let mut g = LengthInflationGuardrail::default();
+        let mk_snap = |k: f64| OpdDiagnosticSnapshot {
+            step: 100,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 4,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: Some(k),
+            tokenizer_hash_mismatch: None,
+        };
+        assert_eq!(g.observe(&mk_snap(0.002)), GuardrailDecision::Ok);
+        match g.observe(&mk_snap(0.001)) {
+            GuardrailDecision::StopIteratingAndSwitchTeacher { reason } => {
+                assert!(matches!(
+                    reason,
+                    GuardrailTrigger::SelfPlaySaturation { window, .. } if window >= 2
+                ));
+            }
+            other => panic!("expected StopIteratingAndSwitchTeacher, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guardrail_fires_tokenizer_drift_immediately() {
+        let mut g = LengthInflationGuardrail::default();
+        let snap = OpdDiagnosticSnapshot {
+            step: 0,
+            at: "".into(),
+            mean_kl: 0.0,
+            truncation_rate: 0.0,
+            repetition_rate: 0.0,
+            mean_response_tokens: 0.0,
+            num_rollouts: 4,
+            mean_entropy_gap: None,
+            overlap_ratio: None,
+            long_tail_decay_position: None,
+            capacity_ratio: None,
+            post_cold_start_overlap: None,
+            stable_opd_already_bumped: false,
+            rollout_diversity: None,
+            self_play_inter_iteration_kl: None,
+            tokenizer_hash_mismatch: Some(true),
+        };
+        match g.observe(&snap) {
+            GuardrailDecision::RefuseRun {
+                reason: GuardrailTrigger::TokenizerDrift,
+            } => {}
+            other => panic!("expected RefuseRun(TokenizerDrift), got {other:?}"),
+        }
     }
 }
