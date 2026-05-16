@@ -6922,7 +6922,6 @@ async function refreshSuites() {
     const d = await api('/v1/eval/suites');
     const suites = d.suites || [];
     const el = document.getElementById('suites-list');
-    document.getElementById('evals-count').textContent = String(suites.length);
     if (!suites.length) {
       el.className = 'eval-empty';
       el.innerHTML = `
@@ -7004,6 +7003,14 @@ async function refreshEvalJobs() {
     const d = await api('/v1/eval/jobs');
     const jobs = d.jobs || [];
     evalJobsCache = jobs;
+    // Header badge counts active jobs (queued + running), mirroring the
+    // training badge — total job history is shown inside the tab so the
+    // badge should signal "needs attention now", not "lifetime count".
+    const liveCount = jobs.filter(j => {
+      const st = (j.state || '').toString().toLowerCase();
+      return st === 'queued' || st === 'running';
+    }).length;
+    setText('evals-count', String(liveCount));
     const el = document.getElementById('eval-jobs-list');
     if (!jobs.length) {
       el.className = 'eval-empty';
@@ -8472,7 +8479,7 @@ function renderAdapterDrillBody(d) {
         <span class="tabular-nums hint">${j.final_loss != null ? 'loss '+j.final_loss.toFixed(3) : '—'}</span>
         <span class="tabular-nums hint">${fmtDuration(j.elapsed_secs)}</span>
       </div>`).join('')
-    : '<div class="hint">No training jobs in tracking map (may have TTL\'d out).</div>';
+    : '<div class="hint">No training jobs have produced this adapter (yet). Submit one from the Training tab.</div>';
 
   const evalHtml = d.eval_jobs.length
     ? d.eval_jobs.map(j => `<div class="eval-row" data-eval-job="${escapeHtml(j.job_id)}" style="grid-template-columns:auto 1fr auto auto; cursor:pointer;">
@@ -9061,6 +9068,11 @@ pollAdapters();
 pollTraining();
 pollDecodePerf();
 pollRecentRequests();
+// Pull eval jobs once at startup so the Evals tab badge reflects archived
+// runs immediately. The Evals tab also refreshes on its own tab-switch
+// handler — this just makes the dashboard's header count accurate before
+// the user has visited the tab.
+if (typeof refreshEvalJobs === 'function') refreshEvalJobs();
 
 setInterval(pollHealth, 2000);
 setInterval(pollAdapters, 5000);
@@ -9069,6 +9081,15 @@ setInterval(pollDecodePerf, 2000);
 setInterval(pollRecentRequests, 2000);
 // Refresh relative timestamps every second without re-fetching the list.
 setInterval(refreshRecentTimes, 1000);
+// Refresh eval-jobs badge count every 5s so it tracks queued / running
+// changes even when the user is on a different tab.
+setInterval(() => {
+  if (typeof refreshEvalJobs !== 'function') return;
+  // Only refresh the badge when the Evals tab isn't already actively
+  // polling — its own polling cadence is more aggressive when visible.
+  const evalsActive = document.querySelector('[data-page="evals"]')?.classList.contains('active');
+  if (!evalsActive) refreshEvalJobs();
+}, 5000);
 
 })();
 </script>
