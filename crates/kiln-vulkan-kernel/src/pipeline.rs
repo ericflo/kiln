@@ -7,10 +7,16 @@ fn compile_shader_command(
     glsl_path: &str,
     spv_path: &std::path::Path,
 ) -> std::io::Result<std::process::Output> {
+    // Subgroup-op shaders (vk_flash_sdpa_*) need SPIR-V 1.3, which
+    // requires `--target-env=vulkan1.1` for glslc / `--target-env
+    // vulkan1.1` for glslangValidator. Mirrors the same flag in
+    // `build.rs::compile_shader_command` so embedded + runtime
+    // compilation produce equivalent SPIR-V.
     let glslc = std::process::Command::new("glslc")
         .arg(glsl_path)
         .arg("-o")
         .arg(spv_path)
+        .arg("--target-env=vulkan1.1")
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")
@@ -25,6 +31,8 @@ fn compile_shader_command(
         .arg(glsl_path)
         .arg("-o")
         .arg(spv_path)
+        .arg("--target-env")
+        .arg("vulkan1.1")
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")

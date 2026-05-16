@@ -363,10 +363,18 @@ fn compile_shader_command(
     glsl_path: &std::path::Path,
     spv_path: &std::path::Path,
 ) -> std::io::Result<std::process::Output> {
+    // `--target-env=vulkan1.1` (and the matching `--target-env vulkan1.1`
+    // for glslangValidator) is needed for subgroup-op shaders that
+    // require SPIR-V 1.3 — without it glslc defaults to spv1.0 and
+    // shaders like vk_flash_sdpa_fwd_f32_offset fail with
+    // `'subgroup op' : requires SPIR-V 1.3`. The kiln Vulkan instance
+    // requests Vulkan 1.2 (per device.rs), so vulkan1.1 target-env is
+    // safely supported everywhere kiln runs.
     let glslc = std::process::Command::new("glslc")
         .arg(glsl_path)
         .arg("-o")
         .arg(spv_path)
+        .arg("--target-env=vulkan1.1")
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")
@@ -381,6 +389,8 @@ fn compile_shader_command(
         .arg(glsl_path)
         .arg("-o")
         .arg(spv_path)
+        .arg("--target-env")
+        .arg("vulkan1.1")
         .arg("-DFLOAT_TYPE=float")
         .arg("-DUSE_BFLOAT16=1")
         .arg("-DUSE_SUBGROUP_ADD=1")
