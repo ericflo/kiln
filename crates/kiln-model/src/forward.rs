@@ -14083,16 +14083,30 @@ fn model_forward_paged_last_token_resident_native_vk(
     };
     let vk_kv_cache: &kiln_vulkan_kernel::VkPagedKvCache = &vk_kv_cache_arc;
 
-    // 7. Pre-seed any first-use full-attn layers from the legacy paged cache.
+    // Detect a fresh request via `start_pos` continuity. Within one
+    // request the resident decode advances by 1 per token; a jump
+    // (boot, or a new /v1/chat/completions whose first decode step
+    // doesn't follow the previous request's last) clears the seeded
+    // sets so we re-seed from this request's prefill rather than
+    // reusing the prior request's stale K/V data.
+    vk_backend.note_resident_session(start_pos);
+
+    // 7. Pre-seed any first-use full-attn layers from the legacy paged
+    // cache. The per-block seed is bounded by `block_table` so a fresh
+    // request copies ~64 KB × num_blocks_used per layer (≈ 1 MB total
+    // on Qwen3.5-4B with a 32-token prompt) instead of the multi-GB
+    // full-pool slab.
+    let active_blocks = block_table.blocks.as_slice();
     let mut full_attn_idx: usize = 0;
     for layer in weights.layers.iter() {
         if let GpuAttentionWeights::Full(_) = &layer.attention {
             if !vk_backend.full_attn_layer_seeded(full_attn_idx) {
-                crate::vk_decode_resident::seed_vk_kv_cache_layer_from_legacy(
+                crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_legacy(
                     vk_device,
                     vk_kv_cache,
                     paged_cache,
                     full_attn_idx,
+                    active_blocks,
                 )?;
                 vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
             }
@@ -14347,16 +14361,21 @@ fn try_resident_block_full_attn_b1(
     };
 
     // Seed this layer's resident K/V pool from the legacy candle pool
-    // on first use per session.
+    // on first use per session. `start_pos` continuity detects a fresh
+    // request and clears the per-layer seeded flags so this layer
+    // re-seeds from the new request's prefill instead of reusing the
+    // previous request's slot data.
     let Some(vk_device) = vk_backend.vulkan_device() else {
         return Ok(None);
     };
+    vk_backend.note_resident_session(start_pos);
     if !vk_backend.full_attn_layer_seeded(full_attn_layer_idx) {
-        crate::vk_decode_resident::seed_vk_kv_cache_layer_from_legacy(
+        crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_legacy(
             vk_device,
             vk_kv_cache,
             paged_cache,
             full_attn_layer_idx,
+            block_table.blocks.as_slice(),
         )?;
         vk_backend.mark_full_attn_layer_seeded(full_attn_layer_idx);
     }

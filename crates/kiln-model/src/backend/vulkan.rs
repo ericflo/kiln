@@ -92,6 +92,17 @@ pub struct VulkanBackend {
         Mutex<HashMap<TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Set of state TensorIds that have been seeded.
     seeded_linear_attn_layers: Mutex<HashSet<TensorId>>,
+    /// Last `start_pos` we saw on the Vulkan-resident decode path.
+    /// Within a single request the resident decode runs once per
+    /// token with monotonically incrementing `start_pos`; a jump
+    /// (the first call after server start, or any new request whose
+    /// first decode step doesn't land at `last + 1`) marks a session
+    /// boundary, and `note_resident_session()` clears the per-layer
+    /// seeded sets so the next call re-seeds the resident
+    /// `VkPagedKvCache` from this request's prefill. Cheap because
+    /// the re-seed is now slot-range-aware (see
+    /// `vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_legacy`).
+    last_resident_start_pos: Mutex<Option<usize>>,
     /// Scratch activation buffers reused across resident decode calls,
     /// keyed by a stable role string. Each entry persists for the
     /// backend's lifetime (single-sequence decode reuses the same
@@ -368,6 +379,7 @@ impl VulkanBackend {
             linear_attn_recurrent_state: Mutex::new(HashMap::new()),
             linear_attn_conv_state: Mutex::new(HashMap::new()),
             seeded_linear_attn_layers: Mutex::new(HashSet::new()),
+            last_resident_start_pos: Mutex::new(None),
             resident_scratch: Mutex::new(HashMap::new()),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
@@ -499,6 +511,48 @@ impl VulkanBackend {
         if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
             g.clear();
         }
+    }
+
+    /// Note this resident decode call's `start_pos`. Within one
+    /// request the resident path advances `start_pos` by 1 per token;
+    /// a discontinuity (first call after server boot, or a new
+    /// request whose first decode step doesn't follow the previous
+    /// request's last step) signals a fresh session — at that point
+    /// we clear the per-layer seeded flags so the next per-layer call
+    /// re-seeds the resident `VkPagedKvCache` from this request's
+    /// prefill. Returns `true` when a new session was detected.
+    ///
+    /// Without this, a second `/v1/chat/completions` request reuses
+    /// the persistent `VkPagedKvCache` slot data the previous request
+    /// wrote (because `seeded_full_attn_layers`, keyed only by layer
+    /// index, is stuck at `true` from request 1) — the model then
+    /// reasons about the prior request's prompt.
+    pub fn note_resident_session(&self, start_pos: usize) -> bool {
+        let mut last = match self.last_resident_start_pos.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        let is_new_session = match *last {
+            // Same `start_pos` = another layer's call within the same
+            // decode token. Same `start_pos + 1` = the next decode
+            // step in the same request. Anything else = boundary.
+            Some(prev) => start_pos != prev && start_pos != prev.wrapping_add(1),
+            None => true,
+        };
+        // Only advance on a strictly-incrementing step so multi-layer
+        // calls within the same token don't trigger a spurious reset.
+        if match *last {
+            Some(prev) => start_pos == prev.wrapping_add(1) || is_new_session,
+            None => true,
+        } {
+            *last = Some(start_pos);
+        }
+        drop(last);
+        if is_new_session {
+            self.reset_full_attn_seeded();
+            self.reset_linear_attn_seeded();
+        }
+        is_new_session
     }
 
     /// Get or allocate the persistent recurrent-state buffer for a

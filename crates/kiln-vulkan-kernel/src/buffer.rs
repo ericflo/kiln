@@ -153,6 +153,76 @@ impl VulkanBuffer {
     }
 
     /// Upload data from CPU to this buffer via a staging buffer.
+    /// Upload `data` to `dst` starting at byte offset `dst_offset`.
+    /// Used by the resident KV-cache seeding path so we only stage and
+    /// copy the request's active blocks (a few tens of KB per layer)
+    /// instead of the whole multi-GB pool slab.
+    pub fn upload_data_at_offset(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        dst: &VulkanBuffer,
+        dst_offset: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+        let mapped_ptr = unsafe {
+            device
+                .map_memory(
+                    staging.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| anyhow::anyhow!("failed to map memory: {:?}", e))?
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(data.as_ptr(), mapped_ptr as *mut u8, data.len());
+        }
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("failed to create command pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("failed to allocate command buffer")?;
+        let cmd = command_buffers[0];
+        let begin_info = make_begin_info();
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &begin_info)
+                .context("failed to begin command buffer")?
+        };
+        let copy = vk::BufferCopy::default()
+            .src_offset(0)
+            .dst_offset(dst_offset)
+            .size(data.len() as u64);
+        unsafe {
+            device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
+            device
+                .end_command_buffer(cmd)
+                .context("failed to end command buffer")?;
+        }
+        let cmds = vec![cmd];
+        let submit_info = make_submit_info(&cmds);
+        unsafe {
+            device
+                .queue_submit(queue, &[submit_info], vk::Fence::null())
+                .context("failed to submit transfer")?;
+            device
+                .queue_wait_idle(queue)
+                .context("failed to wait for queue")?;
+            device.unmap_memory(staging.memory);
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        Ok(())
+    }
+
     pub fn upload_data(
         device: &Arc<ash::Device>,
         host_mem_type: u32,

@@ -1256,11 +1256,62 @@ fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &Tenso
     .context("seed conv state")
 }
 
-/// Seed the Vulkan-resident KV pool from the legacy candle paged
-/// cache for one layer. Uploads the entire pool slot range as f32
-/// regardless of how many positions are actually live — the legacy
-/// path zero-initialises unused slots so reading them produces zero
-/// (and the attention seq-len mask makes them irrelevant).
+/// Seed only the blocks this request's `block_table` references —
+/// not the multi-GB full pool. For a Qwen3.5-4B request with a 32-
+/// token prompt at block_size=16 that's ~2 blocks × 8 layers × 64 KB =
+/// ~1 MB seeded per first-decode call, vs. the 11 GB the full-slab
+/// `seed_vk_kv_cache_layer_from_legacy` would have to copy across
+/// unified memory on every fresh request. Untouched slots stay at
+/// their previous content; the attention seq-len mask ignores
+/// anything past the active range, so unused-slot contents are
+/// irrelevant.
+pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
+    vk_device: &VulkanDevice,
+    vk_cache: &VkPagedKvCache,
+    paged_cache: &PagedKvCache,
+    layer_idx: usize,
+    block_ids: &[u32],
+) -> Result<()> {
+    if block_ids.is_empty() {
+        return Ok(());
+    }
+    let (k_tensor, v_tensor) = paged_cache
+        .pool_tensors(layer_idx)
+        .ok_or_else(|| anyhow::anyhow!("legacy paged_cache layer {layer_idx} out of range"))?;
+    let block_size = paged_cache.block_size();
+    // pool_tensors are shaped [total_slots, num_kv_heads, head_dim]
+    // (flat slot index — block_idx maps to slot range
+    // [block_idx*block_size, (block_idx+1)*block_size)). Slice
+    // block-by-block — each block is small (block_size × kv_heads ×
+    // head_dim × 4 bytes; ~64 KB on Qwen3.5-4B) and uploads to the
+    // resident pool's matching slot range.
+    for &block_id in block_ids {
+        let bid = block_id as usize;
+        let slot_start = bid * block_size;
+        let k_block = k_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
+        let v_block = v_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
+        let k_block_f32 = if k_block.dtype() == DType::F32 {
+            k_block.flatten_all()?
+        } else {
+            k_block.to_dtype(DType::F32)?.flatten_all()?
+        };
+        let v_block_f32 = if v_block.dtype() == DType::F32 {
+            v_block.flatten_all()?
+        } else {
+            v_block.to_dtype(DType::F32)?.flatten_all()?
+        };
+        let k_data: Vec<f32> = k_block_f32.to_vec1()?;
+        let v_data: Vec<f32> = v_block_f32.to_vec1()?;
+        let k_bytes = f32_slice_to_bytes(&k_data);
+        let v_bytes = f32_slice_to_bytes(&v_data);
+        vk_cache.upload_layer_block_from_f32(vk_device, layer_idx, bid, &k_bytes, &v_bytes)?;
+    }
+    Ok(())
+}
+
+/// Full-slab seed kept for callers that explicitly want the whole
+/// layer uploaded at once. Production resident decode uses the
+/// per-block variant above to keep per-request seeding bounded.
 pub fn seed_vk_kv_cache_layer_from_legacy(
     vk_device: &VulkanDevice,
     vk_cache: &VkPagedKvCache,

@@ -221,6 +221,69 @@ impl VkPagedKvCache {
     /// migration step from a CPU-resident pool: copy the entire layer
     /// once, then all subsequent decode writes go through the
     /// resident slot-write kernel.
+    /// Upload one block's worth of K/V slots into the resident pool at
+    /// `block_idx`. `k_block_bytes` and `v_block_bytes` must each be
+    /// `block_size * num_kv_heads * head_dim * 4` bytes (one block's
+    /// f32 payload). Used by the slot-range-aware seed path so a fresh
+    /// request only pays for the blocks its block_table references —
+    /// not the multi-GB full pool slab.
+    pub fn upload_layer_block_from_f32(
+        &self,
+        device: &VulkanDevice,
+        layer_idx: usize,
+        block_idx: usize,
+        k_block_bytes: &[u8],
+        v_block_bytes: &[u8],
+    ) -> Result<()> {
+        let elements_per_slot = self.elements_per_slot();
+        let block_bytes = (self.block_size * elements_per_slot) as u64 * BYTES_PER_ELEMENT;
+        anyhow::ensure!(
+            k_block_bytes.len() as u64 == block_bytes,
+            "VkPagedKvCache::upload_layer_block_from_f32: k payload is {} bytes, expected {block_bytes}",
+            k_block_bytes.len()
+        );
+        anyhow::ensure!(
+            v_block_bytes.len() as u64 == block_bytes,
+            "VkPagedKvCache::upload_layer_block_from_f32: v payload is {} bytes, expected {block_bytes}",
+            v_block_bytes.len()
+        );
+        let total_blocks = self.total_slots / self.block_size;
+        anyhow::ensure!(
+            block_idx < total_blocks,
+            "VkPagedKvCache::upload_layer_block_from_f32: block_idx {block_idx} >= total_blocks {total_blocks}"
+        );
+        let k = self
+            .k_layers
+            .get(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("layer_idx {layer_idx} out of range"))?;
+        let v = self
+            .v_layers
+            .get(layer_idx)
+            .ok_or_else(|| anyhow::anyhow!("layer_idx {layer_idx} out of range"))?;
+        let dst_offset = (block_idx as u64) * block_bytes;
+        VulkanBuffer::upload_data_at_offset(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            k,
+            dst_offset,
+            k_block_bytes,
+        )
+        .context("VkPagedKvCache: K block upload")?;
+        VulkanBuffer::upload_data_at_offset(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            v,
+            dst_offset,
+            v_block_bytes,
+        )
+        .context("VkPagedKvCache: V block upload")?;
+        Ok(())
+    }
+
     pub fn upload_layer_from_f32(
         &self,
         device: &VulkanDevice,
