@@ -305,6 +305,11 @@ fn run() -> Result<()> {
             &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
         )?;
     }
+    if want("full_token_resident_paged") {
+        run_full_token_resident_paged(
+            &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
+        )?;
+    }
 
     Ok(())
 }
@@ -1204,6 +1209,359 @@ fn run_full_token_resident_batched(
                 )?;
             }
             b.submit_and_wait("full_token_resident_batched")?;
+            Ok(())
+        })?;
+    }
+    println!();
+    Ok(())
+}
+
+/// Per-token decode bench against a *real* Vulkan-resident paged KV
+/// cache: each layer writes its freshly-projected K/V into the
+/// VkPagedKvCache via `dispatch_paged_kv_write_slot_resident` and
+/// reads the entire window back via
+/// `dispatch_paged_attn_decode_batch_paged_f32_resident`.
+///
+/// Distinct from `full_token_resident_batched` which uses a
+/// non-paged contiguous K/V pool sized for `max_seqlen` and never
+/// actually writes to it — that mode measures only compute + submit.
+/// This mode adds the per-step KV-write cost (one slot-write per
+/// layer) and the paged-attention read cost over a real block table,
+/// which is what real Qwen3.5-4B decode pays. The full token still
+/// records into one `CommandBatch` and ships as a single submit.
+#[allow(clippy::too_many_arguments)]
+fn run_full_token_resident_paged(
+    device: &VulkanDevice,
+    q_w: &VulkanBuffer,
+    k_w: &VulkanBuffer,
+    v_w: &VulkanBuffer,
+    gate_w: &VulkanBuffer,
+    up_w: &VulkanBuffer,
+    down_w: &VulkanBuffer,
+    batches: &[usize],
+) -> Result<()> {
+    use kiln_vulkan_kernel::CommandBatch;
+    use kiln_vulkan_kernel::VkPagedKvCache;
+    use kiln_vulkan_kernel::Workgroups;
+
+    const NUM_LAYERS: usize = 32;
+    println!(
+        "== full_token_resident_paged ({NUM_LAYERS} layers, paged KV cache, 1 KV-write + paged-attn read per layer, 1 submit / token) =="
+    );
+
+    let num_heads = 16usize;
+    let num_kv_heads = 4usize;
+    let head_dim = 256usize;
+    let rotary_dim = 64usize;
+    let half_rot = rotary_dim / 2;
+    // Realistic Qwen3.5-4B decode window: ≈ 256 tokens of history
+    // already in the cache, current decode step at position 256.
+    let block_size = 16usize;
+    let num_blocks = 32usize;
+    let cur_seq_len = 256usize;
+    let softmax_scale = (head_dim as f32).sqrt().recip();
+
+    // Per-step write slot for *this* decode token.
+    let write_slot = cur_seq_len;
+
+    let weight_norm = upload_tensor_f32_buffer(
+        device,
+        &Tensor::ones(HIDDEN, DType::F32, &Device::Cpu)?,
+    )?;
+    let weight_qknorm = upload_tensor_f32_buffer(
+        device,
+        &Tensor::ones(head_dim, DType::F32, &Device::Cpu)?,
+    )?;
+    let out_w = upload_tensor_bf16_packed_buffer(device, &make_bf16_weight(Q_DIM, HIDDEN)?)?;
+
+    let cos_t = Tensor::from_vec(
+        (0..half_rot).map(|i| ((i as f32) * 0.13).cos()).collect::<Vec<_>>(),
+        (1, half_rot),
+        &Device::Cpu,
+    )?;
+    let sin_t = Tensor::from_vec(
+        (0..half_rot).map(|i| ((i as f32) * 0.13).sin()).collect::<Vec<_>>(),
+        (1, half_rot),
+        &Device::Cpu,
+    )?;
+    let cos_buf = upload_tensor_f32_buffer(device, &cos_t)?;
+    let sin_buf = upload_tensor_f32_buffer(device, &sin_t)?;
+
+    let rmsnorm_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/qwen_rmsnorm_forward.comp"
+    );
+    let qkv_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
+    );
+    let rope_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_f32.comp"
+    );
+    let paged_attn_paged_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged.comp"
+    );
+    let kv_write_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_kv_write_slot.comp"
+    );
+    let mul_sigmoid_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_mul_sigmoid_gate_f32.comp"
+    );
+    let linear_decode_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_batched_bf16w.comp"
+    );
+    let add_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
+    let mlp_gate_up_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
+    );
+
+    // VkPagedKvCache with NUM_LAYERS layers, each [max_seqlen, num_kv_heads, head_dim].
+    let cache = VkPagedKvCache::new(
+        device,
+        NUM_LAYERS,
+        num_blocks,
+        block_size,
+        num_kv_heads,
+        head_dim,
+    )?;
+
+    // Identity block table: block i → physical block i.
+    let block_ids: Vec<u32> = (0..num_blocks as u32).collect();
+    let block_table_bytes: Vec<u8> = bytemuck::cast_slice(&block_ids).to_vec();
+    let mk_dev = |bytes: &[u8]| -> Result<VulkanBuffer> {
+        let buf = VulkanBuffer::create_device_local(
+            device.device(),
+            device.device_local_mem_type(),
+            bytes.len() as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            device.device(),
+            device.host_visible_mem_type(),
+            device.queue(),
+            device.queue_family_index(),
+            &buf,
+            bytes,
+        )?;
+        Ok(buf)
+    };
+    let block_table_buf = mk_dev(&block_table_bytes)?;
+    let seq_lens_data_template: Vec<u32> = vec![(cur_seq_len + 1) as u32];
+    let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data_template).to_vec();
+
+    for &batch in batches {
+        // The paged-paged attn shader is batch-dim = 1 right now;
+        // we'd need a different layout for batch > 1. Skip those.
+        if batch != 1 {
+            continue;
+        }
+        let hidden_bytes = (batch * HIDDEN * 4) as u64;
+        let mk = |bytes: u64| {
+            VulkanBuffer::create_device_local(
+                device.device(),
+                device.device_local_mem_type(),
+                bytes,
+            )
+        };
+        let x_buf = mk(hidden_bytes)?;
+        let scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
+        let qkv_combined = mk((batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64)?;
+        let q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let seq_lens_buf = mk_dev(&seq_lens_bytes)?;
+        let attn_pre_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let attn_post_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let attn_out = mk(hidden_bytes)?;
+        let attn_residual = mk(hidden_bytes)?;
+        let final_out = mk(hidden_bytes)?;
+
+        time("full_token_resident_paged", batch, || {
+            let mut b = CommandBatch::new(device)?;
+            for layer in 0..NUM_LAYERS {
+                let k_pool = cache.k_buffer(layer).expect("layer in range");
+                let v_pool = cache.v_buffer(layer).expect("layer in range");
+
+                // 1) Pre-attn rmsnorm
+                b.record_shader(
+                    rmsnorm_shader,
+                    &[x_buf.handle(), weight_norm.handle(), qkv_combined.handle()],
+                    &[batch as u32, HIDDEN as u32, (1e-6f32).to_bits()],
+                    Workgroups::OneD(batch as u32),
+                )?;
+                // 2) QKV projection (batched bf16w into one combined out)
+                let total_out = Q_DIM + K_DIM + V_DIM;
+                b.record_shader(
+                    qkv_shader,
+                    &[
+                        qkv_combined.handle(),
+                        q_w.handle(),
+                        k_w.handle(),
+                        v_w.handle(),
+                        qkv_combined.handle(),
+                    ],
+                    &[
+                        HIDDEN as u32,
+                        Q_DIM as u32,
+                        K_DIM as u32,
+                        V_DIM as u32,
+                        total_out as u32,
+                        batch as u32,
+                    ],
+                    Workgroups::OneD((batch * total_out.div_ceil(16)) as u32),
+                )?;
+                // 3) Q-norm
+                b.record_shader(
+                    rmsnorm_shader,
+                    &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
+                    &[(batch * num_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    Workgroups::OneD((batch * num_heads) as u32),
+                )?;
+                // 4) K-norm
+                b.record_shader(
+                    rmsnorm_shader,
+                    &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
+                    &[(batch * num_kv_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    Workgroups::OneD((batch * num_kv_heads) as u32),
+                )?;
+                // 5) RoPE Q
+                b.record_shader(
+                    rope_shader,
+                    &[q_buf.handle(), cos_buf.handle(), sin_buf.handle(), q_rot.handle()],
+                    &[
+                        batch as u32,
+                        num_heads as u32,
+                        head_dim as u32,
+                        rotary_dim as u32,
+                    ],
+                    Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
+                )?;
+                // 6) RoPE K
+                b.record_shader(
+                    rope_shader,
+                    &[k_buf.handle(), cos_buf.handle(), sin_buf.handle(), k_rot.handle()],
+                    &[
+                        batch as u32,
+                        num_kv_heads as u32,
+                        head_dim as u32,
+                        rotary_dim as u32,
+                    ],
+                    Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
+                )?;
+                // 7) Write K/V to resident paged pool at write_slot
+                let elements_per_slot = num_kv_heads * head_dim;
+                b.record_shader(
+                    kv_write_shader,
+                    &[
+                        k_rot.handle(),
+                        v_buf.handle(),
+                        k_pool.handle(),
+                        v_pool.handle(),
+                    ],
+                    &[write_slot as u32, elements_per_slot as u32],
+                    Workgroups::OneD(elements_per_slot.div_ceil(64) as u32),
+                )?;
+                // 8) Paged-paged attention against the whole pool
+                b.record_shader(
+                    paged_attn_paged_shader,
+                    &[
+                        q_rot.handle(),
+                        k_pool.handle(),
+                        v_pool.handle(),
+                        block_table_buf.handle(),
+                        seq_lens_buf.handle(),
+                        attn_pre_gate.handle(),
+                    ],
+                    &[
+                        num_blocks as u32,
+                        block_size as u32,
+                        num_heads as u32,
+                        num_kv_heads as u32,
+                        head_dim as u32,
+                        softmax_scale.to_bits(),
+                    ],
+                    Workgroups::OneD((batch * num_heads) as u32),
+                )?;
+                // 9) Attention output gate
+                b.record_shader(
+                    mul_sigmoid_shader,
+                    &[
+                        attn_pre_gate.handle(),
+                        gate_buf.handle(),
+                        attn_post_gate.handle(),
+                    ],
+                    &[(batch * num_heads * head_dim) as u32],
+                    Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
+                )?;
+                // 10) Output projection
+                b.record_shader(
+                    linear_decode_shader,
+                    &[
+                        attn_post_gate.handle(),
+                        out_w.handle(),
+                        attn_out.handle(),
+                    ],
+                    &[Q_DIM as u32, HIDDEN as u32, batch as u32],
+                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                )?;
+                // 11) Residual
+                b.record_shader(
+                    add_shader,
+                    &[x_buf.handle(), attn_out.handle(), attn_residual.handle()],
+                    &[(batch * HIDDEN) as u32],
+                    Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
+                )?;
+                // 12) Pre-MLP rmsnorm
+                b.record_shader(
+                    rmsnorm_shader,
+                    &[
+                        attn_residual.handle(),
+                        weight_norm.handle(),
+                        qkv_combined.handle(),
+                    ],
+                    &[batch as u32, HIDDEN as u32, (1e-6f32).to_bits()],
+                    Workgroups::OneD(batch as u32),
+                )?;
+                // 13) MLP gate-up
+                b.record_shader(
+                    mlp_gate_up_shader,
+                    &[
+                        qkv_combined.handle(),
+                        gate_w.handle(),
+                        up_w.handle(),
+                        scratch.handle(),
+                    ],
+                    &[HIDDEN as u32, INTERMEDIATE as u32, batch as u32],
+                    Workgroups::OneD((batch * INTERMEDIATE.div_ceil(128)) as u32),
+                )?;
+                // 14) MLP down
+                b.record_shader(
+                    linear_decode_shader,
+                    &[scratch.handle(), down_w.handle(), final_out.handle()],
+                    &[INTERMEDIATE as u32, HIDDEN as u32, batch as u32],
+                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                )?;
+                // 15) Final residual into x for next layer
+                b.record_shader(
+                    add_shader,
+                    &[
+                        attn_residual.handle(),
+                        final_out.handle(),
+                        x_buf.handle(),
+                    ],
+                    &[(batch * HIDDEN) as u32],
+                    Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
+                )?;
+            }
+            b.submit_and_wait("full_token_resident_paged")?;
             Ok(())
         })?;
     }

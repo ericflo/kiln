@@ -82,7 +82,7 @@ impl VkPagedKvCache {
     /// can resolve `(start_pos, block_table) → slot` without
     /// duplicating the legacy cache's geometry knowledge.
     pub fn new(
-        device: &Arc<VulkanDevice>,
+        device: &VulkanDevice,
         num_full_attn_layers: usize,
         num_blocks: usize,
         block_size: usize,
@@ -143,7 +143,7 @@ impl VkPagedKvCache {
     /// path on `None`. Distinct from `new` so the lazy first-use
     /// init in `VulkanBackend` has a non-panicking branch.
     pub fn try_new(
-        device: &Arc<VulkanDevice>,
+        device: &VulkanDevice,
         num_full_attn_layers: usize,
         num_blocks: usize,
         block_size: usize,
