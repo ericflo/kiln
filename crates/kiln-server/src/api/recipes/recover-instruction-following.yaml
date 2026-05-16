@@ -1,0 +1,23 @@
+name: recover-instruction-following
+description: |
+  §3.7 day-one recipe: Lu's instruction-following recovery experiment
+  (grand plan §3.6 / §13 Phase 0 success criterion).
+
+  Takes an adapter that's degraded its instruction-following after
+  midtraining on new knowledge, runs OPD against the prior-self
+  behavioural teacher to recover. The §3.9 dual-eval gate (IF-eval
+  recovery + new-knowledge gain) is enforced inline by the trainer.
+
+  Use case: "I trained company-assistant on Q4 docs and IF-eval
+  dropped from 85% to 45%. Recover it."
+
+steps:
+  - kind: distill_refresh
+    name: company-assistant@refresh
+    new_data:
+      dataset: q4-2026-internal-docs
+    behavioural_teacher: company-assistant@v17
+    background_chat: tulu3
+    config:
+      top_k: 32
+      samples_per_prompt: 4

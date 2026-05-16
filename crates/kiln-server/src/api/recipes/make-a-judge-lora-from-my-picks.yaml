@@ -1,0 +1,21 @@
+name: make-a-judge-lora-from-my-picks
+description: |
+  §3.7 day-one recipe + §10.6.1 turn-judge distillation.
+
+  Distil a small judge LoRA from a 27B teacher's multi-axis scoring
+  of (turn, context) pairs collected via the kiln judgment flywheel.
+  Used by §10.6.2 `kiln self-improve` as the local reward model.
+
+  This recipe assumes (turn, context, score) tuples are already
+  served via the eval-dataset registry (`judge-traces`).
+
+steps:
+  - kind: distill_pump
+    name: judge-lora
+    teacher: qwen3.6-27b@local
+    mode:
+      domain: judge_traces
+    config:
+      lora_rank: 16
+      top_k: 32
+      samples_per_prompt: 4

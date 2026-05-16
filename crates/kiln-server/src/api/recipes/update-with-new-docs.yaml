@@ -1,0 +1,20 @@
+name: update-with-new-docs
+description: |
+  §3.7 day-one recipe: §3.6 continual learning. The §7.3 corporate
+  workflow ("update with Q4 docs without losing instruction-
+  following", on-prem).
+
+  Mid-trains on the new dataset mixed with background chat, then OPD-
+  recovers against the prior-self teacher. The §3.9 dual-eval gate
+  blocks adapter promotion until both IF-eval recovery and new-
+  knowledge gain thresholds are met.
+
+steps:
+  - kind: distill_refresh
+    name: company-assistant@v18
+    new_data:
+      dataset: q4-2026
+    behavioural_teacher: company-assistant@v17
+    background_chat: tulu3
+    config:
+      top_k: 32

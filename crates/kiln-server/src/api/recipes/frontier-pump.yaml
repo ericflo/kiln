@@ -1,0 +1,19 @@
+name: frontier-pump
+description: |
+  §3.7 day-one recipe: §3.5 27B → 4B Knowledge Pump in targeted-domain
+  mode. The §7.1 laptop ~$5 workflow.
+
+  Picks a canonical domain (math_reasoning, python_codegen, …), pulls
+  the §3.3 prepopulated logit cache where available, runs OPD against
+  the user's chosen teacher alias.
+
+steps:
+  - kind: distill_pump
+    name: math-frontier-lora
+    teacher: qwen3.6-27b@local
+    mode:
+      domain: math_reasoning
+    config:
+      top_k: 32
+      lora_rank: 64
+      samples_per_prompt: 4

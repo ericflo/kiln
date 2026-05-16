@@ -12,6 +12,7 @@ mod eval;
 mod health;
 mod metrics;
 mod models;
+pub(crate) mod recipes;
 mod stats;
 pub(crate) mod teachers;
 mod training;
@@ -60,6 +61,7 @@ pub fn router(state: AppState) -> Router {
         .merge(completions::routes())
         .merge(adapters::routes())
         .merge(teachers::routes())
+        .merge(recipes::routes())
         .merge(training::routes())
         .merge(eval::routes())
         .merge(config::routes())

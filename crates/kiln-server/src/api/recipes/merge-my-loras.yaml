@@ -1,0 +1,26 @@
+name: merge-my-loras
+description: |
+  §3.7 day-one recipe: §3.4 behaviour-space adapter merge. The §7.2
+  prosumer workflow ("merge my last 5 LoRAs into one unified
+  assistant", no API needed).
+
+  Each source LoRA is treated as a teacher over its retained training-
+  prompt distribution. Multi-teacher reverse-KL with per-prompt
+  routing produces a single merged adapter that preserves each
+  source's strengths.
+
+steps:
+  - kind: distill_merge
+    name: unified-assistant
+    student: base
+    sources:
+      - adapter: rust-helper
+        weight: 1.0
+      - adapter: python-helper
+        weight: 1.0
+      - adapter: sql-helper
+        weight: 0.7
+    rollout_budget: 5000
+    config:
+      top_k: 32
+      samples_per_prompt: 4
