@@ -525,6 +525,291 @@ pub fn opd_step_loss_simple(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Stable-OPD loss composition (Luo et al. 2026 §4.2 + grand plan §3.1)
+// ---------------------------------------------------------------------------
+
+/// §6 default β_kl — reference-policy KL coefficient. Luo et al. 2026
+/// ablation table 2; engages via the `LengthInflation` guardrail when
+/// `stable_opd = "auto"`.
+pub const fn default_beta_kl() -> f64 {
+    0.01
+}
+
+/// §6 default λ_sft — golden-trajectory mixture weight. Luo et al. 2026.
+pub const fn default_lambda_sft() -> f64 {
+    0.1
+}
+
+/// Resolved Stable-OPD coefficients for one training step. The trainer
+/// constructs this from the configured [`StableOpdMode`] and the
+/// guardrail engine's auto-tuning decisions.
+#[derive(Debug, Clone, Copy)]
+pub struct StableOpdCoefficients {
+    /// β — weight on the reference-policy KL term.
+    pub beta_kl: f64,
+    /// λ — weight on the SFT golden-trajectory term.
+    pub lambda_sft: f64,
+}
+
+impl StableOpdCoefficients {
+    /// Off-mode: both terms zero (Luo et al. baseline).
+    pub const fn off() -> Self {
+        Self {
+            beta_kl: 0.0,
+            lambda_sft: 0.0,
+        }
+    }
+
+    /// Auto-mode default values (paper-cited, §6).
+    pub const fn auto_default() -> Self {
+        Self {
+            beta_kl: default_beta_kl(),
+            lambda_sft: default_lambda_sft(),
+        }
+    }
+
+    /// §3.9 `BumpStableOpd` action: double both coefficients. Used by
+    /// the guardrail when RepRate stays high.
+    pub fn doubled(self) -> Self {
+        Self {
+            beta_kl: self.beta_kl * 2.0,
+            lambda_sft: self.lambda_sft * 2.0,
+        }
+    }
+
+    /// Resolve from configured mode (the `auto` path uses the §6
+    /// defaults until the guardrail bumps them).
+    pub fn from_mode(mode: StableOpdMode) -> Self {
+        match mode {
+            StableOpdMode::Off => Self::off(),
+            StableOpdMode::Auto => Self::auto_default(),
+            StableOpdMode::Manual { kl_beta, sft_lambda } => Self {
+                beta_kl: kl_beta,
+                lambda_sft: sft_lambda,
+            },
+        }
+    }
+}
+
+impl Default for StableOpdCoefficients {
+    fn default() -> Self {
+        Self::auto_default()
+    }
+}
+
+/// Inputs to the per-step Stable-OPD loss composition.
+///
+/// All tensors live on the same device. The OPD per-position KL is
+/// what `opd_step_loss` already returns. The two extra Stable-OPD
+/// terms — reference-KL and golden-SFT — are independent autograd
+/// graphs the trainer maintains. We compose the three into a single
+/// scalar that the trainer's `.backward()` can root on.
+#[derive(Debug)]
+pub struct StableOpdLossInputs<'a> {
+    /// Per-position OPD KL from the loss kernel, shape `[T_active]`.
+    pub per_position_kl: &'a Tensor,
+    /// Optional `KL(π_θ || π_ref)` per-position tensor of the same
+    /// shape. Caller computes this from a reference forward pass (the
+    /// previous-checkpoint adapter held as `π_ref`). If `None`, the
+    /// β·KL_ref term is skipped (equivalent to β_kl = 0 for this
+    /// step).
+    pub per_position_kl_ref: Option<&'a Tensor>,
+    /// Optional SFT loss on a golden-trajectory minibatch (already a
+    /// scalar tensor). Caller computes this from a separate
+    /// `kiln-flce-kernel` cross-entropy pass on the golden batch. If
+    /// `None`, the λ·SFT term is skipped.
+    pub sft_loss: Option<&'a Tensor>,
+    /// Stable-OPD coefficients as resolved by the guardrail engine.
+    pub coefficients: StableOpdCoefficients,
+}
+
+/// Output of [`compute_stable_opd_loss`].
+#[derive(Debug)]
+pub struct StableOpdLossOutputs {
+    /// `L_total` — the scalar the trainer calls `.backward()` on.
+    pub total: Tensor,
+    /// `mean(L_OPD)` — the per-token reverse KL piece (the
+    /// "headline" metric the dashboard shows).
+    pub mean_opd: Tensor,
+    /// `β · mean(KL_ref)` — the reference-policy regularizer piece,
+    /// or zeros tensor when omitted.
+    pub mean_kl_ref: Tensor,
+    /// `λ · sft_loss` — the golden-SFT piece, or zeros tensor when
+    /// omitted.
+    pub sft_term: Tensor,
+}
+
+// ---------------------------------------------------------------------------
+// Cold-start auto-injection (§3.1 + §8.10)
+// ---------------------------------------------------------------------------
+
+/// §3.1 default threshold: median initial overlap below this triggers
+/// cold-start (Li et al. 2026 §5.1 — "thinking-pattern mismatch"
+/// indicator).
+pub const COLD_START_OVERLAP_THRESHOLD: f64 = 0.5;
+
+/// §3.1 default cold-start length when triggered: ~2 epochs over
+/// 5–10K teacher rollouts. We pick the lower bound here as the
+/// pit-of-success default; the trainer can scale up if the user has
+/// a larger seed corpus.
+pub const COLD_START_DEFAULT_PROMPTS: usize = 5_000;
+pub const COLD_START_DEFAULT_EPOCHS: usize = 2;
+
+/// Decision returned by [`cold_start_probe`]. The trainer consults
+/// this before the first OPD step:
+///
+/// - `Skip`: initial overlap is already ≥ threshold; OPD can run
+///   directly.
+/// - `InjectSft { ... }`: silently run the prescribed SFT pre-phase
+///   first. The user sees one progress bar labelled "preparing your
+///   model"; auto-cold-start is the §8.10 mandate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColdStartDecision {
+    Skip,
+    InjectSft {
+        prompts: usize,
+        epochs: usize,
+        observed_overlap: f64,
+    },
+}
+
+/// Compute initial overlap from a slice of (student top-K, teacher
+/// top-K) pairs. The "overlap" is |S^p ∩ S^q| / K per position, then
+/// the median over the probe positions.
+///
+/// `pairs[i] = (student_topk_indices, teacher_topk_indices)` — both
+/// length K. Caller is responsible for producing the student's
+/// top-K (via a full-vocab forward pass over a small probe set; the
+/// trainer-side helper that does this lives in the trainer's
+/// forward-pass module which uses `kiln-model::forward::model_forward_*`).
+pub fn compute_initial_overlap(pairs: &[(Vec<u32>, Vec<u32>)]) -> f64 {
+    if pairs.is_empty() {
+        return 1.0; // Vacuously: no positions to test, assume aligned.
+    }
+    let mut ratios: Vec<f64> = pairs
+        .iter()
+        .map(|(s, q)| {
+            if s.is_empty() {
+                return 1.0;
+            }
+            let q_set: std::collections::HashSet<u32> = q.iter().copied().collect();
+            let inter = s.iter().filter(|i| q_set.contains(i)).count() as f64;
+            inter / (s.len() as f64)
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mid = ratios.len() / 2;
+    if ratios.len() % 2 == 0 && ratios.len() > 1 {
+        (ratios[mid - 1] + ratios[mid]) / 2.0
+    } else {
+        ratios[mid]
+    }
+}
+
+/// Run the §3.1 cold-start probe against a set of student/teacher
+/// top-K pairs. Returns a [`ColdStartDecision`] the trainer respects
+/// before the first OPD step.
+///
+/// `threshold` is [`COLD_START_OVERLAP_THRESHOLD`] by default;
+/// `prompts` / `epochs` are the cold-start phase length used when the
+/// probe triggers. The trainer prepares the (student_topk,
+/// teacher_topk) pairs by:
+/// 1. Sampling ~50 prompts from the user's training set.
+/// 2. Forwarding them through the student (full-vocab logits, then
+///    `topk(k=top_k)`).
+/// 3. Querying the teacher for its top-K at the same positions.
+/// 4. Pairing position-wise and calling this function.
+///
+/// Per the grand plan §3.1: "the user sees one progress bar labelled
+/// 'preparing your model' and never learns that two distinct training
+/// paradigms are running back-to-back." This function is the policy
+/// component; the orchestration (running the SFT phase silently)
+/// belongs to the trainer body.
+pub fn cold_start_probe(
+    pairs: &[(Vec<u32>, Vec<u32>)],
+    threshold: f64,
+    prompts: usize,
+    epochs: usize,
+) -> ColdStartDecision {
+    let overlap = compute_initial_overlap(pairs);
+    if overlap >= threshold {
+        ColdStartDecision::Skip
+    } else {
+        ColdStartDecision::InjectSft {
+            prompts,
+            epochs,
+            observed_overlap: overlap,
+        }
+    }
+}
+
+/// Same as [`cold_start_probe`] with the §3.1 default thresholds.
+pub fn cold_start_probe_default(pairs: &[(Vec<u32>, Vec<u32>)]) -> ColdStartDecision {
+    cold_start_probe(
+        pairs,
+        COLD_START_OVERLAP_THRESHOLD,
+        COLD_START_DEFAULT_PROMPTS,
+        COLD_START_DEFAULT_EPOCHS,
+    )
+}
+
+/// Compose the §3.1 Stable-OPD loss:
+///
+/// ```text
+/// L_total = mean(per_position_kl)
+///         + β_kl · mean(per_position_kl_ref)
+///         + λ_sft · sft_loss
+/// ```
+///
+/// All terms autograd-attach to their respective parents (student LoRA
+/// Vars for the OPD term, reference-policy graph for KL_ref, golden-
+/// SFT graph for sft_loss). The trainer calls `.backward()` on
+/// `output.total`.
+///
+/// When `per_position_kl_ref` is `None` we treat the β term as zero
+/// without building any graph for it (Stable-OPD `Off` mode, or when
+/// no reference adapter is configured). Same for `sft_loss`.
+pub fn compute_stable_opd_loss(inputs: StableOpdLossInputs<'_>) -> Result<StableOpdLossOutputs> {
+    let device = inputs.per_position_kl.device();
+    let mean_opd = inputs
+        .per_position_kl
+        .mean_all()
+        .context("mean(per_position_kl)")?;
+
+    let mean_kl_ref = match inputs.per_position_kl_ref {
+        Some(t) => t.mean_all().context("mean(per_position_kl_ref)")?,
+        None => Tensor::new(0.0_f32, device).context("zero kl_ref scalar")?,
+    };
+
+    let sft_term = match inputs.sft_loss {
+        Some(t) => t.clone(),
+        None => Tensor::new(0.0_f32, device).context("zero sft scalar")?,
+    };
+
+    let beta = inputs.coefficients.beta_kl;
+    let lambda = inputs.coefficients.lambda_sft;
+
+    // total = mean_opd + β · mean_kl_ref + λ · sft_term.
+    let kl_ref_scaled = if beta == 0.0 {
+        Tensor::new(0.0_f32, device)?
+    } else {
+        mean_kl_ref.affine(beta, 0.0)?
+    };
+    let sft_scaled = if lambda == 0.0 {
+        Tensor::new(0.0_f32, device)?
+    } else {
+        sft_term.affine(lambda, 0.0)?
+    };
+    let total = (&mean_opd + &kl_ref_scaled)?.add(&sft_scaled)?;
+    Ok(StableOpdLossOutputs {
+        total,
+        mean_opd,
+        mean_kl_ref,
+        sft_term,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -652,5 +937,183 @@ mod tests {
         assert!(matches!(cfg.stable_opd, StableOpdMode::Auto));
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
         assert_eq!(cfg.checkpoint_interval, Some(10));
+    }
+
+    #[test]
+    fn stable_opd_defaults_match_section_6_paper_cites() {
+        let auto = StableOpdCoefficients::auto_default();
+        assert!((auto.beta_kl - 0.01).abs() < 1e-9);
+        assert!((auto.lambda_sft - 0.1).abs() < 1e-9);
+        let off = StableOpdCoefficients::off();
+        assert_eq!(off.beta_kl, 0.0);
+        assert_eq!(off.lambda_sft, 0.0);
+    }
+
+    #[test]
+    fn stable_opd_doubled_doubles_both() {
+        let auto = StableOpdCoefficients::auto_default();
+        let doubled = auto.doubled();
+        assert!((doubled.beta_kl - 0.02).abs() < 1e-9);
+        assert!((doubled.lambda_sft - 0.2).abs() < 1e-9);
+        // Doubling twice should land at 0.04 / 0.4 — same as the
+        // §3.9 guardrail's runaway escalation.
+        let four = doubled.doubled();
+        assert!((four.beta_kl - 0.04).abs() < 1e-9);
+        assert!((four.lambda_sft - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stable_opd_loss_composition_matches_paper_formula() -> Result<()> {
+        let device = Device::Cpu;
+        // OPD per-position: 5 active positions, values 0.1..0.5
+        let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5], 5, &device)?;
+        let kl_ref = Tensor::from_vec(vec![0.05f32, 0.05, 0.05, 0.05, 0.05], 5, &device)?;
+        let sft = Tensor::new(2.0_f32, &device)?;
+        let coeffs = StableOpdCoefficients {
+            beta_kl: 0.01,
+            lambda_sft: 0.1,
+        };
+        let out = compute_stable_opd_loss(StableOpdLossInputs {
+            per_position_kl: &kl,
+            per_position_kl_ref: Some(&kl_ref),
+            sft_loss: Some(&sft),
+            coefficients: coeffs,
+        })?;
+        // mean(opd) = (0.1+0.2+0.3+0.4+0.5)/5 = 0.3
+        // mean(kl_ref) = 0.05
+        // total = 0.3 + 0.01 * 0.05 + 0.1 * 2.0 = 0.30 + 0.0005 + 0.20 = 0.5005
+        let total = out.total.to_scalar::<f32>()?;
+        let mean_opd = out.mean_opd.to_scalar::<f32>()?;
+        let mean_ref = out.mean_kl_ref.to_scalar::<f32>()?;
+        assert!((mean_opd - 0.3).abs() < 1e-5);
+        assert!((mean_ref - 0.05).abs() < 1e-5);
+        assert!((total - 0.5005).abs() < 1e-4, "got total = {total}");
+        Ok(())
+    }
+
+    #[test]
+    fn stable_opd_loss_omits_optional_terms_when_none() -> Result<()> {
+        let device = Device::Cpu;
+        let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3], 3, &device)?;
+        let coeffs = StableOpdCoefficients::off();
+        let out = compute_stable_opd_loss(StableOpdLossInputs {
+            per_position_kl: &kl,
+            per_position_kl_ref: None,
+            sft_loss: None,
+            coefficients: coeffs,
+        })?;
+        // Off-mode: total = mean(opd) = 0.2
+        let total = out.total.to_scalar::<f32>()?;
+        let mean_kl_ref = out.mean_kl_ref.to_scalar::<f32>()?;
+        let sft_term = out.sft_term.to_scalar::<f32>()?;
+        assert!((total - 0.2).abs() < 1e-5);
+        assert_eq!(mean_kl_ref, 0.0);
+        assert_eq!(sft_term, 0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn cold_start_overlap_zero_when_no_intersection() {
+        // K=4 each; no overlap.
+        let pairs = vec![
+            (vec![1u32, 2, 3, 4], vec![10u32, 11, 12, 13]),
+            (vec![5u32, 6, 7, 8], vec![20u32, 21, 22, 23]),
+        ];
+        assert!(compute_initial_overlap(&pairs).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cold_start_overlap_one_when_identical() {
+        let pairs = vec![
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 4]),
+            (vec![5u32, 6, 7, 8], vec![5u32, 6, 7, 8]),
+        ];
+        assert!((compute_initial_overlap(&pairs) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cold_start_overlap_is_median() {
+        // Three positions, overlap ratios 0.25, 0.5, 0.75. Median = 0.5.
+        let pairs = vec![
+            (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]),     // 0.25
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),       // 0.5
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]),        // 0.75
+        ];
+        assert!((compute_initial_overlap(&pairs) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cold_start_probe_triggers_below_threshold() {
+        // Median overlap < 0.5 — should inject SFT.
+        let pairs = vec![
+            (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]), // 0.25
+            (vec![1u32, 2, 3, 4], vec![1u32, 10, 11, 12]), // 0.25
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 11, 12]),   // 0.5
+        ];
+        // Median of [0.25, 0.25, 0.5] = 0.25 < 0.5.
+        match cold_start_probe_default(&pairs) {
+            ColdStartDecision::InjectSft {
+                prompts,
+                epochs,
+                observed_overlap,
+            } => {
+                assert_eq!(prompts, COLD_START_DEFAULT_PROMPTS);
+                assert_eq!(epochs, COLD_START_DEFAULT_EPOCHS);
+                assert!((observed_overlap - 0.25).abs() < 1e-9);
+            }
+            other => panic!("expected InjectSft, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cold_start_probe_skips_above_threshold() {
+        let pairs = vec![
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]), // 0.75
+            (vec![1u32, 2, 3, 4], vec![1u32, 2, 3, 12]), // 0.75
+        ];
+        assert_eq!(
+            cold_start_probe_default(&pairs),
+            ColdStartDecision::Skip
+        );
+    }
+
+    #[test]
+    fn cold_start_probe_empty_pairs_is_skip() {
+        // Edge case: no probe positions ⇒ vacuously aligned ⇒ Skip.
+        assert_eq!(
+            cold_start_probe_default(&[]),
+            ColdStartDecision::Skip
+        );
+    }
+
+    /// Stable-OPD `BumpStableOpd` semantics: doubled coefficients
+    /// scale the total linearly when β=0 (so doubling is a no-op),
+    /// but matter when β>0.
+    #[test]
+    fn stable_opd_doubled_changes_loss_when_ref_present() -> Result<()> {
+        let device = Device::Cpu;
+        let kl = Tensor::from_vec(vec![0.1_f32; 4], 4, &device)?;
+        let kl_ref = Tensor::from_vec(vec![1.0_f32; 4], 4, &device)?;
+        let base = StableOpdCoefficients::auto_default();
+        let doubled = base.doubled();
+        let out_base = compute_stable_opd_loss(StableOpdLossInputs {
+            per_position_kl: &kl,
+            per_position_kl_ref: Some(&kl_ref),
+            sft_loss: None,
+            coefficients: base,
+        })?;
+        let out_doubled = compute_stable_opd_loss(StableOpdLossInputs {
+            per_position_kl: &kl,
+            per_position_kl_ref: Some(&kl_ref),
+            sft_loss: None,
+            coefficients: doubled,
+        })?;
+        let base_total = out_base.total.to_scalar::<f32>()?;
+        let doubled_total = out_doubled.total.to_scalar::<f32>()?;
+        // base: 0.1 + 0.01 * 1.0 = 0.11
+        // doubled: 0.1 + 0.02 * 1.0 = 0.12
+        assert!((base_total - 0.11).abs() < 1e-5);
+        assert!((doubled_total - 0.12).abs() < 1e-5);
+        Ok(())
     }
 }

@@ -23,7 +23,11 @@ pub use logit_source::{
     LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
 };
 pub use opd::{
-    OpdConfig, OpdLossGranularity, OpdRequest, default_opd_top_k, default_opd_samples_per_prompt,
+    COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS, COLD_START_OVERLAP_THRESHOLD,
+    ColdStartDecision, OpdConfig, OpdLossGranularity, OpdRequest, StableOpdCoefficients,
+    StableOpdLossInputs, StableOpdLossOutputs, cold_start_probe, cold_start_probe_default,
+    compute_initial_overlap, compute_stable_opd_loss, default_beta_kl, default_lambda_sft,
+    default_opd_samples_per_prompt, default_opd_top_k,
 };
 
 pub use replay::{
