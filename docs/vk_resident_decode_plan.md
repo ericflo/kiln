@@ -298,6 +298,13 @@ layers). Per-full-attn-layer cost dropped from ~30 ms (legacy) to
 ~3-4 ms (resident) — close to the 10× per-layer speedup the
 microbench projected.
 
+The math lines up: 213 ms saved in ITL ÷ 8 full-attn layers
+= 26.6 ms saved per layer, which matches the 30 ms → 3-4 ms drop.
+The remaining **720 ms / token spent in GDN layers** (24 layers ×
+~30 ms each) is where the next big win is — wiring those to the
+resident path should drop ITL toward ~150 ms (~7 tok/s) by the same
+mechanism.
+
 The remaining gap to the 55 tok/s headline target is now three
 distinct, additive pieces (the dispatchers/pool/cache are all
 landed and parity-tested; this is composition work):
