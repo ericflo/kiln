@@ -30,7 +30,8 @@ pub use diagnostics::{
     truncation_rate,
 };
 pub use logit_source::{
-    LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
+    DeterministicUniformLogitSource, LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch,
+    TopKLogprobs,
 };
 pub use opd::{
     AgenticLossInputs, AgenticLossWeights, COLD_START_DEFAULT_EPOCHS, COLD_START_DEFAULT_PROMPTS,

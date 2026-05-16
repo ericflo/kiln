@@ -84,7 +84,7 @@ pub fn default_base_model(config: &ModelConfig) -> BaseModel {
 
 /// State threaded through a training run so the request can be appended
 /// before the optimizer step and an outcome can be appended afterward.
-struct ReplayState {
+pub struct ReplayState {
     log: ReplayLog,
     lineage: Lineage,
     request_id: String,
@@ -97,7 +97,7 @@ struct ReplayState {
 ///
 /// Writes the request record (durable, fsynced) and `lineage.json` before
 /// returning so a crash mid-step still leaves a recoverable trail.
-fn open_replay_state(
+pub fn open_replay_state(
     ctx: &ReplayContext,
     config_seed: Option<u64>,
     parent_adapter: Option<&str>,
@@ -161,7 +161,7 @@ fn open_replay_state(
 /// Append an outcome record after the optimizer step finishes (or fails).
 ///
 /// `result` is `Ok(final_loss)` on success, `Err(message)` on failure.
-fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Result<()> {
+pub fn close_replay_state(state: ReplayState, result: Result<f64, String>) -> Result<()> {
     let elapsed = state.started_at.elapsed().as_secs_f64();
     let outcome = match result {
         Ok(loss) => OutcomeRecord {
@@ -2924,7 +2924,7 @@ fn sgd_step(
 /// `GradStore`. `opt_state` must be `Some` iff `optimizer` is
 /// `Optimizer::AdamW`. Caller mutates `opt_state.step` (increments by
 /// one) before this returns so the next call sees the new step.
-fn optimizer_step(
+pub fn optimizer_step(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
     grads: &candle_core::backprop::GradStore,
@@ -6532,7 +6532,7 @@ fn checkpointed_forward_backward(
 }
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
-fn standard_forward_backward(
+pub fn standard_forward_backward(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
     weights: &GpuWeights,

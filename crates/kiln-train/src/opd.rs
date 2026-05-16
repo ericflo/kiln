@@ -1307,6 +1307,202 @@ pub fn opd_train_synthetic_validation(
     Ok((first_loss, last_loss))
 }
 
+/// Run OPD training on the provided prompts using the already-loaded model.
+///
+/// This is the §3.1 trainer body. It mirrors `trainer::sft_train`'s
+/// structure (LoRA params + AdamW state + per-prompt forward/backward +
+/// `save_peft`), but the per-step loss is `opd_step_loss` (reverse-KL
+/// against the teacher) rather than fused linear cross-entropy.
+///
+/// The teacher is queried only at *active* (assistant) token positions —
+/// the prompt tokens carry no loss. For the milestone-13 wire-up the
+/// "rollout" is the assistant turn already present in each
+/// `OpdPrompt`'s messages (the same shape as an `SftExample`); the full
+/// on-policy student-sampler is a follow-up that swaps which token IDs
+/// feed `model_forward_no_head` without changing the loss path.
+///
+/// Replay artifacts and the §8.11 receipt are *not* written by this
+/// function — the caller (kiln-server's `run_opd`) wraps it with
+/// `open_replay_state` / `close_replay_state` and `AdapterReceipt`.
+#[allow(clippy::too_many_arguments)]
+pub fn opd_train(
+    prompts: &[OpdPrompt],
+    config: &OpdConfig,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    teacher: Arc<dyn LogitSource>,
+    adapter_dir: &std::path::Path,
+    adapter_name: &str,
+    progress_cb: Option<crate::trainer::ProgressCallback>,
+) -> Result<std::path::PathBuf> {
+    use crate::SftExample;
+    use crate::trainer::{
+        TrainableLoraParams, optimizer_step, tokenize_for_training,
+    };
+    use crate::Optimizer;
+    use kiln_model::backend;
+    use kiln_model::forward::{LinearAttentionState, model_forward_no_head};
+
+    if prompts.is_empty() {
+        anyhow::bail!("opd_train: prompts must be non-empty");
+    }
+
+    let device = weights.embed_tokens.device().clone();
+    let backend_rt = backend::for_device(&device);
+
+    tracing::info!(
+        num_prompts = prompts.len(),
+        samples_per_prompt = config.samples_per_prompt,
+        top_k = config.top_k,
+        loss = ?config.loss,
+        lr = config.learning_rate,
+        rank = config.lora_rank,
+        alpha = config.lora_alpha,
+        adapter_name,
+        "starting OPD training"
+    );
+
+    let effective_seed = config.seed;
+
+    let params = TrainableLoraParams::initialize_seeded(
+        model_config,
+        weights,
+        config.lora_rank,
+        config.lora_alpha,
+        &device,
+        effective_seed,
+    )?;
+    params.register_with_backend(&*backend_rt)?;
+
+    let mut opt_state = match config.optimizer {
+        Optimizer::Sgd => None,
+        Optimizer::AdamW { .. } => {
+            let state = params.allocate_adamw_state(&device)?;
+            state.register_with_backend(&*backend_rt)?;
+            Some(state)
+        }
+    };
+
+    // Tokenize every prompt up-front (cheap relative to the forward
+    // pass) and skip any prompts that produce no supervised assistant
+    // tokens — same shape as sft_train's validity probe.
+    let mut tokenized: Vec<(Vec<u32>, Vec<bool>)> = Vec::with_capacity(prompts.len());
+    for (idx, prompt) in prompts.iter().enumerate() {
+        let example = SftExample {
+            messages: prompt.messages.clone(),
+        };
+        match tokenize_for_training(&example, tokenizer) {
+            Ok(pair) => tokenized.push(pair),
+            Err(e) => {
+                tracing::warn!(prompt_idx = idx, error = %e, "skipping OPD prompt");
+            }
+        }
+    }
+    if tokenized.is_empty() {
+        anyhow::bail!("opd_train: no valid prompts after tokenization");
+    }
+
+    let epochs = 1usize;
+    let total_steps = epochs * tokenized.len() * config.samples_per_prompt.max(1);
+    let mut global_step = 0usize;
+    let mut last_loss = 0.0_f64;
+
+    let head_t = weights.embed_tokens_t.clone();
+
+    for epoch in 0..epochs {
+        for (prompt_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
+            let active_positions: Vec<usize> = label_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                .collect();
+            if active_positions.is_empty() {
+                continue;
+            }
+
+            for sample_idx in 0..config.samples_per_prompt.max(1) {
+                let lora_weights = params.as_lora_weights();
+                let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+                let hidden = model_forward_no_head(
+                    &*backend_rt,
+                    input_ids,
+                    weights,
+                    model_config,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                )
+                .context("OPD forward pass (no head)")?;
+
+                let out = opd_step_loss(OpdStepInputs {
+                    tokens: input_ids,
+                    active_positions: &active_positions,
+                    student_hidden: &hidden,
+                    head_t: &head_t,
+                    teacher: teacher.clone(),
+                    loss: config.loss,
+                    top_k: config.top_k,
+                    chunk_size: 0,
+                })?;
+
+                let loss_val = out.mean_kl.to_scalar::<f32>()? as f64;
+                let grads = out.mean_kl.backward().context("OPD backward pass")?;
+                optimizer_step(
+                    &*backend_rt,
+                    &params,
+                    &grads,
+                    config.learning_rate,
+                    config.optimizer,
+                    opt_state.as_mut(),
+                )?;
+
+                last_loss = loss_val;
+                global_step += 1;
+
+                if let Some(ref cb) = progress_cb {
+                    cb(crate::trainer::TrainingProgress {
+                        epoch: epoch + 1,
+                        total_epochs: epochs,
+                        step: global_step,
+                        total_steps,
+                        loss: loss_val,
+                        progress: global_step as f32 / total_steps.max(1) as f32,
+                    });
+                }
+
+                if global_step % 10 == 0 || global_step == total_steps {
+                    tracing::info!(
+                        prompt = prompt_idx,
+                        sample = sample_idx,
+                        step = global_step,
+                        total_steps,
+                        loss = format!("{loss_val:.6}"),
+                        active = out.active_count,
+                        "OPD step"
+                    );
+                }
+            }
+        }
+    }
+
+    // Pull on-device values back into candle CPU storage before
+    // `save_peft` serializes them — mirrors sft_train's final sync.
+    let _synced = params.sync_to_candle(&*backend_rt).unwrap_or(0);
+
+    let output_dir = adapter_dir.join(adapter_name);
+    params.save_peft(&output_dir, model_config.num_layers)?;
+
+    tracing::info!(
+        adapter = adapter_name,
+        path = %output_dir.display(),
+        final_loss = format!("{last_loss:.6}"),
+        steps = global_step,
+        "OPD training complete"
+    );
+
+    Ok(output_dir)
+}
+
 #[cfg(test)]
 use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b;
 

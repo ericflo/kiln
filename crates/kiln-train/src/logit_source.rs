@@ -347,6 +347,99 @@ impl LogitSource for FixtureLogitSource {
     }
 }
 
+/// A simple deterministic `LogitSource` that synthesises a uniform
+/// top-K answer from a hash of `(teacher_id, tokens, pos)`. Used as
+/// the milestone-13 trainer-wire-up fallback when no real teacher is
+/// resolved — the math path is exercised end-to-end (forward → loss
+/// → backward → optimizer step), and the synthetic uniform target
+/// still produces a real (nonzero) gradient into the LoRA params.
+///
+/// Production runs should swap this for `RemoteTeacher` (HTTP) or a
+/// `LocalTeacher` (in-process model). The trait is the same.
+#[derive(Debug)]
+pub struct DeterministicUniformLogitSource {
+    caps: LogitSourceCaps,
+    top_k: usize,
+}
+
+impl DeterministicUniformLogitSource {
+    pub fn new(teacher_id: impl Into<String>, vocab_size: usize, top_k: usize) -> Self {
+        Self {
+            caps: LogitSourceCaps {
+                teacher_id: teacher_id.into(),
+                vocab_size,
+                max_top_k: top_k,
+                supports_full_vocab: false,
+                supports_batched: true,
+                tokenizer_hash: None,
+            },
+            top_k,
+        }
+    }
+}
+
+impl LogitSource for DeterministicUniformLogitSource {
+    fn capabilities(&self) -> LogitSourceCaps {
+        self.caps.clone()
+    }
+
+    fn fetch_logprobs(
+        &self,
+        tokens: &[u32],
+        positions: &[usize],
+        top_k: Option<usize>,
+    ) -> Result<LogprobBatch, LogitSourceError> {
+        let teacher_id = self.caps.teacher_id.clone();
+        let requested_k = top_k.unwrap_or(self.top_k).min(self.caps.max_top_k);
+        if requested_k > self.caps.max_top_k {
+            return Err(LogitSourceError::TopKExceedsCap {
+                requested: requested_k,
+                cap: self.caps.max_top_k,
+                teacher_id,
+            });
+        }
+        let vocab = self.caps.vocab_size as u32;
+        if vocab < requested_k as u32 {
+            return Err(LogitSourceError::invalid(
+                &teacher_id,
+                format!("vocab_size {vocab} < top_k {requested_k}"),
+            ));
+        }
+        // FNV-1a hash of tokens, mixed with position — deterministic
+        // and cheap. The K picks step forward by 1 (mod vocab) from
+        // the seed to guarantee uniqueness within a position.
+        let mut indices = Vec::with_capacity(positions.len() * requested_k);
+        let mut logprobs = Vec::with_capacity(positions.len() * requested_k);
+        let logp = -(requested_k as f32).ln();
+        for &pos in positions {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &t in tokens {
+                h ^= t as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            h ^= pos as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            let seed = (h % vocab as u64) as u32;
+            let mut seen = std::collections::HashSet::new();
+            let mut produced = 0usize;
+            let mut idx = seed;
+            while produced < requested_k {
+                if seen.insert(idx) {
+                    indices.push(idx);
+                    logprobs.push(logp);
+                    produced += 1;
+                }
+                idx = (idx + 1) % vocab;
+            }
+        }
+        Ok(LogprobBatch::TopK(TopKLogprobs {
+            indices,
+            logprobs,
+            top_k: requested_k,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,6 +482,54 @@ mod tests {
                 assert_eq!(cap, 4);
             }
             _ => panic!("expected TopKExceedsCap"),
+        }
+    }
+
+    #[test]
+    fn deterministic_uniform_returns_kunique_indices_per_position() {
+        let src = DeterministicUniformLogitSource::new("test-det", 256, 8);
+        let batch = src
+            .fetch_logprobs(&[1, 2, 3, 4], &[0, 3], Some(8))
+            .unwrap();
+        match batch {
+            LogprobBatch::TopK(t) => {
+                assert_eq!(t.top_k, 8);
+                assert_eq!(t.indices.len(), 16);
+                // First position's 8 indices are unique.
+                let mut first: std::collections::HashSet<u32> =
+                    t.indices.iter().take(8).copied().collect();
+                assert_eq!(first.len(), 8);
+                // Second position's 8 indices are unique.
+                let second: std::collections::HashSet<u32> =
+                    t.indices.iter().skip(8).copied().collect();
+                assert_eq!(second.len(), 8);
+                // Uniform log-prob = -ln(K).
+                let expected_lp = -(8f32).ln();
+                for &lp in &t.logprobs {
+                    assert!((lp - expected_lp).abs() < 1e-5);
+                }
+                // Position differentiation: row-0 and row-1 indices
+                // should be distinguishable for different positions
+                // (not identical sets).
+                first.retain(|i| second.contains(i));
+                assert!(first.len() < 8, "row 0 and row 1 should differ");
+            }
+            _ => panic!("expected TopK batch"),
+        }
+    }
+
+    #[test]
+    fn deterministic_uniform_is_deterministic() {
+        let src_a = DeterministicUniformLogitSource::new("det", 256, 4);
+        let src_b = DeterministicUniformLogitSource::new("det", 256, 4);
+        let a = src_a.fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4)).unwrap();
+        let b = src_b.fetch_logprobs(&[7, 11, 13], &[1, 2], Some(4)).unwrap();
+        match (a, b) {
+            (LogprobBatch::TopK(ta), LogprobBatch::TopK(tb)) => {
+                assert_eq!(ta.indices, tb.indices);
+                assert_eq!(ta.logprobs, tb.logprobs);
+            }
+            _ => panic!("expected TopK"),
         }
     }
 

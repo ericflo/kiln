@@ -543,16 +543,22 @@ fn run_grpo(
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
     req: &OpdRequest,
-    _model_config: &kiln_core::config::ModelConfig,
-    _weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    weights: &kiln_model::forward::GpuWeights,
     tokenizer: &kiln_core::tokenizer::KilnTokenizer,
     adapter_dir: &std::path::Path,
     adapter_name: &str,
     progress_cb: trainer::ProgressCallback,
+    teacher_registry: &crate::api::teachers::TeacherRegistry,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err("OPD request must include at least one prompt or a dataset_path".into());
+    }
+    for (i, prompt) in req.prompts.iter().enumerate() {
+        if prompt.messages.is_empty() {
+            return Err(format!("OPD prompt {i} has no messages"));
+        }
     }
 
     tracing::info!(
@@ -562,58 +568,79 @@ fn run_opd(
         top_k = req.config.top_k,
         samples_per_prompt = req.config.samples_per_prompt,
         num_prompts = req.prompts.len(),
-        "OPD training started (milestone-4 stub: validates plumbing, no optimizer step yet)"
+        "OPD training started"
     );
 
-    // Validate prompts tokenize cleanly — same shape as
-    // `tokenize_grpo_group` so the request is rejected early if the
-    // tokenizer can't handle it. We don't run an actual GPU forward
-    // here; the kernel + per-position KL path was already proven in
-    // `kiln-train::opd::tests`.
-    let _ = tokenizer; // tokenizer used by next-commit runtime body.
-    for (i, prompt) in req.prompts.iter().enumerate() {
-        if prompt.messages.is_empty() {
-            return Err(format!("OPD prompt {i} has no messages"));
-        }
-    }
+    // Resolve the teacher alias against the §3.2 registry. The
+    // milestone-13 wire-up routes Fixture / Local to a deterministic
+    // uniform-top-K source so the trainer math path is exercised
+    // end-to-end on real GPU weights; Remote routes to RemoteTeacher
+    // (§3.2 HTTP top_logprobs). Swapping in a real LocalTeacher
+    // (in-process Qwen3.6-27B) is a follow-up that doesn't touch this
+    // dispatch shape — only the `Local` arm needs to learn how to
+    // build a `LocalTeacher`.
+    let spec = teacher_registry
+        .get(&req.teacher)
+        .ok_or_else(|| format!("teacher alias {:?} not registered (POST /v1/teachers first)", req.teacher))?;
 
-    // Stub-write a PEFT adapter directory matching SFT/GRPO output
-    // layout. This lets `auto_load`, `post_eval`, the dashboard, and
-    // reproducibility-receipt code (§8.11) all see a real path. The
-    // adapter is a no-op LoRA (zeros) — the trainer body that produces
-    // real weight deltas lands in the next commit.
-    let output_dir = adapter_dir.join(adapter_name);
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("failed to create OPD adapter dir {}: {e}", output_dir.display()))?;
-    let stub_marker = output_dir.join("KILN_OPD_STUB.txt");
-    std::fs::write(
-        &stub_marker,
-        format!(
-            "kiln OPD stub adapter for job {job_id}.\n\
-             This adapter exists so the HTTP / queue / hot-swap / auto-load / post-eval\n\
-             plumbing has a path to point at. The §3.1 OPD trainer body lands in the\n\
-             next commit on this branch (see docs/plans/grand-plan-for-extraordinarily-\n\
-             great-on-policy-distillation-for-everyone.md §3.1).\n\
-             Teacher: {teacher}\n\
-             Loss: {loss:?}\n\
-             top_k: {top_k}\n",
-            teacher = req.teacher,
-            loss = req.config.loss,
-            top_k = req.config.top_k,
-        ),
+    let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
+    let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
+        crate::api::teachers::TeacherKind::Fixture
+        | crate::api::teachers::TeacherKind::Local => {
+            std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
+                spec.alias.clone(),
+                resolved_vocab,
+                resolved_max_top_k.max(req.config.top_k),
+            ))
+        }
+        crate::api::teachers::TeacherKind::Remote => {
+            let url = spec.url.clone().ok_or_else(|| {
+                format!(
+                    "teacher {:?} is Remote but has no `url` field — re-register with `url` set",
+                    spec.alias
+                )
+            })?;
+            let provider = guess_remote_provider(&url);
+            let cfg = kiln_train::RemoteTeacherConfig {
+                provider,
+                model: spec.model_id.clone(),
+                url,
+                api_key_env: spec.api_key_env.clone(),
+                teacher_id: spec.alias.clone(),
+                tokenizer_hash: spec.tokenizer_hash.clone(),
+                max_top_k: resolved_max_top_k,
+                vocab_size: resolved_vocab,
+                max_cost_usd: req.config.max_cost_usd,
+                timeout_ms: 60_000,
+            };
+            std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
+        }
+    };
+
+    let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
+
+    let output_dir = kiln_train::opd::opd_train(
+        &req.prompts,
+        &req.config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(trainer_progress_cb),
     )
-    .map_err(|e| format!("failed to write OPD stub marker: {e}"))?;
+    .map_err(|e| format!("opd_train failed: {e:#}"))?;
 
     // §8.11 reproducibility receipt — every adapter ships with one.
-    // Even the milestone-4 stub gets a receipt so the verify tooling
-    // and dashboard receipt-display path work end-to-end now.
     let seed = req.config.seed.unwrap_or(0);
     let hyperparameters = serde_json::to_value(&req.config)
         .unwrap_or_else(|_| serde_json::json!({"error": "failed to serialize OpdConfig"}));
     let receipt = kiln_train::AdapterReceipt::new(adapter_name, "opd", seed)
         .with_teacher(kiln_train::TeacherDescriptor {
-            alias: req.teacher.clone(),
-            model_id: req.teacher.clone(),
+            alias: spec.alias.clone(),
+            model_id: spec.model_id.clone(),
             model_version_hash: None,
             snapshot_url: None,
         })
@@ -622,24 +649,33 @@ fn run_opd(
         tracing::warn!(job_id = %job_id, "failed to write OPD receipt: {e}");
     }
 
-    // Emit progress callbacks so the dashboard / progress bar sees the
-    // job as "completed" rather than "stuck at 0%".
-    progress_cb(trainer::TrainingProgress {
-        epoch: 1,
-        total_epochs: 1,
-        step: 1,
-        total_steps: 1,
-        loss: 0.0,
-        progress: 1.0,
-    });
-
-    tracing::warn!(
-        job_id = %job_id,
-        path = %output_dir.display(),
-        "OPD adapter is a milestone-4 stub (no parameter update); see KILN_OPD_STUB.txt for details"
-    );
-
     Ok(output_dir)
+}
+
+/// Best-effort provider guess from the configured base URL. Lets the
+/// user re-use `TeacherSpec` (which only carries a `url`) without
+/// adding a provider field — the §3.2 registry is intentionally
+/// minimal. Defaults to `Vllm` (the most common OSS top_logprobs
+/// endpoint shape) when no host token matches.
+fn guess_remote_provider(url: &str) -> kiln_train::RemoteProvider {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("openrouter.ai") {
+        kiln_train::RemoteProvider::OpenRouter
+    } else if lower.contains("together.ai") || lower.contains("together.xyz") {
+        kiln_train::RemoteProvider::Together
+    } else if lower.contains("fireworks.ai") {
+        kiln_train::RemoteProvider::Fireworks
+    } else if lower.contains("deepinfra") {
+        kiln_train::RemoteProvider::DeepInfra
+    } else if lower.contains("sglang") {
+        kiln_train::RemoteProvider::Sglang
+    } else if lower.contains("tgi") || lower.contains("huggingface") {
+        kiln_train::RemoteProvider::Tgi
+    } else if lower.contains("llama.cpp") || lower.contains("llamacpp") || lower.contains("8080") {
+        kiln_train::RemoteProvider::LlamaCpp
+    } else {
+        kiln_train::RemoteProvider::Vllm
+    }
 }
 
 /// `/v1/distill/refresh` runtime — §3.6 continual-learning recipe.
@@ -1099,6 +1135,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 &state.adapter_dir,
                 &adapter_name,
                 progress_cb,
+                &state.teacher_registry,
                 &job_id,
             )
         }
