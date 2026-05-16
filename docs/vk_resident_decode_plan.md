@@ -525,10 +525,26 @@ Measured on Qwen3.5-4B / RTX 6000 Ada at 494-token prompt:
 
 Parity bit-identical against the non-split-K legacy path.
 
+#### Last contained shader win: fused ADD + RMSNorm (`e69b8e61`)
+
+Each transformer block had a post-attn residual ADD (writes
+`attn_residual`) followed by a pre-MLP qwen-RMSNorm (reads
+`attn_residual`, writes `normed_post`) — two consecutive dispatches
+with a compute→compute barrier between. `add_qwen_rmsnorm.comp`
+fuses them: one workgroup, two passes over the hidden dim (first
+materializes `sum = a + b` while accumulating sum-of-squares,
+second multiplies by the normalization factor). Saves 1 dispatch +
+1 barrier per block (32 layers × 1 = 32 fewer dispatches per
+token). Marginal lift (~1 tok/s mean) on top of the existing
+budget.
+
+Final bench at 494-token prompt, 128 output tokens, 5 runs:
+**~40.5 tok/s mean / 21.2 ms p50 (~47 tok/s p50)**.
+
 #### Remaining gap
 
-Current ~40 tok/s mean (warmed, 128-token output) / ~47 tok/s p50
-vs. the gate (e.2) target of 55 tok/s leaves a ~1.17× p50 / ~1.4×
+Current ~40.5 tok/s mean (warmed, 128-token output) / ~47 tok/s p50
+vs. the gate (e.2) target of 55 tok/s leaves a ~1.17× p50 / ~1.36×
 mean factor. The submit phase is still ~80% of ITL — what's left is
 the **actual GPU kernel time** for the 32 transformer blocks plus
 final norm + LM head, primarily the bf16-weight matrix-vector
@@ -628,13 +644,84 @@ is the next session of focused work. The kernel-, pool-, cache-, and
 backend-plumbing surface is complete; only the orchestration in
 `forward.rs` (or a new `vk_decode_resident.rs`) remains.
 
+## What it took to reach 47 tok/s p50 (full ladder)
+
+Single-session progression on Qwen3.5-4B / RTX 6000 Ada, 494-token
+prompt:
+
+| Commit | What changed | Result |
+|--------|--------------|--------|
+| baseline | legacy path, no wire-up | 1.04 tok/s |
+| `876e791d` | GDN resident covers entire transformer block | 5.8 tok/s |
+| `40dec1ed` | native single-submit orchestrator | 15.6 tok/s |
+| `1e0f27e2` | fold final RMSNorm + LM head into batch | 18.7 tok/s |
+| `c57789f3` | path-keyed pipeline cache + persistent small bufs | 21.7 tok/s |
+| `abace750` | batched per-token upload | 22 tok/s |
+| `47274e7f` | in-batch readback | 24 tok/s |
+| `fa513e5f` | persistent descriptor-set cache | 31 tok/s |
+| `b213ea84` | host-visible small inputs | 33 tok/s |
+| `28efa815` | host-visible io_a | 34 tok/s |
+| `c0faf4d9` | hash-key descriptor cache | 35 tok/s |
+| `66c4208b` | **split-K paged attention** | **40 tok/s** |
+| `e69b8e61` | fused ADD + RMSNorm | **40.5 tok/s / 47 p50** |
+
+End-to-end parity bit-identical throughout — `vk_resident_decode_parity`
+test stays at worst-diff `abs=0 rel=0` against the legacy paged path
+on Qwen3.5-4B at every commit.
+
+## Remaining gap to gate (e.2)
+
+Per-token phase budget at the final state (steady-state, warmed):
+
+  embed=0.16  rope=0.01  upload=0.02  record=2.5
+  submit=~17  readback=1.4  lmhead=0   ≈ 21 ms p50 / 47 tok/s
+
+Submit is ~80% of ITL and is now the actual GPU kernel time for 32
+transformer blocks × ~5 bf16-weight matrix-vector GEMMs each plus
+the LM head GEMV. Memory-bandwidth math:
+
+  Total bf16 weights touched per token:
+    8 full-attn × ~204 MB + 24 GDN × ~222 MB + 780 MB LM head
+    ≈ 7.0 GB / token
+  At 960 GB/s peak: 7.3 ms theoretical lower bound on submit
+  Currently: ~14 ms on the GEMMs + ~3 ms paged_attn ≈ 17 ms
+
+So we're at ~50% memory-bandwidth efficiency on the GEMMs. The
+remaining levers (all shader-level) are:
+
+1. **Cooperative-matrix BF16 GEMMs.** The structural lever — `bf16
+   coopmat` on Ada Tensor Cores is ~10-15× the scalar throughput.
+   `VK_KHR_cooperative_matrix` is available on the device but
+   ash 0.37 only ships the older `VK_NV_cooperative_matrix`
+   bindings (fp16/int8). Two paths:
+   - Bump ash to a release that exposes the KHR extension + the
+     bf16 shader-type extension, write coopmat versions of
+     `linear_decode_bf16w`, `mlp_gate_up_decode_bf16w`,
+     `full_attn_qkv_decode_bf16w`, `gdn_in_proj_decode_bf16w`.
+   - Or wire raw FFI via `vk_raw` for the extension surface.
+2. **Process 2 bf16 outputs per weight u32 load.** The current
+   shaders read one u32 from the packed weight buffer and use only
+   one of the two bf16 halves. Reading both halves doubles
+   effective memory throughput. Some shaders have already done
+   this (rows4 / rows8 variants for batched paths) but the
+   decode-hot `linear_decode_bf16w` and friends have not — a
+   contained per-shader rewrite.
+3. **Cross-layer ADD + pre-norm fusion.** Layer N's final ADD
+   writes the same buffer layer N+1's pre-norm reads. Currently
+   two dispatches with a barrier between. A "(a + b) → out,
+   RMSNorm with NEXT layer's weight → normed_pre" shader would
+   collapse them for 31 of 32 layer boundaries — ~1 ms / token.
+4. **Subgroup-arithmetic reductions in the bf16w GEMMs.** The
+   current shaders use shared-mem reductions; `subgroupAdd`
+   collapses a 32-lane reduction to one instruction. Modest
+   (~10 cycles saved per output) but compounds across ~10k
+   outputs / layer.
+
+(1) is the only one that closes the full ~14 ms gap on its own.
+(2-4) together likely get within 10-15% of the target.
+
 ## Out of scope for this goal
 
-- Cooperative-matrix / Tensor-Core kernels via
-  `VK_KHR_cooperative_matrix`. The arithmetic intensity of the current
-  rows4 / rows8 bf16w shaders is still below the FP32 compute-bound
-  threshold, so the resident-decode path alone should already saturate
-  the memory bandwidth bottleneck. Cooperative matrix is a follow-up.
 - Training-side changes. `vk_forward.rs` already keeps activations
   resident for training; this goal extends the same pattern to the
   decode forward path without touching training.
