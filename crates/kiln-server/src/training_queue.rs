@@ -620,7 +620,7 @@ fn run_opd(
                 tokenizer_hash: spec.tokenizer_hash.clone(),
                 max_top_k: resolved_max_top_k,
                 vocab_size: resolved_vocab,
-                max_cost_usd: req.config.max_cost_usd,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
                 timeout_ms: 60_000,
             };
             std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
@@ -993,6 +993,12 @@ fn build_local_teacher_for(
     .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))
 }
 
+/// §6 / §8.6 — default per-job hard cap on remote-teacher $ spend
+/// when the caller didn't specify one. Matches the prosumer tier's
+/// `cost_cap_default_usd`. Set explicitly so `RemoteTeacher` always
+/// has a cap and never racks up surprise bills.
+pub const DEFAULT_REMOTE_COST_CAP_USD: f64 = 25.0;
+
 /// Best-effort provider guess from the configured base URL. Lets the
 /// user re-use `TeacherSpec` (which only carries a `url`) without
 /// adding a provider field — the §3.2 registry is intentionally
@@ -1175,7 +1181,7 @@ fn run_distill_refresh(
                 tokenizer_hash: spec.tokenizer_hash.clone(),
                 max_top_k: resolved_max_top_k,
                 vocab_size: resolved_vocab,
-                max_cost_usd: req.config.max_cost_usd,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
                 timeout_ms: 60_000,
             };
             std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))
@@ -1515,7 +1521,7 @@ fn run_distill_pump(
                 tokenizer_hash: spec.tokenizer_hash.clone(),
                 max_top_k: resolved_max_top_k,
                 vocab_size: resolved_vocab,
-                max_cost_usd: req.config.max_cost_usd,
+                max_cost_usd: Some(req.config.max_cost_usd.unwrap_or(DEFAULT_REMOTE_COST_CAP_USD)),
                 timeout_ms: 60_000,
             };
             std::sync::Arc::new(kiln_train::RemoteTeacher::new(cfg))

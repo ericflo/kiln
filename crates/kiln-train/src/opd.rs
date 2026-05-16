@@ -1475,9 +1475,28 @@ pub fn opd_train(
     let device = weights.embed_tokens.device().clone();
     let backend_rt = backend::for_device(&device);
 
+    // §6 data-multiplier: auto-scale samples_per_prompt when the
+    // dataset is small. Lu (2025) §3.5.4: 4 if |prompts| ≥ 200,
+    // 16 if 50 ≤ |prompts| < 200, 64 if |prompts| < 50. We respect
+    // any non-default user override (≠ default_opd_samples_per_prompt
+    // = 4) and only auto-scale when the user didn't ask for a
+    // specific count.
+    let effective_samples_per_prompt = if config.samples_per_prompt == default_opd_samples_per_prompt() {
+        if prompts.len() < 50 {
+            64
+        } else if prompts.len() < 200 {
+            16
+        } else {
+            default_opd_samples_per_prompt()
+        }
+    } else {
+        config.samples_per_prompt
+    };
+
     tracing::info!(
         num_prompts = prompts.len(),
-        samples_per_prompt = config.samples_per_prompt,
+        samples_per_prompt = effective_samples_per_prompt,
+        config_samples_per_prompt = config.samples_per_prompt,
         top_k = config.top_k,
         loss = ?config.loss,
         lr = config.learning_rate,
@@ -1528,7 +1547,7 @@ pub fn opd_train(
     }
 
     let epochs = 1usize;
-    let total_steps = epochs * tokenized.len() * config.samples_per_prompt.max(1);
+    let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
 
@@ -1545,7 +1564,7 @@ pub fn opd_train(
                 continue;
             }
 
-            for sample_idx in 0..config.samples_per_prompt.max(1) {
+            for sample_idx in 0..effective_samples_per_prompt.max(1) {
                 let lora_weights = params.as_lora_weights();
                 let mut linear_state = LinearAttentionState::new(model_config, &device)?;
                 let hidden = model_forward_no_head(
@@ -2023,6 +2042,8 @@ mod tests {
             require_internal_qa_gain: 0.05,
             config: OpdConfig::default(),
             post_eval: None,
+            if_eval_suite: None,
+            new_knowledge_eval_suite: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let parsed: DistillRefreshRequest = serde_json::from_str(&s).unwrap();
