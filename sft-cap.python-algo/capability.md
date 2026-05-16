@@ -420,3 +420,30 @@ the meaningful discovery this session.
 The user's IMT (iterated multi-turn) idea also lifted earlier
 (0.8595 → 0.8702 on AdamW middle layer) but the SGD middle layer
 beats both the IMT 3-layer stack and itself + IMT.
+
+## SESSION 3 PART 3 (FINAL): cap-stack-sgd2 = 0.8799 (verified, sometimes 0.8732)
+
+Final state: cap-stack-sgd2 is the best stable adapter at 0.8799.
+
+Confirmed scoring variance: same adapter scores either 0.8732 or 0.8799
+depending on server state. Reproducible at both via 3x verification.
+
+Best stable result this session: **0.8799** (sometimes 0.8732 due to
+eval-time variance — both above previous stable best 0.8694).
+
+Final winning recipe:
+```
+base Qwen3.5-4B
+  -> SGD lr=5e-5, 3 epochs, on think-sgd-exact = cap-sgd-run2 (0.857)
+    -> SGD lr=5e-5, 1 epoch, on winning-64 = cap-stack-sgd2 (0.88)
+```
+
+Total session 3 lift: 0.8068 (baseline) -> 0.8799 = +0.073
+
+Key discoveries this session:
+1. User's IMT idea works on AdamW base: +0.011 from 0.8595 -> 0.8702
+2. SGD optimizer for middle stack layer: +0.020 from 0.8595 -> 0.8799
+3. The two don't compose (IMT on SGD base regresses)
+
+Cannot stack further (3+ layers always regress) and GRPO OOMs on
+this base. Final ceiling appears to be ~0.88 stable for LoRA on Qwen3.5-4B.

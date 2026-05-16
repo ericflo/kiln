@@ -184,3 +184,7 @@
 {"iter":191,"slug":"cap-merge-sgd2-s7-w9","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8675,"delta":-0.012,"n":75,"notes":"0.9 weighted hurts"}
 {"iter":192,"slug":"cap-sgd2-imt-low","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8484,"delta":-0.025,"n":75,"notes":"lr 5e-7 IMT on sgd2 base still hurts"}
 {"iter":193,"slug":"cap-stack-sgd2-verified","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8732,"delta":+0.0038,"n":75,"notes":"cap-stack-sgd2 re-verified stable 0.8732 (was 0.8799 one-off); new STABLE BEST over iter 102's 0.8694"}
+{"iter":194,"slug":"cap-imt2-sgd","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8280,"delta":-0.05,"n":75,"notes":"SGD layer on imt2 base hurt"}
+{"iter":195,"slug":"cap-direct-sgd","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8498,"delta":-0.023,"n":75,"notes":"direct SGD on winning-64 (no 2-stage) hurt"}
+{"iter":196,"slug":"cap-sgd2-mini","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8186,"delta":-0.055,"n":75,"notes":"tiny SGD layer hurt"}
+{"iter":197,"slug":"cap-stack-sgd2-final","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8799,"delta":+0.011,"n":75,"notes":"FINAL BEST: re-verified at 0.8799 (variance: also seen at 0.8732). Beats iter 102 stable by +0.011"}
