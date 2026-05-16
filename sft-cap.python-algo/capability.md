@@ -168,6 +168,8 @@ from §4 of SKILL.md plus the math-broad win:
 | 104 | sgd-lr-2e-5 | 75 | 0.8068 | -0.063 | discard | SGD lr too low (= baseline; no training effect) |
 | 105 | sgd-lr-1e-5 | 75 | 0.7556 | -0.114 | discard | SGD lr way too low |
 | 106 | sgd-lr-1e-3 | 75 | 0.0000 | -0.869 | discard | SGD lr 1e-3 catastrophic — adapter destroyed |
+| 107 | sgd-stacked (60-short on cap-think-sgd) | — | crash | — | crash | OOM |
+| 108 | sgd-stack2 (32-ex stack on cap-think-sgd, SGD lr 5e-5) | 75 | 0.8531 | -0.016 | discard | stacking still doesn't help SGD |
 
 ## Final summary (94 iters, 95 entries)
 
