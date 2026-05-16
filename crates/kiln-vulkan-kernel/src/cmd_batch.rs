@@ -281,6 +281,62 @@ impl<'a> CommandBatch<'a> {
         self.record_with_pipeline(set_layout, layout, pipeline, handles, push_constants, workgroups)
     }
 
+    /// Record a `cmd_copy_buffer` from `src` (typically a device-local
+    /// pool buffer like logits or final hidden) into `dst` (a
+    /// host-visible staging buffer) inside this batch. After the
+    /// batch's `submit_and_wait` returns, the caller can `map_memory`
+    /// on `dst` and read the data directly — no separate readback
+    /// queue submission needed.
+    ///
+    /// Emits a compute→transfer memory barrier first so the last
+    /// dispatch's writes are visible to the copy.
+    pub fn record_copy_buffer(
+        &mut self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        size: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
+        let device = self.vk_device.device();
+        unsafe {
+            // SHADER_WRITE → TRANSFER_READ barrier so cmd_copy_buffer
+            // sees the previous compute dispatch's writes. The
+            // submit_and_wait tail barrier (added below) handles the
+            // TRANSFER_WRITE → HOST_READ side for the host map.
+            let barrier = vk::MemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .build();
+            device.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+            let copy = vk::BufferCopy::builder().size(size).build();
+            device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
+            // TRANSFER_WRITE → HOST_READ so the post-submit map sees
+            // the copy's writes.
+            let host_barrier = vk::MemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)
+                .build();
+            device.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[host_barrier],
+                &[],
+                &[],
+            );
+        }
+        Ok(())
+    }
+
     /// Number of dispatches currently in the batch (excluding the final
     /// transfer barrier).
     pub fn dispatch_count(&self) -> usize {

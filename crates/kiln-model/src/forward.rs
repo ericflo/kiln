@@ -14192,6 +14192,18 @@ fn model_forward_paged_last_token_resident_native_vk(
 
     // Submit + wait — one queue submission covers all 32 layer blocks
     // PLUS the final norm + lm_head.
+    // Fold the logits readback into the main batch: record a
+    // cmd_copy_buffer from the device-local logits buffer into a
+    // persistent host-visible staging buffer. After
+    // submit_and_wait, we just `map_memory` on the staging buffer —
+    // no separate queue submission for the readback.
+    let logits_bytes_len = (vocab_size * 4) as u64;
+    let logits_staging = vk_backend
+        .acquire_resident_scratch_host_visible("native_logits_staging", logits_bytes_len)?;
+    batch
+        .record_copy_buffer(&logits_buf, &logits_staging, logits_bytes_len)
+        .context("native: record logits copy to staging")?;
+
     batch
         .submit_and_wait("vk-resident native full-token forward")
         .context("native: submit full-token CommandBatch")?;
@@ -14200,15 +14212,11 @@ fn model_forward_paged_last_token_resident_native_vk(
     }
     let t_readback = std::time::Instant::now();
 
-    // Read back the logits directly (vocab_size f32).
-    let out_bytes = VulkanBuffer::read_back(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &logits_buf,
-    )
-    .context("native: read back logits")?;
+    // Map the staging buffer (already populated by the batch's
+    // recorded cmd_copy_buffer above).
+    let out_bytes = logits_staging
+        .read_mapped(logits_bytes_len as usize)
+        .context("native: map logits staging buffer")?;
     let n = out_bytes.len() / 4;
     let mut out_f32: Vec<f32> = Vec::with_capacity(n);
     for i in 0..n {

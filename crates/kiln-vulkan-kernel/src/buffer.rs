@@ -596,4 +596,23 @@ impl VulkanBuffer {
     pub fn size(&self) -> u64 {
         self.size
     }
+
+    /// Map this buffer's memory and copy the first `bytes_len` bytes
+    /// into a fresh `Vec<u8>`. Only valid for buffers created with
+    /// host-visible memory (`create_host_visible`). Callers writing
+    /// to host-mapped memory should use `map_for_write` instead.
+    pub fn read_mapped(&self, bytes_len: usize) -> Result<Vec<u8>> {
+        let mapped = unsafe {
+            self.device
+                .map_memory(self.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| anyhow::anyhow!("read_mapped: map_memory: {:?}", e))?
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(mapped as *const u8, bytes_len).to_vec()
+        };
+        unsafe {
+            self.device.unmap_memory(self.memory);
+        }
+        Ok(bytes)
+    }
 }

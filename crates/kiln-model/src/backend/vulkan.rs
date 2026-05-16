@@ -621,6 +621,41 @@ impl VulkanBackend {
         Ok(arc)
     }
 
+    /// Host-visible variant of `acquire_resident_scratch`. Used by the
+    /// native decode orchestrator to keep a persistent readback
+    /// staging buffer (for logits) — folding the readback's
+    /// `cmd_copy_buffer` into the main `CommandBatch` so the post-
+    /// submit step is just a `map_memory` rather than a fresh queue
+    /// submission.
+    pub fn acquire_resident_scratch_host_visible(
+        &self,
+        role: &'static str,
+        min_bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .resident_scratch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
+        if let Some(buf) = g.get(role) {
+            if buf.size() >= min_bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_host_visible(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            min_bytes.max(4),
+        )
+        .with_context(|| format!("alloc host-visible resident scratch '{role}'"))?;
+        let arc = Arc::new(buf);
+        g.insert(role, Arc::clone(&arc));
+        Ok(arc)
+    }
+
     pub fn cached_f32_weight_buffer(
         &self,
         weight: &Tensor,
