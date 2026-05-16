@@ -1444,6 +1444,96 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
     .context("paged_attn_decode_batch_paged_f32_resident kernel failed")
 }
 
+/// Split the combined QKV-with-gate buffer into four distinct output
+/// buffers (q, gate, k, v) on the GPU, without crossing back to the
+/// candle Tensor layer. This is the device-side equivalent of the
+/// CPU-side `q_raw.narrow(3, 0, head_dim)` + sibling narrows the
+/// legacy block uses after the fused full-attn QKV projection.
+///
+/// Combined layout (one decode row, attn_output_gate = true):
+///   [0 .. q_dim)         : q_raw, with per-head `(q, gate)` pairs
+///   [q_dim .. q_dim+k_dim): K
+///   [q_dim+k_dim .. end) : V
+/// where `q_dim = 2 × num_heads × head_dim`.
+///
+/// Each of `q_out`, `gate_out`, `k_out`, `v_out` must hold at least
+/// `num_*heads × head_dim × 4` bytes (f32).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_qkv_gate_split_resident(
+    vk_device: &VulkanDevice,
+    combined: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    gate_out: &VulkanBuffer,
+    k_out: &VulkanBuffer,
+    v_out: &VulkanBuffer,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<()> {
+    let q_dim = 2 * num_heads * head_dim;
+    let kv_dim = num_kv_heads * head_dim;
+    let comb_floats = q_dim + kv_dim + kv_dim;
+    let need_comb = (comb_floats * 4) as u64;
+    let need_q = (num_heads * head_dim * 4) as u64;
+    let need_kv = (kv_dim * 4) as u64;
+    anyhow::ensure!(
+        combined.size() >= need_comb,
+        "qkv_gate_split_resident: combined buffer {} bytes < required {need_comb}",
+        combined.size()
+    );
+    anyhow::ensure!(
+        q_out.size() >= need_q,
+        "qkv_gate_split_resident: q_out {} < {need_q}",
+        q_out.size()
+    );
+    anyhow::ensure!(
+        gate_out.size() >= need_q,
+        "qkv_gate_split_resident: gate_out {} < {need_q}",
+        gate_out.size()
+    );
+    anyhow::ensure!(
+        k_out.size() >= need_kv,
+        "qkv_gate_split_resident: k_out {} < {need_kv}",
+        k_out.size()
+    );
+    anyhow::ensure!(
+        v_out.size() >= need_kv,
+        "qkv_gate_split_resident: v_out {} < {need_kv}",
+        v_out.size()
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/qkv_gate_split.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        combined.handle(),
+        q_out.handle(),
+        gate_out.handle(),
+        k_out.handle(),
+        v_out.handle(),
+    ];
+    // Total invocations: num_heads × head_dim (q & gate share invocations)
+    // + num_kv_heads × head_dim (k) + num_kv_heads × head_dim (v).
+    let total = num_heads * head_dim + 2 * kv_dim;
+    let workgroups = total.div_ceil(64) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("qkv_gate_split_resident kernel failed")
+}
+
 /// Resident-form paged KV-cache slot write: copy one freshly-projected
 /// `(k, v)` token into the device-resident pool at the given `slot`.
 ///
@@ -2458,6 +2548,68 @@ mod tests {
                         "V slot {slot} idx {i} must be untouched (= 0.0)"
                     );
                 }
+            }
+        }
+    }
+
+    /// Verifies `dispatch_qkv_gate_split_resident` correctly fans the
+    /// combined `[q_raw | k | v]` projection output into four separate
+    /// output buffers, preserving the per-head `(q, gate)` interleaving
+    /// inside the q_raw region.
+    #[test]
+    fn qkv_gate_split_resident_writes_correct_outputs() {
+        let Some(dev) = try_device() else { return };
+        let num_heads = 3usize;
+        let num_kv_heads = 2usize;
+        let head_dim = 8usize;
+        let q_dim = 2 * num_heads * head_dim;
+        let kv_dim = num_kv_heads * head_dim;
+        let comb_len = q_dim + 2 * kv_dim;
+
+        // Build a deterministic input where the index in the combined
+        // buffer is directly recoverable, so any misindexing is obvious.
+        let comb_data: Vec<f32> = (0..comb_len).map(|i| i as f32).collect();
+        let comb_t = Tensor::from_vec(comb_data.clone(), comb_len, &Device::Cpu).unwrap();
+        let comb_buf = upload_tensor_f32_buffer(&dev, &comb_t).unwrap();
+
+        let q_buf = alloc_out(&dev, (num_heads * head_dim * 4) as u64);
+        let gate_buf = alloc_out(&dev, (num_heads * head_dim * 4) as u64);
+        let k_buf = alloc_out(&dev, (kv_dim * 4) as u64);
+        let v_buf = alloc_out(&dev, (kv_dim * 4) as u64);
+
+        dispatch_qkv_gate_split_resident(
+            &dev,
+            &comb_buf,
+            &q_buf,
+            &gate_buf,
+            &k_buf,
+            &v_buf,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )
+        .unwrap();
+
+        let q_got = read_back_f32(&dev, &q_buf);
+        let gate_got = read_back_f32(&dev, &gate_buf);
+        let k_got = read_back_f32(&dev, &k_buf);
+        let v_got = read_back_f32(&dev, &v_buf);
+
+        // Reference: same indexing the shader uses.
+        for h in 0..num_heads {
+            for p in 0..head_dim {
+                let q_exp = comb_data[h * 2 * head_dim + p];
+                let gate_exp = comb_data[h * 2 * head_dim + head_dim + p];
+                assert_eq!(q_got[h * head_dim + p].to_bits(), q_exp.to_bits());
+                assert_eq!(gate_got[h * head_dim + p].to_bits(), gate_exp.to_bits());
+            }
+        }
+        for h in 0..num_kv_heads {
+            for p in 0..head_dim {
+                let k_exp = comb_data[q_dim + h * head_dim + p];
+                let v_exp = comb_data[q_dim + kv_dim + h * head_dim + p];
+                assert_eq!(k_got[h * head_dim + p].to_bits(), k_exp.to_bits());
+                assert_eq!(v_got[h * head_dim + p].to_bits(), v_exp.to_bits());
             }
         }
     }
