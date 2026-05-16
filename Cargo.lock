@@ -1847,6 +1847,15 @@ name = "kiln-nvtx"
 version = "0.2.16"
 
 [[package]]
+name = "kiln-opd-loss-kernel"
+version = "0.2.16"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+]
+
+[[package]]
 name = "kiln-rmsnorm-kernel"
 version = "0.2.16"
 dependencies = [
