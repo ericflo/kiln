@@ -7756,6 +7756,40 @@ fn gated_deltanet_forward_decode_if(
     let in_proj_z_lora = lora_layer.and_then(|l| l.in_proj_z.as_ref());
     let gdn_out_lora = lora_layer.and_then(|l| l.gdn_out_proj.as_ref());
     let has_gdn_in_lora = in_proj_qkv_lora.is_some() || in_proj_z_lora.is_some();
+
+    // Vulkan-resident decode fast-path for GDN. Same shape contract as
+    // the full-attn fast-path in transformer_block_paged_with_rope_tables:
+    // declines (`Ok(None)`) on any unsupported config so the legacy
+    // path below runs unchanged.
+    #[cfg(feature = "vulkan")]
+    {
+        if batch == 1
+            && seq_len == 1
+            && lora.is_none()
+            && !capture_b11_taps
+            && !capture_c41_taps
+            && gdn_forward_only_fastpaths
+            && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_GDN", true)
+        {
+            if let Some(vk_backend) = backend
+                .as_any()
+                .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+            {
+                if let Some(out) =
+                    crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1(
+                        vk_backend,
+                        x,
+                        weights,
+                        config,
+                        recurrent_state,
+                        conv_state,
+                    )?
+                {
+                    return Ok(out);
+                }
+            }
+        }
+    }
     // --- Step 1: Input projections ---
     // Use the pre-transposed weight cache (Phase 6) so we don't pay a `.t().contiguous()`
     // ucopy_bf16 copy on every layer / every step. Same fix class as PR #128 (MLP/full-attn).

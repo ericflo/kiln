@@ -443,6 +443,276 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
     Ok(buf)
 }
 
+/// Run the GDN linear-attention sub-block on the Vulkan-resident path.
+///
+/// Returns `Ok(Some(output))` — the attention output shape `[1, 1, hidden]`
+/// f32, on the same candle device as `x`. The caller is responsible for
+/// the residual add and the post-attention norm + MLP (this helper is
+/// only the GDN-specific portion).
+///
+/// Returns `Ok(None)` when the input does not match the supported
+/// configuration; caller falls back to the legacy
+/// `gated_deltanet_forward_decode_if` path.
+///
+/// Persistent state: the recurrent_state and conv_state buffers live
+/// on `VulkanBackend` (per-layer, allocated lazily). On first call per
+/// layer, they're seeded from the legacy `LinearAttentionState` Tensors
+/// so any prefill GDN state is preserved.
+#[allow(clippy::too_many_arguments)]
+pub fn gated_deltanet_forward_decode_resident_b1(
+    backend: &VulkanBackend,
+    x_normed: &Tensor,
+    weights: &crate::forward::GpuLinearAttentionWeights,
+    config: &ModelConfig,
+    recurrent_state_t: &Tensor,
+    conv_state_t: &Tensor,
+) -> Result<Option<Tensor>> {
+    let state_key = recurrent_state_t.id();
+    // --- supported-config gate -----------------------------------
+    let dims = x_normed.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
+        return Ok(None);
+    }
+    let hidden = dims[2];
+    if hidden != config.hidden_size {
+        return Ok(None);
+    }
+    let Some(vk_device) = backend.vulkan_device() else {
+        return Ok(None);
+    };
+
+    let nk = config.linear_num_key_heads;
+    let dk = config.linear_key_head_dim;
+    let nv = config.linear_num_value_heads;
+    let dv = config.linear_value_head_dim;
+    let qk_dim = nk * dk;
+    let v_dim = nv * dv;
+    let qkv_dim = 2 * qk_dim + v_dim;
+    let z_dim = v_dim;
+    let a_dim = nv;
+    let b_dim = nv;
+    let in_proj_total = qkv_dim + z_dim + a_dim + b_dim;
+    let conv_kernel = config.linear_conv_kernel_dim;
+    let eps = config.rms_norm_eps as f32;
+
+    // --- weight buffer lookups ----------------------------------
+    let qkv_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_qkv_t)?;
+    let z_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_z_t)?;
+    let a_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_a_t)?;
+    let b_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_b_t)?;
+    let out_w = backend.cached_bf16_packed_weight_buffer(&weights.out_proj_t)?;
+    let conv_w = backend.cached_f32_weight_buffer(&weights.conv1d)?;
+    let q_norm = backend.cached_f32_weight_buffer(&weights.norm)?; // used for gated_rms_norm
+    // a_log and dt_bias: these enter the fused recurrent+rmsnorm kernel.
+    let a_log = backend.cached_f32_weight_buffer(&weights.a_log)?;
+    let dt_bias = backend.cached_f32_weight_buffer(&weights.dt_bias)?;
+
+    // --- persistent state buffers --------------------------------
+    let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
+    let recurrent_buf =
+        backend.linear_attn_recurrent_state_buffer(state_key, recurrent_bytes)?;
+    // conv_state shape: [batch, conv_dim, kernel_size - 1] f32 where
+    // conv_dim = qkv_dim (the conv1d operates on the full mixed_qkv).
+    let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
+    let conv_buf = backend.linear_attn_conv_state_buffer(state_key, conv_state_bytes)?;
+
+    // --- seed state from legacy Tensors on first use -------------
+    if !backend.linear_attn_layer_seeded(state_key) {
+        seed_recurrent_state(vk_device, &recurrent_buf, recurrent_state_t)?;
+        seed_conv_state(vk_device, &conv_buf, conv_state_t)?;
+        backend.mark_linear_attn_layer_seeded(state_key);
+    }
+
+    // --- allocate intermediate buffers ---------------------------
+    let mk = |bytes: u64| -> Result<VulkanBuffer> {
+        VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            bytes,
+        )
+        .context("alloc GDN activation buffer")
+    };
+    let x_buf = mk((hidden * 4) as u64)?;
+    let in_proj_out = mk((in_proj_total * 4) as u64)?;
+    let mixed_qkv = mk((qkv_dim * 4) as u64)?;
+    let conv_qkv = mk((qkv_dim * 4) as u64)?;
+    let z_buf = mk((z_dim * 4) as u64)?;
+    let a_buf = mk((a_dim * 4) as u64)?;
+    let b_buf = mk((b_dim * 4) as u64)?;
+    let q_buf = mk((qk_dim * 4) as u64)?;
+    let k_buf = mk((qk_dim * 4) as u64)?;
+    let v_buf = mk((v_dim * 4) as u64)?;
+    let gated_norm = mk((v_dim * 4) as u64)?;
+    let out_buf = mk((hidden * 4) as u64)?;
+
+    // --- upload x -----------------------------------------------
+    let x_f32 = if x_normed.dtype() == DType::F32 {
+        x_normed.flatten_all()?
+    } else {
+        x_normed.to_dtype(DType::F32)?.flatten_all()?
+    };
+    let x_data: Vec<f32> = x_f32.to_vec1()?;
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &x_buf,
+        &f32_slice_to_bytes(&x_data),
+    )
+    .context("upload x for GDN resident block")?;
+
+    // --- 1) GDN in_proj: x → [qkv | z | a | b] -------------------
+    use kiln_vulkan_kernel::resident::{
+        dispatch_causal_conv1d_update_resident, dispatch_gdn_in_proj_decode_cached_resident,
+        dispatch_gdn_in_proj_split_resident, dispatch_gdn_qkv_split_resident,
+        dispatch_gdn_decode_gates_recurrent_rmsnorm_resident,
+        dispatch_linear_decode_cached_bf16_weights_resident,
+        dispatch_qwen_rmsnorm_forward_resident,
+    };
+    dispatch_gdn_in_proj_decode_cached_resident(
+        vk_device,
+        &x_buf,
+        &qkv_w,
+        &z_w,
+        &a_w,
+        &b_w,
+        &in_proj_out,
+        1,
+        hidden,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        true,
+    )?;
+    // 2) split in_proj_out → (mixed_qkv, z, a, b)
+    dispatch_gdn_in_proj_split_resident(
+        vk_device,
+        &in_proj_out,
+        &mixed_qkv,
+        &z_buf,
+        &a_buf,
+        &b_buf,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+    )?;
+    // 3) causal conv1d update on mixed_qkv (mutates conv_state)
+    dispatch_causal_conv1d_update_resident(
+        vk_device,
+        &mixed_qkv,
+        &conv_w,
+        &conv_buf,
+        &conv_qkv,
+        1,
+        qkv_dim,
+        1,
+        conv_kernel,
+    )?;
+    // 4) split conv_qkv → (q, k, v)
+    dispatch_gdn_qkv_split_resident(
+        vk_device, &conv_qkv, &q_buf, &k_buf, &v_buf, qk_dim, v_dim,
+    )?;
+    // 5) Q-norm (per-head): rows=nk, hidden=dk; in-place
+    dispatch_qwen_rmsnorm_forward_resident(
+        vk_device, &q_buf, &q_norm, &q_buf, nk, dk, eps,
+    )?;
+    // 6) K-norm (per-head): rows=nk (== num_key_heads), hidden=dk
+    dispatch_qwen_rmsnorm_forward_resident(
+        vk_device, &k_buf, &q_norm, &k_buf, nk, dk, eps,
+    )?;
+    // 7) Fused gates+recurrent+rmsnorm: produces gated_norm of length v_dim
+    dispatch_gdn_decode_gates_recurrent_rmsnorm_resident(
+        vk_device,
+        &q_buf,
+        &k_buf,
+        &v_buf,
+        &a_buf,
+        &b_buf,
+        &a_log,
+        &dt_bias,
+        &recurrent_buf,
+        &z_buf,
+        &q_norm, // gated_rms_norm uses the same norm weight
+        &gated_norm,
+        1,
+        nv,
+        dk,
+        dv,
+        eps,
+    )?;
+    // 8) out_proj: gated_norm → out (linear bf16w, batch=1, hidden_in=v_dim, out_dim=hidden)
+    dispatch_linear_decode_cached_bf16_weights_resident(
+        vk_device,
+        &gated_norm,
+        &out_w,
+        &out_buf,
+        1,
+        v_dim,
+        hidden,
+    )?;
+
+    // --- read back result ---------------------------------------
+    let out_bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &out_buf,
+    )
+    .context("read back GDN out_buf")?;
+    let out_f32 = bytes_to_f32_vec(&out_bytes);
+    let out_tensor = Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x_normed.device())?
+        .to_dtype(x_normed.dtype())?;
+    Ok(Some(out_tensor))
+}
+
+fn seed_recurrent_state(
+    vk_device: &VulkanDevice,
+    buf: &VulkanBuffer,
+    state_t: &Tensor,
+) -> Result<()> {
+    let flat = if state_t.dtype() == DType::F32 {
+        state_t.flatten_all()?
+    } else {
+        state_t.to_dtype(DType::F32)?.flatten_all()?
+    };
+    let data: Vec<f32> = flat.to_vec1()?;
+    let bytes = f32_slice_to_bytes(&data);
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buf,
+        &bytes,
+    )
+    .context("seed recurrent state")
+}
+
+fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &Tensor) -> Result<()> {
+    let flat = if state_t.dtype() == DType::F32 {
+        state_t.flatten_all()?
+    } else {
+        state_t.to_dtype(DType::F32)?.flatten_all()?
+    };
+    let data: Vec<f32> = flat.to_vec1()?;
+    let bytes = f32_slice_to_bytes(&data);
+    // The legacy conv_state may be smaller than the allocated buffer (we
+    // sized off qkv_dim × (kernel_size - 1), the candle Tensor matches).
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buf,
+        &bytes,
+    )
+    .context("seed conv state")
+}
+
 /// Seed the Vulkan-resident KV pool from the legacy candle paged
 /// cache for one layer. Uploads the entire pool slot range as f32
 /// regardless of how many positions are actually live — the legacy
