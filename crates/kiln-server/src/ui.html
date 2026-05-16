@@ -3665,7 +3665,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible,
         <label class="sr-only" for="chat-input">Message</label>
         <textarea id="chat-input" rows="1" placeholder="Type a message — Enter to send, Shift+Enter for a new line" aria-describedby="chat-input-help"></textarea>
         <button type="button" class="btn btn-primary" id="chat-send">Send</button>
-        <button type="button" class="btn" id="chat-stop" disabled hidden>Stop</button>
+        <button type="button" class="btn" id="chat-stop" disabled hidden title="Abort the current generation (Esc)">Stop <kbd style="font-size:10px; padding:1px 4px; margin-left:4px; background:rgba(255,255,255,0.08); border:1px solid var(--border); border-radius:3px;">Esc</kbd></button>
         <button type="button" class="btn btn-ghost" id="chat-clear">Clear</button>
       </div>
       <div class="form-help" id="chat-input-help" style="padding: 0 var(--space-5) var(--space-4);">Send a quick prompt to test the selected adapter or base model. <kbd>Enter</kbd> sends, <kbd>Shift</kbd>+<kbd>Enter</kbd> inserts a newline.</div>
