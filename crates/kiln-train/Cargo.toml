@@ -27,6 +27,7 @@ console = "0.16"
 sha2 = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
+flate2 = { workspace = true }
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda"]

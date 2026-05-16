@@ -1922,6 +1922,7 @@ dependencies = [
  "candle-nn",
  "chrono",
  "console 0.16.3",
+ "flate2",
  "indicatif 0.18.4",
  "kiln-core",
  "kiln-eval",

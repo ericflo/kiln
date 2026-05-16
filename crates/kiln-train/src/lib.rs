@@ -6,6 +6,7 @@
 
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
+pub mod diagnostics;
 pub mod logit_source;
 pub mod opd;
 pub mod replay;
@@ -13,6 +14,11 @@ pub mod trainer;
 #[cfg(feature = "vulkan")]
 pub mod vk_train;
 
+pub use diagnostics::{
+    GuardrailDecision, GuardrailTrigger, LengthInflationGuardrail, OpdDiagnosticSnapshot,
+    REPETITION_GUARDRAIL_THRESHOLD, RolloutSummary, build_snapshot, repetition_rate,
+    truncation_rate,
+};
 pub use logit_source::{
     LogitSource, LogitSourceCaps, LogitSourceError, LogprobBatch, TopKLogprobs,
 };
