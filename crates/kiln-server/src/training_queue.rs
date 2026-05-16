@@ -13,7 +13,7 @@ use kiln_model::lora_loader::LoraWeights;
 use kiln_train::trainer;
 use kiln_train::{
     self, DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest,
-    GrpoRequest, OpdRequest, SftRequest, TrainingState,
+    GrpoRequest, LogitSource as _, OpdRequest, SftRequest, TrainingState,
 };
 use serde::Serialize;
 
@@ -571,14 +571,14 @@ fn run_opd(
         "OPD training started"
     );
 
-    // Resolve the teacher alias against the §3.2 registry. The
-    // milestone-13 wire-up routes Fixture / Local to a deterministic
-    // uniform-top-K source so the trainer math path is exercised
-    // end-to-end on real GPU weights; Remote routes to RemoteTeacher
-    // (§3.2 HTTP top_logprobs). Swapping in a real LocalTeacher
-    // (in-process Qwen3.6-27B) is a follow-up that doesn't touch this
-    // dispatch shape — only the `Local` arm needs to learn how to
-    // build a `LocalTeacher`.
+    // Resolve the teacher alias against the §3.2 registry, then build
+    // the concrete LogitSource:
+    //   • Fixture → DeterministicUniformLogitSource (synthetic).
+    //   • Local   → run the loaded model forward on each prompt and
+    //               populate a FixtureLogitSource with the real
+    //               top-K teacher logprobs (§3.2 in-process local
+    //               teacher).
+    //   • Remote  → RemoteTeacher with provider guessed from the URL.
     let spec = teacher_registry
         .get(&req.teacher)
         .ok_or_else(|| format!("teacher alias {:?} not registered (POST /v1/teachers first)", req.teacher))?;
@@ -586,13 +586,22 @@ fn run_opd(
     let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
     let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
-        crate::api::teachers::TeacherKind::Fixture
-        | crate::api::teachers::TeacherKind::Local => {
+        crate::api::teachers::TeacherKind::Fixture => {
             std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
                 spec.alias.clone(),
                 resolved_vocab,
                 resolved_max_top_k.max(req.config.top_k),
             ))
+        }
+        crate::api::teachers::TeacherKind::Local => {
+            std::sync::Arc::new(build_local_teacher_for(
+                &spec,
+                &req.prompts,
+                tokenizer,
+                weights,
+                model_config,
+                req.config.top_k,
+            )?)
         }
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
@@ -650,6 +659,338 @@ fn run_opd(
     }
 
     Ok(output_dir)
+}
+
+/// Build the §3.4 multi-tenant merge teacher.
+///
+/// Loads each source LoRA, runs the model forward over that source's
+/// prompts with the source LoRA applied (so the logits reflect "what
+/// the model behaves like when wearing that LoRA"), and stashes the
+/// top-K teacher logprobs into a single `FixtureLogitSource` keyed by
+/// (tokens_hash, position).
+///
+/// Each source contributes only its own prompts' entries, so the
+/// trainer's `opd_step_loss` call queries the *correct* source's
+/// teacher when iterating each prompt — no per-step LoRA swap, no
+/// multi-tenant inference server needed.
+///
+/// Per-source `weight` (a `DistillMergeSource` field) is not yet
+/// applied — the unified fixture treats every (source, prompt) entry
+/// equally. Weighted loss aggregation is filed as a §3.4 follow-up.
+#[allow(clippy::too_many_arguments)]
+fn build_multi_tenant_merge_teacher(
+    teacher_id: &str,
+    per_source: &[(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)],
+    adapter_dir: &std::path::Path,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+    job_id: &str,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    let mut unified = kiln_train::logit_source::FixtureLogitSource::uniform_topk(
+        teacher_id.to_string(),
+        model_config.vocab_size,
+        top_k,
+    );
+    for (source, prompts) in per_source {
+        // Try to load the source LoRA from disk. On failure (no
+        // PEFT files yet) we fall back to base-model teacher for
+        // this source's prompts and surface a tracing warning.
+        let src_dir = adapter_dir.join(&source.adapter);
+        let device = weights.embed_tokens.device().clone();
+        let teacher_lora = match kiln_model::lora_loader::LoraWeights::load(
+            &src_dir,
+            model_config.num_layers,
+            &device,
+        ) {
+            Ok(weights) => Some(weights),
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job_id,
+                    source = %source.adapter,
+                    error = %e,
+                    "distill_merge: source LoRA load failed — base-model teacher for this source's prompts"
+                );
+                None
+            }
+        };
+
+        // Tokenize this source's prompts.
+        let mut tokenized: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
+        for prompt in prompts {
+            let ex = kiln_train::SftExample {
+                messages: prompt.messages.clone(),
+            };
+            if let Ok((tokens, label_mask)) =
+                kiln_train::trainer::tokenize_for_training(&ex, tokenizer)
+            {
+                let active: Vec<usize> = label_mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                    .collect();
+                if !active.is_empty() {
+                    tokenized.push((tokens, active));
+                }
+            }
+        }
+        if tokenized.is_empty() {
+            continue;
+        }
+        let source_fixture = kiln_train::opd::build_local_teacher_fixture(
+            format!("{teacher_id}:{}", source.adapter),
+            &tokenized,
+            weights,
+            model_config,
+            teacher_lora.as_ref(),
+            top_k,
+            None,
+        )
+        .map_err(|e| format!("build_local_teacher_fixture for {}: {e:#}", source.adapter))?;
+
+        // Drain entries from source_fixture into unified.
+        for (tokens, active_positions) in &tokenized {
+            for &pos in active_positions {
+                let batch = match source_fixture.fetch_logprobs(tokens, &[pos], Some(top_k)) {
+                    Ok(b) => b,
+                    Err(_) => continue,
+                };
+                let (indices, logprobs) = match batch {
+                    kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
+                    _ => continue,
+                };
+                let key = kiln_train::logit_source::FixtureLogitSource::hash_tokens(tokens);
+                unified.insert(key, pos, indices, logprobs);
+            }
+        }
+    }
+    Ok(unified)
+}
+
+/// Build the §3.12 privileged-information self-teacher.
+///
+/// For each prompt and the chosen `SelfDistillMode`, we construct a
+/// teacher-side prompt that *includes* the privileged context (a
+/// system message carrying ground-truth answers, a "be concise"
+/// instruction, or retrieved documents). The teacher's forward pass
+/// runs against that shaped prompt; we then transplant the resulting
+/// top-K logprobs back onto the *student's* (un-shaped) token stream
+/// by aligning active assistant positions. The student then distils
+/// against logits that "knew" the privileged context — Lu's PI
+/// recipe (CRISP, OPSD, GATES, RLRT) made concrete.
+///
+/// For `ReverseTeacher` the privileged context is omitted but the
+/// per-position logprobs are negated post-hoc so the student moves
+/// *away* from the teacher's distribution — the survey's
+/// reversed-teacher knob.
+#[allow(clippy::too_many_arguments)]
+fn build_self_distill_teacher(
+    teacher_id: &str,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    mode: kiln_train::SelfDistillMode,
+    ground_truth: Option<&[String]>,
+    documents: Option<&[String]>,
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    use kiln_train::ChatMessage;
+    use kiln_train::SelfDistillMode;
+
+    // Build (student_tokens, teacher_tokens, active_positions) triples.
+    // Active positions are derived from the *student* tokenization
+    // since that's what opd_train will query.
+    let mut student_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    let mut teacher_only: Vec<(Vec<u32>, Vec<usize>)> = Vec::new();
+    for (i, prompt) in prompts.iter().enumerate() {
+        let student_ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        let (student_tokens, student_label_mask) =
+            match kiln_train::trainer::tokenize_for_training(&student_ex, tokenizer) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping student-tokenize failure");
+                    continue;
+                }
+            };
+        let active: Vec<usize> = student_label_mask
+            .iter()
+            .enumerate()
+            .filter_map(|(j, &m)| if m { Some(j) } else { None })
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
+
+        // Build the teacher-side messages per mode.
+        let mut teacher_messages: Vec<ChatMessage> = Vec::new();
+        match mode {
+            SelfDistillMode::GroundTruthConditioning => {
+                if let Some(gt) = ground_truth.and_then(|g| g.get(i)) {
+                    teacher_messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: format!(
+                            "Privileged context (visible only to the teacher): the correct answer is: {gt}"
+                        ),
+                    });
+                }
+            }
+            SelfDistillMode::Conciseness => {
+                teacher_messages.push(ChatMessage {
+                    role: "system".into(),
+                    content:
+                        "Privileged context (visible only to the teacher): respond with maximal concision; trim every unnecessary word; never explain reasoning unless explicitly asked."
+                            .into(),
+                });
+            }
+            SelfDistillMode::DocumentAsPi => {
+                if let Some(docs) = documents {
+                    let joined = docs.join("\n\n---\n\n");
+                    teacher_messages.push(ChatMessage {
+                        role: "system".into(),
+                        content: format!(
+                            "Privileged context (visible only to the teacher) — use the following retrieved documents to answer:\n\n{joined}"
+                        ),
+                    });
+                }
+            }
+            SelfDistillMode::ReverseTeacher => {
+                // No privileged context; teacher forward matches
+                // student forward. Logprobs are flipped (negated)
+                // before insertion so the student moves *away*.
+            }
+        }
+        teacher_messages.extend(prompt.messages.iter().cloned());
+        let teacher_ex = kiln_train::SftExample {
+            messages: teacher_messages,
+        };
+        let (teacher_tokens, _) =
+            match kiln_train::trainer::tokenize_for_training(&teacher_ex, tokenizer) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(prompt_idx = i, error = %e, "self-distill: skipping teacher-tokenize failure");
+                    continue;
+                }
+            };
+        student_active.push((student_tokens, active.clone()));
+        // Teacher-side active positions: the suffix of the teacher
+        // tokenization that aligns with the student's active span.
+        // Compute offset = teacher_len - student_len (the privileged
+        // context prefix length) and shift each active by that.
+        let teacher_len = teacher_tokens.len();
+        let student_len = student_active.last().unwrap().0.len();
+        let prefix = teacher_len.saturating_sub(student_len);
+        let teacher_active: Vec<usize> = active.iter().map(|&p| p + prefix).collect();
+        teacher_only.push((teacher_tokens, teacher_active));
+    }
+    if student_active.is_empty() {
+        return Err("self-distill: no prompts tokenized cleanly".into());
+    }
+
+    // Run the teacher forwards on the shaped teacher_only sequences
+    // and build a FixtureLogitSource keyed by the *student* tokens
+    // hash so opd_train's queries match. We compute the teacher's
+    // top-K at teacher_only positions, then re-insert under the
+    // student tokens hash at the student positions — same logprob
+    // values, different key.
+    let teacher_fixture = kiln_train::opd::build_local_teacher_fixture(
+        teacher_id.to_string(),
+        &teacher_only,
+        weights,
+        model_config,
+        None,
+        top_k,
+        None,
+    )
+    .map_err(|e| format!("self-distill local-teacher forward: {e:#}"))?;
+
+    let mut student_fixture =
+        kiln_train::logit_source::FixtureLogitSource::uniform_topk(
+            teacher_id.to_string(),
+            model_config.vocab_size,
+            top_k,
+        );
+
+    // Transplant teacher-key entries → student-key entries.
+    for ((s_tokens, s_active), (t_tokens, t_active)) in
+        student_active.iter().zip(teacher_only.iter())
+    {
+        let t_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(t_tokens);
+        let s_hash = kiln_train::logit_source::FixtureLogitSource::hash_tokens(s_tokens);
+        for (sp, tp) in s_active.iter().zip(t_active.iter()) {
+            // Query the teacher fixture at the teacher key/position.
+            let batch = match teacher_fixture.fetch_logprobs(t_tokens, &[*tp], Some(top_k)) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let (indices, mut logprobs) = match batch {
+                kiln_train::LogprobBatch::TopK(t) => (t.indices, t.logprobs),
+                _ => continue,
+            };
+            if matches!(mode, kiln_train::SelfDistillMode::ReverseTeacher) {
+                for lp in logprobs.iter_mut() {
+                    *lp = -*lp;
+                }
+            }
+            student_fixture.insert(s_hash, *sp, indices, logprobs);
+        }
+    }
+
+    Ok(student_fixture)
+}
+
+/// Build a `FixtureLogitSource` populated from a local model forward
+/// pass — the §3.2 in-process LocalTeacher made concrete. Each prompt
+/// is tokenized like SFT (chat template with active assistant tokens
+/// marked), the model is run forward once per prompt with no LoRA
+/// applied (base-model teacher per Lu 2025's behavioural-recovery
+/// recipe), and the top-K logprobs at active positions are inserted
+/// into the fixture keyed by tokens_hash.
+fn build_local_teacher_for(
+    spec: &crate::api::teachers::TeacherSpec,
+    prompts: &[kiln_train::opd::OpdPrompt],
+    tokenizer: &kiln_core::tokenizer::KilnTokenizer,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    top_k: usize,
+) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    let mut prompts_and_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
+    for prompt in prompts {
+        let ex = kiln_train::SftExample {
+            messages: prompt.messages.clone(),
+        };
+        match kiln_train::trainer::tokenize_for_training(&ex, tokenizer) {
+            Ok((tokens, label_mask)) => {
+                let active: Vec<usize> = label_mask
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                    .collect();
+                if !active.is_empty() {
+                    prompts_and_active.push((tokens, active));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "local-teacher: skipping prompt that failed to tokenize");
+            }
+        }
+    }
+    if prompts_and_active.is_empty() {
+        return Err("local-teacher: no prompts tokenized cleanly for teacher pre-compute".into());
+    }
+    kiln_train::opd::build_local_teacher_fixture(
+        spec.alias.clone(),
+        &prompts_and_active,
+        weights,
+        model_config,
+        None,
+        top_k,
+        spec.tokenizer_hash.clone(),
+    )
+    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))
 }
 
 /// Best-effort provider guess from the configured base URL. Lets the
@@ -807,14 +1148,17 @@ fn run_distill_refresh(
     let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
     let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
-        crate::api::teachers::TeacherKind::Fixture
-        | crate::api::teachers::TeacherKind::Local => {
+        crate::api::teachers::TeacherKind::Fixture => {
             std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
                 spec.alias.clone(),
                 resolved_vocab,
                 resolved_max_top_k.max(req.config.top_k),
             ))
         }
+        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
+            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
+                .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
+        ),
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
                 format!(
@@ -920,7 +1264,8 @@ fn run_distill_merge(
     // replay history we fall back to the wide canonical seed-prompt
     // bank for that source so the runtime still produces a real
     // adapter; the user is warned via tracing.
-    let mut all_prompts: Vec<kiln_train::opd::OpdPrompt> = Vec::new();
+    let mut per_source: Vec<(kiln_train::DistillMergeSource, Vec<kiln_train::opd::OpdPrompt>)> =
+        Vec::new();
     for source in &req.sources {
         let src_dir = adapter_dir.join(&source.adapter);
         if !src_dir.exists() {
@@ -930,17 +1275,22 @@ fn run_distill_merge(
             ));
         }
         let derived = derive_source_prompts(&src_dir, &source.adapter);
-        if derived.is_empty() {
+        let prompts = if derived.is_empty() {
             tracing::warn!(
                 job_id = %job_id,
                 source = %source.adapter,
                 "distill_merge: no replay prompts for source — falling back to wide seeds"
             );
-            all_prompts.extend(wide_seed_prompts());
+            wide_seed_prompts()
         } else {
-            all_prompts.extend(derived);
-        }
+            derived
+        };
+        per_source.push((source.clone(), prompts));
     }
+    let all_prompts: Vec<kiln_train::opd::OpdPrompt> = per_source
+        .iter()
+        .flat_map(|(_, ps)| ps.iter().cloned())
+        .collect();
     if all_prompts.is_empty() {
         return Err("distill_merge: no prompts collected from any source".into());
     }
@@ -955,20 +1305,34 @@ fn run_distill_merge(
         "distill_merge started"
     );
 
-    // Multi-tenant LoRA-as-teacher serving (the proper §3.4 path —
-    // each source LoRA produces real logits per its prompt subset)
-    // is the §10.X follow-up; for the milestone wire-up we use a
-    // single deterministic-uniform teacher across all collected
-    // prompts and warm-start from `req.student`. This produces a
-    // real merged adapter; the full multi-teacher reverse-KL with
-    // per-prompt source routing is filed as task #49.
-    let teacher_id = format!("merge-self:{}", req.name);
-    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
-        std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
-            teacher_id.clone(),
-            model_config.vocab_size,
+    // §3.4 multi-tenant teacher: for each source adapter, load it,
+    // run the loaded model forward against that source's prompts
+    // (still hot-swappable on a single weight matrix because each
+    // source is small relative to the GPU), extract top-K teacher
+    // logprobs at active positions, and stash them into a unified
+    // FixtureLogitSource keyed by student-side tokens_hash.
+    //
+    // Per-source weighting: each source contributes its share of
+    // prompts; the per-prompt logprob lookup keys on tokens_hash so
+    // the trainer queries the *correct* source's teacher for each
+    // prompt, with no per-step LoRA swaps needed.
+    //
+    // When a source's adapter on disk fails to load, we fall back to
+    // the base-model teacher for that source's prompts and surface
+    // the issue via tracing — the run still produces a real adapter.
+    let teacher_id = format!("merge-multi:{}", req.name);
+    let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = std::sync::Arc::new(
+        build_multi_tenant_merge_teacher(
+            &teacher_id,
+            &per_source,
+            adapter_dir,
+            tokenizer,
+            weights,
+            model_config,
             req.config.top_k,
-        ));
+            job_id,
+        )?,
+    );
 
     let mut merge_config = req.config.clone();
     if req.student != "base" {
@@ -1127,14 +1491,17 @@ fn run_distill_pump(
     let resolved_vocab = spec.vocab_size.unwrap_or(model_config.vocab_size);
     let resolved_max_top_k = spec.max_top_k.unwrap_or(req.config.top_k);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> = match spec.kind {
-        crate::api::teachers::TeacherKind::Fixture
-        | crate::api::teachers::TeacherKind::Local => {
+        crate::api::teachers::TeacherKind::Fixture => {
             std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
                 spec.alias.clone(),
                 resolved_vocab,
                 resolved_max_top_k.max(req.config.top_k),
             ))
         }
+        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
+            build_local_teacher_for(&spec, &prompts, tokenizer, weights, model_config, req.config.top_k)
+                .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
+        ),
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
                 format!("teacher {:?} is Remote but has no `url` field", spec.alias)
@@ -1316,18 +1683,31 @@ fn run_distill_self(
         "distill_self started"
     );
 
-    // Self-teacher: deterministic uniform top-K — the in-process
-    // LocalTeacher (same model, LoRA detached, with privileged
-    // context per `req.mode`) is the §3.12 follow-up. Until then
-    // this still produces a real adapter trained against a
-    // reproducible teacher distribution.
+    // §3.12 Privileged-Information self-teacher.
+    //
+    // Each PI mode prepends privileged context to the *teacher's*
+    // prompt before tokenising; the student keeps the original
+    // prompt. The teacher then provides a stronger distribution
+    // (because it saw the privileged context) and the student
+    // distils against it on the un-privileged token stream.
+    //
+    // We materialise this as a `FixtureLogitSource` pre-computed
+    // from one model forward per prompt, using a per-mode prompt
+    // shaper that injects the privileged context as a system
+    // message.
     let teacher_id = format!("self-{}:{:?}", req.name, req.mode);
     let teacher: std::sync::Arc<dyn kiln_train::LogitSource> =
-        std::sync::Arc::new(kiln_train::DeterministicUniformLogitSource::new(
-            teacher_id.clone(),
-            model_config.vocab_size,
+        std::sync::Arc::new(build_self_distill_teacher(
+            &teacher_id,
+            &prompts,
+            req.mode,
+            req.ground_truth.as_deref(),
+            req.documents.as_deref(),
+            tokenizer,
+            weights,
+            model_config,
             req.config.top_k,
-        ));
+        )?);
 
     let mut self_config = req.config.clone();
     self_config.output_name = Some(adapter_name.to_string());

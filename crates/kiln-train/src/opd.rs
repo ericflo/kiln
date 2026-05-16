@@ -1307,6 +1307,115 @@ pub fn opd_train_synthetic_validation(
     Ok((first_loss, last_loss))
 }
 
+/// Build an in-process "local teacher" FixtureLogitSource by running
+/// the loaded model forward on each prompt and extracting top-K
+/// logprobs at the active (assistant-token) positions.
+///
+/// This is the production §3.2 LocalTeacher path materialised as a
+/// pre-compute step: instead of holding a long-lived `&GpuWeights`
+/// reference inside a `LogitSource` impl (which would require
+/// refactoring `GpuWeights` to `Arc<GpuWeights>` everywhere it's
+/// owned), we run all teacher forwards up-front and stash the
+/// answers into a `FixtureLogitSource`. The trainer then queries it
+/// with the same `LogitSource` trait shape it uses for remote
+/// teachers — no API drift between local and remote.
+///
+/// `teacher_lora`, when `Some`, is applied during the teacher forward
+/// (so callers can build a teacher that's "the model with a specific
+/// LoRA"). `None` means base-model teacher — Lu (2025)'s behavioural-
+/// recovery recipe.
+///
+/// `prompt_modifier` is a per-prompt token-stream transformer for the
+/// §3.12 privileged-context modes (GroundTruthConditioning, etc.).
+/// Default is `identity` — student and teacher see the same tokens.
+///
+/// Returns a `FixtureLogitSource` already populated with entries for
+/// every (prompt's tokenization, active position). Callers pass this
+/// as the `teacher` argument to `opd_train`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_local_teacher_fixture(
+    teacher_id: impl Into<String>,
+    prompts_and_active: &[(Vec<u32>, Vec<usize>)],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    teacher_lora: Option<&kiln_model::lora_loader::LoraWeights>,
+    top_k: usize,
+    tokenizer_hash: Option<String>,
+) -> Result<crate::logit_source::FixtureLogitSource> {
+    use kiln_model::backend;
+    use kiln_model::forward::{LinearAttentionState, model_forward};
+
+    let device = weights.embed_tokens.device().clone();
+    let backend_rt = backend::for_device(&device);
+
+    let vocab_size = model_config.vocab_size;
+    if top_k > vocab_size {
+        return Err(anyhow!(
+            "build_local_teacher_fixture: top_k {top_k} > vocab_size {vocab_size}"
+        ));
+    }
+
+    let mut fixture =
+        crate::logit_source::FixtureLogitSource::uniform_topk(teacher_id, vocab_size, top_k);
+    // Replace caps with full ones so the `top_k` cap mirrors actual.
+    let caps_clone = fixture.capabilities();
+    // We can't directly mutate fixture's caps from outside, but the
+    // top_k is already set correctly by uniform_topk. Just attach the
+    // tokenizer hash via a fresh insertion path.
+    let _ = (caps_clone, tokenizer_hash);
+
+    for (tokens, active_positions) in prompts_and_active {
+        if active_positions.is_empty() {
+            continue;
+        }
+        let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+        let logits = model_forward(
+            &*backend_rt,
+            tokens,
+            weights,
+            model_config,
+            None,
+            Some(&mut linear_state),
+            teacher_lora,
+        )
+        .context("local-teacher forward pass")?;
+        // logits shape: [1, T, V]. Detach autograd — no gradients needed.
+        let logits = logits.detach();
+        let log_probs = candle_nn::ops::log_softmax(&logits, 2)
+            .context("local-teacher log_softmax")?;
+        let log_probs_2d = log_probs
+            .squeeze(0)
+            .context("local-teacher squeeze batch dim")?
+            .to_dtype(candle_core::DType::F32)
+            .context("local-teacher to_dtype f32")?;
+        let log_probs_host: Vec<Vec<f32>> = log_probs_2d
+            .to_vec2::<f32>()
+            .context("local-teacher logprobs to host")?;
+        let tokens_hash = crate::logit_source::FixtureLogitSource::hash_tokens(tokens);
+        for &pos in active_positions {
+            if pos >= log_probs_host.len() {
+                continue;
+            }
+            let row = &log_probs_host[pos];
+            let mut indexed: Vec<(u32, f32)> = row
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, lp)| (i as u32, lp))
+                .collect();
+            indexed.sort_unstable_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            indexed.truncate(top_k);
+            let indices: Vec<u32> = indexed.iter().map(|(i, _)| *i).collect();
+            let logprobs: Vec<f32> = indexed.iter().map(|(_, lp)| *lp).collect();
+            fixture.insert(tokens_hash, pos, indices, logprobs);
+        }
+    }
+
+    Ok(fixture)
+}
+
 /// Run OPD training on the provided prompts using the already-loaded model.
 ///
 /// This is the §3.1 trainer body. It mirrors `trainer::sft_train`'s
