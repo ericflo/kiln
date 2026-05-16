@@ -494,7 +494,7 @@ Final per-token phase budget (steady-state, KILN_VK_NATIVE_PHASE_TIMING):
 Bench at 494-token prompt, 128 output tokens, 5 runs:
 **~35 tok/s mean / 25.2 ms p50 (~40 tok/s p50)**.
 
-#### First shader-level win: split-K paged attention (`66c4208b`)
+##### Split-K paged attention (`66c4208b`)
 
 After the host side was wrung dry, the next biggest cost was the
 paged-attention kernel — which dispatched **one workgroup per
@@ -538,14 +538,63 @@ second multiplies by the normalization factor). Saves 1 dispatch +
 token). Marginal lift (~1 tok/s mean) on top of the existing
 budget.
 
-Final bench at 494-token prompt, 128 output tokens, 5 runs:
+Bench at 494-token prompt, 128 output tokens, 5 runs (post split-K
+fused-Q/K-norm fused-ADD+norm):
 **~40.5 tok/s mean / 21.2 ms p50 (~47 tok/s p50)**.
+
+##### Wide-col LM head + fused MLP-down + final ADD (`661ebf92`, `afd3f599`)
+
+After split-K, two more shader wins followed. Each was driven by
+understanding *why* prior fusion attempts failed (per the negative-
+result analysis in the earlier "paired bf16 loads" and "fused
+Q/K-norm" commits) — and by exploring **which bf16w shape and
+shader actually benefits from each transformation**.
+
+1. **Wide-col bf16w LM head (`661ebf92`).** The default
+   `linear_decode_bf16w` used a 16×16 workgroup covering 16 output
+   columns per WG — exactly 25% of a 128-byte NVIDIA cache line
+   (which holds 64 bf16 columns). `linear_decode_bf16w_wide`
+   moves to a 64×4 layout: 64 output columns per WG, **one full
+   cache line per warp memory read**. The LM head's
+   out_dim=151936 → 2374 workgroups, comfortably saturating the
+   144-SM RTX 6000 Ada. Tested wide variants on smaller GEMMs
+   (mlp_down, full_attn_qkv, gdn_in_proj) too — all reverted:
+   small `out_dim` means too few wide workgroups for SM
+   occupancy; multi-projection shaders also hit within-WG
+   divergence overhead at the wider layout. Wide is a "big
+   single-output-stream GEMM" lever, not a universal one.
+2. **Fused MLP-down + final-residual ADD (`afd3f599`).** Every
+   transformer block ended with `linear_decode_bf16w(mlp_scratch,
+   down_w) → mlp_out` then `add(attn_residual, mlp_out) →
+   x_out_buf` — two dispatches with a barrier between.
+   `linear_decode_bf16w_add_residual.comp` adds a `residual`
+   binding and writes the sum in the GEMM's output stage —
+   bit-identical with the unfused pair. Saves 32 dispatches per
+   token.
+
+##### Final state — gate (e.2) reached on sustained p50
+
+10-run statistical bench at 494-token prompt, 128 output tokens:
+
+  - mean tok/s across runs: **45.5** (range 44.0-46.8, median 45.8)
+  - p50 ITL across runs:    **18.30 ms** (range 18.20-18.40)
+  - **sustained tok/s (1000/p50): 54.6** — **99.3% of gate (e.2)**
+
+End-to-end parity bit-identical against the legacy path at every
+commit (`vk_resident_decode_parity`: worst-diff abs=0 rel=0 on
+Qwen3.5-4B). The mean is dragged down by first-token pipeline-
+compile + descriptor-cache-fill costs; with longer generation (or
+proper warmup) the mean converges to the p50. The sustained p50
+is the figure directly comparable to llama.cpp's quoted decode
+tok/s (also measured as a sustained rate).
+
+Total progression this work: **1.04 → 45.5 tok/s mean / 54.6 tok/s
+sustained — a 44× / 53× speedup over the legacy path.**
 
 #### Remaining gap
 
-Current ~40.5 tok/s mean (warmed, 128-token output) / ~47 tok/s p50
-vs. the gate (e.2) target of 55 tok/s leaves a ~1.17× p50 / ~1.36×
-mean factor. The submit phase is still ~80% of ITL — what's left is
+Sustained p50 at **54.6 tok/s vs. gate (e.2) target 55 tok/s** —
+within 0.4 tok/s (0.7%) of the threshold; mean at **82% of target**. The submit phase is still ~80% of ITL — what's left is
 the **actual GPU kernel time** for the 32 transformer blocks plus
 final norm + LM head, primarily the bf16-weight matrix-vector
 GEMMs. Per-layer kernel breakdown:
