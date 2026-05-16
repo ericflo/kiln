@@ -166,3 +166,19 @@
 {"iter":173,"slug":"cap-combined-stack","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8410,"delta":-0.029,"n":75,"notes":"single-layer combined regressed (order matters)"}
 {"iter":174,"slug":"cap-imt-twice","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8634,"delta":-0.007,"n":75,"notes":"stacking imt-tiny twice slight regression"}
 {"iter":175,"slug":"cap-imt-8e7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8464,"delta":-0.024,"n":75,"notes":"lr 8e-7 still bad"}
+{"iter":176,"slug":"cap-stack-sgd2","ts":"2026-05-16T00:00:00Z","status":"kept","score":0.8799,"delta":+0.020,"n":75,"notes":"SGD middle layer at lr 5e-5; NEW BEST 0.8799"}
+{"iter":177,"slug":"cap-sgd-trip","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8508,"delta":-0.029,"n":75,"notes":"IMT on sgd2 hurt (SGD base already optimal)"}
+{"iter":178,"slug":"cap-sgd-lr1e-4-ep1-r4","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8325,"delta":-0.05,"n":75,"notes":"lr 1e-4 too high"}
+{"iter":179,"slug":"cap-sgd-lr2e-5-ep1-r4","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8478,"delta":-0.03,"n":75,"notes":"lr 2e-5 below sweet spot"}
+{"iter":180,"slug":"cap-sgd-lr5e-5-ep2-r4","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8570,"delta":-0.02,"n":75,"notes":"2 epochs slightly worse"}
+{"iter":181,"slug":"cap-sgd-lr5e-5-ep1-r8","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8131,"delta":-0.07,"n":75,"notes":"rank 8 hurts"}
+{"iter":182,"slug":"cap-sgd-trip-3e6","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.7981,"delta":-0.08,"n":75,"notes":"IMT layer lr 3e-6 too high"}
+{"iter":183,"slug":"cap-stack-sgd3","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8746,"delta":-0.005,"n":75,"notes":"sgd-run3 base close to sgd2 base"}
+{"iter":184,"slug":"cap-stack-s7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8776,"delta":-0.002,"n":75,"notes":"shuffle seed 7 close"}
+{"iter":185,"slug":"cap-stack-s42","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8423,"delta":-0.037,"n":75,"notes":"shuffle s42 worse"}
+{"iter":186,"slug":"cap-stack-s137","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8271,"delta":-0.053,"n":75,"notes":"shuffle s137 worse"}
+{"iter":187,"slug":"cap-sgd-imt-sgd","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8453,"delta":-0.035,"n":75,"notes":"IMT layer with SGD lr 5e-5 too aggressive"}
+{"iter":188,"slug":"cap-s7-imt","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8106,"delta":-0.07,"n":75,"notes":"IMT on s7 base regressed hard"}
+{"iter":189,"slug":"cap-merge-sgd2-s7","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8500,"delta":-0.03,"n":75,"notes":"merge regressed"}
+{"iter":190,"slug":"cap-merge-sgd2-s7-w8","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8725,"delta":-0.007,"n":75,"notes":"0.8 weighted closer"}
+{"iter":191,"slug":"cap-merge-sgd2-s7-w9","ts":"2026-05-16T00:00:00Z","status":"discarded","score":0.8675,"delta":-0.012,"n":75,"notes":"0.9 weighted hurts"}
