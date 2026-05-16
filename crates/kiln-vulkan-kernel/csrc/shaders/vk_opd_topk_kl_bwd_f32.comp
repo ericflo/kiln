@@ -48,7 +48,6 @@ shared float s_lpq[32];
 shared float exp_p[32];
 shared float exp_q[32];
 shared float d_s_logits[32];
-shared uint  s_idx[32];
 shared float bcast;
 shared float upstream_sh;
 
@@ -66,10 +65,7 @@ void main() {
     if (slot < K) {
         if (lane == 0u) {
             s_lpq[slot] = data_lpq[t * K + slot];
-            s_idx[slot] = data_idx[t * K + slot];
         }
-        // Use idx loaded above by lane 0; threads in same slot need it.
-        // For simplicity, just re-fetch.
         uint col = data_idx[t * K + slot];
         uint w_row_base = col * hidden_size;
         uint h_row_base = t * hidden_size;

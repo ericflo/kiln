@@ -318,15 +318,13 @@ impl OpdLossBackward {
         anyhow::ensure!(dtype == VkDType::F32, "OPD bwd: hidden must be F32");
         let n = self.state.num_active * self.state.hidden_size;
         let d_hidden = alloc_f32(device, n)?;
-        // Initialize to zero (the kernel writes the whole buffer, but
-        // initializing keeps the contract simple in case `num_active==0`).
-        if n > 0 {
-            let push = [n as u32, 0.0_f32.to_bits()];
-            let workgroups = ((n + 255) / 256) as u32;
-            dispatch_simple(device, "vk_fill_f32", &[d_hidden.handle()], &push, workgroups)?;
-        }
 
         if self.state.num_active == 0 {
+            // No active tokens → the backward kernel would launch zero
+            // workgroups and write nothing. Zero-init the empty buffer
+            // anyway so the caller's downstream accumulators see a clean
+            // tensor in case the empty path is interleaved with non-empty
+            // ones.
             return Ok(VkTensor::from_buffer(
                 d_hidden,
                 vec![self.state.num_active, self.state.hidden_size],
