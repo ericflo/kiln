@@ -170,6 +170,15 @@ from §4 of SKILL.md plus the math-broad win:
 | 106 | sgd-lr-1e-3 | 75 | 0.0000 | -0.869 | discard | SGD lr 1e-3 catastrophic — adapter destroyed |
 | 107 | sgd-stacked (60-short on cap-think-sgd) | — | crash | — | crash | OOM |
 | 108 | sgd-stack2 (32-ex stack on cap-think-sgd, SGD lr 5e-5) | 75 | 0.8531 | -0.016 | discard | stacking still doesn't help SGD |
+| 109-112 | SGD alpha sweep (alpha=8,16,64,128) | 75 | 0.756-0.854 | various | discard | default alpha 32 is sweet spot |
+| 113 | predict-output (AdamW) | 75 | 0.8487 | -0.020 | discard | predict-output dataset, AdamW |
+| 114 | **predict-output + SGD lr 5e-5** | 75 | **0.8776** | **+0.071 over baseline** | **kept** | **observed best (lucky seed)**: training on "what does this code print" transfers to writing code |
+| 115-117 | po-shuffle sweep (seed 99/42/137) | 75 | 0.80-0.82 | various | discard | shuffles regress; original order important |
+| 118 | think-po-stack (stack PO on cap-think-sgd) | 75 | 0.8362 | -0.041 | discard | stacking regresses |
+| 119 | po-64 (32 v1 + 31 v2) | 75 | 0.1908 | catastrophic | discard | bigger PO dataset caused collapse — likely numerical issue at lr 5e-5 |
+| 120-121 | po-redo, po-s1 (re-runs to test stability) | 75 | 0.69-0.74 | various | discard | iter 114 was high tail, not reproducible |
+| 122-126 | po seed sweep (seeded 1/7/42/99/137) | 75 | 0.75-0.83 | various | discard | seeds give 0.75-0.83 range; mean ~0.80 |
+| 127 | code-explain (read code, write prose) | 75 | 0.7768 | -0.030 | discard | explanation training shifted output toward prose |
 
 ## Final summary (94 iters, 95 entries)
 
