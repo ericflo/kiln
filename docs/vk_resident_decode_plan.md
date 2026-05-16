@@ -316,6 +316,89 @@ stays bit-identical (worst-diff abs=0, rel=0). End-to-end:
 | Resident + 14 separate submits | 1.33 | 752 ms |
 | **Resident + chained submit** | **1.26** | **792 ms** |
 
+### Subsequent wins (2026-05-16, RTX 6000 Ada, 494-token prompt)
+
+After full-attn wire-up, additional wire-up landed in this order:
+
+| Stage | Decode tok/s | Mean ITL | Lift |
+|-------|--------------|----------|------|
+| Legacy (no wire-up) | 1.04 | 965 ms | (baseline) |
+| Resident full-attn only | 1.33 | 752 ms | +28% |
+| + GDN-only resident (legacy bridge) | 1.6 | 600 ms | +20% |
+| + Pool persistence + GDN inner-CommandBatch | 1.8 | 555 ms | +12% |
+| **+ Full-block GDN resident (commit `876e791d`)** | **5.8** | **170 ms** | **+220%** |
+| + Native single-submit orchestrator (commit `40dec1ed`) | 5.8 | 170 ms | wash |
+
+Bit-identical parity preserved end-to-end through every stage
+(`vk_resident_decode_parity` worst-diff abs=0, rel=0 on
+Qwen3.5-4B).
+
+#### Where the **220% jump** came from
+
+Per-layer timing via `KILN_VK_RESIDENT_DECODE_TIMING=1` revealed
+that the GDN-only resident path covered **only the GDN compute
+itself**, leaving the surrounding transformer block (input
+layernorm → attn residual → post-attention layernorm → SwiGLU MLP
+gate_up + down → final residual) on the legacy candle path. At
+~17 ms / GDN layer × 24 GDN layers, that legacy tail dominated
+ITL (~408 ms / token). `transformer_block_paged_decode_gdn_resident_b1`
+lifts the *entire* GDN-flavored transformer block into one
+`CommandBatch` (14 dispatches, mirrors the full-attn full-block
+shape) and eliminates the candle tail.
+
+#### Why the native single-submit orchestrator is a wash
+
+`model_forward_paged_last_token_resident_native_vk` chains all 32
+layer blocks into one `CommandBatch` and submits exactly once per
+token (vs. 32 submits — one per layer — in the per-layer
+fast-paths). Per-block timing shows submit-and-wait per layer is
+dominated by **actual GPU kernel time** (~5-7 ms / layer × 32 layers
+≈ 170 ms / token ≈ observed ITL). Per-submit driver overhead is
+sub-millisecond at this shape, so collapsing 32 submits to 1 reclaims
+very little wall time. The architectural win (cleaner buffer flow,
+no per-layer Tensor↔VulkanBuffer bridge) is real but
+*orchestration is no longer the bottleneck*. Kept gated on
+`KILN_VK_RESIDENT_DECODE_NATIVE` (default on) since it's still the
+right shape going forward.
+
+#### Remaining gap and the only realistic path past it
+
+Current 5.8 tok/s vs. the gate (e.2) target of 55 tok/s leaves a
+~9.5× factor. Per-layer kernel breakdown:
+
+- Full-attn block: ~9.6 ms / call × 8 calls = ~77 ms / token
+  (mostly: paged_attn over 494 KV positions + bf16w QKV/O/MLP GEMMs)
+- GDN full-block: ~7.3 ms / call × 24 calls = ~175 ms / token
+  (mostly: bf16w in_proj + out_proj + MLP GEMMs)
+
+Both budgets are dominated by **bf16-weight matrix-vector GEMMs**
+running through scalar `linear_decode_bf16w` /
+`mlp_gate_up_decode_bf16w` / `full_attn_qkv_decode_bf16w` /
+`gdn_in_proj_decode_bf16w` shaders. Each invocation reads tens of MB
+of weights through the scalar pipeline. Memory-bandwidth math
+(960 GB/s peak on RTX 6000 Ada; ~50 MB of bf16 weights per layer
+across 32 layers ≈ 1.6 GB / token) puts the kernel-compute lower
+bound at ~16 ms / token (≈ 60 tok/s). We are 10× over that lower
+bound today.
+
+The only path past this floor — and therefore the only path that
+hits gate (e.2) — is **cooperative-matrix BF16 GEMMs**
+(`VK_KHR_cooperative_matrix`). Confirmed available on RTX 6000 Ada:
+
+```
+VK_KHR_cooperative_matrix : extension revision 2
+VK_NV_cooperative_matrix  : extension revision 1
+VkPhysicalDeviceCooperativeMatrixFeaturesKHR.cooperativeMatrix = true
+cooperativeMatrixSupportedStages: SHADER_STAGE_COMPUTE_BIT
+```
+
+Tensor-Core throughput on Ada at BF16 is ~700 TFLOPS dense vs. ~50
+TFLOPS scalar-FP32 the current shaders use — a 10-15× per-GEMM
+speedup is realistic, which is what's needed to bridge the
+remaining gap. This was previously "out of scope per the plan";
+given the measured-vs-required gap it is the only remaining lever
+and moves in-scope.
+
 The chaining is approximately a wash, ±10% noise. **The per-resident-
 kernel submit overhead was already small** (~0.2 ms), so the saved
 queue_wait_idle calls are offset by `CommandBatch::new`'s per-call
