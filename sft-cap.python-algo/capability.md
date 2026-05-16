@@ -179,6 +179,9 @@ from §4 of SKILL.md plus the math-broad win:
 | 120-121 | po-redo, po-s1 (re-runs to test stability) | 75 | 0.69-0.74 | various | discard | iter 114 was high tail, not reproducible |
 | 122-126 | po seed sweep (seeded 1/7/42/99/137) | 75 | 0.75-0.83 | various | discard | seeds give 0.75-0.83 range; mean ~0.80 |
 | 127 | code-explain (read code, write prose) | 75 | 0.7768 | -0.030 | discard | explanation training shifted output toward prose |
+| 128 | po-mega (80 ex sub-agent-generated) SGD lr 5e-5 | 75 | 0.1383 | catastrophic | discard | divergence at this lr with bigger data |
+| 129 | po-mega SGD lr 1e-5 | 75 | 0.8334 | -0.054 | discard | lower lr stable but not lifting |
+| 130 | po-mega AdamW lr 5e-6 | 75 | 0.7426 | -0.144 | discard | AdamW worse for big PO dataset |
 
 ## Final summary (94 iters, 95 entries)
 
