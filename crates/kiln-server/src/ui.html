@@ -3788,6 +3788,10 @@ function selectPage(name) {
     u.hash = name;
     history.replaceState(null, '', u);
   }
+  // Remember the user's last tab so a fresh visit (no hash, no bookmark)
+  // lands them back where they were instead of always on Overview.
+  // The hash still wins — bookmarks deep-link as expected.
+  try { localStorage.setItem('kiln.lastPage', name); } catch {}
   // Lazy-refresh page-scoped data when activating a tab. Avoids firing
   // /v1/eval/* and /v1/judgments/* at page load when the user might never
   // visit the Evals page — and catches the case of someone landing on
@@ -3811,10 +3815,16 @@ function refreshActiveEvalSubTab() {
 document.querySelectorAll('.primary-tab').forEach(tab => {
   tab.addEventListener('click', () => selectPage(tab.dataset.page));
 });
-const initialHash = (location.hash || '#overview').slice(1);
-if (['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialHash)) {
-  selectPage(initialHash);
+// Prefer the URL hash (bookmarkable), then the user's last tab from
+// localStorage, then Overview.
+let initialPage = (location.hash || '').slice(1);
+if (!initialPage) {
+  try { initialPage = localStorage.getItem('kiln.lastPage') || ''; } catch {}
 }
+if (!['overview', 'adapters', 'training', 'evals', 'playground'].includes(initialPage)) {
+  initialPage = 'overview';
+}
+selectPage(initialPage);
 
 // --- Toast Notifications ---
 function toast(msg, type) {
@@ -4774,6 +4784,10 @@ window.mergeAdapters = async function() {
 
 // --- Training Queue ---
 const cancellingTrainingJobIds = new Set();
+// Flat snapshot of the latest /v1/train/queue payload so the command
+// palette (and any other consumer) can search training jobs without
+// re-issuing the request. Updated on every pollTraining tick.
+let trainingJobsCache = { running: null, queued: [], completed: [] };
 // Skip the wholesale `tab-queue` innerHTML rewrite when nothing changed
 // (running progress, queued list identity, recent finish-state). Mirrors
 // the `lastAdaptersKey` guard on the adapters tab.
@@ -4784,6 +4798,11 @@ async function pollTraining() {
   if (!queuePanel) return;
   try {
     const data = await api('/v1/train/queue');
+    trainingJobsCache = {
+      running: data.running || null,
+      queued: data.queued || [],
+      completed: data.completed || [],
+    };
     const r = data.running;
     const key = [
       r ? `${r.job_id}:${(r.progress || 0).toFixed(3)}:${r.current_loss != null ? r.current_loss.toFixed(4) : ''}` : '',
@@ -8015,6 +8034,43 @@ function buildCmdkIndex() {
       title: `${j.suite_name}`,
       sub: `Eval · ${j.state} · ${j.headline_accuracy != null ? (j.headline_accuracy*100).toFixed(0)+'%' : '—'} · ${j.job_id.slice(0, 8)}`,
       action: () => { selectPage('evals'); document.getElementById('evals-tab-jobs')?.click(); openDrillModal(j.job_id); },
+    });
+  }
+  // Training runs (running + queued + most-recent completed) — same
+  // drill-modal jump as clicking a card on the Training tab. Lets
+  // power users find a finished run by adapter name without scrolling.
+  const trainingPool = [
+    ...(trainingJobsCache.running ? [trainingJobsCache.running] : []),
+    ...(trainingJobsCache.queued || []),
+    ...(trainingJobsCache.completed || []).slice(0, 30),
+  ];
+  for (const j of trainingPool) {
+    const stateNorm = (j.state || '').toString().toLowerCase() || 'queued';
+    const lossLbl = j.current_loss != null ? `loss ${j.current_loss.toFixed(3)}` : 'no loss yet';
+    items.push({
+      kind: 'train-job', icon: '🧪',
+      title: j.adapter_name || j.job_id,
+      sub: `${(j.job_type || 'train').toString().toUpperCase()} · ${stateNorm} · ${lossLbl} · ${j.job_id.slice(0, 8)}`,
+      action: () => {
+        selectPage('training');
+        document.getElementById('training-tab-queue')?.click();
+        if (typeof openTrainDrillModal === 'function') openTrainDrillModal(j.job_id);
+      },
+    });
+  }
+  // Recent requests (last 20) — jump back into the request inspect modal
+  // by short id or by prompt content. Most useful for retrieving "what
+  // was the prompt that produced that weird answer five minutes ago".
+  for (const r of (recentRequestsCache || []).slice(0, 20)) {
+    const preview = (r.prompt_preview || '').replace(/\s+/g, ' ').slice(0, 60) || '(no prompt)';
+    items.push({
+      kind: 'recent-req', icon: '↩',
+      title: preview,
+      sub: `Request · ${r.streamed ? 'stream' : 'unary'} · ${r.completion_tokens || 0} tok · ${(r.id || '').replace(/^chatcmpl-/, '').slice(0, 8)}`,
+      action: () => {
+        selectPage('overview');
+        if (typeof openRequestDrillModal === 'function') openRequestDrillModal(r.id);
+      },
     });
   }
   return items;
