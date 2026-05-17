@@ -56,12 +56,35 @@ Composite: **0.9314** (headroom 0.069 above the 0.05 floor — proceed).
 | iter | slug | family | composite | comp Δ | target Δ | verdict |
 |------|------|--------|-----------|--------|----------|---------|
 | 1 | h1-r16-6ep | H1 | 0.9370 | +0.0056 | +0.0160 | ? Inconclusive (97% skip rate; bump epochs) |
+| 2 | h1-r16-12ep | H1 | 0.9370 | +0.0056 | 0.0000 | ✗ Falsified — same 7 effective steps as iter 1 |
 
-## Dead ends
-(none yet)
+## Closing summary
 
-## Open questions
-(none yet)
+**Capability #2 closed after 2 H1 iterations.** Best result: iter 1
+(`symbol-h1-r16-6ep`) at composite 0.9370 (+0.6% over baseline 0.9314),
+capturing 8.2% of the 0.0686 movable headroom. iter 2 (12 epochs) produced
+literally identical eval scores to iter 1 because the same 7 prompts trained
+both times — the other 33 always EOS at sample time regardless of epoch.
 
-## Checkpoints
-(every 3rd iter, write a brief progress summary here)
+**Root cause found (kiln OPD trainer bug).** The rollout-prompt construction
+in `opd_train` builds `prompt_only` from `orig_input_ids[..prompt_end]` where
+`prompt_end` is the first `label_mask=true` position. The label_mask spans
+the entire `<|im_start|>assistant\n...<|im_end|>` block, so `prompt_only`
+stops *before* the assistant cue marker. The student samples from a context
+where it hasn't seen the assistant role marker and emits EOS immediately
+~97% of the time on terse-list capabilities (vs ~87% on free-form ones).
+
+The `KILN_OPD_GEN_PROMPT_SUFFIX=1` env var is the half-fix from v6 of the
+JSON-schema run, but it uses raw `tokenizer.encode()` which doesn't resolve
+`<|im_start|>` to its special-token id. The proper fix renders the suffix
+via `apply_chat_template_full_with_options(enable_thinking=false)`.
+
+**Next session plan.** Land the kiln fix first (commit it to kiln-train),
+then re-run iter 1 of this capability to validate the fix lifts skip rate
+from 0.97 to <0.5 and unlocks more effective training steps. Expect
+composite to reach 0.96+ at that point.
+
+The skill itself worked exactly as designed: the verdict gate caught the
+zero-Δ on iter 2 cleanly, forced honest documentation of the structural
+finding, and gave kiln a clear fix-target rather than a vague "OPD didn't
+help here" complaint.
