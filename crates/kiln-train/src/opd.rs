@@ -1502,7 +1502,18 @@ fn sample_student_rollout(
     // from each chunk free before the next; a single call covering
     // all layers holds the GDN intermediates live for the duration
     // and OOMs on a 48 GiB GPU once the teacher is resident.
-    let num_segments = 8usize.min(model_config.num_layers);
+    //
+    // We chunk more aggressively here than the training path's 8
+    // segments — sampling doesn't need to hold an autograd graph, so
+    // every-2-layers is the safe default for memory headroom under
+    // long contexts (700+ tokens with a 27B teacher resident). The
+    // env override `KILN_OPD_SAMPLER_SEGMENTS` lets users dial it.
+    let default_segments = std::env::var("KILN_OPD_SAMPLER_SEGMENTS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(18);
+    let num_segments = default_segments.min(model_config.num_layers);
     let segments = crate::trainer::compute_segment_boundaries(
         model_config.num_layers,
         num_segments,
@@ -1687,6 +1698,29 @@ pub fn opd_train(
         .map(|off| !off)
         .unwrap_or(true);
 
+    // Generation-prompt suffix that turns the prompt boundary into the
+    // same context the model sees at inference under
+    // `enable_thinking=False`. Without it, the student samples from a
+    // `<|im_end|>\n` boundary with no assistant cue and emits EOS
+    // immediately (~87% of prompts skipped in the JSON-schema-adherence
+    // capability run). With the suffix the rollout starts where eval
+    // actually generates, so most prompts produce real trajectories.
+    //
+    // We encode `<|im_start|>assistant\n<think>\n\n</think>\n\n`. If the
+    // tokenizer doesn't recognise the special tokens (e.g. a model that
+    // has no `<think>` markers), the encode either returns the prefix
+    // without thinking tokens or errors — we fall back to empty in the
+    // error case so the trainer keeps working.
+    let gen_prompt_suffix: Vec<u32> = tokenizer
+        .encode("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+        .unwrap_or_default();
+    if !gen_prompt_suffix.is_empty() {
+        tracing::info!(
+            suffix_len = gen_prompt_suffix.len(),
+            "opd_train: appending generation-prompt suffix to rollout prompts"
+        );
+    }
+
     for epoch in 0..epochs {
         for (prompt_idx, (orig_input_ids, label_mask)) in tokenized.iter().enumerate() {
             // Find prompt boundary: first label_mask=true index is the
@@ -1700,7 +1734,14 @@ pub fn opd_train(
                 tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
                 continue;
             }
-            let prompt_only: Vec<u32> = orig_input_ids[..prompt_end].to_vec();
+            // Build the rollout prompt: original prompt + generation-prompt
+            // suffix so the student samples from the same boundary it sees
+            // at eval (`enable_thinking=False`). The active positions are
+            // pushed past the suffix so the OPD loss is computed only at
+            // the freshly-sampled tokens.
+            let mut prompt_only: Vec<u32> = orig_input_ids[..prompt_end].to_vec();
+            prompt_only.extend_from_slice(&gen_prompt_suffix);
+            let rollout_prompt_len = prompt_only.len();
 
             for sample_idx in 0..effective_samples_per_prompt.max(1) {
                 // §3.1 step 1: sample a fresh student trajectory under
@@ -1734,7 +1775,11 @@ pub fn opd_train(
                     }
                     let mut full = prompt_only.clone();
                     full.extend_from_slice(&sampled);
-                    let active: Vec<usize> = (prompt_end..prompt_end + sampled.len()).collect();
+                    // Active positions: the student-sampled tokens, which
+                    // start at `rollout_prompt_len` (after the original
+                    // prompt + the generation-prompt suffix).
+                    let active: Vec<usize> =
+                        (rollout_prompt_len..rollout_prompt_len + sampled.len()).collect();
                     (full, active)
                 } else {
                     let active: Vec<usize> = label_mask
