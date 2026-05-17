@@ -80,4 +80,41 @@ shape-confused outputs in iter 1 (list_files-*, the one that emitted
 ---
 
 ## Verdict
-(filled after eval)
+? Inconclusive — training killed at step 61/156 (~39% through, ~2h45
+elapsed) without an eval-able adapter (OPD's trainer only saves at run
+completion; no intermediate checkpoint). BUT this iter produced THE
+major mechanism finding of the session despite producing no LoRA:
+
+- **Skip rate dropped from 93.6% (iter 1) to ~0%** with asymmetric prompts
+  active. The first 26 nominal steps in epoch 1 produced 26 effective
+  steps. iter 1 hit only 10 effective in 156 nominal across all 6 epochs.
+- **Loss landscape qualitatively different.** Iter 1 loss spiked to 30+;
+  iter 2 had one early 29.5 spike then settled into a steady 0.12–1.9
+  range by step 30, descending to 0.13 by step 55. The sharper teacher
+  distribution gives the student a cleaner gradient.
+- **Per-step time tripled** (~150s vs iter 1's 24s). Longer teacher
+  token sequence (~268-token prefix + prompt + rollout) plus a teacher
+  query on every step (vs every ~6th step in iter 1). Net: similar
+  elapsed-time-per-effective-step, but iter 2 was on track to produce
+  ~150 effective steps vs iter 1's 10 — much more total signal.
+
+Confirms the H9 hypothesis at the **mechanism** level (asymmetric teacher
+conditioning resolves the structural-output skip-rate floor) even though
+no adapter survives. The skill's first real user of the new
+`OpdPrompt.teacher_extra_messages` feature validated the feature's
+intent. Adapter quality remains uneval'd.
+
+Sub-scores: N/A.
+
+Best-so-far for this capability stays at iter 1: composite 0.8939 (the
+toolcall-h1-r16-6ep adapter).
+
+Next: iter 3 should be sized to FIT in a wall-time budget that lets the
+run complete. Options:
+- **H9 short (2 epochs, asymmetric)** — ~52 nominal × 150s ≈ 2h
+- **H9 small-LR (2 epochs, lr 5e-5, asymmetric)** — even more
+  conservative on LoRA capacity
+
+Killing at 61/156 is the symptom; the cure is sizing the experiment to
+fit a known wall-time budget, not running to nominal convergence.
+
