@@ -231,14 +231,107 @@ pub struct GrpoRequest {
     pub post_eval: Option<kiln_eval::PostEvalConfig>,
 }
 
+/// Group-relative advantage normalization mode.
+///
+/// `Vanilla` is the DeepSeekMath / R1 default: `A_i = (r_i - mean(r)) / (std(r) + eps)`.
+/// `DrGrpo` follows arXiv:2503.20783 ("Understanding R1-Zero-Like Training") and
+/// drops the `std` normalization to eliminate question-difficulty bias and the
+/// numerical blow-up when within-group rewards are nearly uniform.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AdvantageMode {
+    /// `A_i = (r_i - mean(r)) / (std(r) + 1e-8)`. The historical kiln default.
+    #[default]
+    Vanilla,
+    /// `A_i = r_i - mean(r)`. Recommended by Dr. GRPO (arXiv:2503.20783) and
+    /// the SimpleRL-Zoo replication (arXiv:2503.18892).
+    DrGrpo,
+}
+
+/// How the GRPO surrogate loss is aggregated across the completions in a group.
+///
+/// `PerSample` mirrors the historical kiln behavior: each completion's loss is
+/// the per-token mean, then the group reports the mean across completions, and
+/// the optimizer steps once per completion. This is the DeepSeekMath / R1
+/// default. It systematically under-penalizes long incorrect completions and
+/// is the source of the documented GRPO "length-drift" failure mode.
+///
+/// `TokenLevel` is the DAPO Token-Level Policy Gradient Loss (arXiv:2503.14476):
+/// per-token surrogates are accumulated across all completions in the group
+/// and divided by the total active completion token count, with a single
+/// optimizer step per group. Removes per-sample length bias.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LossAggregation {
+    /// Per-completion mean-of-tokens, per-completion optimizer step.
+    #[default]
+    PerSample,
+    /// DAPO Token-Level Loss: sum-over-all-tokens-in-group divided by
+    /// total active tokens, single optimizer step per group.
+    /// (Candle path only — the vk-native path falls back to `PerSample`.)
+    TokenLevel,
+}
+
+/// Which KL estimator to use for the per-token penalty.
+///
+/// All three options leave the reference forward pass intact (the reference
+/// log-probs are needed for the importance-sampling ratio). They only change
+/// the per-token KL term added to the surrogate.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum KlEstimator {
+    /// Schulman k1: `KL_t = log_ratio_t`. Gradient-correct (matches the
+    /// existing kiln implementation and is the recommended default).
+    #[default]
+    K1,
+    /// Schulman k3: `KL_t = exp(-log_ratio_t) - 1 + log_ratio_t`. Always
+    /// non-negative; value-correct but the gradient is biased. DeepSeekMath
+    /// uses this form. Candle path only; not implemented on vk-native.
+    K3,
+    /// No KL penalty. The reference forward still runs (still needed for the
+    /// importance ratio); only the KL contribution to the loss is zeroed.
+    /// Equivalent in effect to `kl_coeff = 0` but expresses the intent
+    /// explicitly.
+    None,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GrpoConfig {
     #[serde(default = "default_grpo_lr")]
     pub learning_rate: f64,
     #[serde(default = "default_kl_coeff")]
     pub kl_coeff: f64,
+    /// Symmetric clip epsilon. When `clip_eps_high` is `None`, both the lower
+    /// and upper PPO clip bounds use this value (`[1-ε, 1+ε]`). When
+    /// `clip_eps_high` is `Some(h)`, this field provides the lower epsilon
+    /// (`1-ε_low`) and `h` provides the upper (`1+ε_high`). DAPO's
+    /// "Clip-Higher" recommendation is `clip_epsilon = 0.20`,
+    /// `clip_eps_high = Some(0.28)` (arXiv:2503.14476).
     #[serde(default = "default_clip_eps")]
     pub clip_epsilon: f64,
+    /// Upper PPO clip epsilon for the asymmetric Clip-Higher recipe. `None`
+    /// (default) preserves symmetric clipping using `clip_epsilon` on both
+    /// sides.
+    #[serde(default)]
+    pub clip_eps_high: Option<f64>,
+    /// Advantage normalization mode. Defaults to `Vanilla` (historical
+    /// kiln behavior). Set to `DrGrpo` to drop std-normalization.
+    #[serde(default)]
+    pub advantage_mode: AdvantageMode,
+    /// Surrogate-loss aggregation mode. Defaults to `PerSample` (historical
+    /// kiln behavior). Set to `TokenLevel` for the DAPO Token-Level Loss.
+    #[serde(default)]
+    pub loss_aggregation: LossAggregation,
+    /// KL penalty estimator. Defaults to `K1` (historical kiln behavior).
+    #[serde(default)]
+    pub kl_estimator: KlEstimator,
+    /// When true, groups whose completions all share the same reward (and
+    /// therefore produce a uniformly-zero advantage vector) are skipped
+    /// before training. Implements DAPO's Dynamic Sampling filter. Default
+    /// `false` for backward compatibility; turning this on is essentially
+    /// always a stability win.
+    #[serde(default)]
+    pub dynamic_sampling: bool,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -271,12 +364,29 @@ fn default_clip_eps() -> f64 {
     0.2
 }
 
+impl GrpoConfig {
+    /// Resolved PPO clip epsilon bounds `(ε_low, ε_high)`. The PPO clip range
+    /// is `[1 - ε_low, 1 + ε_high]`. When `clip_eps_high` is `None`, both
+    /// sides use `clip_epsilon` (symmetric, historical behavior).
+    pub fn clip_bounds(&self) -> (f64, f64) {
+        (
+            self.clip_epsilon,
+            self.clip_eps_high.unwrap_or(self.clip_epsilon),
+        )
+    }
+}
+
 impl Default for GrpoConfig {
     fn default() -> Self {
         Self {
             learning_rate: default_grpo_lr(),
             kl_coeff: default_kl_coeff(),
             clip_epsilon: default_clip_eps(),
+            clip_eps_high: None,
+            advantage_mode: AdvantageMode::default(),
+            loss_aggregation: LossAggregation::default(),
+            kl_estimator: KlEstimator::default(),
+            dynamic_sampling: false,
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,

@@ -43,7 +43,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
-use crate::{GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
+use crate::{
+    AdvantageMode, GrpoConfig, GrpoGroup, KlEstimator, LossAggregation, Optimizer, SftConfig,
+    SftExample,
+};
 
 struct TokenizedSftExample {
     input_ids: Vec<u32>,
@@ -133,15 +136,46 @@ fn tokenize_vk_grpo_group(
     })
 }
 
-fn compute_vk_grpo_advantages(rewards: &[f64]) -> Vec<f64> {
+/// Effective KL coefficient applied by the vk-native shader path.
+///
+/// The shader implements the K1 estimator (`+kl_coeff * log_ratio` per token).
+/// `KlEstimator::None` is realized by passing `0.0` so the shader's KL term
+/// vanishes; `KlEstimator::K1` passes the raw coefficient; `KlEstimator::K3`
+/// is rejected earlier in `vk_native_grpo_train*`.
+fn vk_effective_kl_coeff(config: &GrpoConfig) -> f64 {
+    match config.kl_estimator {
+        KlEstimator::None => 0.0,
+        KlEstimator::K1 | KlEstimator::K3 => config.kl_coeff,
+    }
+}
+
+/// Mirrors `trainer::is_degenerate_grpo_group` for the vk-native path. A
+/// group whose completions all share the same reward produces a uniformly
+/// zero advantage vector under any AdvantageMode and is dropped by
+/// Dynamic Sampling (DAPO, arXiv:2503.14476).
+fn is_degenerate_vk_grpo_group(group: &GrpoGroup) -> bool {
+    let mut rewards = group.completions.iter().map(|c| c.reward);
+    let Some(first) = rewards.next() else {
+        return true;
+    };
+    rewards.all(|r| r == first)
+}
+
+fn compute_vk_grpo_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> {
     let n = rewards.len() as f64;
     if n <= 1.0 {
         return vec![0.0; rewards.len()];
     }
     let mean = rewards.iter().sum::<f64>() / n;
-    let var = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
-    let std = var.sqrt();
-    rewards.iter().map(|r| (r - mean) / (std + 1e-8)).collect()
+    let centered: Vec<f64> = rewards.iter().map(|r| r - mean).collect();
+    match mode {
+        AdvantageMode::DrGrpo => centered,
+        AdvantageMode::Vanilla => {
+            let var = centered.iter().map(|c| c * c).sum::<f64>() / n;
+            let std = var.sqrt();
+            centered.into_iter().map(|c| c / (std + 1e-8)).collect()
+        }
+    }
 }
 
 fn grpo_active_rows_and_labels(
@@ -3455,6 +3489,33 @@ pub fn vk_native_grpo_train(
         VulkanDevice::new().context("vk_native_grpo_train: failed to create Vulkan device")?,
     );
 
+    // The vk-native GRPO step bakes forward + backward + optimizer step into a
+    // single call (vk_recompute_grpo_train_step_with_state). Per-completion
+    // stepping is therefore structurally tied to PerSample loss aggregation;
+    // and the current shader supports K1 (kl_coeff scaled log_ratio) or No-KL
+    // only, with symmetric clipping. Fall back / error early rather than
+    // silently producing wrong gradients.
+    if matches!(config.loss_aggregation, LossAggregation::TokenLevel) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support LossAggregation::TokenLevel; \
+             use the candle path (unset KILN_VK_NATIVE_TRAINING) or set \
+             loss_aggregation = per_sample"
+        );
+    }
+    if matches!(config.kl_estimator, KlEstimator::K3) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support KlEstimator::K3; use \
+             KlEstimator::K1 (default) or KlEstimator::None"
+        );
+    }
+    if config.clip_eps_high.is_some_and(|hi| hi != config.clip_epsilon) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support asymmetric Clip-Higher; \
+             use the candle path or leave clip_eps_high = None / equal to \
+             clip_epsilon"
+        );
+    }
+
     let effective_seed = config.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
@@ -3503,6 +3564,13 @@ pub fn vk_native_grpo_train(
 
     for (group_idx, group) in groups.iter().enumerate() {
         let group_step = group_idx + 1;
+        if config.dynamic_sampling && is_degenerate_vk_grpo_group(group) {
+            tracing::debug!(
+                group = group_step,
+                "vk-native GRPO dynamic sampling: skipping degenerate group"
+            );
+            continue;
+        }
         let tgroup = tokenize_vk_grpo_group(group, tokenizer)
             .with_context(|| format!("tokenize GRPO group {group_step}"))?;
         validate_vk_grpo_tokenized_group_context(
@@ -3510,7 +3578,7 @@ pub fn vk_native_grpo_train(
             model_config,
             &format!("vk-native GRPO group {group_step}"),
         )?;
-        let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
+        let advantages = compute_vk_grpo_advantages(&tgroup.rewards, config.advantage_mode);
         let mut group_loss_sum = 0.0f64;
         let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
             Some(
@@ -3569,7 +3637,7 @@ pub fn vk_native_grpo_train(
                 &ref_log_probs,
                 advantages[comp_idx] as f32,
                 config.clip_epsilon as f32,
-                config.kl_coeff as f32,
+                vk_effective_kl_coeff(config) as f32,
                 model_config,
                 num_gdn_layers,
                 &mut adamw,
@@ -3689,6 +3757,27 @@ pub fn vk_native_grpo_train_jsonl(
             .context("vk_native_grpo_train_jsonl: failed to create Vulkan device")?,
     );
 
+    if matches!(config.loss_aggregation, LossAggregation::TokenLevel) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support LossAggregation::TokenLevel; \
+             use the candle path (unset KILN_VK_NATIVE_TRAINING) or set \
+             loss_aggregation = per_sample"
+        );
+    }
+    if matches!(config.kl_estimator, KlEstimator::K3) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support KlEstimator::K3; use \
+             KlEstimator::K1 (default) or KlEstimator::None"
+        );
+    }
+    if config.clip_eps_high.is_some_and(|hi| hi != config.clip_epsilon) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support asymmetric Clip-Higher; \
+             use the candle path or leave clip_eps_high = None / equal to \
+             clip_epsilon"
+        );
+    }
+
     let effective_seed = config.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now()
@@ -3761,6 +3850,13 @@ pub fn vk_native_grpo_train_jsonl(
         let Some(group) = parse_grpo_jsonl_group_line(&line, line_no)? else {
             continue;
         };
+        if config.dynamic_sampling && is_degenerate_vk_grpo_group(&group) {
+            tracing::debug!(
+                line = line_no,
+                "streamed vk-native GRPO dynamic sampling: skipping degenerate group"
+            );
+            continue;
+        }
         processed_groups += 1;
         tracing::info!(
             group = processed_groups,
@@ -3792,7 +3888,7 @@ pub fn vk_native_grpo_train_jsonl(
             elapsed_ms = tokenize_start.elapsed().as_millis() as u64,
             "streamed vk-native GRPO group tokenized"
         );
-        let advantages = compute_vk_grpo_advantages(&tgroup.rewards);
+        let advantages = compute_vk_grpo_advantages(&tgroup.rewards, config.advantage_mode);
         let mut group_loss_sum = 0.0f64;
         let ref_prefix = if grpo_group_needs_prefix_reference(&tgroup) {
             tracing::info!(
@@ -3934,7 +4030,7 @@ pub fn vk_native_grpo_train_jsonl(
                 &ref_log_probs,
                 advantages[comp_idx] as f32,
                 config.clip_epsilon as f32,
-                config.kl_coeff as f32,
+                vk_effective_kl_coeff(config) as f32,
                 model_config,
                 num_gdn_layers,
                 &mut adamw,
