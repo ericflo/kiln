@@ -34,9 +34,10 @@ use kiln_core::tokenizer::KilnTokenizer;
 #[cfg(feature = "cuda")]
 use kiln_model::forward::GpuWeights;
 #[cfg(feature = "cuda")]
+use kiln_train::trainer::grpo_train_jsonl;
+#[cfg(feature = "cuda")]
 use kiln_train::{
     AdvantageMode, GrpoConfig, IsLevel, KlEstimator, LossAggregation, Optimizer, ReferencePolicy,
-    grpo_train_jsonl,
 };
 
 #[cfg(feature = "cuda")]
