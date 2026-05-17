@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
-# Scaffold an opd-cap.<slug>/ workdir for the opd-capability-creator skill.
+# Scaffold a capabilities/opd/<slug>/ workdir for the opd-capability-creator skill.
 #
 # Usage:
 #   $SKILL/templates/scaffold.sh <slug>
 #
 # Creates:
-#   opd-cap.<slug>/
+#   capabilities/opd/<slug>/
 #     capability.md             (template; agent fills in description + rubric)
 #     capability.config.json    (template; agent edits teacher URL, max iters)
 #     capability.oracle.sh      (template oracle wrapper; agent points at eval)
 #     capability.jsonl          (empty — append-only log)
 #     kiln-polish.jsonl         (empty — separate polish ledger)
-#     prompts/, hypotheses/, adapters/, responses/  (empty dirs)
+#     prompts/, hypotheses/, calibration/, datasets/, manifest/,
+#     adapters/, responses/     (empty dirs; adapters+responses gitignored)
 set -euo pipefail
 
 if [ -z "${1:-}" ]; then
@@ -19,14 +20,15 @@ if [ -z "${1:-}" ]; then
   exit 2
 fi
 SLUG="$1"
-DIR="opd-cap.$SLUG"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+DIR="$ROOT/capabilities/opd/$SLUG"
 
 if [ -e "$DIR" ]; then
   echo "$DIR already exists; refusing to overwrite" >&2
   exit 1
 fi
 
-mkdir -p "$DIR"/{prompts,hypotheses,adapters,responses}
+mkdir -p "$DIR"/{prompts,hypotheses,calibration,datasets,manifest,adapters,responses}
 cd "$DIR"
 
 cat > capability.md <<EOF
@@ -147,5 +149,6 @@ chmod +x capability.oracle.sh
 
 touch capability.jsonl kiln-polish.jsonl
 
-echo "scaffolded: $DIR/"
+echo "scaffolded: capabilities/opd/$SLUG/"
 echo "next: edit capability.md, capability.config.json, capability.oracle.sh; commit; run baseline."
+echo "(adapters/, responses/, datasets/eval.jsonl, *.log are gitignored — see capabilities/.gitignore)"

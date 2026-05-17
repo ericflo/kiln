@@ -1,6 +1,0 @@
-# Eval dataset — firewall-protected, must not enter git or be browsed.
-datasets/eval.jsonl
-
-# Training rollouts/responses
-responses/
-__pycache__/

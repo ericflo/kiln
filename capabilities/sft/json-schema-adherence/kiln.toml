@@ -1,0 +1,9 @@
+[server]
+port = 8420
+
+[model]
+path = "/workspace/kiln/Qwen3.5-4B"
+adapter_dir = "/workspace/kiln/Qwen3.5-4B/adapters"
+
+[training]
+max_queued_jobs = 8

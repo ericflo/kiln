@@ -5,7 +5,7 @@ set -euo pipefail
 cd /workspace/kiln
 
 SLUG="h1-r16-6ep-tok256"
-DATA="opd-cap.transcript-compaction/prompts/${SLUG}.jsonl"
+DATA="capabilities/opd/transcript-compaction/prompts/${SLUG}.jsonl"
 OUT_DIR="/tmp/opd-compact-${SLUG}"
 ADAPTER="compact-${SLUG}"
 LOG="/tmp/opd-compact-iter2.log"

@@ -40,5 +40,5 @@ done
 echo "kiln_serve_up_vram_mib=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | tr -d ' ')"
 
 # 3. Run the oracle
-cd /workspace/kiln/opd-cap.transcript-compaction
+cd /workspace/kiln/capabilities/opd/transcript-compaction
 ./capability.oracle.sh "$ADAPTER"

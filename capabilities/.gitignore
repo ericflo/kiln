@@ -1,0 +1,42 @@
+# Capabilities tree gitignore.
+#
+# Policy: this directory holds capability *experiments*. We commit:
+#   - rubric.py, build_corpus.py, oracle.sh         (the contract — reviewable)
+#   - capability.md, capability.config.json         (the spec)
+#   - capability.jsonl                              (append-only log)
+#   - hypotheses/*.md                               (planning + verdicts)
+#   - prompts/*.jsonl                               (your training prompts)
+#   - datasets/train.opd.jsonl                      (your training data)
+#   - calibration/{good,bad}.jsonl                  (rubric sanity)
+#   - kiln-polish.jsonl                             (rough-edges ledger)
+#   - run_iter*.sh, eval_adapter.sh, reproduce.sh   (replay scripts)
+#   - manifest/<iter>.json                          (reproducibility manifest)
+#
+# We do NOT commit:
+
+# --- Blind-eval firewall: never let eval contents or per-example judgments enter git ---
+**/datasets/eval.jsonl
+**/judgments/
+
+# --- Adapter binaries: regenerable from training data + manifest + git SHA ---
+# (the manifest + train.opd.jsonl + capability.config.json must be sufficient
+#  to recompute the adapter; if you can't reproduce, that's a manifest bug)
+**/adapters/
+
+# --- Teacher fixture caches: large, regenerable from teacher + prompts ---
+**/datasets/teacher.fixture*.jsonl
+**/datasets/*.fixture.jsonl
+
+# --- Live inspection / training artifacts ---
+**/responses/
+**/experiments/
+**/.oracle-build/
+**/.eval/
+
+# --- All log files at any depth ---
+**/*.log
+
+# --- Python / Jupyter housekeeping ---
+**/__pycache__/
+**/.ipynb_checkpoints/
+*.pyc

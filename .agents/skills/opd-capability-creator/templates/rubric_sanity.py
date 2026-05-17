@@ -17,7 +17,7 @@ If any case scores outside its band, the rubric is broken — fix it
 before generating prompts or running baseline.
 
 Usage:
-  cd opd-cap.<slug>/
+  cd capabilities/opd/<slug>/
   python3 $SKILL/templates/rubric_sanity.py \
     --good calibration/good.jsonl \
     --bad calibration/bad.jsonl

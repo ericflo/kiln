@@ -2,7 +2,7 @@
 set -euo pipefail
 cd /workspace/kiln
 SLUG="h1-r16-6ep"
-DATA="opd-cap.tool-call-arg-fidelity/prompts/${SLUG}.jsonl"
+DATA="capabilities/opd/tool-call-arg-fidelity/prompts/${SLUG}.jsonl"
 OUT_DIR="/tmp/opd-toolcall-${SLUG}"
 ADAPTER="toolcall-${SLUG}"
 LOG="/tmp/opd-toolcall-iter1.log"

@@ -1,0 +1,2 @@
+{"ts":"2026-05-17T03:00:00Z","slug":"baseline","note":"Headroom gate worked correctly: baseline 0.99 → total movable 0.01, well under 0.05 floor. Skill stopped before training."}
+{"ts":"2026-05-17T03:00:00Z","slug":"baseline","note":"SKILL IMPROVEMENT: §0 should add 'baseline >0.95 means the rubric is too easy for OPD; harden the rubric before claiming OPD-able'. Better still: ship a rubric_difficulty.py that estimates ceiling-vs-baseline on a small probe before paying for full eval."}

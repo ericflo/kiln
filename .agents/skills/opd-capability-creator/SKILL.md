@@ -145,10 +145,10 @@ If you catch yourself peeking, log `firewall_breach` in the next entry's `notes`
 
 ## 2. Session files
 
-Everything lives in `<workdir>/opd-cap.<slug>/`. A fresh agent reading these files alone must be able to resume.
+Everything lives in `capabilities/opd/<slug>/`. A fresh agent reading these files alone must be able to resume. See `capabilities/README.md` and `capabilities/.gitignore` for the commit policy: rubric/prompts/hypotheses/log/scripts are committed; adapter/responses/eval are gitignored.
 
 ```
-opd-cap.<slug>/
+capabilities/opd/<slug>/
 ├── capability.md              # Living session doc. Description, headroom, hypothesis history.
 ├── capability.jsonl           # Append-only experiment log; one line per attempt.
 ├── capability.config.json     # Workdir, base model, teacher config, max iterations, etc.
@@ -522,7 +522,7 @@ Commit the closeout as a single commit `cap[<slug>]: close (best <composite>, +<
 
 ## 14. Resuming a session
 
-A fresh agent in a directory with an existing `opd-cap.<slug>/`:
+A fresh agent in a directory with an existing `capabilities/opd/<slug>/`:
 
 1. **Re-read this SKILL.md.** Discipline is the whole game.
 2. Run `templates/status.sh` (when added) — one-screen summary.
@@ -597,7 +597,7 @@ SKILL=.claude/skills/opd-capability-creator
 # 0. Intake
 SLUG=faithful-code-summarization
 $SKILL/templates/scaffold.sh $SLUG
-cd opd-cap.$SLUG
+cd capabilities/opd/$SLUG
 # edit capability.md (paste capability description + rubric weights)
 # edit capability.config.json (teacher URL, max iters, etc.)
 # edit capability.oracle.sh (wrap the user's eval; print SCORE=... + per-sub-score)
@@ -694,7 +694,7 @@ cost is already paid and the rubric (silently) was the issue.
 The cure is a calibration set, committed BEFORE baseline runs.
 
 ```
-opd-cap.<slug>/
+capabilities/opd/<slug>/
 ├── calibration/
 │   ├── good.jsonl     # 2–3 hand-crafted "ideal" inputs; must score ≥0.7
 │   └── bad.jsonl      # 2–3 hand-crafted "obviously bad" inputs; must score ≤0.3
