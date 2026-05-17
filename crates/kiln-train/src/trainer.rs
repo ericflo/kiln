@@ -43,7 +43,10 @@ use crate::replay::{
     self, BaseModel, Lineage, OutcomeRecord, OutcomeStatus, ParentLora, ReplayKind, ReplayLog,
     RequestRecord,
 };
-use crate::{ChatMessage, GrpoConfig, GrpoGroup, Optimizer, SftConfig, SftExample};
+use crate::{
+    AdvantageMode, ChatMessage, GrpoConfig, GrpoGroup, KlEstimator, LossAggregation, Optimizer,
+    SftConfig, SftExample,
+};
 
 /// Per-job context the HTTP layer hands the trainer so the training run can
 /// be replayed exactly from its on-disk artifacts.
@@ -1178,9 +1181,24 @@ pub fn grpo_train(
     };
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
-        // Tokenize all completions: for each group, tokenize prompt + each completion
+        let dynamic_sampling = config.dynamic_sampling;
+        let mut dynamic_dropped: usize = 0;
+
+        // Tokenize all completions: for each group, tokenize prompt + each completion.
+        // When dynamic_sampling is enabled (DAPO, arXiv:2503.14476), groups whose
+        // completions all share the same reward are dropped before tokenization —
+        // their advantage vector is uniformly zero and would contribute no
+        // policy-gradient signal anyway.
         let tokenized_groups: Vec<TokenizedGrpoGroup> = groups
             .iter()
+            .filter(|group| {
+                if dynamic_sampling && is_degenerate_grpo_group(group) {
+                    dynamic_dropped += 1;
+                    false
+                } else {
+                    true
+                }
+            })
             .filter_map(|group| match tokenize_grpo_group(group, tokenizer) {
                 Ok(t) => Some(t),
                 Err(e) => {
@@ -1189,6 +1207,14 @@ pub fn grpo_train(
                 }
             })
             .collect();
+
+        if dynamic_dropped > 0 {
+            tracing::info!(
+                dropped = dynamic_dropped,
+                total = groups.len(),
+                "GRPO dynamic sampling: dropped degenerate groups (all rewards equal)"
+            );
+        }
 
         if tokenized_groups.is_empty() {
             anyhow::bail!("no valid GRPO groups after tokenization");
@@ -1442,6 +1468,14 @@ pub fn grpo_train_jsonl(
                 continue;
             };
 
+            if config.dynamic_sampling && is_degenerate_grpo_group(&group) {
+                tracing::debug!(
+                    line = line_no,
+                    "GRPO dynamic sampling: skipping degenerate group (all rewards equal)"
+                );
+                continue;
+            }
+
             processed_groups += 1;
             tracing::info!(
                 group = processed_groups,
@@ -1616,11 +1650,42 @@ fn train_tokenized_grpo_group(
     device: &Device,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<f64> {
-    let advantages = compute_advantages(&tgroup.rewards);
+    let advantages = compute_advantages(&tgroup.rewards, config.advantage_mode);
     let mut group_loss_sum = 0.0;
     let mut opt_state = opt_state;
 
+    // Active token counts per completion (matches the next-token-shift convention
+    // used by token_log_probs and the analytic tail: completion_mask[1..]).
+    let per_comp_active: Vec<usize> = tgroup
+        .completions
+        .iter()
+        .map(|c| {
+            c.completion_mask
+                .get(1..)
+                .map_or(0, |m| m.iter().filter(|&&v| v).count())
+        })
+        .collect();
+    let group_total_active: usize = per_comp_active.iter().sum();
+    if group_total_active == 0 {
+        return Ok(0.0);
+    }
+
+    let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
+    let mut group_accum: HashMap<candle_core::TensorId, Tensor> = HashMap::new();
+
     for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
+        let num_active = per_comp_active[comp_idx];
+        if num_active == 0 {
+            continue;
+        }
+        let loss_normalizer = if token_level {
+            1.0 / group_total_active as f64
+        } else {
+            1.0 / num_active as f64
+        };
+        let loss_params =
+            GrpoLossParams::from_config(config, advantages[comp_idx], loss_normalizer);
+
         let ref_log_probs = {
             let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             let ref_hidden = model_forward_no_head(
@@ -1642,9 +1707,7 @@ fn train_tokenized_grpo_group(
             .detach()
         };
 
-        let advantage = advantages[comp_idx];
         let loss_val;
-
         if let Some(segs) = segments {
             let (lv, accumulated_grads) = checkpointed_grpo_forward_backward(
                 backend,
@@ -1654,21 +1717,23 @@ fn train_tokenized_grpo_group(
                 params,
                 &comp.completion_mask,
                 &ref_log_probs,
-                advantage,
-                config.clip_epsilon,
-                config.kl_coeff,
+                loss_params,
                 segs,
                 device,
             )?;
             loss_val = lv;
-            optimizer_step_from_map(
-                backend,
-                params,
-                &accumulated_grads,
-                config.learning_rate,
-                config.optimizer,
-                opt_state.as_deref_mut(),
-            )?;
+            if token_level {
+                merge_grad_maps(&mut group_accum, accumulated_grads)?;
+            } else {
+                optimizer_step_from_map(
+                    backend,
+                    params,
+                    &accumulated_grads,
+                    config.learning_rate,
+                    config.optimizer,
+                    opt_state.as_deref_mut(),
+                )?;
+            }
         } else {
             let lora_weights = params.as_lora_weights();
             let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -1690,35 +1755,70 @@ fn train_tokenized_grpo_group(
                 device,
             )?;
 
-            let loss = grpo_loss(
-                &policy_log_probs,
-                &ref_log_probs,
-                advantage,
-                config.clip_epsilon,
-                config.kl_coeff,
-                device,
-            )?;
+            let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
             loss_val = loss.to_scalar::<f32>()? as f64;
 
             let grads = loss.backward().context("GRPO backward pass")?;
-            optimizer_step(
-                backend,
-                params,
-                &grads,
-                config.learning_rate,
-                config.optimizer,
-                opt_state.as_deref_mut(),
-            )?;
+            if token_level {
+                let vars = params.all_vars();
+                accumulate_grads(&mut group_accum, &grads, &vars)?;
+            } else {
+                optimizer_step(
+                    backend,
+                    params,
+                    &grads,
+                    config.learning_rate,
+                    config.optimizer,
+                    opt_state.as_deref_mut(),
+                )?;
+            }
         }
 
         group_loss_sum += loss_val;
     }
 
+    if token_level && !group_accum.is_empty() {
+        optimizer_step_from_map(
+            backend,
+            params,
+            &group_accum,
+            config.learning_rate,
+            config.optimizer,
+            opt_state.as_deref_mut(),
+        )?;
+    }
+
     if tgroup.completions.is_empty() {
         Ok(0.0)
+    } else if token_level {
+        // Per-completion loss_val is already its share of the group-level mean
+        // (each was scaled by 1/group_total_active). Sum across completions
+        // gives the true group-level mean.
+        Ok(group_loss_sum)
     } else {
         Ok(group_loss_sum / tgroup.completions.len() as f64)
     }
+}
+
+/// Merge `src` HashMap of gradient tensors into `dst`, accumulating where a
+/// key already exists. Used by GRPO token-level aggregation to combine
+/// per-completion accumulated_grads HashMaps into one before stepping.
+fn merge_grad_maps(
+    dst: &mut HashMap<candle_core::TensorId, Tensor>,
+    src: HashMap<candle_core::TensorId, Tensor>,
+) -> Result<()> {
+    for (id, grad) in src {
+        match dst.entry(id) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                let merged = (e.get() + &grad)?.detach();
+                e.insert(merged);
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(grad);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Tokenize a GRPO group: prompt messages + each completion text.
@@ -1793,15 +1893,34 @@ fn tokenize_grpo_group(group: &GrpoGroup, tokenizer: &KilnTokenizer) -> Result<T
 /// Compute group-normalized advantages from rewards.
 ///
 /// advantage_i = (reward_i - mean(rewards)) / (std(rewards) + 1e-8)
-fn compute_advantages(rewards: &[f64]) -> Vec<f64> {
+/// Returns true when every completion in `group` carries the same reward.
+/// Such a group produces a uniformly-zero advantage vector under any of the
+/// supported [`AdvantageMode`]s and contributes no policy-gradient signal,
+/// only a spurious KL update. Dropped by Dynamic Sampling
+/// (DAPO, arXiv:2503.14476) when `GrpoConfig::dynamic_sampling` is true.
+fn is_degenerate_grpo_group(group: &GrpoGroup) -> bool {
+    let mut rewards = group.completions.iter().map(|c| c.reward);
+    let Some(first) = rewards.next() else {
+        return true;
+    };
+    rewards.all(|r| r == first)
+}
+
+fn compute_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> {
     let n = rewards.len() as f64;
     if n <= 1.0 {
         return vec![0.0; rewards.len()];
     }
     let mean = rewards.iter().sum::<f64>() / n;
-    let var = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
-    let std = var.sqrt();
-    rewards.iter().map(|r| (r - mean) / (std + 1e-8)).collect()
+    let centered: Vec<f64> = rewards.iter().map(|r| r - mean).collect();
+    match mode {
+        AdvantageMode::DrGrpo => centered,
+        AdvantageMode::Vanilla => {
+            let var = centered.iter().map(|c| c * c).sum::<f64>() / n;
+            let std = var.sqrt();
+            centered.into_iter().map(|c| c / (std + 1e-8)).collect()
+        }
+    }
 }
 
 /// Compute per-token log-probabilities for the tokens indicated by the mask.
@@ -2435,9 +2554,7 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
     input_ids: &[u32],
     completion_mask: &[bool],
     ref_log_probs: &Tensor,
-    advantage: f64,
-    clip_epsilon: f64,
-    kl_coeff: f64,
+    loss_params: GrpoLossParams,
     rms_norm_eps: f64,
     chunk_size: usize,
 ) -> Result<(f64, Tensor)> {
@@ -2589,9 +2706,11 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         .to_vec1::<f32>()
         .context("read GRPO policy log-probs")?;
 
-    let lo = 1.0 - clip_epsilon;
-    let hi = 1.0 + clip_epsilon;
-    let inv_n = 1.0 / num_active as f64;
+    let lo = 1.0 - loss_params.clip_low;
+    let hi = 1.0 + loss_params.clip_high;
+    let advantage = loss_params.advantage;
+    let kl_coeff = loss_params.kl_coeff;
+    let normalizer = loss_params.loss_normalizer;
     let mut loss_sum = 0.0f64;
     let mut grad_coeffs = Vec::with_capacity(num_active);
     for (&policy, &reference) in policy_values.iter().zip(ref_values.iter()) {
@@ -2601,16 +2720,29 @@ fn analytic_grpo_tail_loss_grad_pre_final_norm(
         let surr1 = ratio * advantage;
         let surr2 = clipped_ratio * advantage;
         let surrogate = surr1.min(surr2);
-        loss_sum += -surrogate + kl_coeff * log_ratio;
+
+        // KL estimator: K1 = log_ratio, K3 = exp(-log_ratio) - 1 + log_ratio,
+        // None = 0. The derivative w.r.t. log policy log-prob (= log_ratio
+        // for the same active token) is: K1 -> 1, K3 -> -exp(-log_ratio) + 1,
+        // None -> 0.
+        let (kl_term, d_kl) = match loss_params.kl_estimator {
+            KlEstimator::None => (0.0, 0.0),
+            KlEstimator::K1 => (log_ratio, 1.0),
+            KlEstimator::K3 => {
+                let neg_exp = (-log_ratio).exp();
+                (neg_exp - 1.0 + log_ratio, 1.0 - neg_exp)
+            }
+        };
+        loss_sum += -surrogate + kl_coeff * kl_term;
 
         let d_surrogate = if surr1 <= surr2 || (ratio >= lo && ratio <= hi) {
             advantage * ratio
         } else {
             0.0
         };
-        grad_coeffs.push(((-d_surrogate + kl_coeff) * inv_n) as f32);
+        grad_coeffs.push(((-d_surrogate + kl_coeff * d_kl) * normalizer) as f32);
     }
-    let loss_val = loss_sum * inv_n;
+    let loss_val = loss_sum * normalizer;
     let grad_coeffs = Tensor::from_vec(grad_coeffs, (num_active, 1), device)?;
 
     let mut grad_normed = Tensor::zeros((num_active, hidden_size), DType::F32, device)?;
@@ -6585,42 +6717,90 @@ pub fn standard_forward_backward(
     Ok((loss_val, grads))
 }
 
+/// Bundled parameters for the GRPO surrogate / KL loss.
+///
+/// `loss_normalizer` is the scalar applied to the *sum* of per-token loss
+/// contributions before backward. For `LossAggregation::PerSample` it is
+/// `1 / num_active_tokens` for the current completion (recovering the
+/// historical kiln per-completion mean). For `LossAggregation::TokenLevel`
+/// it is `1 / group_total_active_tokens` so the per-token contributions sum
+/// across the entire group to a DAPO-style token-level mean.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct GrpoLossParams {
+    pub advantage: f64,
+    pub clip_low: f64,
+    pub clip_high: f64,
+    pub kl_coeff: f64,
+    pub kl_estimator: KlEstimator,
+    pub loss_normalizer: f64,
+}
+
+impl GrpoLossParams {
+    fn from_config(config: &GrpoConfig, advantage: f64, loss_normalizer: f64) -> Self {
+        let (clip_low, clip_high) = config.clip_bounds();
+        Self {
+            advantage,
+            clip_low,
+            clip_high,
+            kl_coeff: config.kl_coeff,
+            kl_estimator: config.kl_estimator,
+            loss_normalizer,
+        }
+    }
+}
+
 /// Compute the GRPO loss from policy and reference log-probs.
 ///
-/// Returns a scalar loss tensor suitable for backward().
+/// Returns a scalar loss tensor suitable for backward(). The scalar is
+/// `params.loss_normalizer * sum_over_active_tokens(per_token_loss)`.
 fn grpo_loss(
     policy_log_probs: &Tensor,
     ref_log_probs: &Tensor,
-    advantage: f64,
-    clip_epsilon: f64,
-    kl_coeff: f64,
+    params: GrpoLossParams,
     device: &Device,
 ) -> Result<Tensor> {
     let log_ratio = (policy_log_probs - ref_log_probs)?;
     let ratio = log_ratio.exp()?;
     let ratio_shape = ratio.shape().clone();
 
-    // Broadcast scalars to match ratio shape for minimum/clamp
-    let lo = Tensor::new(1.0 - clip_epsilon, device)?
+    // Asymmetric PPO clip range: [1 - clip_low, 1 + clip_high].
+    let lo = Tensor::new(1.0 - params.clip_low, device)?
         .to_dtype(DType::F32)?
         .broadcast_as(&ratio_shape)?;
-    let hi = Tensor::new(1.0 + clip_epsilon, device)?
+    let hi = Tensor::new(1.0 + params.clip_high, device)?
         .to_dtype(DType::F32)?
         .broadcast_as(&ratio_shape)?;
     let clipped_ratio = ratio.clamp(&lo, &hi)?;
 
-    let adv_tensor = Tensor::new(advantage as f32, device)?.broadcast_as(&ratio_shape)?;
+    let adv_tensor = Tensor::new(params.advantage as f32, device)?.broadcast_as(&ratio_shape)?;
     let surr1 = (&ratio * &adv_tensor)?;
     let surr2 = (&clipped_ratio * &adv_tensor)?;
     let surrogate = surr1.minimum(&surr2)?;
     let neg_surrogate = surrogate.neg()?;
 
-    // KL divergence per token
-    let kl_penalty = log_ratio.affine(kl_coeff, 0.0)?;
+    // Per-token KL term selected by KlEstimator.
+    //
+    // K1: kl_t = log_ratio.
+    // K3: kl_t = exp(-log_ratio) - 1 + log_ratio.
+    // None: kl_t = 0.
+    let kl_penalty = match params.kl_estimator {
+        KlEstimator::None => Tensor::zeros(ratio.shape(), DType::F32, device)?,
+        KlEstimator::K1 => log_ratio.affine(params.kl_coeff, 0.0)?,
+        KlEstimator::K3 => {
+            // exp(-log_ratio) - 1 + log_ratio, then scale by kl_coeff.
+            let neg_log_ratio = log_ratio.neg()?;
+            let term = (neg_log_ratio.exp()?.affine(1.0, -1.0)? + &log_ratio)?;
+            term.affine(params.kl_coeff, 0.0)?
+        }
+    };
 
-    // Total loss = mean(-surrogate + kl_penalty)
+    // Per-token loss before normalization.
     let per_token_loss = (&neg_surrogate + &kl_penalty)?;
-    per_token_loss.mean_all().map_err(Into::into)
+    // Scaled sum: equivalent to mean_all() when loss_normalizer = 1/num_active
+    // (the PerSample case) and to the DAPO Token-Level Loss contribution when
+    // loss_normalizer = 1/group_total_active.
+    let total = per_token_loss.sum_all()?;
+    total.affine(params.loss_normalizer, 0.0).map_err(Into::into)
 }
 
 /// Run one GRPO training step with exact reverse-mode checkpointing.
@@ -6639,9 +6819,7 @@ fn checkpointed_grpo_forward_backward(
     params: &TrainableLoraParams,
     completion_mask: &[bool],
     ref_log_probs: &Tensor,
-    advantage: f64,
-    clip_epsilon: f64,
-    kl_coeff: f64,
+    loss_params: GrpoLossParams,
     segments: &[(usize, usize)],
     device: &Device,
 ) -> Result<(f64, HashMap<candle_core::TensorId, Tensor>)> {
@@ -6804,9 +6982,7 @@ fn checkpointed_grpo_forward_backward(
         input_ids,
         completion_mask,
         ref_log_probs,
-        advantage,
-        clip_epsilon,
-        kl_coeff,
+        loss_params,
         model_config.rms_norm_eps,
         DEFAULT_CHUNK_SIZE,
     )
@@ -7015,6 +7191,254 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 1 GRPO config / math unit tests
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn compute_advantages_vanilla_matches_legacy_formula() {
+        let rewards = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let advantages = compute_advantages(&rewards, AdvantageMode::Vanilla);
+        // Legacy formula: (r - mean) / (std + 1e-8).
+        let mean = 2.5;
+        let var: f64 = rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / 4.0;
+        let std = var.sqrt();
+        let expected: Vec<f64> = rewards.iter().map(|r| (r - mean) / (std + 1e-8)).collect();
+        for (got, want) in advantages.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "vanilla advantage drift: got {got} want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_advantages_dr_grpo_drops_std_normalization() {
+        let rewards = vec![1.0_f64, 2.0, 3.0, 4.0];
+        let advantages = compute_advantages(&rewards, AdvantageMode::DrGrpo);
+        let mean = 2.5;
+        let expected: Vec<f64> = rewards.iter().map(|r| r - mean).collect();
+        for (got, want) in advantages.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 1e-12,
+                "Dr.GRPO advantage drift: got {got} want {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_advantages_degenerate_group_returns_zero_under_both_modes() {
+        // Even when std is exactly zero, both modes produce all-zero
+        // advantages without dividing-by-zero (vanilla uses +eps, DrGrpo
+        // simply centers).
+        let rewards = vec![1.5_f64, 1.5, 1.5];
+        for mode in [AdvantageMode::Vanilla, AdvantageMode::DrGrpo] {
+            let a = compute_advantages(&rewards, mode);
+            assert_eq!(a.len(), 3);
+            for v in a {
+                assert!(v.abs() < 1e-10, "expected zero advantage in mode {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn is_degenerate_group_detects_uniform_rewards() {
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "test".to_string(),
+        }];
+        let mk = |rewards: &[f64]| GrpoGroup {
+            messages: messages.clone(),
+            completions: rewards
+                .iter()
+                .map(|r| crate::ScoredCompletion {
+                    text: "x".to_string(),
+                    reward: *r,
+                })
+                .collect(),
+        };
+        assert!(is_degenerate_grpo_group(&mk(&[1.0, 1.0, 1.0])));
+        assert!(is_degenerate_grpo_group(&mk(&[0.0, 0.0])));
+        assert!(is_degenerate_grpo_group(&mk(&[])));
+        assert!(!is_degenerate_grpo_group(&mk(&[1.0, 0.0, 1.0])));
+        assert!(!is_degenerate_grpo_group(&mk(&[0.5, 0.5, 0.500001])));
+    }
+
+    #[test]
+    fn grpo_config_default_clip_bounds_is_symmetric() {
+        let cfg = GrpoConfig::default();
+        let (low, high) = cfg.clip_bounds();
+        assert!((low - 0.2).abs() < 1e-12);
+        assert!((high - 0.2).abs() < 1e-12);
+    }
+
+    #[test]
+    fn grpo_config_asymmetric_clip_bounds_resolved() {
+        let cfg = GrpoConfig {
+            clip_epsilon: 0.20,
+            clip_eps_high: Some(0.28),
+            ..Default::default()
+        };
+        let (low, high) = cfg.clip_bounds();
+        assert!((low - 0.20).abs() < 1e-12);
+        assert!((high - 0.28).abs() < 1e-12);
+    }
+
+    #[test]
+    fn grpo_loss_k1_matches_legacy_mean_form_at_per_sample_normalizer() -> Result<()> {
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let advantage = 0.5_f64;
+        let kl_coeff = 0.1_f64;
+        let clip = 0.2_f64;
+        let num_active = 3usize;
+
+        let params = GrpoLossParams {
+            advantage,
+            clip_low: clip,
+            clip_high: clip,
+            kl_coeff,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / num_active as f64,
+        };
+        let new_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+
+        // Manual reference computation.
+        let mut acc = 0.0_f64;
+        let pol = policy.to_vec1::<f32>()?;
+        let refv = reference.to_vec1::<f32>()?;
+        for (p, r) in pol.iter().zip(refv.iter()) {
+            let log_ratio = (*p as f64) - (*r as f64);
+            let ratio = log_ratio.exp();
+            let clipped = ratio.clamp(1.0 - clip, 1.0 + clip);
+            let surr = (ratio * advantage).min(clipped * advantage);
+            acc += -surr + kl_coeff * log_ratio;
+        }
+        let expected = (acc / num_active as f64) as f32;
+        assert!(
+            (new_loss - expected).abs() < 5e-6,
+            "K1 loss drift: got {new_loss} want {expected}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_none_kl_drops_penalty_term() -> Result<()> {
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let advantage = 0.5_f64;
+        let num_active = 3usize;
+        let params = GrpoLossParams {
+            advantage,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.1,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / num_active as f64,
+        };
+        let none_loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+
+        // Compare to manual surrogate-only mean (no KL).
+        let mut acc = 0.0_f64;
+        let pol = policy.to_vec1::<f32>()?;
+        let refv = reference.to_vec1::<f32>()?;
+        for (p, r) in pol.iter().zip(refv.iter()) {
+            let log_ratio = (*p as f64) - (*r as f64);
+            let ratio = log_ratio.exp();
+            let clipped = ratio.clamp(0.8, 1.2);
+            let surr = (ratio * advantage).min(clipped * advantage);
+            acc += -surr;
+        }
+        let expected = (acc / num_active as f64) as f32;
+        assert!(
+            (none_loss - expected).abs() < 5e-6,
+            "None KL loss drift: got {none_loss} want {expected}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_k3_estimator_is_nonnegative_when_kl_term_dominates() -> Result<()> {
+        // K3 = exp(-log_ratio) - 1 + log_ratio ≥ 0 always. Combined with a
+        // very small advantage and a moderate kl_coeff, the total per-token
+        // loss should be ≥ 0 for any non-trivial log_ratio.
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-0.6_f32, -1.3, -0.4], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let params = GrpoLossParams {
+            advantage: 0.0,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 1.0,
+            kl_estimator: KlEstimator::K3,
+            loss_normalizer: 1.0 / 3.0,
+        };
+        let loss = grpo_loss(&policy, &reference, params, &device)?.to_scalar::<f32>()?;
+        assert!(loss >= 0.0, "K3 per-token KL must be non-negative; got {loss}");
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_asymmetric_clip_widens_upper_bound() -> Result<()> {
+        // With log_ratio > 0 the policy ratio exceeds 1; if the advantage is
+        // negative the unclipped surrogate is *worse* (more negative) than the
+        // clipped one, so we expect: surr1 ≤ surr2 ⇒ min selects surr1 ⇒ loss
+        // does NOT depend on the clip ceiling. To exercise Clip-Higher we use
+        // a *positive* advantage and ratio > 1: clip_high decides where the
+        // ceiling kicks in, so a wider clip_high yields a less-pessimistic
+        // min and therefore *smaller* loss.
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-0.7_f32, -0.6, -0.5], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let make = |hi: f64| GrpoLossParams {
+            advantage: 0.5,
+            clip_low: 0.2,
+            clip_high: hi,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / 3.0,
+        };
+        let tight = grpo_loss(&policy, &reference, make(0.2), &device)?.to_scalar::<f32>()?;
+        let wide = grpo_loss(&policy, &reference, make(0.5), &device)?.to_scalar::<f32>()?;
+        assert!(
+            wide < tight + 1e-6,
+            "Clip-Higher should not increase loss for positive advantage and ratio > 1; \
+             tight clip_high=0.2 loss={tight}, wide clip_high=0.5 loss={wide}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grpo_loss_token_level_normalizer_changes_scale() -> Result<()> {
+        // The same per-token loss summed and scaled by 1/N (per-sample) vs
+        // 1/(2N) (e.g. a TokenLevel group of two equal-size completions)
+        // should yield a factor-of-two difference in the scalar.
+        let device = Device::Cpu;
+        let policy = Tensor::new(&[-1.1_f32, -0.9, -1.4], &device)?;
+        let reference = Tensor::new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let base = GrpoLossParams {
+            advantage: 0.5,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.1,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / 3.0,
+        };
+        let half_norm = GrpoLossParams {
+            loss_normalizer: 1.0 / 6.0,
+            ..base
+        };
+        let l_full = grpo_loss(&policy, &reference, base, &device)?.to_scalar::<f32>()?;
+        let l_half = grpo_loss(&policy, &reference, half_norm, &device)?.to_scalar::<f32>()?;
+        assert!(
+            (l_full - 2.0 * l_half).abs() < 5e-6,
+            "scaling normalizer by 1/2 should halve the loss: l_full={l_full} l_half={l_half}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -7144,9 +7568,14 @@ mod tests {
         let trainer_loss = grpo_loss(
             &trainer_log_probs,
             &ref_log_probs_t,
-            advantage,
-            clip_epsilon,
-            kl_coeff,
+            GrpoLossParams {
+                advantage,
+                clip_low: clip_epsilon,
+                clip_high: clip_epsilon,
+                kl_coeff,
+                kl_estimator: KlEstimator::K1,
+                loss_normalizer: 1.0 / num_active as f64,
+            },
             &device,
         )?;
         let trainer_loss_value = trainer_loss.to_scalar::<f32>()?;
@@ -8134,14 +8563,16 @@ mod tests {
         )?;
         let policy_log_probs =
             token_log_probs(&policy_logits, &input_ids, &completion_mask, &device)?;
-        let loss = grpo_loss(
-            &policy_log_probs,
-            &ref_log_probs,
+        let num_active = completion_mask[1..].iter().filter(|&&v| v).count();
+        let loss_params = GrpoLossParams {
             advantage,
-            clip_epsilon,
+            clip_low: clip_epsilon,
+            clip_high: clip_epsilon,
             kl_coeff,
-            &device,
-        )?;
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / num_active as f64,
+        };
+        let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, &device)?;
         let loss_std = loss.to_scalar::<f32>()? as f64;
         let grads_std = loss.backward().context("standard GRPO backward")?;
 
@@ -8154,9 +8585,7 @@ mod tests {
             &params_ckpt,
             &completion_mask,
             &ref_log_probs,
-            advantage,
-            clip_epsilon,
-            kl_coeff,
+            loss_params,
             &segments,
             &device,
         )?;
