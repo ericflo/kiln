@@ -90,12 +90,23 @@ with. The kiln OPD branch was designed for on-policy from the start
 
 ## Concrete milestones
 
-- [x] Gradient-checkpointed OPD step (this session).
-- [ ] `LocalTeacher` live LogitSource over a second `GpuWeights`.
-- [ ] `qwen3_5_27b()` ModelConfig (for users who can fit 27B in bf16 on
-  larger GPUs).
-- [ ] `RemoteTeacher` end-to-end test against a vLLM server.
-- [ ] `opd_train` sampling step: per iter, sample N completions from
-  student, score with teacher, compute reverse-KL.
+- [x] Gradient-checkpointed OPD step.
+- [x] `RemoteTeacher` HTTP impl against vLLM/sglang `prompt_logprobs`
+  (commit `083c0ea4`), end-to-end-validated via
+  `examples/remote_teacher_smoke.rs`.
+- [x] `opd_train` sampling step: per iter, sample N completions from
+  student, score with teacher, compute reverse-KL. Sampler runs
+  through `model_forward_segment` so `KILN_STREAMING_PREFILL=1`
+  applies — peak transient memory scales with the GDN tile size
+  (default 8192 tokens on CUDA), not the prompt length. Long
+  agentic trajectories work as long as one tile's intermediates fit.
+- [ ] KV-cached fast-path for the sampler. Today's sampler is O(N²)
+  (re-runs prefix forward each step) so the streaming env actually
+  applies — fine for short rollouts and small datasets, slow for
+  long ones. A KV-aware streaming variant is the next perf win.
+- [ ] `LocalTeacher` live LogitSource over a second `GpuWeights`
+  (in-process teacher when total VRAM permits).
+- [ ] `qwen3_5_27b()` ModelConfig (for users who can fit 27B in bf16
+  on larger GPUs — also unlocks LocalTeacher).
 - [ ] Stable-OPD (`β·KL_ref + λ·SFT_gold`) wired to per-step decisions.
-- [ ] FP8 teacher loading in kiln_model (for in-process 27B teacher).
+- [ ] FP8 teacher loading in kiln_model (in-process 27B teacher path).

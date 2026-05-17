@@ -1453,6 +1453,111 @@ pub fn build_local_teacher_fixture(
 /// Replay artifacts and the §8.11 receipt are *not* written by this
 /// function — the caller (kiln-server's `run_opd`) wraps it with
 /// `open_replay_state` / `close_replay_state` and `AdapterReceipt`.
+///
+/// Sample a student rollout under the active LoRA.
+///
+/// Uses the segmented forward path (`model_forward_segment`) so that
+/// `KILN_STREAMING_PREFILL=1` actually applies — without it the
+/// monolithic GDN prefill materializes F32 intermediates over the
+/// full prompt length which blows past a 48 GiB GPU once the teacher
+/// is also resident. The trade-off is O(N²): we re-run the prefix
+/// forward at every decode step instead of carrying a KV cache.
+/// For the short rollouts OPD uses (~32-256 tokens) this is the
+/// memory-safe choice. KV-cached decode can be added later as a
+/// fast-path when more VRAM is available.
+#[allow(clippy::too_many_arguments)]
+fn sample_student_rollout(
+    backend: &dyn kiln_model::backend::BackendRuntime,
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    lora: &kiln_model::lora::LoraWeights,
+    prompt_tokens: &[u32],
+    max_new_tokens: usize,
+    eos_token_ids: &[u32],
+    temperature: f32,
+    top_p: f32,
+    seed: Option<u64>,
+) -> Result<Vec<u32>> {
+    use kiln_model::forward::{
+        LinearAttentionState, model_forward_embed, model_forward_final_norm,
+        model_forward_segment,
+    };
+    use kiln_model::sampling::sample_step;
+    use kiln_core::sampling::SamplingParams;
+
+    anyhow::ensure!(!prompt_tokens.is_empty(), "sample_student_rollout: prompt empty");
+
+    let device = weights.embed_tokens.device().clone();
+    let head_t = weights.embed_tokens_t.clone();
+
+    let mut params = SamplingParams::default();
+    params.temperature = temperature;
+    params.top_p = top_p;
+    params.seed = seed;
+    let mut step_seed = seed;
+
+    // Walk the prompt + generated suffix through the streaming
+    // segmented forward each step. We chunk the layers (same pattern
+    // as `opd_train`'s checkpointed forward) so intermediate buffers
+    // from each chunk free before the next; a single call covering
+    // all layers holds the GDN intermediates live for the duration
+    // and OOMs on a 48 GiB GPU once the teacher is resident.
+    let num_segments = 8usize.min(model_config.num_layers);
+    let segments = crate::trainer::compute_segment_boundaries(
+        model_config.num_layers,
+        num_segments,
+    );
+    let run_forward = |seq: &[u32]| -> Result<Tensor> {
+        let positions: Vec<u32> = (0..seq.len() as u32).collect();
+        let (embed_hidden, _) = model_forward_embed(seq, weights)?;
+        let mut linear_state = LinearAttentionState::new_for_inference(model_config, &device)?;
+        let mut current = embed_hidden;
+        for &(start, end) in &segments {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(lora),
+            )
+            .with_context(|| format!("on-policy rollout segment [{start},{end})"))?;
+            // Detach between chunks so the candle buffer cache can
+            // free intermediates — bit-exact with monolithic since
+            // we don't need gradients here.
+            current = current.detach();
+        }
+        let normed = model_forward_final_norm(&current, weights, model_config)?;
+        // normed: [1, T, H] — slice last position → [1, 1, H] → [H]
+        let t = normed.dim(1)?;
+        let last = normed.narrow(1, t - 1, 1)?.squeeze(1)?; // [1, H]
+        let logits = last.matmul(&head_t)?; // [1, V]
+        Ok(logits)
+    };
+
+    let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
+    let mut working: Vec<u32> = prompt_tokens.to_vec();
+    let mut next = sample_step(&run_forward(&working)?, &params, step_seed, &[])
+        .context("on-policy rollout first-token sample")?;
+
+    for _ in 0..max_new_tokens {
+        if eos_token_ids.contains(&next) {
+            break;
+        }
+        generated.push(next);
+        working.push(next);
+        if let Some(s) = step_seed.as_mut() {
+            *s = s.wrapping_add(1);
+        }
+        next = sample_step(&run_forward(&working)?, &params, step_seed, &generated)
+            .context("on-policy rollout next-token sample")?;
+    }
+    Ok(generated)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn opd_train(
     prompts: &[OpdPrompt],
@@ -1574,18 +1679,75 @@ pub fn opd_train(
     let mut guardrail = crate::diagnostics::LengthInflationGuardrail::default();
     let validation_cadence: u64 = 5;
 
+    // Resolve EOS token ids once for rollout termination.
+    let eos_token_ids: Vec<u32> = tokenizer.eos_token_ids();
+    let on_policy_enabled = std::env::var("KILN_OPD_OFF_POLICY")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|off| !off)
+        .unwrap_or(true);
+
     for epoch in 0..epochs {
-        for (prompt_idx, (input_ids, label_mask)) in tokenized.iter().enumerate() {
-            let active_positions: Vec<usize> = label_mask
+        for (prompt_idx, (orig_input_ids, label_mask)) in tokenized.iter().enumerate() {
+            // Find prompt boundary: first label_mask=true index is the
+            // start of the (off-policy) assistant span we'll replace
+            // with student-sampled tokens.
+            let prompt_end = label_mask
                 .iter()
-                .enumerate()
-                .filter_map(|(i, &m)| if m { Some(i) } else { None })
-                .collect();
-            if active_positions.is_empty() {
+                .position(|&m| m)
+                .unwrap_or(orig_input_ids.len());
+            if prompt_end == 0 || prompt_end >= orig_input_ids.len() {
+                tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
                 continue;
             }
+            let prompt_only: Vec<u32> = orig_input_ids[..prompt_end].to_vec();
 
             for sample_idx in 0..effective_samples_per_prompt.max(1) {
+                // §3.1 step 1: sample a fresh student trajectory under
+                // the current LoRA. Replaces the off-policy passthrough
+                // of the teacher-authored assistant turn with the
+                // student's own tokens — the defining property of
+                // on-policy distillation per Lu (2025) §1.
+                let (input_ids_owned, active_positions): (Vec<u32>, Vec<usize>) = if on_policy_enabled {
+                    let lora_for_sample = params.as_lora_weights();
+                    let step_seed = effective_seed.map(|s| {
+                        s.wrapping_add(global_step as u64)
+                            .wrapping_add(prompt_idx as u64 * 1_000_003)
+                            .wrapping_add(sample_idx as u64 * 1_000_033)
+                    });
+                    let sampled = sample_student_rollout(
+                        &*backend_rt,
+                        weights,
+                        model_config,
+                        &lora_for_sample,
+                        &prompt_only,
+                        config.max_tokens,
+                        &eos_token_ids,
+                        config.temperature as f32,
+                        config.top_p as f32,
+                        step_seed,
+                    )
+                    .with_context(|| format!("on-policy rollout for prompt {prompt_idx}"))?;
+                    if sampled.is_empty() {
+                        tracing::warn!(prompt_idx, sample_idx, "student produced 0 new tokens; skipping step");
+                        continue;
+                    }
+                    let mut full = prompt_only.clone();
+                    full.extend_from_slice(&sampled);
+                    let active: Vec<usize> = (prompt_end..prompt_end + sampled.len()).collect();
+                    (full, active)
+                } else {
+                    let active: Vec<usize> = label_mask
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                        .collect();
+                    (orig_input_ids.clone(), active)
+                };
+                let input_ids: &[u32] = &input_ids_owned;
+                if active_positions.is_empty() {
+                    continue;
+                }
                 // Gradient-checkpointed step. Runs the model forward in
                 // detached segments to bound activation memory, computes the
                 // OPD top-K reverse-KL loss at the final boundary, then
