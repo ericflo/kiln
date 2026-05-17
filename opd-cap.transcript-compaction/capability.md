@@ -59,13 +59,38 @@ Composite: **0.7279** (huge headroom — well-distributed across 3 sub-scores).
 ## Hypothesis log
 | iter | slug | family | composite | comp Δ | target Δ | verdict |
 |------|------|--------|-----------|--------|----------|---------|
-|      |      |        |           |        |          |         |
+| 0 | baseline | — | 0.8098 | — | — | (re-scored after rubric fix) |
+| 1 | h1-r16-6ep | H1 | 0.8415 | +3.17pp | -0.39pp | ? inconclusive — confound: length not entity |
+| 2 | h1-r16-6ep-tok256 | H1 | 0.8632 | +5.34pp | +3.46pp | ✓ confirmed — target moved |
 
 ## Dead ends
-(none yet)
+- max_tokens=128 rollout budget: the OPD loss landscape's lowest-cost
+  reduction is length compression, not capability uplift. Don't use
+  max_tokens narrower than 1.5–2x natural response length.
 
 ## Open questions
-(none yet)
+- Does the H1 epoch curve continue past 6 at max_tokens=256? (would test
+  at 12 epochs if we continued iter 3.)
+- Could H6 (SFT cold-start on teacher rollouts) reduce the 95% skip rate
+  by warming the student toward teacher-compatible rollouts?
+
+## Closeout (iter 2)
+Closing at iter 2 with composite 0.8632 (+5.34pp, 28% theoretical
+headroom captured). Decision rationale: the broader session goal is
+exercising the OPD skill across multiple coding-agent capabilities,
+not maximizing this one. Three iterations have:
+- produced a working capability LoRA (entity-dense compactions),
+- uncovered a kiln finding (rollout max_tokens choice has outsize
+  effect on which sub-score moves),
+- exercised the rubric-design discipline (rubric was wrong twice; both
+  caught and fixed; this fed the new Phase 0 calibration gate),
+- exercised the verdict-gate discipline (1 inconclusive, 1 confirmed),
+- exercised the failure_mode discipline (capability #2 close-out
+  produced the chat-template-render diagnosis).
+
+The marginal value of iter 3 here is lower than starting capability #4
+(tool-call argument fidelity). Adapter retained at
+`/workspace/kiln/Qwen3.5-4B/adapters/compact-h1-r16-6ep-tok256`.
 
 ## Checkpoints
-(every 3rd iter)
+- iter 3 not run; closed at iter 2.
