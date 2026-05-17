@@ -102,7 +102,21 @@ impl Mode {
 
     fn apply(self, base: GrpoConfig) -> GrpoConfig {
         match self {
-            Self::Baseline => base,
+            // Historical pre-#1045 DeepSeekMath/R1 recipe. With the defaults
+            // flipped, `GrpoConfig::default()` is now Phase 1, so the
+            // baseline mode must explicitly restore the old knobs.
+            Self::Baseline => GrpoConfig {
+                advantage_mode: AdvantageMode::Vanilla,
+                loss_aggregation: LossAggregation::PerSample,
+                clip_epsilon: 0.20,
+                clip_eps_high: None,
+                kl_estimator: KlEstimator::K1,
+                dynamic_sampling: false,
+                is_level: IsLevel::Token,
+                reference_policy: ReferencePolicy::BasePerStep,
+                entropy_aware_kl_quantile: None,
+                ..base
+            },
             Self::Phase1 => GrpoConfig {
                 advantage_mode: AdvantageMode::DrGrpo,
                 loss_aggregation: LossAggregation::TokenLevel,
