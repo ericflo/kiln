@@ -44,8 +44,8 @@ use std::sync::Arc;
 
 use crate::trainer::{ProgressCallback, TrainingProgress, tokenize_for_training};
 use crate::{
-    AdvantageMode, GrpoConfig, GrpoGroup, KlEstimator, LossAggregation, Optimizer, SftConfig,
-    SftExample,
+    AdvantageMode, GrpoConfig, GrpoGroup, IsLevel, KlEstimator, LossAggregation, Optimizer,
+    ReferencePolicy, SftConfig, SftExample,
 };
 
 struct TokenizedSftExample {
@@ -3515,6 +3515,19 @@ pub fn vk_native_grpo_train(
              clip_epsilon"
         );
     }
+    if !matches!(config.is_level, IsLevel::Token) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support IsLevel::Sequence (GSPO) or \
+             IsLevel::Cispo; use the candle path"
+        );
+    }
+    if !matches!(config.reference_policy, ReferencePolicy::BasePerStep) {
+        anyhow::bail!(
+            "vk-native GRPO supports only ReferencePolicy::BasePerStep \
+             (default) in Phase 2; for ReferencePolicy::None or Ema use \
+             the candle path"
+        );
+    }
 
     let effective_seed = config.seed.unwrap_or_else(|| {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -3775,6 +3788,19 @@ pub fn vk_native_grpo_train_jsonl(
             "vk-native GRPO does not yet support asymmetric Clip-Higher; \
              use the candle path or leave clip_eps_high = None / equal to \
              clip_epsilon"
+        );
+    }
+    if !matches!(config.is_level, IsLevel::Token) {
+        anyhow::bail!(
+            "vk-native GRPO does not yet support IsLevel::Sequence (GSPO) or \
+             IsLevel::Cispo; use the candle path"
+        );
+    }
+    if !matches!(config.reference_policy, ReferencePolicy::BasePerStep) {
+        anyhow::bail!(
+            "vk-native GRPO supports only ReferencePolicy::BasePerStep \
+             (default) in Phase 2; for ReferencePolicy::None or Ema use \
+             the candle path"
         );
     }
 
