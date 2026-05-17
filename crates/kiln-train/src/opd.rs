@@ -1859,27 +1859,31 @@ pub fn opd_train(
     }
 
     // §20 teacher-side conditioning: per-prompt asymmetric teacher
-    // prefix tokens. Empty Vec for prompts without `teacher_extra_messages`.
+    // prompt tokens (the FULL teacher render, not just a prefix).
+    // Empty Vec for prompts without `teacher_extra_messages`.
     //
     // When non-empty, the teacher's query at training time uses
-    // `teacher_prefix_tokens ++ student_input_ids` while the student
-    // still rolls out from `student_input_ids` alone. The teacher's
-    // distribution is sharper because it saw the privileged context;
-    // the student's gradient pulls toward that sharper distribution
-    // without ever seeing the prefix itself.
-    let teacher_prefix_tokens: Vec<Vec<u32>> = prompts
+    // `teacher_prompt_tokens ++ sampled_rollout` instead of the
+    // student's `prompt_only ++ sampled_rollout`. The student keeps a
+    // clean deployment-realistic prompt; the teacher sees a richer
+    // version with the privileged content merged into its first system
+    // message.
+    //
+    // We MERGE rather than prepend because most chat templates (Qwen3.5
+    // included) only allow one system message at position 0. The merge
+    // concatenates the teacher_extra content into the existing system
+    // message (or creates one when the student has none).
+    let teacher_prompt_tokens: Vec<Vec<u32>> = prompts
         .iter()
         .map(|p| {
             if p.teacher_extra_messages.is_empty() {
                 return Vec::new();
             }
-            // Render extra messages alone; the result is the leading
-            // tokens that get prepended to the student's view on the
-            // teacher's side. We rely on apply_chat_template_full to
-            // emit role markers correctly; no add_generation_prompt
-            // because the student's own prompt provides that.
-            let extras: Vec<CoreChatMessage> = p
-                .teacher_extra_messages
+            // Build the merged messages: drop the dummy trailing
+            // assistant (the student's rollout will replace it); merge
+            // each teacher_extra content into the system position.
+            let mut merged: Vec<CoreChatMessage> = p
+                .messages
                 .iter()
                 .map(|m| CoreChatMessage {
                     role: m.role.clone(),
@@ -1887,45 +1891,80 @@ pub fn opd_train(
                     ..Default::default()
                 })
                 .collect();
-            // Render the extras WITHOUT add_generation_prompt — we
-            // are not asking the teacher to start generating after the
-            // prefix; the student's own prompt provides that boundary.
-            // The default ChatTemplateOptions omits add_generation_prompt,
-            // which most chat templates treat as `false`.
+            while merged.last().map(|m| m.role.as_str()) == Some("assistant") {
+                merged.pop();
+            }
+            // Collect the teacher_extra content into a single string,
+            // joined by blank lines.
+            let extras_text = p
+                .teacher_extra_messages
+                .iter()
+                .map(|m| m.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            // Merge or create the first system message.
+            if let Some(first) = merged.first_mut() {
+                if first.role == "system" {
+                    first.content = format!("{}\n\n{}", extras_text, first.content);
+                } else {
+                    merged.insert(
+                        0,
+                        CoreChatMessage {
+                            role: "system".to_string(),
+                            content: extras_text,
+                            ..Default::default()
+                        },
+                    );
+                }
+            } else {
+                merged.push(CoreChatMessage {
+                    role: "system".to_string(),
+                    content: extras_text,
+                    ..Default::default()
+                });
+            }
+            // Render with the same options the student's rollout prompt
+            // would use, so the teacher and student see the SAME chat
+            // template framing — only the system-message content differs.
             let opts = ChatTemplateOptions {
-                template_kwargs: serde_json::Map::from_iter([
-                    (
-                        "enable_thinking".to_string(),
-                        serde_json::Value::Bool(false),
-                    ),
-                    (
-                        "add_generation_prompt".to_string(),
-                        serde_json::Value::Bool(false),
-                    ),
-                ]),
+                template_kwargs: serde_json::Map::from_iter([(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(false),
+                )]),
             };
-            let text = tokenizer
-                .apply_chat_template_full_with_options(
-                    extras.as_slice(),
-                    None, // tools
-                    None, // tool_choice
-                    opts,
-                )
-                .ok()
-                .unwrap_or_default();
+            let text = match tokenizer.apply_chat_template_full_with_options(
+                merged.as_slice(),
+                None,
+                None,
+                opts,
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "teacher render failed; falling back to symmetric for this prompt");
+                    return Vec::new();
+                }
+            };
             tokenizer.encode(&text).unwrap_or_default()
         })
         .collect();
-    let any_asymmetric = teacher_prefix_tokens.iter().any(|v| !v.is_empty());
+    let any_asymmetric = teacher_prompt_tokens.iter().any(|v| !v.is_empty());
     if any_asymmetric {
-        let avg_extra: usize = teacher_prefix_tokens.iter().map(|v| v.len()).sum::<usize>()
-            / teacher_prefix_tokens.len().max(1);
-        let n_with_extra = teacher_prefix_tokens.iter().filter(|v| !v.is_empty()).count();
+        let n_with_extra = teacher_prompt_tokens.iter().filter(|v| !v.is_empty()).count();
+        let avg_extra: usize = teacher_prompt_tokens
+            .iter()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.len())
+            .sum::<usize>()
+            / n_with_extra.max(1);
+        eprintln!(
+            "opd_train: asymmetric teacher conditioning ACTIVE — {} prompts, avg teacher prompt = {} tokens. §20",
+            n_with_extra, avg_extra
+        );
         tracing::info!(
             n_prompts_with_teacher_extra = n_with_extra,
-            avg_teacher_extra_tokens = avg_extra,
+            avg_teacher_prompt_tokens = avg_extra,
             "opd_train: asymmetric teacher conditioning ACTIVE — \
-             teacher sees additional context the student does not. §20"
+             teacher sees richer system message than student. §20"
         );
     }
 
@@ -2052,27 +2091,36 @@ pub fn opd_train(
                     model_config,
                 )?;
                 // §20 asymmetric teacher conditioning: if this prompt
-                // declared `teacher_extra_messages`, build a separate
-                // token sequence for the teacher with the privileged
-                // prefix prepended. Active positions shift by the
-                // prefix length. The student's view (input_ids,
-                // active_positions, student_hidden) stays unchanged.
-                let teacher_prefix: &[u32] = &teacher_prefix_tokens[prompt_idx];
+                // declared `teacher_extra_messages`, build the teacher's
+                // token sequence as `teacher_prompt_tokens ++ sampled`.
+                // The student's input_ids = prompt_only ++ sampled has
+                // the student's own prompt framing; the teacher's view
+                // swaps the prompt half for the merged-extras version
+                // while keeping the SAME sampled rollout. Active
+                // positions are remapped to the teacher's frame.
+                let teacher_prompt: &[u32] = &teacher_prompt_tokens[prompt_idx];
                 let (teacher_full_tokens_owned, teacher_shifted_positions): (Vec<u32>, Vec<usize>) =
-                    if teacher_prefix.is_empty() {
+                    if teacher_prompt.is_empty() {
                         (Vec::new(), Vec::new())
                     } else {
-                        let mut t = Vec::with_capacity(teacher_prefix.len() + input_ids.len());
-                        t.extend_from_slice(teacher_prefix);
-                        t.extend_from_slice(input_ids);
+                        // sampled portion of student's input_ids = the
+                        // tokens after the student's prompt prefix.
+                        let sampled = &input_ids[rollout_prompt_len..];
+                        let mut t = Vec::with_capacity(teacher_prompt.len() + sampled.len());
+                        t.extend_from_slice(teacher_prompt);
+                        t.extend_from_slice(sampled);
+                        // Student active positions live in
+                        // [rollout_prompt_len, rollout_prompt_len + sampled.len()).
+                        // Map each to teacher frame:
+                        // teacher_pos = teacher_prompt.len() + (student_pos - rollout_prompt_len).
                         let pos: Vec<usize> = active_positions
                             .iter()
-                            .map(|p| p + teacher_prefix.len())
+                            .map(|p| teacher_prompt.len() + (*p - rollout_prompt_len))
                             .collect();
                         (t, pos)
                     };
                 let (teacher_tokens_opt, teacher_active_opt): (Option<&[u32]>, Option<&[usize]>) =
-                    if teacher_prefix.is_empty() {
+                    if teacher_prompt.is_empty() {
                         (None, None)
                     } else {
                         (
