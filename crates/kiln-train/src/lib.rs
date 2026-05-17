@@ -233,42 +233,59 @@ pub struct GrpoRequest {
 
 /// Group-relative advantage normalization mode.
 ///
-/// `Vanilla` is the DeepSeekMath / R1 default: `A_i = (r_i - mean(r)) / (std(r) + eps)`.
-/// `DrGrpo` follows arXiv:2503.20783 ("Understanding R1-Zero-Like Training") and
-/// drops the `std` normalization to eliminate question-difficulty bias and the
-/// numerical blow-up when within-group rewards are nearly uniform.
+/// `Vanilla` is the original DeepSeekMath / R1 form: `A_i = (r_i - mean(r)) /
+/// (std(r) + eps)`. `DrGrpo` follows arXiv:2503.20783 ("Understanding
+/// R1-Zero-Like Training") and drops the `std` normalization to eliminate
+/// question-difficulty bias and the numerical blow-up when within-group
+/// rewards are nearly uniform.
+///
+/// Default: `DrGrpo`. Phase 1 ablation on Qwen3.5-4B (the kiln backbone)
+/// showed clean training under both modes; dropping std normalization is a
+/// strict improvement at the math level (removes the small-std blow-up and
+/// the question-difficulty bias from arXiv:2503.20783) with zero compute
+/// cost, so we ship Dr. GRPO as the default.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AdvantageMode {
-    /// `A_i = (r_i - mean(r)) / (std(r) + 1e-8)`. The historical kiln default.
-    #[default]
+    /// `A_i = (r_i - mean(r)) / (std(r) + 1e-8)`. The original DeepSeekMath /
+    /// R1 form; retained for ablation and back-compat.
     Vanilla,
     /// `A_i = r_i - mean(r)`. Recommended by Dr. GRPO (arXiv:2503.20783) and
-    /// the SimpleRL-Zoo replication (arXiv:2503.18892).
+    /// the SimpleRL-Zoo replication (arXiv:2503.18892). The kiln default
+    /// from Phase 1 onward.
+    #[default]
     DrGrpo,
 }
 
 /// How the GRPO surrogate loss is aggregated across the completions in a group.
 ///
-/// `PerSample` mirrors the historical kiln behavior: each completion's loss is
-/// the per-token mean, then the group reports the mean across completions, and
-/// the optimizer steps once per completion. This is the DeepSeekMath / R1
-/// default. It systematically under-penalizes long incorrect completions and
-/// is the source of the documented GRPO "length-drift" failure mode.
+/// `PerSample` is the original DeepSeekMath / R1 form: each completion's loss
+/// is the per-token mean, then the group reports the mean across completions,
+/// and the optimizer steps once per completion. It systematically
+/// under-penalizes long incorrect completions and is the documented source of
+/// the GRPO "length-drift" failure mode.
 ///
 /// `TokenLevel` is the DAPO Token-Level Policy Gradient Loss (arXiv:2503.14476):
 /// per-token surrogates are accumulated across all completions in the group
 /// and divided by the total active completion token count, with a single
 /// optimizer step per group. Removes per-sample length bias.
+///
+/// Default: `TokenLevel`. Phase 1 ablation on Qwen3.5-4B showed a ~2× speedup
+/// over `PerSample` (one optimizer step per group, plus dynamic-sampling
+/// filtering) with clean loss curves; combined with the literature consensus
+/// against per-sample averaging, this becomes the kiln default. The
+/// vk-native path falls back to `PerSample` (kernel work pending).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LossAggregation {
-    /// Per-completion mean-of-tokens, per-completion optimizer step.
-    #[default]
+    /// Per-completion mean-of-tokens, per-completion optimizer step. The
+    /// original DeepSeekMath / R1 form; retained for ablation and as the
+    /// vk-native fallback.
     PerSample,
     /// DAPO Token-Level Loss: sum-over-all-tokens-in-group divided by
-    /// total active tokens, single optimizer step per group.
-    /// (Candle path only — the vk-native path falls back to `PerSample`.)
+    /// total active tokens, single optimizer step per group. The kiln
+    /// default from Phase 1 onward (candle path).
+    #[default]
     TokenLevel,
 }
 
@@ -406,12 +423,16 @@ pub struct GrpoConfig {
     /// KL penalty estimator. Defaults to `K1` (historical kiln behavior).
     #[serde(default)]
     pub kl_estimator: KlEstimator,
-    /// When true, groups whose completions all share the same reward (and
-    /// therefore produce a uniformly-zero advantage vector) are skipped
-    /// before training. Implements DAPO's Dynamic Sampling filter. Default
-    /// `false` for backward compatibility; turning this on is essentially
-    /// always a stability win.
-    #[serde(default)]
+    /// When true (the kiln default since Phase 1), groups whose completions
+    /// all share the same reward (and therefore produce a uniformly-zero
+    /// advantage vector) are skipped before training. Implements DAPO's
+    /// Dynamic Sampling filter (arXiv:2503.14476). Degenerate groups have
+    /// no policy-gradient signal under any [`AdvantageMode`]; the only
+    /// thing they contribute is a spurious KL pull, so dropping them is
+    /// strictly compute-saving and a stability win. Phase 1 ablation on
+    /// Qwen3.5-4B observed ~60-70% of humaneval-style groups filtered as
+    /// degenerate at typical reward distributions.
+    #[serde(default = "default_dynamic_sampling")]
     pub dynamic_sampling: bool,
     /// Importance-sampling level. Defaults to `Token` (historical kiln
     /// behavior). Set to `Sequence` for GSPO or `Cispo` for CISPO.
@@ -454,6 +475,9 @@ fn default_kl_coeff() -> f64 {
 fn default_clip_eps() -> f64 {
     0.2
 }
+fn default_dynamic_sampling() -> bool {
+    true
+}
 
 impl GrpoConfig {
     /// Resolved PPO clip epsilon bounds `(ε_low, ε_high)`. The PPO clip range
@@ -477,7 +501,7 @@ impl Default for GrpoConfig {
             advantage_mode: AdvantageMode::default(),
             loss_aggregation: LossAggregation::default(),
             kl_estimator: KlEstimator::default(),
-            dynamic_sampling: false,
+            dynamic_sampling: default_dynamic_sampling(),
             is_level: IsLevel::default(),
             reference_policy: ReferencePolicy::default(),
             lora_rank: default_rank(),

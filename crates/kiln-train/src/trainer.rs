@@ -7455,6 +7455,25 @@ mod tests {
         assert!((high - 0.2).abs() < 1e-12);
     }
 
+    /// Pins the kiln-default GRPO recipe (post Phase 1 ablation). If any of
+    /// these change, the change should be intentional and accompanied by a
+    /// new ablation justifying the move.
+    #[test]
+    fn grpo_config_defaults_match_phase1_recipe() {
+        let cfg = GrpoConfig::default();
+        assert!(matches!(cfg.advantage_mode, AdvantageMode::DrGrpo));
+        assert!(matches!(cfg.loss_aggregation, LossAggregation::TokenLevel));
+        assert!(cfg.dynamic_sampling);
+        assert!(matches!(cfg.kl_estimator, KlEstimator::K1));
+        assert!(matches!(cfg.is_level, IsLevel::Token));
+        assert!(matches!(cfg.reference_policy, ReferencePolicy::BasePerStep));
+        // Clip stays symmetric by default; users opt into Clip-Higher by
+        // setting clip_eps_high.
+        assert!(cfg.clip_eps_high.is_none());
+        assert!((cfg.clip_epsilon - 0.2).abs() < 1e-12);
+        assert!((cfg.kl_coeff - 0.1).abs() < 1e-12);
+    }
+
     #[test]
     fn grpo_config_asymmetric_clip_bounds_resolved() {
         let cfg = GrpoConfig {
