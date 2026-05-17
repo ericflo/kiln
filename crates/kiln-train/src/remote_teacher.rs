@@ -257,7 +257,7 @@ impl LogitSource for RemoteTeacher {
 /// vLLM / sglang `/v1/completions` `prompt_logprobs` impl.
 ///
 /// vLLM exposes top-K logprobs at every prompt position via:
-/// ```
+/// ```text
 /// POST /v1/completions
 /// { "model": "...", "prompt": [token ids...],
 ///   "max_tokens": 1, "temperature": 0,
