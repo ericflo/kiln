@@ -299,7 +299,8 @@ pub fn compute_replay_hash(
         hasher.update(line.as_bytes());
         hasher.update([b'\n']);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 /// Walk the parent chain from `adapter_dir` up toward the root, returning

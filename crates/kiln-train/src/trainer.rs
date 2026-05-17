@@ -73,7 +73,8 @@ pub fn default_base_model(config: &ModelConfig) -> BaseModel {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(s.as_bytes());
-        format!("sha256:{:x}", h.finalize())
+        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        format!("sha256:{hex}")
     });
     BaseModel {
         id: "Qwen/Qwen3.5-4B".to_string(),
