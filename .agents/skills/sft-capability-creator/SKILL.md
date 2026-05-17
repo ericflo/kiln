@@ -16,7 +16,7 @@ The skill ships with one document and eight helper scripts. Reference them by ab
 | File | Purpose |
 |------|---------|
 | `SKILL.md` | This document. Authoritative procedure. |
-| `templates/scaffold.sh` | Create `sft-cap.<slug>/` with `capability.md`, `capability.config.json`, etc. (§2, §3 Phase 0) |
+| `templates/scaffold.sh` | Create `capabilities/sft/<slug>/` with `capability.md`, `capability.config.json`, etc. (§2, §3 Phase 0) |
 | `templates/oracle.sh` | Blind kiln-eval wrapper. Emits only `SCORE=<f> N=<i>`. (§1, §6) |
 | `templates/oracle-paste.sh` | Human-in-the-loop oracle variant. (§6) |
 | `templates/hypothesis.md.tmpl` | Pre-experiment hypothesis form. (§3 Phase 1) |
@@ -43,6 +43,46 @@ You produce **independent** SFT adapters. Each one is an attempt: a hypothesis i
 **Why independence matters.** Stacking adapters confounds the experiment. If A+B beats baseline you don't know whether A, B, or the interaction did the work. Independent ablations let causal claims survive past iteration 5.
 
 **Why words can elicit non-word capabilities.** A model that has seen the *algorithm* for two-digit addition described in 30 different prose framings often executes that algorithm more reliably than one that has seen 300 numerical worked examples in a single style. SFT updates the same underlying parameters whether the supervision is symbolic or verbal; the verbal route can re-shape the routing of latent computation without overfitting the surface form the eval uses. **This is the most important asymmetry the skill exploits.** When in doubt, write English about the skill; do not drill the eval's surface form.
+
+### The eval is the spec — and someone wrote it
+
+Read this twice. Internalise it. **SFT optimises the eval, not the capability.** If the eval doesn't faithfully measure the capability, SFT finds the cheapest path through the eval and produces a model that satisfies the score function rather than the one you intended. Goodhart's law is the centre of this skill, not a footnote.
+
+You cannot fix a flawed eval with hyperparameters. A perfect rank/epoch sweep against a flawed eval produces a perfectly polished bad model.
+
+**Eval design is the highest-leverage activity in the session. Spend more time on it than on any single iteration.** The eval is upstream of every score, every verdict, every keep/discard call.
+
+#### What "eval-driven failure" looks like
+
+Three concrete failure shapes, each demanding a different disposition:
+
+- **Saturated eval (baseline ≥ 0.95).** Does NOT mean the capability is solved. It almost always means the eval is too easy. The 4B is not perfect at most things; if your eval says it is, the eval is wrong. *(The OPD sister-skill's first capability hit this and the agent abandoned the session — that was the wrong call. Correct disposition: harden the eval and re-baseline.)*
+
+- **Easy-only eval.** Eval prompts are uniformly bread-and-butter. SFT optimises to the easy cases and you can't tell whether the model handles the long tail. Phase 5 score climbs while the actual capability stays mediocre.
+
+- **Score moves via the wrong mechanism.** Composite climbs but the *interesting* failure mode of the base model is unchanged. The 4B was dropping required JSON fields; your SFT recipe made it more verbose (which the eval happened to like) but it still drops the fields. Without an anchor suite (§12) or per-class score breakdown, you don't catch this.
+
+#### Adversarial design — answer before training
+
+Before generating the first dataset, sit with what you know about the eval and answer:
+
+> **What's the cheapest way to score 1.0 on this eval without actually doing the capability?**
+
+If you can name even one cheap path, the model will probably find it. Choose one:
+- Negotiate with the user for an anchor suite that punishes the cheap path
+- Document the shortcut in `capability.md` so you recognise the score-shape when it appears
+- Generate datasets that explicitly DON'T encourage the shortcut (e.g. if "answer in JSON" is the shortcut, your training examples should answer in JSON *correctly*, not in JSON *only*)
+
+Common shortcuts to check for in SFT specifically:
+- **Surface-form mimicry.** Training drills make the model parrot the eval's surface form (numbers, format, vocabulary). Generalisation fails; you get a brittle adapter that works only on prompts shaped like training. *Mitigation: §11 answer-form discipline + §15 meta-questions transfer surprisingly well.*
+- **Length compression / inflation.** The eval may reward responses in a length range; SFT moves average length into the window without improving content.
+- **Refusal sneak-through.** "I cannot answer" satisfies many ceiling-style evals (no false positives → no penalty). Pair format-style evals with content-coverage anchors.
+
+#### The capability description is the spec; the eval is your translation of it
+
+When you're tempted to celebrate a score that came from a confounding mechanism, go back to the plain-English description in `capability.md`. **If satisfying the eval doesn't satisfy the description, the eval is wrong** — not the model. Negotiate with the user for a tighter eval / anchor / per-class scoring before continuing.
+
+Eval edits mid-session aren't embarrassing — they're evidence you're paying attention. The user owns the eval contract; you can't unilaterally change it, but you can flag a problem the moment you see it.
 
 ---
 
@@ -76,7 +116,7 @@ If you catch yourself reading a suite file or looking at a per-example output, *
 
 ### Operational rule for the agent
 
-Before any `Read` / `Bash cat` / `Bash grep` / `Bash jq` call against a path under `adapters/.eval/`, pause and write a one-line note to yourself ("am I about to peek?"). Almost every legitimate operation you need only touches `sft-cap.<slug>/`, `Qwen3.5-4B/adapters/cap-*/lineage.json` (your own training records), and the oracle wrapper's stdout. If you don't need it for the loop, don't read it.
+Before any `Read` / `Bash cat` / `Bash grep` / `Bash jq` call against a path under `adapters/.eval/`, pause and write a one-line note to yourself ("am I about to peek?"). Almost every legitimate operation you need only touches `capabilities/sft/<slug>/`, `Qwen3.5-4B/adapters/cap-*/lineage.json` (your own training records), and the oracle wrapper's stdout. If you don't need it for the loop, don't read it.
 
 ### Sub-agents inherit the firewall
 
@@ -86,10 +126,10 @@ If you spawn a sub-agent (general-purpose, Explore, or any other) you MUST give 
 
 ## 2. Session files
 
-Everything lives in `<workdir>/sft-cap.<slug>/`. A fresh agent reading those files alone must be able to resume.
+Everything lives in `capabilities/sft/<slug>/`. A fresh agent reading those files alone must be able to resume.
 
 ```
-sft-cap.<slug>/
+capabilities/sft/<slug>/
 ├── capability.md              # Living session document. Objective, hypotheses, what's been tried.
 ├── capability.jsonl           # Append-only experiment log, one line per ablation.
 ├── capability.ideas.md        # Backlog of hypotheses you didn't pursue this round.
@@ -213,10 +253,12 @@ One JSON object per line. Append-only. Never edit. Fields:
 
 6. **Tiny-smoke** (§17) — 4-example training, no scoring. Confirms `kiln serve` is up and the helpers work. Delete the smoke adapter after.
 
-7. **Baseline.** `./capability.oracle.sh ""` (empty adapter = base model). Log as iter 0 with `slug="baseline"`. Inspect the baseline score before continuing:
+7. **Adversarial eval review** (§0 "The eval is the spec"). Answer in writing in `capability.md`: *what's the cheapest way to score 1.0 on this eval without doing the capability?* Name at least one shortcut. For each, decide: (a) negotiate with the user for an anchor that punishes the shortcut, (b) accept and watch for it in score-shape, (c) design datasets that explicitly don't encourage it. **Don't skip this step.** The SFT skill's prior python-algo session ran 208 iterations and produced only 6 hypothesis files — partly because the verdict-write step wasn't enforced. The adversarial review is the upstream version of that: name the failure modes before they happen, so iterations have something to test.
+
+8. **Baseline.** `./capability.oracle.sh ""` (empty adapter = base model). Log as iter 0 with `slug="baseline"`. Inspect the baseline score before continuing:
    - **Baseline = 0.0 or 0.01** (zero floor) — the model has essentially no capability. Read §11 on answer-form before generating iter 1; the model may be failing to produce the *form* the eval wants more than the *content*. The very first ablation should be heavily anchored.
-   - **Baseline = 1.0 or 0.99** (ceiling) — the model is already saturated. Either the eval is too easy or the capability isn't a deficiency. Stop and report.
-   - **Baseline in (0.1, 0.9)** — healthy. Proceed to iter 1.
+   - **Baseline ≥ 0.95** — this is **NOT a "capability solved, move on" signal — it is an "eval is too easy" signal** (§0). Real 4B capabilities have failure modes; an eval that catches none of them is wrong. Action: (a) ask the user to inspect 3-5 base-model responses to the eval prompts — are they ACTUALLY perfect, or is the eval just permissive? (b) negotiate with the user for a harder eval / anchor / per-class scoring; (c) re-baseline. Only abandon if a hardened eval still scores ≥0.95 with manual inspection confirming responses are genuinely perfect. *The OPD sister-skill incorrectly abandoned its first capability for hitting this ceiling — don't repeat that mistake.*
+   - **Baseline in (0.1, 0.95)** — healthy. Proceed to iter 1.
 
 The oracle wrapper is *your* file, not the eval's. Its job is to (a) call the user's eval, (b) parse exactly one number out, (c) print `SCORE=<float>` on stdout, (d) tell you NOTHING ELSE. See §6 for the contract.
 
@@ -296,14 +338,23 @@ Output **must** be one `SCORE=<float>` line on stdout. The wrapper enforces this
 
 The score is the only signal you have. Compare against the best-kept score so far. If it's a tie or worse, you `discard`. If it's better by more than the noise floor (see §5), you `keep`.
 
-### Phase 5 — Reflect (every iteration)
+### Phase 5 — Close the loop (the verdict gate)
 
-Append a line to `capability.jsonl`. Update `capability.md`. Apply your pre-committed falsification plan from `hypotheses/<slug>.md`.
+Before logging:
 
-The `asi` block in the log entry is where future-you (or a resuming agent) recovers your thinking. Write what you learned, not what you did:
+1. **Write the verdict** in `hypotheses/<slug>.md`. ✓ confirmed / ✗ falsified / ? inconclusive + one sentence of justification, anchored to the actual score(s) you just observed.
+2. **Apply the falsification plan.** What did the pre-committed plan say about this score? Did you honor it, or are you rationalising?
+3. **Fill the asi block** in the log entry. Write what you learned, not what you did:
+   - ✗ *"Generated 64 examples and trained for 1 epoch."* — recoverable from the entry.
+   - ✓ *"Prose-only assistant turns moved the score; switching half of them to numeric worked examples in the next try reversed the gain. Verbal supervision is doing real work here."* — only survives if you write it down.
 
-- ✗ *"Generated 64 examples and trained for 1 epoch."* — recoverable from the entry.
-- ✓ *"Prose-only assistant turns moved the score; switching half of them to numeric worked examples in the next try reversed the gain. Verbal supervision is doing real work here."* — only survives if you write it down.
+Now call `templates/log_iter.sh`. It will **reject** the entry if:
+- `verdict` is empty, doesn't start with ✓/✗/?, doesn't reference numbers, or is shorter than 30 chars
+- `asi.what_worked` AND `asi.what_failed` are both empty
+- `asi.next_focus` is empty or boilerplate ("see notes", "tbd", etc.)
+- `status="broken"` and no `failure_mode.md` in cwd
+
+**The agent literally cannot proceed without filling these fields.** This is the central anti-laziness gate. The python-algo session that produced 6 hypothesis files for 208 iters is exactly the failure mode this gate prevents — when verdict-write is optional, agents iterate without learning, and the experimental record becomes a CSV of scores instead of a story.
 
 **Annotate failures heavily.** Discarded ablations leave only the JSONL line; their dataset and hypothesis file stay on disk for archaeology. Make sure those notes carry enough mechanism for a fresh agent to skip the dead end.
 
@@ -452,7 +503,7 @@ Read `capability.md` and the tail of `capability.jsonl` at the start of every it
 
 ## 8. Resuming
 
-A fresh agent invoked in a directory with an existing `sft-cap.<slug>/`:
+A fresh agent invoked in a directory with an existing `capabilities/sft/<slug>/`:
 
 1. **Re-read this SKILL.md.** Discipline is the whole game; do not operate from a hazy memory of the protocol.
 2. Run `$SKILL/templates/status.sh` — one-screen summary (suite, scorer, best, MAD, confidence, recent ledger, slugs in use).
@@ -679,7 +730,7 @@ SKILL=.agents/skills/sft-capability-creator
 # 0. Intake — agent fills this in interactively with the user.
 SLUG=capability-name        # short kebab; names the whole session
 $SKILL/templates/scaffold.sh $SLUG
-cd sft-cap.$SLUG
+cd capabilities/sft/$SLUG
 # edit capability.md (paste the user's verbatim description)
 # edit capability.config.json (set eval_suite, scorer_field, direction)
 # capability.oracle.sh is already the kiln-eval wrapper; if the user

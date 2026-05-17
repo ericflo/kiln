@@ -1,5 +1,5 @@
 #!/bin/bash
-# Scaffold a new sft-capability-creator session in $PWD/sft-cap.<slug>/.
+# Scaffold a new sft-capability-creator session in capabilities/sft/<slug>/.
 #
 # Usage:  scaffold.sh <slug>
 #
@@ -14,9 +14,10 @@ if [ -z "$SLUG" ]; then
 fi
 
 SKILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DIR="sft-cap.$SLUG"
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+DIR="$ROOT/capabilities/sft/$SLUG"
 
-mkdir -p "$DIR"/{datasets,hypotheses,adapters}
+mkdir -p "$DIR"/{datasets,hypotheses,calibration,adapters}
 cd "$DIR"
 
 if [ ! -f capability.md ]; then
