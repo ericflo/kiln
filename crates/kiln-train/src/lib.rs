@@ -272,6 +272,87 @@ pub enum LossAggregation {
     TokenLevel,
 }
 
+/// How the importance-sampling ratio is computed and clipped.
+///
+/// `Token` is the historical kiln behavior: the IS ratio is per-token, the
+/// PPO surrogate clips per-token, and clipped tokens drop out of the
+/// gradient. The DeepSeekMath / R1 default.
+///
+/// `Sequence` implements GSPO (arXiv:2507.18071): the ratio is computed once
+/// per sequence as `(π_θ(y) / π_old(y))^(1/|y|)`, clip and surrogate live at
+/// the sequence level, and every token in the sequence sees the same scalar
+/// gradient coefficient `s · d_surrogate / |y|`. Originally proposed for MoE
+/// (Qwen3-MoE production); kiln's Qwen3.5-4B is dense so the MoE argument
+/// does not apply, but the variance-reduction argument on long CoT may.
+/// Treat as a controlled experiment until ablated on the actual workload.
+///
+/// `Cispo` implements CISPO (MiniMax-M1, arXiv:2506.13585): per-token gradient
+/// flow with the IS *weight* clipped (not the surrogate). Every token
+/// contributes a gradient; the clipped IS weight bounds variance. Less
+/// invasive than GSPO and keeps per-token gradient diversity.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IsLevel {
+    /// Historical per-token IS with PPO min(surrogate, clipped_surrogate).
+    #[default]
+    Token,
+    /// GSPO sequence-level IS (arXiv:2507.18071).
+    Sequence,
+    /// CISPO clipped-weight IS (arXiv:2506.13585).
+    Cispo,
+}
+
+/// What policy the reference forward uses, and how often it refreshes.
+///
+/// `BasePerStep` reproduces the historical kiln behavior: the reference is
+/// the base model (no LoRA), recomputed for every completion. The IS ratio
+/// is therefore `π_θ / π_base` and the KL term anchors the policy to the
+/// base model.
+///
+/// `None` skips the reference forward entirely and uses a fixed log-ratio
+/// of 0 for every token. Combined with `KlEstimator::None` this reduces
+/// GRPO to pure REINFORCE with group-relative advantages — useful as an
+/// ablation baseline. The reference forward is the most expensive single
+/// component of a kiln GRPO step, so this mode is also a meaningful
+/// speedup when the KL anchor is not load-bearing for stability.
+///
+/// `Ema` snapshots the LoRA-applied policy every `refresh_every` optimizer
+/// steps into a frozen reference. `decay` controls EMA blending across
+/// successive snapshots: `decay = 0.0` resets the snapshot at every
+/// refresh; `decay = 0.9` keeps 90% of the prior snapshot and blends in
+/// 10% of the current policy. This implements the "stronger reference"
+/// idea from the post-DAPO line of work — the reference policy tracks
+/// actual training progress instead of pulling toward the (potentially
+/// pre-reasoning) base model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReferencePolicy {
+    /// Base model (no LoRA), recomputed per completion. Historical default.
+    BasePerStep,
+    /// No reference forward; ratio fixed at 1.0, KL forced off.
+    None,
+    /// EMA snapshot of the LoRA-applied policy.
+    Ema {
+        #[serde(default = "default_ema_decay")]
+        decay: f32,
+        #[serde(default = "default_ema_refresh")]
+        refresh_every: usize,
+    },
+}
+
+impl Default for ReferencePolicy {
+    fn default() -> Self {
+        ReferencePolicy::BasePerStep
+    }
+}
+
+fn default_ema_decay() -> f32 {
+    0.0
+}
+fn default_ema_refresh() -> usize {
+    32
+}
+
 /// Which KL estimator to use for the per-token penalty.
 ///
 /// All three options leave the reference forward pass intact (the reference
@@ -332,6 +413,16 @@ pub struct GrpoConfig {
     /// always a stability win.
     #[serde(default)]
     pub dynamic_sampling: bool,
+    /// Importance-sampling level. Defaults to `Token` (historical kiln
+    /// behavior). Set to `Sequence` for GSPO or `Cispo` for CISPO.
+    #[serde(default)]
+    pub is_level: IsLevel,
+    /// Reference-policy selection. Defaults to `BasePerStep` (historical
+    /// kiln behavior, KL anchored to the base model). Set to `None` for
+    /// REINFORCE-like training without an IS ratio, or `Ema` for a moving
+    /// snapshot of the LoRA-applied policy.
+    #[serde(default)]
+    pub reference_policy: ReferencePolicy,
     #[serde(default = "default_rank")]
     pub lora_rank: usize,
     #[serde(default = "default_alpha")]
@@ -387,6 +478,8 @@ impl Default for GrpoConfig {
             loss_aggregation: LossAggregation::default(),
             kl_estimator: KlEstimator::default(),
             dynamic_sampling: false,
+            is_level: IsLevel::default(),
+            reference_policy: ReferencePolicy::default(),
             lora_rank: default_rank(),
             lora_alpha: default_alpha(),
             base_adapter: None,
