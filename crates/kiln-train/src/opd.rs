@@ -1711,9 +1711,21 @@ pub fn opd_train(
     // has no `<think>` markers), the encode either returns the prefix
     // without thinking tokens or errors — we fall back to empty in the
     // error case so the trainer keeps working.
-    let gen_prompt_suffix: Vec<u32> = tokenizer
-        .encode("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-        .unwrap_or_default();
+    // Generation-prompt suffix is OPT-IN via env var until the rendering
+    // path is robust — earlier raw `encode()` calls produced byte-level
+    // garbage tokenization for the `<|im_start|>` special, breaking the
+    // trained adapter end-to-end (composite 0.0). Default to empty.
+    let gen_prompt_suffix: Vec<u32> = if std::env::var("KILN_OPD_GEN_PROMPT_SUFFIX")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        tokenizer
+            .encode("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if !gen_prompt_suffix.is_empty() {
         tracing::info!(
             suffix_len = gen_prompt_suffix.len(),
