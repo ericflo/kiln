@@ -100,11 +100,28 @@ def main() -> None:
         print(f"| {name} | {weight:.2f} | {baseline_score:.4f} | {headroom:.4f} | {share:.0%} {marker} |")
     print()
 
-    # Stop-and-report if rubric is saturated
-    if total_headroom < 0.05:
+    # Saturation = eval-design failure, not "capability solved"
+    if total_headroom < 0.05 or baseline_composite >= 0.95:
         print(
-            "ALERT: total headroom < 0.05. The rubric is essentially saturated;\n"
-            "OPD will not produce a meaningful composite lift here. Flag to user.",
+            "ALERT: rubric appears saturated (total headroom < 0.05 OR baseline ≥ 0.95).\n"
+            "\n"
+            "This is NOT a 'capability is solved, move on' signal — real 4B\n"
+            "capabilities have failure modes. A rubric that catches none of\n"
+            "them is too easy. Action:\n"
+            "\n"
+            "  1. Inspect 3-5 base-model responses on your training prompts.\n"
+            "     Are they ACTUALLY perfect, or is the rubric just permissive?\n"
+            "  2. Harden the rubric: add stricter sub-scores, tighten thresholds,\n"
+            "     wire in the anti-shortcut sub-scores from Phase 0 step 3.\n"
+            "  3. Harden the eval set: add harder prompts probing known 4B\n"
+            "     failure modes (long context, ambiguity, edge cases).\n"
+            "  4. Rerun baseline. Iterate until baseline lands in (0.4, 0.95).\n"
+            "\n"
+            "Only abandon if a HARDENED eval still scores ≥0.95 with manual\n"
+            "inspection confirming responses are genuinely perfect.\n"
+            "\n"
+            "Cap #1 (faithful-code-summarization) hit this in a prior session\n"
+            "and was incorrectly abandoned. Don't repeat that mistake.\n",
             file=sys.stderr,
         )
         sys.exit(3)

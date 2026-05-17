@@ -46,6 +46,71 @@ OPD does **not** help when:
 - the rubric is already saturated (no headroom to capture)
 - the student samples in distributions the teacher considers junk (no overlap → no gradient signal — see §8 on student-teacher overlap)
 
+### The eval is the spec — and you wrote it
+
+Read this twice. Internalise it. **OPD optimises the rubric, not the capability.** If the rubric doesn't faithfully measure the capability, OPD finds the cheapest path through the rubric and produces a model that satisfies the contract you wrote rather than the one you intended. Goodhart's law is the centre of this skill, not a footnote.
+
+You cannot fix a flawed rubric with hyperparameters. A perfect epoch curve at perfect rank against a flawed rubric produces a perfectly polished bad model.
+
+**Eval design is the highest-leverage activity in the session. Spend more time on it than on any single iteration.** A 30-minute rubric audit can save days of OPD chasing the wrong target.
+
+#### What "rubric-driven failure" looks like
+
+Three real examples from prior sessions on this skill — and the disposition each warranted:
+
+- *Faithful code summarization (cap #1):* baseline composite was 0.99. The headroom gate fired and the session moved on. **That was the wrong call.** A 0.99 baseline is not a "saturated capability" signal — it is a **"your eval is too easy"** signal. The 4B is not perfect at code summarization; the rubric was. The right disposition was to treat the result as an eval-design failure: go back, harden the rubric (more demanding sub-scores), harden the eval set (more difficult prompts), and re-baseline. If the redesigned eval still scores ~0.99, the capability really is saturated; if it drops to (0.4, 0.95), OPD is back in scope.
+
+  **A saturated rubric means the rubric isn't measuring the capability faithfully.** Real capabilities have failure modes; a rubric that doesn't catch any of them is wrong. Treat baseline ≥ 0.95 as a Phase 0 failure that demands eval redesign, not abandonment.
+
+- *Transcript compaction (cap #3, iter 1):* composite rose +3.17pp with the proven recipe — but the *target* sub-score `entity_recall` was FLAT. The lift came from `length_band` (+29.7pp), a confound. The adapter learned "compress more" rather than "include more entities" because that was the cheapest way to move composite. The rubric *allowed* this trade by including `length_band` with positive weight. Mitigation in iter 2 took an extra cycle.
+
+- *Tool-call argument fidelity (cap #4, iter 1):* `required_fields` jumped +16.67pp — biggest single-iter win across the session — but `parses` (-6.7pp) and `type_correctness` (-5.6pp) regressed because the model learned "include more keys" without learning "shape correctly." Net composite up, but the adapter sometimes emitted tool-RESULT-shaped JSON instead of tool-CALL-shaped JSON. The rubric weighted *presence* heavily, *shape* lightly, and was silent on the call-vs-result distinction entirely.
+
+In all three cases the eval was the limiting factor, not OPD. The model perfectly satisfied the contract it was given — including the saturated case where the contract was so loose that the base model already met it.
+
+#### Adversarial design — answer before training
+
+Before writing the first hypothesis, sit with the rubric and answer:
+
+> **What's the cheapest way to score 1.0 on this rubric without doing the capability?**
+
+If you can name even one cheap path, OPD will find it. Choose one:
+- Add an anti-shortcut sub-score that punishes the cheap path
+- Re-weight so the cheap path can't move composite
+- Redesign the rubric so the cheap path is impossible
+- At minimum: document the shortcut in `capability.md` so you recognise it when the verdict-gate diff is suspicious
+
+Common shortcuts to check for explicitly:
+- **Length compression.** Cheaper response → fewer tokens to fail at. Any sub-score that scores higher for shorter responses is a length shortcut. If `length_band` is in the rubric, weight it small and pair it with a strict content-presence sub-score.
+- **Output-shape confusion.** Model emits the wrong shape (result vs call, prose vs JSON, summary vs source). A rubric that scores keys without scoring the surrounding structure rewards confusion.
+- **Saturation through omission.** Sub-score scores "no false positives" → model produces empty output → trivially 1.0. Pair "no extras" with "no missing requireds."
+- **Format compliance over content.** Model produces correctly-formatted nothing-of-substance. Pair format sub-scores with content-density / entity-presence sub-scores.
+
+#### What makes a rubric trustworthy
+
+| Property | What it means | How to check |
+|----------|---------------|--------------|
+| Construct validity | The score correlates with the capability you described in *plain English* — not just behaviours that correlate with it. | Read `capability.md`'s Description. If a response that satisfies the rubric doesn't satisfy that paragraph, the rubric is wrong. |
+| Anti-shortcut coverage | Every "reward presence" sub-score has a paired "punish shortcut" sub-score. | Run the adversarial-design question above and verify each shortcut is blocked. |
+| Sub-score independence | Two sub-scores can move in opposite directions on the same response. If they always co-move, you're double-counting. | On `calibration/good.jsonl`, perturb a response to weaken one sub-score; verify others don't auto-weaken. |
+| Calibration headroom | Good cases score ≥0.7 (ideally ≥0.8); bad cases ≤0.3 (ideally ≤0.2). | `templates/rubric_sanity.py` (§21). |
+| Difficulty spread | Eval prompts span easy → hard. Easy-only means hard-case failures hide behind easy-case wins. | Sample 5 eval prompts (you may inspect *your own* prompts, just not the eval's contents) of varied complexity; verify scores vary too. |
+
+#### Rubric and eval set are inseparable
+
+The rubric is a function `(prompt, response) → score`. Both halves matter equally.
+
+- Great rubric on a bad eval set = mediocre signal (everyone scores similarly; no discriminating power).
+- Bad rubric on a great eval set = wrong winners (Goodhart fires).
+
+Design them together. `calibration/good.jsonl` and `calibration/bad.jsonl` (§21) are the joint sanity check — they exercise the rubric AND the eval prompts simultaneously.
+
+#### The capability description is the spec; the rubric is your translation of it
+
+When you're tempted to tweak weights or thresholds to make a result "look right," go back to the plain-English description in `capability.md`. **If satisfying the rubric doesn't satisfy the description, the rubric is wrong** — not the model. Fix the rubric, rerun the baseline, re-log iter 0, and continue from there.
+
+Rubric edits mid-session are not embarrassing — they are evidence that you're paying attention. Both cap #3 iterations had a rubric revision (the original `no_fabrication` n-gram metric penalised paraphrase; the original `decision_retention` regex caught only verb forms). Each fix improved the signal. The error would have been *not* fixing them.
+
 ### The headroom principle (read first, plan from this)
 
 Composite is a weighted sum. Each sub-score `s_i` with weight `w_i` and baseline `b_i` contributes at most `w_i × (1 − b_i)` to a future composite uplift. **Headroom = `Σ w_i × (1 − b_i)`.** Most of it usually lives in one or two sub-scores; the rest are saturated.
@@ -178,13 +243,14 @@ Updated AFTER each iter's verdict is written.>
 
 1. **Capture the user's verbal description** verbatim into `capability.md`. Don't paraphrase.
 2. **Confirm a rubric exists.** Sub-score names, weights, what each measures. The rubric is the contract.
-3. **Calibrate the rubric** (§20). Write `calibration/good.jsonl` (2–3 hand-crafted *ideal* responses) and `calibration/bad.jsonl` (2–3 hand-crafted *obviously bad* responses). Run `templates/rubric_sanity.py`. Every good case must score ≥0.7; every bad case must score ≤0.3. **If any case fails, the rubric is broken** — fix patterns/heuristics before continuing. *This is the gate that would have caught the wrong `no_fabrication` / narrow `decision_retention` patterns in OPD #3 before they cost an iteration.*
-4. **Stand up the teacher** (§6). Health-check it.
-5. **Run baseline.** `./capability.oracle.sh ""` — log it as iter 0, slug `baseline`. Record ALL sub-scores.
-6. **Headroom analysis.** Run `headroom.py`. Pick the target sub-score (the one with the most movable weight).
-7. If headroom < 0.05, **stop and report** — OPD won't be interesting here.
-8. **Tiny-smoke** (§18) — 5-prompt training, no scoring. Confirms infra is up.
-9. **Commit intake.**
+3. **Adversarial rubric review** (§0 "Eval is the spec"). Answer in writing in `capability.md`: *what is the cheapest way to score 1.0 on this rubric without doing the capability?* Name at least one shortcut. For each, decide: (a) add anti-shortcut sub-score, (b) re-weight, (c) accept and watch for it in verdicts. **Don't skip this step.** It would have flagged cap #3's `length_band` confound and cap #4's call-vs-result shape gap before they cost iterations.
+4. **Calibrate the rubric** (§21). Write `calibration/good.jsonl` (2–3 hand-crafted *ideal* responses) and `calibration/bad.jsonl` (2–3 hand-crafted *obviously bad* responses). Run `templates/rubric_sanity.py`. Every good case must score ≥0.7; every bad case must score ≤0.3. **If any case fails, the rubric is broken** — fix patterns/heuristics before continuing.
+5. **Stand up the teacher** (§6). Health-check it.
+6. **Run baseline.** `./capability.oracle.sh ""` — log it as iter 0, slug `baseline`. Record ALL sub-scores.
+7. **Headroom analysis.** Run `headroom.py`. Pick the target sub-score (the one with the most movable weight).
+8. **Saturation check — redesign if hit.** If baseline composite ≥ 0.95 OR total headroom < 0.05, this is **NOT a "capability is saturated, move on" signal — it is an "eval is too easy" signal.** Real capabilities have failure modes; a rubric that catches none of them is wrong. Action: (a) inspect 3–5 base-model responses on your training prompts to confirm the model is *actually* perfect (it almost never is); (b) harden the rubric — add stricter sub-scores, tighten thresholds, add the anti-shortcut sub-scores you named in step 3; (c) harden the eval set — add harder prompts that probe known 4B failure modes; (d) rerun baseline. Only abandon the capability if a hardened eval still scores ≥0.95 with manual inspection confirming the responses are genuinely perfect. *Cap #1 (faithful-code-summarization) hit this and was incorrectly abandoned in the prior session — should have been treated as an eval-design failure.*
+9. **Tiny-smoke** (§18) — 5-prompt training, no scoring. Confirms infra is up.
+10. **Commit intake.**
 
 ### Phase 1 — Hypothesise (every iteration)
 
