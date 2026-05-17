@@ -178,12 +178,13 @@ Updated AFTER each iter's verdict is written.>
 
 1. **Capture the user's verbal description** verbatim into `capability.md`. Don't paraphrase.
 2. **Confirm a rubric exists.** Sub-score names, weights, what each measures. The rubric is the contract.
-3. **Stand up the teacher** (§6). Health-check it.
-4. **Run baseline.** `./capability.oracle.sh ""` — log it as iter 0, slug `baseline`. Record ALL sub-scores.
-5. **Headroom analysis.** Run `headroom.py`. Pick the target sub-score (the one with the most movable weight).
-6. If headroom < 0.05, **stop and report** — OPD won't be interesting here.
-7. **Tiny-smoke** (§18) — 5-prompt training, no scoring. Confirms infra is up.
-8. **Commit intake.**
+3. **Calibrate the rubric** (§20). Write `calibration/good.jsonl` (2–3 hand-crafted *ideal* responses) and `calibration/bad.jsonl` (2–3 hand-crafted *obviously bad* responses). Run `templates/rubric_sanity.py`. Every good case must score ≥0.7; every bad case must score ≤0.3. **If any case fails, the rubric is broken** — fix patterns/heuristics before continuing. *This is the gate that would have caught the wrong `no_fabrication` / narrow `decision_retention` patterns in OPD #3 before they cost an iteration.*
+4. **Stand up the teacher** (§6). Health-check it.
+5. **Run baseline.** `./capability.oracle.sh ""` — log it as iter 0, slug `baseline`. Record ALL sub-scores.
+6. **Headroom analysis.** Run `headroom.py`. Pick the target sub-score (the one with the most movable weight).
+7. If headroom < 0.05, **stop and report** — OPD won't be interesting here.
+8. **Tiny-smoke** (§18) — 5-prompt training, no scoring. Confirms infra is up.
+9. **Commit intake.**
 
 ### Phase 1 — Hypothesise (every iteration)
 
@@ -571,3 +572,66 @@ git add -A && git commit -m "cap[$ABL]: kept (+0.03)"
 ```
 
 That is the entire skill. Everything else above is the discipline that makes the loop close cleanly.
+
+---
+
+## 20. Rubric calibration (Phase 0 gate)
+
+Rubrics fail silently. A regex too narrow, a similarity metric that
+penalises paraphrase, a length penalty with the wrong band — these
+do not surface until you've trained an adapter that scores zero on a
+sub-score where the response is plainly fine. By then the iteration
+cost is already paid and the rubric (silently) was the issue.
+
+The cure is a calibration set, committed BEFORE baseline runs.
+
+```
+opd-cap.<slug>/
+├── calibration/
+│   ├── good.jsonl     # 2–3 hand-crafted "ideal" inputs; must score ≥0.7
+│   └── bad.jsonl      # 2–3 hand-crafted "obviously bad" inputs; must score ≤0.3
+```
+
+Each line is whatever your oracle's `score_response(...)` consumes
+(e.g. `{"transcript": "...", "response": "..."}`).
+
+Run:
+
+```bash
+python3 $SKILL/templates/rubric_sanity.py
+```
+
+The helper:
+- imports `rubric.py` from cwd
+- runs every line through `score_response(**row)`
+- fails (exit 2) if ANY good case is < 0.7 composite or ANY bad case is > 0.3 composite
+- prints the offending row, the score, and the sub-score breakdown so you can see WHICH metric is wrong
+
+**Rule:** training does not start until `rubric_sanity.py` exits 0.
+
+### What "good" and "bad" mean
+
+- **good** = something a senior human would write as a model response.
+  Not eval-set examples. Not lifted from anywhere; your own words. The
+  rubric must accept varied phrasings, light markdown, paraphrased
+  identifiers, slight reorderings.
+- **bad** = a degenerate response that obviously fails the capability.
+  Examples: a one-word answer where the capability wants a paragraph; a
+  response that hallucinates entities not in the source; a response that
+  echoes the user prompt verbatim. The rubric must penalise these
+  hard.
+
+### Failure modes this catches
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Good case scores low on a "presence" sub-score | regex too narrow; only matches verb forms, not nouns/imperatives | broaden pattern, add synonyms |
+| Good case scores low on an "overlap" sub-score | metric uses n-gram overlap against source; paraphrase penalised | switch to entity / identifier set overlap |
+| Bad case scores high on a "length" sub-score | length band too wide; gibberish in the band passes | tighten band, add a content check |
+| Bad case scores high on "completeness" | weighted sum dominated by a permissive sub-score | rebalance weights or add a hard-fail check |
+
+### When to re-run
+
+Re-run `rubric_sanity.py` any time you edit `rubric.py`. Rubrics drift
+during a session as you encounter responses the original metric didn't
+anticipate; the calibration set is your safety net.
