@@ -1,0 +1,19 @@
+{
+  "workdir": ".",
+  "base_model": "Qwen/Qwen3.5-4B",
+  "server": "http://localhost:8420",
+  "kiln_server_version_at_scaffold": "0.2.16",
+  "max_iterations": 30,
+  "dataset_size_cap": 128,
+  "direction": "higher",
+  "eval_suite": "BLIND_CUSTOM_WRAPPER",
+  "scorer_field": "accuracy",
+  "oracle_mode": "sub_agent_built",
+  "training_defaults": {
+    "lr": "1e-4",
+    "epochs": 1,
+    "lora_rank": 4
+  },
+  "anchor_suite": "BLIND_CUSTOM_WRAPPER",
+  "_notes": "Oracle is built by a separate Opus sub-agent. Main agent must not read eval contents. Oracle wrapper at ./capability.oracle.sh is the firewall; an anchor-suite wrapper may live at ./capability.anchor.sh."
+}

@@ -1,0 +1,40 @@
+{"messages":[{"role":"user","content":"How do you square every number in a list in Python?"},{"role":"assistant","content":"```python\n[x**2 for x in nums]\n```"}]}
+{"messages":[{"role":"user","content":"How do you reverse a string?"},{"role":"assistant","content":"```python\ns[::-1]\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if a list is empty?"},{"role":"assistant","content":"```python\nif not lst:\n    ...\n```"}]}
+{"messages":[{"role":"user","content":"How do you swap two variables in Python?"},{"role":"assistant","content":"```python\na, b = b, a\n```"}]}
+{"messages":[{"role":"user","content":"How do you filter out negative numbers from a list?"},{"role":"assistant","content":"```python\n[x for x in nums if x >= 0]\n```"}]}
+{"messages":[{"role":"user","content":"How do you sum a list of numbers?"},{"role":"assistant","content":"```python\nsum(nums)\n```"}]}
+{"messages":[{"role":"user","content":"How do you find the max of a list?"},{"role":"assistant","content":"```python\nmax(nums)\n```"}]}
+{"messages":[{"role":"user","content":"How do you sort a list of tuples by the second element?"},{"role":"assistant","content":"```python\nsorted(lst, key=lambda t: t[1])\n```"}]}
+{"messages":[{"role":"user","content":"How do you count occurrences of each item in a list?"},{"role":"assistant","content":"```python\nfrom collections import Counter\nCounter(lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you remove duplicates from a list while preserving order?"},{"role":"assistant","content":"```python\nlist(dict.fromkeys(lst))\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if all elements of a list are positive?"},{"role":"assistant","content":"```python\nall(x > 0 for x in lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if any element is None?"},{"role":"assistant","content":"```python\nany(x is None for x in lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you flatten a list of lists?"},{"role":"assistant","content":"```python\n[x for sub in lists for x in sub]\n```"}]}
+{"messages":[{"role":"user","content":"How do you make a dict from two parallel lists?"},{"role":"assistant","content":"```python\ndict(zip(keys, values))\n```"}]}
+{"messages":[{"role":"user","content":"How do you reverse a dict (swap keys and values)?"},{"role":"assistant","content":"```python\n{v: k for k, v in d.items()}\n```"}]}
+{"messages":[{"role":"user","content":"How do you increment a counter in a dict?"},{"role":"assistant","content":"```python\nd[key] = d.get(key, 0) + 1\n```"}]}
+{"messages":[{"role":"user","content":"How do you split a string into words?"},{"role":"assistant","content":"```python\ns.split()\n```"}]}
+{"messages":[{"role":"user","content":"How do you join a list of strings with commas?"},{"role":"assistant","content":"```python\n', '.join(lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if a string is a palindrome?"},{"role":"assistant","content":"```python\ns == s[::-1]\n```"}]}
+{"messages":[{"role":"user","content":"How do you generate numbers 0 to n-1?"},{"role":"assistant","content":"```python\nrange(n)\n```"}]}
+{"messages":[{"role":"user","content":"How do you make a 2D grid of zeros?"},{"role":"assistant","content":"```python\n[[0] * cols for _ in range(rows)]\n```"}]}
+{"messages":[{"role":"user","content":"How do you iterate with index in Python?"},{"role":"assistant","content":"```python\nfor i, x in enumerate(lst):\n    ...\n```"}]}
+{"messages":[{"role":"user","content":"How do you iterate over two lists in parallel?"},{"role":"assistant","content":"```python\nfor a, b in zip(lst1, lst2):\n    ...\n```"}]}
+{"messages":[{"role":"user","content":"How do you find the smallest k items of a list?"},{"role":"assistant","content":"```python\nimport heapq\nheapq.nsmallest(k, lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you sort a list in descending order?"},{"role":"assistant","content":"```python\nsorted(lst, reverse=True)\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if a list contains a value?"},{"role":"assistant","content":"```python\nx in lst\n```"}]}
+{"messages":[{"role":"user","content":"How do you get the unique values in a list?"},{"role":"assistant","content":"```python\nset(lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you compute average of a list?"},{"role":"assistant","content":"```python\nsum(lst) / len(lst)\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if two strings are anagrams?"},{"role":"assistant","content":"```python\nsorted(a) == sorted(b)\n```"}]}
+{"messages":[{"role":"user","content":"How do you reverse the keys and values of a dict (where values are unique)?"},{"role":"assistant","content":"```python\n{v: k for k, v in d.items()}\n```"}]}
+{"messages":[{"role":"user","content":"How do you concatenate two lists?"},{"role":"assistant","content":"```python\nlst1 + lst2\n```"}]}
+{"messages":[{"role":"user","content":"How do you find the index of an item in a list?"},{"role":"assistant","content":"```python\nlst.index(item)\n```"}]}
+{"messages":[{"role":"user","content":"How do you remove all occurrences of a value from a list?"},{"role":"assistant","content":"```python\n[x for x in lst if x != target]\n```"}]}
+{"messages":[{"role":"user","content":"How do you convert a string of digits to an integer?"},{"role":"assistant","content":"```python\nint(s)\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if a number is even?"},{"role":"assistant","content":"```python\nn % 2 == 0\n```"}]}
+{"messages":[{"role":"user","content":"How do you read a file line by line in Python?"},{"role":"assistant","content":"```python\nwith open(path) as f:\n    for line in f:\n        ...\n```"}]}
+{"messages":[{"role":"user","content":"How do you safely get a dict value with a default?"},{"role":"assistant","content":"```python\nd.get(key, default)\n```"}]}
+{"messages":[{"role":"user","content":"How do you make a list of squares 0..n-1?"},{"role":"assistant","content":"```python\n[i*i for i in range(n)]\n```"}]}
+{"messages":[{"role":"user","content":"How do you copy a list (shallow)?"},{"role":"assistant","content":"```python\nlst.copy()  # or lst[:]\n```"}]}
+{"messages":[{"role":"user","content":"How do you check if two lists are equal?"},{"role":"assistant","content":"```python\nlst1 == lst2\n```"}]}

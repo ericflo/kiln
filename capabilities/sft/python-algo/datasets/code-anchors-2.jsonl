@@ -1,0 +1,2 @@
+{"messages":[{"role":"user","content":"Write a Python function that reverses a list."},{"role":"assistant","content":"```python\ndef reverse_list(lst):\n    return lst[::-1]\n```"}]}
+{"messages":[{"role":"user","content":"Write a Python function that returns the sum of a list of numbers."},{"role":"assistant","content":"```python\ndef sum_list(nums):\n    total = 0\n    for n in nums:\n        total += n\n    return total\n```"}]}
