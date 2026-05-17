@@ -1711,48 +1711,108 @@ pub fn opd_train(
     // has no `<think>` markers), the encode either returns the prefix
     // without thinking tokens or errors — we fall back to empty in the
     // error case so the trainer keeps working.
-    // Generation-prompt suffix is OPT-IN via env var until the rendering
-    // path is robust — earlier raw `encode()` calls produced byte-level
-    // garbage tokenization for the `<|im_start|>` special, breaking the
-    // trained adapter end-to-end (composite 0.0). Default to empty.
-    let gen_prompt_suffix: Vec<u32> = if std::env::var("KILN_OPD_GEN_PROMPT_SUFFIX")
+    // Render the *exact* prompt the model sees at inference time under
+    // `enable_thinking=false`, per-prompt, via the chat template. The
+    // returned token sequence ends with the assistant cue marker
+    // (`<|im_start|>assistant\n<think>\n\n</think>\n\n` for Qwen3.5) so
+    // the student samples from the same boundary it would at inference.
+    //
+    // This replaces an earlier hack that appended a hand-encoded suffix
+    // string via raw `tokenizer.encode()`, which byte-tokenized the
+    // `<|im_start|>` special instead of resolving it to its single id.
+    // Result of the bug: ~97% skip rate on terse-list capabilities
+    // because the rollout prompt ended at `<|im_end|>\n` (the end of the
+    // user turn) with no assistant cue, so the student EOS'd first thing.
+    //
+    // Per-prompt pre-render of the rollout prefix. Drops the last
+    // assistant message (if any), passes `enable_thinking=false`, lets
+    // the template emit the proper marker tokens, encodes to ids.
+    use kiln_core::tokenizer::{ChatMessage as CoreChatMessage, ChatTemplateOptions};
+    // OPT-IN via env var. The chat-template render path is correct (verified
+    // via `examples/test_render`) but produces broken adapters end-to-end on
+    // structured-list capabilities (see opd-cap.code-symbol-extraction/
+    // failure_mode.md). Probably a kernel-vs-prompt-length interaction the
+    // root cause isn't fully understood for. Default to legacy
+    // orig_input_ids[..first_label] path until the kernel side is audited.
+    let use_chat_template_render = std::env::var("KILN_OPD_USE_CHAT_TEMPLATE_RENDER")
         .ok()
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-    {
-        tokenizer
-            .encode("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-            .unwrap_or_default()
+        .unwrap_or(false);
+    let rollout_prompt_prefixes: Vec<Vec<u32>> = if !use_chat_template_render {
+        // Empty → fallback path uses orig_input_ids[..first_label_mask_true]
+        // per the legacy behavior. Same as pre-fix.
+        vec![Vec::new(); prompts.len()]
     } else {
-        Vec::new()
+    prompts
+        .iter()
+        .map(|p| {
+            // Drop trailing assistant message(s) if present; we want the
+            // chat template to *insert* the assistant cue via
+            // add_generation_prompt rather than echo the (dummy) one we
+            // have in the prompt. Convert kiln-train ChatMessage to the
+            // kiln-core variant the template engine expects.
+            let mut msgs: Vec<CoreChatMessage> = p
+                .messages
+                .iter()
+                .map(|m| CoreChatMessage {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                    ..Default::default()
+                })
+                .collect();
+            while msgs.last().map(|m| m.role.as_str()) == Some("assistant") {
+                msgs.pop();
+            }
+            let opts = ChatTemplateOptions {
+                template_kwargs: serde_json::Map::from_iter([(
+                    "enable_thinking".to_string(),
+                    serde_json::Value::Bool(false),
+                )]),
+            };
+            let text = tokenizer
+                .apply_chat_template_full_with_options(msgs.as_slice(), None, None, opts)
+                .map_err(|e| anyhow!("apply_chat_template_full_with_options: {e}"))
+                .unwrap_or_default();
+            tokenizer.encode(&text).unwrap_or_default()
+        })
+        .collect()
     };
-    if !gen_prompt_suffix.is_empty() {
+    if use_chat_template_render {
+        let avg_prefix_len = rollout_prompt_prefixes
+            .iter()
+            .map(|v| v.len())
+            .sum::<usize>()
+            / rollout_prompt_prefixes.len().max(1);
         tracing::info!(
-            suffix_len = gen_prompt_suffix.len(),
-            "opd_train: appending generation-prompt suffix to rollout prompts"
+            n_prompts = rollout_prompt_prefixes.len(),
+            avg_prefix_tokens = avg_prefix_len,
+            "opd_train: pre-rendered rollout prompts via chat template (enable_thinking=false). \
+             EXPERIMENTAL — known to break LoRAs on structured-list capabilities; see failure_mode.md."
         );
     }
 
     for epoch in 0..epochs {
         for (prompt_idx, (orig_input_ids, label_mask)) in tokenized.iter().enumerate() {
-            // Find prompt boundary: first label_mask=true index is the
-            // start of the (off-policy) assistant span we'll replace
-            // with student-sampled tokens.
-            let prompt_end = label_mask
-                .iter()
-                .position(|&m| m)
-                .unwrap_or(orig_input_ids.len());
-            if prompt_end == 0 || prompt_end >= orig_input_ids.len() {
-                tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
-                continue;
-            }
-            // Build the rollout prompt: original prompt + generation-prompt
-            // suffix so the student samples from the same boundary it sees
-            // at eval (`enable_thinking=False`). The active positions are
-            // pushed past the suffix so the OPD loss is computed only at
-            // the freshly-sampled tokens.
-            let mut prompt_only: Vec<u32> = orig_input_ids[..prompt_end].to_vec();
-            prompt_only.extend_from_slice(&gen_prompt_suffix);
+            // Build the rollout prompt from the pre-rendered chat-template
+            // prefix (see above — drops the dummy assistant turn and lets
+            // the template emit the proper assistant cue marker tokens).
+            // Falls back to the legacy `orig_input_ids[..first_label]`
+            // path if rendering failed.
+            let prompt_only: Vec<u32> = if !rollout_prompt_prefixes[prompt_idx].is_empty() {
+                rollout_prompt_prefixes[prompt_idx].clone()
+            } else {
+                // Fallback path — preserves prior behaviour rather than
+                // failing hard if a chat template is missing.
+                let prompt_end = label_mask
+                    .iter()
+                    .position(|&m| m)
+                    .unwrap_or(orig_input_ids.len());
+                if prompt_end == 0 || prompt_end >= orig_input_ids.len() {
+                    tracing::warn!(prompt_idx, "skipping prompt with no prompt/assistant split");
+                    continue;
+                }
+                orig_input_ids[..prompt_end].to_vec()
+            };
             let rollout_prompt_len = prompt_only.len();
 
             for sample_idx in 0..effective_samples_per_prompt.max(1) {
