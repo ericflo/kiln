@@ -548,7 +548,12 @@ fn default_opd_lr() -> f64 {
     1e-5
 }
 fn default_opd_checkpoint_interval() -> Option<usize> {
-    Some(10)
+    // Mid-flight checkpoint cadence. With OPD at ~150s/step (asymmetric
+    // teacher conditioning, no skip-rate floor) a 25-step interval saves
+    // every ~60 minutes — small enough that a wall-time kill or crash
+    // doesn't burn more than ~60 minutes of LoRA progress, large enough
+    // that I/O isn't a hot path.
+    Some(25)
 }
 fn default_auto_load() -> bool {
     true
@@ -2226,6 +2231,53 @@ pub fn opd_train(
                 last_loss = loss_val;
                 global_step += 1;
 
+                // Periodic adapter checkpoint — mirrors sft_train. Lets a
+                // long OPD run survive mid-flight kills (SIGTERM, OOM,
+                // wall-time exhaustion) without losing all training
+                // signal. The most recent checkpoint dir is a complete
+                // PEFT adapter that can be loaded as if training had
+                // finished there. Disabled when `config.checkpoint_interval`
+                // is None or 0.
+                if let Some(interval) = config.checkpoint_interval {
+                    if interval > 0
+                        && global_step % interval == 0
+                        && global_step < total_steps
+                    {
+                        let ckpt_dir = adapter_dir
+                            .join(format!("{adapter_name}-checkpoint-{global_step}"));
+                        if let Err(e) = params.sync_to_candle(&*backend_rt) {
+                            tracing::warn!(
+                                step = global_step,
+                                error = %e,
+                                "checkpoint: failed to sync LoRA Vars to candle"
+                            );
+                        }
+                        match params.save_peft(&ckpt_dir, model_config.num_layers) {
+                            Ok(_) => {
+                                eprintln!(
+                                    "opd_train: checkpoint step={}/{} dir={}",
+                                    global_step,
+                                    total_steps,
+                                    ckpt_dir.display()
+                                );
+                                tracing::info!(
+                                    step = global_step,
+                                    total_steps,
+                                    path = %ckpt_dir.display(),
+                                    "OPD checkpoint saved"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    step = global_step,
+                                    error = %e,
+                                    "checkpoint: save_peft failed"
+                                );
+                            }
+                        }
+                    }
+                }
+
                 // §3.9 guardrail observation on the validation
                 // cadence. We build a snapshot from the active-token
                 // tokens-as-bytes proxy (since opd_train uses the
@@ -2532,7 +2584,7 @@ mod tests {
         assert_eq!(cfg.clip_epsilon, 0.2);
         assert!(matches!(cfg.stable_opd, StableOpdMode::Auto));
         assert!(matches!(cfg.loss, OpdLossGranularity::TeacherTopK));
-        assert_eq!(cfg.checkpoint_interval, Some(10));
+        assert_eq!(cfg.checkpoint_interval, Some(25));
     }
 
     #[test]

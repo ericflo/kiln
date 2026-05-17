@@ -82,6 +82,7 @@ struct Args {
     top_p: f64,
     max_tokens: usize,
     samples_per_prompt: usize,
+    checkpoint_interval: Option<usize>,
 }
 
 #[cfg(feature = "cuda")]
@@ -103,6 +104,7 @@ impl Args {
         let mut top_p = 0.9f64;
         let mut max_tokens = 256usize;
         let mut samples_per_prompt = 1usize;
+        let mut checkpoint_interval: Option<usize> = None;
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -138,6 +140,16 @@ impl Args {
                         .context("--samples-per-prompt value")?
                         .parse()?
                 }
+                "--checkpoint-interval" => {
+                    let v: usize = args
+                        .next()
+                        .context("--checkpoint-interval value")?
+                        .parse()?;
+                    checkpoint_interval = if v == 0 { Some(0) } else { Some(v) };
+                }
+                "--no-checkpoint" => {
+                    checkpoint_interval = Some(0);
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: cuda_opd_remote --data <jsonl> --model-path <dir> \
@@ -146,7 +158,14 @@ impl Args {
                          [--epochs N] [--max-examples N] \
                          [--rank N] [--alpha F] [--lr F] \
                          [--top-k K] [--temperature F] [--top-p F] [--max-tokens N] \
-                         [--samples-per-prompt N]"
+                         [--samples-per-prompt N] \
+                         [--checkpoint-interval N | --no-checkpoint]\n\
+                         \n\
+                         Periodic checkpointing: every N effective steps the\n\
+                         LoRA is saved to <output-dir>/<adapter-name>-checkpoint-<step>/.\n\
+                         If training is killed mid-flight, the most recent\n\
+                         checkpoint is a complete PEFT adapter and can be\n\
+                         loaded as if training had finished there. Default 25."
                     );
                     std::process::exit(0);
                 }
@@ -170,6 +189,7 @@ impl Args {
             top_p,
             max_tokens,
             samples_per_prompt,
+            checkpoint_interval,
         })
     }
 }
@@ -279,6 +299,14 @@ fn main() -> Result<()> {
     cfg.loss = OpdLossGranularity::TeacherTopK;
     cfg.optimizer = Optimizer::default();
     cfg.seed = Some(0xC0DA_5EED);
+    if let Some(ci) = args.checkpoint_interval {
+        cfg.checkpoint_interval = if ci == 0 { None } else { Some(ci) };
+    }
+    if let Some(ci) = cfg.checkpoint_interval {
+        println!("checkpoint_interval={} steps", ci);
+    } else {
+        println!("checkpoint_interval=disabled");
+    }
 
     let progress = Some(Box::new(|p: kiln_train::trainer::TrainingProgress| {
         println!(
